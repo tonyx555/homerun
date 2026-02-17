@@ -26,8 +26,7 @@ from typing import Optional
 
 from config import settings
 from models import ArbitrageOpportunity, Event, Market
-from models.opportunity import MispricingType
-from services.strategies.base import BaseStrategy
+from services.strategies.weather_base import BaseWeatherStrategy
 from services.weather.signal_engine import (
     ensemble_bucket_probability,
     compute_confidence,
@@ -42,7 +41,7 @@ def _norm_cdf(x: float, mu: float, sigma: float) -> float:
     return 0.5 * (1.0 + math.erf((x - mu) / (sigma * math.sqrt(2.0))))
 
 
-class WeatherDistributionStrategy(BaseStrategy):
+class WeatherDistributionStrategy(BaseWeatherStrategy):
     """
     Full distribution comparison: build probability across all buckets,
     buy the most underpriced.
@@ -66,68 +65,13 @@ class WeatherDistributionStrategy(BaseStrategy):
         "risk_base_score": 0.30,
     }
 
-    def __init__(self):
-        super().__init__()
-        self._config = dict(self.DEFAULT_CONFIG)
-
-    def configure(self, config: dict) -> None:
-        """Apply user config overrides from the DB config column."""
-        if config:
-            for key in self.DEFAULT_CONFIG:
-                if key in config:
-                    self._config[key] = config[key]
-
-    def detect(
-        self,
-        events: list[Event],
-        markets: list[Market],
-        prices: dict[str, dict],
-    ) -> list[ArbitrageOpportunity]:
-        """Sync detect - returns empty.
-
-        WeatherDistributionStrategy is fed by the weather workflow pipeline,
-        not the main scanner loop. Weather intents are converted to
-        opportunities by detect_from_intents().
-        """
-        return []
-
-    def detect_from_intents(
-        self,
-        intents: list[dict],
-        markets: list[Market],
-        events: list[Event],
-    ) -> list[ArbitrageOpportunity]:
-        """Convert weather trade intents into ArbitrageOpportunity objects.
-
-        Accepts enriched intents with sibling_markets data for full
-        distribution normalization.
-        """
-        if not intents:
-            return []
-
-        cfg = self._config
-        opportunities: list[ArbitrageOpportunity] = []
-        market_map = {m.id: m for m in markets}
-        event_map: dict[str, Event] = {}
-        for event in events:
-            for m in event.markets:
-                event_map[m.id] = event
-
-        for intent in intents:
-            try:
-                opp = self._evaluate_intent(intent, market_map, event_map, cfg)
-                if opp:
-                    opportunities.append(opp)
-            except Exception as e:
-                logger.debug("Weather Distribution: skipped intent: %s", e)
-
-        if opportunities:
-            logger.info(
-                "Weather Distribution: %d opportunities from %d intents",
-                len(opportunities),
-                len(intents),
-            )
-        return opportunities
+    # ------------------------------------------------------------------
+    # Override _evaluate_intent entirely -- the distribution flow with
+    # sibling markets, cross-bucket normalisation and ranking is too
+    # different from the standard scaffold.  We reuse the base-class
+    # protected helpers for the common tail (market lookup, profit calc,
+    # position sizing, opportunity construction).
+    # ------------------------------------------------------------------
 
     def _evaluate_intent(
         self,
@@ -274,27 +218,20 @@ class WeatherDistributionStrategy(BaseStrategy):
 
         # -----------------------------------------------------------
         # 7. Build opportunity for current market's bucket
+        #    (reuse base-class helpers for common tail)
         # -----------------------------------------------------------
-        market = market_map.get(market_id) if market_id else None
+        market, event = self._lookup_market(market_id, market_map, event_map)
         if not market:
             return None
 
-        event = event_map.get(market_id)
         city = intent.get("location", "Unknown")
         question = market.question or ""
 
         side = "YES" if direction == "buy_yes" else "NO"
-        token_id = None
-        if market.clob_token_ids:
-            idx = 0 if direction == "buy_yes" else (1 if len(market.clob_token_ids) > 1 else 0)
-            token_id = market.clob_token_ids[idx]
+        token_id = self._resolve_token_id(market, direction)
 
-        expected_payout = target_price
-        total_cost = entry_price
-        gross_profit = expected_payout - total_cost
-        fee_amount = expected_payout * self.fee
-        net_profit = gross_profit - fee_amount
-        roi = (net_profit / total_cost) * 100 if total_cost > 0 else 0
+        profit = self._compute_profit(entry_price, target_price)
+        roi = profit["roi"]
 
         if roi < cfg["min_edge_percent"] / 2:
             return None
@@ -363,41 +300,82 @@ class WeatherDistributionStrategy(BaseStrategy):
             }
         ]
 
-        market_dict = {
-            "id": market.id,
-            "slug": market.slug,
-            "question": market.question,
-            "yes_price": market.yes_price,
-            "no_price": market.no_price,
-            "liquidity": market.liquidity,
-        }
+        market_dict = self._build_market_dict(market)
 
-        return ArbitrageOpportunity(
-            strategy=self.strategy_type,
-            title=f"Distribution: {city} - {question[:40]}",
-            description=(
-                f"Rank {current_rank}/{total_buckets} bucket | "
-                f"Normalized model: {model_prob:.1%} vs market: {yes_price:.0%} | "
-                f"{side} at ${entry_price:.2f} (edge: {edge_percent:.1f}%)"
-            ),
-            total_cost=total_cost,
-            expected_payout=expected_payout,
-            gross_profit=gross_profit,
-            fee=fee_amount,
-            net_profit=net_profit,
-            roi_percent=roi,
-            is_guaranteed=False,
-            roi_type="directional_payout",
+        title = f"Distribution: {city} - {question[:40]}"
+        description = (
+            f"Rank {current_rank}/{total_buckets} bucket | "
+            f"Normalized model: {model_prob:.1%} vs market: {yes_price:.0%} | "
+            f"{side} at ${entry_price:.2f} (edge: {edge_percent:.1f}%)"
+        )
+
+        return self._build_opportunity(
+            title=title,
+            description=description,
+            total_cost=profit["total_cost"],
+            expected_payout=profit["expected_payout"],
+            gross_profit=profit["gross_profit"],
+            fee_amount=profit["fee_amount"],
+            net_profit=profit["net_profit"],
+            roi=roi,
             risk_score=risk_score,
             risk_factors=risk_factors,
-            markets=[market_dict],
-            event_id=event.id if event else None,
-            event_slug=event.slug if event else None,
-            event_title=event.title if event else None,
-            category=event.category if event else None,
+            market_dict=market_dict,
+            event=event,
             min_liquidity=min_liquidity,
-            max_position_size=max_position,
-            resolution_date=market.end_date,
-            mispricing_type=MispricingType.NEWS_INFORMATION,
-            positions_to_take=positions,
+            max_position=max_position,
+            market=market,
+            positions=positions,
         )
+
+    # ------------------------------------------------------------------
+    # Stubs for abstract hooks (not used since _evaluate_intent is
+    # overridden, but required by the base class interface).
+    # ------------------------------------------------------------------
+
+    def compute_model_probability(
+        self, intent: dict, cfg: dict,
+    ) -> tuple[Optional[float], dict]:
+        # Not called -- _evaluate_intent is fully overridden.
+        return None, {}
+
+    def risk_scoring(
+        self,
+        cfg: dict,
+        intent: dict,
+        model_prob: float,
+        confidence: float,
+        edge_percent: float,
+        extra_metadata: dict,
+    ) -> tuple[float, list[str]]:
+        # Not called -- _evaluate_intent is fully overridden.
+        return 0.0, []
+
+    def build_metadata(
+        self,
+        intent: dict,
+        cfg: dict,
+        model_prob: float,
+        direction: str,
+        edge_percent: float,
+        confidence: float,
+        extra_metadata: dict,
+    ) -> dict:
+        # Not called -- _evaluate_intent is fully overridden.
+        return {}
+
+    def build_title_description(
+        self,
+        city: str,
+        question: str,
+        intent: dict,
+        model_prob: float,
+        direction: str,
+        side: str,
+        entry_price: float,
+        yes_price: float,
+        edge_percent: float,
+        extra_metadata: dict,
+    ) -> tuple[str, str]:
+        # Not called -- _evaluate_intent is fully overridden.
+        return "", ""

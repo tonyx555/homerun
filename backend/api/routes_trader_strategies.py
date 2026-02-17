@@ -1,4 +1,12 @@
-"""API routes for DB-native trader strategy definitions."""
+"""API routes for DB-native trader strategy definitions.
+
+DEPRECATED — backward compatibility alias.
+
+These /trader-strategies endpoints are preserved for backward compatibility.
+New clients should use the unified /strategies API (routes_strategies.py)
+which serves both opportunity-detection and trader-execution strategies
+through a single interface.
+"""
 
 from __future__ import annotations
 

@@ -359,27 +359,8 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
             ]
         },
     ),
-    SystemOpportunityStrategySeed(
-        slug="weather_bucket_edge",
-        source_key="weather",
-        name="Weather Bucket Edge",
-        description="Per-bucket edge: compare model probability directly to market price for each temperature bucket.",
-        import_module="services.strategies.weather_bucket_edge",
-        class_name="WeatherBucketEdgeStrategy",
-        sort_order=204,
-        config_schema={
-            "param_fields": [
-                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0},
-                {"key": "probability_scale_c", "label": "Sigmoid Scale (C)", "type": "number", "min": 0.5, "max": 5.0},
-                {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
-                {"key": "min_model_agreement", "label": "Min Model Agreement", "type": "number", "min": 0, "max": 1},
-                {"key": "min_source_count", "label": "Min Forecast Sources", "type": "integer", "min": 1},
-                {"key": "max_source_spread_c", "label": "Max Source Spread (C)", "type": "number", "min": 0},
-                {"key": "max_entry_price", "label": "Max Entry Price", "type": "number", "min": 0, "max": 1},
-                {"key": "risk_base_score", "label": "Base Risk Score", "type": "number", "min": 0, "max": 1},
-            ]
-        },
-    ),
+    # weather_bucket_edge removed — functionally identical to weather_edge
+    # with probability_scale_c=1.5. Use weather_edge with that config instead.
     SystemOpportunityStrategySeed(
         slug="traders_confluence",
         source_key="traders",
@@ -496,6 +477,16 @@ async def ensure_system_opportunity_strategies_seeded(session: AsyncSession) -> 
         current.version = int(current.version or 0) + 1
         current.updated_at = datetime.utcnow()
         rewritten += 1
+
+    # Disable removed strategies that may still exist in DB.
+    _REMOVED_SLUGS = ["weather_bucket_edge"]
+    for slug in _REMOVED_SLUGS:
+        removed = existing.get(slug)
+        if removed and removed.enabled:
+            removed.enabled = False
+            removed.status = "removed"
+            removed.updated_at = datetime.utcnow()
+            rewritten += 1
 
     if inserted == 0 and rewritten == 0:
         return 0

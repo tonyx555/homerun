@@ -12,9 +12,14 @@ Plugins may implement either:
                       the event loop by the scanner.
   - Both           -- detect_async() takes priority at runtime.
 
+Unified strategies may additionally implement:
+  - evaluate()     -- execution gating (default: passthrough).
+  - should_exit()  -- exit logic for open positions (default: TP/SL/trailing).
+
 The loader validates, compiles, and instantiates plugins at runtime, making
 them available to the scanner alongside the built-in strategies.
 """
+from __future__ import annotations
 
 import ast
 import sys
@@ -35,128 +40,79 @@ logger = get_logger(__name__)
 PLUGIN_TEMPLATE = '''"""
 Plugin: My Custom Strategy
 
-Describe what your strategy does here. This docstring is for your reference.
-
-Implement detect() for synchronous strategies, or detect_async() for
-strategies that need async I/O (LLM calls, HTTP requests, etc.).
-If you implement detect_async(), it takes priority over detect().
+A unified strategy that handles detection, execution gating, and exit logic.
+Implement detect() to find opportunities, evaluate() to gate execution,
+and should_exit() to manage open positions.
 """
 
 from models import Market, Event, ArbitrageOpportunity
-from services.strategies.base import BaseStrategy
+from services.strategies.base import BaseStrategy, StrategyDecision, ExitDecision, DecisionCheck
 
 
 class MyCustomStrategy(BaseStrategy):
     """
-    A custom arbitrage detection strategy.
+    A custom unified strategy.
 
-    Attributes:
-        strategy_type: Unique slug for this plugin (set automatically by the loader).
-        name: Human-readable name shown in the UI.
-        description: Short description shown in the strategy list.
+    Required: detect() or detect_async() — find opportunities
+    Optional: evaluate() — custom execution gating (default: passthrough)
+    Optional: should_exit() — custom exit logic (default: TP/SL/trailing)
     """
 
     name = "My Custom Strategy"
-    description = "Describe what this strategy detects"
+    description = "Describe what this strategy detects and how it trades"
 
-    # Optional: default config values (users can override in the UI)
     default_config = {
+        # Detection params
         "example_threshold": 0.05,
+        # Execution params
+        "min_edge_percent": 3.0,
+        "min_confidence": 0.4,
+        "base_size_usd": 25.0,
+        "max_size_usd": 200.0,
+        # Exit params
+        "take_profit_pct": 15.0,
+        "stop_loss_pct": 8.0,
+        "max_hold_minutes": None,
+        "trailing_stop_pct": None,
     }
 
-    def detect(
-        self,
-        events: list[Event],
-        markets: list[Market],
-        prices: dict[str, dict],
-    ) -> list[ArbitrageOpportunity]:
-        """
-        Detect arbitrage opportunities.
-
-        This method is called every scan cycle with the full set of active
-        events, markets, and live CLOB prices.
-
-        Args:
-            events: All active Polymarket events.
-            markets: All active markets across events.
-            prices: Live CLOB mid-prices keyed by token ID.
-                    Format: { token_id: { "mid": float, "best_bid": float, "best_ask": float } }
-
-        Returns:
-            List of detected ArbitrageOpportunity objects.
-
-        Tips:
-            - Use self.create_opportunity() to build opportunities (applies
-              hard filters like min liquidity, min ROI, fee model, etc.)
-            - Access config via self.config (dict with your default_config
-              values, overridden by user settings)
-            - Use self.fee for the current fee rate
-            - Use self.min_profit for the minimum profit threshold
-            - Filter out closed/inactive markets early for performance
-            - Return an empty list if no opportunities are found
-        """
+    def detect(self, events, markets, prices):
+        """Find opportunities. Runs every scan cycle."""
         opportunities = []
-
         for market in markets:
-            # Skip closed or inactive markets
             if market.closed or not market.active:
                 continue
-
-            # Skip non-binary markets
-            if len(market.outcome_prices) != 2:
-                continue
-
-            # Get prices — use live CLOB prices when available
-            yes_price = market.yes_price
-            no_price = market.no_price
-
-            if market.clob_token_ids:
-                if len(market.clob_token_ids) > 0:
-                    token = market.clob_token_ids[0]
-                    if token in prices:
-                        yes_price = prices[token].get("mid", yes_price)
-                if len(market.clob_token_ids) > 1:
-                    token = market.clob_token_ids[1]
-                    if token in prices:
-                        no_price = prices[token].get("mid", no_price)
-
-            # ---- Your detection logic here ----
-            # Example: find markets where YES + NO is unusually low
-            total_cost = yes_price + no_price
-            threshold = self.config.get("example_threshold", 0.05)
-
-            if total_cost >= (1.0 - threshold):
-                continue
-
-            # Build positions
-            positions = [
-                {
-                    "action": "BUY",
-                    "outcome": "YES",
-                    "price": yes_price,
-                    "token_id": market.clob_token_ids[0] if market.clob_token_ids else None,
-                },
-                {
-                    "action": "BUY",
-                    "outcome": "NO",
-                    "price": no_price,
-                    "token_id": market.clob_token_ids[1]
-                    if market.clob_token_ids and len(market.clob_token_ids) > 1
-                    else None,
-                },
-            ]
-
-            opp = self.create_opportunity(
-                title=f"My Strategy: {market.question[:50]}",
-                description=f"Custom detection on {market.question[:80]}",
-                total_cost=total_cost,
-                markets=[market],
-                positions=positions,
-            )
-            if opp:
-                opportunities.append(opp)
-
+            # Your detection logic here...
+            # Attach context for evaluate() and should_exit():
+            # opp = self.create_opportunity(...)
+            # if opp:
+            #     opp.strategy_context = {"my_signal_data": ...}
+            #     opportunities.append(opp)
         return opportunities
+
+    def evaluate(self, signal, context):
+        """Gate execution. Called when orchestrator picks up signal."""
+        params = context.get("params") or {}
+        edge = float(getattr(signal, "edge_percent", 0) or 0)
+
+        if edge < float(params.get("min_edge_percent", 3.0)):
+            return StrategyDecision("skipped", f"Edge {edge:.1f}% too low")
+
+        return StrategyDecision(
+            "selected", "Signal approved",
+            size_usd=float(params.get("base_size_usd", 25.0)),
+            checks=[DecisionCheck("edge", "Edge check", True, score=edge)]
+        )
+
+    def should_exit(self, position, market_state):
+        """Manage open positions. Called every lifecycle cycle."""
+        # Custom exit logic example:
+        # ctx = getattr(position, "strategy_context", {})
+        # if ctx.get("my_signal_data", 0) < threshold:
+        #     return ExitDecision("close", "Signal decayed")
+
+        # Fall back to standard TP/SL/trailing from config
+        return self.default_exit_check(position, market_state)
 '''
 
 
@@ -172,6 +128,8 @@ ALLOWED_IMPORT_PREFIXES = {
     "models",
     "services.strategies",
     "services.strategies.base",
+    "services.trader_orchestrator.strategies.base",
+    "services.trader_orchestrator.strategies",
     "services.news",
     "services.optimization",
     "services.ws_feeds",
@@ -310,23 +268,56 @@ def _find_strategy_class(tree: ast.AST) -> Optional[str]:
 
 
 def _check_detect_method(tree: ast.AST, class_name: str) -> bool:
-    """Check that the strategy class has a detect or detect_async method.
+    """Check that the strategy class has a detect, detect_async, or evaluate method.
 
-    Plugins may implement either:
+    Plugins must implement at least one of:
     * ``detect()``        -- synchronous, run in a thread-pool executor.
     * ``detect_async()``  -- async (preferred for I/O-bound strategies).
-    * Both                -- detect_async takes priority at runtime.
+    * ``evaluate()``      -- execution gating (unified strategies).
+    * Both detect + evaluate -- detect_async takes priority at runtime.
 
     The base class provides a default ``detect_async`` that delegates to
-    ``detect()``, so defining either one is sufficient.
+    ``detect()``, so defining either one is sufficient.  A strategy that
+    implements only ``evaluate()`` is also valid (trader-oriented strategy).
     """
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef) and node.name == class_name:
             for item in node.body:
                 if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    if item.name in ("detect", "detect_async"):
+                    if item.name in ("detect", "detect_async", "evaluate"):
                         return True
     return False
+
+
+def _check_optional_methods(tree: ast.AST, class_name: str) -> dict:
+    """Return which optional methods are present in the strategy class.
+
+    Returns a dict with boolean flags:
+        has_evaluate: True if evaluate() is defined
+        has_should_exit: True if should_exit() is defined
+        has_detect: True if detect() is defined
+        has_detect_async: True if detect_async() is defined
+    """
+    result = {
+        "has_evaluate": False,
+        "has_should_exit": False,
+        "has_detect": False,
+        "has_detect_async": False,
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if item.name == "evaluate":
+                        result["has_evaluate"] = True
+                    elif item.name == "should_exit":
+                        result["has_should_exit"] = True
+                    elif item.name == "detect":
+                        result["has_detect"] = True
+                    elif item.name == "detect_async":
+                        result["has_detect_async"] = True
+            break
+    return result
 
 
 def _check_name_attribute(tree: ast.AST, class_name: str) -> Optional[str]:
@@ -363,6 +354,7 @@ def validate_plugin_source(source_code: str) -> dict:
         class_name (str|None): Name of the strategy class found
         strategy_name (str|None): Value of the 'name' attribute
         strategy_description (str|None): Value of the 'description' attribute
+        capabilities (dict|None): Which optional methods are present
         errors (list[str]): List of validation error messages
         warnings (list[str]): List of non-fatal warnings
     """
@@ -371,6 +363,7 @@ def validate_plugin_source(source_code: str) -> dict:
         "class_name": None,
         "strategy_name": None,
         "strategy_description": None,
+        "capabilities": None,
         "errors": [],
         "warnings": [],
     }
@@ -398,17 +391,22 @@ def validate_plugin_source(source_code: str) -> dict:
         return result
     result["class_name"] = class_name
 
-    # 4. Check detect() or detect_async() method
+    # 4. Check detect(), detect_async(), or evaluate() method
     if not _check_detect_method(tree, class_name):
         result["errors"].append(
-            f"Class '{class_name}' must implement detect() or detect_async(). "
-            f"Use detect() for synchronous strategies or detect_async() "
-            f"(preferred) for async I/O-bound strategies. Both receive "
-            f"(events, markets, prices) and return a list of ArbitrageOpportunity objects."
+            f"Class '{class_name}' must implement at least one of: detect(), "
+            f"detect_async(), or evaluate(). Use detect() for synchronous "
+            f"detection strategies, detect_async() (preferred) for async "
+            f"I/O-bound strategies, or evaluate() for execution-gating "
+            f"strategies."
         )
         return result
 
-    # 5. Extract metadata
+    # 5. Check which optional methods are present
+    capabilities = _check_optional_methods(tree, class_name)
+    result["capabilities"] = capabilities
+
+    # 6. Extract metadata
     name = _check_name_attribute(tree, class_name)
     description = _check_description_attribute(tree, class_name)
 
@@ -547,14 +545,11 @@ class PluginLoader:
             # Instantiate the strategy
             instance = strategy_class()
 
-            # Apply config overrides
-            if config:
-                # Merge with default_config if it exists
-                default_config = getattr(instance, "default_config", {})
-                merged_config = {**default_config, **config}
-                instance.config = merged_config
-            else:
-                instance.config = getattr(instance, "default_config", {})
+            # Set key so the orchestrator can look up this strategy
+            instance.key = slug
+
+            # Apply config overrides via the configure() method
+            instance.configure(config or {})
 
             # Calculate source hash for change detection
             import hashlib

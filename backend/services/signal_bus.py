@@ -140,6 +140,7 @@ async def upsert_trade_signal(
     liquidity: Optional[float],
     expires_at: Optional[datetime],
     payload_json: Optional[dict[str, Any]],
+    strategy_context_json: Optional[dict[str, Any]] = None,
     dedupe_key: str,
     commit: bool = True,
 ) -> TradeSignal:
@@ -181,6 +182,7 @@ async def upsert_trade_signal(
             liquidity=liquidity,
             expires_at=_to_utc_naive(expires_at),
             payload_json=_safe_json(payload_json),
+            strategy_context_json=_safe_json(strategy_context_json),
             dedupe_key=dedupe_key,
             status="pending",
             created_at=_utc_now(),
@@ -207,6 +209,7 @@ async def upsert_trade_signal(
             row.liquidity = liquidity
             row.expires_at = _to_utc_naive(expires_at)
             row.payload_json = _safe_json(payload_json)
+            row.strategy_context_json = _safe_json(strategy_context_json)
             row.updated_at = _utc_now()
             await _record_signal_emission(
                 session,
@@ -600,6 +603,7 @@ async def emit_scanner_signals(
             liquidity=float(opp.min_liquidity or 0.0),
             expires_at=expires,
             payload_json=opp.model_dump(mode="json"),
+            strategy_context_json=opp.strategy_context or None,
             dedupe_key=dedupe_key,
             commit=False,
         )
@@ -649,6 +653,7 @@ async def emit_news_intent_signals(
                 "reasoning": finding_metadata.get("reasoning"),
                 "evidence": finding_metadata.get("evidence"),
             },
+            strategy_context_json=None,
             dedupe_key=dedupe_key,
             commit=False,
         )
@@ -697,6 +702,7 @@ async def emit_weather_intent_signals(
                 "take_profit_price": getattr(intent, "take_profit_price", None),
                 "stop_loss_pct": getattr(intent, "stop_loss_pct", None),
             },
+            strategy_context_json=None,
             dedupe_key=dedupe_key,
             commit=False,
         )
@@ -835,6 +841,7 @@ async def emit_tracked_trader_signals(
             liquidity=sig.get("market_liquidity"),
             expires_at=expires_at,
             payload_json=payload,
+            strategy_context_json=None,
             dedupe_key=dedupe_key,
             commit=False,
         )
@@ -1122,6 +1129,7 @@ async def emit_crypto_market_signals(
             liquidity=liquidity,
             expires_at=expires_at,
             payload_json=payload,
+            strategy_context_json=None,
             dedupe_key=dedupe_key,
             commit=False,
         )

@@ -34,6 +34,7 @@ import Sparkline from './Sparkline'
 // ─── Constants ────────────────────────────────────────────
 
 const STRATEGY_COLORS: Record<string, string> = {
+  // Scanner detectors
   search: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
   basic: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
   negrisk: 'bg-green-500/10 text-green-400 border-green-500/20',
@@ -49,6 +50,21 @@ const STRATEGY_COLORS: Record<string, string> = {
   correlation_arb: 'bg-sky-500/10 text-sky-400 border-sky-500/20',
   market_making: 'bg-fuchsia-500/10 text-fuchsia-400 border-fuchsia-500/20',
   stat_arb: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
+  miracle: 'bg-pink-500/10 text-pink-400 border-pink-500/20',
+  combinatorial: 'bg-violet-500/10 text-violet-400 border-violet-500/20',
+  settlement_lag: 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20',
+  flash_crash_reversion: 'bg-red-500/10 text-red-400 border-red-500/20',
+  tail_end_carry: 'bg-zinc-500/10 text-zinc-400 border-zinc-500/20',
+  spread_dislocation: 'bg-slate-500/10 text-slate-400 border-slate-500/20',
+  // Weather detectors
+  weather_edge: 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20',
+  weather_ensemble_edge: 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20',
+  weather_distribution: 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20',
+  weather_conservative_no: 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20',
+  // Pipeline detectors
+  news_edge: 'bg-amber-500/10 text-amber-400 border-amber-500/20',
+  btc_eth_highfreq: 'bg-orange-500/10 text-orange-400 border-orange-500/20',
+  traders_confluence: 'bg-orange-500/10 text-orange-400 border-orange-500/20',
 }
 
 const STRATEGY_ABBREV: Record<string, string> = {
@@ -67,6 +83,19 @@ const STRATEGY_ABBREV: Record<string, string> = {
   correlation_arb: 'COR',
   market_making: 'MMK',
   stat_arb: 'SAR',
+  miracle: 'MIR',
+  combinatorial: 'CMB',
+  settlement_lag: 'SET',
+  flash_crash_reversion: 'FCR',
+  tail_end_carry: 'TEC',
+  spread_dislocation: 'SPR',
+  weather_edge: 'WTH',
+  weather_ensemble_edge: 'WEN',
+  weather_distribution: 'WDI',
+  weather_conservative_no: 'WNO',
+  news_edge: 'NEW',
+  btc_eth_highfreq: 'BTC',
+  traders_confluence: 'TRD',
 }
 
 const STRATEGY_NAMES: Record<string, string> = {
@@ -85,6 +114,19 @@ const STRATEGY_NAMES: Record<string, string> = {
   correlation_arb: 'Correlation Arb',
   market_making: 'Market Making',
   stat_arb: 'Statistical Arb',
+  miracle: 'Miracle',
+  combinatorial: 'Combinatorial',
+  settlement_lag: 'Settlement Lag',
+  flash_crash_reversion: 'Flash Crash',
+  tail_end_carry: 'Tail-End Carry',
+  spread_dislocation: 'Spread Dislocation',
+  weather_edge: 'Weather Edge',
+  weather_ensemble_edge: 'Weather Ensemble',
+  weather_distribution: 'Weather Distribution',
+  weather_conservative_no: 'Weather NO',
+  news_edge: 'News Edge',
+  btc_eth_highfreq: 'Crypto HF',
+  traders_confluence: 'Traders Flow',
 }
 
 const RECOMMENDATION_COLORS: Record<string, string> = {
@@ -374,7 +416,8 @@ function OpportunityCard({ opportunity, onExecute, onOpenCopilot, onSearchNews }
   const marketYesPrice = resolveMarketYesPrice(market)
   const marketNoPrice = resolveMarketNoPrice(market)
   const weather = market?.weather
-  const isWeatherOpportunity = !isSearch && (opportunity.strategy === 'weather_edge' || Boolean(weather))
+  const WEATHER_STRATEGIES = new Set(['weather_edge', 'weather_ensemble_edge', 'weather_distribution', 'weather_conservative_no'])
+  const isWeatherOpportunity = !isSearch && (WEATHER_STRATEGIES.has(opportunity.strategy) || Boolean(weather))
 
   const weatherSources = useMemo((): WeatherForecastSource[] => {
     if (!weather) return []

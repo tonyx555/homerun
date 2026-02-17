@@ -86,7 +86,43 @@ const STATUS_COLORS: Record<string, string> = {
   draft: 'bg-cyan-500/15 text-cyan-400 border-cyan-500/30',
 }
 
-export default function TraderStrategiesManager() {
+/** Detect which lifecycle methods a strategy source code implements */
+function detectCapabilities(sourceCode: string): { hasDetect: boolean; hasEvaluate: boolean; hasShouldExit: boolean } {
+  return {
+    hasDetect: /def\s+(detect|detect_async)\s*\(/.test(sourceCode),
+    hasEvaluate: /def\s+evaluate\s*\(/.test(sourceCode),
+    hasShouldExit: /def\s+should_exit\s*\(/.test(sourceCode),
+  }
+}
+
+function CapabilityBadges({ sourceCode }: { sourceCode: string }) {
+  const caps = detectCapabilities(sourceCode || '')
+  return (
+    <div className="flex items-center gap-1 mt-1">
+      {caps.hasDetect && (
+        <span className="text-[8px] font-semibold uppercase tracking-wider px-1.5 py-0 rounded bg-amber-500/15 text-amber-400 border border-amber-500/25">
+          Detect
+        </span>
+      )}
+      {caps.hasEvaluate && (
+        <span className="text-[8px] font-semibold uppercase tracking-wider px-1.5 py-0 rounded bg-violet-500/15 text-violet-400 border border-violet-500/25">
+          Evaluate
+        </span>
+      )}
+      {caps.hasShouldExit && (
+        <span className="text-[8px] font-semibold uppercase tracking-wider px-1.5 py-0 rounded bg-rose-500/15 text-rose-400 border border-rose-500/25">
+          Exit
+        </span>
+      )}
+    </div>
+  )
+}
+
+interface TraderStrategiesManagerProps {
+  searchQuery?: string
+}
+
+export default function TraderStrategiesManager({ searchQuery }: TraderStrategiesManagerProps) {
   const queryClient = useQueryClient()
   const [showDocs, setShowDocs] = useState(false)
   const [showParams, setShowParams] = useState(false)
@@ -140,10 +176,23 @@ export default function TraderStrategiesManager() {
   }, [strategyCatalog, traderConfigSchemaQuery.data?.sources])
 
   const filteredStrategies = useMemo(() => {
-    const rows = [...strategyCatalog]
-    if (strategyFilterSource === 'all') return rows
-    return rows.filter((item) => item.source_key === strategyFilterSource)
-  }, [strategyCatalog, strategyFilterSource])
+    let rows = [...strategyCatalog]
+    if (strategyFilterSource !== 'all') {
+      rows = rows.filter((item) => item.source_key === strategyFilterSource)
+    }
+    if (searchQuery && searchQuery.trim()) {
+      const q = searchQuery.trim().toLowerCase()
+      rows = rows.filter(
+        (item) =>
+          (item.label || '').toLowerCase().includes(q) ||
+          (item.strategy_key || '').toLowerCase().includes(q) ||
+          (item.source_key || '').toLowerCase().includes(q) ||
+          (item.description || '').toLowerCase().includes(q) ||
+          (item.class_name || '').toLowerCase().includes(q)
+      )
+    }
+    return rows
+  }, [strategyCatalog, strategyFilterSource, searchQuery])
 
   useEffect(() => {
     if (selectedStrategyId) return
@@ -420,6 +469,7 @@ export default function TraderStrategiesManager() {
                     <p className="text-[10px] font-mono text-muted-foreground mt-1 truncate">
                       {strategy.strategy_key}
                     </p>
+                    {strategy.source_code && <CapabilityBadges sourceCode={strategy.source_code} />}
                   </button>
                 )
               })

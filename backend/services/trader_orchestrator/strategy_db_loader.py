@@ -24,6 +24,9 @@ ALLOWED_IMPORT_PREFIXES = {
     # Strategy runtime APIs
     "services.trader_orchestrator.strategies.base",
     "services.trader_orchestrator.strategies",
+    # Unified strategy base (BaseStrategy with evaluate/should_exit)
+    "services.strategies.base",
+    "services.strategies",
     # Platform services
     "services.ai",
     "services.ws_feeds",
@@ -222,13 +225,19 @@ def validate_trader_strategy_source(source_code: str, class_name: str | None = N
         return result
 
     # Not requiring method body in AST because wrapper classes can inherit evaluate().
+    # Unified strategies may have detect() instead of evaluate() — accept either.
     has_evaluate_method = any(
         isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == "evaluate"
         for item in class_node.body
     )
-    if not has_evaluate_method:
+    has_detect_method = any(
+        isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name in ("detect", "detect_async")
+        for item in class_node.body
+    )
+    if not has_evaluate_method and not has_detect_method:
         result["warnings"].append(
-            "Class does not define evaluate() directly; loader will validate inherited evaluate() at runtime."
+            "Class does not define evaluate() or detect() directly; "
+            "loader will validate inherited methods at runtime."
         )
 
     result["class_name"] = picked_name
@@ -358,10 +367,17 @@ class StrategyDBLoader:
                 )
             if not isinstance(strategy_class, type):
                 raise TraderStrategyValidationError(f"'{class_name}' is not a class.")
+
+            # Accept classes extending BaseTraderStrategy OR BaseStrategy (unified)
+            from services.strategies.base import BaseStrategy
+
             if not issubclass(strategy_class, BaseTraderStrategy):
-                raise TraderStrategyValidationError(
-                    f"Class '{class_name}' must extend BaseTraderStrategy."
-                )
+                if issubclass(strategy_class, BaseStrategy):
+                    pass  # Accept unified strategies that extend BaseStrategy
+                else:
+                    raise TraderStrategyValidationError(
+                        f"Class '{class_name}' must extend BaseTraderStrategy or BaseStrategy."
+                    )
 
             instance = strategy_class()
             if not self._signature_valid(instance):

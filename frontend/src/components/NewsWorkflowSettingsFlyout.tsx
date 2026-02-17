@@ -704,7 +704,7 @@ export default function NewsWorkflowSettingsFlyout({
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-xs font-medium">Strategy Code</p>
-                <p className="text-[10px] text-muted-foreground">Edit the News Edge opportunity strategy source code</p>
+                <p className="text-[10px] text-muted-foreground">Edit the News Edge detector source code</p>
               </div>
               <Button
                 variant="outline"

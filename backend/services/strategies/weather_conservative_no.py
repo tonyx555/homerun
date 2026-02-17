@@ -26,8 +26,7 @@ from typing import Optional
 
 from config import settings
 from models import ArbitrageOpportunity, Event, Market
-from models.opportunity import MispricingType
-from services.strategies.base import BaseStrategy
+from services.strategies.weather_base import BaseWeatherStrategy
 from services.weather.signal_engine import (
     compute_confidence,
     compute_model_agreement,
@@ -37,7 +36,7 @@ from services.weather.signal_engine import (
 logger = logging.getLogger(__name__)
 
 
-class WeatherConservativeNoStrategy(BaseStrategy):
+class WeatherConservativeNoStrategy(BaseWeatherStrategy):
     """
     Conservative NO-betting: bet NO on buckets far from forecast consensus
     for high win rate.
@@ -63,30 +62,9 @@ class WeatherConservativeNoStrategy(BaseStrategy):
         "risk_base_score": 0.20,      # lower risk since these are high-probability bets
     }
 
-    def __init__(self):
-        super().__init__()
-        self._config = dict(self.DEFAULT_CONFIG)
-
-    def configure(self, config: dict) -> None:
-        """Apply user config overrides from the DB config column."""
-        if config:
-            for key in self.DEFAULT_CONFIG:
-                if key in config:
-                    self._config[key] = config[key]
-
-    def detect(
-        self,
-        events: list[Event],
-        markets: list[Market],
-        prices: dict[str, dict],
-    ) -> list[ArbitrageOpportunity]:
-        """Sync detect - returns empty.
-
-        WeatherConservativeNoStrategy is fed by the weather workflow
-        pipeline, not the main scanner loop. Weather intents are converted
-        to opportunities by detect_from_intents().
-        """
-        return []
+    # ------------------------------------------------------------------
+    # Override detect_from_intents for event_position_counts tracking
+    # ------------------------------------------------------------------
 
     def detect_from_intents(
         self,
@@ -133,6 +111,12 @@ class WeatherConservativeNoStrategy(BaseStrategy):
                 len(intents),
             )
         return opportunities
+
+    # ------------------------------------------------------------------
+    # Override _evaluate_intent -- conservative NO flow is distinct
+    # enough to warrant a full override (distance filter, always NO,
+    # Gaussian decay, different token idx logic, different min_edge).
+    # ------------------------------------------------------------------
 
     def _evaluate_intent(
         self,
@@ -230,11 +214,10 @@ class WeatherConservativeNoStrategy(BaseStrategy):
         # 9. Look up market and event
         # ------------------------------------------------------------------
         market_id = intent.get("market_id")
-        market = market_map.get(market_id) if market_id else None
+        market, event = self._lookup_market(market_id, market_map, event_map)
         if not market:
             return None
 
-        event = event_map.get(market_id)
         city = intent.get("location", "Unknown")
         question = intent.get("question", market.question or "")
 
@@ -256,14 +239,8 @@ class WeatherConservativeNoStrategy(BaseStrategy):
         # ------------------------------------------------------------------
         # 11. Profit calculations
         # ------------------------------------------------------------------
-        # For NO bets: we pay entry_price, if NO resolves correct we get
-        # model_prob_no as the expected payout (probabilistic)
-        expected_payout = model_prob_no
-        total_cost = entry_price
-        gross_profit = expected_payout - total_cost
-        fee_amount = expected_payout * self.fee
-        net_profit = gross_profit - fee_amount
-        roi = (net_profit / total_cost) * 100 if total_cost > 0 else 0
+        profit = self._compute_profit(entry_price, model_prob_no)
+        roi = profit["roi"]
 
         if roi < 1.0:
             return None
@@ -321,14 +298,7 @@ class WeatherConservativeNoStrategy(BaseStrategy):
             }
         ]
 
-        market_dict = {
-            "id": market.id,
-            "slug": market.slug,
-            "question": market.question,
-            "yes_price": market.yes_price,
-            "no_price": market.no_price,
-            "liquidity": market.liquidity,
-        }
+        market_dict = self._build_market_dict(market)
 
         title = f"Conservative NO: {city} - {question[:40]}"
         description = (
@@ -336,28 +306,73 @@ class WeatherConservativeNoStrategy(BaseStrategy):
             f"(distance {distance:.1f}C from {consensus_value_c:.1f}C consensus)"
         )
 
-        return ArbitrageOpportunity(
-            strategy=self.strategy_type,
+        return self._build_opportunity(
             title=title,
             description=description,
-            total_cost=total_cost,
-            expected_payout=expected_payout,
-            gross_profit=gross_profit,
-            fee=fee_amount,
-            net_profit=net_profit,
-            roi_percent=roi,
-            is_guaranteed=False,
-            roi_type="directional_payout",
+            total_cost=profit["total_cost"],
+            expected_payout=profit["expected_payout"],
+            gross_profit=profit["gross_profit"],
+            fee_amount=profit["fee_amount"],
+            net_profit=profit["net_profit"],
+            roi=roi,
             risk_score=risk_score,
             risk_factors=risk_factors,
-            markets=[market_dict],
-            event_id=event.id if event else None,
-            event_slug=event.slug if event else None,
-            event_title=event.title if event else None,
-            category=event.category if event else None,
+            market_dict=market_dict,
+            event=event,
             min_liquidity=min_liquidity,
-            max_position_size=max_position,
-            resolution_date=market.end_date,
-            mispricing_type=MispricingType.NEWS_INFORMATION,
-            positions_to_take=positions,
+            max_position=max_position,
+            market=market,
+            positions=positions,
         )
+
+    # ------------------------------------------------------------------
+    # Stubs for abstract hooks (not used since _evaluate_intent is
+    # overridden, but required by the base class interface).
+    # ------------------------------------------------------------------
+
+    def compute_model_probability(
+        self, intent: dict, cfg: dict,
+    ) -> tuple[Optional[float], dict]:
+        # Not called -- _evaluate_intent is fully overridden.
+        return None, {}
+
+    def risk_scoring(
+        self,
+        cfg: dict,
+        intent: dict,
+        model_prob: float,
+        confidence: float,
+        edge_percent: float,
+        extra_metadata: dict,
+    ) -> tuple[float, list[str]]:
+        # Not called -- _evaluate_intent is fully overridden.
+        return 0.0, []
+
+    def build_metadata(
+        self,
+        intent: dict,
+        cfg: dict,
+        model_prob: float,
+        direction: str,
+        edge_percent: float,
+        confidence: float,
+        extra_metadata: dict,
+    ) -> dict:
+        # Not called -- _evaluate_intent is fully overridden.
+        return {}
+
+    def build_title_description(
+        self,
+        city: str,
+        question: str,
+        intent: dict,
+        model_prob: float,
+        direction: str,
+        side: str,
+        entry_price: float,
+        yes_price: float,
+        edge_percent: float,
+        extra_metadata: dict,
+    ) -> tuple[str, str]:
+        # Not called -- _evaluate_intent is fully overridden.
+        return "", ""

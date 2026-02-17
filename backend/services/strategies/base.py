@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 from abc import ABC
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Any, Optional
 from datetime import datetime, timezone
 
 from models import Market, Event, ArbitrageOpportunity
@@ -19,6 +22,38 @@ def make_aware(dt: Optional[datetime]) -> Optional[datetime]:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+@dataclass
+class DecisionCheck:
+    """A single check/gate in the evaluate decision."""
+    key: str
+    label: str
+    passed: bool
+    score: float = None
+    detail: str = None
+    payload: dict = field(default_factory=dict)
+
+
+@dataclass
+class StrategyDecision:
+    """Result of evaluate() — whether to trade a signal."""
+    decision: str  # selected | skipped | blocked | failed
+    reason: str
+    score: float = None
+    size_usd: float = None
+    checks: list = field(default_factory=list)
+    payload: dict = field(default_factory=dict)
+
+
+@dataclass
+class ExitDecision:
+    """Result of should_exit() — whether to close a position."""
+    action: str  # "close" | "hold" | "reduce"
+    reason: str
+    close_price: float = None
+    reduce_fraction: float = None  # For partial exits (0-1)
+    payload: dict = field(default_factory=dict)
 
 
 class BaseStrategy(ABC):
@@ -42,6 +77,10 @@ class BaseStrategy(ABC):
     strategy_type: str  # StrategyType value or plugin slug
     name: str
     description: str
+    key: str = ""  # Set to strategy_type or slug; used by orchestrator for lookups
+
+    # Default config (overridden by user settings in UI)
+    default_config: dict = {}
 
     def __init__(self):
         self.fee = settings.POLYMARKET_FEE
@@ -76,6 +115,167 @@ class BaseStrategy(ABC):
         HTTP requests via ``httpx``, or database queries.
         """
         return self.detect(events, markets, prices)
+
+    def configure(self, config: dict) -> None:
+        """Apply user config overrides. Called by the loader after instantiation."""
+        merged = dict(self.default_config)
+        if config:
+            merged.update(config)
+        self.config = merged
+
+    # ── Execution phase (optional override) ──────────────────
+
+    def evaluate(self, signal: Any, context: dict) -> StrategyDecision:
+        """Decide whether to trade a signal RIGHT NOW.
+
+        Called by the orchestrator when a pending signal from this strategy
+        is ready for execution. Override to add custom gating logic.
+
+        Default: passthrough — trusts the detection layer's edge/confidence
+        and returns 'selected' with base sizing from config.
+
+        Args:
+            signal: TradeSignal object with .edge_percent, .confidence,
+                    .direction, .entry_price, .payload_json, .strategy_context
+            context: {
+                "params": dict,        # Strategy config (merged default + user overrides)
+                "trader": object,      # Trader ORM row
+                "mode": str,           # "paper" or "live"
+                "live_market": dict,   # Live CLOB prices (if available)
+                "source_config": dict, # Source config from trader
+            }
+
+        Returns:
+            StrategyDecision with decision="selected"|"skipped"|"blocked"|"failed"
+        """
+        params = context.get("params") or {}
+
+        edge = float(getattr(signal, "edge_percent", 0) or 0)
+        confidence = float(getattr(signal, "confidence", 0) or 0)
+        if confidence > 1.0:
+            confidence = confidence / 100.0
+
+        min_edge = float(params.get("min_edge_percent", 0))
+        min_conf = float(params.get("min_confidence", 0))
+        base_size = float(params.get("base_size_usd", 25.0))
+        max_size = float(params.get("max_size_usd", 500.0))
+
+        checks = [
+            DecisionCheck("edge", "Edge threshold", edge >= min_edge, score=edge, detail=f"min={min_edge:.1f}"),
+            DecisionCheck("confidence", "Confidence threshold", confidence >= min_conf, score=confidence, detail=f"min={min_conf:.2f}"),
+        ]
+
+        if not all(c.passed for c in checks):
+            failed = [c for c in checks if not c.passed]
+            return StrategyDecision(
+                decision="skipped",
+                reason=f"Failed: {', '.join(c.key for c in failed)}",
+                score=edge * confidence,
+                checks=checks,
+            )
+
+        size = min(base_size * (1 + edge / 100) * (0.5 + confidence), max_size)
+
+        return StrategyDecision(
+            decision="selected",
+            reason="Passthrough: detection thresholds met",
+            score=edge * confidence,
+            size_usd=size,
+            checks=checks,
+        )
+
+    # ── Exit/hold phase (optional override) ──────────────────
+
+    def should_exit(self, position: Any, market_state: dict) -> ExitDecision:
+        """Decide whether to close an open position.
+
+        Called every lifecycle cycle for positions opened by this strategy.
+        Override to implement custom exit logic (e.g., re-check forecasts,
+        monitor correlated markets, decay-based exits).
+
+        Default: delegates to default_exit_check() which applies standard
+        TP/SL/trailing/max-hold from strategy config.
+
+        Args:
+            position: Position object with:
+                .entry_price, .current_price, .highest_price, .lowest_price
+                .age_minutes, .pnl_percent, .strategy_context (dict from detect)
+                .config (strategy params at time of entry)
+            market_state: {
+                "current_price": float,
+                "market_tradable": bool,
+                "is_resolved": bool,
+                "winning_outcome": str|None,
+            }
+
+        Returns:
+            ExitDecision with action="close"|"hold"|"reduce"
+            Return None to use default behavior (same as ExitDecision("hold", ...))
+        """
+        return self.default_exit_check(position, market_state)
+
+    def default_exit_check(self, position: Any, market_state: dict) -> ExitDecision:
+        """Standard TP/SL/trailing/max-hold exit logic.
+
+        Strategies can call this as a fallback after their custom checks.
+        Uses config params: take_profit_pct, stop_loss_pct, trailing_stop_pct,
+        max_hold_minutes, min_hold_minutes, resolve_only.
+        """
+        config = getattr(position, "config", None) or {}
+        current_price = market_state.get("current_price")
+
+        # Resolution always wins
+        if market_state.get("is_resolved"):
+            winning = market_state.get("winning_outcome")
+            outcome_idx = getattr(position, "outcome_idx", 0)
+            close_price = 1.0 if winning == outcome_idx else 0.0
+            return ExitDecision("close", "Market resolved", close_price=close_price)
+
+        if current_price is None:
+            return ExitDecision("hold", "No current price available")
+
+        # Resolve-only mode
+        if config.get("resolve_only", False):
+            return ExitDecision("hold", "Resolve-only mode")
+
+        entry_price = float(getattr(position, "entry_price", 0) or 0)
+        age_minutes = float(getattr(position, "age_minutes", 0) or 0)
+        min_hold = float(config.get("min_hold_minutes", 0) or 0)
+        min_hold_passed = age_minutes >= min_hold
+
+        if not min_hold_passed:
+            return ExitDecision("hold", f"Min hold not met ({age_minutes:.0f}/{min_hold:.0f} min)")
+
+        pnl_pct = ((current_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+
+        # Take profit
+        tp = config.get("take_profit_pct")
+        if tp is not None and pnl_pct >= float(tp):
+            return ExitDecision("close", f"Take profit hit ({pnl_pct:.1f}% >= {tp}%)", close_price=current_price)
+
+        # Stop loss
+        sl = config.get("stop_loss_pct")
+        if sl is not None and pnl_pct <= -abs(float(sl)):
+            return ExitDecision("close", f"Stop loss hit ({pnl_pct:.1f}% <= -{sl}%)", close_price=current_price)
+
+        # Trailing stop
+        trailing = config.get("trailing_stop_pct")
+        highest = float(getattr(position, "highest_price", 0) or 0)
+        if trailing is not None and float(trailing) > 0 and highest > entry_price:
+            trigger_price = highest * (1.0 - float(trailing) / 100.0)
+            if current_price <= trigger_price:
+                return ExitDecision("close", f"Trailing stop ({current_price:.4f} <= {trigger_price:.4f})", close_price=current_price)
+
+        # Max hold
+        max_hold = config.get("max_hold_minutes")
+        if max_hold is not None and age_minutes >= float(max_hold):
+            return ExitDecision("close", f"Max hold exceeded ({age_minutes:.0f} >= {max_hold} min)", close_price=current_price)
+
+        # Market inactive
+        if not market_state.get("market_tradable", True) and config.get("close_on_inactive_market", False):
+            return ExitDecision("close", "Market inactive", close_price=current_price)
+
+        return ExitDecision("hold", "No exit condition met")
 
     def calculate_risk_score(
         self, markets: list[Market], resolution_date: Optional[datetime] = None

@@ -46,6 +46,7 @@ from api.routes_validation import router as validation_router
 from api.routes_trader_orchestrator import router as trader_orchestrator_router
 from api.routes_trader_sources import router as trader_sources_router
 from api.routes_trader_strategies import router as trader_strategies_router
+from api.routes_strategies import router as strategies_router
 from api.routes_traders import router as traders_router
 from services import wallet_tracker
 from services.copy_trader import copy_trader
@@ -106,24 +107,18 @@ async def lifespan(app: FastAPI):
 
         # Warm DB-native trader strategy registry at process startup.
         try:
-            from services.opportunity_strategy_catalog import (
-                ensure_system_opportunity_strategies_seeded,
-            )
-            from services.trader_orchestrator.strategy_catalog import (
-                ensure_system_trader_strategies_seeded,
-            )
+            from services.strategy_catalog import ensure_all_strategies_seeded
             from services.trader_orchestrator.strategy_db_loader import (
                 strategy_db_loader,
             )
 
             async with AsyncSessionLocal() as session:
-                opportunity_seeded = await ensure_system_opportunity_strategies_seeded(session)
-                trader_seeded = await ensure_system_trader_strategies_seeded(session)
+                seeded = await ensure_all_strategies_seeded(session)
                 await strategy_db_loader.refresh_from_db(session=session)
             logger.info(
                 "Strategy registries loaded",
-                opportunity_seeded=opportunity_seeded,
-                trader_seeded=trader_seeded,
+                opportunity_seeded=seeded["opportunity"],
+                trader_seeded=seeded["trader"],
             )
         except Exception as e:
             logger.warning(f"Failed to preload strategy registries: {e}")
@@ -527,6 +522,9 @@ app.add_middleware(
 
 
 # API routes
+# Unified strategies router registered first so /api/strategies/* takes priority
+# over the legacy GET /strategies endpoint in the main router.
+app.include_router(strategies_router, prefix="/api", tags=["Strategies (Unified)"])
 app.include_router(router, prefix="/api")
 app.include_router(simulation_router, prefix="/api/simulation", tags=["Simulation"])
 app.include_router(copy_trading_router, prefix="/api/copy-trading", tags=["Copy Trading"])

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import timedelta
 from typing import Any, Optional
 
@@ -11,6 +12,8 @@ from models.database import TradeSignal, TraderOrder
 from services.polymarket import polymarket_client
 from services.simulation import simulation_service
 from utils.utcnow import utcnow
+
+logger = logging.getLogger("position_lifecycle")
 
 PAPER_ACTIVE_STATUSES = {"submitted", "executed", "open"}
 LIVE_ACTIVE_STATUSES = {"submitted", "executed", "open"}
@@ -364,59 +367,109 @@ async def reconcile_paper_positions(
                 close_price = current_price
                 close_trigger = "manual_mark_to_market"
                 price_source = current_price_source
-            elif (
-                not resolve_only
-                and take_profit_pct is not None
-                and pnl_pct is not None
-                and min_hold_passed
-                and pnl_pct >= take_profit_pct
-            ):
-                close_price = current_price
-                close_trigger = "take_profit"
-                price_source = current_price_source
-            elif (
-                not resolve_only
-                and stop_loss_pct is not None
-                and pnl_pct is not None
-                and min_hold_passed
-                and pnl_pct <= -abs(stop_loss_pct)
-            ):
-                close_price = current_price
-                close_trigger = "stop_loss"
-                price_source = current_price_source
-            elif (
-                not resolve_only
-                and trailing_stop_pct is not None
-                and trailing_stop_pct > 0
-                and current_price is not None
-                and highest_price is not None
-                and min_hold_passed
-            ):
-                trailing_trigger_price = highest_price * (1.0 - (trailing_stop_pct / 100.0))
-                if highest_price > entry_price and current_price <= trailing_trigger_price:
-                    close_price = current_price
-                    close_trigger = "trailing_stop"
+            else:
+                # ── Strategy-based exit check ──────────────────────────
+                # If the strategy that opened this position has a
+                # should_exit() method, call it first and respect its
+                # decision before falling through to default TP/SL/etc.
+                strategy_slug = (payload.get("strategy_type") or "").strip().lower()
+                strategy_exit = None
+                if strategy_slug:
+                    from services.plugin_loader import plugin_loader
+                    plugin = plugin_loader.get_plugin(strategy_slug)
+                    if plugin and hasattr(plugin.instance, "should_exit"):
+                        try:
+                            class _PaperPositionView:
+                                pass
+                            pos_view = _PaperPositionView()
+                            pos_view.entry_price = entry_price
+                            pos_view.current_price = current_price
+                            pos_view.highest_price = highest_price
+                            pos_view.lowest_price = lowest_price
+                            pos_view.age_minutes = age_minutes
+                            pos_view.pnl_percent = pnl_pct
+                            pos_view.strategy_context = payload.get("strategy_context", {})
+                            pos_view.config = payload.get("strategy_exit_config", {})
+                            pos_view.outcome_idx = outcome_idx
+
+                            market_state_dict = {
+                                "current_price": current_price,
+                                "market_tradable": market_tradable,
+                                "is_resolved": False,
+                                "winning_outcome": None,
+                            }
+
+                            exit_decision = plugin.instance.should_exit(pos_view, market_state_dict)
+                            if exit_decision is not None and getattr(exit_decision, "action", None) == "close":
+                                strategy_exit = exit_decision
+                        except Exception as exc:
+                            logger.warning(
+                                "Strategy should_exit() error for %s: %s",
+                                strategy_slug,
+                                exc,
+                            )
+
+                if strategy_exit is not None:
+                    close_price = (
+                        strategy_exit.close_price
+                        if strategy_exit.close_price is not None
+                        else current_price
+                    )
+                    close_trigger = f"strategy:{strategy_exit.reason}"
                     price_source = current_price_source
-            elif (
-                not resolve_only
-                and max_hold_minutes is not None
-                and age_minutes is not None
-                and age_minutes >= max_hold_minutes
-            ):
-                if current_price is not None:
+                elif (
+                    not resolve_only
+                    and take_profit_pct is not None
+                    and pnl_pct is not None
+                    and min_hold_passed
+                    and pnl_pct >= take_profit_pct
+                ):
                     close_price = current_price
-                    close_trigger = "max_hold"
+                    close_trigger = "take_profit"
                     price_source = current_price_source
-            elif (
-                not resolve_only
-                and close_on_inactive_market
-                and not market_tradable
-                and current_price is not None
-                and min_hold_passed
-            ):
-                close_price = current_price
-                close_trigger = "market_inactive"
-                price_source = current_price_source
+                elif (
+                    not resolve_only
+                    and stop_loss_pct is not None
+                    and pnl_pct is not None
+                    and min_hold_passed
+                    and pnl_pct <= -abs(stop_loss_pct)
+                ):
+                    close_price = current_price
+                    close_trigger = "stop_loss"
+                    price_source = current_price_source
+                elif (
+                    not resolve_only
+                    and trailing_stop_pct is not None
+                    and trailing_stop_pct > 0
+                    and current_price is not None
+                    and highest_price is not None
+                    and min_hold_passed
+                ):
+                    trailing_trigger_price = highest_price * (1.0 - (trailing_stop_pct / 100.0))
+                    if highest_price > entry_price and current_price <= trailing_trigger_price:
+                        close_price = current_price
+                        close_trigger = "trailing_stop"
+                        price_source = current_price_source
+                elif (
+                    not resolve_only
+                    and max_hold_minutes is not None
+                    and age_minutes is not None
+                    and age_minutes >= max_hold_minutes
+                ):
+                    if current_price is not None:
+                        close_price = current_price
+                        close_trigger = "max_hold"
+                        price_source = current_price_source
+                elif (
+                    not resolve_only
+                    and close_on_inactive_market
+                    and not market_tradable
+                    and current_price is not None
+                    and min_hold_passed
+                ):
+                    close_price = current_price
+                    close_trigger = "market_inactive"
+                    price_source = current_price_source
 
         if close_price is None:
             state_changed = False
@@ -727,59 +780,109 @@ async def reconcile_live_positions(
                 close_price = current_price
                 close_trigger = "manual_mark_to_market"
                 price_source = current_price_source
-            elif (
-                not resolve_only
-                and take_profit_pct is not None
-                and pnl_pct is not None
-                and min_hold_passed
-                and pnl_pct >= take_profit_pct
-            ):
-                close_price = current_price
-                close_trigger = "take_profit"
-                price_source = current_price_source
-            elif (
-                not resolve_only
-                and stop_loss_pct is not None
-                and pnl_pct is not None
-                and min_hold_passed
-                and pnl_pct <= -abs(stop_loss_pct)
-            ):
-                close_price = current_price
-                close_trigger = "stop_loss"
-                price_source = current_price_source
-            elif (
-                not resolve_only
-                and trailing_stop_pct is not None
-                and trailing_stop_pct > 0
-                and current_price is not None
-                and highest_price is not None
-                and min_hold_passed
-            ):
-                trailing_trigger_price = highest_price * (1.0 - (trailing_stop_pct / 100.0))
-                if highest_price > entry_price and current_price <= trailing_trigger_price:
-                    close_price = current_price
-                    close_trigger = "trailing_stop"
+            else:
+                # ── Strategy-based exit check ──────────────────────────
+                # If the strategy that opened this position has a
+                # should_exit() method, call it first and respect its
+                # decision before falling through to default TP/SL/etc.
+                strategy_slug = (payload.get("strategy_type") or "").strip().lower()
+                strategy_exit = None
+                if strategy_slug:
+                    from services.plugin_loader import plugin_loader
+                    plugin = plugin_loader.get_plugin(strategy_slug)
+                    if plugin and hasattr(plugin.instance, "should_exit"):
+                        try:
+                            class _LivePositionView:
+                                pass
+                            pos_view = _LivePositionView()
+                            pos_view.entry_price = entry_price
+                            pos_view.current_price = current_price
+                            pos_view.highest_price = highest_price
+                            pos_view.lowest_price = lowest_price
+                            pos_view.age_minutes = age_minutes
+                            pos_view.pnl_percent = pnl_pct
+                            pos_view.strategy_context = payload.get("strategy_context", {})
+                            pos_view.config = payload.get("strategy_exit_config", {})
+                            pos_view.outcome_idx = outcome_idx
+
+                            market_state_dict = {
+                                "current_price": current_price,
+                                "market_tradable": market_tradable,
+                                "is_resolved": False,
+                                "winning_outcome": None,
+                            }
+
+                            exit_decision = plugin.instance.should_exit(pos_view, market_state_dict)
+                            if exit_decision is not None and getattr(exit_decision, "action", None) == "close":
+                                strategy_exit = exit_decision
+                        except Exception as exc:
+                            logger.warning(
+                                "Strategy should_exit() error for %s: %s",
+                                strategy_slug,
+                                exc,
+                            )
+
+                if strategy_exit is not None:
+                    close_price = (
+                        strategy_exit.close_price
+                        if strategy_exit.close_price is not None
+                        else current_price
+                    )
+                    close_trigger = f"strategy:{strategy_exit.reason}"
                     price_source = current_price_source
-            elif (
-                not resolve_only
-                and max_hold_minutes is not None
-                and age_minutes is not None
-                and age_minutes >= max_hold_minutes
-            ):
-                if current_price is not None:
+                elif (
+                    not resolve_only
+                    and take_profit_pct is not None
+                    and pnl_pct is not None
+                    and min_hold_passed
+                    and pnl_pct >= take_profit_pct
+                ):
                     close_price = current_price
-                    close_trigger = "max_hold"
+                    close_trigger = "take_profit"
                     price_source = current_price_source
-            elif (
-                not resolve_only
-                and close_on_inactive_market
-                and not market_tradable
-                and current_price is not None
-                and min_hold_passed
-            ):
-                close_price = current_price
-                close_trigger = "market_inactive"
-                price_source = current_price_source
+                elif (
+                    not resolve_only
+                    and stop_loss_pct is not None
+                    and pnl_pct is not None
+                    and min_hold_passed
+                    and pnl_pct <= -abs(stop_loss_pct)
+                ):
+                    close_price = current_price
+                    close_trigger = "stop_loss"
+                    price_source = current_price_source
+                elif (
+                    not resolve_only
+                    and trailing_stop_pct is not None
+                    and trailing_stop_pct > 0
+                    and current_price is not None
+                    and highest_price is not None
+                    and min_hold_passed
+                ):
+                    trailing_trigger_price = highest_price * (1.0 - (trailing_stop_pct / 100.0))
+                    if highest_price > entry_price and current_price <= trailing_trigger_price:
+                        close_price = current_price
+                        close_trigger = "trailing_stop"
+                        price_source = current_price_source
+                elif (
+                    not resolve_only
+                    and max_hold_minutes is not None
+                    and age_minutes is not None
+                    and age_minutes >= max_hold_minutes
+                ):
+                    if current_price is not None:
+                        close_price = current_price
+                        close_trigger = "max_hold"
+                        price_source = current_price_source
+                elif (
+                    not resolve_only
+                    and close_on_inactive_market
+                    and not market_tradable
+                    and current_price is not None
+                    and min_hold_passed
+                ):
+                    close_price = current_price
+                    close_trigger = "market_inactive"
+                    price_source = current_price_source
 
         if close_price is None:
             state_changed = False

@@ -123,6 +123,9 @@ class ArbitrageOpportunity(BaseModel):
     # Inline AI analysis (populated by scanner, persisted across scans)
     ai_analysis: Optional[AIAnalysis] = None
 
+    # Strategy-specific context passed from detect() to evaluate() and should_exit()
+    strategy_context: dict = {}
+
     def __init__(self, **data):
         super().__init__(**data)
         # Build a canonical fingerprint from ALL market IDs (sorted) to avoid

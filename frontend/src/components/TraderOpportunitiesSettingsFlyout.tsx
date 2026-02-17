@@ -247,7 +247,7 @@ export default function TraderOpportunitiesSettingsFlyout({
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-xs font-medium">Strategy Code</p>
-                <p className="text-[10px] text-muted-foreground">Edit the Traders Confluence opportunity strategy source code</p>
+                <p className="text-[10px] text-muted-foreground">Edit the Traders Confluence detector source code</p>
               </div>
               <Button
                 variant="outline"

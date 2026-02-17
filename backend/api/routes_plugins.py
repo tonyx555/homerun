@@ -1,5 +1,10 @@
 """
-Plugin API Routes
+Plugin API Routes  (DEPRECATED — backward compatibility alias)
+
+These /plugins endpoints are preserved for backward compatibility.
+New clients should use the unified /strategies API (routes_strategies.py)
+which serves both opportunity-detection and trader-execution strategies
+through a single interface.
 
 Full CRUD for code-based strategy plugins. Each plugin is a Python file
 defining a BaseStrategy subclass with custom detection logic — a real strategy,

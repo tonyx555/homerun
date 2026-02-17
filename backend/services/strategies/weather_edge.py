@@ -23,10 +23,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from config import settings
-from models import ArbitrageOpportunity, Event, Market
-from models.opportunity import MispricingType
-from services.strategies.base import BaseStrategy
+from services.strategies.weather_base import BaseWeatherStrategy
 from services.weather.signal_engine import (
     clamp01,
     compute_confidence,
@@ -37,7 +34,7 @@ from services.weather.signal_engine import (
 logger = logging.getLogger(__name__)
 
 
-class WeatherEdgeStrategy(BaseStrategy):
+class WeatherEdgeStrategy(BaseWeatherStrategy):
     """
     Weather Edge Strategy
 
@@ -50,7 +47,6 @@ class WeatherEdgeStrategy(BaseStrategy):
     name = "Weather Edge"
     description = "Detect weather-driven mispricings via multi-source forecast consensus"
 
-    # Default config thresholds (overridden by DB config column)
     DEFAULT_CONFIG = {
         "min_edge_percent": 6.0,
         "min_confidence": 0.55,
@@ -62,159 +58,87 @@ class WeatherEdgeStrategy(BaseStrategy):
         "probability_scale_c": 2.0,
     }
 
-    def __init__(self):
-        super().__init__()
-        self._config = dict(self.DEFAULT_CONFIG)
+    # ------------------------------------------------------------------
+    # Hook: quality_gates
+    # ------------------------------------------------------------------
 
-    def configure(self, config: dict) -> None:
-        """Apply user config overrides from the DB config column."""
-        if config:
-            for key in self.DEFAULT_CONFIG:
-                if key in config:
-                    self._config[key] = config[key]
-
-    def detect(
-        self,
-        events: list[Event],
-        markets: list[Market],
-        prices: dict[str, dict],
-    ) -> list[ArbitrageOpportunity]:
-        """Sync detect - returns empty.
-
-        WeatherEdgeStrategy is fed by the weather workflow pipeline,
-        not the main scanner loop. Weather intents are converted to
-        opportunities by detect_from_intents().
-        """
-        return []
-
-    def detect_from_intents(
-        self,
-        intents: list[dict],
-        markets: list[Market],
-        events: list[Event],
-    ) -> list[ArbitrageOpportunity]:
-        """Convert weather trade intents into ArbitrageOpportunity objects.
-
-        Accepts enriched intents with raw forecast data. Computes its own
-        direction by comparing model probability to market price.
-        """
-        if not intents:
-            return []
-
-        cfg = self._config
-        opportunities: list[ArbitrageOpportunity] = []
-        market_map = {m.id: m for m in markets}
-        event_map: dict[str, Event] = {}
-        for event in events:
-            for m in event.markets:
-                event_map[m.id] = event
-
-        for intent in intents:
-            try:
-                opp = self._evaluate_intent(intent, market_map, event_map, cfg)
-                if opp:
-                    opportunities.append(opp)
-            except Exception as e:
-                logger.debug("Weather Edge: skipped intent: %s", e)
-
-        if opportunities:
-            logger.info("Weather Edge: %d opportunities from %d intents", len(opportunities), len(intents))
-        return opportunities
-
-    def _evaluate_intent(
-        self,
-        intent: dict,
-        market_map: dict[str, Market],
-        event_map: dict[str, Event],
-        cfg: dict,
-    ) -> Optional[ArbitrageOpportunity]:
-        """Evaluate a single weather trade intent against config thresholds.
-
-        Computes direction by comparing model probability to market price,
-        NOT by checking against a fixed 0.5 threshold.
-        """
+    def quality_gates(self, intent: dict, cfg: dict) -> bool:
         source_count = int(intent.get("source_count", 0))
-        source_spread_c = float(intent.get("source_spread_c") or intent.get("source_spread_c", 0) or 0)
+        source_spread_c = float(
+            intent.get("source_spread_c") or intent.get("source_spread_c", 0) or 0
+        )
         agreement = float(intent.get("model_agreement", 0))
-        yes_price = float(intent.get("yes_price", 0.5))
-        no_price = float(intent.get("no_price", 0.5))
+
+        if agreement < cfg["min_model_agreement"]:
+            return False
+        if source_count < cfg["min_source_count"]:
+            return False
+        if source_spread_c > cfg["max_source_spread_c"]:
+            return False
+        return True
+
+    # ------------------------------------------------------------------
+    # Hook: compute_model_probability
+    # ------------------------------------------------------------------
+
+    def compute_model_probability(
+        self, intent: dict, cfg: dict,
+    ) -> tuple[Optional[float], dict]:
         bucket_low = intent.get("bucket_low_c")
         bucket_high = intent.get("bucket_high_c")
         consensus_value_c = intent.get("consensus_value_c")
 
-        # Quality gates (non-directional filters)
-        if agreement < cfg["min_model_agreement"]:
-            return None
-        if source_count < cfg["min_source_count"]:
-            return None
-        if source_spread_c > cfg["max_source_spread_c"]:
-            return None
-
-        # Compute model probability for this bucket
         scale_c = float(cfg.get("probability_scale_c", 2.0))
         if bucket_low is not None and bucket_high is not None and consensus_value_c is not None:
             model_prob = temp_range_probability(
-                float(consensus_value_c), float(bucket_low), float(bucket_high), scale_c
+                float(consensus_value_c), float(bucket_low), float(bucket_high), scale_c,
             )
         else:
-            # Fallback: use pre-computed consensus probability
             model_prob = float(intent.get("consensus_probability", 0.5) or 0.5)
 
-        # Direction: compare model probability to market price
-        # This is the KEY FIX: we compare to market price, not 0.5
-        if model_prob > yes_price:
-            direction = "buy_yes"
-            entry_price = yes_price
-            target_price = model_prob
-            edge_percent = (model_prob - yes_price) * 100.0
-        else:
-            direction = "buy_no"
-            entry_price = no_price
-            target_price = 1.0 - model_prob
-            edge_percent = ((1.0 - model_prob) - no_price) * 100.0
+        return model_prob, {}
 
-        # Apply edge and confidence filters
-        if edge_percent < cfg["min_edge_percent"]:
-            return None
-        if entry_price > cfg["max_entry_price"]:
-            return None
+    # ------------------------------------------------------------------
+    # Hook: post_direction_gates  (confidence check AFTER direction/edge)
+    # ------------------------------------------------------------------
 
+    def post_direction_gates(
+        self,
+        intent: dict,
+        cfg: dict,
+        model_prob: float,
+        edge_percent: float,
+        extra_metadata: dict,
+    ) -> bool:
+        agreement = float(intent.get("model_agreement", 0))
+        source_count = int(intent.get("source_count", 0))
+        source_spread_c = float(
+            intent.get("source_spread_c") or intent.get("source_spread_c", 0) or 0
+        )
         confidence = compute_confidence(agreement, model_prob, source_count, source_spread_c)
         if confidence < cfg["min_confidence"]:
-            return None
+            return False
+        return True
 
-        market_id = intent.get("market_id")
-        market = market_map.get(market_id) if market_id else None
-        if not market:
-            return None
+    # ------------------------------------------------------------------
+    # Hook: risk_scoring
+    # ------------------------------------------------------------------
 
-        event = event_map.get(market_id)
-        city = intent.get("location", "Unknown")
+    def risk_scoring(
+        self,
+        cfg: dict,
+        intent: dict,
+        model_prob: float,
+        confidence: float,
+        edge_percent: float,
+        extra_metadata: dict,
+    ) -> tuple[float, list[str]]:
+        source_count = int(intent.get("source_count", 0))
+        source_spread_c = float(
+            intent.get("source_spread_c") or intent.get("source_spread_c", 0) or 0
+        )
+        agreement = float(intent.get("model_agreement", 0))
 
-        # Position sizing
-        side = "YES" if direction == "buy_yes" else "NO"
-        token_id = None
-        if market.clob_token_ids:
-            idx = 0 if direction == "buy_yes" else (1 if len(market.clob_token_ids) > 1 else 0)
-            token_id = market.clob_token_ids[idx]
-
-        expected_payout = target_price
-        total_cost = entry_price
-        gross_profit = expected_payout - total_cost
-        fee_amount = expected_payout * self.fee
-        net_profit = gross_profit - fee_amount
-        roi = (net_profit / total_cost) * 100 if total_cost > 0 else 0
-
-        if roi < cfg["min_edge_percent"] / 2:
-            return None
-
-        min_liquidity = market.liquidity
-        max_position = min(min_liquidity * 0.05, 400.0)
-
-        if max_position < settings.MIN_POSITION_SIZE:
-            return None
-
-        # Risk scoring
         risk_score = float(cfg["risk_base_score"])
         risk_factors = [
             "Weather-driven directional bet (forecast vs market)",
@@ -228,66 +152,70 @@ class WeatherEdgeStrategy(BaseStrategy):
             risk_score += 0.1
             risk_factors.append("High source disagreement")
         risk_score = min(risk_score, 1.0)
+        return risk_score, risk_factors
 
+    # ------------------------------------------------------------------
+    # Hook: build_metadata
+    # ------------------------------------------------------------------
+
+    def build_metadata(
+        self,
+        intent: dict,
+        cfg: dict,
+        model_prob: float,
+        direction: str,
+        edge_percent: float,
+        confidence: float,
+        extra_metadata: dict,
+    ) -> dict:
+        city = intent.get("location", "Unknown")
         consensus_temp = intent.get("consensus_value_c")
         market_temp = intent.get("market_implied_temp_c")
+        agreement = float(intent.get("model_agreement", 0))
+        source_count = int(intent.get("source_count", 0))
+        source_spread_c = float(
+            intent.get("source_spread_c") or intent.get("source_spread_c", 0) or 0
+        )
 
-        positions = [
-            {
-                "action": "BUY",
-                "outcome": side,
-                "price": entry_price,
-                "token_id": token_id,
-                "_weather_edge": {
-                    "city": city,
-                    "consensus_temp_c": consensus_temp,
-                    "market_implied_temp_c": market_temp,
-                    "model_agreement": agreement,
-                    "source_count": source_count,
-                    "source_spread_c": source_spread_c,
-                    "edge_percent": edge_percent,
-                    "confidence": confidence,
-                    "direction": direction,
-                    "model_probability": model_prob,
-                },
-            }
-        ]
-
-        market_dict = {
-            "id": market.id,
-            "slug": market.slug,
-            "question": market.question,
-            "yes_price": market.yes_price,
-            "no_price": market.no_price,
-            "liquidity": market.liquidity,
+        return {
+            "_weather_edge": {
+                "city": city,
+                "consensus_temp_c": consensus_temp,
+                "market_implied_temp_c": market_temp,
+                "model_agreement": agreement,
+                "source_count": source_count,
+                "source_spread_c": source_spread_c,
+                "edge_percent": edge_percent,
+                "confidence": confidence,
+                "direction": direction,
+                "model_probability": model_prob,
+            },
         }
 
-        return ArbitrageOpportunity(
-            strategy=self.strategy_type,
-            title=f"Weather Edge: {city} - {market.question[:40]}",
-            description=(
-                f"Forecast consensus ({source_count} sources, {agreement:.0%} agreement) "
-                f"suggests {side} at ${entry_price:.2f} "
-                f"(model: {model_prob:.0%} vs market: {yes_price:.0%}, edge: {edge_percent:.1f}%)"
-            ),
-            total_cost=total_cost,
-            expected_payout=expected_payout,
-            gross_profit=gross_profit,
-            fee=fee_amount,
-            net_profit=net_profit,
-            roi_percent=roi,
-            is_guaranteed=False,
-            roi_type="directional_payout",
-            risk_score=risk_score,
-            risk_factors=risk_factors,
-            markets=[market_dict],
-            event_id=event.id if event else None,
-            event_slug=event.slug if event else None,
-            event_title=event.title if event else None,
-            category=event.category if event else None,
-            min_liquidity=min_liquidity,
-            max_position_size=max_position,
-            resolution_date=market.end_date,
-            mispricing_type=MispricingType.NEWS_INFORMATION,
-            positions_to_take=positions,
+    # ------------------------------------------------------------------
+    # Hook: build_title_description
+    # ------------------------------------------------------------------
+
+    def build_title_description(
+        self,
+        city: str,
+        question: str,
+        intent: dict,
+        model_prob: float,
+        direction: str,
+        side: str,
+        entry_price: float,
+        yes_price: float,
+        edge_percent: float,
+        extra_metadata: dict,
+    ) -> tuple[str, str]:
+        source_count = int(intent.get("source_count", 0))
+        agreement = float(intent.get("model_agreement", 0))
+
+        title = f"Weather Edge: {city} - {question[:40]}"
+        description = (
+            f"Forecast consensus ({source_count} sources, {agreement:.0%} agreement) "
+            f"suggests {side} at ${entry_price:.2f} "
+            f"(model: {model_prob:.0%} vs market: {yes_price:.0%}, edge: {edge_percent:.1f}%)"
         )
+        return title, description

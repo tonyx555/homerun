@@ -36,6 +36,7 @@ from services.trader_orchestrator.sources.registry import (
 from services.trader_orchestrator.strategy_catalog import (
     ensure_system_trader_strategies_seeded,
 )
+from services.plugin_loader import plugin_loader
 from services.trader_orchestrator.strategy_db_loader import strategy_db_loader
 from services.trader_orchestrator_state import (
     cleanup_trader_open_orders,
@@ -844,99 +845,43 @@ async def _run_trader_once(
                     runtime_signal.source = signal_source
                     traders_scope_payload: dict[str, Any] | None = None
 
-                    if not strategy_status.available:
-                        blocked_reason = f"strategy_unavailable:{resolved_strategy_key}"
-                        checks_payload = [
-                            {
-                                "check_key": "strategy_available",
-                                "check_label": "Strategy available",
-                                "passed": False,
-                                "score": None,
-                                "detail": str(strategy_status.reason or blocked_reason),
-                                "payload": {
-                                    "requested_strategy_key": strategy_key,
-                                    "resolved_strategy_key": resolved_strategy_key,
-                                },
-                            }
-                        ]
-                        decision_row = await create_trader_decision(
-                            session,
-                            trader_id=trader_id,
-                            signal=runtime_signal,
-                            strategy_key=resolved_strategy_key,
-                            decision="blocked",
-                            reason=blocked_reason,
-                            score=0.0,
-                            checks_summary={"count": len(checks_payload)},
-                            risk_snapshot={},
-                            payload={
-                                "source_key": signal_source,
-                                "source_config": source_config,
-                                "strategy_runtime_error": strategy_status.reason,
-                            },
-                            commit=False,
-                        )
-                        decisions_written += 1
-                        await create_trader_decision_checks(
-                            session,
-                            decision_id=decision_row.id,
-                            checks=checks_payload,
-                            commit=False,
-                        )
-                        await set_trade_signal_status(
-                            session,
-                            signal_id=signal_id,
-                            status="skipped",
-                            commit=False,
-                        )
-                        await record_signal_consumption(
-                            session,
-                            trader_id=trader_id,
-                            signal_id=signal_id,
-                            decision_id=decision_row.id,
-                            outcome="blocked",
-                            reason=blocked_reason,
-                            commit=False,
-                        )
-                        await create_trader_event(
-                            session,
-                            trader_id=trader_id,
-                            event_type="strategy_unavailable",
-                            severity="warn",
-                            source=signal_source,
-                            message=blocked_reason,
-                            payload={
-                                "decision_id": decision_row.id,
-                                "signal_id": signal.id,
-                                "requested_strategy_key": strategy_key,
-                                "resolved_strategy_key": resolved_strategy_key,
-                                "error": strategy_status.reason,
-                            },
-                            commit=False,
-                        )
-                        await upsert_trader_signal_cursor(
-                            session,
-                            trader_id=trader_id,
-                            last_signal_created_at=signal.created_at,
-                            last_signal_id=signal_id,
-                            commit=False,
-                        )
-                        await session.commit()
-                        cursor_created_at = signal.created_at
-                        cursor_signal_id = signal_id
-                        processed_signals += 1
-                        continue
+                    # ── Strategy resolution ──────────────────────────────
+                    # 1. Try the trader strategy DB loader (existing behavior)
+                    strategy = None
+                    if strategy_status.available:
+                        strategy = strategy_db_loader.get_strategy(resolved_strategy_key)
 
-                    strategy = strategy_db_loader.get_strategy(resolved_strategy_key)
+                    # 2. Fallback: try the plugin loader (unified strategies)
+                    #    The signal's strategy_type may match a plugin slug when
+                    #    the trader uses a generic strategy_key like "opportunity_general"
+                    #    but the signal originated from a specific plugin strategy.
+                    if strategy is None:
+                        signal_strategy_type = str(
+                            getattr(signal, "strategy_type", "") or ""
+                        ).strip().lower()
+                        if signal_strategy_type:
+                            plugin = plugin_loader.get_plugin(signal_strategy_type)
+                            if plugin and hasattr(plugin.instance, "evaluate"):
+                                strategy = plugin.instance
+
+                    # 3. Final fallback: try plugin loader with source key
+                    if strategy is None:
+                        plugin = plugin_loader.get_plugin(signal_source)
+                        if plugin and hasattr(plugin.instance, "evaluate"):
+                            strategy = plugin.instance
+
                     if strategy is None:
                         blocked_reason = f"strategy_unavailable:{resolved_strategy_key}"
+                        strategy_detail = str(strategy_status.reason or blocked_reason)
+                        if strategy_status.available:
+                            strategy_detail = "Strategy cache miss"
                         checks_payload = [
                             {
                                 "check_key": "strategy_available",
                                 "check_label": "Strategy available",
                                 "passed": False,
                                 "score": None,
-                                "detail": "Strategy cache miss",
+                                "detail": strategy_detail,
                                 "payload": {
                                     "requested_strategy_key": strategy_key,
                                     "resolved_strategy_key": resolved_strategy_key,
@@ -956,7 +901,7 @@ async def _run_trader_once(
                             payload={
                                 "source_key": signal_source,
                                 "source_config": source_config,
-                                "strategy_runtime_error": "strategy cache miss",
+                                "strategy_runtime_error": strategy_detail,
                             },
                             commit=False,
                         )
@@ -973,6 +918,15 @@ async def _run_trader_once(
                             status="skipped",
                             commit=False,
                         )
+                        await record_signal_consumption(
+                            session,
+                            trader_id=trader_id,
+                            signal_id=signal_id,
+                            decision_id=decision_row.id,
+                            outcome="blocked",
+                            reason=blocked_reason,
+                            commit=False,
+                        )
                         await create_trader_event(
                             session,
                             trader_id=trader_id,
@@ -985,17 +939,8 @@ async def _run_trader_once(
                                 "signal_id": signal.id,
                                 "requested_strategy_key": strategy_key,
                                 "resolved_strategy_key": resolved_strategy_key,
-                                "error": "strategy cache miss",
+                                "error": strategy_detail,
                             },
-                            commit=False,
-                        )
-                        await record_signal_consumption(
-                            session,
-                            trader_id=trader_id,
-                            signal_id=signal_id,
-                            decision_id=decision_row.id,
-                            outcome="blocked",
-                            reason=blocked_reason,
                             commit=False,
                         )
                         await upsert_trader_signal_cursor(
@@ -1384,6 +1329,32 @@ async def _run_trader_once(
                                         payload_copy["simulation_ledger_error"] = str(exc)
                                         execution_payload = payload_copy
 
+                        # ── Enrich order payload with strategy context & exit config ──
+                        # so position_lifecycle can invoke strategy-based should_exit().
+                        order_payload = dict(execution_payload or {})
+                        order_payload["strategy_type"] = str(
+                            getattr(signal, "strategy_type", "") or ""
+                        ).strip().lower()
+                        order_payload["strategy_context"] = (
+                            getattr(signal, "strategy_context_json", None)
+                            or getattr(signal, "strategy_context", None)
+                            or {}
+                        )
+                        _exit_param_keys = {
+                            "take_profit_pct",
+                            "stop_loss_pct",
+                            "trailing_stop_pct",
+                            "max_hold_minutes",
+                            "min_hold_minutes",
+                            "resolve_only",
+                            "close_on_inactive_market",
+                        }
+                        order_payload["strategy_exit_config"] = {
+                            k: v
+                            for k, v in (strategy_params or {}).items()
+                            if k in _exit_param_keys
+                        }
+
                         await create_trader_order(
                             session,
                             trader_id=trader_id,
@@ -1394,7 +1365,7 @@ async def _run_trader_once(
                             notional_usd=size_usd,
                             effective_price=effective_price,
                             reason=final_reason,
-                            payload=execution_payload,
+                            payload=order_payload,
                             error_message=error_message,
                             commit=False,
                         )

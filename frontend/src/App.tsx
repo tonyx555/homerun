@@ -69,7 +69,7 @@ import { Button } from './components/ui/button'
 import { Input } from './components/ui/input'
 import { Separator } from './components/ui/separator'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './components/ui/tooltip'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './components/ui/select'
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from './components/ui/select'
 
 // App components
 import OpportunityCard from './components/OpportunityCard'
@@ -687,6 +687,20 @@ function App() {
     }),
     [strategies, selectedStrategy, showZeroCountStrategies, strategyCounts]
   )
+
+  const SOURCE_GROUP_ORDER = ['scanner', 'weather', 'news', 'crypto', 'traders'] as const
+  const SOURCE_GROUP_LABELS: Record<string, string> = { scanner: 'Scanner', weather: 'Weather', news: 'News', crypto: 'Crypto', traders: 'Traders' }
+  const groupedStrategies = useMemo(() => {
+    const groups: Record<string, typeof visibleStrategies> = {}
+    for (const s of visibleStrategies) {
+      const key = s.source_key || 'scanner'
+      if (!groups[key]) groups[key] = []
+      groups[key].push(s)
+    }
+    return SOURCE_GROUP_ORDER
+      .filter((k) => groups[k]?.length)
+      .map((k) => ({ key: k, label: SOURCE_GROUP_LABELS[k] || k, strategies: groups[k] }))
+  }, [visibleStrategies])
 
   useEffect(() => {
     if (!selectedStrategySubtype) return
@@ -1528,18 +1542,23 @@ function App() {
                             </SelectTrigger>
                             <SelectContent>
                               <SelectItem value="_all">All Detectors</SelectItem>
-                              {visibleStrategies.map((s) => (
-                                <SelectItem
-                                  key={s.type}
-                                  value={s.type}
-                                  suffix={strategyCounts[s.type] != null ? (
-                                    <span className="ml-auto pl-2 inline-flex items-center justify-center rounded-full bg-primary/15 text-primary text-[10px] font-medium min-w-[20px] h-4 px-1.5">
-                                      {strategyCounts[s.type]}
-                                    </span>
-                                  ) : undefined}
-                                >
-                                  {s.name}
-                                </SelectItem>
+                              {groupedStrategies.map((group) => (
+                                <SelectGroup key={group.key}>
+                                  <SelectLabel className="text-[10px] uppercase tracking-wider text-muted-foreground/60 font-medium px-2 py-1">{group.label}</SelectLabel>
+                                  {group.strategies.map((s) => (
+                                    <SelectItem
+                                      key={s.type}
+                                      value={s.type}
+                                      suffix={strategyCounts[s.type] != null ? (
+                                        <span className="ml-auto pl-2 inline-flex items-center justify-center rounded-full bg-primary/15 text-primary text-[10px] font-medium min-w-[20px] h-4 px-1.5">
+                                          {strategyCounts[s.type]}
+                                        </span>
+                                      ) : undefined}
+                                    >
+                                      {s.name}
+                                    </SelectItem>
+                                  ))}
+                                </SelectGroup>
                               ))}
                             </SelectContent>
                           </Select>

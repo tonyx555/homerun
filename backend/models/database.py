@@ -1963,6 +1963,7 @@ class TradeSignal(Base):
         String, nullable=False, default="pending"
     )  # pending | selected | submitted | executed | skipped | expired | failed
     payload_json = Column(JSON, nullable=True)
+    strategy_context_json = Column(JSON, nullable=True)  # Context from detect() for evaluate()/should_exit()
     dedupe_key = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

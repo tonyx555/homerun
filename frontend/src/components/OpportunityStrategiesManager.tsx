@@ -121,11 +121,44 @@ const SOURCE_LABELS: Record<string, string> = {
   traders: 'Traders tab',
 }
 
-interface OpportunityStrategiesManagerProps {
-  initialSourceFilter?: string
+/** Detect which lifecycle methods a strategy source code implements */
+function detectCapabilities(sourceCode: string): { hasDetect: boolean; hasEvaluate: boolean; hasShouldExit: boolean } {
+  return {
+    hasDetect: /def\s+(detect|detect_async)\s*\(/.test(sourceCode),
+    hasEvaluate: /def\s+evaluate\s*\(/.test(sourceCode),
+    hasShouldExit: /def\s+should_exit\s*\(/.test(sourceCode),
+  }
 }
 
-export default function OpportunityStrategiesManager({ initialSourceFilter }: OpportunityStrategiesManagerProps) {
+function CapabilityBadges({ sourceCode }: { sourceCode: string }) {
+  const caps = detectCapabilities(sourceCode || '')
+  return (
+    <div className="flex items-center gap-1 mt-1">
+      {caps.hasDetect && (
+        <span className="text-[8px] font-semibold uppercase tracking-wider px-1.5 py-0 rounded bg-amber-500/15 text-amber-400 border border-amber-500/25">
+          Detect
+        </span>
+      )}
+      {caps.hasEvaluate && (
+        <span className="text-[8px] font-semibold uppercase tracking-wider px-1.5 py-0 rounded bg-violet-500/15 text-violet-400 border border-violet-500/25">
+          Evaluate
+        </span>
+      )}
+      {caps.hasShouldExit && (
+        <span className="text-[8px] font-semibold uppercase tracking-wider px-1.5 py-0 rounded bg-rose-500/15 text-rose-400 border border-rose-500/25">
+          Exit
+        </span>
+      )}
+    </div>
+  )
+}
+
+interface OpportunityStrategiesManagerProps {
+  initialSourceFilter?: string
+  searchQuery?: string
+}
+
+export default function OpportunityStrategiesManager({ initialSourceFilter, searchQuery }: OpportunityStrategiesManagerProps) {
   const queryClient = useQueryClient()
   const [showDocs, setShowDocs] = useState(false)
   const [showConfig, setShowConfig] = useState(false)
@@ -179,10 +212,22 @@ export default function OpportunityStrategiesManager({ initialSourceFilter }: Op
   }, [strategyCatalog])
 
   const filteredStrategies = useMemo(() => {
-    const rows = [...strategyCatalog]
-    if (strategyFilterSource === 'all') return rows
-    return rows.filter((item) => item.source_key === strategyFilterSource)
-  }, [strategyCatalog, strategyFilterSource])
+    let rows = [...strategyCatalog]
+    if (strategyFilterSource !== 'all') {
+      rows = rows.filter((item) => item.source_key === strategyFilterSource)
+    }
+    if (searchQuery && searchQuery.trim()) {
+      const q = searchQuery.trim().toLowerCase()
+      rows = rows.filter(
+        (item) =>
+          (item.name || '').toLowerCase().includes(q) ||
+          (item.slug || '').toLowerCase().includes(q) ||
+          (item.source_key || '').toLowerCase().includes(q) ||
+          (item.description || '').toLowerCase().includes(q)
+      )
+    }
+    return rows
+  }, [strategyCatalog, strategyFilterSource, searchQuery])
 
   const selectedStrategy = useMemo(
     () => strategyCatalog.find((item) => item.id === selectedStrategyId) || null,
@@ -484,6 +529,7 @@ export default function OpportunityStrategiesManager({ initialSourceFilter }: Op
                                 <p className="text-[10px] font-mono text-muted-foreground mt-1 truncate">
                                   {strategy.slug}
                                 </p>
+                                {strategy.source_code && <CapabilityBadges sourceCode={strategy.source_code} />}
                               </button>
                             )
                           })}
@@ -530,6 +576,11 @@ export default function OpportunityStrategiesManager({ initialSourceFilter }: Op
                                 <p className="text-[10px] text-muted-foreground mt-1 truncate pl-[18px]">
                                   → {tabLabel}
                                 </p>
+                                {strategy.source_code && (
+                                  <div className="pl-[18px]">
+                                    <CapabilityBadges sourceCode={strategy.source_code} />
+                                  </div>
+                                )}
                               </button>
                             )
                           })}
