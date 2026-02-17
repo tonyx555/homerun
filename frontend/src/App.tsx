@@ -110,7 +110,7 @@ const ITEMS_PER_PAGE = 20
 
 const NAV_ITEMS: { id: Tab; icon: React.ElementType; label: string; shortcut: string }[] = [
   { id: 'opportunities', icon: Zap, label: 'Opportunities', shortcut: '1' },
-  { id: 'trading', icon: Bot, label: 'Trading', shortcut: '2' },
+  { id: 'trading', icon: Bot, label: 'Trader', shortcut: '2' },
   { id: 'strategies', icon: Layers3, label: 'Strategies', shortcut: '3' },
   { id: 'accounts', icon: Wallet, label: 'Accounts', shortcut: '4' },
   { id: 'traders', icon: Users, label: 'Traders', shortcut: '5' },
@@ -1527,7 +1527,7 @@ function App() {
                               <SelectValue placeholder="Strategy" />
                             </SelectTrigger>
                             <SelectContent>
-                              <SelectItem value="_all">All Strategies</SelectItem>
+                              <SelectItem value="_all">All Detectors</SelectItem>
                               {visibleStrategies.map((s) => (
                                 <SelectItem
                                   key={s.type}

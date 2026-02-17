@@ -6,11 +6,15 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   Clock3,
   Copy,
   Filter,
   Loader2,
+  Pause,
   Play,
+  Plus,
+  Settings,
   ShieldAlert,
   Sparkles,
   Square,
@@ -56,7 +60,7 @@ import { cn } from '../lib/utils'
 import { selectedAccountIdAtom } from '../store/atoms'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from './ui/card'
+import { Card } from './ui/card'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog'
 import { Input } from './ui/input'
 import { Label } from './ui/label'
@@ -65,7 +69,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from './ui/sheet'
 import { Switch } from './ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs'
 
 type FeedFilter = 'all' | 'decision' | 'order' | 'event'
 type ScopeFilter = 'all' | 'selected'
@@ -755,13 +758,6 @@ function traderSourceKeys(trader: Trader): string[] {
   return uniqueSourceList((trader.sources || []).map((source) => normalizeSourceKey(source)))
 }
 
-function traderPrimaryStrategyKey(trader: Trader): string {
-  if (Array.isArray(trader.source_configs) && trader.source_configs.length > 0) {
-    return normalizeStrategyKey(trader.source_configs[0]?.strategy_key || DEFAULT_STRATEGY_KEY)
-  }
-  return normalizeStrategyKey(trader.strategy_key || DEFAULT_STRATEGY_KEY)
-}
-
 function copyTradingFromActiveMode(active: ActiveCopyMode): CopyTradingFormState {
   if (active.mode === 'disabled' || !active.config_id) {
     return DEFAULT_COPY_TRADING
@@ -1164,6 +1160,8 @@ export default function TradingPanel() {
   const [tradeSearch, setTradeSearch] = useState('')
   const [decisionSearch, setDecisionSearch] = useState('')
   const [confirmLiveStartOpen, setConfirmLiveStartOpen] = useState(false)
+  const [workTab, setWorkTab] = useState<'terminal' | 'positions' | 'trades' | 'decisions' | 'risk'>('terminal')
+  const [activityStreamOpen, setActivityStreamOpen] = useState(true)
 
   const [traderFlyoutOpen, setTraderFlyoutOpen] = useState(false)
   const [traderFlyoutMode, setTraderFlyoutMode] = useState<'create' | 'edit'>('create')
@@ -2249,10 +2247,6 @@ export default function TradingPanel() {
     [allDecisions]
   )
 
-  const selectedDecisionTotal = useMemo(
-    () => allDecisions.filter((decision) => String(decision.decision).toLowerCase() === 'selected').length,
-    [allDecisions]
-  )
 
   const selectedTraderExposure = useMemo(
     () => selectedPositionBook.reduce((sum, row) => sum + row.exposureUsd, 0),
@@ -2302,8 +2296,6 @@ export default function TradingPanel() {
     ? selectedDecision?.risk_snapshot?.checks
     : []
   const riskAllowed = selectedDecision ? toBoolean(selectedDecision.risk_snapshot?.allowed, false) : false
-  const lastCycleDecisions = toNumber(worker?.stats?.decisions_last_cycle)
-  const lastCycleOrders = toNumber(worker?.stats?.orders_last_cycle)
   const latestSelectedTraderActivityTs = selectedTraderActivityRows.length > 0
     ? toTs(selectedTraderActivityRows[0].ts)
     : 0
@@ -2314,12 +2306,8 @@ export default function TradingPanel() {
     latestSelectedTraderRunTs > (latestSelectedTraderActivityTs + 1000)
   )
 
-  const runRate = toNumber(metrics?.decisions_count) > 0
-    ? (toNumber(metrics?.orders_count) / toNumber(metrics?.decisions_count)) * 100
-    : 0
   const tradersRunningDisplay = orchestratorRunning ? toNumber(metrics?.traders_running) : 0
   const displayAvgEdge = normalizeEdgePercent(globalSummary.avgEdge)
-  const displayAvgConfidence = normalizeConfidencePercent(globalSummary.avgConfidence)
   const selectedTraderStatusLabel = !orchestratorRunning
     ? 'Engine Off'
     : !selectedTrader?.is_enabled
@@ -2376,1065 +2364,239 @@ export default function TradingPanel() {
   }
 
   return (
-    <div className="h-full min-h-0 flex flex-col gap-3">
-      <Card className="shrink-0 border-cyan-500/30 bg-gradient-to-br from-cyan-500/[0.08] via-card to-emerald-500/[0.08]">
-        <CardContent className="px-3 py-2 space-y-1.5">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <Sparkles className="w-3.5 h-3.5 text-cyan-300" />
-            <span className="text-sm font-semibold leading-none">Autotrading Orchestration Hub</span>
-            <Badge
-              className="h-5 px-1.5 text-[10px]"
-              variant={orchestratorBlocked ? 'destructive' : orchestratorRunning ? 'default' : 'secondary'}
-            >
-              {orchestratorStatusLabel}
-            </Badge>
-            <Badge className="h-5 px-1.5 text-[10px]" variant={globalMode === 'live' ? 'destructive' : 'outline'}>
-              {globalMode.toUpperCase()}
-            </Badge>
-            <Badge className="h-5 px-1.5 text-[10px]" variant={killSwitchOn ? 'destructive' : 'outline'}>
-              {killSwitchOn ? 'ORDERS BLOCKED' : 'ORDERS OPEN'}
-            </Badge>
-            <div className="ml-auto text-[11px] text-muted-foreground flex items-center gap-1">
-              <Clock3 className="w-3 h-3" />
-              {formatTimestamp(worker?.last_run_at)}
-            </div>
+    <div className="h-full min-h-0 flex flex-col gap-1.5">
+      {/* ── Hub Strip ── */}
+      <div className="shrink-0 rounded-lg border border-cyan-500/30 bg-gradient-to-r from-cyan-500/[0.06] via-card to-emerald-500/[0.06] px-3 py-1.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+        <div className="flex items-center gap-1.5">
+          <Button
+            onClick={runStartStopCommand}
+            disabled={startStopDisabled}
+            className="h-7 min-w-[140px] text-[11px]"
+            variant={startStopIsRunning ? 'secondary' : 'default'}
+            size="sm"
+          >
+            {startStopPending ? (
+              <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />
+            ) : startStopIsRunning ? (
+              <Square className="w-3.5 h-3.5 mr-1" />
+            ) : selectedAccountIsLive ? (
+              <Zap className="w-3.5 h-3.5 mr-1" />
+            ) : (
+              <Play className="w-3.5 h-3.5 mr-1" />
+            )}
+            {startStopIsRunning ? 'Stop' : selectedAccountMode.toUpperCase()}
+          </Button>
+          <div className="flex items-center gap-1.5 rounded border border-red-500/30 bg-red-500/5 px-1.5 py-0.5">
+            <ShieldAlert className="w-3 h-3 text-red-400" />
+            <Switch
+              checked={killSwitchOn}
+              onCheckedChange={(enabled) => killSwitchMutation.mutate(enabled)}
+              disabled={controlBusy}
+              className="scale-[0.8]"
+            />
           </div>
+        </div>
 
-          <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1.5 flex flex-wrap items-center gap-1.5">
-            <Button
-              onClick={runStartStopCommand}
-              disabled={startStopDisabled}
-              className="h-7 min-w-[164px] text-[11px]"
-              variant={startStopIsRunning ? 'secondary' : 'default'}
-            >
-              {startStopPending ? (
-                <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
-              ) : startStopIsRunning ? (
-                <Square className="w-3.5 h-3.5 mr-1.5" />
-              ) : selectedAccountIsLive ? (
-                <Zap className="w-3.5 h-3.5 mr-1.5" />
-              ) : (
-                <Play className="w-3.5 h-3.5 mr-1.5" />
-              )}
-              {startStopIsRunning ? 'Stop Engine' : `Start Engine (${selectedAccountMode.toUpperCase()})`}
+        <div className="flex items-center gap-1.5">
+          <Badge className="h-5 px-1.5 text-[10px]" variant={orchestratorBlocked ? 'destructive' : orchestratorRunning ? 'default' : 'secondary'}>
+            {orchestratorStatusLabel}
+          </Badge>
+          <Badge className="h-5 px-1.5 text-[10px]" variant={globalMode === 'live' ? 'destructive' : 'outline'}>
+            {globalMode.toUpperCase()}
+          </Badge>
+          <Badge className="h-5 px-1.5 text-[10px]" variant={killSwitchOn ? 'destructive' : 'outline'}>
+            {killSwitchOn ? 'BLOCKED' : 'OPEN'}
+          </Badge>
+        </div>
+
+        <div className="hidden lg:flex items-center gap-3 text-[11px] font-mono text-muted-foreground">
+          <span>{tradersRunningDisplay}/{toNumber(metrics?.traders_total)}</span>
+          <span className="text-border">|</span>
+          <span className={toNumber(metrics?.daily_pnl) >= 0 ? 'text-emerald-500' : 'text-red-500'}>
+            {formatCurrency(toNumber(metrics?.daily_pnl))}
+          </span>
+          <span className="text-border">|</span>
+          <span>Exp {formatCurrency(toNumber(metrics?.gross_exposure_usd), true)}</span>
+          <span className="text-border">|</span>
+          <span>{globalSummary.open} open</span>
+          <span className="text-border">|</span>
+          <span>WR {formatPercent(globalSummary.winRate)}</span>
+          <span className="text-border">|</span>
+          <span>Edge {formatPercent(displayAvgEdge)}</span>
+        </div>
+
+        <div className="ml-auto flex items-center gap-1 text-[10px] text-muted-foreground">
+          <span className={cn('w-1.5 h-1.5 rounded-full', worker?.last_error ? 'bg-amber-400' : 'bg-emerald-500')} />
+          <Clock3 className="w-3 h-3" />
+          {formatTimestamp(worker?.last_run_at)}
+        </div>
+      </div>
+
+      {/* ── Main: Roster Rail + Work Area ── */}
+      <div className="flex-1 min-h-0 grid gap-2 xl:grid-cols-[240px_minmax(0,1fr)]">
+        {/* Left rail — Trader Roster */}
+        <div className="hidden xl:flex flex-col min-h-0 rounded-lg border border-border/70 bg-card overflow-hidden">
+          <div className="shrink-0 px-2.5 py-2 border-b border-border/50 flex items-center justify-between gap-1">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Traders</span>
+            <Button size="sm" className="h-6 w-6 p-0" variant="outline" onClick={openCreateTraderFlyout} title="New trader">
+              <Plus className="w-3.5 h-3.5" />
             </Button>
-            <div className="flex items-center gap-2 rounded-md border border-red-500/35 bg-red-500/10 px-2 py-1">
-              <ShieldAlert className="w-3.5 h-3.5 text-red-700 dark:text-red-200" />
-              <span className="text-[11px] text-red-700 dark:text-red-200">Block New Orders</span>
-              <Switch
-                checked={killSwitchOn}
-                onCheckedChange={(enabled) => killSwitchMutation.mutate(enabled)}
-                disabled={controlBusy}
-              />
+          </div>
+          <ScrollArea className="flex-1 min-h-0">
+            <div className="p-1.5 space-y-0.5">
+              {/* "All Traders" aggregate */}
+              <button
+                type="button"
+                onClick={() => setSelectedTraderId(null)}
+                className={cn(
+                  'w-full text-left rounded-md px-2 py-1.5 text-[11px] transition-colors',
+                  !selectedTraderId
+                    ? 'bg-cyan-500/15 text-foreground font-medium'
+                    : 'text-muted-foreground hover:bg-muted/40'
+                )}
+              >
+                All Traders
+              </button>
+              {traders.map((trader) => {
+                const traderStatus = !trader.is_enabled ? 'disabled' : trader.is_paused ? 'paused' : 'running'
+                const isActive = trader.id === selectedTraderId
+                const traderSources = traderSourceKeys(trader)
+                return (
+                  <button
+                    key={trader.id}
+                    type="button"
+                    onClick={() => setSelectedTraderId(trader.id)}
+                    className={cn(
+                      'w-full text-left rounded-md px-2 py-1.5 transition-colors group',
+                      isActive
+                        ? 'bg-cyan-500/15 text-foreground'
+                        : 'text-muted-foreground hover:bg-muted/40 hover:text-foreground'
+                    )}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span className={cn(
+                        'w-1.5 h-1.5 rounded-full shrink-0',
+                        traderStatus === 'running' && orchestratorRunning ? 'bg-emerald-500' :
+                        traderStatus === 'paused' ? 'bg-amber-400' : 'bg-zinc-500'
+                      )} />
+                      <span className="text-[11px] font-medium truncate leading-tight">{trader.name}</span>
+                    </div>
+                    <div className="flex flex-wrap gap-0.5 mt-0.5 pl-3">
+                      {traderSources.map((source) => (
+                        <span key={source} className="px-1 py-0 text-[8px] rounded bg-muted/60 text-muted-foreground leading-relaxed">{source}</span>
+                      ))}
+                    </div>
+                  </button>
+                )
+              })}
             </div>
-            <span className="ml-auto text-[11px] text-muted-foreground hidden xl:block">
-              {!selectedAccountValid
-                ? 'Select a global account in the top control panel to start the engine.'
-                : modeMismatch
-                  ? 'Account mode and orchestrator mode are not aligned.'
-                  : 'Start/Stop controls the global engine. Trader controls below only pause/resume individual traders.'}
-            </span>
+          </ScrollArea>
+        </div>
+
+        {/* Right — Work Area */}
+        <div className="flex flex-col min-h-0 gap-1.5">
+          {/* Trader header bar (when a specific trader is selected) */}
+          {selectedTrader && (
+            <div className="shrink-0 rounded-lg border border-border/70 bg-card px-3 py-1.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+              <span className="text-sm font-semibold">{selectedTrader.name}</span>
+              <Badge className="h-5 px-1.5 text-[10px]" variant={selectedTraderStatusLabel === 'Running' ? 'default' : selectedTraderStatusLabel === 'Paused' ? 'secondary' : 'outline'}>
+                {selectedTraderStatusLabel}
+              </Badge>
+              <div className="hidden md:flex items-center gap-2 text-[11px] font-mono text-muted-foreground">
+                <span className={selectedTraderSummary.pnl >= 0 ? 'text-emerald-500' : 'text-red-500'}>{formatCurrency(selectedTraderSummary.pnl)}</span>
+                <span className="text-border">|</span>
+                <span>WR {formatPercent(selectedTraderSummary.winRate)}</span>
+                <span className="text-border">|</span>
+                <span>{selectedOrders.length} orders</span>
+                <span className="text-border">|</span>
+                <span>Exp {formatCurrency(selectedTraderExposure, true)}</span>
+                <span className="text-border">|</span>
+                <span>Edge {formatPercent(normalizeEdgePercent(selectedTraderSummary.avgEdge))}</span>
+              </div>
+              <div className="ml-auto flex items-center gap-1">
+                <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]" disabled={!selectedTraderCanResume} onClick={() => traderStartMutation.mutate(selectedTrader.id)}>
+                  <Play className="w-3 h-3 mr-0.5" /> Resume
+                </Button>
+                <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]" disabled={!selectedTraderCanPause} onClick={() => traderPauseMutation.mutate(selectedTrader.id)}>
+                  <Pause className="w-3 h-3 mr-0.5" /> Pause
+                </Button>
+                <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]" onClick={() => traderRunOnceMutation.mutate(selectedTrader.id)} disabled={traderRunOnceMutation.isPending}>
+                  <Zap className="w-3 h-3 mr-0.5" /> Once
+                </Button>
+                <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]" onClick={() => openEditTraderFlyout(selectedTrader)}>
+                  <Settings className="w-3 h-3 mr-0.5" /> Config
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {/* Tab bar */}
+          <div className="shrink-0 flex items-center gap-0.5 border-b border-border/50 px-1">
+            {([
+              { key: 'terminal' as const, label: 'Terminal' },
+              { key: 'positions' as const, label: 'Positions' },
+              { key: 'trades' as const, label: 'Trades' },
+              { key: 'decisions' as const, label: 'Decisions' },
+              { key: 'risk' as const, label: 'Risk' },
+            ]).map((tab) => (
+              <button
+                key={tab.key}
+                type="button"
+                onClick={() => setWorkTab(tab.key)}
+                className={cn(
+                  'px-3 py-1.5 text-[11px] font-medium transition-colors border-b-2 -mb-[1px]',
+                  workTab === tab.key
+                    ? 'border-cyan-500 text-foreground'
+                    : 'border-transparent text-muted-foreground hover:text-foreground'
+                )}
+              >
+                {tab.label}
+              </button>
+            ))}
           </div>
 
-          <div className="grid gap-1.5 grid-cols-2 sm:grid-cols-4 xl:grid-cols-8">
-            <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1">
-              <p className="text-[9px] uppercase tracking-widest text-muted-foreground">Worker</p>
-              <p className="text-[11px] truncate" title={worker?.current_activity || 'Idle'}>
-                {worker?.current_activity || 'Idle'}
-              </p>
-            </div>
-            <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1">
-              <p className="text-[9px] uppercase tracking-widest text-muted-foreground">Health</p>
-              <p className="text-[11px] flex items-center gap-1">
-                {worker?.last_error ? <AlertTriangle className="w-3 h-3 text-amber-400" /> : <CheckCircle2 className="w-3 h-3 text-emerald-400" />}
-                {worker?.last_error ? 'Degraded' : 'Healthy'}
-              </p>
-            </div>
-            <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1">
-              <p className="text-[9px] uppercase tracking-widest text-muted-foreground">Traders</p>
-              <p className="text-[11px]">{tradersRunningDisplay} / {toNumber(metrics?.traders_total)} active</p>
-            </div>
-            <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1">
-              <p className="text-[9px] uppercase tracking-widest text-muted-foreground">Capture</p>
-              <p className="text-[11px]">{formatPercent(runRate)}</p>
-            </div>
-            <div className={cn(
-              'rounded-md border px-2 py-1',
-              toNumber(metrics?.daily_pnl) >= 0 ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-red-500/30 bg-red-500/5'
-            )}>
-              <p className="text-[9px] uppercase tracking-widest text-muted-foreground">Daily PnL</p>
-              <p className="text-[11px] font-mono">{formatCurrency(toNumber(metrics?.daily_pnl))}</p>
-            </div>
-            <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1">
-              <p className="text-[9px] uppercase tracking-widest text-muted-foreground">Exposure</p>
-              <p className="text-[11px] font-mono">{formatCurrency(toNumber(metrics?.gross_exposure_usd), true)}</p>
-            </div>
-            <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1">
-              <p className="text-[9px] uppercase tracking-widest text-muted-foreground">Open / Orders</p>
-              <p className="text-[11px] font-mono">{globalSummary.open} / {allOrders.length}</p>
-            </div>
-            <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1">
-              <p className="text-[9px] uppercase tracking-widest text-muted-foreground">Win / Edge / Conf</p>
-              <p className="text-[11px] font-mono">
-                {formatPercent(globalSummary.winRate)} / {formatPercent(displayAvgEdge)} / {formatPercent(displayAvgConfidence)}
-              </p>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Tabs defaultValue="command" className="flex-1 min-h-0 flex flex-col gap-2">
-        <TabsList className="w-full justify-start overflow-auto shrink-0 h-9">
-          <TabsTrigger value="command">Command Center</TabsTrigger>
-          <TabsTrigger value="traders">Auto Traders</TabsTrigger>
-          <TabsTrigger value="governance">Governance</TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="command" className="mt-0 flex-1 min-h-0 overflow-hidden">
-          <div className="h-full min-h-0 grid gap-3 grid-rows-[minmax(0,1fr)_minmax(0,1fr)]">
-            <div className="grid gap-3 xl:grid-cols-[minmax(0,1.45fr)_minmax(0,1fr)] min-h-0">
-              <Card className="h-full flex flex-col min-h-0 overflow-hidden">
-                <CardHeader className="py-2">
-                  <CardTitle className="text-sm flex flex-wrap items-center justify-between gap-2">
-                    <span>Live Global Terminal</span>
-                    <Badge variant="outline">{filteredActivityRows.length} rows</Badge>
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="flex-1 min-h-0 overflow-hidden">
-                  <div className="flex flex-wrap items-center gap-1 mb-2">
-                    {(['all', 'decision', 'order', 'event'] as FeedFilter[]).map((kind) => (
-                      <Button
-                        key={kind}
-                        size="sm"
-                        variant={feedFilter === kind ? 'default' : 'outline'}
-                        onClick={() => setFeedFilter(kind)}
-                        className="h-6 px-2 text-[11px]"
-                      >
-                        {kind}
-                      </Button>
-                    ))}
+          {/* Tab content — fills remaining space */}
+          <div className="flex-1 min-h-0 overflow-hidden">
+            {/* ── Terminal ── */}
+            {workTab === 'terminal' && (
+              <div className="h-full flex flex-col min-h-0 gap-1.5">
+                <div className="shrink-0 flex flex-wrap items-center gap-1 px-1">
+                  {(['all', 'decision', 'order', 'event'] as FeedFilter[]).map((kind) => (
+                    <Button key={kind} size="sm" variant={selectedTraderId ? (traderFeedFilter === kind ? 'default' : 'outline') : (feedFilter === kind ? 'default' : 'outline')} onClick={() => selectedTraderId ? setTraderFeedFilter(kind) : setFeedFilter(kind)} className="h-5 px-2 text-[10px]">
+                      {kind}
+                    </Button>
+                  ))}
+                  {!selectedTraderId && (
                     <div className="ml-auto flex items-center gap-1">
-                      <Button
-                        size="sm"
-                        variant={scopeFilter === 'all' ? 'default' : 'outline'}
-                        className="h-6 px-2 text-[11px]"
-                        onClick={() => setScopeFilter('all')}
-                      >
-                        all
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant={scopeFilter === 'selected' ? 'default' : 'outline'}
-                        className="h-6 px-2 text-[11px]"
-                        onClick={() => setScopeFilter('selected')}
-                        disabled={!selectedTraderId}
-                      >
-                        selected
-                      </Button>
+                      <Button size="sm" variant={scopeFilter === 'all' ? 'default' : 'outline'} className="h-5 px-2 text-[10px]" onClick={() => setScopeFilter('all')}>all</Button>
+                      <Button size="sm" variant={scopeFilter === 'selected' ? 'default' : 'outline'} className="h-5 px-2 text-[10px]" onClick={() => setScopeFilter('selected')} disabled={!selectedTraderId}>selected</Button>
                     </div>
-                  </div>
-
-                  {filteredActivityRows.length === 0 ? (
-                    <div className="h-full flex items-center justify-center text-sm text-muted-foreground">No events matching filters.</div>
-                  ) : (
-                    <ScrollArea className="h-full min-h-0 rounded-md border border-border/70 bg-muted/20">
-                      <div className="space-y-1 p-2 font-mono text-[11px] leading-relaxed">
-                        {filteredActivityRows.map((row) => (
-                          <div
-                            key={`${row.kind}:${row.id}`}
-                            className={cn(
-                              'rounded border px-2 py-1',
-                              row.tone === 'positive' && 'border-emerald-500/30 text-emerald-700 dark:text-emerald-100',
-                              row.tone === 'negative' && 'border-red-500/35 text-red-700 dark:text-red-100',
-                              row.tone === 'warning' && 'border-amber-500/35 text-amber-700 dark:text-amber-100',
-                              row.tone === 'neutral' && 'border-border text-foreground'
-                            )}
-                          >
-                            <span className="text-muted-foreground">[{formatTimestamp(row.ts)}]</span>{' '}
-                            <span className="uppercase">{row.kind}</span>{' '}
-                            <span className="text-muted-foreground">{traderNameById[String(row.traderId || '')] || shortId(row.traderId || '')}</span>{' '}
-                            <span>{row.title}</span>
-                            <span className="text-muted-foreground"> :: {row.detail}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </ScrollArea>
                   )}
-                </CardContent>
-              </Card>
-
-              <Card className="h-full flex flex-col min-h-0 overflow-hidden">
-                <CardHeader className="py-2">
-                  <CardTitle className="text-sm">Execution Radar</CardTitle>
-                </CardHeader>
-                <CardContent className="flex-1 min-h-0 overflow-hidden space-y-2">
-                  <div className="grid gap-2 grid-cols-2">
-                    <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1">
-                      <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Decisions</p>
-                      <p className="text-sm font-mono">{allDecisions.length}</p>
-                    </div>
-                    <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1">
-                      <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Orders</p>
-                      <p className="text-sm font-mono">{allOrders.length}</p>
-                    </div>
-                    <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1">
-                      <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Conversion</p>
-                      <p className="text-sm font-mono">{formatPercent(runRate)}</p>
-                    </div>
-                    <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1">
-                      <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Worker State</p>
-                      <p className="text-sm">{worker?.last_error ? 'Degraded' : 'Healthy'}</p>
-                    </div>
-                  </div>
-
-                  <ScrollArea className="h-full min-h-0 rounded-md border border-border/70 p-2">
-                    <div className="space-y-3 pr-2">
-                      <div>
-                        <p className="text-[11px] uppercase tracking-widest text-muted-foreground mb-1">Source Leaders</p>
-                        {globalSummary.sourceRows.length === 0 ? (
-                          <p className="text-xs text-muted-foreground">No source-level data.</p>
-                        ) : (
-                          <div className="space-y-1.5">
-                            {globalSummary.sourceRows.slice(0, 6).map((row) => (
-                              <div key={row.source} className="rounded-md border border-border/70 px-2 py-1.5">
-                                <div className="flex items-center justify-between text-xs">
-                                  <span>{row.source}</span>
-                                  <span className="font-mono">{row.orders}</span>
-                                </div>
-                                <div className="mt-1 flex items-center justify-between text-[11px] text-muted-foreground">
-                                  <span>{formatCurrency(row.notional, true)}</span>
-                                  <span className={cn(row.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>{formatCurrency(row.pnl)}</span>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-
-                      <div>
-                        <p className="text-[11px] uppercase tracking-widest text-muted-foreground mb-1">Trader Leaders</p>
-                        {globalSummary.topTraderRows.slice(0, 6).map((row) => (
-                          <div key={row.traderId} className="rounded-md border border-border/70 px-2 py-1.5 mb-1.5">
-                            <div className="flex items-center justify-between text-xs">
-                              <span className="truncate">{row.traderName}</span>
-                              <span className={cn('font-mono', row.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                                {formatCurrency(row.pnl)}
-                              </span>
-                            </div>
-                            <div className="mt-1 text-[11px] text-muted-foreground">
-                              {row.orders} orders • {row.resolved} resolved
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </ScrollArea>
-                </CardContent>
-              </Card>
-            </div>
-
-            <div className="grid gap-3 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)] min-h-0">
-              <Card className="h-full flex flex-col min-h-0 overflow-hidden">
-                <CardHeader className="py-2">
-                  <CardTitle className="text-sm">Open Position Book</CardTitle>
-                </CardHeader>
-                <CardContent className="flex-1 min-h-0 overflow-hidden">
-                  {globalPositionBook.length === 0 ? (
-                    <div className="h-full flex items-center justify-center text-sm text-muted-foreground">No live positions are currently held by orchestrator traders.</div>
-                  ) : (
-                    <ScrollArea className="h-full min-h-0">
-                      <Table>
-                        <TableHeader>
-                          <TableRow>
-                            <TableHead>Trader</TableHead>
-                            <TableHead>Market</TableHead>
-                            <TableHead>Dir</TableHead>
-                            <TableHead className="text-right">Exposure</TableHead>
-                            <TableHead className="text-right">Avg Px</TableHead>
-                            <TableHead className="text-right">Edge</TableHead>
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {globalPositionBook.slice(0, 150).map((row) => (
-                            <TableRow key={row.key}>
-                              <TableCell className="font-medium">{row.traderName}</TableCell>
-                              <TableCell>
-                                <div className="max-w-[320px] truncate" title={row.marketQuestion}>{row.marketQuestion}</div>
-                                <div className="text-[11px] text-muted-foreground">{shortId(row.marketId)}</div>
-                              </TableCell>
-                              <TableCell>
-                                <Badge variant={row.direction === 'BUY' ? 'default' : row.direction === 'SELL' ? 'secondary' : 'outline'}>{row.direction}</Badge>
-                              </TableCell>
-                              <TableCell className="text-right font-mono">{formatCurrency(row.exposureUsd)}</TableCell>
-                              <TableCell className="text-right font-mono">{row.averagePrice !== null ? row.averagePrice.toFixed(3) : 'n/a'}</TableCell>
-                              <TableCell className="text-right font-mono">{row.weightedEdge !== null ? formatPercent(normalizeEdgePercent(row.weightedEdge)) : 'n/a'}</TableCell>
-                            </TableRow>
-                          ))}
-                        </TableBody>
-                      </Table>
-                    </ScrollArea>
-                  )}
-                </CardContent>
-              </Card>
-
-              <Card className="h-full flex flex-col min-h-0 overflow-hidden">
-                <CardHeader className="py-2">
-                  <CardTitle className="text-sm">Decision Funnel + Selection Queue</CardTitle>
-                </CardHeader>
-                <CardContent className="flex-1 min-h-0 overflow-hidden space-y-2">
-                  <div className="grid gap-2 grid-cols-2">
-                    <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1.5">
-                      <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Observed</p>
-                      <p className="text-sm font-mono">{allDecisions.length}</p>
-                    </div>
-                    <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1.5">
-                      <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Selected</p>
-                      <p className="text-sm font-mono">{selectedDecisionTotal}</p>
-                    </div>
-                    <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1.5">
-                      <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Orders Emitted</p>
-                      <p className="text-sm font-mono">{toNumber(metrics?.orders_count)}</p>
-                    </div>
-                    <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1.5">
-                      <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Failed Orders</p>
-                      <p className="text-sm font-mono">{globalSummary.failed}</p>
-                    </div>
-                  </div>
-
-                  <div className={cn(
-                    'rounded-md border px-2 py-1.5 text-xs',
-                    worker?.last_error ? 'border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-100' : 'border-border/70 bg-background/70 text-muted-foreground'
-                  )}>
-                    {worker?.last_error ? `Worker alert: ${worker.last_error}` : 'No worker alerts. Decision and order pipeline healthy.'}
-                  </div>
-
-                  <ScrollArea className="h-full min-h-0 rounded-md border border-border/70 bg-muted/20">
-                    <div className="space-y-1 p-2">
-                      {recentSelectedDecisions.length === 0 ? (
-                        <p className="text-sm text-muted-foreground">No selected decisions yet.</p>
-                      ) : (
-                        recentSelectedDecisions.map((decision) => (
-                          <div key={decision.id} className="rounded-md border border-border/70 px-2 py-1.5">
-                            <div className="flex items-center justify-between text-[11px]">
-                              <span className="font-mono text-muted-foreground">{formatTimestamp(decision.created_at)}</span>
-                              <span className="font-mono">{decision.score !== null ? decision.score.toFixed(2) : 'n/a'}</span>
-                            </div>
-                            <p className="text-xs mt-1 truncate" title={`${decision.source} • ${decision.strategy_key}`}>
-                              {decision.source} • {decision.strategy_key}
-                            </p>
-                            <p className="text-[11px] text-muted-foreground truncate" title={decision.reason || ''}>
-                              {decision.reason || 'No decision rationale recorded.'}
-                            </p>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  </ScrollArea>
-                </CardContent>
-              </Card>
-            </div>
-          </div>
-        </TabsContent>
-
-        <TabsContent value="traders" className="mt-0 flex-1 min-h-0 overflow-hidden">
-          <div className="h-full min-h-0 grid gap-3 xl:grid-cols-[320px_minmax(0,1fr)]">
-            <Card className="h-full flex flex-col min-h-0 overflow-hidden">
-              <CardHeader className="py-2">
-                <CardTitle className="text-sm flex items-center justify-between gap-2">
-                  <span>Trader Roster</span>
-                  <div className="flex items-center gap-2">
-                    <Badge variant="outline">{traders.length}</Badge>
-                    <Button size="sm" className="h-7 px-2 text-[11px]" onClick={openCreateTraderFlyout}>
-                      Add Trader
-                    </Button>
-                  </div>
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="flex-1 min-h-0 overflow-hidden">
-                <ScrollArea className="h-full min-h-0">
-                  <div className="space-y-2 pr-2">
-                    {traders.map((trader) => {
-                      const isSelected = selectedTraderId === trader.id
-                      const traderSummary = globalSummary.topTraderRows.find((row) => row.traderId === trader.id)
-                      const traderPnl = traderSummary?.pnl || 0
-                      const traderStatus = !orchestratorRunning
-                        ? 'Engine Off'
-                        : !trader.is_enabled
-                          ? 'Disabled'
-                          : trader.is_paused
-                            ? 'Paused'
-                            : 'Running'
-
-                      return (
-                        <div
-                          key={trader.id}
-                          className={cn(
-                            'rounded-md border p-2 transition-colors',
-                            isSelected ? 'border-cyan-500/50 bg-cyan-500/10' : 'border-border hover:bg-muted/40'
-                          )}
-                        >
-                          <button className="w-full text-left" onClick={() => setSelectedTraderId(trader.id)}>
-                            <div className="flex items-center justify-between gap-2">
-                              <p className="font-medium text-sm truncate" title={trader.name}>{trader.name}</p>
-                              <Badge variant={traderStatus === 'Running' ? 'default' : 'secondary'}>
-                                {traderStatus}
-                              </Badge>
-                            </div>
-                            <p className="text-xs text-muted-foreground mt-1 truncate" title={traderPrimaryStrategyKey(trader)}>
-                              {traderPrimaryStrategyKey(trader)} • {trader.interval_seconds}s
-                            </p>
-                            <div className="mt-1 flex items-center justify-between text-[11px]">
-                              <span className="text-muted-foreground">{traderSourceKeys(trader).join(', ') || 'No sources'}</span>
-                              <span className={cn('font-mono', traderPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                                {formatCurrency(traderPnl)}
-                              </span>
-                            </div>
-                          </button>
-
-                          <div className="mt-2 flex flex-wrap gap-1">
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              className="h-6 px-2 text-[11px]"
-                              onClick={() => openEditTraderFlyout(trader)}
-                            >
-                              Edit
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              className="h-6 px-2 text-[11px]"
-                              onClick={() => {
-                                setSelectedTraderId(trader.id)
-                                openEditTraderFlyout(trader)
-                              }}
-                            >
-                              Delete
-                            </Button>
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                </ScrollArea>
-              </CardContent>
-            </Card>
-
-            <div className="h-full min-h-0 flex flex-col gap-3 min-w-0">
-              <Card className="shrink-0">
-                <CardHeader className="py-2">
-                  <CardTitle className="text-sm flex flex-wrap items-center justify-between gap-2">
-                    <span>{selectedTrader?.name || 'Trader Console'}</span>
-                    <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-                      <Badge variant={selectedTraderStatusLabel === 'Running' ? 'default' : 'secondary'}>
-                        {selectedTraderStatusLabel}
-                      </Badge>
-                      <span>{formatTimestamp(selectedTrader?.last_run_at)}</span>
-                    </div>
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-2">
-                  <div className="flex flex-wrap gap-1.5">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-7 px-2 text-[11px]"
-                      onClick={() => selectedTrader && traderStartMutation.mutate(selectedTrader.id)}
-                      disabled={!selectedTraderCanResume || traderStartMutation.isPending}
-                    >
-                      Resume Trader
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-7 px-2 text-[11px]"
-                      onClick={() => selectedTrader && traderPauseMutation.mutate(selectedTrader.id)}
-                      disabled={!selectedTraderCanPause || traderPauseMutation.isPending}
-                    >
-                      Pause Trader
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-7 px-2 text-[11px]"
-                      onClick={() => selectedTrader && traderRunOnceMutation.mutate(selectedTrader.id)}
-                      disabled={!selectedTrader || !selectedTrader.is_enabled || traderRunOnceMutation.isPending}
-                    >
-                      Run Once
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-7 px-2 text-[11px]"
-                      onClick={() => selectedTrader && openEditTraderFlyout(selectedTrader)}
-                      disabled={!selectedTrader}
-                    >
-                      Configure
-                    </Button>
-                  </div>
-                  <p className="text-[11px] text-muted-foreground">
-                    Engine start/stop is global. Trader controls here only change this trader&apos;s runtime state.
-                  </p>
-
-                  <div className="grid gap-1.5 grid-cols-2 md:grid-cols-4 xl:grid-cols-8">
-                    <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1">
-                      <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Open</p>
-                      <p className="text-[11px] font-mono">{selectedTraderSummary.open}</p>
-                    </div>
-                    <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1">
-                      <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Exposure</p>
-                      <p className="text-[11px] font-mono">{formatCurrency(selectedTraderExposure, true)}</p>
-                    </div>
-                    <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1">
-                      <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Decisions</p>
-                      <p className="text-[11px] font-mono">{selectedTraderSummary.decisions}</p>
-                    </div>
-                    <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1">
-                      <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Selected</p>
-                      <p className="text-[11px] font-mono">{selectedTraderSummary.selectedDecisions}</p>
-                    </div>
-                    <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1">
-                      <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Conversion</p>
-                      <p className="text-[11px] font-mono">{formatPercent(selectedTraderSummary.conversion)}</p>
-                    </div>
-                    <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1">
-                      <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Win Rate</p>
-                      <p className="text-[11px] font-mono">{formatPercent(selectedTraderSummary.winRate)}</p>
-                    </div>
-                    <div className={cn(
-                      'rounded-md border px-2 py-1',
-                      selectedTraderSummary.pnl >= 0 ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-red-500/30 bg-red-500/5'
-                    )}>
-                      <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Realized PnL</p>
-                      <p className="text-[11px] font-mono">{formatCurrency(selectedTraderSummary.pnl)}</p>
-                    </div>
-                    <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1">
-                      <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Edge / Conf</p>
-                      <p className="text-[11px] font-mono">
-                        {formatPercent(normalizeEdgePercent(selectedTraderSummary.avgEdge))} / {formatPercent(normalizeConfidencePercent(selectedTraderSummary.avgConfidence))}
-                      </p>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-
-              <Tabs defaultValue="terminal" className="flex-1 min-h-0 flex flex-col gap-2">
-                <TabsList className="w-full justify-start overflow-auto shrink-0 h-8">
-                  <TabsTrigger value="terminal">Live Terminal</TabsTrigger>
-                  <TabsTrigger value="positions">Positions</TabsTrigger>
-                  <TabsTrigger value="decisions">Decisions</TabsTrigger>
-                  <TabsTrigger value="trades">Trades</TabsTrigger>
-                </TabsList>
-
-                <TabsContent value="terminal" className="mt-0 flex-1 min-h-0">
-                  <Card className="h-full flex flex-col min-h-0 overflow-hidden">
-                    <CardHeader className="py-2">
-                      <CardTitle className="text-sm flex flex-wrap items-center justify-between gap-2">
-                        <span>Trader Activity Terminal</span>
-                        <div className="flex items-center gap-1">
-                          {(['all', 'decision', 'order', 'event'] as FeedFilter[]).map((kind) => (
-                            <Button
-                              key={kind}
-                              size="sm"
-                              variant={traderFeedFilter === kind ? 'default' : 'outline'}
-                              className="h-6 px-2 text-[11px]"
-                              onClick={() => setTraderFeedFilter(kind)}
-                            >
-                              {kind}
-                            </Button>
-                          ))}
-                        </div>
-                      </CardTitle>
-                    </CardHeader>
-                    <CardContent className="flex-1 min-h-0 overflow-hidden space-y-2">
-                      {selectedTrader ? (
-                        <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1.5 text-[11px]">
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <span className="font-medium">Engine heartbeat</span>
-                            <span className="font-mono text-muted-foreground">{formatTimestamp(selectedTrader?.last_run_at || worker?.last_run_at)}</span>
-                          </div>
-                          <p className="mt-1 text-muted-foreground">
-                            Last cycle: decisions={lastCycleDecisions} orders={lastCycleOrders}
-                            {selectedTraderNoNewRows ? ' • no new qualifying signals for this trader yet.' : ''}
-                          </p>
-                        </div>
-                      ) : null}
-                      {!selectedTrader ? (
-                        <div className="h-full flex items-center justify-center text-sm text-muted-foreground">Select a trader from the roster.</div>
-                      ) : filteredTraderActivityRows.length === 0 ? (
-                        <div className="h-full flex flex-col items-center justify-center gap-1 text-sm text-muted-foreground">
-                          <p>No terminal rows for this trader yet.</p>
-                          {orchestratorRunning ? (
-                            <p className="text-[11px]">Worker is running; rows appear when new decisions, orders, or events are created.</p>
-                          ) : null}
-                        </div>
-                      ) : (
-                        <ScrollArea className="h-full min-h-0 rounded-md border border-border/70 bg-muted/20">
-                          <div className="space-y-1 p-2 font-mono text-[11px] leading-relaxed">
-                            {filteredTraderActivityRows.map((row) => (
-                              <div
-                                key={`${row.kind}:${row.id}`}
-                                className={cn(
-                                  'rounded border px-2 py-1',
-                                  row.tone === 'positive' && 'border-emerald-500/30 text-emerald-700 dark:text-emerald-100',
-                                  row.tone === 'negative' && 'border-red-500/35 text-red-700 dark:text-red-100',
-                                  row.tone === 'warning' && 'border-amber-500/35 text-amber-700 dark:text-amber-100',
-                                  row.tone === 'neutral' && 'border-border text-foreground'
-                                )}
-                              >
-                                <span className="text-muted-foreground">[{formatTimestamp(row.ts)}]</span>{' '}
-                                <span className="uppercase">{row.kind}</span>{' '}
-                                <span>{row.title}</span>
-                                <span className="text-muted-foreground"> :: {row.detail}</span>
-                              </div>
-                            ))}
-                          </div>
-                        </ScrollArea>
-                      )}
-                    </CardContent>
-                  </Card>
-                </TabsContent>
-
-                <TabsContent value="positions" className="mt-0 flex-1 min-h-0">
-                  <Card className="h-full flex flex-col min-h-0 overflow-hidden">
-                    <CardHeader className="py-2">
-                      <CardTitle className="text-sm">Positions Held by Trader</CardTitle>
-                    </CardHeader>
-                    <CardContent className="flex-1 min-h-0 overflow-hidden">
-                      {selectedPositionBook.length === 0 ? (
-                        <div className="h-full flex items-center justify-center text-sm text-muted-foreground">No open positions held by this trader.</div>
-                      ) : (
-                        <ScrollArea className="h-full min-h-0 rounded-md border border-border/80">
-                          <Table>
-                            <TableHeader>
-                              <TableRow>
-                                <TableHead>Market</TableHead>
-                                <TableHead>Dir</TableHead>
-                                <TableHead className="text-right">Exposure</TableHead>
-                                <TableHead className="text-right">Avg Px</TableHead>
-                                <TableHead className="text-right">Edge</TableHead>
-                                <TableHead className="text-right">Conf</TableHead>
-                              </TableRow>
-                            </TableHeader>
-                            <TableBody>
-                              {selectedPositionBook.map((row) => (
-                                <TableRow key={row.key}>
-                                  <TableCell>
-                                    <div className="max-w-[380px] truncate" title={row.marketQuestion}>{row.marketQuestion}</div>
-                                    <div className="text-[11px] text-muted-foreground">{shortId(row.marketId)}</div>
-                                  </TableCell>
-                                  <TableCell>
-                                    <Badge variant={row.direction === 'BUY' ? 'default' : row.direction === 'SELL' ? 'secondary' : 'outline'}>{row.direction}</Badge>
-                                  </TableCell>
-                                  <TableCell className="text-right font-mono">{formatCurrency(row.exposureUsd)}</TableCell>
-                                  <TableCell className="text-right font-mono">{row.averagePrice !== null ? row.averagePrice.toFixed(3) : 'n/a'}</TableCell>
-                                  <TableCell className="text-right font-mono">{row.weightedEdge !== null ? formatPercent(normalizeEdgePercent(row.weightedEdge)) : 'n/a'}</TableCell>
-                                  <TableCell className="text-right font-mono">{row.weightedConfidence !== null ? formatPercent(normalizeConfidencePercent(row.weightedConfidence)) : 'n/a'}</TableCell>
-                                </TableRow>
-                              ))}
-                            </TableBody>
-                          </Table>
-                        </ScrollArea>
-                      )}
-                    </CardContent>
-                  </Card>
-                </TabsContent>
-
-                <TabsContent value="decisions" className="mt-0 flex-1 min-h-0 overflow-hidden">
-                  <Card className="h-full flex flex-col min-h-0 overflow-hidden">
-                    <CardHeader className="py-2">
-                      <CardTitle className="text-sm flex flex-wrap items-center justify-between gap-2">
-                        <span>Decision Inspector</span>
-                        <Badge variant="outline">{filteredDecisions.length} rows</Badge>
-                      </CardTitle>
-                    </CardHeader>
-                    <CardContent className="flex-1 min-h-0 overflow-hidden grid gap-3 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
-                      <div className="min-h-0 flex flex-col gap-2 overflow-hidden">
-                        <Input
-                          value={decisionSearch}
-                          onChange={(event) => setDecisionSearch(event.target.value)}
-                          placeholder="Filter by source, strategy, reason..."
-                        />
-                        <div className="grid gap-2 grid-cols-3">
-                          <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 px-2 py-1">
-                            <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Selected</p>
-                            <p className="text-[11px] font-mono">{decisionOutcomeSummary.selected}</p>
-                          </div>
-                          <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1">
-                            <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Blocked</p>
-                            <p className="text-[11px] font-mono">{decisionOutcomeSummary.blocked}</p>
-                          </div>
-                          <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1">
-                            <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Other</p>
-                            <p className="text-[11px] font-mono">{decisionOutcomeSummary.skipped}</p>
-                          </div>
-                        </div>
-                        <ScrollArea className="flex-1 min-h-0 rounded-md border border-border/80 p-2">
-                          <div className="space-y-2 pr-2">
-                            {filteredDecisions.map((decision) => (
-                              <button
-                                key={decision.id}
-                                onClick={() => setSelectedDecisionId(decision.id)}
-                                className={cn(
-                                  'w-full text-left rounded-md border p-2 transition-colors',
-                                  selectedDecisionId === decision.id ? 'border-cyan-500/40 bg-cyan-500/10' : 'border-border hover:bg-muted/30'
-                                )}
-                              >
-                                <div className="flex items-center justify-between gap-2 text-[11px]">
-                                  <span className="font-mono text-muted-foreground">{formatTimestamp(decision.created_at)}</span>
-                                  <Badge variant={String(decision.decision).toLowerCase() === 'selected' ? 'default' : String(decision.decision).toLowerCase() === 'blocked' ? 'destructive' : 'outline'}>
-                                    {String(decision.decision).toUpperCase()}
-                                  </Badge>
-                                </div>
-                                <div className="mt-1 flex items-center justify-between gap-2">
-                                  <p className="text-xs font-medium truncate">{decision.source} • {decision.strategy_key}</p>
-                                  <span className="text-[11px] font-mono text-muted-foreground">
-                                    {decision.score !== null ? decision.score.toFixed(2) : 'n/a'}
-                                  </span>
-                                </div>
-                                <p className="text-[11px] text-muted-foreground mt-1 line-clamp-2">{decision.reason || 'No reason captured.'}</p>
-                              </button>
-                            ))}
-                            {filteredDecisions.length === 0 ? <p className="text-sm text-muted-foreground">No decisions matching filter.</p> : null}
-                          </div>
-                        </ScrollArea>
-                      </div>
-
-                      <div className="min-h-0 flex flex-col gap-2 overflow-hidden">
-                        {!selectedDecision ? (
-                          <div className="h-full flex items-center justify-center text-sm text-muted-foreground">
-                            Select a decision from the left panel to inspect signal, risk, checks, and order linkage.
-                          </div>
-                        ) : (
-                          <>
-                            <div className="rounded-md border border-border p-2.5 space-y-2">
-                              <div className="flex items-center justify-between gap-2">
-                                <p className="font-medium text-sm truncate">{selectedDecision.strategy_key}</p>
-                                <Badge variant={String(selectedDecision.decision).toLowerCase() === 'selected' ? 'default' : String(selectedDecision.decision).toLowerCase() === 'blocked' ? 'destructive' : 'outline'}>
-                                  {String(selectedDecision.decision).toUpperCase()}
-                                </Badge>
-                              </div>
-                              <div className="grid gap-1 text-[11px] text-muted-foreground sm:grid-cols-2">
-                                <span>Score: {selectedDecision.score !== null ? selectedDecision.score.toFixed(2) : 'n/a'}</span>
-                                <span>Timestamp: {formatTimestamp(selectedDecision.created_at)}</span>
-                                <span className="truncate">Source: {selectedDecision.source}</span>
-                                <span className="truncate">Signal: {shortId(selectedDecision.signal_id)}</span>
-                              </div>
-                              <p className="text-[11px] text-muted-foreground">{selectedDecision.reason || 'No reason text.'}</p>
-                            </div>
-
-                            <ScrollArea className="flex-1 min-h-0 rounded-md border border-border/80 p-2">
-                              <div className="space-y-2 pr-2">
-                                <div className={cn(
-                                  'rounded-md border p-2',
-                                  riskAllowed ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-amber-500/30 bg-amber-500/10'
-                                )}>
-                                  <div className="flex items-center justify-between gap-2">
-                                    <p className="text-xs font-semibold">Risk Gate</p>
-                                    <Badge variant={riskAllowed ? 'default' : 'destructive'}>
-                                      {riskAllowed ? 'ALLOW' : 'BLOCK'}
-                                    </Badge>
-                                  </div>
-                                  {riskChecks.length === 0 ? (
-                                    <p className="mt-1 text-[11px] text-muted-foreground">No risk checks captured.</p>
-                                  ) : (
-                                    <div className="mt-2 space-y-1.5">
-                                      {riskChecks.map((check, index) => {
-                                        const passed = toBoolean(check?.passed, false)
-                                        const label = String(check?.check_label || check?.check_key || `risk_check_${index + 1}`)
-                                        const detail = String(check?.detail || '')
-                                        const score = check?.score
-                                        return (
-                                          <div key={`${label}:${index}`} className="rounded border border-border/60 px-2 py-1.5 text-[11px]">
-                                            <div className="flex items-center justify-between gap-2">
-                                              <span className="truncate">{label}</span>
-                                              <Badge variant={passed ? 'default' : 'destructive'}>{passed ? 'PASS' : 'FAIL'}</Badge>
-                                            </div>
-                                            <p className="mt-1 text-muted-foreground">{detail || 'No detail.'}</p>
-                                            {score !== null && score !== undefined ? (
-                                              <p className="mt-1 text-muted-foreground font-mono">score={toNumber(score).toFixed(2)}</p>
-                                            ) : null}
-                                          </div>
-                                        )
-                                      })}
-                                    </div>
-                                  )}
-                                </div>
-
-                                <div className="rounded-md border border-border p-2">
-                                  <div className="flex items-center justify-between gap-2">
-                                    <p className="text-xs font-semibold">Strategy Checks</p>
-                                    <span className="text-[11px] text-muted-foreground font-mono">
-                                      pass={decisionPassCount} fail={decisionFailCount}
-                                    </span>
-                                  </div>
-                                  {decisionDetailQuery.isLoading ? (
-                                    <div className="mt-2 flex items-center gap-2 text-[11px] text-muted-foreground">
-                                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                      Loading check records...
-                                    </div>
-                                  ) : decisionChecks.length === 0 ? (
-                                    <p className="mt-2 text-[11px] text-muted-foreground">No check records for this decision.</p>
-                                  ) : (
-                                    <div className="mt-2 space-y-1.5">
-                                      {decisionChecks.map((check) => (
-                                        <div key={check.id} className={cn(
-                                          'rounded-md border p-2',
-                                          check.passed ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-red-500/30 bg-red-500/5'
-                                        )}>
-                                          <div className="flex items-center justify-between gap-2">
-                                            <p className="text-xs font-medium truncate">{check.check_label}</p>
-                                            <Badge variant={check.passed ? 'default' : 'destructive'}>{check.passed ? 'PASS' : 'FAIL'}</Badge>
-                                          </div>
-                                          <p className="mt-1 text-[11px] text-muted-foreground">{check.detail || 'No detail provided.'}</p>
-                                          {check.score !== null ? (
-                                            <p className="mt-1 text-[11px] text-muted-foreground font-mono">score={check.score.toFixed(2)}</p>
-                                          ) : null}
-                                        </div>
-                                      ))}
-                                    </div>
-                                  )}
-                                </div>
-
-                                <div className="rounded-md border border-border p-2">
-                                  <div className="flex items-center justify-between gap-2">
-                                    <p className="text-xs font-semibold">Linked Orders</p>
-                                    <span className="text-[11px] text-muted-foreground font-mono">{decisionOrders.length}</span>
-                                  </div>
-                                  {decisionOrders.length === 0 ? (
-                                    <p className="mt-2 text-[11px] text-muted-foreground">No order linked to this decision.</p>
-                                  ) : (
-                                    <div className="mt-2 space-y-1.5">
-                                      {decisionOrders.map((order) => (
-                                        <div key={order.id} className="rounded border border-border/60 px-2 py-1.5 text-[11px]">
-                                          <div className="flex items-center justify-between gap-2">
-                                            <span className="truncate">{order.market_question || shortId(order.market_id)}</span>
-                                            <Badge variant={FAILED_ORDER_STATUSES.has(normalizeStatus(order.status)) ? 'destructive' : OPEN_ORDER_STATUSES.has(normalizeStatus(order.status)) ? 'outline' : 'default'}>
-                                              {normalizeStatus(order.status)}
-                                            </Badge>
-                                          </div>
-                                          <p className="mt-1 text-muted-foreground font-mono">
-                                            {formatCurrency(toNumber(order.notional_usd))} • {String(order.mode || 'n/a').toUpperCase()} • {String(order.direction || 'n/a').toUpperCase()}
-                                          </p>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  )}
-                                </div>
-                              </div>
-                            </ScrollArea>
-                          </>
-                        )}
-                      </div>
-                    </CardContent>
-                  </Card>
-                </TabsContent>
-
-                <TabsContent value="trades" className="mt-0 flex-1 min-h-0">
-                  <Card className="h-full flex flex-col min-h-0 overflow-hidden">
-                    <CardHeader className="py-2">
-                      <CardTitle className="text-sm flex flex-wrap items-center justify-between gap-2">
-                        <span>Trade History + Outcomes</span>
-                        <div className="flex items-center gap-1 flex-wrap">
-                          {(['all', 'open', 'resolved', 'failed'] as TradeStatusFilter[]).map((filter) => (
-                            <Button
-                              key={filter}
-                              size="sm"
-                              variant={tradeStatusFilter === filter ? 'default' : 'outline'}
-                              className="h-6 px-2 text-[11px]"
-                              onClick={() => setTradeStatusFilter(filter)}
-                            >
-                              {filter}
-                            </Button>
-                          ))}
-                        </div>
-                      </CardTitle>
-                    </CardHeader>
-                    <CardContent className="flex-1 min-h-0 overflow-hidden space-y-2">
-                      <Input
-                        value={tradeSearch}
-                        onChange={(event) => setTradeSearch(event.target.value)}
-                        placeholder="Search market, source, direction..."
-                      />
-
-                      <ScrollArea className="h-full min-h-0 rounded-md border border-border/80">
-                        <Table>
-                          <TableHeader>
-                            <TableRow>
-                              <TableHead>Market</TableHead>
-                              <TableHead>Status</TableHead>
-                              <TableHead>Dir</TableHead>
-                              <TableHead className="text-right">Notional</TableHead>
-                              <TableHead className="text-right">Edge</TableHead>
-                              <TableHead className="text-right">P/L</TableHead>
-                            </TableRow>
-                          </TableHeader>
-                          <TableBody>
-                            {filteredTradeHistory.map((order) => {
-                              const status = normalizeStatus(order.status)
-                              const pnl = toNumber(order.actual_profit)
-                              return (
-                                <TableRow key={order.id}>
-                                  <TableCell>
-                                    <div className="max-w-[380px] truncate" title={order.market_question || order.market_id}>{order.market_question || order.market_id}</div>
-                                    <div className="text-[11px] text-muted-foreground">{formatShortDate(order.executed_at || order.created_at)}</div>
-                                  </TableCell>
-                                  <TableCell>
-                                    <Badge
-                                      variant={
-                                        FAILED_ORDER_STATUSES.has(status) ? 'destructive' :
-                                          RESOLVED_ORDER_STATUSES.has(status) ? 'default' :
-                                            'outline'
-                                      }
-                                    >
-                                      {status}
-                                    </Badge>
-                                  </TableCell>
-                                  <TableCell>{String(order.direction || 'n/a').toUpperCase()}</TableCell>
-                                  <TableCell className="text-right font-mono">{formatCurrency(toNumber(order.notional_usd))}</TableCell>
-                                  <TableCell className="text-right font-mono">{order.edge_percent !== null ? formatPercent(normalizeEdgePercent(toNumber(order.edge_percent))) : 'n/a'}</TableCell>
-                                  <TableCell className={cn('text-right font-mono', pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                                    {order.actual_profit !== null ? formatCurrency(pnl) : 'n/a'}
-                                  </TableCell>
-                                </TableRow>
-                              )
-                            })}
-                            {filteredTradeHistory.length === 0 ? (
-                              <TableRow>
-                                <TableCell colSpan={6} className="text-center text-muted-foreground">No trades match the selected filters.</TableCell>
-                              </TableRow>
-                            ) : null}
-                          </TableBody>
-                        </Table>
-                      </ScrollArea>
-                    </CardContent>
-                  </Card>
-                </TabsContent>
-
-              </Tabs>
-            </div>
-          </div>
-        </TabsContent>
-
-        <TabsContent value="governance" className="mt-0 flex-1 min-h-0 overflow-hidden">
-          <div className="h-full min-h-0 grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
-            <Card className="h-full flex flex-col min-h-0 overflow-hidden">
-              <CardHeader className="py-2">
-                <CardTitle className="text-sm">Governance Controls + Guardrails</CardTitle>
-              </CardHeader>
-              <CardContent className="flex-1 min-h-0 overflow-hidden">
-                <ScrollArea className="h-full min-h-0 pr-2">
-                  <div className="space-y-3 pb-2">
-                    <div className="rounded-md border border-border p-3">
-                      <p className="text-[11px] uppercase tracking-wider text-muted-foreground">Control state</p>
-                      <div className="mt-2 space-y-2 text-sm">
-                        <div className="flex items-center justify-between">
-                          <span className="text-muted-foreground">Mode</span>
-                          <Badge variant={globalMode === 'live' ? 'destructive' : 'outline'}>{globalMode.toUpperCase()}</Badge>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span className="text-muted-foreground">Engine</span>
-                          <span className={cn('font-medium', orchestratorBlocked ? 'text-amber-600 dark:text-amber-200' : '')}>
-                            {orchestratorStatusLabel}
-                          </span>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span className="text-muted-foreground">Block new orders</span>
-                          <span className={cn('font-medium', killSwitchOn ? 'text-red-400' : 'text-emerald-400')}>{killSwitchOn ? 'Active' : 'Inactive'}</span>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span className="text-muted-foreground">Run interval</span>
-                          <span className="font-medium font-mono">{toNumber(overviewQuery.data?.control?.run_interval_seconds)}s</span>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className={cn(
-                      'rounded-md border p-3',
-                      !selectedAccountValid || modeMismatch ? 'border-amber-500/40 bg-amber-500/10' : 'border-border'
-                    )}>
-                      <p className="text-[11px] uppercase tracking-wider text-muted-foreground">Account + Mode Governance</p>
-                      <div className="mt-2 text-sm space-y-2">
-                        <div className="flex items-center justify-between">
-                          <span className="text-muted-foreground">Global account selected</span>
-                          <span className="font-medium">{selectedAccountValid ? 'Yes' : 'No'}</span>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span className="text-muted-foreground">Mode synchronized</span>
-                          <span className="font-medium">{modeMismatch ? 'No' : 'Yes'}</span>
-                        </div>
-                        <div className="text-xs text-muted-foreground">
-                          Start commands are blocked until a valid global account is selected and mode alignment is satisfied.
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="rounded-md border border-border p-3">
-                      <p className="text-[11px] uppercase tracking-wider text-muted-foreground">Live guardrails</p>
-                      <div className="mt-2 space-y-2 text-xs">
-                        <div className="flex items-center justify-between">
-                          <span className="text-muted-foreground">Live requires preflight pass + arm token</span>
-                          <Badge variant="outline">Enforced</Badge>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span className="text-muted-foreground">Block New Orders guard blocks order creation</span>
-                          <Badge variant="outline">Enforced</Badge>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span className="text-muted-foreground">Worker pause overrides start</span>
-                          <Badge variant="outline">Enforced</Badge>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="rounded-md border border-border p-3">
-                      <p className="text-[11px] uppercase tracking-wider text-muted-foreground">Emergency controls</p>
-                      <div className="mt-2 rounded-md border border-border/70 bg-muted/20 px-2 py-1.5 text-xs text-muted-foreground">
-                        Header controls are intentionally split by function:
-                        <span className="font-medium text-foreground"> Start/Stop </span>
-                        changes engine state,
-                        <span className="font-medium text-foreground"> Block New Orders </span>
-                        keeps engine running but blocks new selected orders.
-                      </div>
-                    </div>
-                  </div>
-                </ScrollArea>
-              </CardContent>
-            </Card>
-
-            <Card className="h-full flex flex-col min-h-0 overflow-hidden">
-              <CardHeader className="py-2">
-                <CardTitle className="text-sm">Risk + Failure Terminal</CardTitle>
-              </CardHeader>
-              <CardContent className="flex-1 min-h-0 overflow-hidden space-y-2">
-                <div className="grid gap-2 grid-cols-2">
-                  <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1.5">
-                    <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Risk rows</p>
-                    <p className="text-sm font-mono">{riskActivityRows.length}</p>
-                  </div>
-                  <div className="rounded-md border border-border/70 bg-background/70 px-2 py-1.5">
-                    <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Failed orders</p>
-                    <p className="text-sm font-mono">{failedOrders.length}</p>
-                  </div>
                 </div>
-
-                <ScrollArea className="h-full min-h-0 rounded-md border border-border/70 bg-muted/20">
-                  <div className="space-y-1 p-2 font-mono text-[11px] leading-relaxed">
-                    {riskActivityRows.length === 0 ? (
-                      <div className="rounded border border-emerald-500/30 px-2 py-1 text-emerald-700 dark:text-emerald-100">
-                        [HEALTHY] no warning or failure events captured.
-                      </div>
+                {selectedTraderId && selectedTraderNoNewRows && (
+                  <div className="shrink-0 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-700 dark:text-amber-100 mx-1">
+                    No new rows since last cycle ({formatTimestamp(selectedTrader?.last_run_at || worker?.last_run_at)}).
+                  </div>
+                )}
+                <ScrollArea className="flex-1 min-h-0 rounded-md border border-border/50 bg-muted/10 mx-1">
+                  <div className="space-y-0.5 p-1.5 font-mono text-[11px] leading-relaxed">
+                    {(selectedTraderId ? filteredTraderActivityRows : filteredActivityRows).length === 0 ? (
+                      <div className="py-8 text-center text-muted-foreground text-xs">No events matching filters.</div>
                     ) : (
-                      riskActivityRows.map((row) => (
+                      (selectedTraderId ? filteredTraderActivityRows : filteredActivityRows).map((row) => (
                         <div
                           key={`${row.kind}:${row.id}`}
                           className={cn(
-                            'rounded border px-2 py-1',
-                            row.tone === 'negative' ? 'border-red-500/35 text-red-700 dark:text-red-100' : 'border-amber-500/35 text-amber-700 dark:text-amber-100'
+                            'rounded border px-2 py-0.5',
+                            row.tone === 'positive' && 'border-emerald-500/25 text-emerald-700 dark:text-emerald-100',
+                            row.tone === 'negative' && 'border-red-500/30 text-red-700 dark:text-red-100',
+                            row.tone === 'warning' && 'border-amber-500/30 text-amber-700 dark:text-amber-100',
+                            row.tone === 'neutral' && 'border-border/50 text-foreground'
                           )}
                         >
                           <span className="text-muted-foreground">[{formatTimestamp(row.ts)}]</span>{' '}
-                          <span className="uppercase">{row.kind}</span>{' '}
+                          <span className="uppercase text-[10px]">{row.kind}</span>{' '}
+                          {!selectedTraderId && <><span className="text-muted-foreground">{traderNameById[String(row.traderId || '')] || shortId(row.traderId || '')}</span>{' '}</>}
                           <span>{row.title}</span>
                           <span className="text-muted-foreground"> :: {row.detail}</span>
                         </div>
@@ -3442,11 +2604,320 @@ export default function TradingPanel() {
                     )}
                   </div>
                 </ScrollArea>
-              </CardContent>
-            </Card>
+              </div>
+            )}
+
+            {/* ── Positions ── */}
+            {workTab === 'positions' && (
+              <div className="h-full min-h-0 overflow-hidden px-1">
+                {(selectedTraderId ? selectedPositionBook : globalPositionBook).length === 0 ? (
+                  <div className="h-full flex items-center justify-center text-sm text-muted-foreground">No open positions.</div>
+                ) : (
+                  <ScrollArea className="h-full min-h-0">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          {!selectedTraderId && <TableHead className="text-[11px]">Trader</TableHead>}
+                          <TableHead className="text-[11px]">Market</TableHead>
+                          <TableHead className="text-[11px]">Dir</TableHead>
+                          <TableHead className="text-[11px] text-right">Exposure</TableHead>
+                          <TableHead className="text-[11px] text-right">AvgPx</TableHead>
+                          <TableHead className="text-[11px] text-right">Edge</TableHead>
+                          <TableHead className="text-[11px] text-right">Conf</TableHead>
+                          <TableHead className="text-[11px] text-right">Orders</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {(selectedTraderId ? selectedPositionBook : globalPositionBook).map((row) => (
+                          <TableRow key={row.key} className="text-xs">
+                            {!selectedTraderId && <TableCell className="font-mono py-1 text-[11px]">{row.traderName}</TableCell>}
+                            <TableCell className="max-w-[240px] truncate py-1" title={row.marketQuestion}>{row.marketQuestion}</TableCell>
+                            <TableCell className="py-1">
+                              <Badge variant={row.direction === 'YES' ? 'default' : 'secondary'} className="text-[10px] h-5 px-1.5">{row.direction}</Badge>
+                            </TableCell>
+                            <TableCell className="text-right font-mono py-1">{formatCurrency(row.exposureUsd)}</TableCell>
+                            <TableCell className="text-right font-mono py-1">{row.averagePrice !== null ? row.averagePrice.toFixed(3) : 'n/a'}</TableCell>
+                            <TableCell className="text-right font-mono py-1">{row.weightedEdge !== null ? formatPercent(row.weightedEdge) : 'n/a'}</TableCell>
+                            <TableCell className="text-right font-mono py-1">{row.weightedConfidence !== null ? formatPercent(normalizeConfidencePercent(row.weightedConfidence)) : 'n/a'}</TableCell>
+                            <TableCell className="text-right font-mono py-1">{row.orderCount}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </ScrollArea>
+                )}
+              </div>
+            )}
+
+            {/* ── Trades ── */}
+            {workTab === 'trades' && (
+              <div className="h-full flex flex-col min-h-0 gap-1.5">
+                <div className="shrink-0 flex flex-wrap items-center gap-1 px-1">
+                  <Input value={tradeSearch} onChange={(event) => setTradeSearch(event.target.value)} placeholder="Search..." className="h-6 w-36 text-[11px]" />
+                  {(['all', 'open', 'resolved', 'failed'] as TradeStatusFilter[]).map((status) => (
+                    <Button key={status} size="sm" variant={tradeStatusFilter === status ? 'default' : 'outline'} onClick={() => setTradeStatusFilter(status)} className="h-5 px-2 text-[10px]">{status}</Button>
+                  ))}
+                </div>
+                <div className="flex-1 min-h-0 overflow-hidden px-1">
+                  {filteredTradeHistory.length === 0 ? (
+                    <div className="h-full flex items-center justify-center text-sm text-muted-foreground">No trades matching filters.</div>
+                  ) : (
+                    <ScrollArea className="h-full min-h-0">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            {!selectedTraderId && <TableHead className="text-[11px]">Trader</TableHead>}
+                            <TableHead className="text-[11px]">Market</TableHead>
+                            <TableHead className="text-[11px]">Dir</TableHead>
+                            <TableHead className="text-[11px]">Status</TableHead>
+                            <TableHead className="text-[11px] text-right">Notional</TableHead>
+                            <TableHead className="text-[11px] text-right">Edge</TableHead>
+                            <TableHead className="text-[11px] text-right">P&amp;L</TableHead>
+                            <TableHead className="text-[11px]">Mode</TableHead>
+                            <TableHead className="text-[11px]">Created</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {filteredTradeHistory.map((order) => {
+                            const status = normalizeStatus(order.status)
+                            const pnl = toNumber(order.actual_profit)
+                            return (
+                              <TableRow key={order.id} className="text-xs">
+                                {!selectedTraderId && <TableCell className="font-mono py-1 text-[11px]">{traderNameById[String(order.trader_id || '')] || shortId(order.trader_id || '')}</TableCell>}
+                                <TableCell className="max-w-[220px] truncate py-1" title={order.market_question || order.market_id}>{order.market_question || shortId(order.market_id)}</TableCell>
+                                <TableCell className="py-1">
+                                  <Badge variant={String(order.direction || '').toUpperCase() === 'YES' ? 'default' : 'secondary'} className="text-[10px] h-5 px-1.5">{String(order.direction || '').toUpperCase()}</Badge>
+                                </TableCell>
+                                <TableCell className="py-1">
+                                  <Badge variant={OPEN_ORDER_STATUSES.has(status) ? 'default' : RESOLVED_ORDER_STATUSES.has(status) ? (pnl >= 0 ? 'default' : 'destructive') : 'outline'} className="text-[10px] h-5 px-1.5">{status}</Badge>
+                                </TableCell>
+                                <TableCell className="text-right font-mono py-1">{formatCurrency(toNumber(order.notional_usd))}</TableCell>
+                                <TableCell className="text-right font-mono py-1">{formatPercent(toNumber(order.edge_percent))}</TableCell>
+                                <TableCell className={cn('text-right font-mono py-1', pnl > 0 ? 'text-emerald-500' : pnl < 0 ? 'text-red-500' : '')}>{RESOLVED_ORDER_STATUSES.has(status) ? formatCurrency(pnl) : '\u2014'}</TableCell>
+                                <TableCell className="py-1 uppercase text-[10px]">{String(order.mode || '').toUpperCase()}</TableCell>
+                                <TableCell className="py-1 text-[10px] text-muted-foreground">{formatShortDate(order.created_at)}</TableCell>
+                              </TableRow>
+                            )
+                          })}
+                        </TableBody>
+                      </Table>
+                    </ScrollArea>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* ── Decisions ── */}
+            {workTab === 'decisions' && (
+              <div className="h-full min-h-0 grid gap-2 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] px-1">
+                <div className="flex flex-col gap-1.5 min-h-0 overflow-hidden">
+                  <Input value={decisionSearch} onChange={(event) => setDecisionSearch(event.target.value)} placeholder="Search decisions..." className="h-6 text-[11px] shrink-0" />
+                  <div className="shrink-0 grid gap-1 grid-cols-3">
+                    <div className="rounded border border-emerald-500/30 bg-emerald-500/5 px-2 py-1 text-center">
+                      <p className="text-[9px] uppercase text-muted-foreground">Selected</p>
+                      <p className="text-xs font-mono text-emerald-500">{decisionOutcomeSummary.selected}</p>
+                    </div>
+                    <div className="rounded border border-red-500/30 bg-red-500/5 px-2 py-1 text-center">
+                      <p className="text-[9px] uppercase text-muted-foreground">Blocked</p>
+                      <p className="text-xs font-mono text-red-500">{decisionOutcomeSummary.blocked}</p>
+                    </div>
+                    <div className="rounded border border-border/70 bg-background/70 px-2 py-1 text-center">
+                      <p className="text-[9px] uppercase text-muted-foreground">Skipped</p>
+                      <p className="text-xs font-mono">{decisionOutcomeSummary.skipped}</p>
+                    </div>
+                  </div>
+                  <ScrollArea className="flex-1 min-h-0 rounded-md border border-border/50 bg-muted/10">
+                    <div className="space-y-0.5 p-1.5 text-xs">
+                      {filteredDecisions.length === 0 ? (
+                        <p className="py-4 text-center text-muted-foreground">No decisions.</p>
+                      ) : (
+                        filteredDecisions.map((decision) => {
+                          const isActive = decision.id === selectedDecisionId
+                          const outcome = String(decision.decision || '').toLowerCase()
+                          return (
+                            <button
+                              key={decision.id}
+                              type="button"
+                              onClick={() => setSelectedDecisionId(decision.id)}
+                              className={cn(
+                                'w-full text-left rounded border px-2 py-1 transition-colors',
+                                isActive ? 'border-cyan-500/50 bg-cyan-500/10' : 'border-border/50 hover:bg-muted/40',
+                                outcome === 'selected' && !isActive ? 'border-emerald-500/25' :
+                                outcome === 'blocked' && !isActive ? 'border-red-500/25' : ''
+                              )}
+                            >
+                              <div className="flex items-center justify-between gap-2 font-mono">
+                                <span className="truncate max-w-[180px]" title={decision.market_question || decision.market_id}>{decision.market_question || shortId(decision.market_id)}</span>
+                                <Badge variant={outcome === 'selected' ? 'default' : outcome === 'blocked' ? 'destructive' : 'outline'} className="text-[9px] h-4 px-1 shrink-0">{outcome}</Badge>
+                              </div>
+                              <p className="text-[10px] text-muted-foreground truncate">{decision.reason || decision.strategy_key}</p>
+                            </button>
+                          )
+                        })
+                      )}
+                    </div>
+                  </ScrollArea>
+                </div>
+
+                <div className="flex flex-col gap-1.5 min-h-0 overflow-hidden">
+                  {selectedDecision ? (
+                    <>
+                      <div className="shrink-0 rounded-md border border-border p-2 text-xs space-y-1">
+                        <p className="font-medium">{selectedDecision.market_question || shortId(selectedDecision.market_id)}</p>
+                        <div className="grid gap-1 text-[11px] text-muted-foreground sm:grid-cols-2">
+                          <span>Source: {selectedDecision.source}</span>
+                          <span>Strategy: {selectedDecision.strategy_key}</span>
+                          <span>Direction: {String(selectedDecision.direction || 'n/a').toUpperCase()}</span>
+                          <span>Price: {toNumber(selectedDecision.market_price).toFixed(3)}</span>
+                          <span>Model: {toNumber(selectedDecision.model_probability).toFixed(3)}</span>
+                          <span>Edge: {formatPercent(toNumber(selectedDecision.edge_percent))}</span>
+                          <span>Confidence: {formatPercent(normalizeConfidencePercent(toNumber(selectedDecision.confidence)))}</span>
+                          <span>Score: {toNumber(selectedDecision.signal_score).toFixed(3)}</span>
+                        </div>
+                        <p className="text-[10px]">Reason: {selectedDecision.reason || 'n/a'}</p>
+                      </div>
+
+                      {decisionChecks.length > 0 ? (
+                        <ScrollArea className="flex-1 min-h-0 rounded-md border border-border/50 bg-muted/10">
+                          <div className="space-y-1 p-2 text-xs">
+                            <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Checks ({decisionPassCount} pass / {decisionFailCount} fail)</p>
+                            {decisionChecks.map((check, i) => (
+                              <div key={i} className={cn('rounded border px-2 py-1', check.passed ? 'border-emerald-500/25' : 'border-red-500/25')}>
+                                <div className="flex items-center gap-1">
+                                  {check.passed ? <CheckCircle2 className="w-3 h-3 text-emerald-500" /> : <AlertTriangle className="w-3 h-3 text-red-500" />}
+                                  <span className="font-medium">{check.check_name}</span>
+                                </div>
+                                {check.message ? <p className="text-[10px] text-muted-foreground mt-0.5 pl-4">{check.message}</p> : null}
+                              </div>
+                            ))}
+                            {riskChecks && riskChecks.length > 0 ? (
+                              <>
+                                <p className="text-[10px] uppercase tracking-wider text-muted-foreground mt-2 mb-1">Risk Checks — {riskAllowed ? 'Allowed' : 'Blocked'}</p>
+                                {riskChecks.map((check: any, i: number) => (
+                                  <div key={`risk-${i}`} className={cn('rounded border px-2 py-1', check.passed ? 'border-emerald-500/25' : 'border-red-500/25')}>
+                                    <div className="flex items-center gap-1">
+                                      {check.passed ? <CheckCircle2 className="w-3 h-3 text-emerald-500" /> : <AlertTriangle className="w-3 h-3 text-red-500" />}
+                                      <span className="font-medium">{check.check_name || check.name}</span>
+                                    </div>
+                                    {check.message ? <p className="text-[10px] text-muted-foreground mt-0.5 pl-4">{check.message}</p> : null}
+                                  </div>
+                                ))}
+                              </>
+                            ) : null}
+                            {decisionOrders.length > 0 ? (
+                              <>
+                                <p className="text-[10px] uppercase tracking-wider text-muted-foreground mt-2 mb-1">Linked Orders ({decisionOrders.length})</p>
+                                {decisionOrders.map((order: any) => (
+                                  <div key={order.id} className="rounded border border-border px-2 py-1 font-mono text-[10px]">
+                                    {normalizeStatus(order.status).toUpperCase()} {'\u2022'} {formatCurrency(toNumber(order.notional_usd))} {'\u2022'} {String(order.direction || '').toUpperCase()}
+                                  </div>
+                                ))}
+                              </>
+                            ) : null}
+                          </div>
+                        </ScrollArea>
+                      ) : (
+                        <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">No checks data.</div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">Select a decision to view details.</div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* ── Risk ── */}
+            {workTab === 'risk' && (
+              <div className="h-full min-h-0 grid gap-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)] px-1">
+                {/* Governance */}
+                <div className="flex flex-col min-h-0 gap-1.5 overflow-hidden">
+                  <div className="shrink-0 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground px-1">Governance</div>
+                  <ScrollArea className="flex-1 min-h-0 rounded-md border border-border/50 bg-muted/10">
+                    <div className="space-y-2 p-2">
+                      <div className="rounded border border-border/70 p-2 text-xs space-y-1.5">
+                        <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Control State</p>
+                        <div className="flex items-center justify-between"><span className="text-muted-foreground">Mode</span><Badge variant={globalMode === 'live' ? 'destructive' : 'outline'}>{globalMode.toUpperCase()}</Badge></div>
+                        <div className="flex items-center justify-between"><span className="text-muted-foreground">Engine</span><span className={cn('font-medium', orchestratorBlocked ? 'text-amber-400' : '')}>{orchestratorStatusLabel}</span></div>
+                        <div className="flex items-center justify-between"><span className="text-muted-foreground">Block orders</span><span className={cn('font-medium', killSwitchOn ? 'text-red-400' : 'text-emerald-400')}>{killSwitchOn ? 'Active' : 'Inactive'}</span></div>
+                        <div className="flex items-center justify-between"><span className="text-muted-foreground">Run interval</span><span className="font-mono">{toNumber(overviewQuery.data?.control?.run_interval_seconds)}s</span></div>
+                      </div>
+                      <div className={cn('rounded border p-2 text-xs space-y-1.5', !selectedAccountValid || modeMismatch ? 'border-amber-500/35 bg-amber-500/5' : 'border-border/70')}>
+                        <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Account Governance</p>
+                        <div className="flex items-center justify-between"><span className="text-muted-foreground">Account selected</span><span className="font-medium">{selectedAccountValid ? 'Yes' : 'No'}</span></div>
+                        <div className="flex items-center justify-between"><span className="text-muted-foreground">Mode sync</span><span className="font-medium">{modeMismatch ? 'No' : 'Yes'}</span></div>
+                      </div>
+                      <div className="rounded border border-border/70 p-2 text-xs space-y-1.5">
+                        <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Live Guardrails</p>
+                        <div className="flex items-center justify-between"><span className="text-muted-foreground">Preflight + arm</span><Badge variant="outline" className="text-[9px] h-4">Enforced</Badge></div>
+                        <div className="flex items-center justify-between"><span className="text-muted-foreground">Kill switch guard</span><Badge variant="outline" className="text-[9px] h-4">Enforced</Badge></div>
+                        <div className="flex items-center justify-between"><span className="text-muted-foreground">Worker pause override</span><Badge variant="outline" className="text-[9px] h-4">Enforced</Badge></div>
+                      </div>
+                    </div>
+                  </ScrollArea>
+                </div>
+
+                {/* Risk + Failure Terminal */}
+                <div className="flex flex-col min-h-0 gap-1.5 overflow-hidden">
+                  <div className="shrink-0 flex items-center gap-3 px-1">
+                    <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Risk Terminal</span>
+                    <div className="flex items-center gap-2 text-[11px] font-mono text-muted-foreground">
+                      <span>{riskActivityRows.length} warnings</span>
+                      <span className="text-border">|</span>
+                      <span>{failedOrders.length} failed</span>
+                    </div>
+                  </div>
+                  <ScrollArea className="flex-1 min-h-0 rounded-md border border-border/50 bg-muted/10">
+                    <div className="space-y-0.5 p-1.5 font-mono text-[11px] leading-relaxed">
+                      {riskActivityRows.length === 0 ? (
+                        <div className="rounded border border-emerald-500/25 px-2 py-1 text-emerald-700 dark:text-emerald-100">[HEALTHY] no warning or failure events captured.</div>
+                      ) : (
+                        riskActivityRows.map((row) => (
+                          <div key={`${row.kind}:${row.id}`} className={cn('rounded border px-2 py-0.5', row.tone === 'negative' ? 'border-red-500/30 text-red-700 dark:text-red-100' : 'border-amber-500/30 text-amber-700 dark:text-amber-100')}>
+                            <span className="text-muted-foreground">[{formatTimestamp(row.ts)}]</span>{' '}
+                            <span className="uppercase text-[10px]">{row.kind}</span>{' '}
+                            <span>{row.title}</span>
+                            <span className="text-muted-foreground"> :: {row.detail}</span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </ScrollArea>
+                </div>
+              </div>
+            )}
           </div>
-        </TabsContent>
-      </Tabs>
+
+          {/* ── Collapsible Activity Stream ── */}
+          <div className="shrink-0">
+            <button
+              type="button"
+              onClick={() => setActivityStreamOpen((prev) => !prev)}
+              className="w-full flex items-center gap-1.5 px-2 py-1 text-[10px] uppercase tracking-wider text-muted-foreground hover:text-foreground transition-colors border-t border-border/40"
+            >
+              {activityStreamOpen ? <ChevronDown className="w-3 h-3" /> : <ChevronUp className="w-3 h-3" />}
+              Recent Selections ({recentSelectedDecisions.length})
+            </button>
+            {activityStreamOpen && (
+              <div className="max-h-[100px] overflow-auto border-t border-border/30 px-2 py-1 space-y-0.5">
+                {recentSelectedDecisions.length === 0 ? (
+                  <p className="text-[10px] text-muted-foreground">No recent selections.</p>
+                ) : (
+                  recentSelectedDecisions.slice(0, 8).map((decision) => (
+                    <div key={decision.id} className="flex items-center justify-between gap-2 text-[10px] font-mono">
+                      <span className="truncate max-w-[300px] text-muted-foreground" title={decision.market_question || ''}>{decision.market_question || shortId(decision.market_id)}</span>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <Badge variant="outline" className="text-[8px] h-3.5 px-1">{decision.source}</Badge>
+                        <span className="text-muted-foreground">{formatShortDate(decision.created_at)}</span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
 
       <Dialog open={confirmLiveStartOpen} onOpenChange={setConfirmLiveStartOpen}>
         <DialogContent>
@@ -3517,7 +2988,7 @@ export default function TradingPanel() {
                 <FlyoutSection
                   title="Trader Profile"
                   icon={Sparkles}
-                  subtitle="Name this trader and configure source-specific strategies below."
+                  subtitle="Name this trader and configure source-specific execution strategies below."
                 >
                   <div>
                     <Label>Name</Label>

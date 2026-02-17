@@ -1442,10 +1442,12 @@ export interface TradeSignal {
 export interface TraderDecisionCheck {
   id: string
   check_key: string
+  check_name: string
   check_label: string
   passed: boolean
   score: number | null
   detail: string | null
+  message: string | null
   payload: Record<string, any>
   created_at: string | null
 }
@@ -1747,6 +1749,14 @@ export interface TraderDecision {
   decision: string
   reason: string | null
   score: number | null
+  market_id: string
+  market_question: string | null
+  direction: string | null
+  market_price: number | null
+  model_probability: number | null
+  edge_percent: number | null
+  confidence: number | null
+  signal_score: number | null
   event_id: string | null
   trace_id: string | null
   checks_summary: Record<string, any>
