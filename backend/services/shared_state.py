@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 SNAPSHOT_ID = "latest"
 CONTROL_ID = "default"
 
+# In-memory targeted condition IDs for the next scan request.
+# Set by the evaluate endpoint, consumed and cleared by the scanner worker.
+_pending_targeted_condition_ids: list[str] = []
+
 
 def _parse_iso_datetime(value: str) -> datetime:
     """Parse ISO datetime strings defensively, including legacy malformed UTC suffixes."""
@@ -510,11 +514,29 @@ async def set_scanner_interval(session: AsyncSession, interval_seconds: int) -> 
     await session.commit()
 
 
-async def request_one_scan(session: AsyncSession) -> None:
-    """Set requested_scan_at so worker runs one scan on next loop (API: scan now)."""
+async def request_one_scan(
+    session: AsyncSession,
+    condition_ids: list[str] | None = None,
+) -> None:
+    """Set requested_scan_at so worker runs one scan on next loop (API: scan now).
+
+    If *condition_ids* is provided, the scan will prioritise those markets
+    instead of running a full untargeted scan.
+    """
+    global _pending_targeted_condition_ids
     row = await ensure_scanner_control(session)
     row.requested_scan_at = utcnow()
+    if condition_ids:
+        _pending_targeted_condition_ids = list(condition_ids)
     await session.commit()
+
+
+def pop_targeted_condition_ids() -> list[str]:
+    """Return and clear any pending targeted condition IDs for the next scan."""
+    global _pending_targeted_condition_ids
+    ids = _pending_targeted_condition_ids
+    _pending_targeted_condition_ids = []
+    return ids
 
 
 async def clear_scan_request(session: AsyncSession) -> None:

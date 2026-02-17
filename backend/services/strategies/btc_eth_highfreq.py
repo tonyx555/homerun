@@ -213,12 +213,74 @@ def _thin_liquidity_usd():
     return _cfg.BTC_ETH_HF_THIN_LIQUIDITY_USD
 
 
-# Dump-hedge combined cost target raised from 0.97 to 0.98: after 2% fee,
-# you need combined < 0.98 to profit. 0.97 left only 1% gross before fees.
-_DUMP_HEDGE_MAX_COMBINED = 0.98  # Combined cost target after dump-hedge
+# ---------------------------------------------------------------------------
+# Sub-strategy scoring constants
+# ---------------------------------------------------------------------------
+
+# -- Pure Arb scoring --
+_PURE_ARB_NET_PROFIT_SCALE = 1000.0  # Converts net profit to score points (0.02 -> 20 pts)
+_PURE_ARB_HIGH_LIQUIDITY_USD = 5000.0  # Liquidity threshold for full bonus
+_PURE_ARB_HIGH_LIQUIDITY_BONUS = 15.0
+_PURE_ARB_MED_LIQUIDITY_USD = 2000.0  # Liquidity threshold for medium bonus
+_PURE_ARB_MED_LIQUIDITY_BONUS = 8.0
+_PURE_ARB_LOW_LIQUIDITY_USD = 1000.0  # Liquidity threshold for small bonus
+_PURE_ARB_LOW_LIQUIDITY_BONUS = 3.0
+_PURE_ARB_BALANCE_SCALE = 5.0  # Score weight for balanced yes/no prices
+
+# -- Dump-Hedge scoring --
+_DUMP_HEDGE_NEAR_RESOLVED_THRESHOLD = 0.05  # Below this, market is effectively resolved
+_DUMP_HEDGE_FAIR_VALUE = 0.50  # Fair value for 50/50 binary up-or-down market
+_DUMP_HEDGE_DROP_SCORE_SCALE = 200.0  # Score scale for drop magnitude
+_DUMP_HEDGE_EV_PROFIT_SCALE = 500.0  # Score scale for expected-value profit
+_DUMP_HEDGE_GUARANTEED_SCALE = 1000.0  # Score scale for guaranteed arb component
+_DUMP_HEDGE_VOLATILITY_SCALE = 50.0  # Score scale for recent volatility
+_DUMP_HEDGE_HIGH_LIQUIDITY_USD = 3000.0  # Above this, full liquidity bonus
+_DUMP_HEDGE_HIGH_LIQUIDITY_BONUS = 5.0
+_DUMP_HEDGE_LOW_LIQUIDITY_USD = 1000.0  # Below this, heavy penalty
+_DUMP_HEDGE_LOW_LIQUIDITY_PENALTY = 0.5  # Multiplied against score
+
+# -- Pre-Placed Limits scoring --
 _LIMIT_ORDER_TARGET_LOW = 0.45  # Lower limit order price
 _LIMIT_ORDER_TARGET_HIGH = 0.47  # Upper limit order price
+_LIMIT_ORDER_MIN_TARGET = 0.42  # Absolute minimum limit order price
+_LIMIT_ORDER_FEE_REFERENCE_PRICE = 0.48  # Typical limit price for fee calculation
+_LIMIT_ORDER_MIN_PROFIT_MARGIN = 0.01  # Minimum profit margin after fees
+_LIMIT_ORDER_BASE_SCORE = 10.0  # Base score for thin-book opportunity
+_LIMIT_VERY_THIN_LIQUIDITY_USD = 100.0  # Very thin book threshold
+_LIMIT_VERY_THIN_BONUS = 20.0
+_LIMIT_THIN_LIQUIDITY_USD = 250.0  # Thin book threshold
+_LIMIT_THIN_BONUS = 10.0
+_LIMIT_MODERATE_LIQUIDITY_USD = 400.0  # Moderate book threshold
+_LIMIT_MODERATE_BONUS = 3.0
+_LIMIT_NEAR_HALF_BONUS = 15.0  # Bonus when prices are near 0.50
+_LIMIT_VERY_NEW_VOLUME_USD = 100.0  # Almost certainly new market
+_LIMIT_VERY_NEW_BONUS = 20.0
+_LIMIT_NEW_VOLUME_USD = 500.0  # Very new market
+_LIMIT_NEW_BONUS = 12.0
+_LIMIT_PROFIT_SCORE_SCALE = 300.0  # Score scale for expected profit
+_LIMIT_SIGNIFICANT_VOLUME_USD = 10000.0  # High volume reduces fill probability
+_LIMIT_SIGNIFICANT_VOLUME_PENALTY = 0.4  # Multiplied against score
 _NEW_MARKET_VOLUME_THRESHOLD = 5000.0  # Markets with volume below this are "new"
+
+# -- Directional Edge scoring --
+_DIRECTIONAL_TREND_SCALE = 2.0  # Scale factor: trend -> probability adjustment
+_DIRECTIONAL_MODEL_PROB_MIN = 0.30  # Min model probability clamp
+_DIRECTIONAL_MODEL_PROB_MAX = 0.70  # Max model probability clamp
+_DIRECTIONAL_EARLY_PHASE_MINUTES = 10.0  # Remaining minutes for early/mid boundary
+_DIRECTIONAL_EARLY_MIN_EDGE = 0.08  # Required edge in early phase
+_DIRECTIONAL_EARLY_SCORE_MULT = 1.0
+_DIRECTIONAL_MID_PHASE_MINUTES = 5.0  # Remaining minutes for mid/late boundary
+_DIRECTIONAL_MID_MIN_EDGE = 0.05  # Required edge in mid phase
+_DIRECTIONAL_MID_SCORE_MULT = 1.5
+_DIRECTIONAL_LATE_MIN_EDGE = 0.03  # Required edge in late phase
+_DIRECTIONAL_LATE_SCORE_MULT = 2.0
+_DIRECTIONAL_EDGE_SCORE_SCALE = 500.0  # Score scale for edge magnitude
+_DIRECTIONAL_MAX_SCORE = 80.0  # Cap on directional score
+_DIRECTIONAL_STRONG_TREND_THRESHOLD = 0.05  # High trend strength
+_DIRECTIONAL_STRONG_TREND_BONUS = 15.0
+_DIRECTIONAL_MODERATE_TREND_THRESHOLD = 0.02  # Moderate trend strength
+_DIRECTIONAL_MODERATE_TREND_BONUS = 8.0
+_DIRECTIONAL_LATE_PHASE_BONUS = 20.0  # Extra score in late phase
 
 # Price history defaults
 _DEFAULT_HISTORY_WINDOW_SEC = 300  # 5 minutes for 15-min markets
@@ -621,7 +683,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         # We set self.fee to the midpoint estimate; the scoring methods
         # use polymarket_fee_curve() for price-specific calculations.
         # See: https://docs.polymarket.com/polymarket-learn/trading/maker-rebates-program
-        self.fee = 0.0156  # ~1.56% at 50% probability
+        self.fee = _cfg.BTC_ETH_HF_FEE_ESTIMATE  # default ~1.56% at 50% probability
         # Per-market price history keyed by market ID
         self._price_histories: dict[str, MarketPriceHistory] = {}
 
@@ -923,20 +985,20 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             )
 
         # Base score proportional to net profit (scale: 1 cent = 10 points)
-        base_score = net_profit * 1000.0  # e.g. 0.02 net profit -> 20 pts
+        base_score = net_profit * _PURE_ARB_NET_PROFIT_SCALE
 
         # Bonus for high liquidity (confidence we can fill)
         liquidity = c.market.liquidity
-        if liquidity >= 5000:
-            base_score += 15.0
-        elif liquidity >= 2000:
-            base_score += 8.0
-        elif liquidity >= 1000:
-            base_score += 3.0
+        if liquidity >= _PURE_ARB_HIGH_LIQUIDITY_USD:
+            base_score += _PURE_ARB_HIGH_LIQUIDITY_BONUS
+        elif liquidity >= _PURE_ARB_MED_LIQUIDITY_USD:
+            base_score += _PURE_ARB_MED_LIQUIDITY_BONUS
+        elif liquidity >= _PURE_ARB_LOW_LIQUIDITY_USD:
+            base_score += _PURE_ARB_LOW_LIQUIDITY_BONUS
 
         # Bonus for balanced prices (both sides near 0.49-0.50 = most liquid)
         balance = 1.0 - abs(c.yes_price - c.no_price)
-        base_score += balance * 5.0
+        base_score += balance * _PURE_ARB_BALANCE_SCALE
 
         return SubStrategyScore(
             strategy=SubStrategy.PURE_ARB,
@@ -968,8 +1030,8 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         # For 15-min/1-hr up-or-down markets, the opening price is always 0.50.
         # If we have no history yet, infer the "dump" from deviation off 0.50.
         if history is None or not history.has_data:
-            yes_dev = 0.50 - c.yes_price  # positive if YES dropped below 0.50
-            no_dev = 0.50 - c.no_price  # positive if NO dropped below 0.50
+            yes_dev = _DUMP_HEDGE_FAIR_VALUE - c.yes_price  # positive if YES dropped below 0.50
+            no_dev = _DUMP_HEDGE_FAIR_VALUE - c.no_price  # positive if NO dropped below 0.50
             max_drop = max(yes_dev, no_dev, 0.0)
             dumped_side = "YES" if yes_dev >= no_dev else "NO"
         else:
@@ -995,14 +1057,17 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         # Skip near-resolved markets: if the dumped side is below $0.05,
         # the market has effectively resolved (one outcome is ~certain)
         # and this is NOT a temporary dump worth trading.
-        if dumped_price < 0.05:
+        if dumped_price < _DUMP_HEDGE_NEAR_RESOLVED_THRESHOLD:
             return SubStrategyScore(
                 strategy=SubStrategy.DUMP_HEDGE,
                 score=0.0,
-                reason=(f"Market effectively resolved ({dumped_side} at ${dumped_price:.4f} < $0.05 threshold)"),
+                reason=(
+                    f"Market effectively resolved ({dumped_side} at ${dumped_price:.4f} "
+                    f"< ${_DUMP_HEDGE_NEAR_RESOLVED_THRESHOLD} threshold)"
+                ),
             )
 
-        fair_value = 0.50  # up-or-down markets are coin flips
+        fair_value = _DUMP_HEDGE_FAIR_VALUE
         dump_fee = polymarket_fee_curve(dumped_price)
         ev_profit = fair_value - dumped_price - dump_fee
 
@@ -1022,19 +1087,19 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             )
 
         # Score: larger drop and larger EV profit = better
-        base_score = max_drop * 200.0  # 5% drop -> 10 pts, 10% drop -> 20 pts
-        base_score += max(ev_profit, 0) * 500.0  # reward EV-profitable dumps
-        base_score += guaranteed_component * 1000.0  # strongly reward guaranteed arb
+        base_score = max_drop * _DUMP_HEDGE_DROP_SCORE_SCALE
+        base_score += max(ev_profit, 0) * _DUMP_HEDGE_EV_PROFIT_SCALE
+        base_score += guaranteed_component * _DUMP_HEDGE_GUARANTEED_SCALE
 
         # Volatility bonus: higher volatility means more dump-hedge opportunities
         volatility = history.recent_volatility() if (history and history.has_data) else 0.0
-        base_score += volatility * 50.0
+        base_score += volatility * _DUMP_HEDGE_VOLATILITY_SCALE
 
         # Liquidity matters: need to be able to fill quickly
-        if c.market.liquidity >= 3000:
-            base_score += 5.0
-        elif c.market.liquidity < 1000:
-            base_score *= 0.5  # penalize low liquidity heavily
+        if c.market.liquidity >= _DUMP_HEDGE_HIGH_LIQUIDITY_USD:
+            base_score += _DUMP_HEDGE_HIGH_LIQUIDITY_BONUS
+        elif c.market.liquidity < _DUMP_HEDGE_LOW_LIQUIDITY_USD:
+            base_score *= _DUMP_HEDGE_LOW_LIQUIDITY_PENALTY
 
         return SubStrategyScore(
             strategy=SubStrategy.DUMP_HEDGE,
@@ -1068,26 +1133,26 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         - Required minimum profit margin
         """
         # Base targets
-        min_target = 0.42  # Absolute minimum (most aggressive)
+        min_target = _LIMIT_ORDER_MIN_TARGET
 
         # Start from the aggressive end
-        base_price = 0.45
+        base_price = _LIMIT_ORDER_TARGET_LOW
 
         # Adjust based on liquidity: thinner book = can be more aggressive
-        if c.market.liquidity < 100:
+        if c.market.liquidity < _LIMIT_VERY_THIN_LIQUIDITY_USD:
             base_price = min_target  # Very thin, be aggressive
-        elif c.market.liquidity < 250:
+        elif c.market.liquidity < _LIMIT_THIN_LIQUIDITY_USD:
             base_price = 0.44
-        elif c.market.liquidity < 400:
-            base_price = 0.45
+        elif c.market.liquidity < _LIMIT_MODERATE_LIQUIDITY_USD:
+            base_price = _LIMIT_ORDER_TARGET_LOW
         else:
             base_price = 0.46  # Moderate book, bid closer to fill
 
         # Ensure combined still profits: need combined < 1.0 - fee
         # If we bid base_price on both sides, combined = 2 * base_price
         # Need: 2 * base_price + fee < 1.0
-        limit_fee = polymarket_fee_curve(0.48)  # fee at typical limit price
-        max_combined = 1.0 - limit_fee - 0.01  # Leave 1% minimum profit
+        limit_fee = polymarket_fee_curve(_LIMIT_ORDER_FEE_REFERENCE_PRICE)
+        max_combined = 1.0 - limit_fee - _LIMIT_ORDER_MIN_PROFIT_MARGIN
         max_per_side = max_combined / 2.0
 
         target_price = min(base_price, max_per_side)
@@ -1136,35 +1201,35 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             )
 
         # Base score: thin book is a strong signal
-        base_score = 10.0
+        base_score = _LIMIT_ORDER_BASE_SCORE
 
         # Lower liquidity = more opportunity for limit fills
-        if liquidity < 100:
-            base_score += 20.0
-        elif liquidity < 250:
-            base_score += 10.0
+        if liquidity < _LIMIT_VERY_THIN_LIQUIDITY_USD:
+            base_score += _LIMIT_VERY_THIN_BONUS
+        elif liquidity < _LIMIT_THIN_LIQUIDITY_USD:
+            base_score += _LIMIT_THIN_BONUS
         else:
-            base_score += 3.0
+            base_score += _LIMIT_MODERATE_BONUS
 
         # Near-half prices suggest a freshly opened market (ideal)
         if both_near_half:
-            base_score += 15.0
+            base_score += _LIMIT_NEAR_HALF_BONUS
 
         # Market age proxy: very low volume = likely just opened
-        if c.market.volume < 100:
-            base_score += 20.0  # Almost certainly a new market
-        elif c.market.volume < 500:
-            base_score += 12.0  # Very new
+        if c.market.volume < _LIMIT_VERY_NEW_VOLUME_USD:
+            base_score += _LIMIT_VERY_NEW_BONUS
+        elif c.market.volume < _LIMIT_NEW_VOLUME_USD:
+            base_score += _LIMIT_NEW_BONUS
         elif c.market.volume < _NEW_MARKET_VOLUME_THRESHOLD:
             base_score += 5.0  # Relatively new
 
         # Bonus for the expected profit
-        base_score += target_profit * 300.0
+        base_score += target_profit * _LIMIT_PROFIT_SCORE_SCALE
 
         # Penalty: if the market already has significant volume, limits are
         # less likely to fill at our targets
-        if c.market.volume > 10000:
-            base_score *= 0.4
+        if c.market.volume > _LIMIT_SIGNIFICANT_VOLUME_USD:
+            base_score *= _LIMIT_SIGNIFICANT_VOLUME_PENALTY
 
         return SubStrategyScore(
             strategy=SubStrategy.PRE_PLACED_LIMITS,
@@ -1260,8 +1325,8 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         trend_strength = abs(trend)
 
         # Model probability: base 50/50, adjusted by trend
-        model_up = 0.50 + (trend * 2.0)  # Scale trend into probability
-        model_up = max(0.30, min(0.70, model_up))  # Clamp
+        model_up = 0.50 + (trend * _DIRECTIONAL_TREND_SCALE)
+        model_up = max(_DIRECTIONAL_MODEL_PROB_MIN, min(_DIRECTIONAL_MODEL_PROB_MAX, model_up))
         model_down = 1.0 - model_up
 
         # Calculate edge: model vs market
@@ -1289,18 +1354,18 @@ class BtcEthHighFreqStrategy(BaseStrategy):
 
         remaining_min = (remaining_secs / 60.0) if remaining_secs else 15.0
 
-        if remaining_min > 10:
+        if remaining_min > _DIRECTIONAL_EARLY_PHASE_MINUTES:
             phase = "EARLY"
-            min_edge = 0.08  # Require 8% edge early (less predictable)
-            score_multiplier = 1.0
-        elif remaining_min > 5:
+            min_edge = _DIRECTIONAL_EARLY_MIN_EDGE
+            score_multiplier = _DIRECTIONAL_EARLY_SCORE_MULT
+        elif remaining_min > _DIRECTIONAL_MID_PHASE_MINUTES:
             phase = "MID"
-            min_edge = 0.05  # 5% edge in the middle
-            score_multiplier = 1.5
+            min_edge = _DIRECTIONAL_MID_MIN_EDGE
+            score_multiplier = _DIRECTIONAL_MID_SCORE_MULT
         else:
             phase = "LATE"
-            min_edge = 0.03  # 3% edge late (model is most accurate)
-            score_multiplier = 2.0
+            min_edge = _DIRECTIONAL_LATE_MIN_EDGE
+            score_multiplier = _DIRECTIONAL_LATE_SCORE_MULT
 
         if best_edge < min_edge:
             return SubStrategyScore(
@@ -1315,17 +1380,17 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             )
 
         # Score based on edge size, amplified by time phase
-        score = min(best_edge * 500.0 * score_multiplier, 80.0)
+        score = min(best_edge * _DIRECTIONAL_EDGE_SCORE_SCALE * score_multiplier, _DIRECTIONAL_MAX_SCORE)
 
         # Bonus for trend strength
-        if trend_strength > 0.05:
-            score += 15.0
-        elif trend_strength > 0.02:
-            score += 8.0
+        if trend_strength > _DIRECTIONAL_STRONG_TREND_THRESHOLD:
+            score += _DIRECTIONAL_STRONG_TREND_BONUS
+        elif trend_strength > _DIRECTIONAL_MODERATE_TREND_THRESHOLD:
+            score += _DIRECTIONAL_MODERATE_TREND_BONUS
 
         # LATE phase bonus: we're most confident here
         if phase == "LATE":
-            score += 20.0
+            score += _DIRECTIONAL_LATE_PHASE_BONUS
 
         # The price we'd buy at
         buy_price = market_up_prob if best_side == "UP" else market_down_prob

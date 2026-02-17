@@ -727,12 +727,12 @@ class CryptoService:
                     for m in markets:
                         for i, token_id in enumerate(m.clob_token_ids or []):
                             if token_id and len(token_id) > 20:
-                                if feed_mgr.price_cache.is_fresh(token_id):
-                                    mid = feed_mgr.price_cache.get_mid(token_id)
+                                if feed_mgr.cache.is_fresh(token_id):
+                                    mid = feed_mgr.cache.get_mid_price(token_id)
                                     if mid is not None:
                                         ws_prices[token_id] = mid
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("CryptoService: WS price cache read failed: %s", exc)
 
             # Layer 2: CLOB HTTP API for tokens not in WS cache
             missing_tokens = []

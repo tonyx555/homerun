@@ -782,9 +782,9 @@ class AppSettings(Base):
     max_slippage_percent = Column(Float, default=2.0)
 
     # Opportunity Search Filters (hard rejection thresholds)
-    min_liquidity_hard = Column(Float, default=200.0)
-    min_position_size = Column(Float, default=25.0)
-    min_absolute_profit = Column(Float, default=5.0)
+    min_liquidity_hard = Column(Float, default=1000.0)
+    min_position_size = Column(Float, default=50.0)
+    min_absolute_profit = Column(Float, default=10.0)
     min_annualized_roi = Column(Float, default=10.0)
     max_resolution_months = Column(Integer, default=18)
     max_plausible_roi = Column(Float, default=30.0)

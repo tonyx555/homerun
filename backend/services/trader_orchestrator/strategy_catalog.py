@@ -73,14 +73,14 @@ SYSTEM_TRADER_STRATEGY_SEEDS: list[SystemTraderStrategySeed] = [
             "param_fields": [
                 {"key": "strategy_mode", "label": "Strategy Mode", "type": "enum", "options": ["auto", "directional", "pure_arb", "rebalance"]},
                 {"key": "target_assets", "label": "Target Assets", "type": "array[string]"},
-                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0},
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
                 {"key": "direction_guardrail_enabled", "label": "Direction Guardrail Enabled", "type": "boolean"},
                 {"key": "direction_guardrail_prob_floor", "label": "Direction Guardrail Prob Floor", "type": "number", "min": 0, "max": 1},
                 {"key": "direction_guardrail_price_floor", "label": "Direction Guardrail Price Floor", "type": "number", "min": 0, "max": 1},
                 {"key": "direction_guardrail_regimes", "label": "Direction Guardrail Regimes", "type": "array[string]", "options": ["opening", "mid", "closing"]},
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1},
+                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
+                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
         },
         aliases=[],
@@ -109,14 +109,14 @@ SYSTEM_TRADER_STRATEGY_SEEDS: list[SystemTraderStrategySeed] = [
             "param_fields": [
                 {"key": "strategy_mode", "label": "Strategy Mode", "type": "enum", "options": ["auto", "directional", "pure_arb", "rebalance"]},
                 {"key": "target_assets", "label": "Target Assets", "type": "array[string]"},
-                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0},
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
                 {"key": "direction_guardrail_enabled", "label": "Direction Guardrail Enabled", "type": "boolean"},
                 {"key": "direction_guardrail_prob_floor", "label": "Direction Guardrail Prob Floor", "type": "number", "min": 0, "max": 1},
                 {"key": "direction_guardrail_price_floor", "label": "Direction Guardrail Price Floor", "type": "number", "min": 0, "max": 1},
                 {"key": "direction_guardrail_regimes", "label": "Direction Guardrail Regimes", "type": "array[string]", "options": ["opening", "mid", "closing"]},
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1},
+                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
+                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
         },
         aliases=["strategy.default", "default"],
@@ -145,14 +145,14 @@ SYSTEM_TRADER_STRATEGY_SEEDS: list[SystemTraderStrategySeed] = [
             "param_fields": [
                 {"key": "strategy_mode", "label": "Strategy Mode", "type": "enum", "options": ["auto", "directional", "pure_arb", "rebalance"]},
                 {"key": "target_assets", "label": "Target Assets", "type": "array[string]"},
-                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0},
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
                 {"key": "direction_guardrail_enabled", "label": "Direction Guardrail Enabled", "type": "boolean"},
                 {"key": "direction_guardrail_prob_floor", "label": "Direction Guardrail Prob Floor", "type": "number", "min": 0, "max": 1},
                 {"key": "direction_guardrail_price_floor", "label": "Direction Guardrail Price Floor", "type": "number", "min": 0, "max": 1},
                 {"key": "direction_guardrail_regimes", "label": "Direction Guardrail Regimes", "type": "array[string]", "options": ["opening", "mid", "closing"]},
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1},
+                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
+                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
         },
         aliases=[],
@@ -181,14 +181,14 @@ SYSTEM_TRADER_STRATEGY_SEEDS: list[SystemTraderStrategySeed] = [
             "param_fields": [
                 {"key": "strategy_mode", "label": "Strategy Mode", "type": "enum", "options": ["auto", "directional", "pure_arb", "rebalance"]},
                 {"key": "target_assets", "label": "Target Assets", "type": "array[string]"},
-                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0},
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
                 {"key": "direction_guardrail_enabled", "label": "Direction Guardrail Enabled", "type": "boolean"},
                 {"key": "direction_guardrail_prob_floor", "label": "Direction Guardrail Prob Floor", "type": "number", "min": 0, "max": 1},
                 {"key": "direction_guardrail_price_floor", "label": "Direction Guardrail Price Floor", "type": "number", "min": 0, "max": 1},
                 {"key": "direction_guardrail_regimes", "label": "Direction Guardrail Regimes", "type": "array[string]", "options": ["opening", "mid", "closing"]},
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1},
+                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
+                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
         },
         aliases=[],
@@ -212,13 +212,13 @@ SYSTEM_TRADER_STRATEGY_SEEDS: list[SystemTraderStrategySeed] = [
         },
         param_schema={
             "param_fields": [
-                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0},
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
                 {"key": "max_risk_score", "label": "Max Risk Score", "type": "number", "min": 0, "max": 1},
                 {"key": "min_liquidity", "label": "Min Liquidity", "type": "number", "min": 0},
                 {"key": "min_markets", "label": "Min Markets", "type": "integer", "min": 1},
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1},
+                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
+                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
         },
         aliases=["opportunity_weather"],
@@ -241,12 +241,12 @@ SYSTEM_TRADER_STRATEGY_SEEDS: list[SystemTraderStrategySeed] = [
         },
         param_schema={
             "param_fields": [
-                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0},
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
                 {"key": "max_risk_score", "label": "Max Risk Score", "type": "number", "min": 0, "max": 1},
                 {"key": "min_markets", "label": "Min Markets", "type": "integer", "min": 1},
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1},
+                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
+                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
         },
         aliases=[],
@@ -266,9 +266,9 @@ SYSTEM_TRADER_STRATEGY_SEEDS: list[SystemTraderStrategySeed] = [
         },
         param_schema={
             "param_fields": [
-                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0},
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1},
+                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
             ]
         },
         aliases=[],
@@ -290,11 +290,11 @@ SYSTEM_TRADER_STRATEGY_SEEDS: list[SystemTraderStrategySeed] = [
         },
         param_schema={
             "param_fields": [
-                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0},
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
                 {"key": "min_confluence_strength", "label": "Min Confluence Strength", "type": "number", "min": 0, "max": 1},
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1},
+                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
+                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
         },
         aliases=[],
@@ -319,14 +319,14 @@ SYSTEM_TRADER_STRATEGY_SEEDS: list[SystemTraderStrategySeed] = [
         },
         param_schema={
             "param_fields": [
-                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0},
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
                 {"key": "min_model_agreement", "label": "Min Model Agreement", "type": "number", "min": 0, "max": 1},
                 {"key": "min_source_count", "label": "Min Forecast Sources", "type": "integer", "min": 1},
                 {"key": "max_source_spread_c", "label": "Max Source Spread (C)", "type": "number", "min": 0},
                 {"key": "max_entry_price", "label": "Max Entry Price", "type": "number", "min": 0, "max": 1},
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1},
+                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
+                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
         },
         aliases=[],
@@ -351,14 +351,14 @@ SYSTEM_TRADER_STRATEGY_SEEDS: list[SystemTraderStrategySeed] = [
         },
         param_schema={
             "param_fields": [
-                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0},
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
                 {"key": "min_temp_dislocation_c", "label": "Min Temp Dislocation (C)", "type": "number", "min": 0},
                 {"key": "min_source_count", "label": "Min Forecast Sources", "type": "integer", "min": 1},
                 {"key": "max_source_spread_c", "label": "Max Source Spread (C)", "type": "number", "min": 0},
                 {"key": "max_target_hours", "label": "Max Target Horizon (hours)", "type": "number", "min": 1},
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1},
+                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
+                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
         },
         aliases=[],

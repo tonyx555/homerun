@@ -281,8 +281,13 @@ class ArbitrageScanner:
                         continue
             history.append(point)
 
-            while history and history[0].get("t", 0) < cutoff_ms:
-                history.pop(0)
+            # Trim expired entries in O(n) via bisect-style scan + single slice delete,
+            # avoiding the O(n^2) cost of repeated list.pop(0).
+            trim_idx = 0
+            while trim_idx < len(history) and history[trim_idx].get("t", 0) < cutoff_ms:
+                trim_idx += 1
+            if trim_idx:
+                del history[:trim_idx]
             if len(history) > self._market_history_max_points:
                 del history[: len(history) - self._market_history_max_points]
 
@@ -811,8 +816,17 @@ class ArbitrageScanner:
             print(f"  Validation guardrails: skipped {skipped} demoted strategies")
         return filtered
 
-    async def scan_once(self) -> list[ArbitrageOpportunity]:
-        """Perform a single scan for arbitrage opportunities"""
+    async def scan_once(
+        self,
+        targeted_condition_ids: list[str] | None = None,
+    ) -> list[ArbitrageOpportunity]:
+        """Perform a single scan for arbitrage opportunities.
+
+        If *targeted_condition_ids* is provided, only markets whose
+        condition_id matches one of the given IDs will be evaluated.
+        This allows the evaluate endpoint to run a focused scan
+        instead of a full market sweep.
+        """
         print(f"[{utcnow().isoformat()}] Starting arbitrage scan...")
         await self._set_activity("Fetching Polymarket events and markets...")
         loop = asyncio.get_running_loop()
@@ -834,6 +848,23 @@ class ArbitrageScanner:
             # like NegRisk that iterate event.markets don't pick them up.
             for event in events:
                 event.markets = [m for m in event.markets if m.end_date is None or _make_aware(m.end_date) > now]
+
+            # If targeted condition IDs are provided, narrow the scan to
+            # just those markets and the events that contain them.
+            if targeted_condition_ids:
+                _target_set = {cid.lower() for cid in targeted_condition_ids}
+                markets = [
+                    m for m in markets
+                    if getattr(m, "condition_id", getattr(m, "id", "")).lower() in _target_set
+                ]
+                for event in events:
+                    event.markets = [
+                        m for m in event.markets
+                        if getattr(m, "condition_id", getattr(m, "id", "")).lower() in _target_set
+                    ]
+                # Drop events with no remaining markets
+                events = [e for e in events if e.markets]
+                print(f"  Targeted scan: narrowed to {len(markets)} markets across {len(events)} events")
 
             print(f"  Fetched {len(events)} Polymarket events and {len(markets)} markets")
             await self._set_activity(f"Fetched {len(events)} events, {len(markets)} markets")
@@ -876,17 +907,47 @@ class ArbitrageScanner:
                     if len(tid) > 20:
                         all_token_ids.append(tid)
 
-            # Batch price fetching (limit to avoid rate limits)
+            # Priority-sort tokens so HOT/WARM markets get fresh prices first.
+            # Build a set of prioritized token IDs from tiered scanning data.
+            PRICE_BATCH_CAP = 1500
+            priority_token_ids: set[str] = set()
+            if settings.TIERED_SCANNING_ENABLED and hasattr(self, "_prioritizer"):
+                try:
+                    tier_map = self._prioritizer.classify_all(markets, now)
+                    for tier_key in (MarketTier.HOT, MarketTier.WARM):
+                        for m in tier_map.get(tier_key, []):
+                            for tid in m.clob_token_ids:
+                                if len(tid) > 20:
+                                    priority_token_ids.add(tid)
+                except Exception:
+                    pass  # Fall through to unsorted if prioritizer fails
+
+            if priority_token_ids:
+                # Prioritized tokens first, then rotate remaining cold tokens
+                prioritized = [t for t in all_token_ids if t in priority_token_ids]
+                remaining = [t for t in all_token_ids if t not in priority_token_ids]
+                # Rotate cold tokens across cycles so all eventually get fresh prices
+                if not hasattr(self, "_cold_token_rotation_offset"):
+                    self._cold_token_rotation_offset = 0
+                if remaining:
+                    offset = self._cold_token_rotation_offset % max(1, len(remaining))
+                    remaining = remaining[offset:] + remaining[:offset]
+                    self._cold_token_rotation_offset += PRICE_BATCH_CAP - len(prioritized)
+                sorted_token_ids = prioritized + remaining
+            else:
+                sorted_token_ids = all_token_ids
+
+            # Batch price fetching with increased cap and priority sorting
             prices = {}
-            if all_token_ids:
-                await self._set_activity(f"Fetching prices for {min(len(all_token_ids), 500)} tokens...")
-                # Sample tokens if too many
-                token_sample = all_token_ids[:500]
+            if sorted_token_ids:
+                token_sample = sorted_token_ids[:PRICE_BATCH_CAP]
+                await self._set_activity(f"Fetching prices for {len(token_sample)} tokens...")
                 prices = await self.market_data.get_prices_batch(token_sample)
-                print(f"  Fetched prices for {len(prices)} tokens")
+                print(f"  Fetched prices for {len(prices)}/{len(all_token_ids)} tokens "
+                      f"({len(priority_token_ids)} prioritized)")
 
             # Overlay WebSocket real-time prices where available
-            prices = self._merge_ws_prices(prices, all_token_ids[:500])
+            prices = self._merge_ws_prices(prices, sorted_token_ids[:PRICE_BATCH_CAP])
 
             # Cache full data for fast scans between full scans
             self._cached_events = list(events)

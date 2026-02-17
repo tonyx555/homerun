@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import get_db_session
 from services.pause_state import global_pause_state
-from services.trader_orchestrator.position_lifecycle import reconcile_paper_positions
+from services.trader_orchestrator.position_lifecycle import reconcile_live_positions, reconcile_paper_positions
 from services.trader_orchestrator_state import (
     cleanup_trader_open_orders,
     create_config_revision,
@@ -322,7 +322,14 @@ async def delete_trader_route(
             },
         )
 
-    ok = await delete_trader(session, trader_id)
+    try:
+        ok = await delete_trader(
+            session,
+            trader_id,
+            force=(action == TraderDeleteAction.force_delete),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     if not ok:
         raise HTTPException(status_code=404, detail="Trader not found")
     await create_trader_event(
@@ -437,11 +444,11 @@ async def cleanup_trader_positions(
 
     if (
         request.method == TraderPositionCleanupMethod.mark_to_market
-        and request.scope != TraderPositionCleanupScope.paper
+        and request.scope not in {TraderPositionCleanupScope.paper, TraderPositionCleanupScope.live}
     ):
         raise HTTPException(
             status_code=422,
-            detail="mark_to_market cleanup currently supports paper scope only",
+            detail="mark_to_market cleanup supports paper and live scopes (use scope=paper or scope=live)",
         )
 
     if request.method == TraderPositionCleanupMethod.cancel:
@@ -458,17 +465,30 @@ async def cleanup_trader_positions(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
     else:
-        lifecycle_result = await reconcile_paper_positions(
-            session,
-            trader_id=trader_id,
-            trader_params={},
-            dry_run=request.dry_run,
-            force_mark_to_market=True,
-            max_age_hours=request.max_age_hours,
-            reason=str(request.reason or "manual_mark_to_market_cleanup"),
-        )
-        if not request.dry_run:
-            await sync_trader_position_inventory(session, trader_id=trader_id, mode="paper")
+        if request.scope == TraderPositionCleanupScope.live:
+            lifecycle_result = await reconcile_live_positions(
+                session,
+                trader_id=trader_id,
+                trader_params={},
+                dry_run=request.dry_run,
+                force_mark_to_market=True,
+                max_age_hours=request.max_age_hours,
+                reason=str(request.reason or "manual_mark_to_market_cleanup"),
+            )
+            if not request.dry_run:
+                await sync_trader_position_inventory(session, trader_id=trader_id, mode="live")
+        else:
+            lifecycle_result = await reconcile_paper_positions(
+                session,
+                trader_id=trader_id,
+                trader_params={},
+                dry_run=request.dry_run,
+                force_mark_to_market=True,
+                max_age_hours=request.max_age_hours,
+                reason=str(request.reason or "manual_mark_to_market_cleanup"),
+            )
+            if not request.dry_run:
+                await sync_trader_position_inventory(session, trader_id=trader_id, mode="paper")
         result = {
             "trader_id": trader_id,
             "scope": request.scope.value,

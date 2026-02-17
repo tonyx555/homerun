@@ -43,6 +43,7 @@ from utils.utcnow import utcnow
 from utils.secrets import decrypt_secret
 
 ORCHESTRATOR_CONTROL_ID = "default"
+_UNSET = object()  # Sentinel: distinguish "not provided" from explicit None
 ORCHESTRATOR_SNAPSHOT_ID = "latest"
 OPEN_ORDER_STATUSES = {"submitted", "executed", "open"}
 PAPER_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
@@ -143,9 +144,18 @@ def _position_identity_key(mode: Any, market_id: Any, direction: Any) -> tuple[s
 
 def _normalize_confidence_fraction(value: Any, default: float = 0.0) -> float:
     parsed = _safe_float(value, default)
-    if parsed > 1.0:
+    if parsed < 0.0:
+        parsed = 0.0
+    elif parsed <= 1.0:
+        # Already a 0-1 fraction; use as-is.
+        pass
+    elif parsed <= 100.0:
+        # Percentage scale (e.g. 75 -> 0.75).
         parsed = parsed / 100.0
-    return max(0.0, min(1.0, parsed))
+    else:
+        # Values above 100 are nonsensical; clamp to 1.0.
+        parsed = 1.0
+    return parsed
 
 
 def _normalize_resume_policy(value: Any) -> str:
@@ -615,9 +625,13 @@ async def read_orchestrator_snapshot(session: AsyncSession) -> dict[str, Any]:
 
 async def update_orchestrator_control(session: AsyncSession, **updates: Any) -> dict[str, Any]:
     row = await ensure_orchestrator_control(session)
-    for field in ("is_enabled", "is_paused", "mode", "run_interval_seconds", "requested_run_at", "kill_switch"):
+    # Fields where None is never a valid explicit value -- skip if None.
+    for field in ("is_enabled", "is_paused", "mode", "run_interval_seconds", "kill_switch"):
         if field in updates and updates[field] is not None:
             setattr(row, field, updates[field])
+    # requested_run_at accepts explicit None (to clear a stale timestamp).
+    if "requested_run_at" in updates:
+        setattr(row, "requested_run_at", updates["requested_run_at"])
     if isinstance(updates.get("settings_json"), dict):
         merged = dict(row.settings_json or {})
         merged.update(updates["settings_json"])
@@ -853,10 +867,41 @@ async def update_trader(
     return _serialize_trader(row)
 
 
-async def delete_trader(session: AsyncSession, trader_id: str) -> bool:
+async def delete_trader(session: AsyncSession, trader_id: str, *, force: bool = False) -> bool:
     row = await session.get(Trader, trader_id)
     if row is None:
         return False
+
+    # Check for open positions and active orders before deletion.
+    open_positions = (
+        await session.execute(
+            select(func.count())
+            .select_from(TraderPosition)
+            .where(
+                TraderPosition.trader_id == trader_id,
+                TraderPosition.status == ACTIVE_POSITION_STATUS,
+            )
+        )
+    ).scalar() or 0
+
+    active_orders = (
+        await session.execute(
+            select(func.count())
+            .select_from(TraderOrder)
+            .where(
+                TraderOrder.trader_id == trader_id,
+                TraderOrder.status.in_(OPEN_ORDER_STATUSES),
+            )
+        )
+    ).scalar() or 0
+
+    if (open_positions > 0 or active_orders > 0) and not force:
+        raise ValueError(
+            f"Trader {trader_id} has {open_positions} open position(s) and "
+            f"{active_orders} active order(s). Close or cancel them first, "
+            f"or pass force=True to delete anyway."
+        )
+
     await session.delete(row)
     await session.commit()
     return True
@@ -1800,6 +1845,90 @@ async def get_daily_realized_pnl(
         mode=mode,
         since=today_start,
     )
+
+
+async def get_unrealized_pnl(
+    session: AsyncSession,
+    *,
+    trader_id: Optional[str] = None,
+    mode: Optional[str] = None,
+) -> float:
+    """Compute mark-to-market unrealized PnL for all active orders.
+
+    For each open position with an entry price and notional, fetches the
+    current live mid-price and computes unrealized PnL as:
+        quantity * (current_price - entry_price)
+    where quantity = notional / entry_price.
+
+    Returns the total unrealized PnL in USD (negative means the open
+    positions are currently losing money).
+    """
+    from services.live_price_snapshot import get_live_mid_prices
+
+    # Gather active orders with entry prices and token IDs
+    query = select(TraderOrder).where(
+        TraderOrder.entry_price.is_not(None),
+        TraderOrder.notional_usd.is_not(None),
+    )
+    if trader_id:
+        query = query.where(TraderOrder.trader_id == trader_id)
+    if mode is not None:
+        mode_key = _normalize_mode_key(mode)
+        if mode_key == "other":
+            query = query.where(func.lower(func.coalesce(TraderOrder.mode, "")) == "")
+        else:
+            query = query.where(func.lower(func.coalesce(TraderOrder.mode, "")) == mode_key)
+
+    rows = list((await session.execute(query)).scalars().all())
+
+    # Filter to active orders only and collect token IDs for price lookup
+    active_orders = []
+    token_ids: list[str] = []
+    for order in rows:
+        order_mode = _normalize_mode_key(order.mode)
+        if not _is_active_order_status(order_mode, order.status):
+            continue
+        entry_price = float(order.effective_price or order.entry_price or 0)
+        notional = float(order.notional_usd or 0)
+        if entry_price <= 0 or notional <= 0:
+            continue
+
+        payload = order.payload_json or {}
+        token_id = str(
+            payload.get("token_id")
+            or payload.get("selected_token_id")
+            or ""
+        ).strip()
+        if not token_id:
+            continue
+
+        active_orders.append((order, entry_price, notional, token_id))
+        token_ids.append(token_id)
+
+    if not active_orders:
+        return 0.0
+
+    # Fetch current prices in batch
+    try:
+        prices = await get_live_mid_prices(token_ids)
+    except Exception:
+        return 0.0
+
+    total_unrealized = 0.0
+    for order, entry_price, notional, token_id in active_orders:
+        current_price = prices.get(token_id)
+        if current_price is None or current_price <= 0:
+            continue
+        quantity = notional / entry_price
+        direction = str(order.direction or "").strip().lower()
+        if direction in ("sell", "no", "short"):
+            # Short position: profit when price drops
+            total_unrealized += quantity * (entry_price - current_price)
+        else:
+            # Long position (default): profit when price rises
+            total_unrealized += quantity * (current_price - entry_price)
+
+    return total_unrealized
 
 
 async def get_consecutive_loss_count(

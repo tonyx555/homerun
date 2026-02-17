@@ -452,6 +452,11 @@ class SmartWalletPoolService:
                 market_ids=markets,
                 per_market_limit=100,
             )
+            await self._collect_tracked_wallet_candidates(
+                candidate_sources,
+                events,
+                per_wallet_limit=80,
+            )
 
             await self._upsert_candidate_wallets(
                 candidate_sources,
@@ -495,6 +500,11 @@ class SmartWalletPoolService:
                 events,
                 max_markets=12,
                 max_trades_per_market=80,
+            )
+            await self._collect_tracked_wallet_candidates(
+                candidate_sources,
+                events,
+                per_wallet_limit=50,
             )
             await self._upsert_candidate_wallets(
                 candidate_sources,
@@ -1387,6 +1397,62 @@ class SmartWalletPoolService:
                         tx_hash=None,
                     )
                 )
+
+    async def _collect_tracked_wallet_candidates(
+        self,
+        candidates: dict[str, dict[str, bool]],
+        events: list[dict],
+        per_wallet_limit: int,
+    ):
+        """Ensure TrackedWallet and TraderGroupMember entries are included in
+        candidate/activity-rollup ingestion so they can participate in
+        confluence detection even if they never appear on leaderboards or
+        active-market scans."""
+        async with AsyncSessionLocal() as session:
+            tracked_result = await session.execute(select(TrackedWallet.address))
+            tracked_addresses = {
+                str(row[0]).strip().lower()
+                for row in tracked_result.all()
+                if row[0]
+            }
+
+            group_result = await session.execute(
+                select(TraderGroupMember.wallet_address)
+                .join(TraderGroup, TraderGroupMember.group_id == TraderGroup.id)
+                .where(TraderGroup.is_active == True)  # noqa: E712
+            )
+            group_addresses = {
+                str(row[0]).strip().lower()
+                for row in group_result.all()
+                if row[0]
+            }
+
+        all_addresses = tracked_addresses | group_addresses
+        # Only scan wallets not already collected by other sources
+        missing = [addr for addr in all_addresses if addr not in candidates]
+        if not missing:
+            return
+
+        logger.info(
+            "Collecting tracked/group wallet candidates not seen in sweep",
+            count=len(missing),
+        )
+
+        # Mark all tracked/group addresses as candidates so they get
+        # upserted into DiscoveredWallet regardless of trade fetch success.
+        for addr in all_addresses:
+            if addr in tracked_addresses:
+                candidates[addr]["tracked_wallet"] = True
+            if addr in group_addresses:
+                candidates[addr]["group_member"] = True
+
+        # Fetch trades for the missing wallets to populate activity rollups
+        await self._collect_wallet_trade_candidates(
+            candidates,
+            events,
+            wallet_addresses=missing,
+            per_wallet_limit=per_wallet_limit,
+        )
 
     # ------------------------------------------------------------------
     # Persistence and scoring

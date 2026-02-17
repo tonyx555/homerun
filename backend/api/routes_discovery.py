@@ -10,6 +10,7 @@ from typing import Any, Literal, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import (
+    AsyncSessionLocal,
     DiscoveredWallet,
     ScannerSnapshot,
     TrackedWallet,
@@ -1001,6 +1002,53 @@ async def _track_wallet_addresses(
         except Exception:
             continue
     return tracked
+
+
+async def _ensure_discovered_wallet_entries(
+    addresses: list[str],
+    source_label: str = "group_member",
+) -> int:
+    """Ensure each address has a DiscoveredWallet row so it can participate
+    in pool scoring and confluence detection.  Creates stub entries for any
+    addresses not already present and marks them with appropriate source
+    flags.  Returns the number of newly created entries."""
+    if not addresses:
+        return 0
+
+    created = 0
+    async with AsyncSessionLocal() as session:
+        existing_result = await session.execute(
+            select(DiscoveredWallet.address).where(
+                DiscoveredWallet.address.in_(addresses)
+            )
+        )
+        existing_addresses = {
+            str(row[0]).strip().lower()
+            for row in existing_result.all()
+            if row[0]
+        }
+
+        for address in addresses:
+            addr_lower = address.strip().lower()
+            if addr_lower in existing_addresses:
+                continue
+            session.add(
+                DiscoveredWallet(
+                    address=addr_lower,
+                    discovered_at=utcnow(),
+                    discovery_source=source_label,
+                    source_flags={
+                        "tracked_wallet": True,
+                        "group_member": True,
+                    },
+                )
+            )
+            created += 1
+
+        if created:
+            await session.commit()
+
+    return created
 
 
 def _apply_pool_flag_updates(
@@ -2339,6 +2387,14 @@ async def create_trader_group(
                 fetch_initial=False,
             )
 
+        # Ensure group members exist in DiscoveredWallet so they can
+        # participate in pool scoring and confluence detection.
+        if addresses:
+            await _ensure_discovered_wallet_entries(
+                addresses=addresses,
+                source_label=f"group:{name}",
+            )
+
         groups = await _fetch_group_payload(
             session=session,
             include_members=True,
@@ -2402,6 +2458,14 @@ async def add_group_members(
                 addresses=to_add,
                 label=f"Group: {group.name}",
                 fetch_initial=False,
+            )
+
+        # Ensure new group members exist in DiscoveredWallet so they can
+        # participate in pool scoring and confluence detection.
+        if to_add:
+            await _ensure_discovered_wallet_entries(
+                addresses=to_add,
+                source_label=f"group:{group.name}",
             )
 
         groups = await _fetch_group_payload(

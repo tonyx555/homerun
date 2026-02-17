@@ -17,7 +17,13 @@ from typing import Any, Optional
 from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.database import TradeSignal, TradeSignalEmission, TradeSignalSnapshot
+from models.database import (
+    DiscoveredWallet,
+    TradeSignal,
+    TradeSignalEmission,
+    TradeSignalSnapshot,
+    TrackedWallet,
+)
 from models.opportunity import ArbitrageOpportunity
 from services.market_tradability import get_market_tradability_map
 
@@ -707,6 +713,41 @@ async def emit_tracked_trader_signals(
 ) -> int:
     emitted = 0
     active_dedupe_keys: set[str] = set()
+
+    # Pre-fetch pool and tracked wallet sets so each signal carries its
+    # actual source type ("tracked", "pool", or "both") rather than a
+    # generic "confluence" label.  This allows downstream filtering at the
+    # signal level instead of only at API read time.
+    all_wallets: set[str] = set()
+    for sig in confluence_signals:
+        for addr in sig.get("wallets") or []:
+            if isinstance(addr, str) and addr:
+                all_wallets.add(addr.lower())
+
+    pool_addresses: set[str] = set()
+    tracked_addresses: set[str] = set()
+    if all_wallets:
+        try:
+            discovered_rows = await session.execute(
+                select(DiscoveredWallet.address, DiscoveredWallet.in_top_pool).where(
+                    DiscoveredWallet.address.in_(list(all_wallets))
+                )
+            )
+            for address, in_top_pool in discovered_rows.all():
+                if address and bool(in_top_pool):
+                    pool_addresses.add(address.lower())
+
+            tracked_rows = await session.execute(
+                select(TrackedWallet.address).where(
+                    TrackedWallet.address.in_(list(all_wallets))
+                )
+            )
+            for (address,) in tracked_rows.all():
+                if address:
+                    tracked_addresses.add(address.lower())
+        except Exception:
+            pass  # Degrade gracefully: signals still emit, just without source flags
+
     for sig in confluence_signals:
         if sig.get("is_tradeable") is False:
             continue
@@ -753,6 +794,32 @@ async def emit_tracked_trader_signals(
         dedupe_key = tracked_trader_signal_dedupe_key(market_id)
         active_dedupe_keys.add(dedupe_key)
 
+        # Classify signal source from wallet membership.
+        sig_wallets = {
+            addr.lower()
+            for addr in (sig.get("wallets") or [])
+            if isinstance(addr, str) and addr
+        }
+        from_pool = bool(sig_wallets & pool_addresses)
+        from_tracked = bool(sig_wallets & tracked_addresses)
+        if from_tracked and from_pool:
+            signal_source_type = "both"
+        elif from_tracked:
+            signal_source_type = "tracked"
+        elif from_pool:
+            signal_source_type = "pool"
+        else:
+            signal_source_type = "confluence"
+
+        payload = {
+            **sig,
+            "traders_channel": signal_source_type,
+            "source_flags": {
+                "from_pool": from_pool,
+                "from_tracked_traders": from_tracked,
+            },
+        }
+
         await upsert_trade_signal(
             session,
             source="traders",
@@ -767,7 +834,7 @@ async def emit_tracked_trader_signals(
             confidence=confidence,
             liquidity=sig.get("market_liquidity"),
             expires_at=expires_at,
-            payload_json={**sig, "traders_channel": "confluence"},
+            payload_json=payload,
             dedupe_key=dedupe_key,
             commit=False,
         )

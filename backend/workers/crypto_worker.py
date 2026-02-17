@@ -88,7 +88,7 @@ def _collect_ws_prices_for_markets(feed_manager, markets: list) -> dict[str, flo
         return {}
 
     ws_prices: dict[str, float] = {}
-    price_cache = getattr(feed_manager, "price_cache", None)
+    price_cache = getattr(feed_manager, "cache", None)
     if price_cache is None:
         return ws_prices
 
@@ -100,8 +100,9 @@ def _collect_ws_prices_for_markets(feed_manager, markets: list) -> dict[str, flo
             try:
                 if not price_cache.is_fresh(token):
                     continue
-                mid = price_cache.get_mid(token)
-            except Exception:
+                mid = price_cache.get_mid_price(token)
+            except Exception as exc:
+                logger.debug("WS price cache read failed for token %s: %s", token, exc)
                 continue
             if mid is None:
                 continue

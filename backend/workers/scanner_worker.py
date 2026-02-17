@@ -37,6 +37,7 @@ from services import scanner
 from services.signal_bus import emit_scanner_signals
 from services.shared_state import (
     clear_scan_request,
+    pop_targeted_condition_ids,
     read_scanner_control,
     read_scanner_snapshot,
     update_scanner_activity,
@@ -291,6 +292,9 @@ async def _run_scan_loop() -> None:
 
         await _ensure_ws_feeds_running()
 
+        # If the scan was explicitly requested, check for targeted condition IDs.
+        targeted_ids = pop_targeted_condition_ids() if requested else []
+
         run_full_scan = bool(requested)
         if not run_full_scan and settings.TIERED_SCANNING_ENABLED:
             now = datetime.now(timezone.utc)
@@ -305,7 +309,7 @@ async def _run_scan_loop() -> None:
             if settings.TIERED_SCANNING_ENABLED and not run_full_scan and scanner._cached_markets:
                 await scanner.scan_fast()
             else:
-                await scanner.scan_once()
+                await scanner.scan_once(targeted_condition_ids=targeted_ids or None)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -425,6 +429,37 @@ async def _run_scan_loop() -> None:
 
         try:
             async with AsyncSessionLocal() as session:
+                # Re-read AI analysis fields from the current snapshot right before
+                # writing, inside the same session/transaction.  This closes the
+                # TOCTOU window: any AI analysis that landed between the earlier
+                # reattach-read and this point is merged into the outgoing opps so
+                # the subsequent write does not clobber it.
+                if opps:
+                    try:
+                        snapshot_opps, _ = await read_scanner_snapshot(session)
+                        ai_by_stable: dict[str, object] = {}
+                        for snap_opp in snapshot_opps:
+                            stable_id = getattr(snap_opp, "stable_id", None)
+                            analysis = getattr(snap_opp, "ai_analysis", None)
+                            if stable_id and analysis is not None:
+                                ai_by_stable[stable_id] = analysis
+                        if ai_by_stable:
+                            merged = 0
+                            for opp in opps:
+                                if getattr(opp, "ai_analysis", None) is not None:
+                                    continue
+                                sid = getattr(opp, "stable_id", None)
+                                if sid and sid in ai_by_stable:
+                                    opp.ai_analysis = ai_by_stable[sid]
+                                    merged += 1
+                            if merged:
+                                logger.debug(
+                                    "Pre-write AI merge: attached %d analyses",
+                                    merged,
+                                )
+                    except Exception as e:
+                        logger.debug("Pre-write AI merge skipped: %s", e)
+
                 market_history = scanner.get_market_history_for_opportunities(opps)
                 await write_scanner_snapshot(session, opps, status, market_history=market_history)
                 emitted = await emit_scanner_signals(session, opps)

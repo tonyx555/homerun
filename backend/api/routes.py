@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from typing import Optional
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from utils.utcnow import utcnow
+from utils.utcnow import utcnow, utcfromtimestamp
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sqlalchemy import select
@@ -496,12 +496,16 @@ async def evaluate_search_markets(
     """
     condition_ids = body.get("condition_ids", [])
 
-    await shared_state.request_one_scan(session)
+    await shared_state.request_one_scan(session, condition_ids=condition_ids or None)
 
     return {
         "status": "evaluating",
         "count": len(condition_ids),
-        "message": "Strategy scan requested. Detected opportunities will appear in the Markets tab.",
+        "message": (
+            "Strategy scan requested"
+            + (f" for {len(condition_ids)} market(s)" if condition_ids else "")
+            + ". Detected opportunities will appear in the Markets tab."
+        ),
     }
 
 
@@ -780,13 +784,18 @@ async def get_all_recent_trades(
                 if trade_time_str:
                     try:
                         if isinstance(trade_time_str, (int, float)):
-                            trade_time = datetime.fromtimestamp(trade_time_str)
+                            trade_time = utcfromtimestamp(trade_time_str)
                         elif "T" in str(trade_time_str) or "-" in str(trade_time_str):
-                            trade_time = datetime.fromisoformat(
-                                str(trade_time_str).replace("Z", "+00:00").replace("+00:00", "")
+                            # Parse ISO format, normalizing to naive UTC
+                            parsed = datetime.fromisoformat(
+                                str(trade_time_str).replace("Z", "+00:00")
                             )
+                            # Convert aware datetimes to UTC then strip tzinfo
+                            if parsed.tzinfo is not None:
+                                parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+                            trade_time = parsed
                         else:
-                            trade_time = datetime.fromtimestamp(float(trade_time_str))
+                            trade_time = utcfromtimestamp(float(trade_time_str))
 
                         if trade_time < cutoff_time:
                             continue
@@ -808,27 +817,37 @@ async def get_all_recent_trades(
         all_trades = await polymarket_client.enrich_trades_with_market_info(all_trades)
 
         # Sort by normalized timestamp (most recent first)
+        def _parse_to_naive_utc(raw_ts):
+            """Parse a timestamp value to a naive UTC datetime."""
+            if isinstance(raw_ts, (int, float)):
+                try:
+                    return utcfromtimestamp(raw_ts)
+                except (ValueError, OSError):
+                    return None
+            if isinstance(raw_ts, str) and raw_ts.strip():
+                text = raw_ts.strip()
+                try:
+                    if "T" in text or "-" in text:
+                        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                        if parsed.tzinfo is not None:
+                            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+                        return parsed
+                    return utcfromtimestamp(float(text))
+                except (ValueError, TypeError, OSError):
+                    return None
+            return None
+
         def get_sort_key(t):
             ts = t.get("timestamp_iso", "")
             if ts:
-                try:
-                    return datetime.fromisoformat(ts.replace("Z", "+00:00").replace("+00:00", ""))
-                except (ValueError, TypeError):
-                    pass
+                parsed = _parse_to_naive_utc(ts)
+                if parsed is not None:
+                    return parsed
             # Fallback to raw timestamp fields
             raw = t.get("match_time") or t.get("timestamp") or t.get("time") or t.get("created_at") or ""
-            if isinstance(raw, str) and raw:
-                try:
-                    if "T" in raw or "-" in raw:
-                        return datetime.fromisoformat(raw.replace("Z", "+00:00").replace("+00:00", ""))
-                    return datetime.fromtimestamp(float(raw))
-                except (ValueError, TypeError, OSError):
-                    pass
-            elif isinstance(raw, (int, float)):
-                try:
-                    return datetime.fromtimestamp(raw)
-                except (ValueError, OSError):
-                    pass
+            parsed = _parse_to_naive_utc(raw)
+            if parsed is not None:
+                return parsed
             return datetime.min
 
         all_trades.sort(key=get_sort_key, reverse=True)

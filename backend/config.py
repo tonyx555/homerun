@@ -252,6 +252,7 @@ class Settings(BaseSettings):
     BTC_ETH_HF_SERIES_SOL_4H: str = "10326"
     BTC_ETH_HF_SERIES_XRP_4H: str = "10327"
     BTC_ETH_HF_MAKER_MODE: bool = True  # Place maker (limit) orders to avoid fees & earn rebates
+    BTC_ETH_HF_FEE_ESTIMATE: float = 0.0156  # Midpoint taker fee estimate at 50% probability
 
     # Miracle Strategy Thresholds
     MIRACLE_MIN_NO_PRICE: float = 0.90  # Only consider NO prices >= this

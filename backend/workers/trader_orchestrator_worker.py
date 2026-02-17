@@ -26,7 +26,7 @@ from services.trader_orchestrator.live_market_context import (
     RuntimeTradeSignalView,
     build_live_signal_contexts,
 )
-from services.trader_orchestrator.position_lifecycle import reconcile_paper_positions
+from services.trader_orchestrator.position_lifecycle import reconcile_live_positions, reconcile_paper_positions
 from services.simulation import simulation_service
 from services.trader_orchestrator.risk_manager import evaluate_risk
 from services.trader_orchestrator.sources.registry import (
@@ -46,6 +46,7 @@ from services.trader_orchestrator_state import (
     get_consecutive_loss_count,
     get_daily_realized_pnl,
     get_gross_exposure,
+    get_unrealized_pnl,
     get_last_resolved_loss_at,
     get_market_exposure,
     get_open_market_ids_for_trader,
@@ -481,6 +482,33 @@ async def _run_trader_once(
                         "by_status": lifecycle_result.get("by_status"),
                     },
                 )
+        elif run_mode == "live":
+            force_flatten = resume_policy == "flatten_then_start"
+            lifecycle_result = await reconcile_live_positions(
+                session,
+                trader_id=trader_id,
+                trader_params=default_strategy_params,
+                dry_run=False,
+                force_mark_to_market=force_flatten,
+                reason="worker_flatten_then_start" if force_flatten else "worker_lifecycle",
+            )
+            closed_positions = int(lifecycle_result.get("closed", 0))
+            if closed_positions > 0:
+                await create_trader_event(
+                    session,
+                    trader_id=trader_id,
+                    event_type="live_positions_closed",
+                    source="worker",
+                    message=f"Closed {closed_positions} live position(s)",
+                    payload={
+                        "matched": lifecycle_result.get("matched"),
+                        "closed": closed_positions,
+                        "held": lifecycle_result.get("held"),
+                        "skipped": lifecycle_result.get("skipped"),
+                        "total_realized_pnl": lifecycle_result.get("total_realized_pnl"),
+                        "by_status": lifecycle_result.get("by_status"),
+                    },
+                )
         await sync_trader_position_inventory(
             session,
             trader_id=trader_id,
@@ -606,6 +634,18 @@ async def _run_trader_once(
 
         global_daily_pnl = await get_daily_realized_pnl(session, mode=run_mode)
         trader_daily_pnl = await get_daily_realized_pnl(session, trader_id=trader_id, mode=run_mode)
+        # Compute unrealized PnL (mark-to-market) for open positions so the
+        # daily loss limit accounts for positions that are deeply underwater.
+        try:
+            global_unrealized_pnl = await get_unrealized_pnl(session, mode=run_mode)
+            trader_unrealized_pnl = await get_unrealized_pnl(session, trader_id=trader_id, mode=run_mode)
+        except Exception:
+            global_unrealized_pnl = 0.0
+            trader_unrealized_pnl = 0.0
+        # Track cumulative notional committed within this cycle so that
+        # subsequent risk checks account for intra-cycle exposure even
+        # before PnL is realized in the database.
+        intra_cycle_committed_usd: float = 0.0
         trader_loss_streak = await get_consecutive_loss_count(
             session,
             trader_id=trader_id,
@@ -639,6 +679,15 @@ async def _run_trader_once(
             trader_id=trader_id,
         )
         processed_signals = 0
+
+        # Kill switch is the very first gate: short-circuit before any signal
+        # fetching, live-market context building, or risk evaluation.
+        if bool(control.get("kill_switch")):
+            logger.info(
+                "Kill switch active for trader %s — skipping all signal processing",
+                trader_id,
+            )
+            return 0, 0
 
         while processed_signals < max_signals_per_cycle:
             batch_limit = min(scan_batch_size, max_signals_per_cycle - processed_signals)
@@ -987,11 +1036,15 @@ async def _run_trader_once(
                         )
                         drift_pct = live_context.get("entry_price_delta_pct")
                         drift_score = _safe_float(drift_pct)
+                        max_drift = _safe_float(
+                            effective_risk_limits.get("max_entry_drift_pct"),
+                            10.0,
+                        )
                         checks_payload.append(
                             {
                                 "check_key": "live_entry_drift",
                                 "check_label": "Entry drift from signal",
-                                "passed": drift_score is None or abs(drift_score) <= 1000.0,
+                                "passed": drift_score is None or abs(drift_score) <= max_drift,
                                 "score": drift_score,
                                 "detail": (
                                     f"drift={drift_score:.2f}%"
@@ -1019,6 +1072,10 @@ async def _run_trader_once(
                     if final_decision == "selected":
                         gross_exposure = await get_gross_exposure(session, mode=run_mode)
                         market_exposure = await get_market_exposure(session, str(signal.market_id), mode=run_mode)
+                        # Adjust PnL by intra-cycle committed exposure so risk
+                        # checks treat pending notional as a worst-case loss.
+                        adjusted_global_daily_pnl = global_daily_pnl - intra_cycle_committed_usd
+                        adjusted_trader_daily_pnl = trader_daily_pnl - intra_cycle_committed_usd
                         risk_result = evaluate_risk(
                             size_usd=size_usd,
                             gross_exposure_usd=gross_exposure,
@@ -1026,17 +1083,25 @@ async def _run_trader_once(
                             market_exposure_usd=market_exposure,
                             global_limits=global_limits,
                             trader_limits=effective_risk_limits,
-                            global_daily_realized_pnl_usd=global_daily_pnl,
-                            trader_daily_realized_pnl_usd=trader_daily_pnl,
+                            global_daily_realized_pnl_usd=adjusted_global_daily_pnl,
+                            trader_daily_realized_pnl_usd=adjusted_trader_daily_pnl,
+                            global_unrealized_pnl_usd=global_unrealized_pnl,
+                            trader_unrealized_pnl_usd=trader_unrealized_pnl,
                             trader_consecutive_losses=trader_loss_streak,
                             cycle_orders_placed=orders_written,
                             cooldown_active=cooldown_active,
+                            mode=run_mode,
                         )
                         risk_snapshot = {
                             "allowed": risk_result.allowed,
                             "reason": risk_result.reason,
                             "global_daily_realized_pnl_usd": global_daily_pnl,
                             "trader_daily_realized_pnl_usd": trader_daily_pnl,
+                            "global_unrealized_pnl_usd": global_unrealized_pnl,
+                            "trader_unrealized_pnl_usd": trader_unrealized_pnl,
+                            "intra_cycle_committed_usd": intra_cycle_committed_usd,
+                            "adjusted_global_daily_pnl_usd": adjusted_global_daily_pnl,
+                            "adjusted_trader_daily_pnl_usd": adjusted_trader_daily_pnl,
                             "trader_consecutive_losses": trader_loss_streak,
                             "cooldown_seconds": cooldown_seconds,
                             "cooldown_active": cooldown_active,
@@ -1091,10 +1156,6 @@ async def _run_trader_once(
                             final_decision = "blocked"
                             final_reason = "Stacking guard: market already open while allow_averaging=false"
 
-                    if bool(control.get("kill_switch")) and final_decision == "selected":
-                        final_decision = "blocked"
-                        final_reason = "Kill switch is enabled"
-
                     decision_row = await create_trader_decision(
                         session,
                         trader_id=trader_id,
@@ -1126,6 +1187,7 @@ async def _run_trader_once(
                             "risk_runtime": {
                                 "global_daily_realized_pnl_usd": global_daily_pnl,
                                 "trader_daily_realized_pnl_usd": trader_daily_pnl,
+                                "intra_cycle_committed_usd": intra_cycle_committed_usd,
                                 "trader_consecutive_losses": trader_loss_streak,
                                 "cooldown_seconds": cooldown_seconds,
                                 "cooldown_active": cooldown_active,
@@ -1282,6 +1344,10 @@ async def _run_trader_once(
                             opened_market_id = str(getattr(runtime_signal, "market_id", "") or "").strip()
                             if opened_market_id:
                                 open_market_ids.add(opened_market_id)
+                            # Accumulate committed notional for intra-cycle
+                            # PnL adjustment so subsequent risk checks treat
+                            # this exposure as worst-case unrealized loss.
+                            intra_cycle_committed_usd += size_usd
                         orders_written += 1
                         order_status = status
 
@@ -1395,6 +1461,22 @@ async def run_worker_loop() -> None:
                     await asyncio.sleep(interval)
                     continue
 
+                # Kill switch is the highest-priority gate after enabled/paused.
+                # Short-circuit before ANY mode checks, trader iteration, or
+                # signal processing so no work is wasted while the switch is on.
+                if bool(control.get("kill_switch")):
+                    logger.info("Kill switch active — skipping entire orchestrator cycle")
+                    await write_orchestrator_snapshot(
+                        session,
+                        running=True,
+                        enabled=True,
+                        current_activity="Kill switch active — all signal processing blocked",
+                        interval_seconds=interval,
+                        stats=await compute_orchestrator_metrics(session),
+                    )
+                    await asyncio.sleep(interval)
+                    continue
+
                 mode = str(control.get("mode") or "paper").strip().lower()
                 control_settings = control.get("settings") or {}
 
@@ -1469,12 +1551,12 @@ async def run_worker_loop() -> None:
                 due = _is_due(trader, now)
 
                 if is_paused:
-                    if mode == "paper":
+                    if mode in ("paper", "live"):
                         await _run_trader_once(trader, control, process_signals=False)
                     continue
 
                 if not due:
-                    if mode == "paper":
+                    if mode in ("paper", "live"):
                         await _run_trader_once(trader, control, process_signals=False)
                     continue
 

@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from utils.utcnow import utcnow
 from typing import Optional
 
-from sqlalchemy import select, text, update, func, or_
+from sqlalchemy import and_, select, text, update, func, or_
 
 from models.database import (
     DiscoveredWallet,
@@ -224,6 +224,13 @@ class ConfluenceDetector:
         )
         return active
 
+    # Minimum quality thresholds for recently-active wallets.
+    # Wallets passing rank_score or in_top_pool are already vetted;
+    # these gates apply only to the recency-based conditions.
+    MIN_QUALIFYING_WIN_RATE = 0.40
+    MIN_QUALIFYING_TOTAL_TRADES = 5
+    MIN_QUALIFYING_TOTAL_PNL = 0.0  # Must be net-positive
+
     async def _get_qualifying_wallets(self) -> list[dict]:
         """Get wallets eligible for confluence scoring."""
         async with AsyncSessionLocal() as session:
@@ -232,8 +239,17 @@ class ConfluenceDetector:
                     or_(
                         DiscoveredWallet.rank_score >= self.MIN_WALLET_RANK_SCORE,
                         DiscoveredWallet.in_top_pool == True,  # noqa: E712
-                        DiscoveredWallet.trades_24h > 0,
-                        DiscoveredWallet.trades_1h > 0,
+                        # Recently active wallets must also meet minimum quality
+                        # thresholds to avoid including low-quality noise.
+                        and_(
+                            or_(
+                                DiscoveredWallet.trades_24h > 0,
+                                DiscoveredWallet.trades_1h > 0,
+                            ),
+                            DiscoveredWallet.win_rate >= self.MIN_QUALIFYING_WIN_RATE,
+                            DiscoveredWallet.total_trades >= self.MIN_QUALIFYING_TOTAL_TRADES,
+                            DiscoveredWallet.total_pnl >= self.MIN_QUALIFYING_TOTAL_PNL,
+                        ),
                     ),
                 )
             )
