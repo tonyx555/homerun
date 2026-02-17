@@ -680,6 +680,7 @@ class WorkflowOrchestrator:
                             rejected_finding,
                             market_metadata_by_id.get(rejected_finding.market_id),
                         )
+                        self._attach_market_type(rejected_finding, cluster_market_type)
                         self._assign_finding_keys(rejected_finding)
                         all_findings.append(rejected_finding)
                         # Record hard rejections in negative cache.
@@ -707,6 +708,7 @@ class WorkflowOrchestrator:
                             rejected,
                             market_metadata_by_id.get(rejected.market_id),
                         )
+                        self._attach_market_type(rejected, cluster_market_type)
                         self._assign_finding_keys(rejected)
                         all_findings.append(rejected)
                         alignment_dropped += 1
@@ -734,6 +736,7 @@ class WorkflowOrchestrator:
                             rejected,
                             market_metadata_by_id.get(rejected.market_id),
                         )
+                        self._attach_market_type(rejected, cluster_market_type)
                         self._assign_finding_keys(rejected)
                         all_findings.append(rejected)
                         alignment_dropped += 1
@@ -810,6 +813,8 @@ class WorkflowOrchestrator:
                         finding,
                         market_metadata_by_id.get(finding.market_id),
                     )
+                    # Inject detected market type into evidence for UI/API visibility.
+                    self._attach_market_type(finding, cluster_market_type)
                     self._assign_finding_keys(finding)
                     market_sources_seen[finding.market_id].update(self._finding_sources(finding))
                 all_findings.extend(article_findings)
@@ -1319,8 +1324,31 @@ class WorkflowOrchestrator:
                 penalized.append(rc)
                 continue
 
-            # LLM was called but this candidate was NOT scored by it.
-            # The LLM actively excluded it -- treat as a real verification failure.
+            # LLM was requested but this candidate has used_llm=False.
+            # Distinguish between:
+            #   (a) LLM was actually called and actively excluded this candidate
+            #       -> real verification failure, reject.
+            #   (b) LLM was unavailable/budget-exhausted despite being requested
+            #       -> treat like a budget-skip (penalize, don't reject).
+            rationale_lower = (getattr(rc, "rationale", "") or "").lower()
+            is_budget_skip = any(
+                hint in rationale_lower
+                for hint in ("unavailable", "budget", "fallback", "retrieval score")
+            )
+
+            if is_budget_skip:
+                # LLM couldn't run (budget exhausted or provider down).
+                # Penalize but let through -- same treatment as !llm_was_requested.
+                if hasattr(rc, "rerank_score"):
+                    rc.rerank_score = rc.rerank_score * 0.7
+                if hasattr(rc, "relevance"):
+                    rc.relevance = rc.relevance * 0.7
+                original_rationale = getattr(rc, "rationale", "") or ""
+                rc.rationale = f"[verifier_budget_exhausted] {original_rationale}".strip()
+                penalized.append(rc)
+                continue
+
+            # LLM was called and actively excluded this candidate.
             finding = self._build_rejected_finding(
                 article=article,
                 event=event,
@@ -1430,6 +1458,21 @@ class WorkflowOrchestrator:
             existing_market_graph = {}
         event_graph["market"] = {**existing_market_graph, **market_meta}
         finding.event_graph = event_graph
+
+    @staticmethod
+    def _attach_market_type(finding, market_type: str) -> None:
+        """Inject the detected market domain type into a finding's evidence.
+
+        This makes the detected type (sports, politics, crypto, entertainment,
+        general) visible in the UI/API so users can see why certain markets
+        are matched differently.
+        """
+        if finding is None or not market_type:
+            return
+
+        evidence = dict(getattr(finding, "evidence", {}) or {})
+        evidence["market_type"] = market_type
+        finding.evidence = evidence
 
     @staticmethod
     def _finding_sources(finding) -> set[str]:

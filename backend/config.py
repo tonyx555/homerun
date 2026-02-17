@@ -357,10 +357,16 @@ class Settings(BaseSettings):
     # News Edge Strategy
     NEWS_EDGE_ENABLED: bool = True  # Enable news-driven edge scanning
     NEWS_SCAN_INTERVAL_SECONDS: int = 60  # Poll news sources every 60s (was 180s)
-    NEWS_MIN_EDGE_PERCENT: float = 8.0  # Minimum edge to generate opportunity
-    NEWS_MIN_CONFIDENCE: float = 0.6  # Minimum model confidence
+    # 5% edge covers fees + slippage and is meaningful in prediction markets.
+    # Previous 8% default was too strict and filtered actionable opportunities.
+    NEWS_MIN_EDGE_PERCENT: float = 5.0
+    # 0.45 allows moderate-confidence news signals through. News edges carry
+    # inherent uncertainty; 0.6 was too restrictive for most workflows.
+    NEWS_MIN_CONFIDENCE: float = 0.45
     NEWS_MAX_ARTICLES_PER_SCAN: int = 200  # Max articles to process per scan
-    NEWS_SIMILARITY_THRESHOLD: float = 0.45  # Cosine similarity threshold for matching
+    # 0.25 casts a wider net for retrieval; the LLM reranker handles
+    # false positives.  Previous 0.45 was too aggressive before reranking.
+    NEWS_SIMILARITY_THRESHOLD: float = 0.25
     NEWS_ARTICLE_TTL_HOURS: int = 168  # Keep articles for 7 days (168h)
     NEWS_MAX_OPPORTUNITIES_PER_SCAN: int = 20  # Cap opportunities per scan
     NEWS_GDELT_ENABLED: bool = True  # Enable GDELT as additional news source

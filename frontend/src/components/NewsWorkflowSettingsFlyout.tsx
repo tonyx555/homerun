@@ -575,10 +575,6 @@ export default function NewsWorkflowSettingsFlyout({
             <p className="text-[10px] text-muted-foreground/60 -mt-1">
               LLM probability estimation thresholds. Only findings above these thresholds are marked actionable.
             </p>
-            <div className="grid grid-cols-2 gap-2.5">
-              <NumericField label="Min Edge %" help="Min price divergence to flag" value={form.min_edge_percent} onChange={(v) => set('min_edge_percent', v)} min={0} max={100} step={0.5} disabled={!form.enabled} />
-              <NumericField label="Min Confidence" help="Min LLM confidence (0-1)" value={form.min_confidence} onChange={(v) => set('min_confidence', v)} min={0} max={1} step={0.05} disabled={!form.enabled} />
-            </div>
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-xs font-medium">Require Second Source</p>
@@ -586,16 +582,55 @@ export default function NewsWorkflowSettingsFlyout({
               </div>
               <Switch checked={form.require_second_source} onCheckedChange={(v) => set('require_second_source', v)} className="scale-75" disabled={!form.enabled} />
             </div>
+          </Section>
+
+          {/* Quality Thresholds */}
+          <Section title="Quality Thresholds" icon={CheckCircle} color="text-teal-500">
+            <p className="text-[10px] text-muted-foreground/60 -mt-1">
+              Confidence, edge, and verification gates that control which candidates become actionable opportunities.
+            </p>
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-xs font-medium">Require LLM Verifier</p>
-                <p className="text-[10px] text-muted-foreground">When enabled, candidates must pass LLM verification. When disabled, unverified candidates pass with reduced confidence.</p>
+                <p className="text-[10px] text-muted-foreground">Require LLM verification for candidates. When off, unverified candidates pass with reduced confidence.</p>
               </div>
               <Switch checked={form.require_verifier} onCheckedChange={(v) => set('require_verifier', v)} className="scale-75" disabled={!form.enabled} />
             </div>
+            <div className="grid grid-cols-2 gap-2.5">
+              <NumericField
+                label="Min Confidence"
+                help="Minimum confidence score for actionable findings"
+                value={form.min_confidence}
+                onChange={(v) => set('min_confidence', v)}
+                min={0}
+                max={1}
+                step={0.05}
+                disabled={!form.enabled}
+              />
+              <NumericField
+                label="Min Edge %"
+                help="Minimum edge percentage to generate an opportunity"
+                value={form.min_edge_percent}
+                onChange={(v) => set('min_edge_percent', v)}
+                min={0}
+                max={100}
+                step={1}
+                disabled={!form.enabled}
+              />
+              <NumericField
+                label="Cycle LLM Call Cap"
+                help="Maximum LLM calls per workflow cycle"
+                value={form.cycle_llm_call_cap}
+                onChange={(v) => set('cycle_llm_call_cap', v)}
+                min={5}
+                max={200}
+                step={5}
+                disabled={!form.enabled}
+              />
+            </div>
           </Section>
 
-          {/* Model Override */}
+          {/* LLM Budget Guards */}
           <Section title="LLM Budget Guards" icon={Timer} color="text-amber-500">
             <p className="text-[10px] text-muted-foreground/60 -mt-1">
               Hard caps applied on top of global AI monthly limits to control workflow spend and call volume.
@@ -619,16 +654,6 @@ export default function NewsWorkflowSettingsFlyout({
                 min={0}
                 max={1000}
                 step={0.1}
-                disabled={!form.enabled}
-              />
-              <NumericField
-                label="Cycle LLM Call Cap"
-                help="Max provider calls per cycle"
-                value={form.cycle_llm_call_cap}
-                onChange={(v) => set('cycle_llm_call_cap', v)}
-                min={0}
-                max={500}
-                step={1}
                 disabled={!form.enabled}
               />
               <NumericField
