@@ -1,7 +1,10 @@
 # Homerun - Windows Setup Script
-# Run: .\setup.ps1
+# Run: .\scripts\setup.ps1
 
 $ErrorActionPreference = "Stop"
+
+# Navigate to project root (parent of scripts\)
+Set-Location (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))
 
 Write-Host "=========================================" -ForegroundColor Green
 Write-Host "  Homerun Setup (Windows)" -ForegroundColor Green
@@ -120,7 +123,7 @@ Write-Host "  Setup Complete!" -ForegroundColor Green
 Write-Host "=========================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "To start the application, run:"
-Write-Host "  .\run.ps1" -ForegroundColor Cyan
+Write-Host "  .\scripts\run.ps1" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Or start services individually:"
 Write-Host "  Backend:  cd backend; .\venv\Scripts\Activate.ps1; uvicorn main:app --reload" -ForegroundColor Gray

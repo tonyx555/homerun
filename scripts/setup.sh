@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# Navigate to project root (parent of scripts/)
+cd "$(dirname "$0")/.."
+
 echo "========================================="
 echo "  Autonomous Prediction Market Trading Platform Setup"
 echo "========================================="
@@ -124,7 +127,7 @@ echo "  Setup Complete!"
 echo "========================================="
 echo ""
 echo "To start the application, run:"
-echo "  ./run.sh"
+echo "  ./scripts/run.sh"
 echo ""
 echo "Or start services individually:"
 echo "  Backend:  cd backend && source venv/bin/activate && uvicorn main:app --reload"

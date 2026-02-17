@@ -1431,10 +1431,10 @@ class HomerunApp(App):
                 "-ExecutionPolicy",
                 "Bypass",
                 "-File",
-                str(PROJECT_ROOT / "setup.ps1"),
+                str(PROJECT_ROOT / "scripts" / "setup.ps1"),
             ]
         else:
-            setup_cmd = ["bash", str(PROJECT_ROOT / "setup.sh")]
+            setup_cmd = ["bash", str(PROJECT_ROOT / "scripts" / "setup.sh")]
 
         self._enqueue_log(">>> Running setup script...", source="SYSTEM", level="INFO")
         try:
@@ -1671,7 +1671,7 @@ class HomerunApp(App):
         else:
             venv_python = BACKEND_DIR / "venv" / "bin" / "python"
         if not venv_python.exists():
-            setup_cmd = ".\\setup.ps1" if sys.platform == "win32" else "./setup.sh"
+            setup_cmd = ".\\scripts\\setup.ps1" if sys.platform == "win32" else "./scripts/setup.sh"
             self._enqueue_log(
                 f"ERROR: Virtual environment not found. Run {setup_cmd} first.",
                 source="BACKEND",
@@ -2223,7 +2223,7 @@ def main() -> None:
     # Verify venv exists
     venv_dir = BACKEND_DIR / "venv"
     if not venv_dir.exists():
-        setup_cmd = ".\\setup.ps1" if sys.platform == "win32" else "./setup.sh"
+        setup_cmd = ".\\scripts\\setup.ps1" if sys.platform == "win32" else "./scripts/setup.sh"
         print(f"Setup not complete. Run {setup_cmd} first.")
         sys.exit(1)
 

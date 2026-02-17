@@ -21,11 +21,11 @@ endef
 
 # Setup dependencies
 setup:
-	@./setup.sh
+	@./scripts/setup.sh
 
 # Run the application
 run:
-	@./run.sh
+	@./scripts/run.sh
 
 # Development mode (with hot reload)
 dev: stop
