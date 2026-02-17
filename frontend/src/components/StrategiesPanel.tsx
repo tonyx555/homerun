@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Bot, Puzzle } from 'lucide-react'
 import { cn } from '../lib/utils'
-import { Button } from './ui/button'
 import OpportunityStrategiesManager from './OpportunityStrategiesManager'
 import TraderStrategiesManager from './TraderStrategiesManager'
 
@@ -23,35 +22,33 @@ export default function StrategiesPanel() {
 
   return (
     <div className="h-full min-h-0 flex flex-col">
-      <div className="shrink-0 pb-3 flex items-center gap-2">
-        <Button
-          variant="outline"
-          size="sm"
+      <div className="shrink-0 pb-3 flex items-center gap-1.5">
+        <button
+          type="button"
           onClick={() => setSubTab('opportunity')}
           className={cn(
-            'gap-1.5 text-xs h-8',
+            'flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all duration-150',
             subTab === 'opportunity'
-              ? 'bg-amber-500/20 text-amber-300 border-amber-500/30 hover:bg-amber-500/30 hover:text-amber-300'
-              : 'bg-card text-muted-foreground hover:text-foreground border-border'
+              ? 'bg-amber-500/15 text-amber-300 ring-1 ring-amber-500/30'
+              : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
           )}
         >
           <Puzzle className="w-3.5 h-3.5" />
           Opportunity Strategies
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
+        </button>
+        <button
+          type="button"
           onClick={() => setSubTab('autotrader')}
           className={cn(
-            'gap-1.5 text-xs h-8',
+            'flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all duration-150',
             subTab === 'autotrader'
-              ? 'bg-cyan-500/20 text-cyan-400 border-cyan-500/30 hover:bg-cyan-500/30 hover:text-cyan-400'
-              : 'bg-card text-muted-foreground hover:text-foreground border-border'
+              ? 'bg-cyan-500/15 text-cyan-400 ring-1 ring-cyan-500/30'
+              : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
           )}
         >
           <Bot className="w-3.5 h-3.5" />
           AutoTrader Strategies
-        </Button>
+        </button>
       </div>
 
       <div className={cn('flex-1 min-h-0', subTab === 'opportunity' ? '' : 'hidden')}>

@@ -1,5 +1,21 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  AlertTriangle,
+  Check,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  Code2,
+  Copy,
+  Loader2,
+  Plus,
+  RefreshCw,
+  Save,
+  Settings2,
+  X,
+  Zap,
+} from 'lucide-react'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
@@ -8,11 +24,11 @@ import { ScrollArea } from './ui/scroll-area'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
 import { Switch } from './ui/switch'
 import { cn } from '../lib/utils'
+import CodeEditor from './CodeEditor'
 import {
   cloneTraderStrategy,
   createTraderStrategy,
   getTraderConfigSchema,
-  getTraderStrategyDocs,
   getTraderStrategies,
   reloadTraderStrategy,
   updateTraderStrategy,
@@ -57,9 +73,18 @@ function errorMessage(error: unknown, fallback: string): string {
   return fallback
 }
 
+const STATUS_COLORS: Record<string, string> = {
+  loaded: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
+  active: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
+  error: 'bg-red-500/15 text-red-400 border-red-500/30',
+  unloaded: 'bg-zinc-500/15 text-zinc-400 border-zinc-500/30',
+  draft: 'bg-cyan-500/15 text-cyan-400 border-cyan-500/30',
+}
+
 export default function TraderStrategiesManager() {
   const queryClient = useQueryClient()
   const [showDocs, setShowDocs] = useState(false)
+  const [showParams, setShowParams] = useState(false)
   const [strategyFilterSource, setStrategyFilterSource] = useState<string>('all')
   const [selectedStrategyId, setSelectedStrategyId] = useState<string | null>(null)
   const [strategyEditorCode, setStrategyEditorCode] = useState('')
@@ -92,12 +117,6 @@ export default function TraderStrategiesManager() {
     refetchInterval: 15000,
   })
 
-  const traderDocsQuery = useQuery({
-    queryKey: ['trader-strategy-docs'],
-    queryFn: getTraderStrategyDocs,
-    staleTime: Infinity,
-  })
-
   const strategyCatalog = traderStrategiesQuery.data || []
 
   const selectedStrategy = useMemo(
@@ -106,7 +125,7 @@ export default function TraderStrategiesManager() {
   )
 
   const sourceKeys = useMemo(() => {
-    const fromSchema = (traderConfigSchemaQuery.data?.sources || []).map((source) => String(source.key || '').toLowerCase())
+    const fromSchema = (traderConfigSchemaQuery.data?.sources || []).map((source: any) => String(source.key || '').toLowerCase())
     const fromCatalog = strategyCatalog.map((strategy) => String(strategy.source_key || '').toLowerCase())
     const merged = uniqueStrings([...fromSchema, ...fromCatalog])
     return merged.length > 0 ? merged : ['crypto']
@@ -293,37 +312,57 @@ export default function TraderStrategiesManager() {
     setStrategyValidation(null)
   }
 
-  return (
-    <div className="h-full min-h-0 flex flex-col gap-3">
-      <div className="rounded-lg border border-border/70 p-3">
-        <button
-          type="button"
-          onClick={() => setShowDocs((prev) => !prev)}
-          className="flex w-full items-center justify-between text-left text-xs font-medium"
-        >
-          <span>AutoTrader Strategy API Reference</span>
-          <span className="text-[11px] text-muted-foreground">{showDocs ? 'Hide' : 'Show'}</span>
-        </button>
-        {showDocs ? (
-          <div className="mt-2 space-y-2 text-[11px] text-muted-foreground">
-            <p>{traderDocsQuery.data?.overview?.description || 'Strategies evaluate trade signals and return StrategyDecision.'}</p>
-            <p className="font-mono text-[10px] rounded border border-border/70 bg-muted/40 px-2 py-1">
-              {traderDocsQuery.data?.evaluate_method?.signature || 'def evaluate(self, signal, context) -> StrategyDecision'}
-            </p>
-          </div>
-        ) : null}
-      </div>
+  const hasSelection = Boolean(selectedStrategy || strategyDraftKey)
+  const displayStatus = selectedStrategy?.status || 'draft'
+  const statusColor = STATUS_COLORS[displayStatus] || STATUS_COLORS.draft
 
-      <div className="min-h-0 grid grid-cols-1 lg:grid-cols-[320px_minmax(0,1fr)] gap-3">
-      <div className="rounded-lg border border-border/70 p-3 min-h-0 flex flex-col gap-3">
-        <div className="space-y-2">
-          <Label className="text-xs text-muted-foreground">Source Filter</Label>
+  return (
+    <div className="h-full min-h-0 flex gap-3">
+      {/* ── Left sidebar: Strategy list ── */}
+      <div className="w-[280px] shrink-0 min-h-0 flex flex-col rounded-lg border border-border/70 bg-card/50">
+        {/* Header actions */}
+        <div className="shrink-0 p-3 space-y-3 border-b border-border/50">
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              className="h-7 gap-1.5 px-2.5 text-[11px] flex-1"
+              onClick={startNewStrategyDraft}
+              disabled={strategyManagerBusy}
+            >
+              <Plus className="w-3 h-3" />
+              New Strategy
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-7 gap-1 px-2 text-[11px]"
+              onClick={() => cloneStrategyMutation.mutate()}
+              disabled={strategyManagerBusy || !selectedStrategy}
+              title="Clone selected strategy"
+            >
+              <Copy className="w-3 h-3" />
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-7 px-2 text-[11px]"
+              onClick={() => refreshStrategyCatalog()}
+              disabled={strategyManagerBusy}
+              title="Refresh catalog"
+            >
+              <RefreshCw className={cn('w-3 h-3', traderStrategiesQuery.isFetching && 'animate-spin')} />
+            </Button>
+          </div>
+
           <Select value={strategyFilterSource} onValueChange={setStrategyFilterSource}>
-            <SelectTrigger className="h-8 text-xs">
+            <SelectTrigger className="h-7 text-[11px]">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="all">All Sources</SelectItem>
+              <SelectItem value="all">All Sources ({strategyCatalog.length})</SelectItem>
               {sourceKeys.map((sourceKey) => (
                 <SelectItem key={sourceKey} value={sourceKey}>
                   {sourceKey}
@@ -333,69 +372,45 @@ export default function TraderStrategiesManager() {
           </Select>
         </div>
 
-        <div className="flex items-center gap-2">
-          <Button
-            type="button"
-            size="sm"
-            className="h-7 px-2 text-[11px]"
-            onClick={startNewStrategyDraft}
-            disabled={strategyManagerBusy}
-          >
-            New Strategy
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            className="h-7 px-2 text-[11px]"
-            onClick={() => cloneStrategyMutation.mutate()}
-            disabled={strategyManagerBusy || !selectedStrategy}
-          >
-            Clone
-          </Button>
-        </div>
-
-        <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-          <span>{filteredStrategies.length} strategies</span>
-          {selectedStrategy ? (
-            <span className="font-mono">
-              v{selectedStrategy.version} • {selectedStrategy.status}
-            </span>
-          ) : (
-            <span className="font-mono">new draft</span>
-          )}
-        </div>
-
-        <ScrollArea className="flex-1 min-h-0 rounded-md border border-border/70">
-          <div className="space-y-1 p-1.5">
+        {/* Strategy list */}
+        <ScrollArea className="flex-1 min-h-0">
+          <div className="p-1.5 space-y-1">
             {filteredStrategies.length === 0 ? (
-              <p className="px-2 py-1 text-xs text-muted-foreground">No strategies for this source.</p>
+              <p className="px-3 py-6 text-xs text-muted-foreground text-center">No strategies found.</p>
             ) : (
               filteredStrategies.map((strategy) => {
                 const active = selectedStrategyId === strategy.id
+                const sColor = STATUS_COLORS[strategy.status] || STATUS_COLORS.draft
                 return (
                   <button
                     key={strategy.id}
                     type="button"
                     onClick={() => setSelectedStrategyId(strategy.id)}
                     className={cn(
-                      'w-full rounded-md border px-2 py-1.5 text-left transition-colors',
-                      active ? 'border-cyan-500/50 bg-cyan-500/10' : 'border-border/70 hover:bg-muted/40'
+                      'w-full rounded-md px-2.5 py-2 text-left transition-all duration-150',
+                      active
+                        ? 'bg-cyan-500/10 ring-1 ring-cyan-500/30'
+                        : 'hover:bg-muted/50'
                     )}
                   >
                     <div className="flex items-center justify-between gap-2">
                       <p className="text-xs font-medium truncate" title={strategy.label || strategy.strategy_key}>
                         {strategy.label || strategy.strategy_key}
                       </p>
-                      <Badge variant={strategy.enabled ? 'default' : 'secondary'} className="text-[10px]">
-                        {strategy.enabled ? 'Enabled' : 'Disabled'}
-                      </Badge>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {!strategy.enabled && (
+                          <span className="w-1.5 h-1.5 rounded-full bg-zinc-500" title="Disabled" />
+                        )}
+                        <Badge
+                          variant="outline"
+                          className={cn('text-[9px] px-1.5 py-0 h-4 border', sColor)}
+                        >
+                          {strategy.status}
+                        </Badge>
+                      </div>
                     </div>
-                    <p className="text-[10px] font-mono text-muted-foreground mt-1 truncate" title={strategy.strategy_key}>
+                    <p className="text-[10px] font-mono text-muted-foreground mt-1 truncate">
                       {strategy.strategy_key}
-                    </p>
-                    <p className="text-[10px] text-muted-foreground mt-0.5 truncate" title={strategy.description || ''}>
-                      {strategy.description || 'No description'}
                     </p>
                   </button>
                 )
@@ -403,196 +418,322 @@ export default function TraderStrategiesManager() {
             )}
           </div>
         </ScrollArea>
-      </div>
 
-      <div className="rounded-lg border border-border/70 min-h-0 flex flex-col">
-        <ScrollArea className="flex-1 min-h-0 px-4 py-3">
-          <div className="space-y-3 pb-2">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div>
-                <Label>Strategy Key</Label>
-                <Input
-                  value={strategyDraftKey}
-                  onChange={(event) => setStrategyDraftKey(event.target.value)}
-                  className="mt-1 font-mono"
-                />
-              </div>
-              <div>
-                <Label>Source Key</Label>
-                <Select value={strategyEditorSourceKey} onValueChange={setStrategyEditorSourceKey}>
-                  <SelectTrigger className="mt-1">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {sourceKeys.map((sourceKey) => (
-                      <SelectItem key={sourceKey} value={sourceKey}>
-                        {sourceKey}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div>
-                <Label>Label</Label>
-                <Input
-                  value={strategyEditorLabel}
-                  onChange={(event) => setStrategyEditorLabel(event.target.value)}
-                  className="mt-1"
-                />
-              </div>
-              <div>
-                <Label>Class Name</Label>
-                <Input
-                  value={strategyEditorClassName}
-                  onChange={(event) => setStrategyEditorClassName(event.target.value)}
-                  className="mt-1 font-mono"
-                />
-              </div>
-              <div className="sm:col-span-2">
-                <Label>Description</Label>
-                <Input
-                  value={strategyEditorDescription}
-                  onChange={(event) => setStrategyEditorDescription(event.target.value)}
-                  className="mt-1"
-                />
-              </div>
-              <div className="sm:col-span-2">
-                <Label>Aliases (comma separated)</Label>
-                <Input
-                  value={strategyEditorAliasesCsv}
-                  onChange={(event) => setStrategyEditorAliasesCsv(event.target.value)}
-                  className="mt-1 font-mono"
-                  placeholder="alias_one, alias_two"
-                />
-              </div>
-              <div className="sm:col-span-2 rounded-md border border-border/70 p-2 flex items-center justify-between">
-                <div>
-                  <p className="text-xs font-medium">Enabled</p>
-                  <p className="text-[11px] text-muted-foreground">
-                    Disabled strategies are excluded from runtime load and source schema options.
-                  </p>
-                </div>
-                <Switch checked={strategyEditorEnabled} onCheckedChange={setStrategyEditorEnabled} />
-              </div>
-            </div>
-
-            <div className="rounded-md border border-border/70 p-2">
-              <Label>Source Code</Label>
-              <textarea
-                className="mt-1 w-full min-h-[280px] rounded-md border bg-background p-2 text-xs font-mono"
-                value={strategyEditorCode}
-                onChange={(event) => setStrategyEditorCode(event.target.value)}
-              />
-            </div>
-
-            <div className="grid gap-3 lg:grid-cols-2">
-              <div className="rounded-md border border-border/70 p-2">
-                <Label>Default Params JSON</Label>
-                <textarea
-                  className="mt-1 w-full min-h-[160px] rounded-md border bg-background p-2 text-xs font-mono"
-                  value={strategyEditorParamsJson}
-                  onChange={(event) => setStrategyEditorParamsJson(event.target.value)}
-                />
-              </div>
-              <div className="rounded-md border border-border/70 p-2">
-                <Label>Param Schema JSON</Label>
-                <textarea
-                  className="mt-1 w-full min-h-[160px] rounded-md border bg-background p-2 text-xs font-mono"
-                  value={strategyEditorSchemaJson}
-                  onChange={(event) => setStrategyEditorSchemaJson(event.target.value)}
-                />
-              </div>
-            </div>
-
-              <div className="rounded-md border border-border/70 p-2 text-xs">
-                <div className="flex flex-wrap items-center gap-2">
-                  <Badge variant={selectedStrategy?.is_system ? 'secondary' : 'default'}>
-                    {selectedStrategy?.is_system ? 'System' : 'Custom'}
-                  </Badge>
-                  <Badge variant="outline">status:{selectedStrategy?.status || 'draft'}</Badge>
-                  <Badge variant="outline">version:{selectedStrategy?.version || 1}</Badge>
-                </div>
-              </div>
-
-            {strategyValidation ? (
-              <div className={cn(
-                'rounded-md border px-3 py-2 text-xs',
-                strategyValidation.valid
-                  ? 'border-emerald-500/40 bg-emerald-500/10'
-                  : 'border-red-500/40 bg-red-500/10'
-              )}>
-                <p className="font-semibold">{strategyValidation.valid ? 'Validation passed' : 'Validation failed'}</p>
-                {strategyValidation.errors.length > 0 ? (
-                  <div className="mt-1 space-y-1">
-                    {strategyValidation.errors.map((error, index) => (
-                      <p key={`${error}-${index}`} className="font-mono text-[11px]">{error}</p>
-                    ))}
-                  </div>
-                ) : null}
-                {strategyValidation.warnings.length > 0 ? (
-                  <div className="mt-1 space-y-1">
-                    {strategyValidation.warnings.map((warning, index) => (
-                      <p key={`${warning}-${index}`} className="font-mono text-[11px]">{warning}</p>
-                    ))}
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-
-            {strategyEditorError ? (
-              <div className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-500">
-                {strategyEditorError}
-              </div>
-            ) : null}
-          </div>
-        </ScrollArea>
-
-        <div className="border-t border-border px-4 py-3 flex flex-wrap items-center justify-between gap-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              className="h-8 text-xs"
-              onClick={() => validateStrategyMutation.mutate()}
-              disabled={strategyManagerBusy || !selectedStrategy}
-            >
-              Validate
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              className="h-8 text-xs"
-              onClick={() => reloadStrategyMutation.mutate()}
-              disabled={strategyManagerBusy || !selectedStrategy}
-            >
-              Reload Runtime
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              className="h-8 text-xs"
-              onClick={() => refreshStrategyCatalog()}
-              disabled={strategyManagerBusy}
-            >
-              Refresh Catalog
-            </Button>
-          </div>
-          <Button
-            type="button"
-            className="h-8 text-xs"
-            onClick={() => saveStrategyMutation.mutate()}
-              disabled={
-                strategyManagerBusy ||
-                !strategyEditorCode.trim() ||
-                !strategyEditorClassName.trim() ||
-                !strategyEditorLabel.trim() ||
-                !strategyDraftKey.trim()
-              }
-            >
-              Save Strategy
-          </Button>
+        {/* Footer stats */}
+        <div className="shrink-0 px-3 py-2 border-t border-border/50 text-[10px] text-muted-foreground flex justify-between">
+          <span>{filteredStrategies.length} strategies</span>
+          <span>{strategyCatalog.filter((s) => s.enabled).length} enabled</span>
         </div>
       </div>
+
+      {/* ── Right panel: Editor ── */}
+      <div className="flex-1 min-w-0 min-h-0 flex flex-col rounded-lg border border-border/70">
+        {!hasSelection ? (
+          <div className="flex-1 flex items-center justify-center text-muted-foreground">
+            <div className="text-center space-y-2">
+              <Code2 className="w-8 h-8 mx-auto opacity-40" />
+              <p className="text-sm">Select a strategy or create a new one</p>
+            </div>
+          </div>
+        ) : (
+          <>
+            {/* ── Editor toolbar ── */}
+            <div className="shrink-0 px-4 py-2.5 border-b border-border/50 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Code2 className="w-4 h-4 text-cyan-400 shrink-0" />
+                  <span className="text-sm font-medium truncate">
+                    {strategyEditorLabel || 'Untitled Strategy'}
+                  </span>
+                </div>
+                <Badge variant="outline" className={cn('text-[10px] shrink-0 border', statusColor)}>
+                  {displayStatus}
+                </Badge>
+                {selectedStrategy?.is_system && (
+                  <Badge variant="secondary" className="text-[10px] shrink-0">System</Badge>
+                )}
+                {selectedStrategy && (
+                  <span className="text-[10px] font-mono text-muted-foreground shrink-0">
+                    v{selectedStrategy.version}
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-1.5 shrink-0">
+                <div className="flex items-center gap-2 mr-2 pr-2 border-r border-border/50">
+                  <span className="text-[10px] text-muted-foreground">Enabled</span>
+                  <Switch
+                    checked={strategyEditorEnabled}
+                    onCheckedChange={setStrategyEditorEnabled}
+                    className="scale-75"
+                  />
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 gap-1 px-2 text-[11px]"
+                  onClick={() => validateStrategyMutation.mutate()}
+                  disabled={strategyManagerBusy || !selectedStrategy}
+                >
+                  {validateStrategyMutation.isPending ? (
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                  ) : (
+                    <Check className="w-3 h-3" />
+                  )}
+                  Validate
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 gap-1 px-2 text-[11px]"
+                  onClick={() => reloadStrategyMutation.mutate()}
+                  disabled={strategyManagerBusy || !selectedStrategy}
+                >
+                  {reloadStrategyMutation.isPending ? (
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                  ) : (
+                    <Zap className="w-3 h-3" />
+                  )}
+                  Reload
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  className="h-7 gap-1 px-2 text-[11px] bg-cyan-600 hover:bg-cyan-500 text-white"
+                  onClick={() => saveStrategyMutation.mutate()}
+                  disabled={
+                    strategyManagerBusy ||
+                    !strategyEditorCode.trim() ||
+                    !strategyEditorClassName.trim() ||
+                    !strategyEditorLabel.trim() ||
+                    !strategyDraftKey.trim()
+                  }
+                >
+                  {saveStrategyMutation.isPending ? (
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                  ) : (
+                    <Save className="w-3 h-3" />
+                  )}
+                  Save
+                </Button>
+              </div>
+            </div>
+
+            {/* ── Validation / Error banners ── */}
+            {strategyValidation && (
+              <div
+                className={cn(
+                  'shrink-0 px-4 py-2 text-xs flex items-start gap-2 border-b',
+                  strategyValidation.valid
+                    ? 'bg-emerald-500/5 border-emerald-500/20 text-emerald-400'
+                    : 'bg-red-500/5 border-red-500/20 text-red-400'
+                )}
+              >
+                {strategyValidation.valid ? (
+                  <CheckCircle2 className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                ) : (
+                  <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                )}
+                <div className="min-w-0">
+                  <p className="font-medium">
+                    {strategyValidation.valid ? 'Validation passed' : 'Validation failed'}
+                  </p>
+                  {strategyValidation.errors.map((error, i) => (
+                    <p key={`e-${i}`} className="font-mono text-[11px] mt-0.5">{error}</p>
+                  ))}
+                  {strategyValidation.warnings.map((warning, i) => (
+                    <p key={`w-${i}`} className="font-mono text-[11px] mt-0.5 text-amber-400">{warning}</p>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setStrategyValidation(null)}
+                  className="shrink-0 p-0.5 hover:bg-white/10 rounded"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            )}
+
+            {strategyEditorError && (
+              <div className="shrink-0 px-4 py-2 text-xs flex items-start gap-2 bg-red-500/5 border-b border-red-500/20 text-red-400">
+                <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                <p className="min-w-0 flex-1">{strategyEditorError}</p>
+                <button
+                  type="button"
+                  onClick={() => setStrategyEditorError(null)}
+                  className="shrink-0 p-0.5 hover:bg-white/10 rounded"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            )}
+
+            {/* ── Main editor content ── */}
+            <div className="flex-1 min-h-0 flex flex-col">
+              {/* Collapsible metadata section */}
+              <div className="shrink-0 border-b border-border/50">
+                <button
+                  type="button"
+                  onClick={() => setShowDocs((prev) => !prev)}
+                  className="w-full px-4 py-2 flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  {showDocs ? (
+                    <ChevronDown className="w-3 h-3" />
+                  ) : (
+                    <ChevronRight className="w-3 h-3" />
+                  )}
+                  <Settings2 className="w-3 h-3" />
+                  <span>Strategy Settings</span>
+                  <span className="ml-auto font-mono text-[10px] opacity-60">
+                    {strategyDraftKey || 'no-key'}
+                  </span>
+                </button>
+
+                {showDocs && (
+                  <div className="px-4 pb-3 space-y-3 animate-in fade-in duration-200">
+                    <div className="grid gap-3 grid-cols-2 xl:grid-cols-4">
+                      <div>
+                        <Label className="text-[11px] text-muted-foreground">Strategy Key</Label>
+                        <Input
+                          value={strategyDraftKey}
+                          onChange={(event) => setStrategyDraftKey(event.target.value)}
+                          className="mt-1 h-8 text-xs font-mono"
+                        />
+                      </div>
+                      <div>
+                        <Label className="text-[11px] text-muted-foreground">Label</Label>
+                        <Input
+                          value={strategyEditorLabel}
+                          onChange={(event) => setStrategyEditorLabel(event.target.value)}
+                          className="mt-1 h-8 text-xs"
+                        />
+                      </div>
+                      <div>
+                        <Label className="text-[11px] text-muted-foreground">Source</Label>
+                        <Select value={strategyEditorSourceKey} onValueChange={setStrategyEditorSourceKey}>
+                          <SelectTrigger className="mt-1 h-8 text-xs">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {sourceKeys.map((sourceKey) => (
+                              <SelectItem key={sourceKey} value={sourceKey}>
+                                {sourceKey}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div>
+                        <Label className="text-[11px] text-muted-foreground">Class Name</Label>
+                        <Input
+                          value={strategyEditorClassName}
+                          onChange={(event) => setStrategyEditorClassName(event.target.value)}
+                          className="mt-1 h-8 text-xs font-mono"
+                        />
+                      </div>
+                    </div>
+                    <div className="grid gap-3 grid-cols-1 xl:grid-cols-2">
+                      <div>
+                        <Label className="text-[11px] text-muted-foreground">Description</Label>
+                        <Input
+                          value={strategyEditorDescription}
+                          onChange={(event) => setStrategyEditorDescription(event.target.value)}
+                          className="mt-1 h-8 text-xs"
+                          placeholder="Describe what this strategy evaluates..."
+                        />
+                      </div>
+                      <div>
+                        <Label className="text-[11px] text-muted-foreground">Aliases (comma separated)</Label>
+                        <Input
+                          value={strategyEditorAliasesCsv}
+                          onChange={(event) => setStrategyEditorAliasesCsv(event.target.value)}
+                          className="mt-1 h-8 text-xs font-mono"
+                          placeholder="alias_one, alias_two"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Code editor - takes remaining space */}
+              <div className="flex-1 min-h-0 flex flex-col">
+                <div className="px-4 py-2 flex items-center justify-between shrink-0">
+                  <div className="flex items-center gap-2">
+                    <Code2 className="w-3.5 h-3.5 text-cyan-400" />
+                    <span className="text-xs font-medium">Source Code</span>
+                    <span className="text-[10px] text-muted-foreground font-mono">Python</span>
+                  </div>
+                  {strategyEditorClassName && (
+                    <span className="text-[10px] font-mono text-muted-foreground">
+                      class {strategyEditorClassName}
+                    </span>
+                  )}
+                </div>
+                <div className="flex-1 min-h-0 px-3 pb-2">
+                  <CodeEditor
+                    value={strategyEditorCode}
+                    onChange={setStrategyEditorCode}
+                    language="python"
+                    className="h-full"
+                    minHeight="100%"
+                    placeholder="Write your trader strategy source code here..."
+                  />
+                </div>
+              </div>
+
+              {/* Collapsible params/schema JSON section */}
+              <div className="shrink-0 border-t border-border/50">
+                <button
+                  type="button"
+                  onClick={() => setShowParams((prev) => !prev)}
+                  className="w-full px-4 py-2 flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  {showParams ? (
+                    <ChevronDown className="w-3 h-3" />
+                  ) : (
+                    <ChevronRight className="w-3 h-3" />
+                  )}
+                  <Settings2 className="w-3 h-3" />
+                  <span>Parameters &amp; Schema</span>
+                </button>
+                {showParams && (
+                  <div className="px-3 pb-3 grid gap-3 grid-cols-1 lg:grid-cols-2 animate-in fade-in duration-200">
+                    <div>
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="text-[11px] font-medium text-muted-foreground">Default Params</span>
+                        <span className="text-[10px] text-muted-foreground font-mono">JSON</span>
+                      </div>
+                      <CodeEditor
+                        value={strategyEditorParamsJson}
+                        onChange={setStrategyEditorParamsJson}
+                        language="json"
+                        minHeight="140px"
+                        placeholder="{}"
+                      />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="text-[11px] font-medium text-muted-foreground">Param Schema</span>
+                        <span className="text-[10px] text-muted-foreground font-mono">JSON</span>
+                      </div>
+                      <CodeEditor
+                        value={strategyEditorSchemaJson}
+                        onChange={setStrategyEditorSchemaJson}
+                        language="json"
+                        minHeight="140px"
+                        placeholder='{"param_fields": []}'
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   )
