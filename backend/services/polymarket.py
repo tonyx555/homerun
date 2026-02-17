@@ -595,6 +595,23 @@ class PolymarketClient:
         return None
 
     @staticmethod
+    def _extract_tags(data: dict) -> list[str]:
+        """Extract normalised tag strings from a Gamma API market/event response."""
+        tags: list[str] = []
+        raw = data.get("tags", [])
+        if isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, str) and item.strip():
+                    tags.append(item.strip())
+                elif isinstance(item, dict):
+                    value = item.get("label") or item.get("name")
+                    if value:
+                        tags.append(str(value).strip())
+        elif isinstance(raw, str) and raw.strip():
+            tags.append(raw.strip())
+        return tags
+
+    @staticmethod
     def _extract_market_info(market_data: dict) -> dict:
         """Extract standardized market info from a Gamma API market response."""
         token_ids = PolymarketClient._extract_token_ids_from_market(market_data)
@@ -714,6 +731,7 @@ class PolymarketClient:
             "volume": market_data.get("volume")
             if market_data.get("volume") is not None
             else market_data.get("volumeNum"),
+            "tags": PolymarketClient._extract_tags(market_data),
         }
 
     @staticmethod

@@ -872,13 +872,18 @@ class SmartWalletPoolService:
         session,
         signals: list[MarketConfluenceSignal],
     ) -> list[MarketConfluenceSignal]:
-        """Deactivate and remove signals whose markets are no longer tradable."""
+        """Deactivate and remove signals whose markets are no longer tradable.
+
+        Also excludes crypto-tagged markets — those are handled by the
+        dedicated crypto system.
+        """
         if not signals:
             return []
 
         now = utcnow()
         kept: list[MarketConfluenceSignal] = []
         deactivated = 0
+        crypto_excluded = 0
         metadata_updates = 0
         market_info_by_id: dict[str, Optional[dict[str, Any]]] = {}
 
@@ -899,6 +904,13 @@ class SmartWalletPoolService:
                 except Exception:
                     info = None
                 market_info_by_id[cache_key] = info
+
+            # Exclude crypto markets — handled by the dedicated crypto system.
+            if info:
+                tags = [t.lower() for t in (info.get("tags") or []) if isinstance(t, str)]
+                if "crypto" in tags:
+                    crypto_excluded += 1
+                    continue
 
             tradable = self.client.is_market_tradable(info, now=now) if info else True
             if tradable:
@@ -921,12 +933,13 @@ class SmartWalletPoolService:
             signal.expired_at = now
             deactivated += 1
 
-        if deactivated or metadata_updates:
+        if deactivated or metadata_updates or crypto_excluded:
             await session.commit()
             logger.info(
                 "Pruned non-tradable confluence signals",
                 checked=len(signals),
                 deactivated=deactivated,
+                crypto_excluded=crypto_excluded,
                 metadata_updates=metadata_updates,
                 remaining=len(kept),
             )
