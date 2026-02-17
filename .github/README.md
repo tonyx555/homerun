@@ -2,8 +2,6 @@
   <img src="../homerun-logo.png" alt="Homerun" width="180"/>
 </p>
 
-<h1 align="center">Homerun</h1>
-
 <p align="center">
   <strong>Open-source prediction market arbitrage scanner and trading platform.<br/>Clone, run, and start finding mispriced markets in under a minute.</strong>
 </p>
