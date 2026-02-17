@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 import re
@@ -10,6 +9,7 @@ from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from utils.utcnow import utcnow
 
 _RELATIVE_IMPORT_RE = re.compile(r"(?m)^(\s*)from\s+\.([A-Za-z_][A-Za-z0-9_]*)\s+import\s+")
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -194,6 +194,40 @@ SYSTEM_TRADER_STRATEGY_SEEDS: list[SystemTraderStrategySeed] = [
         aliases=[],
     ),
     SystemTraderStrategySeed(
+        strategy_key="crypto_spike_reversion",
+        source_key="crypto",
+        label="Crypto Spike Reversion",
+        description="Spike-reversion execution using live 5m/30m/2h movement context.",
+        class_name="CryptoSpikeReversionStrategy",
+        import_module="services.trader_orchestrator.strategies.crypto_spike_reversion",
+        import_class="CryptoSpikeReversionStrategy",
+        default_params={
+            "min_edge_percent": 2.8,
+            "min_confidence": 0.44,
+            "min_abs_move_5m": 1.8,
+            "max_abs_move_2h": 14.0,
+            "require_reversion_shape": True,
+            "base_size_usd": 20.0,
+            "max_size_usd": 120.0,
+            "sizing_policy": "kelly",
+            "kelly_fractional_scale": 0.45,
+        },
+        param_schema={
+            "param_fields": [
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
+                {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
+                {"key": "min_abs_move_5m", "label": "Min |5m Move| (%)", "type": "number", "min": 0, "max": 100},
+                {"key": "max_abs_move_2h", "label": "Max |2h Move| (%)", "type": "number", "min": 0, "max": 100},
+                {"key": "require_reversion_shape", "label": "Require Reversion Shape", "type": "boolean"},
+                {"key": "sizing_policy", "label": "Sizing Policy", "type": "enum", "options": ["fixed", "linear", "adaptive", "kelly"]},
+                {"key": "kelly_fractional_scale", "label": "Kelly Fractional Scale", "type": "number", "min": 0.05, "max": 1},
+                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
+                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
+            ]
+        },
+        aliases=[],
+    ),
+    SystemTraderStrategySeed(
         strategy_key="opportunity_general",
         source_key="scanner",
         label="Opportunity General",
@@ -245,6 +279,78 @@ SYSTEM_TRADER_STRATEGY_SEEDS: list[SystemTraderStrategySeed] = [
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
                 {"key": "max_risk_score", "label": "Max Risk Score", "type": "number", "min": 0, "max": 1},
                 {"key": "min_markets", "label": "Min Markets", "type": "integer", "min": 1},
+                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
+                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
+            ]
+        },
+        aliases=[],
+    ),
+    SystemTraderStrategySeed(
+        strategy_key="opportunity_flash_reversion",
+        source_key="scanner",
+        label="Opportunity Flash Reversion",
+        description="Execution strategy specialized for flash-crash reversion opportunities.",
+        class_name="OpportunityFlashReversionStrategy",
+        import_module="services.trader_orchestrator.strategies.opportunity_ported",
+        import_class="OpportunityFlashReversionStrategy",
+        default_params={
+            "min_edge_percent": 3.0,
+            "min_confidence": 0.4,
+            "max_risk_score": 0.8,
+            "min_liquidity": 1500.0,
+            "min_abs_move_5m": 1.5,
+            "require_crash_alignment": True,
+            "sizing_policy": "kelly",
+            "kelly_fractional_scale": 0.5,
+            "base_size_usd": 16.0,
+            "max_size_usd": 130.0,
+        },
+        param_schema={
+            "param_fields": [
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
+                {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
+                {"key": "max_risk_score", "label": "Max Risk Score", "type": "number", "min": 0, "max": 1},
+                {"key": "min_liquidity", "label": "Min Liquidity", "type": "number", "min": 0},
+                {"key": "min_abs_move_5m", "label": "Min |5m Move| (%)", "type": "number", "min": 0, "max": 100},
+                {"key": "require_crash_alignment", "label": "Require Crash Alignment", "type": "boolean"},
+                {"key": "sizing_policy", "label": "Sizing Policy", "type": "enum", "options": ["fixed", "linear", "adaptive", "kelly"]},
+                {"key": "kelly_fractional_scale", "label": "Kelly Fractional Scale", "type": "number", "min": 0.05, "max": 1},
+                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
+                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
+            ]
+        },
+        aliases=[],
+    ),
+    SystemTraderStrategySeed(
+        strategy_key="opportunity_tail_carry",
+        source_key="scanner",
+        label="Opportunity Tail Carry",
+        description="Execution strategy specialized for near-expiry tail-carry opportunities.",
+        class_name="OpportunityTailCarryStrategy",
+        import_module="services.trader_orchestrator.strategies.opportunity_ported",
+        import_class="OpportunityTailCarryStrategy",
+        default_params={
+            "min_edge_percent": 1.6,
+            "min_confidence": 0.35,
+            "max_risk_score": 0.78,
+            "min_entry_price": 0.85,
+            "max_entry_price": 0.985,
+            "min_days_to_resolution": 0.03,
+            "max_days_to_resolution": 7.0,
+            "sizing_policy": "adaptive",
+            "base_size_usd": 14.0,
+            "max_size_usd": 90.0,
+        },
+        param_schema={
+            "param_fields": [
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
+                {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
+                {"key": "max_risk_score", "label": "Max Risk Score", "type": "number", "min": 0, "max": 1},
+                {"key": "min_entry_price", "label": "Min Entry Price", "type": "number", "min": 0.01, "max": 1},
+                {"key": "max_entry_price", "label": "Max Entry Price", "type": "number", "min": 0.01, "max": 1},
+                {"key": "min_days_to_resolution", "label": "Min Days To Resolution", "type": "number", "min": 0},
+                {"key": "max_days_to_resolution", "label": "Max Days To Resolution", "type": "number", "min": 0},
+                {"key": "sizing_policy", "label": "Sizing Policy", "type": "enum", "options": ["fixed", "linear", "adaptive", "kelly"]},
                 {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
                 {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
@@ -458,7 +564,7 @@ async def ensure_system_trader_strategies_seeded(session: AsyncSession) -> int:
         current.status = "unloaded"
         current.error_message = None
         current.version = int(current.version or 0) + 1
-        current.updated_at = datetime.utcnow()
+        current.updated_at = utcnow()
         rewritten += 1
 
     if inserted == 0 and rewritten == 0:

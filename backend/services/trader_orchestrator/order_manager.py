@@ -46,47 +46,50 @@ def _live_context(signal: Any, payload: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def _pick_token_id(signal: Any, *, payload: dict[str, Any], live_context: dict[str, Any]) -> str | None:
+def _pick_token_id(
+    signal: Any,
+    *,
+    payload: dict[str, Any],
+    live_context: dict[str, Any],
+) -> tuple[str | None, str | None, list[str]]:
     direction = str(getattr(signal, "direction", "") or "").strip().lower()
-    candidates: list[str] = []
+    selected_outcome = str(live_context.get("selected_outcome") or "").strip().lower()
+    candidates: list[tuple[str, str]] = []
 
-    selected_token = _normalize_id(live_context.get("selected_token_id") or payload.get("selected_token_id"))
-    if selected_token:
-        candidates.append(selected_token)
+    def _append_candidate(source: str, value: Any) -> None:
+        normalized = _normalize_id(value)
+        if normalized:
+            candidates.append((source, normalized))
 
-    if direction == "buy_yes":
-        candidates.extend(
-            [
-                _normalize_id(live_context.get("yes_token_id")),
-                _normalize_id(payload.get("yes_token_id")),
-            ]
-        )
-    elif direction == "buy_no":
-        candidates.extend(
-            [
-                _normalize_id(live_context.get("no_token_id")),
-                _normalize_id(payload.get("no_token_id")),
-            ]
-        )
+    _append_candidate("live_context.selected_token_id", live_context.get("selected_token_id"))
+    _append_candidate("payload.selected_token_id", payload.get("selected_token_id"))
+
+    if direction == "buy_yes" or selected_outcome == "yes":
+        _append_candidate("live_context.yes_token_id", live_context.get("yes_token_id"))
+        _append_candidate("payload.yes_token_id", payload.get("yes_token_id"))
+    elif direction == "buy_no" or selected_outcome == "no":
+        _append_candidate("live_context.no_token_id", live_context.get("no_token_id"))
+        _append_candidate("payload.no_token_id", payload.get("no_token_id"))
 
     token_ids = live_context.get("token_ids")
     if not isinstance(token_ids, list):
         token_ids = payload.get("token_ids")
     if isinstance(token_ids, list):
-        candidates.extend([_normalize_id(token_id) for token_id in token_ids])
+        normalized_tokens = [_normalize_id(token_id) for token_id in token_ids if _normalize_id(token_id)]
+        if len(normalized_tokens) == 1:
+            _append_candidate("token_ids[0]", normalized_tokens[0])
+        elif len(normalized_tokens) >= 2:
+            if direction == "buy_yes" or selected_outcome == "yes":
+                _append_candidate("token_ids[0]", normalized_tokens[0])
+            elif direction == "buy_no" or selected_outcome == "no":
+                _append_candidate("token_ids[1]", normalized_tokens[1])
 
-    direct_payload_token = _normalize_id(payload.get("token_id") or payload.get("asset") or payload.get("assetId"))
-    if direct_payload_token:
-        candidates.append(direct_payload_token)
+    _append_candidate("payload.token_id", payload.get("token_id"))
 
-    market_id = _normalize_id(getattr(signal, "market_id", ""))
-    if market_id:
-        candidates.append(market_id)
-
-    for candidate in candidates:
+    for source, candidate in candidates:
         if _looks_like_token_id(candidate):
-            return candidate
-    return None
+            return candidate, source, [source_name for source_name, _ in candidates]
+    return None, None, [source_name for source_name, _ in candidates]
 
 
 async def submit_order(
@@ -103,7 +106,11 @@ async def submit_order(
     if mode_key == "live":
         payload = _safe_payload(signal)
         live_context = _live_context(signal, payload)
-        token_id = _pick_token_id(signal, payload=payload, live_context=live_context)
+        token_id, token_id_source, token_resolution_attempts = _pick_token_id(
+            signal,
+            payload=payload,
+            live_context=live_context,
+        )
         if not token_id:
             return (
                 "failed",
@@ -115,6 +122,7 @@ async def submit_order(
                     "reason": "missing_token_id",
                     "market_id": str(getattr(signal, "market_id", "") or ""),
                     "direction": str(getattr(signal, "direction", "") or ""),
+                    "token_resolution_attempts": token_resolution_attempts,
                 },
             )
 
@@ -167,6 +175,7 @@ async def submit_order(
                 "shares": shares,
                 "direction": str(getattr(signal, "direction", "") or ""),
                 "market_id": str(getattr(signal, "market_id", "") or ""),
+                "token_id_source": token_id_source,
             },
         )
 

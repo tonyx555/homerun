@@ -155,8 +155,10 @@ class PolymarketClient:
         self,
         active: bool = True,
         closed: bool = False,
-        limit: int = 100,
+        limit: int = 200,
         offset: int = 0,
+        order: str = "",
+        ascending: bool = False,
     ) -> list[Market]:
         """Fetch markets from Gamma API"""
         params = {
@@ -165,6 +167,9 @@ class PolymarketClient:
             "limit": limit,
             "offset": offset,
         }
+        if order:
+            params["order"] = order
+            params["ascending"] = str(ascending).lower()
 
         response = await self._rate_limited_get(
             f"{self.gamma_url}/markets", params=params
@@ -175,20 +180,33 @@ class PolymarketClient:
         return [Market.from_gamma_response(m) for m in data]
 
     async def get_all_markets(self, active: bool = True) -> list[Market]:
-        """Fetch all markets with pagination"""
+        """Fetch all markets with pagination.
+
+        Uses configurable page size, sort order, and market cap from DB settings.
+        Sorts by volume descending by default so the highest-value markets are
+        fetched first if the cap is reached before exhausting the API.
+        """
         all_markets = []
         offset = 0
-        limit = 100
+        page_size = max(50, min(500, settings.MARKET_FETCH_PAGE_SIZE))
+        order = settings.MARKET_FETCH_ORDER or ""
+        cap = settings.MAX_MARKETS_TO_SCAN
 
         while True:
-            markets = await self.get_markets(active=active, limit=limit, offset=offset)
+            markets = await self.get_markets(
+                active=active,
+                limit=page_size,
+                offset=offset,
+                order=order,
+                ascending=False,
+            )
             if not markets:
                 break
 
             all_markets.extend(markets)
-            offset += limit
+            offset += page_size
 
-            if len(all_markets) >= settings.MAX_MARKETS_TO_SCAN:
+            if cap > 0 and len(all_markets) >= cap:
                 break
 
         return all_markets
@@ -198,16 +216,15 @@ class PolymarketClient:
         since_minutes: int = 10,
         active: bool = True,
     ) -> list[Market]:
-        """Fetch only recently created/updated markets (incremental delta fetch).
+        """Fetch only recently updated markets (incremental delta fetch).
 
-        Instead of fetching all 500 markets, this queries for markets ordered
-        by creation date descending and stops once it hits markets older than
-        `since_minutes`. Much lighter on API quota and lets us detect new
-        markets faster by polling this endpoint more frequently.
+        Queries for markets ordered by updatedAt descending and stops once it
+        hits markets older than `since_minutes`.  Also picks up markets that
+        had price changes (not just newly created ones).
         """
         all_markets = []
         offset = 0
-        limit = 50
+        page_size = max(50, min(500, settings.MARKET_FETCH_PAGE_SIZE))
         cutoff = utcnow() - timedelta(minutes=since_minutes)
 
         while True:
@@ -215,9 +232,9 @@ class PolymarketClient:
                 params = {
                     "active": str(active).lower(),
                     "closed": "false",
-                    "limit": limit,
+                    "limit": page_size,
                     "offset": offset,
-                    "order": "createdAt",
+                    "order": "updatedAt",
                     "ascending": "false",
                 }
                 response = await self._rate_limited_get(
@@ -231,31 +248,31 @@ class PolymarketClient:
 
                 page_markets = [Market.from_gamma_response(m) for m in data]
                 all_markets.extend(page_markets)
-                offset += limit
+                offset += page_size
 
                 # Check if the oldest market in this page is older than cutoff.
-                # If so, we've gone far enough back in time.
                 oldest_in_page = data[-1]
-                created_at_raw = oldest_in_page.get("createdAt") or oldest_in_page.get(
-                    "created_at"
+                updated_at_raw = (
+                    oldest_in_page.get("updatedAt")
+                    or oldest_in_page.get("updated_at")
+                    or oldest_in_page.get("createdAt")
+                    or oldest_in_page.get("created_at")
                 )
-                if created_at_raw:
+                if updated_at_raw:
                     try:
-                        if isinstance(created_at_raw, str):
-                            created_at = datetime.fromisoformat(
-                                created_at_raw.replace("Z", "+00:00")
+                        if isinstance(updated_at_raw, str):
+                            updated_at = datetime.fromisoformat(
+                                updated_at_raw.replace("Z", "+00:00")
                             ).replace(tzinfo=None)
                         else:
-                            created_at = utcfromtimestamp(
-                                float(created_at_raw)
-                            )
-                        if created_at < cutoff:
+                            updated_at = utcfromtimestamp(float(updated_at_raw))
+                        if updated_at < cutoff:
                             break
                     except (ValueError, TypeError, OSError):
                         pass
 
-                # Safety: don't fetch more than 200 in incremental mode
-                if len(all_markets) >= 200:
+                # Safety cap for incremental mode
+                if len(all_markets) >= 500:
                     break
 
             except Exception as e:
@@ -279,20 +296,24 @@ class PolymarketClient:
         return [Event.from_gamma_response(e) for e in data]
 
     async def get_all_events(self, closed: bool = False) -> list[Event]:
-        """Fetch all events with pagination"""
+        """Fetch all events with pagination.
+
+        Uses configurable page size and event cap from DB settings.
+        """
         all_events = []
         offset = 0
-        limit = 100
+        page_size = max(50, min(500, settings.MARKET_FETCH_PAGE_SIZE))
+        cap = settings.MAX_EVENTS_TO_SCAN
 
         while True:
-            events = await self.get_events(closed=closed, limit=limit, offset=offset)
+            events = await self.get_events(closed=closed, limit=page_size, offset=offset)
             if not events:
                 break
 
             all_events.extend(events)
-            offset += limit
+            offset += page_size
 
-            if offset >= 1000:  # Safety limit
+            if cap > 0 and len(all_events) >= cap:
                 break
 
         return all_events

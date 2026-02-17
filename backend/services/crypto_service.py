@@ -77,11 +77,12 @@ class CryptoMarket:
         end = None
         start = None
         seconds_left = None
+        now_ts = datetime.now(timezone.utc).timestamp()
 
         if self.end_time:
             try:
                 end = datetime.fromisoformat(str(self.end_time).replace("Z", "+00:00"))
-                seconds_left = max(0, (end.timestamp() - time.time()))
+                seconds_left = max(0, (end.timestamp() - now_ts))
             except (ValueError, AttributeError):
                 pass
 
@@ -91,7 +92,7 @@ class CryptoMarket:
             except (ValueError, AttributeError):
                 pass
 
-        is_live = start is not None and end is not None and start.timestamp() <= time.time() < end.timestamp()
+        is_live = start is not None and end is not None and start.timestamp() <= now_ts < end.timestamp()
 
         combined = None
         if self.up_price is not None and self.down_price is not None:

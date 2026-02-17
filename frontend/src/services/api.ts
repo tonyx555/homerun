@@ -2289,6 +2289,9 @@ export interface ScannerSettings {
   scan_interval_seconds: number
   min_profit_threshold: number
   max_markets_to_scan: number
+  max_events_to_scan: number
+  market_fetch_page_size: number
+  market_fetch_order: string
   min_liquidity: number
 }
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 import uuid
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
@@ -108,6 +109,14 @@ SIGNAL_METADATA_REFRESH_TTL = timedelta(minutes=20)
 SIGNAL_METADATA_REFRESH_LIMIT = 12
 SIGNAL_DUPLICATE_QUESTION_THRESHOLD = 3
 
+CRYPTO_MARKET_PATTERN = re.compile(
+    r"\b("
+    r"crypto|cryptocurrency|bitcoin|btc|ethereum|eth|solana|sol|xrp|ripple|"
+    r"dogecoin|doge|litecoin|ltc|cardano|ada|binance|bnb|avalanche|avax"
+    r")\b",
+    re.IGNORECASE,
+)
+
 
 POOL_RUNTIME_DEFAULTS: dict[str, Any] = {
     "target_pool_size": 500,
@@ -139,6 +148,31 @@ POOL_RUNTIME_DEFAULTS: dict[str, Any] = {
 
 def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(value, hi))
+
+
+def _looks_like_crypto_market(
+    *texts: Any,
+    tags: Optional[list[Any]] = None,
+    category: Any = None,
+) -> bool:
+    if tags:
+        for tag in tags:
+            normalized = str(tag or "").strip().lower()
+            if not normalized:
+                continue
+            if normalized == "crypto" or CRYPTO_MARKET_PATTERN.search(normalized):
+                return True
+
+    category_text = str(category or "").strip().lower()
+    if category_text and ("crypto" in category_text or CRYPTO_MARKET_PATTERN.search(category_text)):
+        return True
+
+    for text in texts:
+        normalized = str(text or "").strip()
+        if normalized and CRYPTO_MARKET_PATTERN.search(normalized):
+            return True
+
+    return False
 
 
 class SmartWalletPoolService:
@@ -704,6 +738,22 @@ class SmartWalletPoolService:
                 session=session,
                 signals=signals,
             )
+            before_crypto_filter = len(signals)
+            signals = [
+                signal
+                for signal in signals
+                if not _looks_like_crypto_market(
+                    signal.market_question,
+                    signal.market_slug,
+                    signal.market_id,
+                )
+            ]
+            if len(signals) != before_crypto_filter:
+                logger.info(
+                    "Excluded crypto confluence signals from traders opportunities",
+                    removed=before_crypto_filter - len(signals),
+                    include_filtered=include_filtered,
+                )
             signals = signals[:limit]
 
             await self._refresh_signal_market_metadata(session=session, signals=signals)
@@ -916,13 +966,21 @@ class SmartWalletPoolService:
                 market_info_by_id[cache_key] = info
 
             # Exclude crypto markets — handled by the dedicated crypto system.
-            if info:
-                tags = [t.lower() for t in (info.get("tags") or []) if isinstance(t, str)]
-                if "crypto" in tags:
-                    signal.is_active = False
-                    signal.expired_at = now
-                    crypto_excluded += 1
-                    continue
+            info_tags = (info.get("tags") if isinstance(info, dict) else []) or []
+            info_category = info.get("category") if isinstance(info, dict) else None
+            if _looks_like_crypto_market(
+                signal.market_question,
+                signal.market_slug,
+                info.get("question") if isinstance(info, dict) else None,
+                info.get("slug") if isinstance(info, dict) else None,
+                info.get("event_slug") if isinstance(info, dict) else None,
+                tags=info_tags if isinstance(info_tags, list) else [info_tags],
+                category=info_category,
+            ):
+                signal.is_active = False
+                signal.expired_at = now
+                crypto_excluded += 1
+                continue
 
             tradable = self.client.is_market_tradable(info, now=now) if info else True
             if tradable:

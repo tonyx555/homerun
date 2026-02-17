@@ -68,6 +68,26 @@ export default function StrategiesPanel() {
         </button>
       </div>
 
+      <div className="shrink-0 pb-3 grid gap-2 md:grid-cols-2">
+        <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2">
+          <p className="text-[11px] font-semibold text-amber-300">Opportunity Strategies</p>
+          <p className="text-[11px] text-muted-foreground leading-relaxed mt-1">
+            `detect(events, markets, prices)` filters the raw Polymarket/Kalshi firehose into executable opportunities.
+          </p>
+        </div>
+        <div className="rounded-md border border-cyan-500/30 bg-cyan-500/5 px-3 py-2">
+          <p className="text-[11px] font-semibold text-cyan-300">AutoTrader Strategies</p>
+          <p className="text-[11px] text-muted-foreground leading-relaxed mt-1">
+            `evaluate(signal, context)` scores/filters signals into selected, skipped, or blocked trade decisions for execution.
+          </p>
+        </div>
+        <div className="rounded-md border border-border/50 bg-card/40 px-3 py-2 md:col-span-2">
+          <p className="text-[11px] text-muted-foreground leading-relaxed">
+            Position sizing (including Kelly-style sizing) is a sizing policy inside autotrader strategies, not its own strategy type.
+          </p>
+        </div>
+      </div>
+
       <div className={cn('flex-1 min-h-0', subTab === 'opportunity' ? '' : 'hidden')}>
         <OpportunityStrategiesManager initialSourceFilter={initialSourceFilter} />
       </div>

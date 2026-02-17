@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   ExternalLink,
@@ -107,7 +107,7 @@ export default function OpportunityTable({ opportunities, onExecute, onOpenCopil
   )
 }
 
-function TableRow({
+const TableRow = memo(function TableRow({
   opportunity,
   onExecute,
   onOpenCopilot,
@@ -448,4 +448,4 @@ function TableRow({
       )}
     </div>
   )
-}
+})

@@ -728,6 +728,9 @@ async def detailed_health_check():
             "scan_interval": settings.SCAN_INTERVAL_SECONDS,
             "min_profit_threshold": settings.MIN_PROFIT_THRESHOLD,
             "max_markets": settings.MAX_MARKETS_TO_SCAN,
+            "max_events": settings.MAX_EVENTS_TO_SCAN,
+            "market_fetch_page_size": settings.MARKET_FETCH_PAGE_SIZE,
+            "market_fetch_order": settings.MARKET_FETCH_ORDER,
         },
     }
 

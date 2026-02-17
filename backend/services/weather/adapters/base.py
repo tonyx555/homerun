@@ -45,6 +45,8 @@ class WeatherForecastResult:
     consensus_probability: Optional[float] = None
     consensus_value_c: Optional[float] = None
     source_spread_c: Optional[float] = None
+    ensemble_members: Optional[list[float]] = None
+    ensemble_daily_max: Optional[list[float]] = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

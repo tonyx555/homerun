@@ -101,4 +101,4 @@ Remove-Item data\arbitrage.db -ErrorAction SilentlyContinue
 | Backend won't start | Check `python3 --version` (need 3.10+) |
 | Frontend won't start | Check `node --version` (need 18+), run `cd frontend && npm install` |
 | Port already in use | Kill existing process: `lsof -ti:8000 \| xargs kill` |
-| Missing `.env` | Run `cp .env.example .env` |
+| Settings not loading | Check the Settings UI — all configuration lives in the database |

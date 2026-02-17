@@ -1,14 +1,29 @@
 import sys
 from pathlib import Path
 
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
+
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
+from models.database import Base
 from services.trader_orchestrator_state import _normalize_trader_payload
 
 
-def test_normalize_trader_payload_converts_percent_min_confidence():
+async def _build_session_factory(tmp_path: Path):
+    db_path = tmp_path / "trader_state_confidence.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    session_factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    return engine, session_factory
+
+
+@pytest.mark.asyncio
+async def test_normalize_trader_payload_converts_percent_min_confidence(tmp_path):
     payload = {
         "name": "Crypto HF Trader",
         "source_configs": [
@@ -19,11 +34,15 @@ def test_normalize_trader_payload_converts_percent_min_confidence():
             }
         ],
     }
-    normalized = _normalize_trader_payload(payload)
+    engine, session_factory = await _build_session_factory(tmp_path)
+    async with session_factory() as session:
+        normalized = await _normalize_trader_payload(session, payload)
+    await engine.dispose()
     assert normalized["source_configs"][0]["strategy_params"]["min_confidence"] == 0.45
 
 
-def test_normalize_trader_payload_preserves_fraction_min_confidence():
+@pytest.mark.asyncio
+async def test_normalize_trader_payload_preserves_fraction_min_confidence(tmp_path):
     payload = {
         "name": "Crypto HF Trader",
         "source_configs": [
@@ -34,5 +53,8 @@ def test_normalize_trader_payload_preserves_fraction_min_confidence():
             }
         ],
     }
-    normalized = _normalize_trader_payload(payload)
+    engine, session_factory = await _build_session_factory(tmp_path)
+    async with session_factory() as session:
+        normalized = await _normalize_trader_payload(session, payload)
+    await engine.dispose()
     assert normalized["source_configs"][0]["strategy_params"]["min_confidence"] == 0.45

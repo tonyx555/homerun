@@ -143,7 +143,16 @@ class ScannerSettingsModel(BaseModel):
         default=2.5, ge=0, description="Minimum profit threshold %"
     )
     max_markets_to_scan: int = Field(
-        default=500, ge=10, le=5000, description="Maximum markets to scan"
+        default=5000, ge=10, le=10000, description="Maximum markets to scan per cycle"
+    )
+    max_events_to_scan: int = Field(
+        default=3000, ge=10, le=10000, description="Maximum events to scan per cycle"
+    )
+    market_fetch_page_size: int = Field(
+        default=200, ge=50, le=500, description="API page size for market/event fetches"
+    )
+    market_fetch_order: str = Field(
+        default="volume", description="Sort order for market fetches (volume, updatedAt, createdAt, or empty)"
     )
     min_liquidity: float = Field(
         default=1000.0, ge=0, description="Minimum liquidity in USD"

@@ -104,10 +104,13 @@ const CRYPTO_STRATEGY_OPTIONS = [
   { key: 'crypto_15m', label: 'Crypto 15m', timeframe: '15m' },
   { key: 'crypto_1h', label: 'Crypto 1h', timeframe: '1h' },
   { key: 'crypto_4h', label: 'Crypto 4h', timeframe: '4h' },
+  { key: 'crypto_spike_reversion', label: 'Crypto Spike Reversion', timeframe: null },
 ] as const
 const CRYPTO_TIMEFRAME_OPTIONS = ['5m', '15m', '1h', '4h'] as const
+const CRYPTO_MODE_PARAM_KEYS = ['strategy_mode', 'mode'] as const
+const CRYPTO_ASSET_PARAM_KEYS = ['target_assets', 'allowed_assets', 'assets', 'coins'] as const
+const CRYPTO_TIMEFRAME_PARAM_KEYS = ['target_timeframes', 'allowed_timeframes', 'timeframes', 'cadence'] as const
 const RESUME_POLICY_OPTIONS = ['resume_full', 'manage_only', 'flatten_then_start'] as const
-type CryptoStrategyMode = (typeof CRYPTO_STRATEGY_MODES)[number]
 type ResumePolicy = (typeof RESUME_POLICY_OPTIONS)[number]
 type TradersScopeMode = 'tracked' | 'pool' | 'individual' | 'group'
 const TRADERS_SCOPE_OPTIONS: Array<{ key: TradersScopeMode; label: string }> = [
@@ -119,7 +122,7 @@ const TRADERS_SCOPE_OPTIONS: Array<{ key: TradersScopeMode; label: string }> = [
 
 type TraderAdvancedConfig = {
   cadenceProfile: string
-  strategyMode: CryptoStrategyMode
+  strategyMode: string
   cryptoAssetsCsv: string
   cryptoTimeframesCsv: string
   minSignalScore: number
@@ -273,6 +276,7 @@ const STRATEGY_LABELS: Record<string, string> = {
   crypto_15m: 'Crypto 15m',
   crypto_1h: 'Crypto 1h',
   crypto_4h: 'Crypto 4h',
+  crypto_spike_reversion: 'Crypto Spike Reversion',
   news_reaction: 'News Reaction',
   opportunity_general: 'Opportunity General',
   opportunity_structural: 'Opportunity Structural',
@@ -295,30 +299,56 @@ type StrategyOption = {
   label: string
 }
 
+type StrategyOptionDetail = {
+  key: string
+  label: string
+  defaultParams: Record<string, unknown>
+  paramFields: Array<Record<string, unknown>>
+}
+
 
 function toNumber(value: unknown): number {
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : 0
 }
 
-function isCryptoStrategyKey(value: string): boolean {
+function isFixedTimeframeCryptoStrategyKey(value: string): boolean {
   const key = String(value || '').trim().toLowerCase()
-  return CRYPTO_STRATEGY_OPTIONS.some((option) => option.key === key)
+  return CRYPTO_STRATEGY_OPTIONS.some((option) => option.key === key && Boolean(option.timeframe))
 }
 
-function normalizeCryptoStrategyMode(value: unknown): CryptoStrategyMode {
-  const mode = String(value || '').trim().toLowerCase()
-  if (CRYPTO_STRATEGY_MODES.includes(mode as CryptoStrategyMode)) {
-    return mode as CryptoStrategyMode
+function normalizeCryptoStrategyMode(
+  value: unknown,
+  allowedModes: string[] = [...CRYPTO_STRATEGY_MODES],
+  fallback = 'auto'
+): string {
+  const normalizedAllowed: string[] = []
+  const seen = new Set<string>()
+  for (const raw of allowedModes) {
+    const candidate = String(raw || '').trim().toLowerCase()
+    if (!candidate || seen.has(candidate)) continue
+    seen.add(candidate)
+    normalizedAllowed.push(candidate)
   }
-  return 'auto'
+  const mode = String(value || '').trim().toLowerCase()
+  if (mode && normalizedAllowed.includes(mode)) {
+    return mode
+  }
+  const normalizedFallback = String(fallback || '').trim().toLowerCase()
+  if (normalizedFallback && normalizedAllowed.includes(normalizedFallback)) {
+    return normalizedFallback
+  }
+  if (normalizedAllowed.length > 0) {
+    return normalizedAllowed[0]
+  }
+  return mode || normalizedFallback || 'auto'
 }
 
 function normalizeCryptoAsset(value: unknown): string | null {
   const asset = String(value || '').trim().toUpperCase()
   if (!asset) return null
   if (asset === 'XBT') return 'BTC'
-  return CRYPTO_ASSET_OPTIONS.includes(asset as (typeof CRYPTO_ASSET_OPTIONS)[number]) ? asset : null
+  return asset
 }
 
 function normalizeCryptoTimeframe(value: unknown): string | null {
@@ -341,13 +371,21 @@ function toStringList(value: unknown): string[] {
   return []
 }
 
-function normalizeCryptoAssetList(value: unknown): string[] {
+function normalizeCryptoAssetList(value: unknown, allowedAssets?: string[]): string[] {
   const selected = new Set(
     toStringList(value)
       .map((item) => normalizeCryptoAsset(item))
       .filter((item): item is string => Boolean(item))
   )
-  return CRYPTO_ASSET_OPTIONS.filter((item) => selected.has(item))
+  const allowed = new Set(
+    (allowedAssets || [])
+      .map((item) => normalizeCryptoAsset(item))
+      .filter((item): item is string => Boolean(item))
+  )
+  if (allowed.size > 0) {
+    return Array.from(allowed).filter((item) => selected.has(item))
+  }
+  return Array.from(selected)
 }
 
 function normalizeCryptoTimeframeList(value: unknown): string[] {
@@ -569,20 +607,123 @@ function isCryptoSourceKey(key: string): boolean {
   return k === 'crypto'
 }
 
-function sourceStrategyOptions(source: TraderSource): StrategyOption[] {
+function sourceStrategyDetails(source: TraderSource): StrategyOptionDetail[] {
   const options = (source.strategy_options || [])
     .filter((item) => item && typeof item === 'object')
-    .map((item) => ({
-      key: String(item.key || '').trim().toLowerCase(),
-      label: String(item.label || strategyLabelForKey(String(item.key || ''))),
-    }))
+    .map((item) => {
+      const key = String(item.key || '').trim().toLowerCase()
+      return {
+        key,
+        label: String(item.label || strategyLabelForKey(key)),
+        defaultParams: isRecord(item.default_params) ? { ...item.default_params } : {},
+        paramFields: Array.isArray(item.param_fields)
+          ? item.param_fields.filter((field): field is Record<string, unknown> => isRecord(field))
+          : [],
+      }
+    })
     .filter((item) => item.key)
   if (options.length > 0) return options
   const fallback = DEFAULT_STRATEGY_BY_SOURCE[normalizeSourceKey(source.key)]
   if (fallback) {
-    return [{ key: fallback, label: strategyLabelForKey(fallback) }]
+    return [{ key: fallback, label: strategyLabelForKey(fallback), defaultParams: {}, paramFields: [] }]
   }
   return []
+}
+
+function sourceStrategyOptions(source: TraderSource): StrategyOption[] {
+  return sourceStrategyDetails(source).map((item) => ({ key: item.key, label: item.label }))
+}
+
+function strategyParamKey(
+  strategy: StrategyOptionDetail | null | undefined,
+  candidateKeys: readonly string[]
+): string | null {
+  if (!strategy) return null
+  for (const candidate of candidateKeys) {
+    if (strategy.paramFields.some((field) => String(field.key || '').trim().toLowerCase() === candidate)) {
+      return candidate
+    }
+  }
+  for (const candidate of candidateKeys) {
+    if (Object.prototype.hasOwnProperty.call(strategy.defaultParams, candidate)) {
+      return candidate
+    }
+  }
+  return null
+}
+
+function strategyParamOptions(
+  strategy: StrategyOptionDetail | null | undefined,
+  paramKey: string | null
+): string[] {
+  if (!strategy || !paramKey) return []
+  const field = strategy.paramFields.find(
+    (item) => String(item.key || '').trim().toLowerCase() === paramKey
+  )
+  const rawOptions = Array.isArray(field?.options) ? field.options : []
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const rawOption of rawOptions) {
+    let normalized = ''
+    if (typeof rawOption === 'string') {
+      normalized = rawOption.trim()
+    } else if (isRecord(rawOption)) {
+      if (typeof rawOption.value === 'string') normalized = rawOption.value.trim()
+      else if (typeof rawOption.label === 'string') normalized = rawOption.label.trim()
+    }
+    if (!normalized) continue
+    const dedupeKey = normalized.toLowerCase()
+    if (seen.has(dedupeKey)) continue
+    seen.add(dedupeKey)
+    out.push(normalized)
+  }
+  return out
+}
+
+function strategyHasParamKey(
+  strategy: StrategyOptionDetail | null | undefined,
+  paramKey: string
+): boolean {
+  if (!strategy || !paramKey) return false
+  if (strategy.paramFields.some((field) => String(field.key || '').trim().toLowerCase() === paramKey)) {
+    return true
+  }
+  return Object.prototype.hasOwnProperty.call(strategy.defaultParams, paramKey)
+}
+
+function strategyDefaultValuesForKeys(
+  strategy: StrategyOptionDetail | null | undefined,
+  candidateKeys: readonly string[]
+): string[] {
+  if (!strategy) return []
+  for (const candidate of candidateKeys) {
+    const values = toStringList(strategy.defaultParams[candidate])
+    if (values.length > 0) return values
+  }
+  return []
+}
+
+function cryptoModeOptionsForStrategy(strategy: StrategyOptionDetail | null | undefined): string[] {
+  const paramKey = strategyParamKey(strategy, CRYPTO_MODE_PARAM_KEYS)
+  const options = strategyParamOptions(strategy, paramKey)
+    .map((item) => normalizeCryptoStrategyMode(item))
+    .filter(Boolean)
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const option of options) {
+    const key = option.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(option)
+  }
+  return out
+}
+
+function cryptoAssetOptionsForStrategy(strategy: StrategyOptionDetail | null | undefined): string[] {
+  const paramKey = strategyParamKey(strategy, CRYPTO_ASSET_PARAM_KEYS)
+  const fieldOptions = normalizeCryptoAssetList(strategyParamOptions(strategy, paramKey))
+  if (fieldOptions.length > 0) return fieldOptions
+  return normalizeCryptoAssetList(strategyDefaultValuesForKeys(strategy, CRYPTO_ASSET_PARAM_KEYS))
 }
 
 function defaultStrategyForSource(sourceKey: string, sourceCatalog: TraderSource[]): string {
@@ -595,7 +736,8 @@ function defaultStrategyForSource(sourceKey: string, sourceCatalog: TraderSource
 
 function cryptoTimeframeForStrategyKey(strategyKey: string): string {
   const normalized = String(strategyKey || '').trim().toLowerCase()
-  return CRYPTO_STRATEGY_OPTIONS.find((item) => item.key === normalized)?.timeframe || '15m'
+  const timeframe = CRYPTO_STRATEGY_OPTIONS.find((item) => item.key === normalized)?.timeframe
+  return typeof timeframe === 'string' ? timeframe : ''
 }
 
 function traderSourceKeys(trader: Trader): string[] {
@@ -744,29 +886,68 @@ function computeAdvancedConfig(
 function withConfiguredParams(
   raw: Record<string, unknown>,
   config: TraderAdvancedConfig,
-  strategyKey: string
+  sourceKey: string,
+  strategyKey: string,
+  strategyDetail: StrategyOptionDetail | null
 ): Record<string, unknown> {
-  const targetAssets = normalizeCryptoAssetList(config.cryptoAssetsCsv)
-  const next: Record<string, unknown> = {
-    ...raw,
-    min_signal_score: config.minSignalScore,
-    min_edge_percent: config.minEdgePercent,
-    min_confidence: confidencePercentToFraction(config.minConfidence),
-    lookback_minutes: config.lookbackMinutes,
-    scan_batch_size: config.scanBatchSize,
-    max_signals_per_cycle: config.maxSignalsPerCycle,
-    require_second_source: config.requireSecondSource,
-    source_priority: csvToList(config.sourcePriorityCsv),
-    blocked_market_keywords: csvToList(config.blockedKeywordsCsv),
+  const next: Record<string, unknown> = { ...raw }
+  const hasSchema = Boolean(
+    strategyDetail &&
+    (strategyDetail.paramFields.length > 0 || Object.keys(strategyDetail.defaultParams).length > 0)
+  )
+  const applyIfSupported = (paramKey: string, value: unknown) => {
+    if (!hasSchema || strategyHasParamKey(strategyDetail, paramKey)) {
+      next[paramKey] = value
+    } else {
+      delete next[paramKey]
+    }
   }
-  if (isCryptoStrategyKey(strategyKey)) {
-    next.strategy_mode = config.strategyMode
-    next.target_assets = targetAssets.length > 0 ? targetAssets : [...CRYPTO_ASSET_OPTIONS]
-    next.target_timeframes = [cryptoTimeframeForStrategyKey(strategyKey)]
+  applyIfSupported('min_signal_score', config.minSignalScore)
+  applyIfSupported('min_edge_percent', config.minEdgePercent)
+  applyIfSupported('min_confidence', confidencePercentToFraction(config.minConfidence))
+  applyIfSupported('lookback_minutes', config.lookbackMinutes)
+  applyIfSupported('scan_batch_size', config.scanBatchSize)
+  applyIfSupported('max_signals_per_cycle', config.maxSignalsPerCycle)
+  applyIfSupported('require_second_source', config.requireSecondSource)
+  applyIfSupported('source_priority', csvToList(config.sourcePriorityCsv))
+  applyIfSupported('blocked_market_keywords', csvToList(config.blockedKeywordsCsv))
+
+  if (normalizeSourceKey(sourceKey) !== 'crypto') {
+    for (const key of CRYPTO_MODE_PARAM_KEYS) delete next[key]
+    for (const key of CRYPTO_ASSET_PARAM_KEYS) delete next[key]
+    for (const key of CRYPTO_TIMEFRAME_PARAM_KEYS) delete next[key]
+    return next
+  }
+
+  const supportsFixedTimeframe = isFixedTimeframeCryptoStrategyKey(strategyKey)
+  const modeParamKey = strategyParamKey(strategyDetail, CRYPTO_MODE_PARAM_KEYS)
+  const modeOptions = cryptoModeOptionsForStrategy(strategyDetail)
+  if (modeParamKey || supportsFixedTimeframe) {
+    const targetKey = modeParamKey || 'strategy_mode'
+    const allowedModes = modeOptions.length > 0 ? modeOptions : [...CRYPTO_STRATEGY_MODES]
+    next[targetKey] = normalizeCryptoStrategyMode(config.strategyMode, allowedModes, 'auto')
   } else {
-    delete next.strategy_mode
-    delete next.target_assets
-    delete next.target_timeframes
+    for (const key of CRYPTO_MODE_PARAM_KEYS) delete next[key]
+  }
+
+  const assetParamKey = strategyParamKey(strategyDetail, CRYPTO_ASSET_PARAM_KEYS)
+  const schemaAssets = cryptoAssetOptionsForStrategy(strategyDetail)
+  const allowedAssets = schemaAssets.length > 0 ? schemaAssets : supportsFixedTimeframe ? [...CRYPTO_ASSET_OPTIONS] : []
+  if (assetParamKey || allowedAssets.length > 0) {
+    const targetKey = assetParamKey || 'target_assets'
+    const targetAssets = normalizeCryptoAssetList(config.cryptoAssetsCsv, allowedAssets)
+    next[targetKey] = targetAssets.length > 0 ? targetAssets : allowedAssets
+  } else {
+    for (const key of CRYPTO_ASSET_PARAM_KEYS) delete next[key]
+  }
+
+  const timeframeParamKey = strategyParamKey(strategyDetail, CRYPTO_TIMEFRAME_PARAM_KEYS)
+  const fixedTimeframe = cryptoTimeframeForStrategyKey(strategyKey)
+  if (fixedTimeframe) {
+    const targetKey = timeframeParamKey || 'target_timeframes'
+    next[targetKey] = [fixedTimeframe]
+  } else {
+    for (const key of CRYPTO_TIMEFRAME_PARAM_KEYS) delete next[key]
   }
   return next
 }
@@ -1171,13 +1352,32 @@ export default function TradingPanel() {
     return out
   }, [draftSources])
 
-  const sourceStrategyOptionsByKey = useMemo(() => {
-    const out: Record<string, StrategyOption[]> = {}
+  const sourceStrategyDetailsByKey = useMemo(() => {
+    const out: Record<string, StrategyOptionDetail[]> = {}
     for (const source of sourceCards) {
-      out[normalizeSourceKey(source.key)] = sourceStrategyOptions(source)
+      out[normalizeSourceKey(source.key)] = sourceStrategyDetails(source)
     }
     return out
   }, [sourceCards])
+
+  const sourceStrategyOptionsByKey = useMemo(() => {
+    const out: Record<string, StrategyOption[]> = {}
+    for (const [sourceKey, details] of Object.entries(sourceStrategyDetailsByKey)) {
+      out[sourceKey] = details.map((item) => ({ key: item.key, label: item.label }))
+    }
+    return out
+  }, [sourceStrategyDetailsByKey])
+
+  const sourceStrategyDetailsLookup = useMemo(() => {
+    const out: Record<string, Record<string, StrategyOptionDetail>> = {}
+    for (const [sourceKey, details] of Object.entries(sourceStrategyDetailsByKey)) {
+      out[sourceKey] = {}
+      for (const detail of details) {
+        out[sourceKey][detail.key] = detail
+      }
+    }
+    return out
+  }, [sourceStrategyDetailsByKey])
 
   const effectiveSourceStrategies = useMemo(() => {
     const out: Record<string, string> = {}
@@ -1200,9 +1400,43 @@ export default function TradingPanel() {
     () => selectedSourceKeySet.has('crypto'),
     [selectedSourceKeySet]
   )
+  const selectedCryptoStrategyDetail = useMemo(
+    () => sourceStrategyDetailsLookup.crypto?.[cryptoStrategyKeyDraft] || null,
+    [cryptoStrategyKeyDraft, sourceStrategyDetailsLookup]
+  )
+  const cryptoModeParamKey = useMemo(
+    () => strategyParamKey(selectedCryptoStrategyDetail, CRYPTO_MODE_PARAM_KEYS),
+    [selectedCryptoStrategyDetail]
+  )
+  const cryptoStrategyModeOptions = useMemo(() => {
+    const options = cryptoModeOptionsForStrategy(selectedCryptoStrategyDetail)
+    if (options.length > 0) return options
+    if (isFixedTimeframeCryptoStrategyKey(cryptoStrategyKeyDraft)) return [...CRYPTO_STRATEGY_MODES]
+    return []
+  }, [cryptoStrategyKeyDraft, selectedCryptoStrategyDetail])
+  const cryptoAssetParamKey = useMemo(
+    () => strategyParamKey(selectedCryptoStrategyDetail, CRYPTO_ASSET_PARAM_KEYS),
+    [selectedCryptoStrategyDetail]
+  )
+  const cryptoAssetOptions = useMemo(() => {
+    const options = cryptoAssetOptionsForStrategy(selectedCryptoStrategyDetail)
+    if (options.length > 0) return options
+    if (isFixedTimeframeCryptoStrategyKey(cryptoStrategyKeyDraft)) return [...CRYPTO_ASSET_OPTIONS]
+    return []
+  }, [cryptoStrategyKeyDraft, selectedCryptoStrategyDetail])
+  const cryptoTimeframeDraft = useMemo(
+    () => cryptoTimeframeForStrategyKey(cryptoStrategyKeyDraft),
+    [cryptoStrategyKeyDraft]
+  )
   const selectedCryptoAssets = useMemo(
-    () => new Set(normalizeCryptoAssetList(advancedConfig.cryptoAssetsCsv)),
-    [advancedConfig.cryptoAssetsCsv]
+    () =>
+      new Set(
+        normalizeCryptoAssetList(
+          advancedConfig.cryptoAssetsCsv,
+          cryptoAssetOptions.length > 0 ? cryptoAssetOptions : [...CRYPTO_ASSET_OPTIONS]
+        )
+      ),
+    [advancedConfig.cryptoAssetsCsv, cryptoAssetOptions]
   )
 
   const setSourceStrategy = (sourceKey: string, strategyKey: string) => {
@@ -1256,20 +1490,47 @@ export default function TradingPanel() {
     setDraftSourceStrategies({})
   }
 
-  const toggleCryptoAssetTarget = (asset: (typeof CRYPTO_ASSET_OPTIONS)[number]) => {
-    const next = new Set(normalizeCryptoAssetList(advancedConfig.cryptoAssetsCsv))
+  const toggleCryptoAssetTarget = (asset: string) => {
+    const availableAssets = cryptoAssetOptions.length > 0 ? cryptoAssetOptions : [...CRYPTO_ASSET_OPTIONS]
+    const next = new Set(normalizeCryptoAssetList(advancedConfig.cryptoAssetsCsv, availableAssets))
     if (next.has(asset)) {
       next.delete(asset)
     } else {
       next.add(asset)
     }
-    setAdvancedValue('cryptoAssetsCsv', CRYPTO_ASSET_OPTIONS.filter((item) => next.has(item)).join(', '))
+    setAdvancedValue('cryptoAssetsCsv', availableAssets.filter((item) => next.has(item)).join(', '))
   }
 
   const enableAllCryptoTargets = () => {
-    setAdvancedValue('cryptoAssetsCsv', CRYPTO_ASSET_OPTIONS.join(', '))
-    setAdvancedValue('cryptoTimeframesCsv', cryptoTimeframeForStrategyKey(cryptoStrategyKeyDraft))
+    const availableAssets = cryptoAssetOptions.length > 0 ? cryptoAssetOptions : [...CRYPTO_ASSET_OPTIONS]
+    if (availableAssets.length > 0) {
+      setAdvancedValue('cryptoAssetsCsv', availableAssets.join(', '))
+    }
+    if (cryptoTimeframeDraft) {
+      setAdvancedValue('cryptoTimeframesCsv', cryptoTimeframeDraft)
+    }
   }
+
+  useEffect(() => {
+    if (!isCryptoStrategyDraft || cryptoStrategyModeOptions.length === 0) return
+    const normalizedMode = normalizeCryptoStrategyMode(
+      advancedConfig.strategyMode,
+      cryptoStrategyModeOptions,
+      cryptoStrategyModeOptions[0]
+    )
+    if (normalizedMode === advancedConfig.strategyMode) return
+    setAdvancedConfig((current) => ({ ...current, strategyMode: normalizedMode }))
+  }, [advancedConfig.strategyMode, cryptoStrategyModeOptions, isCryptoStrategyDraft])
+
+  useEffect(() => {
+    if (!isCryptoStrategyDraft || cryptoAssetOptions.length === 0) return
+    const normalizedAssets = normalizeCryptoAssetList(
+      advancedConfig.cryptoAssetsCsv,
+      cryptoAssetOptions
+    ).join(', ')
+    if (normalizedAssets === advancedConfig.cryptoAssetsCsv) return
+    setAdvancedConfig((current) => ({ ...current, cryptoAssetsCsv: normalizedAssets }))
+  }, [advancedConfig.cryptoAssetsCsv, cryptoAssetOptions, isCryptoStrategyDraft])
 
   useEffect(() => {
     if (!selectedTraderId && traders.length > 0) {
@@ -1487,10 +1748,11 @@ export default function TradingPanel() {
           effectiveSourceStrategies[sourceKey] || defaultStrategyForSource(sourceKey, sourceCards)
         )
       )
+      const strategyDetail = sourceStrategyDetailsLookup[sourceKey]?.[strategyKey] || null
       const nextConfig: TraderSourceConfig = {
         source_key: sourceKey,
         strategy_key: strategyKey,
-        strategy_params: withConfiguredParams(rawStrategyParams, advancedConfig, strategyKey),
+        strategy_params: withConfiguredParams(rawStrategyParams, advancedConfig, sourceKey, strategyKey, strategyDetail),
       }
       if (sourceKey === 'traders') {
         nextConfig.traders_scope = {
@@ -3398,48 +3660,78 @@ export default function TradingPanel() {
                     <div className="rounded-lg border border-sky-500/30 bg-sky-500/5 p-2.5 space-y-2 mt-2">
                       <div className="flex items-center justify-between gap-2">
                         <p className="text-[11px] font-semibold uppercase tracking-wide text-sky-400">Crypto Settings</p>
-                        <Button type="button" size="sm" variant="outline" className="h-5 px-2 text-[10px]" onClick={enableAllCryptoTargets}>
-                          Use all
-                        </Button>
+                        {(Boolean(cryptoAssetParamKey) || cryptoAssetOptions.length > 0) && (
+                          <Button type="button" size="sm" variant="outline" className="h-5 px-2 text-[10px]" onClick={enableAllCryptoTargets}>
+                            Use all
+                          </Button>
+                        )}
                       </div>
-                      <div className="space-y-1.5">
-                        <p className="text-[11px] text-muted-foreground/80">Assets</p>
-                        <div className="flex flex-wrap gap-1.5">
-                          {CRYPTO_ASSET_OPTIONS.map((asset) => (
-                            <Button
-                              key={asset}
-                              type="button"
-                              size="sm"
-                              variant={selectedCryptoAssets.has(asset) ? 'default' : 'outline'}
-                              className="h-6 px-2 text-[11px]"
-                              onClick={() => toggleCryptoAssetTarget(asset)}
-                            >
-                              {asset}
-                            </Button>
-                          ))}
+                      {(Boolean(cryptoAssetParamKey) || cryptoAssetOptions.length > 0) && (
+                        <div className="space-y-1.5">
+                          <p className="text-[11px] text-muted-foreground/80">Assets</p>
+                          {cryptoAssetOptions.length > 0 ? (
+                            <div className="flex flex-wrap gap-1.5">
+                              {cryptoAssetOptions.map((asset) => (
+                                <Button
+                                  key={asset}
+                                  type="button"
+                                  size="sm"
+                                  variant={selectedCryptoAssets.has(asset) ? 'default' : 'outline'}
+                                  className="h-6 px-2 text-[11px]"
+                                  onClick={() => toggleCryptoAssetTarget(asset)}
+                                >
+                                  {asset}
+                                </Button>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="text-[10px] text-muted-foreground/75">No asset options exposed by this strategy schema.</p>
+                          )}
                         </div>
-                      </div>
-                      <div className="space-y-1.5">
-                        <p className="text-[11px] text-muted-foreground/80">
-                          Timeframe is fixed by selected crypto strategy ({cryptoTimeframeForStrategyKey(cryptoStrategyKeyDraft)}).
+                      )}
+                      {cryptoTimeframeDraft && (
+                        <div className="space-y-1.5">
+                          <p className="text-[11px] text-muted-foreground/80">
+                            Timeframe is fixed by selected crypto strategy ({cryptoTimeframeDraft}).
+                          </p>
+                        </div>
+                      )}
+                      {(Boolean(cryptoModeParamKey) || cryptoStrategyModeOptions.length > 0) && (
+                        <div className="mt-1">
+                          <Label className="text-[11px] text-muted-foreground">Strategy Mode</Label>
+                          <Select
+                            value={normalizeCryptoStrategyMode(
+                              advancedConfig.strategyMode,
+                              cryptoStrategyModeOptions,
+                              cryptoStrategyModeOptions[0] || 'auto'
+                            )}
+                            onValueChange={(value) =>
+                              setAdvancedValue(
+                                'strategyMode',
+                                normalizeCryptoStrategyMode(
+                                  value,
+                                  cryptoStrategyModeOptions,
+                                  cryptoStrategyModeOptions[0] || 'auto'
+                                )
+                              )
+                            }
+                          >
+                            <SelectTrigger className="h-7 text-xs mt-0.5">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {cryptoStrategyModeOptions.map((mode) => (
+                                <SelectItem key={mode} value={mode} className="text-xs">{mode}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      )}
+                      {!cryptoTimeframeDraft && !(Boolean(cryptoAssetParamKey) || cryptoAssetOptions.length > 0) && !(Boolean(cryptoModeParamKey) || cryptoStrategyModeOptions.length > 0) && (
+                        <p className="text-[10px] text-muted-foreground/75">
+                          Selected strategy does not expose dedicated crypto controls in its schema.
                         </p>
-                      </div>
-                      <div className="mt-1">
-                        <Label className="text-[11px] text-muted-foreground">Strategy Mode</Label>
-                        <Select
-                          value={advancedConfig.strategyMode}
-                          onValueChange={(value) => setAdvancedValue('strategyMode', normalizeCryptoStrategyMode(value))}
-                        >
-                          <SelectTrigger className="h-7 text-xs mt-0.5">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {CRYPTO_STRATEGY_MODES.map((mode) => (
-                              <SelectItem key={mode} value={mode} className="text-xs">{mode}</SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
+                      )}
                     </div>
                   )}
 

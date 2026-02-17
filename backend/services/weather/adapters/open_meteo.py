@@ -159,6 +159,7 @@ class OpenMeteoWeatherAdapter(WeatherModelAdapter):
 
     GEO_URL = "https://geocoding-api.open-meteo.com/v1/search"
     FC_URL = "https://api.open-meteo.com/v1/forecast"
+    ENSEMBLE_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
     NWS_POINTS_URL = "https://api.weather.gov/points"
 
     def __init__(self, timeout_seconds: float = 15.0):
@@ -221,6 +222,13 @@ class OpenMeteoWeatherAdapter(WeatherModelAdapter):
                         target_time=contract.target_time,
                         metric=contract.metric,
                     )
+
+            # Fetch ensemble members (non-blocking, degrades gracefully)
+            ensemble_hourly, ensemble_daily_max = await self.fetch_ensemble_members(
+                location=contract.location,
+                target_time=contract.target_time,
+                metric=contract.metric,
+            )
 
             value_by_source: dict[str, float] = {}
             probability_by_source: dict[str, float] = {}
@@ -304,6 +312,11 @@ class OpenMeteoWeatherAdapter(WeatherModelAdapter):
                 for snap in snapshots
             ]
 
+            # Use daily max ensemble for temp_max contracts, hourly otherwise
+            metric_l = (contract.metric or "").lower()
+            result_ensemble = ensemble_daily_max if metric_l.startswith("temp_max") and ensemble_daily_max else ensemble_hourly
+            result_ensemble_daily = ensemble_daily_max or None
+
             return WeatherForecastResult(
                 gfs_probability=gfs_prob,
                 ecmwf_probability=ecmwf_prob,
@@ -313,6 +326,8 @@ class OpenMeteoWeatherAdapter(WeatherModelAdapter):
                 consensus_probability=consensus_probability,
                 consensus_value_c=consensus_value_c,
                 source_spread_c=spread_c,
+                ensemble_members=result_ensemble or None,
+                ensemble_daily_max=result_ensemble_daily,
                 metadata={
                     "provider": "open_meteo",
                     "location": resolved_name or contract.location,
@@ -329,6 +344,7 @@ class OpenMeteoWeatherAdapter(WeatherModelAdapter):
                     "consensus_value_c": consensus_value_c,
                     "source_spread_c": spread_c,
                     "source_errors": source_errors,
+                    "ensemble_member_count": len(result_ensemble) if result_ensemble else 0,
                     "rate_limited": any(
                         _looks_rate_limited(err) for err in source_errors.values()
                     ),
@@ -648,6 +664,111 @@ class OpenMeteoWeatherAdapter(WeatherModelAdapter):
             target_time=target_time,
             metric=metric,
         )
+
+    async def fetch_ensemble_members(
+        self,
+        location: str,
+        target_time: datetime,
+        metric: str,
+    ) -> tuple[list[float], list[float]]:
+        """Fetch GFS ensemble member values from the Open-Meteo Ensemble API.
+
+        Returns (ensemble_hourly, ensemble_daily_max):
+        - ensemble_hourly: per-member value at closest hour to target_time
+        - ensemble_daily_max: per-member daily max on target date (for temp_max contracts)
+        """
+        try:
+            headers = {"User-Agent": "homerun-weather-workflow/1.0"}
+            async with httpx.AsyncClient(
+                timeout=self._timeout,
+                follow_redirects=True,
+                headers=headers,
+            ) as client:
+                lat, lon, _, _, _ = await self._resolve_location(client, location)
+                target_utc = (
+                    target_time.astimezone(timezone.utc)
+                    if target_time.tzinfo is not None
+                    else target_time.replace(tzinfo=timezone.utc)
+                )
+                date_str = target_utc.strftime("%Y-%m-%d")
+
+                params: dict[str, Any] = {
+                    "latitude": lat,
+                    "longitude": lon,
+                    "start_date": date_str,
+                    "end_date": date_str,
+                    "timezone": "UTC",
+                    "models": "gfs_ensemble_025",
+                    "hourly": "temperature_2m",
+                }
+                resp = await client.get(self.ENSEMBLE_URL, params=params)
+                resp.raise_for_status()
+                payload = resp.json() or {}
+
+                hourly = payload.get("hourly") or {}
+                times = hourly.get("time") or []
+                temp_data = hourly.get("temperature_2m") or []
+
+                if not times or not temp_data:
+                    return [], []
+
+                # temp_data is a list of lists: one list per ensemble member,
+                # OR a flat list if only one member. The Open-Meteo ensemble API
+                # returns per-member arrays when multiple members exist.
+                # Detect structure: if first element is a list, it's member-based.
+                if temp_data and isinstance(temp_data[0], list):
+                    # Each element is a member's time series
+                    members = temp_data
+                else:
+                    # Flat array = single member (unusual, treat as 1 member)
+                    members = [temp_data]
+
+                # Find closest hour index to target time
+                target_epoch = int(target_utc.timestamp())
+                best_i = 0
+                best_diff = None
+                for i, ts in enumerate(times):
+                    try:
+                        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+                        diff = abs(int(dt.timestamp()) - target_epoch)
+                    except Exception:
+                        continue
+                    if best_diff is None or diff < best_diff:
+                        best_diff = diff
+                        best_i = i
+
+                # Extract per-member value at closest hour
+                ensemble_hourly: list[float] = []
+                for member_series in members:
+                    if best_i < len(member_series) and member_series[best_i] is not None:
+                        ensemble_hourly.append(float(member_series[best_i]))
+
+                # Compute per-member daily max across all hours on target day
+                ensemble_daily_max: list[float] = []
+                target_date = target_utc.date()
+                day_indices: list[int] = []
+                for i, ts in enumerate(times):
+                    try:
+                        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+                        if dt.date() == target_date:
+                            day_indices.append(i)
+                    except Exception:
+                        continue
+
+                if day_indices:
+                    for member_series in members:
+                        day_vals = [
+                            float(member_series[i])
+                            for i in day_indices
+                            if i < len(member_series) and member_series[i] is not None
+                        ]
+                        if day_vals:
+                            ensemble_daily_max.append(max(day_vals))
+
+                return ensemble_hourly, ensemble_daily_max
+
+        except Exception:
+            return [], []
 
     def _build_source_weights(
         self,

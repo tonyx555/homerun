@@ -104,7 +104,10 @@ class Settings(BaseSettings):
     DISCOVERY_MAX_WALLETS_PER_MARKET: int = 50
 
     # Market Settings
-    MAX_MARKETS_TO_SCAN: int = 500
+    MAX_MARKETS_TO_SCAN: int = 5000
+    MAX_EVENTS_TO_SCAN: int = 3000
+    MARKET_FETCH_PAGE_SIZE: int = 200
+    MARKET_FETCH_ORDER: str = "volume"  # volume, updatedAt, createdAt, or empty for default
     MIN_LIQUIDITY: float = 1000.0  # Minimum liquidity in USD
 
     # Opportunity Quality Filters (hard rejection thresholds)
@@ -514,13 +517,7 @@ class Settings(BaseSettings):
         return text
 
     class Config:
-        # Load project-root .env first (common workflow), then backend/.env
-        # as an override if present.
-        env_file = (
-            str(_PROJECT_ROOT / ".env"),
-            str(_BACKEND_DIR / ".env"),
-        )
-        env_file_encoding = "utf-8"
+        pass
 
 
 settings = Settings()
@@ -801,7 +798,10 @@ async def apply_search_filters():
         # Scanner basics (already wired but also reloaded here for consistency)
         ("SCAN_INTERVAL_SECONDS", "scan_interval_seconds", 60),
         ("MIN_PROFIT_THRESHOLD", "min_profit_threshold", None),
-        ("MAX_MARKETS_TO_SCAN", "max_markets_to_scan", 500),
+        ("MAX_MARKETS_TO_SCAN", "max_markets_to_scan", 5000),
+        ("MAX_EVENTS_TO_SCAN", "max_events_to_scan", 3000),
+        ("MARKET_FETCH_PAGE_SIZE", "market_fetch_page_size", 200),
+        ("MARKET_FETCH_ORDER", "market_fetch_order", "volume"),
         ("MIN_LIQUIDITY", "min_liquidity", 1000.0),
     ]
 

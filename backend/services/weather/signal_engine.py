@@ -27,11 +27,18 @@ class WeatherSignal:
     notes: list[str] = field(default_factory=list)
 
 
-def _clamp01(value: float) -> float:
+# ---------------------------------------------------------------------------
+# Public utility functions — importable by strategy files
+# ---------------------------------------------------------------------------
+
+
+def clamp01(value: float) -> float:
+    """Clamp value to [0, 1]."""
     return max(0.0, min(1.0, value))
 
 
-def _normalize_weights(source_probs: dict[str, float], raw_weights: dict[str, float]) -> dict[str, float]:
+def normalize_weights(source_probs: dict[str, float], raw_weights: dict[str, float]) -> dict[str, float]:
+    """Normalize source weights to sum to 1.0 across keys present in source_probs."""
     keys = [k for k in source_probs.keys() if k in raw_weights]
     if not keys:
         count = len(source_probs)
@@ -44,9 +51,87 @@ def _normalize_weights(source_probs: dict[str, float], raw_weights: dict[str, fl
     return {k: max(0.0, float(raw_weights[k])) / total for k in keys}
 
 
-def _logit(p: float) -> float:
+def logit(p: float) -> float:
+    """Logit transform: log(p / (1-p)), clamped to avoid infinities."""
     bounded = max(0.001, min(0.999, p))
     return math.log(bounded / (1.0 - bounded))
+
+
+def compute_consensus(
+    source_probs: dict[str, float],
+    source_weights: dict[str, float],
+) -> float:
+    """Compute weighted consensus probability from multiple forecast sources."""
+    if not source_probs:
+        return 0.5
+    norm = normalize_weights(source_probs, source_weights)
+    return clamp01(sum(source_probs[k] * norm.get(k, 0.0) for k in source_probs))
+
+
+def compute_model_agreement(source_probs: dict[str, float]) -> float:
+    """Compute agreement metric: 1.0 - max spread across sources."""
+    probs = list(source_probs.values())
+    if len(probs) >= 2:
+        return clamp01(1.0 - (max(probs) - min(probs)))
+    if len(probs) == 1:
+        return 0.67  # Single-source penalty
+    return 0.0
+
+
+def compute_confidence(
+    agreement: float,
+    consensus_yes: float,
+    source_count: int,
+    source_spread_c: Optional[float] = None,
+) -> float:
+    """Blend agreement, separation from 50/50, and source depth into confidence."""
+    separation = abs(consensus_yes - 0.5) * 2.0
+    source_depth = min(1.0, source_count / 3.0)
+    confidence = clamp01((agreement * 0.45) + (separation * 0.35) + (source_depth * 0.20))
+    if source_spread_c is not None and source_spread_c > 0:
+        spread_penalty = min(0.35, source_spread_c / 20.0)
+        confidence = clamp01(confidence * (1.0 - spread_penalty))
+    return confidence
+
+
+def temp_range_probability(value_c: float, low_c: float, high_c: float, scale_c: float = 2.0) -> float:
+    """Probability a temperature falls in [low, high] using logistic CDF.
+
+    Args:
+        value_c: Forecast temperature in Celsius.
+        low_c: Low end of bucket range.
+        high_c: High end of bucket range.
+        scale_c: Sigmoid sharpness (lower = sharper). Default 2.0.
+    """
+    low = min(low_c, high_c)
+    high = max(low_c, high_c)
+
+    def sigmoid(x: float) -> float:
+        return 1.0 / (1.0 + math.exp(-x))
+
+    p_above_low = sigmoid((value_c - low) / scale_c)
+    p_above_high = sigmoid((value_c - high) / scale_c)
+    return max(0.0, min(1.0, p_above_low - p_above_high))
+
+
+def ensemble_bucket_probability(
+    ensemble_values: list[float],
+    low_c: float,
+    high_c: float,
+) -> float:
+    """Count fraction of ensemble members that fall within a temperature bucket."""
+    if not ensemble_values:
+        return 0.0
+    low = min(low_c, high_c)
+    high = max(low_c, high_c)
+    count = sum(1 for v in ensemble_values if low <= v < high)
+    return count / len(ensemble_values)
+
+
+# Keep old private names as aliases for backward compatibility
+_clamp01 = clamp01
+_normalize_weights = normalize_weights
+_logit = logit
 
 
 def _infer_market_temp_c(

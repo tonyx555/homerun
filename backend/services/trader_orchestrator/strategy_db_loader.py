@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import AsyncSessionLocal, TraderStrategyDefinition
 from services.trader_orchestrator.strategies.base import BaseTraderStrategy
+from utils.utcnow import utcnow
 
 
 # Modules DB strategy source is allowed to import.
@@ -159,13 +160,19 @@ def _check_blocked_calls(tree: ast.AST) -> list[str]:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        func_name = None
         if isinstance(node.func, ast.Name):
-            func_name = node.func.id
-        elif isinstance(node.func, ast.Attribute):
-            func_name = node.func.attr
-        if func_name in _BLOCKED_CALL_NAMES:
-            violations.append(f"Blocked call '{func_name}()' (line {node.lineno})")
+            if node.func.id in _BLOCKED_CALL_NAMES:
+                violations.append(f"Blocked call '{node.func.id}()' (line {node.lineno})")
+            continue
+
+        if isinstance(node.func, ast.Attribute):
+            # Allow normal attribute calls like re.compile(). Only block
+            # explicit builtins namespace usage (builtins.compile, etc.).
+            if node.func.attr not in _BLOCKED_CALL_NAMES:
+                continue
+            target = node.func.value
+            if isinstance(target, ast.Name) and target.id in {"builtins", "__builtins__"}:
+                violations.append(f"Blocked call '{target.id}.{node.func.attr}()' (line {node.lineno})")
     return violations
 
 
@@ -417,7 +424,7 @@ class StrategyDBLoader:
                     if not bool(row.enabled):
                         row.status = "disabled"
                         row.error_message = None
-                        row.updated_at = datetime.utcnow()
+                        row.updated_at = utcnow()
                         continue
 
                     try:
@@ -425,7 +432,7 @@ class StrategyDBLoader:
                         next_loaded[strategy_key] = loaded
                         row.status = "loaded"
                         row.error_message = None
-                        row.updated_at = datetime.utcnow()
+                        row.updated_at = utcnow()
                         for alias in loaded.aliases:
                             next_aliases[alias] = strategy_key
                     except Exception as exc:
@@ -434,7 +441,7 @@ class StrategyDBLoader:
                         next_errors[strategy_key] = error_message
                         row.status = "error"
                         row.error_message = f"{error_message}\n{tb}"
-                        row.updated_at = datetime.utcnow()
+                        row.updated_at = utcnow()
 
                 self._loaded = next_loaded
                 self._errors = next_errors

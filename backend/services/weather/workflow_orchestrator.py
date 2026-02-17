@@ -109,6 +109,9 @@ class WeatherWorkflowOrchestrator:
             return_exceptions=True,
         )
 
+        # Collect all raw evaluation results for strategy enrichment
+        raw_results: list[dict[str, Any]] = []
+
         for result in evaluations:
             if isinstance(result, Exception):
                 logger.debug("Weather market evaluation failed", error=str(result))
@@ -126,6 +129,13 @@ class WeatherWorkflowOrchestrator:
             if intent is not None:
                 await shared_state.upsert_weather_intent(session, intent)
                 intents_created += 1
+            # Collect raw data for strategy enrichment
+            raw_results.append(result)
+
+        # Build enriched strategy intents with sibling market data
+        enriched_intents = self._build_enriched_strategy_intents(raw_results)
+        if enriched_intents:
+            await shared_state.store_enriched_weather_intents(session, enriched_intents)
 
         await session.commit()
         all_opportunities = opportunities + report_only_findings
@@ -243,6 +253,34 @@ class WeatherWorkflowOrchestrator:
             threshold_c_low=parsed.threshold_c_low,
             threshold_c_high=parsed.threshold_c_high,
         )
+        # Build raw forecast data payload for strategy enrichment
+        raw_forecast_data = {
+            "market_id": market.condition_id or market.id,
+            "market_question": market.question,
+            "event_slug": market.event_slug,
+            "yes_price": float(market.yes_price),
+            "no_price": float(market.no_price),
+            "liquidity": float(market.liquidity),
+            "clob_token_ids": market.clob_token_ids,
+            "location": parsed.location,
+            "metric": parsed.metric,
+            "operator": parsed.operator,
+            "bucket_low_c": parsed.threshold_c_low,
+            "bucket_high_c": parsed.threshold_c_high,
+            "threshold_c": parsed.threshold_c,
+            "target_time": parsed.target_time.isoformat(),
+            "source_values_c": forecast.metadata.get("source_values_c", {}),
+            "source_probabilities": forecast.metadata.get("source_probabilities", {}),
+            "source_weights": forecast.metadata.get("source_weights", {}),
+            "consensus_value_c": forecast.consensus_value_c,
+            "consensus_probability": forecast.consensus_probability,
+            "source_spread_c": forecast.source_spread_c,
+            "source_count": signal.source_count,
+            "model_agreement": signal.model_agreement,
+            "ensemble_members": forecast.ensemble_members,
+            "ensemble_daily_max": forecast.ensemble_daily_max,
+        }
+
         opp = self._signal_to_opportunity(signal, market, parsed, forecast, settings)
         if not signal.should_trade:
             reasons = signal.reasons or ["filtered by weather thresholds"]
@@ -253,7 +291,11 @@ class WeatherWorkflowOrchestrator:
                 "Report only: does not meet trade thresholds",
                 *reasons,
             ]
-            return {"contracts_parsed": 1, "signals_generated": 1, "opportunity": opp, "intent": None}
+            return {
+                "contracts_parsed": 1, "signals_generated": 1,
+                "opportunity": opp, "intent": None,
+                "raw_forecast_data": raw_forecast_data,
+            }
 
         intent = build_weather_intent(
             signal=signal,
@@ -300,7 +342,63 @@ class WeatherWorkflowOrchestrator:
                 },
             },
         )
-        return {"contracts_parsed": 1, "signals_generated": 1, "opportunity": opp, "intent": intent}
+        return {
+            "contracts_parsed": 1, "signals_generated": 1,
+            "opportunity": opp, "intent": intent,
+            "raw_forecast_data": raw_forecast_data,
+        }
+
+    def _build_enriched_strategy_intents(
+        self, raw_results: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Build enriched intent dicts with sibling market data for strategy consumption.
+
+        Groups markets by event_slug so each intent includes data about ALL
+        temperature buckets in the same event (needed for cross-bucket strategies).
+        """
+        # Collect all raw forecast data, keyed by market_id
+        by_market: dict[str, dict[str, Any]] = {}
+        by_event: dict[str, list[str]] = {}
+
+        for result in raw_results:
+            raw = result.get("raw_forecast_data")
+            if not raw:
+                continue
+            mid = raw.get("market_id")
+            if not mid:
+                continue
+            by_market[mid] = raw
+            event_slug = raw.get("event_slug") or ""
+            if event_slug:
+                by_event.setdefault(event_slug, []).append(mid)
+
+        # Build enriched intents with sibling market info
+        enriched: list[dict[str, Any]] = []
+        for mid, raw in by_market.items():
+            event_slug = raw.get("event_slug") or ""
+            sibling_ids = by_event.get(event_slug, [])
+            siblings = []
+            for sid in sibling_ids:
+                if sid == mid:
+                    continue
+                sib = by_market.get(sid)
+                if sib:
+                    siblings.append({
+                        "market_id": sid,
+                        "market_question": sib.get("market_question", ""),
+                        "yes_price": sib.get("yes_price", 0),
+                        "no_price": sib.get("no_price", 0),
+                        "bucket_low_c": sib.get("bucket_low_c"),
+                        "bucket_high_c": sib.get("bucket_high_c"),
+                        "liquidity": sib.get("liquidity", 0),
+                        "clob_token_ids": sib.get("clob_token_ids"),
+                    })
+
+            enriched_intent = dict(raw)
+            enriched_intent["sibling_markets"] = siblings
+            enriched.append(enriched_intent)
+
+        return enriched
 
     async def _fetch_weather_markets(self, limit: int) -> list:
         """Fetch markets that are parseable by the weather contract parser.

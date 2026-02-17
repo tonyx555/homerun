@@ -89,6 +89,32 @@ TRADER_TEMPLATES: list[dict[str, Any]] = [
         },
     },
     {
+        "id": "opportunity_ported",
+        "name": "Opportunity Ported Stack",
+        "description": "Scanner execution tuned for flash-reversion and tail-carry opportunities.",
+        "source_configs": [
+            {
+                "source_key": "scanner",
+                "strategy_key": "opportunity_flash_reversion",
+                "strategy_params": {
+                    "min_edge_percent": 3.0,
+                    "min_confidence": 0.4,
+                    "max_risk_score": 0.8,
+                    "min_liquidity": 1500.0,
+                    "min_abs_move_5m": 1.5,
+                    "sizing_policy": "kelly",
+                    "kelly_fractional_scale": 0.5,
+                    "base_size_usd": 16.0,
+                },
+            }
+        ],
+        "interval_seconds": 60,
+        "risk_limits": {
+            "max_open_orders": 8,
+            "max_per_market_exposure_usd": 300.0,
+        },
+    },
+    {
         "id": "traders_flow",
         "name": "Traders Flow",
         "description": "Confluence trader-flow strategy across tracked and pool scopes.",

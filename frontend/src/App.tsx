@@ -358,7 +358,10 @@ function App() {
 
   // WebSocket for real-time updates
   const { isConnected, lastMessage } = useWebSocket('/ws')
-  useRealtimeInvalidation(lastMessage, queryClient, setScannerActivity)
+  useRealtimeInvalidation(lastMessage, queryClient, setScannerActivity, {
+    activeTab,
+    opportunitiesView,
+  })
   useDisplayedOpportunityRefresh({
     activeTab,
     opportunitiesView,

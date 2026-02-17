@@ -725,7 +725,10 @@ class AppSettings(Base):
     # Scanner Settings
     scan_interval_seconds = Column(Integer, default=60)
     min_profit_threshold = Column(Float, default=2.5)
-    max_markets_to_scan = Column(Integer, default=500)
+    max_markets_to_scan = Column(Integer, default=5000)
+    max_events_to_scan = Column(Integer, default=3000)
+    market_fetch_page_size = Column(Integer, default=200)
+    market_fetch_order = Column(String, default="volume")
     min_liquidity = Column(Float, default=1000.0)
 
     # Discovery Engine Settings
@@ -788,7 +791,7 @@ class AppSettings(Base):
     min_annualized_roi = Column(Float, default=10.0)
     max_resolution_months = Column(Integer, default=18)
     max_plausible_roi = Column(Float, default=30.0)
-    max_trade_legs = Column(Integer, default=8)
+    max_trade_legs = Column(Integer, default=6)
     min_liquidity_per_leg = Column(Float, default=500.0)
 
     # NegRisk Exhaustivity Thresholds
@@ -822,7 +825,7 @@ class AppSettings(Base):
     btc_eth_hf_series_eth_15m = Column(String, default="10191")
     btc_eth_hf_series_sol_15m = Column(String, default="10423")
     btc_eth_hf_series_xrp_15m = Column(String, default="10422")
-    btc_eth_hf_series_btc_5m = Column(String, default="")
+    btc_eth_hf_series_btc_5m = Column(String, default="10684")
     btc_eth_hf_series_eth_5m = Column(String, default="")
     btc_eth_hf_series_sol_5m = Column(String, default="")
     btc_eth_hf_series_xrp_5m = Column(String, default="")
@@ -982,11 +985,11 @@ class AppSettings(Base):
     weather_workflow_enabled = Column(Boolean, default=True)
     weather_workflow_auto_run = Column(Boolean, default=True)
     weather_workflow_scan_interval_seconds = Column(Integer, default=14400)
-    weather_workflow_entry_max_price = Column(Float, default=0.25)
+    weather_workflow_entry_max_price = Column(Float, default=0.92)
     weather_workflow_take_profit_price = Column(Float, default=0.85)
     weather_workflow_stop_loss_pct = Column(Float, default=50.0)
-    weather_workflow_min_edge_percent = Column(Float, default=8.0)
-    weather_workflow_min_confidence = Column(Float, default=0.6)
+    weather_workflow_min_edge_percent = Column(Float, default=2.0)
+    weather_workflow_min_confidence = Column(Float, default=0.3)
     weather_workflow_min_model_agreement = Column(Float, default=0.75)
     weather_workflow_min_liquidity = Column(Float, default=500.0)
     weather_workflow_max_markets_per_scan = Column(Integer, default=200)

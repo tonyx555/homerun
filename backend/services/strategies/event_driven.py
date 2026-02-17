@@ -270,29 +270,35 @@ class EventDrivenStrategy(BaseStrategy):
 
     def _detect_catalysts(self) -> list[tuple[str, float, float]]:
         """
-        Detect catalyst moves: markets that moved > 12% with follow-through.
+        Detect catalyst moves: markets that moved > 12%.
+
+        When we have >=3 points, also require same-direction follow-through to
+        suppress one-tick noise. With only 2 points available, allow a large
+        move so the strategy can react on the first repricing jump.
 
         Returns list of (market_id, move_direction, move_magnitude).
         move_direction is positive for upward moves, negative for downward.
         """
         catalysts = []
         for market_id, history in self._price_history.items():
-            if len(history) < 3:
+            if len(history) < 2:
                 continue
 
-            pre_prev = history[-3][1]
             prev_price = history[-2][1]
             curr_price = history[-1][1]
             move = curr_price - prev_price
-            confirming_move = prev_price - pre_prev
 
             if abs(move) < _CATALYST_THRESHOLD:
                 continue
-            if abs(confirming_move) < _MIN_CONFIRMING_MOVE:
-                continue
-            # Require same-direction price momentum to reduce one-tick noise.
-            if move * confirming_move <= 0:
-                continue
+
+            if len(history) >= 3:
+                pre_prev = history[-3][1]
+                confirming_move = prev_price - pre_prev
+                if abs(confirming_move) < _MIN_CONFIRMING_MOVE:
+                    continue
+                # Require same-direction price momentum to reduce one-tick noise.
+                if move * confirming_move <= 0:
+                    continue
             catalysts.append((market_id, move, abs(move)))
 
         return catalysts
@@ -337,11 +343,10 @@ class EventDrivenStrategy(BaseStrategy):
             else False
         )
 
-        # 1. Same event — related, but still require keyword overlap to avoid
-        # broad fan-out in large sports events.
+        # 1. Same event — always related.
         if catalyst_event and catalyst_event in event_market_ids:
             for mid in event_market_ids[catalyst_event]:
-                if mid != catalyst_id and self._has_keyword_overlap(catalyst_id, mid):
+                if mid != catalyst_id:
                     related[mid] = True
 
         # 2. Keyword overlap with Jaccard ratio check

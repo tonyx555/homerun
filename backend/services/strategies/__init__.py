@@ -16,6 +16,9 @@ from .stat_arb import StatArbStrategy
 from .event_driven import EventDrivenStrategy
 from .temporal_decay import TemporalDecayStrategy
 from .correlation_arb import CorrelationArbStrategy
+from .flash_crash_reversion import FlashCrashReversionStrategy
+from .tail_end_carry import TailEndCarryStrategy
+from .spread_dislocation import SpreadDislocationStrategy
 
 __all__ = [
     "BasicArbStrategy",
@@ -36,4 +39,7 @@ __all__ = [
     "EventDrivenStrategy",
     "TemporalDecayStrategy",
     "CorrelationArbStrategy",
+    "FlashCrashReversionStrategy",
+    "TailEndCarryStrategy",
+    "SpreadDislocationStrategy",
 ]

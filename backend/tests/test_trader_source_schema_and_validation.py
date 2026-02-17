@@ -46,8 +46,14 @@ async def test_crypto_schema_exposes_exact_timeframe_strategies(tmp_path):
     async with session_factory() as session:
         schema = await build_trader_config_schema(session)
     crypto_source = next(source for source in schema["sources"] if source["key"] == "crypto")
-    crypto_strategies = [str(option["key"]) for option in crypto_source.get("strategy_options", [])]
-    assert crypto_strategies == ["crypto_5m", "crypto_15m", "crypto_1h", "crypto_4h"]
+    crypto_strategies = {str(option["key"]) for option in crypto_source.get("strategy_options", [])}
+    assert crypto_strategies == {
+        "crypto_5m",
+        "crypto_15m",
+        "crypto_1h",
+        "crypto_4h",
+        "crypto_spike_reversion",
+    }
     await engine.dispose()
 
 
@@ -59,11 +65,16 @@ async def test_scanner_and_weather_have_separate_strategy_sets(tmp_path):
     scanner_source = next(source for source in schema["sources"] if source["key"] == "scanner")
     weather_source = next(source for source in schema["sources"] if source["key"] == "weather")
 
-    scanner_strategies = [str(option["key"]) for option in scanner_source.get("strategy_options", [])]
-    weather_strategies = [str(option["key"]) for option in weather_source.get("strategy_options", [])]
+    scanner_strategies = {str(option["key"]) for option in scanner_source.get("strategy_options", [])}
+    weather_strategies = {str(option["key"]) for option in weather_source.get("strategy_options", [])}
 
-    assert scanner_strategies == ["opportunity_general", "opportunity_structural"]
-    assert weather_strategies == ["weather_consensus", "weather_alerts"]
+    assert scanner_strategies == {
+        "opportunity_general",
+        "opportunity_structural",
+        "opportunity_flash_reversion",
+        "opportunity_tail_carry",
+    }
+    assert weather_strategies == {"weather_consensus", "weather_alerts"}
     await engine.dispose()
 
 

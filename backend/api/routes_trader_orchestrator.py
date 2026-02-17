@@ -29,7 +29,7 @@ router = APIRouter(prefix="/trader-orchestrator", tags=["Trader Orchestrator"])
 
 # ---------------------------------------------------------------------------
 # Authentication dependency for state-changing orchestrator endpoints.
-# Set ORCHESTRATOR_API_KEY in environment/.env to enable. When set, callers
+# Set ORCHESTRATOR_API_KEY in environment to enable. When set, callers
 # must pass the same value in the X-API-Key header.
 # ---------------------------------------------------------------------------
 _ORCHESTRATOR_API_KEY: str | None = os.environ.get("ORCHESTRATOR_API_KEY") or None

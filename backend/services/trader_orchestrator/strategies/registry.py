@@ -13,11 +13,16 @@ from .opportunity_weather import (
     OpportunityGeneralStrategy,
     OpportunityStructuralStrategy,
 )
+from .opportunity_ported import (
+    OpportunityFlashReversionStrategy,
+    OpportunityTailCarryStrategy,
+)
 from .traders_flow import TradersFlowStrategy
 from .weather_models import (
     WeatherAlertsStrategy,
     WeatherConsensusStrategy,
 )
+from .crypto_spike_reversion import CryptoSpikeReversionStrategy
 
 
 # Static strategy map is kept as a seed/reference fallback only.
@@ -29,9 +34,12 @@ _REFERENCE_STRATEGIES: dict[str, TraderStrategy] = {
     NewsReactionStrategy.key: NewsReactionStrategy(),
     OpportunityGeneralStrategy.key: OpportunityGeneralStrategy(),
     OpportunityStructuralStrategy.key: OpportunityStructuralStrategy(),
+    OpportunityFlashReversionStrategy.key: OpportunityFlashReversionStrategy(),
+    OpportunityTailCarryStrategy.key: OpportunityTailCarryStrategy(),
     WeatherConsensusStrategy.key: WeatherConsensusStrategy(),
     WeatherAlertsStrategy.key: WeatherAlertsStrategy(),
     TradersFlowStrategy.key: TradersFlowStrategy(),
+    CryptoSpikeReversionStrategy.key: CryptoSpikeReversionStrategy(),
 }
 
 _STRATEGY_ALIASES: dict[str, str] = {

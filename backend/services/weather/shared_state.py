@@ -24,6 +24,9 @@ WEATHER_SNAPSHOT_ID = "latest"
 WEATHER_CONTROL_ID = "default"
 MIN_TIME_TO_RESOLUTION = timedelta(minutes=30)
 
+# In-memory cache of enriched intents for strategy consumption within a cycle.
+_enriched_weather_intents: list[dict[str, Any]] = []
+
 
 def _parse_iso_datetime(value: str) -> datetime:
     text = value.strip()
@@ -623,3 +626,20 @@ async def update_weather_settings(
     db.updated_at = utcnow()
     await session.commit()
     return await get_weather_settings(session)
+
+
+async def store_enriched_weather_intents(
+    session: AsyncSession,
+    intents: list[dict[str, Any]],
+) -> None:
+    """Store enriched weather intents for strategy consumption within a cycle.
+
+    Uses module-level cache since these are ephemeral per-cycle data.
+    """
+    global _enriched_weather_intents
+    _enriched_weather_intents = list(intents)
+
+
+def get_enriched_weather_intents() -> list[dict[str, Any]]:
+    """Retrieve the latest enriched weather intents for strategy evaluation."""
+    return list(_enriched_weather_intents)

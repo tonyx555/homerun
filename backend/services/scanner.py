@@ -65,6 +65,9 @@ class ArbitrageScanner:
             "correlation_arb": MispricingType.CROSS_MARKET,
             "market_making": MispricingType.WITHIN_MARKET,
             "stat_arb": MispricingType.WITHIN_MARKET,
+            "flash_crash_reversion": MispricingType.WITHIN_MARKET,
+            "tail_end_carry": MispricingType.WITHIN_MARKET,
+            "spread_dislocation": MispricingType.WITHIN_MARKET,
         }
         self._running = False
         self._enabled = True
@@ -866,8 +869,20 @@ class ArbitrageScanner:
                 events = [e for e in events if e.markets]
                 print(f"  Targeted scan: narrowed to {len(markets)} markets across {len(events)} events")
 
-            print(f"  Fetched {len(events)} Polymarket events and {len(markets)} markets")
-            await self._set_activity(f"Fetched {len(events)} events, {len(markets)} markets")
+            # Deduplicate: merge markets from events that aren't in the flat list.
+            # Events may contain nested markets beyond the flat market cap.
+            flat_ids = {m.id for m in markets}
+            extra_from_events = 0
+            for event in events:
+                for em in event.markets:
+                    if em.id not in flat_ids:
+                        markets.append(em)
+                        flat_ids.add(em.id)
+                        extra_from_events += 1
+
+            dedup_msg = f" (+{extra_from_events} from events)" if extra_from_events else ""
+            print(f"  Fetched {len(events)} Polymarket events and {len(markets)} markets{dedup_msg}")
+            await self._set_activity(f"Fetched {len(events)} events, {len(markets)} markets{dedup_msg}")
 
             # Fetch Kalshi markets and merge them so ALL strategies
             # (not just cross-platform) can detect opportunities on Kalshi.

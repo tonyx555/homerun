@@ -40,7 +40,9 @@ class ConfigValidator:
         # Scanner parameters
         self._check_range(result, "SCAN_INTERVAL_SECONDS", settings.SCAN_INTERVAL_SECONDS, 10, 3600)
         self._check_range(result, "MIN_PROFIT_THRESHOLD", settings.MIN_PROFIT_THRESHOLD, 0.001, 0.5)
-        self._check_range(result, "MAX_MARKETS_TO_SCAN", settings.MAX_MARKETS_TO_SCAN, 1, 5000)
+        self._check_range(result, "MAX_MARKETS_TO_SCAN", settings.MAX_MARKETS_TO_SCAN, 1, 10000)
+        self._check_range(result, "MAX_EVENTS_TO_SCAN", settings.MAX_EVENTS_TO_SCAN, 1, 10000)
+        self._check_range(result, "MARKET_FETCH_PAGE_SIZE", settings.MARKET_FETCH_PAGE_SIZE, 50, 500)
         self._check_range(result, "MIN_LIQUIDITY", settings.MIN_LIQUIDITY, 0, 1_000_000)
 
         # Trading safety limits

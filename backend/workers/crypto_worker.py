@@ -46,6 +46,8 @@ _oracle_history_by_asset: dict[str, deque[tuple[int, float]]] = {}
 _IDLE_INTERVAL_SECONDS = 15
 _MIN_LOOP_SLEEP_SECONDS = 0.1
 _VIEWER_HEARTBEAT_SECONDS = 20
+_WS_FEED_RETRY_INITIAL_SECONDS = 1.0
+_WS_FEED_RETRY_MAX_SECONDS = 60.0
 
 
 def _to_float(value: object) -> float | None:
@@ -367,10 +369,15 @@ async def _run_loop() -> None:
     feed_manager = None
     ws_feeds_running = False
     subscribed_tokens: set[str] = set()
+    ws_feed_retry_delay_seconds = _WS_FEED_RETRY_INITIAL_SECONDS
+    ws_feed_next_retry_monotonic = 0.0
 
     async def _ensure_ws_feeds_running() -> None:
-        nonlocal feed_manager, ws_feeds_running
+        nonlocal feed_manager, ws_feeds_running, ws_feed_retry_delay_seconds, ws_feed_next_retry_monotonic
         if ws_feeds_running or not settings.WS_FEED_ENABLED:
+            return
+        now_monotonic = time.monotonic()
+        if now_monotonic < ws_feed_next_retry_monotonic:
             return
         try:
             from services.ws_feeds import get_feed_manager
@@ -390,9 +397,18 @@ async def _run_loop() -> None:
             if not feed_manager._started:
                 await feed_manager.start()
             ws_feeds_running = True
+            ws_feed_retry_delay_seconds = _WS_FEED_RETRY_INITIAL_SECONDS
+            ws_feed_next_retry_monotonic = 0.0
             logger.info("Crypto worker WebSocket feeds started")
         except Exception as exc:
-            logger.warning("Crypto worker WS feeds failed to start (non-critical): %s", exc)
+            retry_in = min(_WS_FEED_RETRY_MAX_SECONDS, max(1.0, float(ws_feed_retry_delay_seconds)))
+            ws_feed_next_retry_monotonic = time.monotonic() + retry_in
+            ws_feed_retry_delay_seconds = min(_WS_FEED_RETRY_MAX_SECONDS, retry_in * 2.0)
+            logger.warning(
+                "Crypto worker WS feeds failed to start (non-critical): %s; retrying in %.1fs",
+                exc,
+                retry_in,
+            )
 
     await _ensure_ws_feeds_running()
 
@@ -432,6 +448,8 @@ async def _run_loop() -> None:
                     await clear_worker_run_request(session, worker_name)
             except Exception:
                 pass
+
+        await _ensure_ws_feeds_running()
 
         run_at = utcnow()
         markets_payload: list[dict] = []

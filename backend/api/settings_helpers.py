@@ -9,13 +9,13 @@ from models.database import AppSettings
 from utils.secrets import decrypt_secret, encrypt_secret
 
 SEARCH_FILTER_DEFAULTS: dict[str, Any] = {
-    "min_liquidity_hard": 200.0,
-    "min_position_size": 25.0,
-    "min_absolute_profit": 5.0,
+    "min_liquidity_hard": 1000.0,
+    "min_position_size": 50.0,
+    "min_absolute_profit": 10.0,
     "min_annualized_roi": 10.0,
     "max_resolution_months": 18,
     "max_plausible_roi": 30.0,
-    "max_trade_legs": 8,
+    "max_trade_legs": 6,
     "min_liquidity_per_leg": 500.0,
     "negrisk_min_total_yes": 0.95,
     "negrisk_warn_total_yes": 0.97,
@@ -311,6 +311,9 @@ def scanner_payload(settings: AppSettings) -> dict[str, Any]:
         "scan_interval_seconds": settings.scan_interval_seconds,
         "min_profit_threshold": settings.min_profit_threshold,
         "max_markets_to_scan": settings.max_markets_to_scan,
+        "max_events_to_scan": getattr(settings, "max_events_to_scan", None) or 3000,
+        "market_fetch_page_size": getattr(settings, "market_fetch_page_size", None) or 200,
+        "market_fetch_order": getattr(settings, "market_fetch_order", None) or "volume",
         "min_liquidity": settings.min_liquidity,
     }
 
@@ -593,8 +596,20 @@ def world_intelligence_payload(settings: AppSettings) -> dict[str, Any]:
 
 def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]:
     """Apply a partial UpdateSettingsRequest onto an AppSettings row."""
-    if request.polymarket:
-        pm = request.polymarket
+    polymarket = getattr(request, "polymarket", None)
+    kalshi = getattr(request, "kalshi", None)
+    llm = getattr(request, "llm", None)
+    notifications = getattr(request, "notifications", None)
+    scanner = getattr(request, "scanner", None)
+    trading = getattr(request, "trading", None)
+    maintenance = getattr(request, "maintenance", None)
+    discovery = getattr(request, "discovery", None)
+    search_filters = getattr(request, "search_filters", None)
+    trading_proxy = getattr(request, "trading_proxy", None)
+    world_intelligence = getattr(request, "world_intelligence", None)
+
+    if polymarket:
+        pm = polymarket
         if pm.api_key is not None:
             set_encrypted_secret(settings, "polymarket_api_key", pm.api_key)
         if pm.api_secret is not None:
@@ -604,8 +619,8 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
         if pm.private_key is not None:
             set_encrypted_secret(settings, "polymarket_private_key", pm.private_key)
 
-    if request.kalshi:
-        kal = request.kalshi
+    if kalshi:
+        kal = kalshi
         if kal.email is not None:
             settings.kalshi_email = kal.email or None
         if kal.password is not None:
@@ -613,8 +628,7 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
         if kal.api_key is not None:
             set_encrypted_secret(settings, "kalshi_api_key", kal.api_key)
 
-    if request.llm:
-        llm = request.llm
+    if llm:
         if llm.provider is not None:
             settings.llm_provider = llm.provider
         if llm.openai_api_key is not None:
@@ -641,8 +655,8 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
         if llm.max_monthly_spend is not None:
             settings.ai_max_monthly_spend = llm.max_monthly_spend
 
-    if request.notifications:
-        notif = request.notifications
+    if notifications:
+        notif = notifications
         settings.notifications_enabled = notif.enabled
         if notif.telegram_bot_token is not None:
             set_encrypted_secret(settings, "telegram_bot_token", notif.telegram_bot_token)
@@ -668,15 +682,18 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
             getattr(notif, "notify_autotrader_summary_per_trader", False)
         )
 
-    if request.scanner:
-        scan = request.scanner
+    if scanner:
+        scan = scanner
         settings.scan_interval_seconds = scan.scan_interval_seconds
         settings.min_profit_threshold = scan.min_profit_threshold
         settings.max_markets_to_scan = scan.max_markets_to_scan
+        settings.max_events_to_scan = getattr(scan, "max_events_to_scan", 3000)
+        settings.market_fetch_page_size = getattr(scan, "market_fetch_page_size", 200)
+        settings.market_fetch_order = getattr(scan, "market_fetch_order", "volume")
         settings.min_liquidity = scan.min_liquidity
 
-    if request.trading:
-        trade = request.trading
+    if trading:
+        trade = trading
         settings.trading_enabled = trade.trading_enabled
         settings.max_trade_size_usd = trade.max_trade_size_usd
         settings.max_daily_trade_volume = trade.max_daily_trade_volume
@@ -699,8 +716,8 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
         settings.btc_eth_hf_series_sol_4h = trade.btc_eth_hf_series_sol_4h
         settings.btc_eth_hf_series_xrp_4h = trade.btc_eth_hf_series_xrp_4h
 
-    if request.maintenance:
-        maint = request.maintenance
+    if maintenance:
+        maint = maintenance
         settings.auto_cleanup_enabled = maint.auto_cleanup_enabled
         settings.cleanup_interval_hours = maint.cleanup_interval_hours
         settings.cleanup_resolved_trade_days = maint.cleanup_resolved_trade_days
@@ -712,8 +729,7 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
         settings.market_cache_weak_entry_grace_days = maint.market_cache_weak_entry_grace_days
         settings.market_cache_max_entries_per_slug = maint.market_cache_max_entries_per_slug
 
-    if request.discovery:
-        discovery = request.discovery
+    if discovery:
         settings.discovery_max_discovered_wallets = discovery.max_discovered_wallets
         settings.discovery_maintenance_enabled = discovery.maintenance_enabled
         settings.discovery_keep_recent_trade_days = discovery.keep_recent_trade_days
@@ -778,15 +794,15 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
         )
         settings.discovery_pool_recompute_interval_seconds = discovery.pool_recompute_interval_seconds
 
-    if request.search_filters:
-        sf = request.search_filters
+    if search_filters:
+        sf = search_filters
         provided_fields = getattr(sf, "model_fields_set", set())
         for field_name in SEARCH_FILTER_DEFAULTS:
             if field_name in provided_fields:
                 setattr(settings, field_name, getattr(sf, field_name))
 
-    if request.trading_proxy:
-        proxy = request.trading_proxy
+    if trading_proxy:
+        proxy = trading_proxy
         settings.trading_proxy_enabled = proxy.enabled
         if proxy.proxy_url is not None:
             set_encrypted_secret(settings, "trading_proxy_url", proxy.proxy_url)
@@ -794,7 +810,6 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
         settings.trading_proxy_timeout = proxy.timeout
         settings.trading_proxy_require_vpn = proxy.require_vpn
 
-    world_intelligence = getattr(request, "world_intelligence", None)
     if world_intelligence is not None:
         current_raw = getattr(settings, "world_intel_settings_json", None)
         current_config = current_raw if isinstance(current_raw, dict) else {}
@@ -861,8 +876,8 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
 
     settings.updated_at = utcnow()
     return {
-        "needs_llm_reinit": bool(request.llm),
-        "needs_proxy_reinit": bool(request.trading_proxy),
-        "needs_filter_reload": bool(request.search_filters),
+        "needs_llm_reinit": bool(llm),
+        "needs_proxy_reinit": bool(trading_proxy),
+        "needs_filter_reload": bool(search_filters),
         "needs_world_intel_reload": world_intelligence is not None,
     }

@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { memo, useState, useMemo } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ChevronDown,
@@ -317,7 +317,7 @@ interface Props {
 
 // ─── Main Component ───────────────────────────────────────
 
-export default function OpportunityCard({ opportunity, onExecute, onOpenCopilot, onSearchNews }: Props) {
+function OpportunityCard({ opportunity, onExecute, onOpenCopilot, onSearchNews }: Props) {
   const [expanded, setExpanded] = useState(false)
   const [aiExpanded, setAiExpanded] = useState(false)
   const queryClient = useQueryClient()
@@ -1248,5 +1248,7 @@ function MiniMetric({
 }
 
 // ─── Exports for shared use ───────────────────────────────
+
+export default memo(OpportunityCard)
 
 export { STRATEGY_COLORS, STRATEGY_NAMES, STRATEGY_ABBREV, RECOMMENDATION_COLORS, ACCENT_BAR_COLORS }

@@ -199,6 +199,69 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         sort_order=170,
     ),
     SystemOpportunityStrategySeed(
+        slug="flash_crash_reversion",
+        source_key="scanner",
+        name="Flash Crash Reversion",
+        description="Short-window crash-reversion filter with execution gates.",
+        import_module="services.strategies.flash_crash_reversion",
+        class_name="FlashCrashReversionStrategy",
+        sort_order=175,
+        config_schema={
+            "param_fields": [
+                {"key": "lookback_seconds", "label": "Lookback (seconds)", "type": "number", "min": 30},
+                {"key": "drop_threshold", "label": "Drop Threshold", "type": "number", "min": 0.01, "max": 0.5},
+                {"key": "min_rebound_fraction", "label": "Min Rebound Fraction", "type": "number", "min": 0.1, "max": 0.95},
+                {"key": "min_target_move", "label": "Min Target Move", "type": "number", "min": 0.005, "max": 0.15},
+                {"key": "max_entry_price", "label": "Max Entry Price", "type": "number", "min": 0.1, "max": 1},
+                {"key": "max_spread", "label": "Max Spread", "type": "number", "min": 0.005, "max": 0.25},
+                {"key": "min_liquidity", "label": "Min Liquidity", "type": "number", "min": 0},
+            ]
+        },
+    ),
+    SystemOpportunityStrategySeed(
+        slug="tail_end_carry",
+        source_key="scanner",
+        name="Tail-End Carry",
+        description="Near-expiry high-probability carry opportunities.",
+        import_module="services.strategies.tail_end_carry",
+        class_name="TailEndCarryStrategy",
+        sort_order=176,
+        config_schema={
+            "param_fields": [
+                {"key": "min_probability", "label": "Min Probability", "type": "number", "min": 0.5, "max": 1},
+                {"key": "max_probability", "label": "Max Probability", "type": "number", "min": 0.5, "max": 1},
+                {"key": "min_days_to_resolution", "label": "Min Days To Resolution", "type": "number", "min": 0},
+                {"key": "max_days_to_resolution", "label": "Max Days To Resolution", "type": "number", "min": 0},
+                {"key": "min_liquidity", "label": "Min Liquidity", "type": "number", "min": 0},
+                {"key": "max_spread", "label": "Max Spread", "type": "number", "min": 0.005, "max": 0.2},
+                {"key": "min_repricing_buffer", "label": "Min Repricing Buffer", "type": "number", "min": 0.005, "max": 0.1},
+                {"key": "repricing_weight", "label": "Repricing Weight", "type": "number", "min": 0.1, "max": 0.9},
+            ]
+        },
+    ),
+    SystemOpportunityStrategySeed(
+        slug="spread_dislocation",
+        source_key="scanner",
+        name="Spread Dislocation",
+        description="Wide bid/ask dislocation filter for spread capture entries.",
+        import_module="services.strategies.spread_dislocation",
+        class_name="SpreadDislocationStrategy",
+        sort_order=177,
+        config_schema={
+            "param_fields": [
+                {"key": "min_spread", "label": "Min Spread", "type": "number", "min": 0.005, "max": 0.5},
+                {"key": "max_spread", "label": "Max Spread", "type": "number", "min": 0.01, "max": 0.6},
+                {"key": "min_mid_price", "label": "Min Mid Price", "type": "number", "min": 0.01, "max": 0.99},
+                {"key": "max_mid_price", "label": "Max Mid Price", "type": "number", "min": 0.01, "max": 0.99},
+                {"key": "capture_fraction", "label": "Capture Fraction", "type": "number", "min": 0.1, "max": 0.95},
+                {"key": "min_target_move", "label": "Min Target Move", "type": "number", "min": 0.002, "max": 0.15},
+                {"key": "min_liquidity", "label": "Min Liquidity", "type": "number", "min": 0},
+                {"key": "min_days_to_resolution", "label": "Min Days To Resolution", "type": "number", "min": 0},
+                {"key": "max_days_to_resolution", "label": "Max Days To Resolution", "type": "number", "min": 0},
+            ]
+        },
+    ),
+    SystemOpportunityStrategySeed(
         slug="news_edge",
         source_key="news",
         name="News Edge",

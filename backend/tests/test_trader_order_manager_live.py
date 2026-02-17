@@ -32,7 +32,7 @@ async def test_submit_order_live_uses_execution_adapter(monkeypatch):
         direction="buy_yes",
         entry_price=0.40,
         market_question="Will X happen?",
-        payload_json={},
+        payload_json={"selected_token_id": "123456789012345678901"},
     )
 
     status, effective_price, error_message, payload = await order_manager.submit_order(
@@ -47,6 +47,7 @@ async def test_submit_order_live_uses_execution_adapter(monkeypatch):
     assert payload["mode"] == "live"
     assert payload["market_id"] == "123456789012345678"
     assert payload["shares"] == pytest.approx(102.5, rel=1e-6)
+    assert payload["token_id_source"] == "payload.selected_token_id"
     execution_mock.assert_awaited_once()
 
 
@@ -58,6 +59,28 @@ async def test_submit_order_live_fails_without_token_id():
         direction="buy_yes",
         entry_price=0.40,
         market_question="Will Y happen?",
+        payload_json={},
+    )
+
+    status, _price, error_message, payload = await order_manager.submit_order(
+        mode="live",
+        signal=signal,
+        size_usd=40.0,
+    )
+
+    assert status == "failed"
+    assert "token_id" in str(error_message or "")
+    assert payload["reason"] == "missing_token_id"
+
+
+@pytest.mark.asyncio
+async def test_submit_order_live_does_not_fallback_to_market_id_token():
+    signal = SimpleNamespace(
+        id="sig-2b",
+        market_id="123456789012345678901",
+        direction="buy_yes",
+        entry_price=0.40,
+        market_question="Will Y2 happen?",
         payload_json={},
     )
 
