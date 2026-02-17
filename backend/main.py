@@ -114,11 +114,12 @@ async def lifespan(app: FastAPI):
 
             async with AsyncSessionLocal() as session:
                 seeded = await ensure_all_strategies_seeded(session)
-                await strategy_db_loader.refresh_from_db(session=session)
+                loaded = await strategy_db_loader.refresh_from_db(session=session)
             logger.info(
                 "Strategy registries loaded",
-                opportunity_seeded=seeded["opportunity"],
-                trader_seeded=seeded["trader"],
+                seeded=seeded.get("seeded", 0),
+                loaded=len(loaded.get("loaded", [])),
+                errors=len(loaded.get("errors", {})),
             )
         except Exception as e:
             logger.warning(f"Failed to preload strategy registries: {e}")
