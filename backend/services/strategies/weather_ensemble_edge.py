@@ -1,0 +1,337 @@
+"""
+Weather Ensemble Edge Strategy
+
+Uses GFS ensemble member data (31 members) to compute per-bucket probabilities
+via Monte Carlo counting. Each ensemble member represents a plausible future
+atmospheric state; the fraction of members landing in a temperature bucket is
+a direct, non-parametric probability estimate.
+
+When ensemble data is unavailable, an optional deterministic fallback uses a
+sigmoid-based probability model identical to the standard weather edge strategy.
+
+Pipeline:
+  1. Weather workflow fetches GFS ensemble forecasts (31 members)
+  2. Intent builder attaches raw ensemble_members array to each intent
+  3. This strategy counts the fraction of members in [bucket_low, bucket_high)
+  4. Direction is chosen by comparing ensemble probability to market price
+     (NOT using a fixed 0.5 threshold)
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Optional
+
+from config import settings
+from models import ArbitrageOpportunity, Event, Market
+from models.opportunity import MispricingType
+from services.strategies.base import BaseStrategy
+from services.weather.signal_engine import (
+    compute_confidence,
+    compute_model_agreement,
+    ensemble_bucket_probability,
+    temp_range_probability,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class WeatherEnsembleEdgeStrategy(BaseStrategy):
+    """
+    Weather Ensemble Edge Strategy
+
+    Counts the fraction of GFS ensemble members that fall within each
+    temperature bucket to derive a non-parametric model probability.
+    Compares that probability directly to market price for direction
+    (buy YES if model says underpriced, buy NO if overpriced).
+    """
+
+    strategy_type = "weather_ensemble_edge"
+    name = "Weather Ensemble Edge"
+    description = "Ensemble Monte Carlo: count fraction of GFS ensemble members in each temperature bucket"
+
+    DEFAULT_CONFIG = {
+        "min_edge_percent": 5.0,
+        "min_ensemble_members": 10,
+        "min_ensemble_agreement": 0.15,  # at least 15% of members in bucket
+        "max_entry_price": 0.85,
+        "risk_base_score": 0.30,
+        "deterministic_fallback": True,  # fall back to sigmoid when no ensemble data
+        "probability_scale_c": 2.0,  # sigmoid sharpness for fallback
+    }
+
+    def __init__(self):
+        super().__init__()
+        self._config = dict(self.DEFAULT_CONFIG)
+
+    def configure(self, config: dict) -> None:
+        """Apply user config overrides from the DB config column."""
+        if config:
+            for key in self.DEFAULT_CONFIG:
+                if key in config:
+                    self._config[key] = config[key]
+
+    def detect(
+        self,
+        events: list[Event],
+        markets: list[Market],
+        prices: dict[str, dict],
+    ) -> list[ArbitrageOpportunity]:
+        """Sync detect - returns empty.
+
+        WeatherEnsembleEdgeStrategy is fed by the weather workflow pipeline,
+        not the main scanner loop. Weather intents are converted to
+        opportunities by detect_from_intents().
+        """
+        return []
+
+    def detect_from_intents(
+        self,
+        intents: list[dict],
+        markets: list[Market],
+        events: list[Event],
+    ) -> list[ArbitrageOpportunity]:
+        """Convert weather trade intents into ArbitrageOpportunity objects.
+
+        Accepts enriched intents that include raw GFS ensemble member arrays.
+        Computes direction by comparing ensemble-derived probability to market
+        price.
+        """
+        if not intents:
+            return []
+
+        cfg = self._config
+        opportunities: list[ArbitrageOpportunity] = []
+        market_map = {m.id: m for m in markets}
+        event_map: dict[str, Event] = {}
+        for event in events:
+            for m in event.markets:
+                event_map[m.id] = event
+
+        for intent in intents:
+            try:
+                opp = self._evaluate_intent(intent, market_map, event_map, cfg)
+                if opp:
+                    opportunities.append(opp)
+            except Exception as e:
+                logger.debug("Ensemble Edge: skipped intent: %s", e)
+
+        if opportunities:
+            logger.info(
+                "Ensemble Edge: %d opportunities from %d intents",
+                len(opportunities),
+                len(intents),
+            )
+        return opportunities
+
+    def _evaluate_intent(
+        self,
+        intent: dict,
+        market_map: dict[str, Market],
+        event_map: dict[str, Event],
+        cfg: dict,
+    ) -> Optional[ArbitrageOpportunity]:
+        """Evaluate a single weather trade intent using ensemble member data.
+
+        Computes direction by comparing ensemble-derived model probability to
+        market price, NOT by checking against a fixed 0.5 threshold.
+        """
+        yes_price = float(intent.get("yes_price", 0.5))
+        no_price = float(intent.get("no_price", 0.5))
+        bucket_low = intent.get("bucket_low_c")
+        bucket_high = intent.get("bucket_high_c")
+        consensus_value_c = intent.get("consensus_value_c")
+
+        # ---- Ensemble data extraction ----
+        # For temp_max metrics the key is ensemble_daily_max; otherwise
+        # ensemble_members holds the raw GFS member values.
+        ensemble_data = intent.get("ensemble_members") or intent.get("ensemble_daily_max")
+
+        model_prob = None
+        ensemble_count = 0
+        ensemble_fraction = 0.0
+        used_ensemble = False
+
+        if ensemble_data and len(ensemble_data) >= int(cfg["min_ensemble_members"]):
+            if bucket_low is not None and bucket_high is not None:
+                ensemble_fraction = ensemble_bucket_probability(
+                    [float(v) for v in ensemble_data],
+                    float(bucket_low),
+                    float(bucket_high),
+                )
+                ensemble_count = len(ensemble_data)
+                model_prob = ensemble_fraction
+                used_ensemble = True
+
+        # ---- Deterministic fallback (sigmoid) ----
+        if model_prob is None and cfg.get("deterministic_fallback"):
+            scale_c = float(cfg.get("probability_scale_c", 2.0))
+            if (
+                bucket_low is not None
+                and bucket_high is not None
+                and consensus_value_c is not None
+            ):
+                model_prob = temp_range_probability(
+                    float(consensus_value_c),
+                    float(bucket_low),
+                    float(bucket_high),
+                    scale_c,
+                )
+
+        # No probability computed -- cannot proceed
+        if model_prob is None:
+            return None
+
+        # ---- Ensemble agreement gate ----
+        if used_ensemble and ensemble_fraction < float(cfg["min_ensemble_agreement"]):
+            return None
+
+        # ---- Direction: compare model probability to market price ----
+        if model_prob > yes_price:
+            direction = "buy_yes"
+            entry_price = yes_price
+            target_price = model_prob
+            edge_percent = (model_prob - yes_price) * 100.0
+        else:
+            direction = "buy_no"
+            entry_price = no_price
+            target_price = 1.0 - model_prob
+            edge_percent = ((1.0 - model_prob) - no_price) * 100.0
+
+        # ---- Edge and price filters ----
+        if edge_percent < float(cfg["min_edge_percent"]):
+            return None
+        if entry_price > float(cfg["max_entry_price"]):
+            return None
+
+        # ---- Market lookup ----
+        market_id = intent.get("market_id")
+        market = market_map.get(market_id) if market_id else None
+        if not market:
+            return None
+
+        event = event_map.get(market_id)
+        city = intent.get("location", "Unknown")
+
+        # ---- Position sizing ----
+        side = "YES" if direction == "buy_yes" else "NO"
+        token_id = None
+        if market.clob_token_ids:
+            idx = 0 if direction == "buy_yes" else (1 if len(market.clob_token_ids) > 1 else 0)
+            token_id = market.clob_token_ids[idx]
+
+        expected_payout = target_price
+        total_cost = entry_price
+        gross_profit = expected_payout - total_cost
+        fee_amount = expected_payout * self.fee
+        net_profit = gross_profit - fee_amount
+        roi = (net_profit / total_cost) * 100 if total_cost > 0 else 0
+
+        if roi < float(cfg["min_edge_percent"]) / 2:
+            return None
+
+        min_liquidity = market.liquidity
+        max_position = min(min_liquidity * 0.05, 400.0)
+
+        if max_position < settings.MIN_POSITION_SIZE:
+            return None
+
+        # ---- Risk scoring ----
+        risk_score = float(cfg["risk_base_score"])
+        risk_factors = [
+            "Weather-driven directional bet (ensemble forecast vs market)",
+        ]
+        if used_ensemble:
+            risk_factors.append(
+                f"Ensemble: {ensemble_count} members, {ensemble_fraction:.0%} in bucket"
+            )
+        else:
+            risk_factors.append("Deterministic fallback (no ensemble data)")
+            risk_score += 0.10
+
+        if edge_percent < 8.0:
+            risk_score += 0.05
+            risk_factors.append("Thin edge")
+        if entry_price > 0.75:
+            risk_score += 0.05
+            risk_factors.append("High entry price")
+        risk_score = min(risk_score, 1.0)
+
+        # ---- Confidence (reuse signal_engine helper for consistency) ----
+        # For ensemble strategies, use agreement proxy based on fraction
+        agreement_proxy = ensemble_fraction if used_ensemble else 0.5
+        source_count = 1 if used_ensemble else 0
+        source_spread_c = float(intent.get("source_spread_c") or 0)
+        confidence = compute_confidence(agreement_proxy, model_prob, source_count, source_spread_c)
+
+        # ---- Build opportunity ----
+        positions = [
+            {
+                "action": "BUY",
+                "outcome": side,
+                "price": entry_price,
+                "token_id": token_id,
+                "_ensemble_edge": {
+                    "city": city,
+                    "used_ensemble": used_ensemble,
+                    "ensemble_count": ensemble_count,
+                    "ensemble_fraction": ensemble_fraction,
+                    "model_probability": model_prob,
+                    "bucket_low_c": bucket_low,
+                    "bucket_high_c": bucket_high,
+                    "consensus_value_c": consensus_value_c,
+                    "edge_percent": edge_percent,
+                    "confidence": confidence,
+                    "direction": direction,
+                },
+            }
+        ]
+
+        market_dict = {
+            "id": market.id,
+            "slug": market.slug,
+            "question": market.question,
+            "yes_price": market.yes_price,
+            "no_price": market.no_price,
+            "liquidity": market.liquidity,
+        }
+
+        question = market.question or ""
+
+        if used_ensemble:
+            desc = (
+                f"Ensemble ({ensemble_count} members, {ensemble_fraction:.0%} in bucket) "
+                f"suggests {side} at ${entry_price:.2f} "
+                f"(model: {model_prob:.0%} vs market: {yes_price:.0%}, edge: {edge_percent:.1f}%)"
+            )
+        else:
+            desc = (
+                f"Sigmoid fallback suggests {side} at ${entry_price:.2f} "
+                f"(model: {model_prob:.0%} vs market: {yes_price:.0%}, edge: {edge_percent:.1f}%)"
+            )
+
+        return ArbitrageOpportunity(
+            strategy=self.strategy_type,
+            title=f"Ensemble Edge: {city} - {question[:40]}",
+            description=desc,
+            total_cost=total_cost,
+            expected_payout=expected_payout,
+            gross_profit=gross_profit,
+            fee=fee_amount,
+            net_profit=net_profit,
+            roi_percent=roi,
+            is_guaranteed=False,
+            roi_type="directional_payout",
+            risk_score=risk_score,
+            risk_factors=risk_factors,
+            markets=[market_dict],
+            event_id=event.id if event else None,
+            event_slug=event.slug if event else None,
+            event_title=event.title if event else None,
+            category=event.category if event else None,
+            min_liquidity=min_liquidity,
+            max_position_size=max_position,
+            resolution_date=market.end_date,
+            mispricing_type=MispricingType.NEWS_INFORMATION,
+            positions_to_take=positions,
+        )

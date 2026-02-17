@@ -295,6 +295,87 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                 {"key": "min_source_count", "label": "Min Forecast Sources", "type": "integer", "min": 1},
                 {"key": "max_source_spread_c", "label": "Max Source Spread (C)", "type": "number", "min": 0},
                 {"key": "max_entry_price", "label": "Max Entry Price", "type": "number", "min": 0, "max": 1},
+                {"key": "probability_scale_c", "label": "Sigmoid Scale (C)", "type": "number", "min": 0.5, "max": 5.0},
+                {"key": "risk_base_score", "label": "Base Risk Score", "type": "number", "min": 0, "max": 1},
+            ]
+        },
+    ),
+    SystemOpportunityStrategySeed(
+        slug="weather_ensemble_edge",
+        source_key="weather",
+        name="Weather Ensemble Edge",
+        description="Ensemble Monte Carlo: count fraction of 31 GFS ensemble members in each temperature bucket.",
+        import_module="services.strategies.weather_ensemble_edge",
+        class_name="WeatherEnsembleEdgeStrategy",
+        sort_order=201,
+        config_schema={
+            "param_fields": [
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0},
+                {"key": "min_ensemble_members", "label": "Min Ensemble Members", "type": "integer", "min": 1},
+                {"key": "min_ensemble_agreement", "label": "Min Ensemble Agreement", "type": "number", "min": 0, "max": 1},
+                {"key": "max_entry_price", "label": "Max Entry Price", "type": "number", "min": 0, "max": 1},
+                {"key": "deterministic_fallback", "label": "Deterministic Fallback", "type": "enum", "options": ["true", "false"]},
+                {"key": "probability_scale_c", "label": "Fallback Sigmoid Scale (C)", "type": "number", "min": 0.5, "max": 5.0},
+                {"key": "risk_base_score", "label": "Base Risk Score", "type": "number", "min": 0, "max": 1},
+            ]
+        },
+    ),
+    SystemOpportunityStrategySeed(
+        slug="weather_distribution",
+        source_key="weather",
+        name="Weather Distribution",
+        description="Full distribution comparison: build probability across all buckets, buy the most underpriced.",
+        import_module="services.strategies.weather_distribution",
+        class_name="WeatherDistributionStrategy",
+        sort_order=202,
+        config_schema={
+            "param_fields": [
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0},
+                {"key": "sigma_c", "label": "Sigma (C)", "type": "number", "min": 0.5, "max": 5.0},
+                {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
+                {"key": "max_entry_price", "label": "Max Entry Price", "type": "number", "min": 0, "max": 1},
+                {"key": "max_buckets_per_event", "label": "Max Buckets per Event", "type": "integer", "min": 1, "max": 10},
+                {"key": "risk_base_score", "label": "Base Risk Score", "type": "number", "min": 0, "max": 1},
+            ]
+        },
+    ),
+    SystemOpportunityStrategySeed(
+        slug="weather_conservative_no",
+        source_key="weather",
+        name="Weather Conservative NO",
+        description="Conservative NO-betting: bet NO on buckets far from forecast consensus for high win rate.",
+        import_module="services.strategies.weather_conservative_no",
+        class_name="WeatherConservativeNoStrategy",
+        sort_order=203,
+        config_schema={
+            "param_fields": [
+                {"key": "min_safe_distance_c", "label": "Min Distance from Forecast (C)", "type": "number", "min": 0},
+                {"key": "max_no_price", "label": "Max NO Price", "type": "number", "min": 0, "max": 1},
+                {"key": "min_model_agreement", "label": "Min Model Agreement", "type": "number", "min": 0, "max": 1},
+                {"key": "max_source_spread_c", "label": "Max Source Spread (C)", "type": "number", "min": 0},
+                {"key": "min_source_count", "label": "Min Forecast Sources", "type": "integer", "min": 1},
+                {"key": "max_positions_per_event", "label": "Max Positions per Event", "type": "integer", "min": 1, "max": 10},
+                {"key": "risk_base_score", "label": "Base Risk Score", "type": "number", "min": 0, "max": 1},
+            ]
+        },
+    ),
+    SystemOpportunityStrategySeed(
+        slug="weather_bucket_edge",
+        source_key="weather",
+        name="Weather Bucket Edge",
+        description="Per-bucket edge: compare model probability directly to market price for each temperature bucket.",
+        import_module="services.strategies.weather_bucket_edge",
+        class_name="WeatherBucketEdgeStrategy",
+        sort_order=204,
+        config_schema={
+            "param_fields": [
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0},
+                {"key": "probability_scale_c", "label": "Sigmoid Scale (C)", "type": "number", "min": 0.5, "max": 5.0},
+                {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
+                {"key": "min_model_agreement", "label": "Min Model Agreement", "type": "number", "min": 0, "max": 1},
+                {"key": "min_source_count", "label": "Min Forecast Sources", "type": "integer", "min": 1},
+                {"key": "max_source_spread_c", "label": "Max Source Spread (C)", "type": "number", "min": 0},
+                {"key": "max_entry_price", "label": "Max Entry Price", "type": "number", "min": 0, "max": 1},
                 {"key": "risk_base_score", "label": "Base Risk Score", "type": "number", "min": 0, "max": 1},
             ]
         },

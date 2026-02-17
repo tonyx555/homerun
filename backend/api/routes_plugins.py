@@ -371,6 +371,10 @@ async def get_plugin_docs():
             {"module": "models", "items": "Market, Event, ArbitrageOpportunity, StrategyType"},
             {"module": "services.strategies.base", "items": "BaseStrategy"},
             {"module": "services.strategies", "items": "Built-in strategy modules"},
+            {"module": "services.weather.signal_engine", "items": (
+                "Weather utility functions: clamp01, temp_range_probability, ensemble_bucket_probability, "
+                "compute_consensus, compute_model_agreement, compute_confidence, normalize_weights, logit"
+            )},
             {"module": "services.news", "items": "News ingestion/matching components"},
             {"module": "services.optimization", "items": "Optimization strategy helpers"},
             {"module": "services.ws_feeds", "items": "Realtime feed helpers"},
@@ -467,6 +471,104 @@ async def get_plugin_docs():
                 "get_news_for_market(market)": "Get recent news articles matched to a market",
                 "calculate_fees(cost, payout, n_legs)": "Calculate comprehensive fees for a trade",
             },
+        },
+        "weather_strategies": {
+            "description": (
+                "Weather strategies use detect_from_intents() instead of detect(). "
+                "The weather workflow passes enriched intents with raw forecast data, "
+                "ensemble members, and sibling market information. Each strategy computes "
+                "its own direction by comparing model probability to market price."
+            ),
+            "detect_from_intents_method": {
+                "signature": "def detect_from_intents(self, intents: list[dict], markets: list[Market], events: list[Event]) -> list[ArbitrageOpportunity]",
+                "description": "Called with enriched weather intents. Each strategy owns its direction logic.",
+            },
+            "enriched_intent_fields": {
+                "market_id": "str — Target market condition ID",
+                "market_question": "str — Human-readable market question",
+                "event_slug": "str — Parent event slug (for grouping sibling buckets)",
+                "yes_price": "float — Current YES price on market",
+                "no_price": "float — Current NO price on market",
+                "liquidity": "float — Market liquidity in USD",
+                "clob_token_ids": "list[str] — [yes_token_id, no_token_id]",
+                "location": "str — City/location (e.g., 'London', 'New York')",
+                "metric": "str — Weather metric (e.g., 'temp_max_range')",
+                "operator": "str — Contract operator ('between', 'gt', 'lt')",
+                "bucket_low_c": "float | None — Low end of temperature bucket in Celsius",
+                "bucket_high_c": "float | None — High end of temperature bucket in Celsius",
+                "threshold_c": "float | None — Single threshold for above/below contracts",
+                "target_time": "str — ISO datetime of forecast target",
+                "source_values_c": "dict[str, float] — Per-source temperature values (e.g., {'open_meteo:gfs_seamless': 7.2})",
+                "source_probabilities": "dict[str, float] — Per-source probabilities",
+                "source_weights": "dict[str, float] — Normalized source weights",
+                "consensus_value_c": "float | None — Weighted consensus temperature in Celsius",
+                "consensus_probability": "float | None — Weighted consensus probability",
+                "source_spread_c": "float | None — Max temperature spread across sources",
+                "source_count": "int — Number of forecast sources",
+                "model_agreement": "float — Cross-model agreement (0-1)",
+                "ensemble_members": "list[float] | None — GFS ensemble member values (up to 31 members)",
+                "ensemble_daily_max": "list[float] | None — Per-member daily max temperatures",
+                "sibling_markets": (
+                    "list[dict] — Other temperature buckets in the same event. "
+                    "Each has: market_id, market_question, yes_price, no_price, "
+                    "bucket_low_c, bucket_high_c, liquidity, clob_token_ids"
+                ),
+            },
+            "signal_engine_utilities": {
+                "description": "Import from services.weather.signal_engine for common calculations",
+                "functions": {
+                    "temp_range_probability(value_c, low_c, high_c, scale_c=2.0)": (
+                        "Probability a temperature falls in [low, high] using logistic CDF. "
+                        "Lower scale_c = sharper discrimination between buckets."
+                    ),
+                    "ensemble_bucket_probability(ensemble_values, low_c, high_c)": (
+                        "Count fraction of ensemble members in a temperature bucket. "
+                        "Monte Carlo approach — no parametric assumptions."
+                    ),
+                    "compute_consensus(source_probs, source_weights)": (
+                        "Weighted consensus probability from multiple forecast sources."
+                    ),
+                    "compute_model_agreement(source_probs)": (
+                        "Agreement metric: 1.0 - max spread across sources."
+                    ),
+                    "compute_confidence(agreement, consensus_yes, source_count, source_spread_c)": (
+                        "Blended confidence score from agreement, separation, and source depth."
+                    ),
+                    "clamp01(value)": "Clamp float to [0, 1].",
+                },
+            },
+            "built_in_weather_strategies": {
+                "weather_edge": (
+                    "Baseline consensus strategy. Compares model probability to market price "
+                    "using sigmoid CDF with configurable scale. Uses deterministic forecasts."
+                ),
+                "weather_ensemble_edge": (
+                    "Ensemble Monte Carlo. Counts fraction of 31 GFS ensemble members in each "
+                    "bucket. Falls back to sigmoid when ensemble data unavailable."
+                ),
+                "weather_distribution": (
+                    "Full distribution comparison. Builds probability mass across ALL temperature "
+                    "buckets in an event, normalizes to sum=1, buys the most underpriced bucket."
+                ),
+                "weather_conservative_no": (
+                    "Conservative NO-betting. Only bets NO on buckets far from consensus forecast. "
+                    "High win rate, lower per-trade profit. Never buys YES."
+                ),
+                "weather_bucket_edge": (
+                    "Per-bucket edge with tunable sigmoid. Like weather_edge but with tighter "
+                    "default sigmoid scale (1.5 vs 2.0) for sharper bucket discrimination."
+                ),
+            },
+            "direction_logic_pattern": (
+                "# The KEY pattern: compare model_prob to market price, NOT to 0.5\n"
+                "model_prob = temp_range_probability(consensus_c, bucket_low, bucket_high, scale)\n"
+                "if model_prob > yes_price:\n"
+                "    direction = 'buy_yes'  # Market underprices this bucket\n"
+                "    edge = (model_prob - yes_price) * 100\n"
+                "else:\n"
+                "    direction = 'buy_no'   # Market overprices this bucket\n"
+                "    edge = ((1 - model_prob) - no_price) * 100"
+            ),
         },
         "cookbook": {
             "description": "Common patterns and recipes for strategy development",
