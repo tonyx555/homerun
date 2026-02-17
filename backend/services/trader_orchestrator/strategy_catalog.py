@@ -635,9 +635,23 @@ def build_system_strategy_rows() -> list[dict[str, Any]]:
                 "error_message": None,
                 "version": 1,
                 "sort_order": 0,
+                # Legacy key aliases — older Alembic migrations reference these
+                # column names from the former trader_strategy_definitions table.
+                "strategy_key": seed.strategy_key,
+                "label": seed.label,
+                "default_params_json": dict(seed.default_params),
+                "param_schema_json": dict(seed.param_schema),
+                "aliases_json": list(seed.aliases),
             }
         )
     return rows
+
+
+_STRATEGY_MODEL_KEYS = {
+    "id", "slug", "source_key", "name", "description", "class_name",
+    "source_code", "config", "config_schema", "aliases", "is_system",
+    "enabled", "status", "error_message", "version", "sort_order",
+}
 
 
 async def ensure_system_trader_strategies_seeded(session: AsyncSession) -> int:
@@ -657,7 +671,8 @@ async def ensure_system_trader_strategies_seeded(session: AsyncSession) -> int:
     for strategy_key, seed_row in seed_by_key.items():
         current = existing.get(strategy_key)
         if current is None:
-            session.add(Strategy(**seed_row))
+            model_kwargs = {k: v for k, v in seed_row.items() if k in _STRATEGY_MODEL_KEYS}
+            session.add(Strategy(**model_kwargs))
             inserted += 1
             continue
 
