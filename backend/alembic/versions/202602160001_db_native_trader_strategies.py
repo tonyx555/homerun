@@ -228,7 +228,9 @@ def _create_execution_sim_events() -> None:
         sa.UniqueConstraint("run_id", "sequence", name="uq_execution_sim_events_run_sequence"),
     )
 
-    op.create_index("idx_execution_sim_events_run_event_at", "execution_sim_events", ["run_id", "event_at"], unique=False)
+    op.create_index(
+        "idx_execution_sim_events_run_event_at", "execution_sim_events", ["run_id", "event_at"], unique=False
+    )
     op.create_index("ix_execution_sim_events_event_at", "execution_sim_events", ["event_at"], unique=False)
     op.create_index("ix_execution_sim_events_event_type", "execution_sim_events", ["event_type"], unique=False)
     op.create_index("ix_execution_sim_events_market_id", "execution_sim_events", ["market_id"], unique=False)

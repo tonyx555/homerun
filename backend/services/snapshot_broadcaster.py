@@ -42,15 +42,17 @@ from utils.market_urls import serialize_opportunity_with_links
 logger = get_logger("snapshot_broadcaster")
 
 # Event types that use signature-based deduplication to avoid flooding WS.
-_DEDUP_EVENT_TYPES = frozenset({
-    "scanner_status",
-    "scanner_activity",
-    "worker_status_update",
-    "crypto_markets_update",
-    "weather_status",
-    "news_workflow_status",
-    "trader_orchestrator_status",
-})
+_DEDUP_EVENT_TYPES = frozenset(
+    {
+        "scanner_status",
+        "scanner_activity",
+        "worker_status_update",
+        "crypto_markets_update",
+        "weather_status",
+        "news_workflow_status",
+        "trader_orchestrator_status",
+    }
+)
 
 
 class SnapshotBroadcaster:
@@ -283,7 +285,8 @@ class SnapshotBroadcaster:
         while self._running:
             try:
                 event_type, data = await asyncio.wait_for(
-                    self._event_queue.get(), timeout=1.0,
+                    self._event_queue.get(),
+                    timeout=1.0,
                 )
             except asyncio.TimeoutError:
                 continue

@@ -104,11 +104,7 @@ def _derive_opportunity_sub_strategy(opportunity: object) -> Optional[str]:
     strategy = str(_field("strategy") or "").strip().lower()
     title = str(_field("title") or "").strip().lower()
     positions_raw = _field("positions_to_take", [])
-    positions = (
-        [p for p in positions_raw if isinstance(p, Mapping)]
-        if isinstance(positions_raw, list)
-        else []
-    )
+    positions = [p for p in positions_raw if isinstance(p, Mapping)] if isinstance(positions_raw, list) else []
 
     if strategy == StrategyType.TEMPORAL_DECAY.value:
         if title.startswith("certainty shock:"):
@@ -136,19 +132,11 @@ def _derive_opportunity_sub_strategy(opportunity: object) -> Optional[str]:
 
     if strategy == StrategyType.CROSS_PLATFORM.value:
         pm = next(
-            (
-                pos
-                for pos in positions
-                if str(pos.get("platform") or "").strip().lower() == "polymarket"
-            ),
+            (pos for pos in positions if str(pos.get("platform") or "").strip().lower() == "polymarket"),
             None,
         )
         kalshi = next(
-            (
-                pos
-                for pos in positions
-                if str(pos.get("platform") or "").strip().lower() == "kalshi"
-            ),
+            (pos for pos in positions if str(pos.get("platform") or "").strip().lower() == "kalshi"),
             None,
         )
         if pm and kalshi:
@@ -293,11 +281,7 @@ async def get_opportunities(
     # Apply strategy-specific subtype filter if provided.
     normalized_sub = _normalize_sub_strategy(sub_strategy)
     if normalized_sub:
-        opportunities = [
-            opp
-            for opp in opportunities
-            if _derive_opportunity_sub_strategy(opp) == normalized_sub
-        ]
+        opportunities = [opp for opp in opportunities if _derive_opportunity_sub_strategy(opp) == normalized_sub]
 
     # Keep all analyzed opportunities visible in Markets, including STRONG SKIP.
     # This allows users to review completed AI analysis on the opportunity card
@@ -524,9 +508,7 @@ async def get_opportunity_counts(
         None,
         description="Optional strategy subtype filter (e.g. certainty_shock, pure_arb)",
     ),
-    category: Optional[str] = Query(
-        None, description="Optional category filter for subfilter lookups"
-    ),
+    category: Optional[str] = Query(None, description="Optional category filter for subfilter lookups"),
 ):
     """Get counts of opportunities grouped by strategy and category.
 
@@ -556,11 +538,7 @@ async def get_opportunity_counts(
 
     normalized_sub = _normalize_sub_strategy(sub_strategy)
     if normalized_sub:
-        opportunities = [
-            opp
-            for opp in opportunities
-            if _derive_opportunity_sub_strategy(opp) == normalized_sub
-        ]
+        opportunities = [opp for opp in opportunities if _derive_opportunity_sub_strategy(opp) == normalized_sub]
 
     # Count by strategy
     strategy_counts: dict[str, int] = {}
@@ -787,9 +765,7 @@ async def get_all_recent_trades(
                             trade_time = utcfromtimestamp(trade_time_str)
                         elif "T" in str(trade_time_str) or "-" in str(trade_time_str):
                             # Parse ISO format, normalizing to naive UTC
-                            parsed = datetime.fromisoformat(
-                                str(trade_time_str).replace("Z", "+00:00")
-                            )
+                            parsed = datetime.fromisoformat(str(trade_time_str).replace("Z", "+00:00"))
                             # Convert aware datetimes to UTC then strip tzinfo
                             if parsed.tzinfo is not None:
                                 parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)

@@ -47,8 +47,13 @@ def test_build_kalshi_market_url_uses_event_ticker_route():
     # Prefer event_ticker when provided explicitly
     assert build_kalshi_market_url(event_ticker="KXELONMARS") == "https://kalshi.com/markets/kxelonmars"
     # Derive event ticker from market ticker and include series/event path
-    assert build_kalshi_market_url(market_ticker="KXELONMARS-99") == "https://kalshi.com/markets/kxelonmars/kxelonmars-99"
-    assert build_kalshi_market_url(market_ticker="KXELONMARS-99_yes") == "https://kalshi.com/markets/kxelonmars/kxelonmars-99"
+    assert (
+        build_kalshi_market_url(market_ticker="KXELONMARS-99") == "https://kalshi.com/markets/kxelonmars/kxelonmars-99"
+    )
+    assert (
+        build_kalshi_market_url(market_ticker="KXELONMARS-99_yes")
+        == "https://kalshi.com/markets/kxelonmars/kxelonmars-99"
+    )
     # Multi-segment market tickers strip trailing outcome codes when needed.
     assert (
         build_kalshi_market_url(market_ticker="KXATPCHALLENGERMATCH-26FEB14KASGOM-KAS")
@@ -71,18 +76,22 @@ def test_build_kalshi_market_url_uses_event_ticker_route():
 def test_build_market_url_kalshi_slug_not_used_as_event():
     # Kalshi markets have slug == full market ticker; build_market_url must
     # NOT treat it as the event ticker.
-    url = build_market_url({
-        "id": "KXPOLITICSMENTION-26FEB15-SHUT",
-        "slug": "KXPOLITICSMENTION-26FEB15-SHUT",
-        "platform": "kalshi",
-    })
+    url = build_market_url(
+        {
+            "id": "KXPOLITICSMENTION-26FEB15-SHUT",
+            "slug": "KXPOLITICSMENTION-26FEB15-SHUT",
+            "platform": "kalshi",
+        }
+    )
     assert url == "https://kalshi.com/markets/kxpoliticsmention/kxpoliticsmention-26feb15"
 
-    url2 = build_market_url({
-        "id": "KXATPCHALLENGERMATCH-26FEB14KASGOM-KAS",
-        "slug": "KXATPCHALLENGERMATCH-26FEB14KASGOM-KAS",
-        "platform": "kalshi",
-    })
+    url2 = build_market_url(
+        {
+            "id": "KXATPCHALLENGERMATCH-26FEB14KASGOM-KAS",
+            "slug": "KXATPCHALLENGERMATCH-26FEB14KASGOM-KAS",
+            "platform": "kalshi",
+        }
+    )
     assert url2 == "https://kalshi.com/markets/kxatpchallengermatch/kxatpchallengermatch-26feb14kasgom"
 
 

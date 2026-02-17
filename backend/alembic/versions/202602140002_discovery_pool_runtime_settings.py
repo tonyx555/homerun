@@ -127,4 +127,3 @@ def upgrade() -> None:
 def downgrade() -> None:
     # Explicit downgrade support is intentionally omitted for SQLite safety.
     pass
-

@@ -154,15 +154,19 @@ def _backfill_traders_source_configs() -> None:
         sa.column("params_json", sa.JSON()),
         sa.column("source_configs_json", sa.JSON()),
     )
-    rows = bind.execute(
-        sa.select(
-            trader_table.c.id,
-            trader_table.c.strategy_key,
-            trader_table.c.sources_json,
-            trader_table.c.params_json,
-            trader_table.c.source_configs_json,
+    rows = (
+        bind.execute(
+            sa.select(
+                trader_table.c.id,
+                trader_table.c.strategy_key,
+                trader_table.c.sources_json,
+                trader_table.c.params_json,
+                trader_table.c.source_configs_json,
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
 
     for row in rows:
         source_configs = _build_source_configs(
@@ -171,9 +175,7 @@ def _backfill_traders_source_configs() -> None:
             row.get("params_json"),
         )
         bind.execute(
-            trader_table.update()
-            .where(trader_table.c.id == row["id"])
-            .values(source_configs_json=source_configs)
+            trader_table.update().where(trader_table.c.id == row["id"]).values(source_configs_json=source_configs)
         )
 
 
@@ -186,21 +188,21 @@ def _canonicalize_trade_signal_sources() -> None:
         sa.column("signal_type", sa.String()),
         sa.column("dedupe_key", sa.String()),
     )
-    rows = bind.execute(
-        sa.select(
-            signal_table.c.id,
-            signal_table.c.source,
-            signal_table.c.signal_type,
-            signal_table.c.dedupe_key,
-        ).where(
-            signal_table.c.source.in_(["traders", "tracked_traders", "pool_traders", "insider"])
+    rows = (
+        bind.execute(
+            sa.select(
+                signal_table.c.id,
+                signal_table.c.source,
+                signal_table.c.signal_type,
+                signal_table.c.dedupe_key,
+            ).where(signal_table.c.source.in_(["traders", "tracked_traders", "pool_traders", "insider"]))
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
 
     reserved_dedupe_keys: set[str] = {
-        str(row["dedupe_key"])
-        for row in rows
-        if str(row.get("source") or "").strip().lower() == "traders"
+        str(row["dedupe_key"]) for row in rows if str(row.get("source") or "").strip().lower() == "traders"
     }
 
     for row in rows:
@@ -216,9 +218,7 @@ def _canonicalize_trade_signal_sources() -> None:
         reserved_dedupe_keys.add(new_dedupe)
 
         bind.execute(
-            signal_table.update()
-            .where(signal_table.c.id == row["id"])
-            .values(source="traders", dedupe_key=new_dedupe)
+            signal_table.update().where(signal_table.c.id == row["id"]).values(source="traders", dedupe_key=new_dedupe)
         )
 
 
@@ -249,20 +249,24 @@ def _rebuild_trade_signal_snapshots() -> None:
 
     bind.execute(snapshot_table.delete())
 
-    rows = bind.execute(
-        sa.select(
-            signal_table.c.source,
-            signal_table.c.status,
-            sa.func.count().label("count"),
-            sa.func.max(signal_table.c.created_at).label("latest_created"),
-            sa.func.min(
-                sa.case(
-                    (signal_table.c.status == "pending", signal_table.c.created_at),
-                    else_=None,
-                )
-            ).label("oldest_pending"),
-        ).group_by(signal_table.c.source, signal_table.c.status)
-    ).mappings().all()
+    rows = (
+        bind.execute(
+            sa.select(
+                signal_table.c.source,
+                signal_table.c.status,
+                sa.func.count().label("count"),
+                sa.func.max(signal_table.c.created_at).label("latest_created"),
+                sa.func.min(
+                    sa.case(
+                        (signal_table.c.status == "pending", signal_table.c.created_at),
+                        else_=None,
+                    )
+                ).label("oldest_pending"),
+            ).group_by(signal_table.c.source, signal_table.c.status)
+        )
+        .mappings()
+        .all()
+    )
 
     by_source: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -300,11 +304,7 @@ def _rebuild_trade_signal_snapshots() -> None:
     now = datetime.utcnow()
     for source, stats in by_source.items():
         latest_signal_at = stats.get("latest_signal_at")
-        freshness = (
-            float((now - latest_signal_at).total_seconds())
-            if isinstance(latest_signal_at, datetime)
-            else None
-        )
+        freshness = float((now - latest_signal_at).total_seconds()) if isinstance(latest_signal_at, datetime) else None
         total = sum(
             int(stats.get(key, 0) or 0)
             for key in (

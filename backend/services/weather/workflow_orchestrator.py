@@ -100,9 +100,7 @@ class WeatherWorkflowOrchestrator:
 
         async def _bounded_evaluate(market_obj):
             async with sem:
-                return await self._evaluate_market(
-                    market_obj, settings=settings, min_liquidity=min_liquidity
-                )
+                return await self._evaluate_market(market_obj, settings=settings, min_liquidity=min_liquidity)
 
         evaluations = await asyncio.gather(
             *[_bounded_evaluate(m) for m in markets],
@@ -154,13 +152,9 @@ class WeatherWorkflowOrchestrator:
             "signals_generated": signals_generated,
             "intents_created": intents_created,
             "report_only_findings": len(report_only_findings),
-            "report_only_top_reasons": self._summarize_report_only_findings(
-                report_only_findings
-            ),
+            "report_only_top_reasons": self._summarize_report_only_findings(report_only_findings),
             "cycle_count": self._cycle_count,
-            "last_elapsed_seconds": round(
-                (datetime.now(timezone.utc) - started).total_seconds(), 2
-            ),
+            "last_elapsed_seconds": round((datetime.now(timezone.utc) - started).total_seconds(), 2),
         }
 
         await shared_state.write_weather_snapshot(
@@ -207,9 +201,7 @@ class WeatherWorkflowOrchestrator:
         resolution_dt = getattr(market, "end_date", None)
         if isinstance(resolution_dt, str):
             try:
-                resolution_dt = datetime.fromisoformat(
-                    str(resolution_dt).replace("Z", "+00:00")
-                )
+                resolution_dt = datetime.fromisoformat(str(resolution_dt).replace("Z", "+00:00"))
             except Exception:
                 resolution_dt = None
         if isinstance(resolution_dt, datetime):
@@ -292,8 +284,10 @@ class WeatherWorkflowOrchestrator:
                 *reasons,
             ]
             return {
-                "contracts_parsed": 1, "signals_generated": 1,
-                "opportunity": opp, "intent": None,
+                "contracts_parsed": 1,
+                "signals_generated": 1,
+                "opportunity": opp,
+                "intent": None,
                 "raw_forecast_data": raw_forecast_data,
             }
 
@@ -325,9 +319,7 @@ class WeatherWorkflowOrchestrator:
                     "source_count": signal.source_count,
                     "source_spread_c": signal.source_spread_c,
                     "source_spread_f": (
-                        (signal.source_spread_c * 9.0 / 5.0)
-                        if signal.source_spread_c is not None
-                        else None
+                        (signal.source_spread_c * 9.0 / 5.0) if signal.source_spread_c is not None else None
                     ),
                     "forecast_sources": self._build_forecast_sources_payload(forecast),
                 },
@@ -343,14 +335,14 @@ class WeatherWorkflowOrchestrator:
             },
         )
         return {
-            "contracts_parsed": 1, "signals_generated": 1,
-            "opportunity": opp, "intent": intent,
+            "contracts_parsed": 1,
+            "signals_generated": 1,
+            "opportunity": opp,
+            "intent": intent,
             "raw_forecast_data": raw_forecast_data,
         }
 
-    def _build_enriched_strategy_intents(
-        self, raw_results: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
+    def _build_enriched_strategy_intents(self, raw_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Build enriched intent dicts with sibling market data for strategy consumption.
 
         Groups markets by event_slug so each intent includes data about ALL
@@ -383,16 +375,18 @@ class WeatherWorkflowOrchestrator:
                     continue
                 sib = by_market.get(sid)
                 if sib:
-                    siblings.append({
-                        "market_id": sid,
-                        "market_question": sib.get("market_question", ""),
-                        "yes_price": sib.get("yes_price", 0),
-                        "no_price": sib.get("no_price", 0),
-                        "bucket_low_c": sib.get("bucket_low_c"),
-                        "bucket_high_c": sib.get("bucket_high_c"),
-                        "liquidity": sib.get("liquidity", 0),
-                        "clob_token_ids": sib.get("clob_token_ids"),
-                    })
+                    siblings.append(
+                        {
+                            "market_id": sid,
+                            "market_question": sib.get("market_question", ""),
+                            "yes_price": sib.get("yes_price", 0),
+                            "no_price": sib.get("no_price", 0),
+                            "bucket_low_c": sib.get("bucket_low_c"),
+                            "bucket_high_c": sib.get("bucket_high_c"),
+                            "liquidity": sib.get("liquidity", 0),
+                            "clob_token_ids": sib.get("clob_token_ids"),
+                        }
+                    )
 
             enriched_intent = dict(raw)
             enriched_intent["sibling_markets"] = siblings
@@ -417,9 +411,7 @@ class WeatherWorkflowOrchestrator:
         now = datetime.now(timezone.utc)
 
         while offset < max_events_offset and len(markets) < limit:
-            events = await polymarket_client.get_events(
-                closed=False, limit=page_size, offset=offset
-            )
+            events = await polymarket_client.get_events(closed=False, limit=page_size, offset=offset)
             if not events:
                 break
             scanned_events += len(events)
@@ -448,9 +440,7 @@ class WeatherWorkflowOrchestrator:
                     end_dt = m.end_date
                     if isinstance(end_dt, str):
                         try:
-                            end_dt = datetime.fromisoformat(
-                                str(end_dt).replace("Z", "+00:00")
-                            )
+                            end_dt = datetime.fromisoformat(str(end_dt).replace("Z", "+00:00"))
                         except Exception:
                             end_dt = None
                     if isinstance(end_dt, datetime):
@@ -484,9 +474,7 @@ class WeatherWorkflowOrchestrator:
             "weather",
         ]
         for query in fallback_queries:
-            searched = await polymarket_client.search_markets(
-                query, limit=min(max(limit * 2, 50), 300)
-            )
+            searched = await polymarket_client.search_markets(query, limit=min(max(limit * 2, 50), 300))
             for m in searched:
                 if not self._is_market_candidate_tradable(m):
                     continue
@@ -505,9 +493,7 @@ class WeatherWorkflowOrchestrator:
                 end_dt = m.end_date
                 if isinstance(end_dt, str):
                     try:
-                        end_dt = datetime.fromisoformat(
-                            str(end_dt).replace("Z", "+00:00")
-                        )
+                        end_dt = datetime.fromisoformat(str(end_dt).replace("Z", "+00:00"))
                     except Exception:
                         end_dt = None
                 if isinstance(end_dt, datetime):
@@ -575,13 +561,9 @@ class WeatherWorkflowOrchestrator:
         try:
             return bool(polymarket_client.is_market_tradable(info))
         except Exception:
-            return bool(getattr(market, "active", True)) and not bool(
-                getattr(market, "closed", False)
-            )
+            return bool(getattr(market, "active", True)) and not bool(getattr(market, "closed", False))
 
-    async def _attach_market_price_history(
-        self, opportunities: list[ArbitrageOpportunity]
-    ) -> None:
+    async def _attach_market_price_history(self, opportunities: list[ArbitrageOpportunity]) -> None:
         """Hydrate per-market YES/NO price history via scanner shared backfill."""
         if not opportunities:
             return
@@ -755,9 +737,7 @@ class WeatherWorkflowOrchestrator:
                 "source_count": signal.source_count,
                 "source_spread_c": signal.source_spread_c,
                 "source_spread_f": (
-                    (signal.source_spread_c * 9.0 / 5.0)
-                    if signal.source_spread_c is not None
-                    else None
+                    (signal.source_spread_c * 9.0 / 5.0) if signal.source_spread_c is not None else None
                 ),
                 "consensus_probability": forecast.consensus_probability,
                 "consensus_temp_c": signal.consensus_temperature_c,
@@ -832,11 +812,7 @@ class WeatherWorkflowOrchestrator:
 
     def _source_probability_summary(self, forecast, signal: WeatherSignal) -> str:
         snapshots = getattr(forecast, "source_snapshots", None) or []
-        ranked = [
-            snap
-            for snap in snapshots
-            if getattr(snap, "probability", None) is not None
-        ]
+        ranked = [snap for snap in snapshots if getattr(snap, "probability", None) is not None]
         if ranked:
             ranked.sort(key=lambda s: float(getattr(s, "weight", 0.0) or 0.0), reverse=True)
             parts: list[str] = []

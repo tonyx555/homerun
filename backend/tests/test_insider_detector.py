@@ -77,6 +77,7 @@ def test_brier_component_prefers_calibrated_entries():
     assert miscalibrated_score is not None
     assert calibrated_score > miscalibrated_score
 
+
 def test_funding_overlap_proxy_component_uses_sync_and_cluster():
     svc = InsiderDetectorService()
     weak = svc._funding_overlap_proxy_component(

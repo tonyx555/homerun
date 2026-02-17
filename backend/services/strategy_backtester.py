@@ -134,9 +134,7 @@ async def run_strategy_backtest(
             events = list(scanner._cached_events)
             markets = list(scanner._cached_markets)
             prices = (
-                dict(scanner._cached_prices)
-                if hasattr(scanner, "_cached_prices") and scanner._cached_prices
-                else {}
+                dict(scanner._cached_prices) if hasattr(scanner, "_cached_prices") and scanner._cached_prices else {}
             )
             result.data_source = "cache"
 
@@ -159,9 +157,7 @@ async def run_strategy_backtest(
                         all_token_ids.append(tid)
             prices = {}
             if all_token_ids:
-                prices = await polymarket_client.get_prices_batch(
-                    all_token_ids[:500]
-                )
+                prices = await polymarket_client.get_prices_batch(all_token_ids[:500])
             result.data_source = "fresh"
 
         result.num_events = len(events)
@@ -187,9 +183,7 @@ async def run_strategy_backtest(
             )
         else:
             opps = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None, strategy.detect, events, markets, prices
-                ),
+                loop.run_in_executor(None, strategy.detect, events, markets, prices),
                 timeout=60.0,
             )
 
@@ -202,13 +196,7 @@ async def run_strategy_backtest(
                 elif hasattr(opp, "dict"):
                     opp_dicts.append(opp.dict())
                 elif hasattr(opp, "__dict__"):
-                    opp_dicts.append(
-                        {
-                            k: v
-                            for k, v in opp.__dict__.items()
-                            if not k.startswith("_")
-                        }
-                    )
+                    opp_dicts.append({k: v for k, v in opp.__dict__.items() if not k.startswith("_")})
                 else:
                     opp_dicts.append(str(opp))
             except Exception:

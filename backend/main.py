@@ -131,9 +131,7 @@ async def lifespan(app: FastAPI):
             await apply_world_intelligence_settings()
             logger.info("World intelligence settings loaded from database")
         except Exception as e:
-            logger.warning(
-                f"Failed to load world intelligence settings (using defaults): {e}"
-            )
+            logger.warning(f"Failed to load world intelligence settings (using defaults): {e}")
 
         # Load DB-backed country reference catalog into runtime cache so
         # country normalization uses dynamic records instead of static files.

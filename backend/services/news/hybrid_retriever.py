@@ -111,6 +111,7 @@ class HybridRetriever:
         if entity_weight > 0:
             try:
                 from services.news.reranker import _extract_entities
+
                 article_ent_info = _extract_entities(article_text)
             except Exception:
                 article_ent_info = None
@@ -186,7 +187,10 @@ class HybridRetriever:
                         _compute_entity_overlap,
                         _extract_entities,
                     )
-                    market_text = f"{market.question} {market.event_title} {market.category} {' '.join(market.tags or [])}"
+
+                    market_text = (
+                        f"{market.question} {market.event_title} {market.category} {' '.join(market.tags or [])}"
+                    )
                     market_ent_info = _extract_entities(market_text)
                     overlap_result = _compute_entity_overlap(article_ent_info, market_ent_info)
                     ent_overlap_score = overlap_result.get("entity_overlap_score", 0.5)

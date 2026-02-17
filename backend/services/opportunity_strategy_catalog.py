@@ -210,7 +210,13 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
             "param_fields": [
                 {"key": "lookback_seconds", "label": "Lookback (seconds)", "type": "number", "min": 30},
                 {"key": "drop_threshold", "label": "Drop Threshold", "type": "number", "min": 0.01, "max": 0.5},
-                {"key": "min_rebound_fraction", "label": "Min Rebound Fraction", "type": "number", "min": 0.1, "max": 0.95},
+                {
+                    "key": "min_rebound_fraction",
+                    "label": "Min Rebound Fraction",
+                    "type": "number",
+                    "min": 0.1,
+                    "max": 0.95,
+                },
                 {"key": "min_target_move", "label": "Min Target Move", "type": "number", "min": 0.005, "max": 0.15},
                 {"key": "max_entry_price", "label": "Max Entry Price", "type": "number", "min": 0.1, "max": 1},
                 {"key": "max_spread", "label": "Max Spread", "type": "number", "min": 0.005, "max": 0.25},
@@ -234,7 +240,13 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                 {"key": "max_days_to_resolution", "label": "Max Days To Resolution", "type": "number", "min": 0},
                 {"key": "min_liquidity", "label": "Min Liquidity", "type": "number", "min": 0},
                 {"key": "max_spread", "label": "Max Spread", "type": "number", "min": 0.005, "max": 0.2},
-                {"key": "min_repricing_buffer", "label": "Min Repricing Buffer", "type": "number", "min": 0.005, "max": 0.1},
+                {
+                    "key": "min_repricing_buffer",
+                    "label": "Min Repricing Buffer",
+                    "type": "number",
+                    "min": 0.005,
+                    "max": 0.1,
+                },
                 {"key": "repricing_weight", "label": "Repricing Weight", "type": "number", "min": 0.1, "max": 0.9},
             ]
         },
@@ -312,10 +324,27 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
             "param_fields": [
                 {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0},
                 {"key": "min_ensemble_members", "label": "Min Ensemble Members", "type": "integer", "min": 1},
-                {"key": "min_ensemble_agreement", "label": "Min Ensemble Agreement", "type": "number", "min": 0, "max": 1},
+                {
+                    "key": "min_ensemble_agreement",
+                    "label": "Min Ensemble Agreement",
+                    "type": "number",
+                    "min": 0,
+                    "max": 1,
+                },
                 {"key": "max_entry_price", "label": "Max Entry Price", "type": "number", "min": 0, "max": 1},
-                {"key": "deterministic_fallback", "label": "Deterministic Fallback", "type": "enum", "options": ["true", "false"]},
-                {"key": "probability_scale_c", "label": "Fallback Sigmoid Scale (C)", "type": "number", "min": 0.5, "max": 5.0},
+                {
+                    "key": "deterministic_fallback",
+                    "label": "Deterministic Fallback",
+                    "type": "enum",
+                    "options": ["true", "false"],
+                },
+                {
+                    "key": "probability_scale_c",
+                    "label": "Fallback Sigmoid Scale (C)",
+                    "type": "number",
+                    "min": 0.5,
+                    "max": 5.0,
+                },
                 {"key": "risk_base_score", "label": "Base Risk Score", "type": "number", "min": 0, "max": 1},
             ]
         },
@@ -334,7 +363,13 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                 {"key": "sigma_c", "label": "Sigma (C)", "type": "number", "min": 0.5, "max": 5.0},
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
                 {"key": "max_entry_price", "label": "Max Entry Price", "type": "number", "min": 0, "max": 1},
-                {"key": "max_buckets_per_event", "label": "Max Buckets per Event", "type": "integer", "min": 1, "max": 10},
+                {
+                    "key": "max_buckets_per_event",
+                    "label": "Max Buckets per Event",
+                    "type": "integer",
+                    "min": 1,
+                    "max": 10,
+                },
                 {"key": "risk_base_score", "label": "Base Risk Score", "type": "number", "min": 0, "max": 1},
             ]
         },
@@ -354,7 +389,13 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                 {"key": "min_model_agreement", "label": "Min Model Agreement", "type": "number", "min": 0, "max": 1},
                 {"key": "max_source_spread_c", "label": "Max Source Spread (C)", "type": "number", "min": 0},
                 {"key": "min_source_count", "label": "Min Forecast Sources", "type": "integer", "min": 1},
-                {"key": "max_positions_per_event", "label": "Max Positions per Event", "type": "integer", "min": 1, "max": 10},
+                {
+                    "key": "max_positions_per_event",
+                    "label": "Max Positions per Event",
+                    "type": "integer",
+                    "min": 1,
+                    "max": 10,
+                },
                 {"key": "risk_base_score", "label": "Base Risk Score", "type": "number", "min": 0, "max": 1},
             ]
         },
@@ -373,15 +414,32 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
             "param_fields": [
                 {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0},
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
-                {"key": "min_confluence_strength", "label": "Min Confluence Strength", "type": "number", "min": 0, "max": 1},
-                {"key": "min_tier", "label": "Min Tier", "type": "enum", "options": ["low", "medium", "high", "extreme"]},
+                {
+                    "key": "min_confluence_strength",
+                    "label": "Min Confluence Strength",
+                    "type": "number",
+                    "min": 0,
+                    "max": 1,
+                },
+                {
+                    "key": "min_tier",
+                    "label": "Min Tier",
+                    "type": "enum",
+                    "options": ["low", "medium", "high", "extreme"],
+                },
                 {"key": "min_wallet_count", "label": "Min Wallet Count", "type": "integer", "min": 1},
                 {"key": "max_entry_price", "label": "Max Entry Price", "type": "number", "min": 0, "max": 1},
                 {"key": "risk_base_score", "label": "Base Risk Score", "type": "number", "min": 0, "max": 1},
                 {"key": "firehose_require_tradable_market", "label": "Require Tradable Market", "type": "boolean"},
                 {"key": "firehose_exclude_crypto_markets", "label": "Exclude Crypto Markets", "type": "boolean"},
                 {"key": "firehose_require_qualified_source", "label": "Require Qualified Source", "type": "boolean"},
-                {"key": "firehose_max_age_minutes", "label": "Firehose Max Age (min)", "type": "integer", "min": 1, "max": 1440},
+                {
+                    "key": "firehose_max_age_minutes",
+                    "label": "Firehose Max Age (min)",
+                    "type": "integer",
+                    "min": 1,
+                    "max": 1440,
+                },
             ]
         },
     ),
@@ -439,11 +497,7 @@ async def ensure_system_opportunity_strategies_seeded(session: AsyncSession) -> 
     existing = {
         plugin.slug: plugin
         for plugin in (
-            (
-                await session.execute(
-                    select(Strategy).where(Strategy.slug.in_(list(seed_by_slug.keys())))
-                )
-            )
+            (await session.execute(select(Strategy).where(Strategy.slug.in_(list(seed_by_slug.keys())))))
             .scalars()
             .all()
         )

@@ -124,9 +124,7 @@ async def _ensure_unique_strategy_key(
     *,
     current_id: str | None = None,
 ) -> None:
-    query = select(Strategy.id).where(
-        func.lower(Strategy.slug) == strategy_key.lower()
-    )
+    query = select(Strategy.id).where(func.lower(Strategy.slug) == strategy_key.lower())
     if current_id:
         query = query.where(Strategy.id != current_id)
     exists = (await session.execute(query)).scalar_one_or_none()
@@ -271,7 +269,10 @@ async def get_trader_strategy_docs():
             ),
         },
         "allowed_imports": [
-            {"module": "services.trader_orchestrator.strategies.base", "items": "BaseTraderStrategy, StrategyDecision, DecisionCheck"},
+            {
+                "module": "services.trader_orchestrator.strategies.base",
+                "items": "BaseTraderStrategy, StrategyDecision, DecisionCheck",
+            },
             {"module": "services.trader_orchestrator.strategies", "items": "Built-in trader strategy modules"},
             {"module": "math", "items": "Standard math functions"},
             {"module": "statistics", "items": "Statistical functions"},

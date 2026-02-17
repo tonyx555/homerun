@@ -61,7 +61,9 @@ class WeatherEnsembleEdgeStrategy(BaseWeatherStrategy):
     # ------------------------------------------------------------------
 
     def compute_model_probability(
-        self, intent: dict, cfg: dict,
+        self,
+        intent: dict,
+        cfg: dict,
     ) -> tuple[Optional[float], dict]:
         bucket_low = intent.get("bucket_low_c")
         bucket_high = intent.get("bucket_high_c")
@@ -89,11 +91,7 @@ class WeatherEnsembleEdgeStrategy(BaseWeatherStrategy):
         # Deterministic fallback (sigmoid)
         if model_prob is None and cfg.get("deterministic_fallback"):
             scale_c = float(cfg.get("probability_scale_c", 2.0))
-            if (
-                bucket_low is not None
-                and bucket_high is not None
-                and consensus_value_c is not None
-            ):
+            if bucket_low is not None and bucket_high is not None and consensus_value_c is not None:
                 model_prob = temp_range_probability(
                     float(consensus_value_c),
                     float(bucket_low),
@@ -123,7 +121,10 @@ class WeatherEnsembleEdgeStrategy(BaseWeatherStrategy):
     # ------------------------------------------------------------------
 
     def _compute_confidence_value(
-        self, intent: dict, model_prob: float, extra_metadata: dict,
+        self,
+        intent: dict,
+        model_prob: float,
+        extra_metadata: dict,
     ) -> float:
         used_ensemble = extra_metadata.get("used_ensemble", False)
         ensemble_fraction = extra_metadata.get("ensemble_fraction", 0.0)
@@ -158,9 +159,7 @@ class WeatherEnsembleEdgeStrategy(BaseWeatherStrategy):
             "Weather-driven directional bet (ensemble forecast vs market)",
         ]
         if used_ensemble:
-            risk_factors.append(
-                f"Ensemble: {ensemble_count} members, {ensemble_fraction:.0%} in bucket"
-            )
+            risk_factors.append(f"Ensemble: {ensemble_count} members, {ensemble_fraction:.0%} in bucket")
         else:
             risk_factors.append("Deterministic fallback (no ensemble data)")
             risk_score += 0.10

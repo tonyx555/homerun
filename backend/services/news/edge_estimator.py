@@ -36,10 +36,10 @@ _LLM_CALL_TIMEOUT_SECONDS = 20.0
 # 0.8 penalty for known information; 0.5 was too aggressive and filtered most established news
 KNOWN_NOVELTY_CONFIDENCE_FACTOR = 0.80
 NOVELTY_CONFIDENCE_MULTIPLIERS = {
-    "breaking": 1.0,   # Just happened -- full confidence
-    "recent": 0.90,    # Hours old -- slight haircut (was 0.85)
+    "breaking": 1.0,  # Just happened -- full confidence
+    "recent": 0.90,  # Hours old -- slight haircut (was 0.85)
     "known": KNOWN_NOVELTY_CONFIDENCE_FACTOR,  # Widely known -- moderate haircut (was 0.5)
-    "stale": 0.60,     # Old news -- moderate haircut (was 0.15; raised from sub-0.5 to avoid over-filtering)
+    "stale": 0.60,  # Old news -- moderate haircut (was 0.15; raised from sub-0.5 to avoid over-filtering)
 }
 # Minimum confidence threshold after novelty adjustment; below this the
 # finding is rejected as low_confidence.

@@ -102,6 +102,7 @@ class StrategySDK:
         """
         try:
             from services.ws_feeds import get_feed_manager
+
             fm = get_feed_manager()
             if fm and fm.cache.is_fresh(token_id):
                 return fm.cache.get_mid_price(token_id)
@@ -121,6 +122,7 @@ class StrategySDK:
         """
         try:
             from services.ws_feeds import get_feed_manager
+
             fm = get_feed_manager()
             if fm:
                 return fm.cache.get_spread_bps(token_id)
@@ -142,6 +144,7 @@ class StrategySDK:
         """
         try:
             from services.chainlink_feed import get_chainlink_feed
+
             feed = get_chainlink_feed()
             if feed:
                 p = feed.get_price(asset.upper())
@@ -256,6 +259,7 @@ class StrategySDK:
         """
         try:
             from services.fee_model import fee_model
+
             breakdown = fee_model.full_breakdown(
                 total_cost=total_cost,
                 expected_payout=expected_payout,
@@ -286,7 +290,8 @@ class StrategySDK:
             Filtered list of markets.
         """
         return [
-            m for m in markets
+            m
+            for m in markets
             if getattr(m, "active", False)
             and not getattr(m, "closed", False)
             and len(getattr(m, "outcome_prices", []) or []) == 2

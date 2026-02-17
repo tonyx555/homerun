@@ -160,9 +160,7 @@ class EventDrivenStrategy(BaseStrategy):
         # market_id -> Event (current scan snapshot)
         self._market_to_event_obj: dict[str, Event] = {}
 
-    def detect(
-        self, events: list[Event], markets: list[Market], prices: dict[str, dict]
-    ) -> list[ArbitrageOpportunity]:
+    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[ArbitrageOpportunity]:
         if not settings.EVENT_DRIVEN_ENABLED:
             return []
 
@@ -320,9 +318,7 @@ class EventDrivenStrategy(BaseStrategy):
             return True
         return False
 
-    def _find_related_markets(
-        self, catalyst_id: str, event_market_ids: dict[str, list[str]]
-    ) -> list[str]:
+    def _find_related_markets(self, catalyst_id: str, event_market_ids: dict[str, list[str]]) -> list[str]:
         """
         Find markets related to the catalyst via:
         1. Same event (always valid)
@@ -337,11 +333,7 @@ class EventDrivenStrategy(BaseStrategy):
 
         catalyst_event = self._market_to_event.get(catalyst_id)
         catalyst_market = self._market_cache.get(catalyst_id)
-        catalyst_is_parlay = (
-            self._is_parlay_or_multileg(catalyst_market.question)
-            if catalyst_market
-            else False
-        )
+        catalyst_is_parlay = self._is_parlay_or_multileg(catalyst_market.question) if catalyst_market else False
 
         # 1. Same event — always related.
         if catalyst_event and catalyst_event in event_market_ids:
@@ -368,11 +360,7 @@ class EventDrivenStrategy(BaseStrategy):
 
             # Skip parlay targets when matching via keywords
             mid_market = self._market_cache.get(mid)
-            mid_is_parlay = (
-                self._is_parlay_or_multileg(mid_market.question)
-                if mid_market
-                else False
-            )
+            mid_is_parlay = self._is_parlay_or_multileg(mid_market.question) if mid_market else False
             if mid_is_parlay:
                 continue
 
@@ -436,11 +424,7 @@ class EventDrivenStrategy(BaseStrategy):
             action = "BUY"
             outcome = "YES"
             entry_price = lagging_yes
-            token_id = (
-                lagging_market.clob_token_ids[0]
-                if lagging_market.clob_token_ids
-                else None
-            )
+            token_id = lagging_market.clob_token_ids[0] if lagging_market.clob_token_ids else None
         else:
             # Catalyst moved down -> lagging should move down -> buy NO
             action = "BUY"
@@ -448,8 +432,7 @@ class EventDrivenStrategy(BaseStrategy):
             entry_price = lagging_no
             token_id = (
                 lagging_market.clob_token_ids[1]
-                if lagging_market.clob_token_ids
-                and len(lagging_market.clob_token_ids) > 1
+                if lagging_market.clob_token_ids and len(lagging_market.clob_token_ids) > 1
                 else None
             )
 
@@ -521,26 +504,17 @@ class EventDrivenStrategy(BaseStrategy):
         if opp:
             # Override risk score to our statistical range
             opp.risk_score = risk_score
-            opp.risk_factors.append(
-                f"Statistical edge (not risk-free): catalyst {catalyst_magnitude:.1%} move"
-            )
-            opp.risk_factors.append(
-                "Price lag may reflect legitimate market disagreement"
-            )
-            opp.risk_factors.append(
-                f"Expected repricing target: +${expected_move:.3f} per share"
-            )
+            opp.risk_factors.append(f"Statistical edge (not risk-free): catalyst {catalyst_magnitude:.1%} move")
+            opp.risk_factors.append("Price lag may reflect legitimate market disagreement")
+            opp.risk_factors.append(f"Expected repricing target: +${expected_move:.3f} per share")
             opp.risk_factors.insert(
                 0,
-                "DIRECTIONAL BET — not arbitrage. "
-                "Price lag may reflect legitimate market disagreement.",
+                "DIRECTIONAL BET — not arbitrage. Price lag may reflect legitimate market disagreement.",
             )
 
         return opp
 
-    def _deduplicate_by_question(
-        self, opportunities: list[ArbitrageOpportunity]
-    ) -> list[ArbitrageOpportunity]:
+    def _deduplicate_by_question(self, opportunities: list[ArbitrageOpportunity]) -> list[ArbitrageOpportunity]:
         """Collapse duplicate markets with equivalent question text."""
         deduped: dict[tuple[str, str], ArbitrageOpportunity] = {}
         for opp in opportunities:

@@ -165,16 +165,9 @@ def build_market_url(
         # from the full market ticker.
         return build_kalshi_market_url(
             market_ticker=market.get("id") or market.get("market_id") or market.get("ticker"),
-            event_ticker=(
-                market.get("event_ticker")
-                or market.get("eventTicker")
-            ),
-            event_slug=(
-                market.get("event_slug") or market.get("eventSlug")
-            ),
-            series_ticker=(
-                market.get("series_ticker") or market.get("seriesTicker")
-            ),
+            event_ticker=(market.get("event_ticker") or market.get("eventTicker")),
+            event_slug=(market.get("event_slug") or market.get("eventSlug")),
+            series_ticker=(market.get("series_ticker") or market.get("seriesTicker")),
         )
 
     return build_polymarket_market_url(

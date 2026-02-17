@@ -40,6 +40,7 @@ async def test_find_opportunity_by_id_falls_back_to_weather_snapshot(monkeypatch
 
     async def _scanner_none(_session, _filter):
         return []
+
     weather_rows = AsyncMock(return_value=[target])
 
     monkeypatch.setattr(routes_ai.shared_state, "get_opportunities_from_db", _scanner_none)

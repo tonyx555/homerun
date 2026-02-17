@@ -143,9 +143,7 @@ class TemporalDecayStrategy(BaseStrategy):
         # market_id -> (deadline_dt, first_seen_price) for decay calculation
         self._market_baselines: dict[str, tuple[datetime, float]] = {}
 
-    def detect(
-        self, events: list[Event], markets: list[Market], prices: dict[str, dict]
-    ) -> list[ArbitrageOpportunity]:
+    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[ArbitrageOpportunity]:
         if not settings.TEMPORAL_DECAY_ENABLED:
             return []
 
@@ -163,11 +161,7 @@ class TemporalDecayStrategy(BaseStrategy):
                 str(getattr(market, "id", "") or "").upper(),
                 str(getattr(market, "condition_id", "") or "").upper(),
             ]
-            if any(
-                key.startswith(prefix)
-                for key in market_keys
-                for prefix in _MULTILEG_MARKET_PREFIXES
-            ):
+            if any(key.startswith(prefix) for key in market_keys for prefix in _MULTILEG_MARKET_PREFIXES):
                 continue
 
             # Skip sports parlays before either decay or shock branches.
@@ -256,9 +250,7 @@ class TemporalDecayStrategy(BaseStrategy):
                 opportunities.append(opp)
 
         if opportunities:
-            logger.info(
-                f"Temporal Decay: found {len(opportunities)} decay mispricing(s)"
-            )
+            logger.info(f"Temporal Decay: found {len(opportunities)} decay mispricing(s)")
 
         return opportunities
 
@@ -337,18 +329,12 @@ class TemporalDecayStrategy(BaseStrategy):
         trough = min(window_prices)
         up_move = yes_price - trough
         down_move = peak - yes_price
-        min_abs_move = float(
-            getattr(settings, "TEMPORAL_SHOCK_MIN_ABS_MOVE", _SHOCK_MIN_ABS_MOVE)
-        )
+        min_abs_move = float(getattr(settings, "TEMPORAL_SHOCK_MIN_ABS_MOVE", _SHOCK_MIN_ABS_MOVE))
         if up_move < min_abs_move and down_move < min_abs_move:
             return None
 
         yes_token = market.clob_token_ids[0] if market.clob_token_ids else None
-        no_token = (
-            market.clob_token_ids[1]
-            if market.clob_token_ids and len(market.clob_token_ids) > 1
-            else None
-        )
+        no_token = market.clob_token_ids[1] if market.clob_token_ids and len(market.clob_token_ids) > 1 else None
 
         if up_move >= down_move:
             outcome = "YES"
@@ -365,9 +351,7 @@ class TemporalDecayStrategy(BaseStrategy):
             retrace = max(yes_price - trough, 0.0)
             shock_desc = "YES repricing downward (NO upward)"
 
-        max_retrace = float(
-            getattr(settings, "TEMPORAL_SHOCK_MAX_RETRACE", _SHOCK_MAX_RETRACE)
-        )
+        max_retrace = float(getattr(settings, "TEMPORAL_SHOCK_MAX_RETRACE", _SHOCK_MAX_RETRACE))
         if retrace > max_retrace:
             return None
 
@@ -425,8 +409,7 @@ class TemporalDecayStrategy(BaseStrategy):
                 "price": entry_price,
                 "token_id": token_id,
                 "rationale": (
-                    f"{shock_desc}; lookback move {move:.3f}, "
-                    f"retrace {retrace:.3f}, target ${target_exit_price:.3f}"
+                    f"{shock_desc}; lookback move {move:.3f}, retrace {retrace:.3f}, target ${target_exit_price:.3f}"
                 ),
             },
         ]
@@ -476,15 +459,9 @@ class TemporalDecayStrategy(BaseStrategy):
                 0,
                 "DIRECTIONAL BET — certainty shock can reverse before final settlement.",
             )
-            opp.risk_factors.append(
-                f"Certainty shock: {shock_desc}, move={move:.1%}, retrace={retrace:.1%}"
-            )
-            opp.risk_factors.append(
-                f"Near expiry window: {days_remaining:.2f} days to deadline"
-            )
-            opp.risk_factors.append(
-                f"Target repricing edge: +${expected_move:.3f} per share"
-            )
+            opp.risk_factors.append(f"Certainty shock: {shock_desc}, move={move:.1%}, retrace={retrace:.1%}")
+            opp.risk_factors.append(f"Near expiry window: {days_remaining:.2f} days to deadline")
+            opp.risk_factors.append(f"Target repricing edge: +${expected_move:.3f} per share")
 
         return opp
 
@@ -718,11 +695,7 @@ class TemporalDecayStrategy(BaseStrategy):
             action = "BUY"
             outcome = "NO"
             entry_price = no_price
-            token_id = (
-                market.clob_token_ids[1]
-                if market.clob_token_ids and len(market.clob_token_ids) > 1
-                else None
-            )
+            token_id = market.clob_token_ids[1] if market.clob_token_ids and len(market.clob_token_ids) > 1 else None
             direction_desc = "overpriced"
         else:
             # Market is UNDERPRICED relative to decay expectation -> buy YES
@@ -795,25 +768,14 @@ class TemporalDecayStrategy(BaseStrategy):
         if opp:
             # Override risk score to our statistical range
             opp.risk_score = risk_score
-            opp.risk_factors.append(
-                f"Statistical edge (not risk-free): "
-                f"decay deviation {abs(deviation):.1%}"
-            )
-            opp.risk_factors.append(
-                f"Deadline in {days_remaining:.0f} days "
-                f"({deadline.strftime('%Y-%m-%d')})"
-            )
-            opp.risk_factors.append(
-                f"Expected repricing target: +${expected_move:.3f} per share"
-            )
+            opp.risk_factors.append(f"Statistical edge (not risk-free): decay deviation {abs(deviation):.1%}")
+            opp.risk_factors.append(f"Deadline in {days_remaining:.0f} days ({deadline.strftime('%Y-%m-%d')})")
+            opp.risk_factors.append(f"Expected repricing target: +${expected_move:.3f} per share")
             opp.risk_factors.insert(
                 0,
-                "DIRECTIONAL BET — not arbitrage. "
-                "Decay deviation may reflect new information, not mispricing.",
+                "DIRECTIONAL BET — not arbitrage. Decay deviation may reflect new information, not mispricing.",
             )
             if days_remaining < 7:
-                opp.risk_factors.append(
-                    "Near-deadline: steep decay but higher event uncertainty"
-                )
+                opp.risk_factors.append("Near-deadline: steep decay but higher event uncertainty")
 
         return opp

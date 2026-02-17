@@ -77,17 +77,8 @@ async def test_force_delete_cleans_up_active_orders_before_delete(tmp_path):
             assert deleted is True
 
             order_rows = list(
-                (
-                    await session.execute(
-                        select(TraderOrder).where(TraderOrder.trader_id == trader_id)
-                    )
-                )
-                .scalars()
-                .all()
+                (await session.execute(select(TraderOrder).where(TraderOrder.trader_id == trader_id))).scalars().all()
             )
-            assert all(
-                str(row.status or "").strip().lower() not in OPEN_ORDER_STATUSES
-                for row in order_rows
-            )
+            assert all(str(row.status or "").strip().lower() not in OPEN_ORDER_STATUSES for row in order_rows)
     finally:
         await engine.dispose()

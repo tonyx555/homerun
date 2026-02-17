@@ -62,9 +62,7 @@ class WeatherEdgeStrategy(BaseWeatherStrategy):
 
     def quality_gates(self, intent: dict, cfg: dict) -> bool:
         source_count = int(intent.get("source_count", 0))
-        source_spread_c = float(
-            intent.get("source_spread_c") or intent.get("source_spread_c", 0) or 0
-        )
+        source_spread_c = float(intent.get("source_spread_c") or intent.get("source_spread_c", 0) or 0)
         agreement = float(intent.get("model_agreement", 0))
 
         if agreement < cfg["min_model_agreement"]:
@@ -80,7 +78,9 @@ class WeatherEdgeStrategy(BaseWeatherStrategy):
     # ------------------------------------------------------------------
 
     def compute_model_probability(
-        self, intent: dict, cfg: dict,
+        self,
+        intent: dict,
+        cfg: dict,
     ) -> tuple[Optional[float], dict]:
         bucket_low = intent.get("bucket_low_c")
         bucket_high = intent.get("bucket_high_c")
@@ -89,7 +89,10 @@ class WeatherEdgeStrategy(BaseWeatherStrategy):
         scale_c = float(cfg.get("probability_scale_c", 2.0))
         if bucket_low is not None and bucket_high is not None and consensus_value_c is not None:
             model_prob = temp_range_probability(
-                float(consensus_value_c), float(bucket_low), float(bucket_high), scale_c,
+                float(consensus_value_c),
+                float(bucket_low),
+                float(bucket_high),
+                scale_c,
             )
         else:
             model_prob = float(intent.get("consensus_probability", 0.5) or 0.5)
@@ -110,9 +113,7 @@ class WeatherEdgeStrategy(BaseWeatherStrategy):
     ) -> bool:
         agreement = float(intent.get("model_agreement", 0))
         source_count = int(intent.get("source_count", 0))
-        source_spread_c = float(
-            intent.get("source_spread_c") or intent.get("source_spread_c", 0) or 0
-        )
+        source_spread_c = float(intent.get("source_spread_c") or intent.get("source_spread_c", 0) or 0)
         confidence = compute_confidence(agreement, model_prob, source_count, source_spread_c)
         if confidence < cfg["min_confidence"]:
             return False
@@ -132,9 +133,7 @@ class WeatherEdgeStrategy(BaseWeatherStrategy):
         extra_metadata: dict,
     ) -> tuple[float, list[str]]:
         source_count = int(intent.get("source_count", 0))
-        source_spread_c = float(
-            intent.get("source_spread_c") or intent.get("source_spread_c", 0) or 0
-        )
+        source_spread_c = float(intent.get("source_spread_c") or intent.get("source_spread_c", 0) or 0)
         agreement = float(intent.get("model_agreement", 0))
 
         risk_score = float(cfg["risk_base_score"])
@@ -171,9 +170,7 @@ class WeatherEdgeStrategy(BaseWeatherStrategy):
         market_temp = intent.get("market_implied_temp_c")
         agreement = float(intent.get("model_agreement", 0))
         source_count = int(intent.get("source_count", 0))
-        source_spread_c = float(
-            intent.get("source_spread_c") or intent.get("source_spread_c", 0) or 0
-        )
+        source_spread_c = float(intent.get("source_spread_c") or intent.get("source_spread_c", 0) or 0)
 
         return {
             "_weather_edge": {

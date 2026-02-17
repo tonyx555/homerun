@@ -58,7 +58,7 @@ class WeatherDistributionStrategy(BaseWeatherStrategy):
 
     DEFAULT_CONFIG = {
         "min_edge_percent": 5.0,
-        "sigma_c": 1.8,           # std dev for normal distribution (when no ensemble)
+        "sigma_c": 1.8,  # std dev for normal distribution (when no ensemble)
         "min_confidence": 0.50,
         "max_entry_price": 0.85,
         "max_buckets_per_event": 2,  # max simultaneous positions in one event
@@ -118,15 +118,17 @@ class WeatherDistributionStrategy(BaseWeatherStrategy):
 
         all_buckets = [current_bucket]
         for sib in sibling_markets:
-            all_buckets.append({
-                "bucket_low_c": float(sib.get("bucket_low_c", 0)),
-                "bucket_high_c": float(sib.get("bucket_high_c", 0)),
-                "yes_price": float(sib.get("yes_price", 0.5)),
-                "no_price": float(sib.get("no_price", 0.5)),
-                "market_id": sib.get("market_id"),
-                "clob_token_ids": sib.get("clob_token_ids"),
-                "is_current": False,
-            })
+            all_buckets.append(
+                {
+                    "bucket_low_c": float(sib.get("bucket_low_c", 0)),
+                    "bucket_high_c": float(sib.get("bucket_high_c", 0)),
+                    "yes_price": float(sib.get("yes_price", 0.5)),
+                    "no_price": float(sib.get("no_price", 0.5)),
+                    "market_id": sib.get("market_id"),
+                    "clob_token_ids": sib.get("clob_token_ids"),
+                    "is_current": False,
+                }
+            )
 
         # -----------------------------------------------------------
         # 2. Compute raw model probability for each bucket
@@ -266,14 +268,16 @@ class WeatherDistributionStrategy(BaseWeatherStrategy):
         # Build distribution snapshot for metadata
         distribution_snapshot = []
         for bucket in ranked:
-            distribution_snapshot.append({
-                "bucket_low_c": bucket["bucket_low_c"],
-                "bucket_high_c": bucket["bucket_high_c"],
-                "model_prob": round(bucket["model_prob"], 4),
-                "yes_price": bucket["yes_price"],
-                "edge": round(bucket["edge"], 4),
-                "market_id": bucket.get("market_id"),
-            })
+            distribution_snapshot.append(
+                {
+                    "bucket_low_c": bucket["bucket_low_c"],
+                    "bucket_high_c": bucket["bucket_high_c"],
+                    "model_prob": round(bucket["model_prob"], 4),
+                    "yes_price": bucket["yes_price"],
+                    "edge": round(bucket["edge"], 4),
+                    "market_id": bucket.get("market_id"),
+                }
+            )
 
         positions = [
             {
@@ -334,7 +338,9 @@ class WeatherDistributionStrategy(BaseWeatherStrategy):
     # ------------------------------------------------------------------
 
     def compute_model_probability(
-        self, intent: dict, cfg: dict,
+        self,
+        intent: dict,
+        cfg: dict,
     ) -> tuple[Optional[float], dict]:
         # Not called -- _evaluate_intent is fully overridden.
         return None, {}

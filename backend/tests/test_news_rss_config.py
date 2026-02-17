@@ -47,8 +47,7 @@ def test_merge_gov_rss_feeds_appends_missing_defaults_without_duplicates():
     doj = [
         row
         for row in merged
-        if row["agency"] == "justice"
-        and row["url"] == "https://www.justice.gov/feeds/opa/justice-news.xml"
+        if row["agency"] == "justice" and row["url"] == "https://www.justice.gov/feeds/opa/justice-news.xml"
     ]
     assert len(doj) == 1
     assert doj[0]["enabled"] is False

@@ -51,7 +51,9 @@ class FlashCrashReversionStrategy(BaseStrategy):
         super().__init__()
         self.config = dict(self.default_config)
         # market_id -> deque[(ts, yes, no, yes_bid, yes_ask, no_bid, no_ask)]
-        self._history: dict[str, deque[tuple[float, float, float, Optional[float], Optional[float], Optional[float], Optional[float]]]] = {}
+        self._history: dict[
+            str, deque[tuple[float, float, float, Optional[float], Optional[float], Optional[float], Optional[float]]]
+        ] = {}
 
     @staticmethod
     def _extract_book_value(payload: Optional[dict], key: str) -> Optional[float]:
@@ -142,7 +144,10 @@ class FlashCrashReversionStrategy(BaseStrategy):
         for market in markets:
             if market.closed or not market.active:
                 continue
-            if len(list(getattr(market, "outcome_prices", []) or [])) < 2 and len(list(getattr(market, "clob_token_ids", []) or [])) < 2:
+            if (
+                len(list(getattr(market, "outcome_prices", []) or [])) < 2
+                and len(list(getattr(market, "clob_token_ids", []) or [])) < 2
+            ):
                 continue
             if _safe_float(getattr(market, "liquidity", 0.0)) < min_liquidity:
                 continue

@@ -239,9 +239,5 @@ async def test_pool_members_keeps_blocked_metadata_for_non_pool_rows():
     row = out["members"][0]
     assert row["in_top_pool"] is False
     assert row["eligibility_status"] == "blocked"
-    assert row["eligibility_blockers"] == [
-        {"code": "recommendation_blocked", "label": "Recommendation blocked"}
-    ]
-    assert row["selection_reasons"] == [
-        {"code": "recommendation_blocked", "label": "Recommendation blocked"}
-    ]
+    assert row["eligibility_blockers"] == [{"code": "recommendation_blocked", "label": "Recommendation blocked"}]
+    assert row["selection_reasons"] == [{"code": "recommendation_blocked", "label": "Recommendation blocked"}]

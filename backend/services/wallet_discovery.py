@@ -1271,9 +1271,7 @@ class WalletDiscoveryEngine:
 
             for entry in entries:
                 addr = self._normalize_wallet_address(
-                    entry.get("proxyWallet")
-                    or entry.get("wallet")
-                    or entry.get("address")
+                    entry.get("proxyWallet") or entry.get("wallet") or entry.get("address")
                 )
                 if addr:
                     discovered.add(addr)
@@ -1803,9 +1801,7 @@ class WalletDiscoveryEngine:
 
             # From leaderboard
             leaderboard_scan_count = int(max(200, min(800, max_markets * 3)))
-            leaderboard_addrs = await self._discover_wallets_from_leaderboard(
-                scan_count=leaderboard_scan_count
-            )
+            leaderboard_addrs = await self._discover_wallets_from_leaderboard(scan_count=leaderboard_scan_count)
             all_addresses.update(leaderboard_addrs)
 
             seeded = await self._upsert_discovered_placeholders(

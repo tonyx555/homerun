@@ -52,13 +52,13 @@ class WeatherConservativeNoStrategy(BaseWeatherStrategy):
     description = "Conservative NO-betting: bet NO on buckets far from forecast consensus for high win rate"
 
     DEFAULT_CONFIG = {
-        "min_safe_distance_c": 2.5,   # min degrees C away from consensus to bet NO
-        "max_no_price": 0.92,         # don't bet NO if it costs more than this
+        "min_safe_distance_c": 2.5,  # min degrees C away from consensus to bet NO
+        "max_no_price": 0.92,  # don't bet NO if it costs more than this
         "min_model_agreement": 0.60,
         "max_source_spread_c": 4.0,
         "min_source_count": 2,
         "max_positions_per_event": 3,
-        "risk_base_score": 0.20,      # lower risk since these are high-probability bets
+        "risk_base_score": 0.20,  # lower risk since these are high-probability bets
     }
 
     # ------------------------------------------------------------------
@@ -188,14 +188,12 @@ class WeatherConservativeNoStrategy(BaseWeatherStrategy):
         ensemble_members = intent.get("ensemble_members")
         if ensemble_members and isinstance(ensemble_members, list) and len(ensemble_members) > 0:
             # Ensemble approach: count fraction outside the bucket
-            bucket_prob = ensemble_bucket_probability(
-                ensemble_members, bucket_low_c, bucket_high_c
-            )
+            bucket_prob = ensemble_bucket_probability(ensemble_members, bucket_low_c, bucket_high_c)
             model_prob_no = 1.0 - bucket_prob
         else:
             # Deterministic approach: Gaussian decay
             # Probability of being in this bucket decays with distance squared
-            gaussian_prob = max(0.01, math.exp(-(distance ** 2) / (2 * 2.0 ** 2)))
+            gaussian_prob = max(0.01, math.exp(-(distance**2) / (2 * 2.0**2)))
             model_prob_no = 1.0 - gaussian_prob
 
         # ------------------------------------------------------------------
@@ -301,8 +299,7 @@ class WeatherConservativeNoStrategy(BaseWeatherStrategy):
 
         title = f"Conservative NO: {city} - {question[:40]}"
         description = (
-            f"Bet NO on {bucket_center:.0f}C "
-            f"(distance {distance:.1f}C from {consensus_value_c:.1f}C consensus)"
+            f"Bet NO on {bucket_center:.0f}C (distance {distance:.1f}C from {consensus_value_c:.1f}C consensus)"
         )
 
         return self._build_opportunity(
@@ -330,7 +327,9 @@ class WeatherConservativeNoStrategy(BaseWeatherStrategy):
     # ------------------------------------------------------------------
 
     def compute_model_probability(
-        self, intent: dict, cfg: dict,
+        self,
+        intent: dict,
+        cfg: dict,
     ) -> tuple[Optional[float], dict]:
         # Not called -- _evaluate_intent is fully overridden.
         return None, {}

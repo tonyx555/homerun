@@ -462,10 +462,7 @@ def _filter_trader_confluence_rows_by_source(
         if not isinstance(source_flags, dict):
             source_flags = {}
 
-        from_tracked = bool(
-            source_flags.get("from_tracked_traders")
-            or source_flags.get("from_trader_groups")
-        )
+        from_tracked = bool(source_flags.get("from_tracked_traders") or source_flags.get("from_trader_groups"))
         from_pool = bool(source_flags.get("from_pool"))
 
         if normalized == "tracked":
@@ -752,8 +749,7 @@ async def _attach_activity_history_fallback(
         )
         has_named_outcomes = bool(labels) and not _labels_look_like_yes_no(labels)
         has_authoritative_prices = (
-            _safe_float(row.get("yes_price")) is not None
-            and _safe_float(row.get("no_price")) is not None
+            _safe_float(row.get("yes_price")) is not None and _safe_float(row.get("no_price")) is not None
         )
         # Wallet activity fallback only carries side+price and cannot safely map
         # named two-outcome markets (e.g. "Kecmanovic" vs "Shelton").
@@ -978,18 +974,10 @@ async def _annotate_trader_signal_rows(
 
             row["validation"] = {
                 "is_valid": bool(row.get("is_valid", strategy_validation.get("is_valid", True))),
-                "is_actionable": bool(
-                    row.get("is_actionable", strategy_validation.get("is_actionable", True))
-                ),
-                "is_tradeable": bool(
-                    row.get("is_tradeable", strategy_validation.get("is_tradeable", True))
-                ),
+                "is_actionable": bool(row.get("is_actionable", strategy_validation.get("is_actionable", True))),
+                "is_tradeable": bool(row.get("is_tradeable", strategy_validation.get("is_tradeable", True))),
                 "checks": checks,
-                "reasons": list(
-                    row.get("validation_reasons")
-                    or strategy_validation.get("reasons")
-                    or []
-                ),
+                "reasons": list(row.get("validation_reasons") or strategy_validation.get("reasons") or []),
             }
             row["is_valid"] = bool(row["validation"]["is_valid"])
             row["is_actionable"] = bool(row["validation"]["is_actionable"])
@@ -1057,15 +1045,9 @@ async def _ensure_discovered_wallet_entries(
     created = 0
     async with AsyncSessionLocal() as session:
         existing_result = await session.execute(
-            select(DiscoveredWallet.address).where(
-                DiscoveredWallet.address.in_(addresses)
-            )
+            select(DiscoveredWallet.address).where(DiscoveredWallet.address.in_(addresses))
         )
-        existing_addresses = {
-            str(row[0]).strip().lower()
-            for row in existing_result.all()
-            if row[0]
-        }
+        existing_addresses = {str(row[0]).strip().lower() for row in existing_result.all() if row[0]}
 
         for address in addresses:
             addr_lower = address.strip().lower()

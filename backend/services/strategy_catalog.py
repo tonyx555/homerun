@@ -11,6 +11,7 @@ When adding a new strategy:
    - trader_orchestrator/strategy_catalog.py  for execution strategies
 3. The seed routine will create/update the DB row on startup
 """
+
 from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession

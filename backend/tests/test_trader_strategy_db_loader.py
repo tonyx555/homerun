@@ -198,9 +198,7 @@ async def test_ensure_system_seed_rewrites_legacy_wrapper_rows(tmp_path):
             row = (
                 (
                     await session.execute(
-                        select(TraderStrategyDefinition).where(
-                            TraderStrategyDefinition.strategy_key == "crypto_15m"
-                        )
+                        select(TraderStrategyDefinition).where(TraderStrategyDefinition.strategy_key == "crypto_15m")
                     )
                 )
                 .scalars()

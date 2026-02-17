@@ -459,14 +459,10 @@ class DependencyValidator:
         price_consistent = self._price_sanity_check(dependencies, prices_a, prices_b)
 
         # Step 4: LLM confidence gate
-        medium_threshold = float(
-            getattr(settings, "COMBINATORIAL_MIN_CONFIDENCE", MEDIUM_CONFIDENCE)
-        )
+        medium_threshold = float(getattr(settings, "COMBINATORIAL_MIN_CONFIDENCE", MEDIUM_CONFIDENCE))
         medium_threshold = max(0.0, min(1.0, medium_threshold))
         self.accuracy_tracker.set_base_threshold(medium_threshold)
-        high_threshold = float(
-            getattr(settings, "COMBINATORIAL_HIGH_CONFIDENCE", HIGH_CONFIDENCE)
-        )
+        high_threshold = float(getattr(settings, "COMBINATORIAL_HIGH_CONFIDENCE", HIGH_CONFIDENCE))
         high_threshold = max(medium_threshold, min(1.0, high_threshold))
 
         effective_threshold = self.accuracy_tracker.effective_threshold

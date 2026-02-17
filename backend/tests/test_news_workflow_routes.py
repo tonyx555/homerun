@@ -112,9 +112,7 @@ def test_build_market_link_payload_prefers_polymarket_slug():
 
     assert payload["market_platform"] == "polymarket"
     assert payload["market_url"] == (
-        "https://polymarket.com/event/"
-        "how-many-people-will-trump-deport-in-2025/"
-        "will-trump-deport-less-than-250000"
+        "https://polymarket.com/event/how-many-people-will-trump-deport-in-2025/will-trump-deport-less-than-250000"
     )
     assert payload["polymarket_url"] == payload["market_url"]
     assert payload["kalshi_url"] is None

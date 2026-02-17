@@ -115,9 +115,17 @@ class CryptoSpikeReversionStrategy(BaseTraderStrategy):
 
         checks = [
             DecisionCheck("source", "Crypto source", source == "crypto", detail="Requires source=crypto."),
-            DecisionCheck("origin", "Crypto worker origin", origin_ok, detail="Requires worker-generated crypto signal."),
+            DecisionCheck(
+                "origin", "Crypto worker origin", origin_ok, detail="Requires worker-generated crypto signal."
+            ),
             DecisionCheck("edge", "Edge threshold", edge >= min_edge, score=edge, detail=f"min={min_edge:.2f}"),
-            DecisionCheck("confidence", "Confidence threshold", confidence >= min_conf, score=confidence, detail=f"min={min_conf:.2f}"),
+            DecisionCheck(
+                "confidence",
+                "Confidence threshold",
+                confidence >= min_conf,
+                score=confidence,
+                detail=f"min={min_conf:.2f}",
+            ),
             DecisionCheck(
                 "direction_alignment",
                 "Direction aligns with spike",

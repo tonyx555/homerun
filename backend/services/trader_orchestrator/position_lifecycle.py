@@ -263,10 +263,7 @@ async def reconcile_paper_positions(
                 select(TradeSignal.id, TradeSignal.payload_json).where(TradeSignal.id.in_(signal_ids))
             )
         ).all()
-        signal_payloads = {
-            str(row.id): dict(row.payload_json or {})
-            for row in signal_rows
-        }
+        signal_payloads = {str(row.id): dict(row.payload_json or {}) for row in signal_rows}
 
     market_info_by_id = await load_market_info_for_orders(candidates)
 
@@ -376,11 +373,14 @@ async def reconcile_paper_positions(
                 strategy_exit = None
                 if strategy_slug:
                     from services.plugin_loader import plugin_loader
+
                     plugin = plugin_loader.get_plugin(strategy_slug)
                     if plugin and hasattr(plugin.instance, "should_exit"):
                         try:
+
                             class _PaperPositionView:
                                 pass
+
                             pos_view = _PaperPositionView()
                             pos_view.entry_price = entry_price
                             pos_view.current_price = current_price
@@ -410,11 +410,7 @@ async def reconcile_paper_positions(
                             )
 
                 if strategy_exit is not None:
-                    close_price = (
-                        strategy_exit.close_price
-                        if strategy_exit.close_price is not None
-                        else current_price
-                    )
+                    close_price = strategy_exit.close_price if strategy_exit.close_price is not None else current_price
                     close_trigger = f"strategy:{strategy_exit.reason}"
                     price_source = current_price_source
                 elif (
@@ -527,9 +523,9 @@ async def reconcile_paper_positions(
                         proceeds = float(simulation_close.get("actual_payout", proceeds))
                 except Exception as exc:
                     skipped += 1
-                    skipped_reasons["simulation_close_error"] = int(
-                        skipped_reasons.get("simulation_close_error", 0)
-                    ) + 1
+                    skipped_reasons["simulation_close_error"] = (
+                        int(skipped_reasons.get("simulation_close_error", 0)) + 1
+                    )
                     details.append(
                         {
                             "order_id": row.id,
@@ -676,10 +672,7 @@ async def reconcile_live_positions(
                 select(TradeSignal.id, TradeSignal.payload_json).where(TradeSignal.id.in_(signal_ids))
             )
         ).all()
-        signal_payloads = {
-            str(row.id): dict(row.payload_json or {})
-            for row in signal_rows
-        }
+        signal_payloads = {str(row.id): dict(row.payload_json or {}) for row in signal_rows}
 
     market_info_by_id = await load_market_info_for_orders(candidates)
 
@@ -789,11 +782,14 @@ async def reconcile_live_positions(
                 strategy_exit = None
                 if strategy_slug:
                     from services.plugin_loader import plugin_loader
+
                     plugin = plugin_loader.get_plugin(strategy_slug)
                     if plugin and hasattr(plugin.instance, "should_exit"):
                         try:
+
                             class _LivePositionView:
                                 pass
+
                             pos_view = _LivePositionView()
                             pos_view.entry_price = entry_price
                             pos_view.current_price = current_price
@@ -823,11 +819,7 @@ async def reconcile_live_positions(
                             )
 
                 if strategy_exit is not None:
-                    close_price = (
-                        strategy_exit.close_price
-                        if strategy_exit.close_price is not None
-                        else current_price
-                    )
+                    close_price = strategy_exit.close_price if strategy_exit.close_price is not None else current_price
                     close_trigger = f"strategy:{strategy_exit.reason}"
                     price_source = current_price_source
                 elif (

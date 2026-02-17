@@ -268,15 +268,11 @@ def build_weather_signal(
         soft_excess = market_price - entry_max_price
         confidence_penalty = max(0.35, 1.0 - (soft_excess / 0.75))
         confidence = _clamp01(confidence * confidence_penalty)
-        notes.append(
-            f"entry_price {market_price:.3f} above soft max {entry_max_price:.3f}; size should be reduced"
-        )
+        notes.append(f"entry_price {market_price:.3f} above soft max {entry_max_price:.3f}; size should be reduced")
 
     reasons: list[str] = []
     if market_price > hard_entry_cap:
-        reasons.append(
-            f"entry_price {market_price:.3f} > hard cap {hard_entry_cap:.3f}"
-        )
+        reasons.append(f"entry_price {market_price:.3f} > hard cap {hard_entry_cap:.3f}")
     if edge_percent < min_edge_percent:
         reasons.append(f"edge {edge_percent:.2f}% < min {min_edge_percent:.2f}%")
     if confidence < min_confidence:

@@ -422,11 +422,7 @@ async def _backfill_simulation_ledger_for_active_paper_orders(
 
 
 async def _build_traders_scope_context(session: Any, traders_scope: dict[str, Any]) -> dict[str, Any]:
-    modes = {
-        str(mode or "").strip().lower()
-        for mode in (traders_scope.get("modes") or [])
-        if str(mode or "").strip()
-    }
+    modes = {str(mode or "").strip().lower() for mode in (traders_scope.get("modes") or []) if str(mode or "").strip()}
     context: dict[str, Any] = {
         "modes": modes,
         "individual_wallets": {
@@ -445,34 +441,34 @@ async def _build_traders_scope_context(session: Any, traders_scope: dict[str, An
     }
 
     if "tracked" in modes:
-        tracked_rows = (
-            await session.execute(select(TrackedWallet.address))
-        ).scalars().all()
+        tracked_rows = (await session.execute(select(TrackedWallet.address))).scalars().all()
         context["tracked_wallets"] = {
             _normalize_wallet(address) for address in tracked_rows if _normalize_wallet(address)
         }
 
     if "pool" in modes:
         pool_rows = (
-            await session.execute(
-                select(DiscoveredWallet.address).where(DiscoveredWallet.in_top_pool == True)  # noqa: E712
+            (
+                await session.execute(
+                    select(DiscoveredWallet.address).where(DiscoveredWallet.in_top_pool == True)  # noqa: E712
+                )
             )
-        ).scalars().all()
-        context["pool_wallets"] = {
-            _normalize_wallet(address) for address in pool_rows if _normalize_wallet(address)
-        }
+            .scalars()
+            .all()
+        )
+        context["pool_wallets"] = {_normalize_wallet(address) for address in pool_rows if _normalize_wallet(address)}
 
     if "group" in modes and context["group_ids"]:
         group_rows = (
-            await session.execute(
-                select(TraderGroupMember.wallet_address).where(
-                    TraderGroupMember.group_id.in_(context["group_ids"])
+            (
+                await session.execute(
+                    select(TraderGroupMember.wallet_address).where(TraderGroupMember.group_id.in_(context["group_ids"]))
                 )
             )
-        ).scalars().all()
-        context["group_wallets"] = {
-            _normalize_wallet(address) for address in group_rows if _normalize_wallet(address)
-        }
+            .scalars()
+            .all()
+        )
+        context["group_wallets"] = {_normalize_wallet(address) for address in group_rows if _normalize_wallet(address)}
 
     return context
 
@@ -535,9 +531,7 @@ async def _run_trader_once(
                     trader_id=trader_id,
                     event_type="paper_ledger_backfill",
                     source="worker",
-                    message=(
-                        f"Backfilled {int(backfill_result['backfilled'])} paper order(s) into simulation ledger"
-                    ),
+                    message=(f"Backfilled {int(backfill_result['backfilled'])} paper order(s) into simulation ledger"),
                     payload=backfill_result,
                 )
 
@@ -619,9 +613,7 @@ async def _run_trader_once(
                     f"Resume policy flatten_then_start waiting to flatten {open_positions} open paper position(s)"
                 )
             else:
-                block_entries_reason = (
-                    f"Resume policy flatten_then_start blocked: {open_positions} open live position(s) require manual flattening"
-                )
+                block_entries_reason = f"Resume policy flatten_then_start blocked: {open_positions} open live position(s) require manual flattening"
 
         effective_process_signals = bool(process_signals)
         if block_entries_reason is not None and process_signals:
@@ -837,9 +829,7 @@ async def _run_trader_once(
                     strategy_key = str(source_config.get("strategy_key") or "").strip().lower()
                     strategy_params = dict(source_config.get("strategy_params") or {})
                     strategy_status = strategy_db_loader.get_availability(strategy_key)
-                    resolved_strategy_key = (
-                        strategy_status.resolved_key or strategy_key
-                    )
+                    resolved_strategy_key = strategy_status.resolved_key or strategy_key
                     live_context = live_contexts.get(signal_id, {})
                     runtime_signal = RuntimeTradeSignalView(signal, live_context=live_context)
                     runtime_signal.source = signal_source
@@ -856,9 +846,7 @@ async def _run_trader_once(
                     #    the trader uses a generic strategy_key like "opportunity_general"
                     #    but the signal originated from a specific plugin strategy.
                     if strategy is None:
-                        signal_strategy_type = str(
-                            getattr(signal, "strategy_type", "") or ""
-                        ).strip().lower()
+                        signal_strategy_type = str(getattr(signal, "strategy_type", "") or "").strip().lower()
                         if signal_strategy_type:
                             plugin = plugin_loader.get_plugin(signal_strategy_type)
                             if plugin and hasattr(plugin.instance, "evaluate"):
@@ -1259,7 +1247,9 @@ async def _run_trader_once(
                             if not paper_account_id:
                                 status = "failed"
                                 normalized_order_status = "failed"
-                                error_message = "Paper account is not configured; set paper_account_id to execute paper trades."
+                                error_message = (
+                                    "Paper account is not configured; set paper_account_id to execute paper trades."
+                                )
                             else:
                                 entry_price = _safe_float(effective_price, None)
                                 if entry_price is None or entry_price <= 0:
@@ -1273,9 +1263,7 @@ async def _run_trader_once(
                                 signal_payload = getattr(runtime_signal, "payload_json", None)
                                 signal_payload = signal_payload if isinstance(signal_payload, dict) else {}
                                 signal_live_context = (
-                                    runtime_signal.live_context
-                                    if isinstance(runtime_signal.live_context, dict)
-                                    else {}
+                                    runtime_signal.live_context if isinstance(runtime_signal.live_context, dict) else {}
                                 )
                                 token_id = (
                                     str(
@@ -1306,8 +1294,14 @@ async def _run_trader_once(
                                             token_id=token_id,
                                             payload={
                                                 "source": signal_source,
-                                                "edge_percent": _safe_float(getattr(runtime_signal, "edge_percent", None), 0.0) or 0.0,
-                                                "confidence": _safe_float(getattr(runtime_signal, "confidence", None), 0.0) or 0.0,
+                                                "edge_percent": _safe_float(
+                                                    getattr(runtime_signal, "edge_percent", None), 0.0
+                                                )
+                                                or 0.0,
+                                                "confidence": _safe_float(
+                                                    getattr(runtime_signal, "confidence", None), 0.0
+                                                )
+                                                or 0.0,
                                             },
                                             session=session,
                                             commit=False,
@@ -1332,9 +1326,7 @@ async def _run_trader_once(
                         # ── Enrich order payload with strategy context & exit config ──
                         # so position_lifecycle can invoke strategy-based should_exit().
                         order_payload = dict(execution_payload or {})
-                        order_payload["strategy_type"] = str(
-                            getattr(signal, "strategy_type", "") or ""
-                        ).strip().lower()
+                        order_payload["strategy_type"] = str(getattr(signal, "strategy_type", "") or "").strip().lower()
                         order_payload["strategy_context"] = (
                             getattr(signal, "strategy_context_json", None)
                             or getattr(signal, "strategy_context", None)
@@ -1350,9 +1342,7 @@ async def _run_trader_once(
                             "close_on_inactive_market",
                         }
                         order_payload["strategy_exit_config"] = {
-                            k: v
-                            for k, v in (strategy_params or {}).items()
-                            if k in _exit_param_keys
+                            k: v for k, v in (strategy_params or {}).items() if k in _exit_param_keys
                         }
 
                         await create_trader_order(

@@ -31,11 +31,7 @@ router = APIRouter()
 
 
 def _extract_binary_market_tokens(market: dict) -> tuple[Optional[str], Optional[str]]:
-    token_ids = (
-        market.get("clob_token_ids")
-        or market.get("token_ids")
-        or market.get("market_token_ids")
-    )
+    token_ids = market.get("clob_token_ids") or market.get("token_ids") or market.get("market_token_ids")
     if not isinstance(token_ids, list):
         return None, None
 

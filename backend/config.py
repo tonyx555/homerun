@@ -645,9 +645,7 @@ async def apply_world_intelligence_settings():
     from utils.secrets import decrypt_secret
 
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(AppSettings).where(AppSettings.id == "default")
-        )
+        result = await session.execute(select(AppSettings).where(AppSettings.id == "default"))
         db = result.scalar_one_or_none()
         if not db:
             return
@@ -657,17 +655,11 @@ async def apply_world_intelligence_settings():
 
     # Preserve older persisted GDELT-specific columns as fallback.
     if "gdelt_news_enabled" not in config_payload:
-        config_payload["gdelt_news_enabled"] = getattr(
-            db, "world_intel_gdelt_news_enabled", None
-        )
+        config_payload["gdelt_news_enabled"] = getattr(db, "world_intel_gdelt_news_enabled", None)
     if "gdelt_news_timespan_hours" not in config_payload:
-        config_payload["gdelt_news_timespan_hours"] = getattr(
-            db, "world_intel_gdelt_news_timespan_hours", None
-        )
+        config_payload["gdelt_news_timespan_hours"] = getattr(db, "world_intel_gdelt_news_timespan_hours", None)
     if "gdelt_news_max_records" not in config_payload:
-        config_payload["gdelt_news_max_records"] = getattr(
-            db, "world_intel_gdelt_news_max_records", None
-        )
+        config_payload["gdelt_news_max_records"] = getattr(db, "world_intel_gdelt_news_max_records", None)
 
     for db_field, (config_attr, default) in _WORLD_INTELLIGENCE_DB_FIELD_MAP.items():
         resolved = _coerce_setting(config_payload.get(db_field), default)

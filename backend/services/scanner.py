@@ -768,9 +768,7 @@ class ArbitrageScanner:
                     plugin_loader.load_plugin(p.slug, p.source_code, p.config or None)
                     # Update status in DB
                     async with AsyncSessionLocal() as session:
-                        result = await session.execute(
-                            select(StrategyModel).where(StrategyModel.id == p.id)
-                        )
+                        result = await session.execute(select(StrategyModel).where(StrategyModel.id == p.id))
                         db_plugin = result.scalar_one_or_none()
                         if db_plugin:
                             db_plugin.status = "loaded"
@@ -781,9 +779,7 @@ class ArbitrageScanner:
                     print(f"  Plugin '{p.slug}' failed to load: {e}")
                     # Update error status in DB
                     async with AsyncSessionLocal() as session:
-                        result = await session.execute(
-                            select(StrategyModel).where(StrategyModel.id == p.id)
-                        )
+                        result = await session.execute(select(StrategyModel).where(StrategyModel.id == p.id))
                         db_plugin = result.scalar_one_or_none()
                         if db_plugin:
                             db_plugin.status = "error"
@@ -876,12 +872,12 @@ class ArbitrageScanner:
             if targeted_condition_ids:
                 _target_set = {cid.lower() for cid in targeted_condition_ids}
                 markets = [
-                    m for m in markets
-                    if getattr(m, "condition_id", getattr(m, "id", "")).lower() in _target_set
+                    m for m in markets if getattr(m, "condition_id", getattr(m, "id", "")).lower() in _target_set
                 ]
                 for event in events:
                     event.markets = [
-                        m for m in event.markets
+                        m
+                        for m in event.markets
                         if getattr(m, "condition_id", getattr(m, "id", "")).lower() in _target_set
                     ]
                 # Drop events with no remaining markets
@@ -977,8 +973,10 @@ class ArbitrageScanner:
                 token_sample = sorted_token_ids[:PRICE_BATCH_CAP]
                 await self._set_activity(f"Fetching prices for {len(token_sample)} tokens...")
                 prices = await self.market_data.get_prices_batch(token_sample)
-                print(f"  Fetched prices for {len(prices)}/{len(all_token_ids)} tokens "
-                      f"({len(priority_token_ids)} prioritized)")
+                print(
+                    f"  Fetched prices for {len(prices)}/{len(all_token_ids)} tokens "
+                    f"({len(priority_token_ids)} prioritized)"
+                )
 
             # Overlay WebSocket real-time prices where available
             prices = self._merge_ws_prices(prices, sorted_token_ids[:PRICE_BATCH_CAP])
@@ -1540,10 +1538,7 @@ class ArbitrageScanner:
             opp
             for opp in existing_map.values()
             if (opp.resolution_date is None or _make_aware(opp.resolution_date) > now)
-            and (
-                opp.last_seen_at is None
-                or _make_aware(opp.last_seen_at) >= stale_cutoff
-            )
+            and (opp.last_seen_at is None or _make_aware(opp.last_seen_at) >= stale_cutoff)
             and opp.strategy != "btc_eth_highfreq"
         ]
 

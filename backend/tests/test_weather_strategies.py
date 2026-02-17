@@ -93,15 +93,14 @@ class TestSignalEngineUtilities:
         assert agreement < 0.25
 
     def test_compute_confidence(self):
-        confidence = compute_confidence(
-            agreement=0.95, consensus_yes=0.8, source_count=3
-        )
+        confidence = compute_confidence(agreement=0.95, consensus_yes=0.8, source_count=3)
         assert 0.6 < confidence < 1.0
 
 
 # ---------------------------------------------------------------------------
 # Weather Edge Strategy (direction fix)
 # ---------------------------------------------------------------------------
+
 
 class TestWeatherEdgeDirectionFix:
     """Test that weather_edge uses model_prob vs market_price, NOT 0.5."""
@@ -194,6 +193,7 @@ class TestWeatherEdgeDirectionFix:
 # Ensemble Edge Strategy
 # ---------------------------------------------------------------------------
 
+
 class TestEnsembleEdgeStrategy:
     """Test ensemble-based direction and probability."""
 
@@ -201,11 +201,37 @@ class TestEnsembleEdgeStrategy:
         """31 GFS members, count those in [6.5, 7.5) range."""
         # Simulate 31 ensemble members centered around 7C
         members = [
-            5.0, 5.5, 6.0, 6.2, 6.4,  # below bucket
-            6.5, 6.8, 7.0, 7.1, 7.2, 7.3, 7.4,  # in bucket (7 members)
-            7.5, 7.8, 8.0, 8.2, 8.5, 8.8,  # above bucket
-            9.0, 9.2, 9.5, 10.0, 10.5, 11.0,  # far above
-            6.6, 6.9, 7.05, 7.15, 7.25, 7.35, 7.45,  # more in bucket (7 members)
+            5.0,
+            5.5,
+            6.0,
+            6.2,
+            6.4,  # below bucket
+            6.5,
+            6.8,
+            7.0,
+            7.1,
+            7.2,
+            7.3,
+            7.4,  # in bucket (7 members)
+            7.5,
+            7.8,
+            8.0,
+            8.2,
+            8.5,
+            8.8,  # above bucket
+            9.0,
+            9.2,
+            9.5,
+            10.0,
+            10.5,
+            11.0,  # far above
+            6.6,
+            6.9,
+            7.05,
+            7.15,
+            7.25,
+            7.35,
+            7.45,  # more in bucket (7 members)
         ]
         assert len(members) == 31
 
@@ -231,6 +257,7 @@ class TestEnsembleEdgeStrategy:
 # ---------------------------------------------------------------------------
 # Distribution Strategy
 # ---------------------------------------------------------------------------
+
 
 class TestDistributionStrategy:
     """Test full distribution normalization and edge ranking."""
@@ -277,6 +304,7 @@ class TestDistributionStrategy:
 # Conservative NO Strategy
 # ---------------------------------------------------------------------------
 
+
 class TestConservativeNoStrategy:
     """Test that conservative NO never bets near consensus."""
 
@@ -308,7 +336,7 @@ class TestConservativeNoStrategy:
         # Gaussian decay: prob_yes = exp(-distance^2 / (2 * sigma^2))
         distance = 4.0  # 4C from consensus
         sigma = 2.0
-        prob_yes = math.exp(-(distance ** 2) / (2 * sigma ** 2))
+        prob_yes = math.exp(-(distance**2) / (2 * sigma**2))
         prob_no = 1.0 - prob_yes
         assert prob_no > 0.85
 
@@ -317,11 +345,11 @@ class TestConservativeNoStrategy:
         # This is above safe distance but closer
         distance = 2.6  # just above min_safe_distance
         sigma = 2.0
-        prob_yes = math.exp(-(distance ** 2) / (2 * sigma ** 2))
+        prob_yes = math.exp(-(distance**2) / (2 * sigma**2))
         prob_no = 1.0 - prob_yes
 
         distance_far = 5.0
-        prob_yes_far = math.exp(-(distance_far ** 2) / (2 * sigma ** 2))
+        prob_yes_far = math.exp(-(distance_far**2) / (2 * sigma**2))
         prob_no_far = 1.0 - prob_yes_far
 
         assert prob_no < prob_no_far  # closer = less certain NO
@@ -330,6 +358,7 @@ class TestConservativeNoStrategy:
 # ---------------------------------------------------------------------------
 # Bucket Edge Strategy
 # ---------------------------------------------------------------------------
+
 
 class TestBucketEdgeStrategy:
     """Test per-bucket edge with tunable sigmoid."""

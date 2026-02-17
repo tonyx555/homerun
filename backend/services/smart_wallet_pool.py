@@ -598,7 +598,9 @@ class SmartWalletPoolService:
                 {
                     "pool_size": pool_size,
                     "target_pool_size": TARGET_POOL_SIZE,
-                    "effective_target_pool_size": int(self._stats.get("effective_target_pool_size") or TARGET_POOL_SIZE),
+                    "effective_target_pool_size": int(
+                        self._stats.get("effective_target_pool_size") or TARGET_POOL_SIZE
+                    ),
                     "churn_rate": round(churn, 4),
                     "recompute_mode": self._recompute_mode,
                     "updated_at": utcnow().isoformat(),
@@ -996,22 +998,12 @@ class SmartWalletPoolService:
                 func.lower(DiscoveredWallet.address).in_(address_list),
             )
         )
-        pool_addresses = {
-            str(address).strip().lower()
-            for (address,) in pool_result.all()
-            if address
-        }
+        pool_addresses = {str(address).strip().lower() for (address,) in pool_result.all() if address}
 
         tracked_result = await session.execute(
-            select(func.lower(TrackedWallet.address)).where(
-                func.lower(TrackedWallet.address).in_(address_list)
-            )
+            select(func.lower(TrackedWallet.address)).where(func.lower(TrackedWallet.address).in_(address_list))
         )
-        tracked_addresses = {
-            str(address).strip().lower()
-            for (address,) in tracked_result.all()
-            if address
-        }
+        tracked_addresses = {str(address).strip().lower() for (address,) in tracked_result.all() if address}
 
         group_result = await session.execute(
             select(func.lower(TraderGroupMember.wallet_address))
@@ -1021,11 +1013,7 @@ class SmartWalletPoolService:
                 func.lower(TraderGroupMember.wallet_address).in_(address_list),
             )
         )
-        group_addresses = {
-            str(address).strip().lower()
-            for (address,) in group_result.all()
-            if address
-        }
+        group_addresses = {str(address).strip().lower() for (address,) in group_result.all() if address}
 
         qualified_addresses = pool_addresses | tracked_addresses | group_addresses
         if not qualified_addresses:
@@ -1035,9 +1023,7 @@ class SmartWalletPoolService:
         dropped = 0
         for signal in signals:
             signal_wallets = {
-                str(raw).strip().lower()
-                for raw in (signal.wallets or [])
-                if isinstance(raw, str) and str(raw).strip()
+                str(raw).strip().lower() for raw in (signal.wallets or []) if isinstance(raw, str) and str(raw).strip()
             }
             if signal_wallets and signal_wallets.intersection(qualified_addresses):
                 kept.append(signal)
@@ -1595,22 +1581,14 @@ class SmartWalletPoolService:
         active-market scans."""
         async with AsyncSessionLocal() as session:
             tracked_result = await session.execute(select(TrackedWallet.address))
-            tracked_addresses = {
-                str(row[0]).strip().lower()
-                for row in tracked_result.all()
-                if row[0]
-            }
+            tracked_addresses = {str(row[0]).strip().lower() for row in tracked_result.all() if row[0]}
 
             group_result = await session.execute(
                 select(TraderGroupMember.wallet_address)
                 .join(TraderGroup, TraderGroupMember.group_id == TraderGroup.id)
                 .where(TraderGroup.is_active == True)  # noqa: E712
             )
-            group_addresses = {
-                str(row[0]).strip().lower()
-                for row in group_result.all()
-                if row[0]
-            }
+            group_addresses = {str(row[0]).strip().lower() for row in group_result.all() if row[0]}
 
         all_addresses = tracked_addresses | group_addresses
         # Only scan wallets not already collected by other sources
@@ -1927,11 +1905,7 @@ class SmartWalletPoolService:
                     effective_target_size,
                 )
 
-            current_pool = [
-                w.address
-                for w in wallets
-                if w.in_top_pool and not self._is_pool_blocked(w)
-            ]
+            current_pool = [w.address for w in wallets if w.in_top_pool and not self._is_pool_blocked(w)]
             final_pool, churn_rate = self._apply_churn_guard(
                 desired=desired,
                 current=current_pool,

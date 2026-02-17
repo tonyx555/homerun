@@ -224,7 +224,9 @@ class ExecutionSimulator:
                 source=str(emission.source or ""),
                 signal_type=str(emission.signal_type or ""),
                 market_id=str(emission.market_id or ""),
-                market_question=(signal_payload.get("market_question") or signal_payload.get("question") or emission.market_id),
+                market_question=(
+                    signal_payload.get("market_question") or signal_payload.get("question") or emission.market_id
+                ),
                 direction=str(emission.direction or signal_payload.get("direction") or "buy_yes"),
                 entry_price=emission.entry_price,
                 edge_percent=emission.edge_percent,
@@ -361,7 +363,9 @@ class ExecutionSimulator:
                 run_id=run_row.id,
                 sequence=sequence,
                 event_type="order_filled",
-                event_at=datetime.fromtimestamp(int(fill.get("event_ts_ms") or candle.get("t") or 0) / 1000, tz=timezone.utc),
+                event_at=datetime.fromtimestamp(
+                    int(fill.get("event_ts_ms") or candle.get("t") or 0) / 1000, tz=timezone.utc
+                ),
                 signal_id=emission.signal_id,
                 market_id=emission.market_id,
                 direction=direction,

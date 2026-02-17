@@ -473,9 +473,7 @@ class EntropyArbStrategy(BaseStrategy):
             total_days,
         )
 
-        min_entropy_deviation = max(
-            0.0, float(getattr(settings, "ENTROPY_ARB_MIN_DEVIATION", 0.25))
-        )
+        min_entropy_deviation = max(0.0, float(getattr(settings, "ENTROPY_ARB_MIN_DEVIATION", 0.25)))
         if abs(float(entropy_info["deviation"])) < min_entropy_deviation:
             return None
 

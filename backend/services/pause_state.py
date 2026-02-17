@@ -44,10 +44,7 @@ class GlobalPauseState:
     async def refresh_from_db(self, *, force: bool = False) -> bool:
         """Refresh pause state from shared DB controls."""
         now = time.monotonic()
-        if (
-            not force
-            and now - self._last_refresh_monotonic < self._refresh_interval_seconds
-        ):
+        if not force and now - self._last_refresh_monotonic < self._refresh_interval_seconds:
             return self._paused
 
         try:
@@ -62,15 +59,11 @@ class GlobalPauseState:
                 scanner_control = await shared_state.read_scanner_control(session)
                 news_control = await news_shared_state.read_news_control(session)
                 weather_control = await weather_shared_state.read_weather_control(session)
-                discovery_control = await discovery_shared_state.read_discovery_control(
-                    session
-                )
+                discovery_control = await discovery_shared_state.read_discovery_control(session)
                 orchestrator_control = await read_orchestrator_control(session)
                 crypto_control = await read_worker_control(session, "crypto")
                 tracked_control = await read_worker_control(session, "tracked_traders")
-                world_intel_control = await read_worker_control(
-                    session, "world_intelligence"
-                )
+                world_intel_control = await read_worker_control(session, "world_intelligence")
 
             self._paused = all(
                 bool(control.get("is_paused", False))

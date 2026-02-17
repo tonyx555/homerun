@@ -34,10 +34,7 @@ async def test_init_database_creates_schema_and_revision(tmp_path, monkeypatch):
 
     async with engine.begin() as conn:
         orchestrator_rows = await conn.execute(
-            text(
-                "SELECT name FROM sqlite_master "
-                "WHERE type='table' AND name='trader_orchestrator_control'"
-            )
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name='trader_orchestrator_control'")
         )
         assert orchestrator_rows.first() is not None
 

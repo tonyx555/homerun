@@ -768,10 +768,7 @@ class OpenAIProvider(BaseLLMProvider):
         """
         # Add system instruction for JSON output
         # Keep prompt overhead small; schema is already enforced via response_format.
-        json_instruction = (
-            "You MUST respond with valid JSON only. "
-            "Do not include any text outside the JSON object."
-        )
+        json_instruction = "You MUST respond with valid JSON only. Do not include any text outside the JSON object."
 
         augmented_messages = list(messages)
         if augmented_messages and augmented_messages[0].role == "system":
@@ -1604,10 +1601,7 @@ class OllamaProvider(BaseLLMProvider):
         temperature: float = 0.0,
     ) -> dict:
         # Keep prompt overhead small; schema is already enforced via response_format.
-        json_instruction = (
-            "You MUST respond with valid JSON only. "
-            "Do not include any text outside the JSON object."
-        )
+        json_instruction = "You MUST respond with valid JSON only. Do not include any text outside the JSON object."
         augmented_messages = list(messages)
         if augmented_messages and augmented_messages[0].role == "system":
             augmented_messages[0] = LLMMessage(
@@ -1698,10 +1692,7 @@ class LMStudioProvider(BaseLLMProvider):
         temperature: float = 0.0,
     ) -> dict:
         # Keep prompt overhead small; schema is already enforced via response_format.
-        json_instruction = (
-            "You MUST respond with valid JSON only. "
-            "Do not include any text outside the JSON object."
-        )
+        json_instruction = "You MUST respond with valid JSON only. Do not include any text outside the JSON object."
         augmented_messages = list(messages)
         if augmented_messages and augmented_messages[0].role == "system":
             augmented_messages[0] = LLMMessage(

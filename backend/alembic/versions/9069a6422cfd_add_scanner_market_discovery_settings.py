@@ -5,14 +5,15 @@ Revises: 202602170002
 Create Date: 2026-02-16 23:28:55.104313
 
 """
+
 from __future__ import annotations
 
 from alembic import op
 import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
-revision = '9069a6422cfd'
-down_revision = '202602170002'
+revision = "9069a6422cfd"
+down_revision = "202602170002"
 branch_labels = None
 depends_on = None
 
@@ -41,7 +42,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    with op.batch_alter_table('app_settings', schema=None) as batch_op:
-        batch_op.drop_column('market_fetch_order')
-        batch_op.drop_column('market_fetch_page_size')
-        batch_op.drop_column('max_events_to_scan')
+    with op.batch_alter_table("app_settings", schema=None) as batch_op:
+        batch_op.drop_column("market_fetch_order")
+        batch_op.drop_column("market_fetch_page_size")
+        batch_op.drop_column("max_events_to_scan")

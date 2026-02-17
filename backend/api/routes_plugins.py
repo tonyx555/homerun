@@ -426,10 +426,13 @@ async def get_plugin_docs():
             {"module": "models", "items": "Market, Event, ArbitrageOpportunity, StrategyType"},
             {"module": "services.strategies.base", "items": "BaseStrategy"},
             {"module": "services.strategies", "items": "Built-in strategy modules"},
-            {"module": "services.weather.signal_engine", "items": (
-                "Weather utility functions: clamp01, temp_range_probability, ensemble_bucket_probability, "
-                "compute_consensus, compute_model_agreement, compute_confidence, normalize_weights, logit"
-            )},
+            {
+                "module": "services.weather.signal_engine",
+                "items": (
+                    "Weather utility functions: clamp01, temp_range_probability, ensemble_bucket_probability, "
+                    "compute_consensus, compute_model_agreement, compute_confidence, normalize_weights, logit"
+                ),
+            },
             {"module": "services.news", "items": "News ingestion/matching components"},
             {"module": "services.optimization", "items": "Optimization strategy helpers"},
             {"module": "services.ws_feeds", "items": "Realtime feed helpers"},
@@ -585,9 +588,7 @@ async def get_plugin_docs():
                     "compute_consensus(source_probs, source_weights)": (
                         "Weighted consensus probability from multiple forecast sources."
                     ),
-                    "compute_model_agreement(source_probs)": (
-                        "Agreement metric: 1.0 - max spread across sources."
-                    ),
+                    "compute_model_agreement(source_probs)": ("Agreement metric: 1.0 - max spread across sources."),
                     "compute_confidence(agreement, consensus_yes, source_count, source_spread_c)": (
                         "Blended confidence score from agreement, separation, and source depth."
                     ),

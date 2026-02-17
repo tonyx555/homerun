@@ -42,83 +42,307 @@ ENTITY_MISMATCH_PENALTY = 0.15  # subtracted from rerank_score for type clashes
 
 # -- Sports teams (major North American + European leagues) -----------------
 _NBA_TEAMS = {
-    "hawks", "celtics", "nets", "hornets", "bulls", "cavaliers", "mavericks",
-    "nuggets", "pistons", "warriors", "rockets", "pacers", "clippers", "lakers",
-    "grizzlies", "heat", "bucks", "timberwolves", "pelicans", "knicks",
-    "thunder", "magic", "76ers", "sixers", "suns", "blazers", "kings",
-    "spurs", "raptors", "jazz", "wizards",
+    "hawks",
+    "celtics",
+    "nets",
+    "hornets",
+    "bulls",
+    "cavaliers",
+    "mavericks",
+    "nuggets",
+    "pistons",
+    "warriors",
+    "rockets",
+    "pacers",
+    "clippers",
+    "lakers",
+    "grizzlies",
+    "heat",
+    "bucks",
+    "timberwolves",
+    "pelicans",
+    "knicks",
+    "thunder",
+    "magic",
+    "76ers",
+    "sixers",
+    "suns",
+    "blazers",
+    "kings",
+    "spurs",
+    "raptors",
+    "jazz",
+    "wizards",
 }
 _NFL_TEAMS = {
-    "cardinals", "falcons", "ravens", "bills", "panthers", "bears",
-    "bengals", "browns", "cowboys", "broncos", "lions", "packers", "texans",
-    "colts", "jaguars", "chiefs", "chargers", "rams", "dolphins", "vikings",
-    "patriots", "saints", "giants", "jets", "raiders", "eagles", "steelers",
-    "49ers", "seahawks", "buccaneers", "commanders", "titans",
+    "cardinals",
+    "falcons",
+    "ravens",
+    "bills",
+    "panthers",
+    "bears",
+    "bengals",
+    "browns",
+    "cowboys",
+    "broncos",
+    "lions",
+    "packers",
+    "texans",
+    "colts",
+    "jaguars",
+    "chiefs",
+    "chargers",
+    "rams",
+    "dolphins",
+    "vikings",
+    "patriots",
+    "saints",
+    "giants",
+    "jets",
+    "raiders",
+    "eagles",
+    "steelers",
+    "49ers",
+    "seahawks",
+    "buccaneers",
+    "commanders",
+    "titans",
 }
 _MLB_TEAMS = {
-    "diamondbacks", "braves", "orioles", "red sox", "cubs", "white sox",
-    "reds", "guardians", "rockies", "tigers", "astros", "royals", "angels",
-    "dodgers", "marlins", "brewers", "twins", "mets", "yankees", "athletics",
-    "phillies", "pirates", "padres", "mariners", "cardinals", "rays",
-    "rangers", "blue jays", "nationals",
+    "diamondbacks",
+    "braves",
+    "orioles",
+    "red sox",
+    "cubs",
+    "white sox",
+    "reds",
+    "guardians",
+    "rockies",
+    "tigers",
+    "astros",
+    "royals",
+    "angels",
+    "dodgers",
+    "marlins",
+    "brewers",
+    "twins",
+    "mets",
+    "yankees",
+    "athletics",
+    "phillies",
+    "pirates",
+    "padres",
+    "mariners",
+    "cardinals",
+    "rays",
+    "rangers",
+    "blue jays",
+    "nationals",
 }
 _NHL_TEAMS = {
-    "ducks", "coyotes", "bruins", "sabres", "flames", "hurricanes",
-    "blackhawks", "avalanche", "blue jackets", "stars", "red wings",
-    "oilers", "panthers", "kings", "wild", "canadiens", "predators",
-    "devils", "islanders", "rangers", "senators", "flyers", "penguins",
-    "sharks", "kraken", "blues", "lightning", "maple leafs", "canucks",
-    "golden knights", "capitals", "jets",
+    "ducks",
+    "coyotes",
+    "bruins",
+    "sabres",
+    "flames",
+    "hurricanes",
+    "blackhawks",
+    "avalanche",
+    "blue jackets",
+    "stars",
+    "red wings",
+    "oilers",
+    "panthers",
+    "kings",
+    "wild",
+    "canadiens",
+    "predators",
+    "devils",
+    "islanders",
+    "rangers",
+    "senators",
+    "flyers",
+    "penguins",
+    "sharks",
+    "kraken",
+    "blues",
+    "lightning",
+    "maple leafs",
+    "canucks",
+    "golden knights",
+    "capitals",
+    "jets",
 }
 _SOCCER_TEAMS = {
-    "arsenal", "chelsea", "liverpool", "manchester united", "manchester city",
-    "tottenham", "barcelona", "real madrid", "bayern munich", "juventus",
-    "psg", "inter milan", "ac milan", "borussia dortmund", "atletico madrid",
+    "arsenal",
+    "chelsea",
+    "liverpool",
+    "manchester united",
+    "manchester city",
+    "tottenham",
+    "barcelona",
+    "real madrid",
+    "bayern munich",
+    "juventus",
+    "psg",
+    "inter milan",
+    "ac milan",
+    "borussia dortmund",
+    "atletico madrid",
 }
 
-_ALL_SPORTS_TEAMS = (
-    _NBA_TEAMS | _NFL_TEAMS | _MLB_TEAMS | _NHL_TEAMS | _SOCCER_TEAMS
-)
+_ALL_SPORTS_TEAMS = _NBA_TEAMS | _NFL_TEAMS | _MLB_TEAMS | _NHL_TEAMS | _SOCCER_TEAMS
 _SPORTS_KEYWORDS = {
-    "nba", "nfl", "mlb", "nhl", "mls", "epl", "premier league", "la liga",
-    "serie a", "bundesliga", "champions league", "playoffs", "super bowl",
-    "world series", "stanley cup", "finals", "championship", "touchdown",
-    "home run", "goal", "assist", "quarterback", "pitcher", "goalie",
-    "halftime", "overtime", "inning", "roster", "draft", "trade deadline",
-    "free agency", "mvp", "coach", "manager",
+    "nba",
+    "nfl",
+    "mlb",
+    "nhl",
+    "mls",
+    "epl",
+    "premier league",
+    "la liga",
+    "serie a",
+    "bundesliga",
+    "champions league",
+    "playoffs",
+    "super bowl",
+    "world series",
+    "stanley cup",
+    "finals",
+    "championship",
+    "touchdown",
+    "home run",
+    "goal",
+    "assist",
+    "quarterback",
+    "pitcher",
+    "goalie",
+    "halftime",
+    "overtime",
+    "inning",
+    "roster",
+    "draft",
+    "trade deadline",
+    "free agency",
+    "mvp",
+    "coach",
+    "manager",
 }
 
 # -- Political figures / government -----------------------------------------
 _POLITICAL_KEYWORDS = {
-    "president", "senator", "congressman", "congresswoman", "governor",
-    "prime minister", "chancellor", "parliament", "congress", "senate",
-    "house of representatives", "white house", "cabinet", "secretary of state",
-    "supreme court", "justice", "democrat", "republican", "gop",
-    "election", "vote", "ballot", "poll", "campaign", "inauguration",
-    "executive order", "bill", "legislation", "veto", "impeach",
+    "president",
+    "senator",
+    "congressman",
+    "congresswoman",
+    "governor",
+    "prime minister",
+    "chancellor",
+    "parliament",
+    "congress",
+    "senate",
+    "house of representatives",
+    "white house",
+    "cabinet",
+    "secretary of state",
+    "supreme court",
+    "justice",
+    "democrat",
+    "republican",
+    "gop",
+    "election",
+    "vote",
+    "ballot",
+    "poll",
+    "campaign",
+    "inauguration",
+    "executive order",
+    "bill",
+    "legislation",
+    "veto",
+    "impeach",
 }
 
 # -- Company / business -----------------------------------------------------
 _COMPANY_KEYWORDS = {
-    "ceo", "cfo", "cto", "ipo", "earnings", "revenue", "stock", "shares",
-    "market cap", "quarterly", "dividend", "profit", "merger", "acquisition",
-    "startup", "valuation", "nasdaq", "nyse", "s&p", "dow jones",
+    "ceo",
+    "cfo",
+    "cto",
+    "ipo",
+    "earnings",
+    "revenue",
+    "stock",
+    "shares",
+    "market cap",
+    "quarterly",
+    "dividend",
+    "profit",
+    "merger",
+    "acquisition",
+    "startup",
+    "valuation",
+    "nasdaq",
+    "nyse",
+    "s&p",
+    "dow jones",
 }
 
 # -- Crypto / blockchain ----------------------------------------------------
 _CRYPTO_KEYWORDS = {
-    "bitcoin", "btc", "ethereum", "eth", "crypto", "blockchain", "defi",
-    "token", "altcoin", "mining", "wallet", "exchange", "binance", "coinbase",
-    "solana", "sol", "cardano", "ada", "dogecoin", "doge", "nft",
+    "bitcoin",
+    "btc",
+    "ethereum",
+    "eth",
+    "crypto",
+    "blockchain",
+    "defi",
+    "token",
+    "altcoin",
+    "mining",
+    "wallet",
+    "exchange",
+    "binance",
+    "coinbase",
+    "solana",
+    "sol",
+    "cardano",
+    "ada",
+    "dogecoin",
+    "doge",
+    "nft",
 }
 
 # -- Country / geopolitical -------------------------------------------------
 _COUNTRIES = {
-    "united states", "usa", "us", "china", "russia", "ukraine", "india",
-    "brazil", "uk", "united kingdom", "france", "germany", "japan",
-    "south korea", "north korea", "iran", "israel", "palestine", "taiwan",
-    "mexico", "canada", "australia", "saudi arabia", "turkey", "egypt",
-    "pakistan", "indonesia", "nigeria", "south africa",
+    "united states",
+    "usa",
+    "us",
+    "china",
+    "russia",
+    "ukraine",
+    "india",
+    "brazil",
+    "uk",
+    "united kingdom",
+    "france",
+    "germany",
+    "japan",
+    "south korea",
+    "north korea",
+    "iran",
+    "israel",
+    "palestine",
+    "taiwan",
+    "mexico",
+    "canada",
+    "australia",
+    "saudi arabia",
+    "turkey",
+    "egypt",
+    "pakistan",
+    "indonesia",
+    "nigeria",
+    "south africa",
 }
 
 # Entity type enum
@@ -177,12 +401,21 @@ for _team in _NHL_TEAMS:
 for _team in _SOCCER_TEAMS:
     _LEAGUE_TAG_MAP[_team] = "soccer"
 # Explicit league keywords
-_LEAGUE_TAG_MAP.update({
-    "nba": "nba", "nfl": "nfl", "mlb": "mlb", "nhl": "nhl",
-    "mls": "soccer", "epl": "soccer", "premier league": "soccer",
-    "la liga": "soccer", "serie a": "soccer", "bundesliga": "soccer",
-    "champions league": "soccer",
-})
+_LEAGUE_TAG_MAP.update(
+    {
+        "nba": "nba",
+        "nfl": "nfl",
+        "mlb": "mlb",
+        "nhl": "nhl",
+        "mls": "soccer",
+        "epl": "soccer",
+        "premier league": "soccer",
+        "la liga": "soccer",
+        "serie a": "soccer",
+        "bundesliga": "soccer",
+        "champions league": "soccer",
+    }
+)
 
 
 def _extract_entities(text: str) -> Dict[str, Any]:
@@ -330,7 +563,12 @@ def _compute_entity_overlap(
     else:
         # At least one side has typed entities
         type_score = len(shared_types) / max(1, min(len(a_types), len(m_types))) if (a_types and m_types) else 0.0
-        entity_score = len(all_shared) / max(1, min(len(a_nouns) + sum(len(v) for v in article_entities.values() if isinstance(v, set)), 1)) if all_shared else 0.0
+        entity_score = (
+            len(all_shared)
+            / max(1, min(len(a_nouns) + sum(len(v) for v in article_entities.values() if isinstance(v, set)), 1))
+            if all_shared
+            else 0.0
+        )
         entity_score = min(1.0, entity_score)
         score = 0.5 * type_score + 0.3 * min(1.0, entity_score) + 0.2 * (1.0 if shared_nouns else 0.0)
         detail = f"Type overlap: {shared_types or 'none'}; entity overlap: {len(all_shared)} shared."
@@ -362,11 +600,7 @@ def _compute_entity_overlap(
     # Intra-sports league mismatch: both are "sports" but different leagues
     # with no shared team/entity overlap (e.g. Padres/MLB vs Spurs/NBA).
     # This is the specific scenario causing the Padres-vs-Spurs false positives.
-    if (
-        not type_mismatch
-        and ENTITY_TYPE_SPORTS in a_types
-        and ENTITY_TYPE_SPORTS in m_types
-    ):
+    if not type_mismatch and ENTITY_TYPE_SPORTS in a_types and ENTITY_TYPE_SPORTS in m_types:
         a_leagues = article_entities.get("sports_leagues", set())
         m_leagues = market_entities.get("sports_leagues", set())
         shared_sports = article_entities.get("sports_entities", set()) & market_entities.get("sports_entities", set())
@@ -399,55 +633,200 @@ def _compute_entity_overlap(
 # than the entity-overlap sets above because we only need to detect the
 # *domain* (not specific entity matches).
 
-_MT_SPORTS_KEYWORDS: frozenset[str] = frozenset({
-    "win", "championship", "game", "match", "playoff", "playoffs",
-    "tournament", "mvp", "score", "season", "league", "finals",
-    "super bowl", "world series", "world cup",
-    "football", "basketball", "baseball", "hockey", "soccer", "tennis",
-    "golf", "mma", "ufc", "boxing", "cricket", "rugby", "nascar",
-    "formula 1", "f1",
-    "nfl", "nba", "mlb", "nhl", "ncaa", "mls", "epl", "premier league",
-    "la liga", "serie a", "bundesliga", "champions league", "uefa",
-    "injury", "roster", "draft", "trade deadline", "free agent",
-    "head coach", "starting lineup",
-})
+_MT_SPORTS_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "win",
+        "championship",
+        "game",
+        "match",
+        "playoff",
+        "playoffs",
+        "tournament",
+        "mvp",
+        "score",
+        "season",
+        "league",
+        "finals",
+        "super bowl",
+        "world series",
+        "world cup",
+        "football",
+        "basketball",
+        "baseball",
+        "hockey",
+        "soccer",
+        "tennis",
+        "golf",
+        "mma",
+        "ufc",
+        "boxing",
+        "cricket",
+        "rugby",
+        "nascar",
+        "formula 1",
+        "f1",
+        "nfl",
+        "nba",
+        "mlb",
+        "nhl",
+        "ncaa",
+        "mls",
+        "epl",
+        "premier league",
+        "la liga",
+        "serie a",
+        "bundesliga",
+        "champions league",
+        "uefa",
+        "injury",
+        "roster",
+        "draft",
+        "trade deadline",
+        "free agent",
+        "head coach",
+        "starting lineup",
+    }
+)
 
-_MT_POLITICS_KEYWORDS: frozenset[str] = frozenset({
-    "election", "president", "presidential", "vote", "voter", "voting",
-    "congress", "senate", "senator", "representative", "governor",
-    "policy", "legislation", "bill", "law", "executive order",
-    "cabinet", "supreme court", "parliament", "prime minister",
-    "democrat", "republican", "gop", "dnc", "rnc",
-    "war", "treaty", "ceasefire", "sanctions", "nato", "united nations",
-    "geopolitical", "diplomacy", "diplomatic", "ambassador",
-    "ukraine", "russia", "china", "taiwan", "iran", "israel",
-    "palestine", "north korea", "eu", "european union",
-    "tariff", "trade war", "immigration", "border",
-    "poll", "polling", "approval rating", "impeach",
-})
+_MT_POLITICS_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "election",
+        "president",
+        "presidential",
+        "vote",
+        "voter",
+        "voting",
+        "congress",
+        "senate",
+        "senator",
+        "representative",
+        "governor",
+        "policy",
+        "legislation",
+        "bill",
+        "law",
+        "executive order",
+        "cabinet",
+        "supreme court",
+        "parliament",
+        "prime minister",
+        "democrat",
+        "republican",
+        "gop",
+        "dnc",
+        "rnc",
+        "war",
+        "treaty",
+        "ceasefire",
+        "sanctions",
+        "nato",
+        "united nations",
+        "geopolitical",
+        "diplomacy",
+        "diplomatic",
+        "ambassador",
+        "ukraine",
+        "russia",
+        "china",
+        "taiwan",
+        "iran",
+        "israel",
+        "palestine",
+        "north korea",
+        "eu",
+        "european union",
+        "tariff",
+        "trade war",
+        "immigration",
+        "border",
+        "poll",
+        "polling",
+        "approval rating",
+        "impeach",
+    }
+)
 
-_MT_CRYPTO_KEYWORDS: frozenset[str] = frozenset({
-    "bitcoin", "btc", "ethereum", "eth", "solana", "sol", "xrp",
-    "crypto", "cryptocurrency", "blockchain", "defi", "nft",
-    "token", "altcoin", "stablecoin", "usdt", "usdc",
-    "binance", "coinbase", "kraken",
-    "market cap", "halving", "mining",
-    "fed", "federal reserve", "interest rate", "rate cut", "rate hike",
-    "inflation", "cpi", "gdp", "treasury", "yield curve",
-    "sec", "etf", "spot etf",
-    "price above", "price below", "price of",
-})
+_MT_CRYPTO_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "bitcoin",
+        "btc",
+        "ethereum",
+        "eth",
+        "solana",
+        "sol",
+        "xrp",
+        "crypto",
+        "cryptocurrency",
+        "blockchain",
+        "defi",
+        "nft",
+        "token",
+        "altcoin",
+        "stablecoin",
+        "usdt",
+        "usdc",
+        "binance",
+        "coinbase",
+        "kraken",
+        "market cap",
+        "halving",
+        "mining",
+        "fed",
+        "federal reserve",
+        "interest rate",
+        "rate cut",
+        "rate hike",
+        "inflation",
+        "cpi",
+        "gdp",
+        "treasury",
+        "yield curve",
+        "sec",
+        "etf",
+        "spot etf",
+        "price above",
+        "price below",
+        "price of",
+    }
+)
 
-_MT_ENTERTAINMENT_KEYWORDS: frozenset[str] = frozenset({
-    "oscar", "oscars", "academy award", "grammy", "grammys",
-    "emmy", "emmys", "golden globe", "bafta",
-    "box office", "movie", "film", "album", "song", "artist",
-    "streaming", "netflix", "disney", "spotify",
-    "billboard", "chart", "rating", "ratings",
-    "celebrity", "actor", "actress", "director",
-    "tv show", "series premiere", "season finale",
-    "award show", "nominee", "nomination",
-})
+_MT_ENTERTAINMENT_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "oscar",
+        "oscars",
+        "academy award",
+        "grammy",
+        "grammys",
+        "emmy",
+        "emmys",
+        "golden globe",
+        "bafta",
+        "box office",
+        "movie",
+        "film",
+        "album",
+        "song",
+        "artist",
+        "streaming",
+        "netflix",
+        "disney",
+        "spotify",
+        "billboard",
+        "chart",
+        "rating",
+        "ratings",
+        "celebrity",
+        "actor",
+        "actress",
+        "director",
+        "tv show",
+        "series premiere",
+        "season finale",
+        "award show",
+        "nominee",
+        "nomination",
+    }
+)
 
 
 def detect_market_type(
@@ -466,12 +845,14 @@ def detect_market_type(
     (highest wins).  If nothing reaches the threshold the Polymarket
     ``category`` field is used as a fallback.
     """
-    text = " ".join([
-        question.lower(),
-        slug.lower().replace("-", " "),
-        event_title.lower(),
-        category.lower(),
-    ])
+    text = " ".join(
+        [
+            question.lower(),
+            slug.lower().replace("-", " "),
+            event_title.lower(),
+            category.lower(),
+        ]
+    )
 
     # Count hits per domain.  We require >=2 keyword matches to reduce
     # false positives (a single word like "game" could appear anywhere).
@@ -564,9 +945,7 @@ _DOMAIN_SYSTEM_PROMPTS: Dict[str, str] = {
         "You are a crypto/finance prediction market relevance scorer. "
         "Given a news article and a list of prediction market questions about "
         "cryptocurrency or financial markets, score how relevant the article is "
-        "to each market.\n\n"
-        + _BASE_SCORING_RULES
-        + "CRYPTO/FINANCE-SPECIFIC SIGNALS TO PRIORITIZE:\n"
+        "to each market.\n\n" + _BASE_SCORING_RULES + "CRYPTO/FINANCE-SPECIFIC SIGNALS TO PRIORITIZE:\n"
         "- Regulatory news: SEC actions, ETF approvals/rejections, legislation\n"
         "- Adoption metrics: institutional purchases, corporate treasury moves\n"
         "- Technical developments: protocol upgrades, network milestones, forks\n"
@@ -585,9 +964,7 @@ _DOMAIN_SYSTEM_PROMPTS: Dict[str, str] = {
         "You are an entertainment prediction market relevance scorer. "
         "Given a news article and a list of prediction market questions about "
         "entertainment, awards, or pop culture, score how relevant the article "
-        "is to each market.\n\n"
-        + _BASE_SCORING_RULES
-        + "ENTERTAINMENT-SPECIFIC SIGNALS TO PRIORITIZE:\n"
+        "is to each market.\n\n" + _BASE_SCORING_RULES + "ENTERTAINMENT-SPECIFIC SIGNALS TO PRIORITIZE:\n"
         "- Critic reviews, aggregated scores (Rotten Tomatoes, Metacritic)\n"
         "- Industry trends: box office tracking, streaming viewership data\n"
         "- Historical award patterns: precursor awards, nomination correlations\n"
@@ -602,9 +979,7 @@ _DOMAIN_SYSTEM_PROMPTS: Dict[str, str] = {
     "general": (
         "You are a prediction market relevance scorer. "
         "Given a news article and a list of prediction market questions, "
-        "score how relevant the article is to each market.\n\n"
-        + _BASE_SCORING_RULES
-        + "GENERAL GUIDANCE:\n"
+        "score how relevant the article is to each market.\n\n" + _BASE_SCORING_RULES + "GENERAL GUIDANCE:\n"
         "- Focus on whether the article provides new, factual information that "
         "would shift a reasonable person's probability estimate for the market.\n"
         "- Consider timeliness: breaking news is more relevant than background context.\n"
@@ -766,9 +1141,7 @@ class Reranker:
         # ---- Phase 2: LLM reranking on surviving candidates ----
         reranked = None
         if allow_llm:
-            reranked = await self._rerank_llm(
-                article_title, article_summary, filtered_candidates, model=model
-            )
+            reranked = await self._rerank_llm(article_title, article_summary, filtered_candidates, model=model)
 
         if reranked is not None:
             # Attach entity overlap data to each result for debugging

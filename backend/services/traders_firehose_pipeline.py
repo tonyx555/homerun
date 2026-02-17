@@ -125,15 +125,7 @@ def _apply_strategy_config(instance: Any, config: dict[str, Any]) -> None:
 
 async def _load_strategy_row(session: AsyncSession) -> Optional[Strategy]:
     await ensure_system_opportunity_strategies_seeded(session)
-    return (
-        (
-            await session.execute(
-                select(Strategy).where(Strategy.slug == _STRATEGY_SLUG)
-            )
-        )
-        .scalars()
-        .first()
-    )
+    return (await session.execute(select(Strategy).where(Strategy.slug == _STRATEGY_SLUG))).scalars().first()
 
 
 async def _resolve_traders_strategy(session: AsyncSession) -> Optional[Any]:
@@ -215,9 +207,7 @@ async def _annotate_source_flags(session: AsyncSession, rows: list[dict[str, Any
                 pool_addresses.add(normalized)
 
         tracked_rows = await session.execute(
-            select(TrackedWallet.address).where(
-                func.lower(TrackedWallet.address).in_(addr_list)
-            )
+            select(TrackedWallet.address).where(func.lower(TrackedWallet.address).in_(addr_list))
         )
         for (address,) in tracked_rows.all():
             normalized = _normalize_wallet_address(address)
@@ -244,9 +234,7 @@ async def _annotate_source_flags(session: AsyncSession, rows: list[dict[str, Any
         pool_wallets = sum(1 for addr in wallets if addr in pool_addresses)
         tracked_wallets = sum(1 for addr in wallets if addr in tracked_addresses)
         group_wallets = sum(1 for addr in wallets if group_ids_by_address.get(addr))
-        matched_group_ids = sorted(
-            {gid for addr in wallets for gid in group_ids_by_address.get(addr, set())}
-        )
+        matched_group_ids = sorted({gid for addr in wallets for gid in group_ids_by_address.get(addr, set())})
         has_qualified_source = bool(pool_wallets or tracked_wallets or group_wallets)
 
         row["source_flags"] = {
@@ -270,18 +258,14 @@ async def _annotate_firehose_context(rows: list[dict[str, Any]]) -> None:
         return
 
     market_ids = [
-        _normalize_market_id(row.get("market_id"))
-        for row in rows
-        if _normalize_market_id(row.get("market_id"))
+        _normalize_market_id(row.get("market_id")) for row in rows if _normalize_market_id(row.get("market_id"))
     ]
     tradability = await get_market_tradability_map(market_ids) if market_ids else {}
     now = utcnow()
 
     for row in rows:
         market_id = _normalize_market_id(row.get("market_id"))
-        detected = _parse_time(
-            row.get("detected_at") or row.get("last_seen_at") or row.get("first_seen_at")
-        )
+        detected = _parse_time(row.get("detected_at") or row.get("last_seen_at") or row.get("first_seen_at"))
         age_minutes = 0.0
         if detected is not None:
             age_minutes = max(0.0, (now - detected).total_seconds() / 60.0)

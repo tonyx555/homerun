@@ -227,11 +227,7 @@ class KalshiClient:
         # Kalshi multi-outcome events (e.g. "What will X say?") have sub-markets
         # where `title` is the shared event question but the specific outcome
         # (e.g. "Trump", "FBI", "Shutdown") is in yes_sub_title / custom_strike.
-        sub_title = (
-            data.get("yes_sub_title", "")
-            or data.get("no_sub_title", "")
-            or ""
-        )
+        sub_title = data.get("yes_sub_title", "") or data.get("no_sub_title", "") or ""
         if not sub_title:
             custom_strike = data.get("custom_strike")
             if isinstance(custom_strike, dict) and custom_strike:

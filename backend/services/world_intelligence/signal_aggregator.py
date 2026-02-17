@@ -210,10 +210,7 @@ def _military_to_signal(activity: MilitaryActivity) -> WorldSignal:
     normalized_callsign = "".join(str(activity.callsign or "").strip().upper().split())
     entity_key = transponder or f"{normalized_callsign}:{_normalize_iso3(activity.country)}:{activity.activity_type}"
     if activity.activity_type == "vessel":
-        description = (
-            f"{activity.aircraft_type}, speed={activity.speed:.1f}kn, "
-            f"heading={activity.heading:.0f}deg"
-        )
+        description = f"{activity.aircraft_type}, speed={activity.speed:.1f}kn, heading={activity.heading:.0f}deg"
     else:
         description = (
             f"{activity.aircraft_type}, alt={activity.altitude:.0f}m, "

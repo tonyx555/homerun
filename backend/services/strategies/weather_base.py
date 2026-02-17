@@ -155,7 +155,12 @@ class BaseWeatherStrategy(BaseStrategy):
 
         # --- 3. Direction ---
         direction_result = self.compute_direction(
-            model_prob, yes_price, no_price, intent, cfg, extra_metadata,
+            model_prob,
+            yes_price,
+            no_price,
+            intent,
+            cfg,
+            extra_metadata,
         )
         if direction_result is None:
             return None
@@ -171,7 +176,11 @@ class BaseWeatherStrategy(BaseStrategy):
 
         # --- Post-direction gates (e.g. confidence check) ---
         if not self.post_direction_gates(
-            intent, cfg, model_prob, edge_percent, extra_metadata,
+            intent,
+            cfg,
+            model_prob,
+            edge_percent,
+            extra_metadata,
         ):
             return None
 
@@ -205,12 +214,22 @@ class BaseWeatherStrategy(BaseStrategy):
         # --- 7. Risk scoring ---
         confidence = self._compute_confidence_value(intent, model_prob, extra_metadata)
         risk_score, risk_factors = self.risk_scoring(
-            cfg, intent, model_prob, confidence, edge_percent, extra_metadata,
+            cfg,
+            intent,
+            model_prob,
+            confidence,
+            edge_percent,
+            extra_metadata,
         )
 
         # --- 8. Build metadata + opportunity ---
         position_meta = self.build_metadata(
-            intent, cfg, model_prob, direction, edge_percent, confidence,
+            intent,
+            cfg,
+            model_prob,
+            direction,
+            edge_percent,
+            confidence,
             extra_metadata,
         )
 
@@ -227,8 +246,16 @@ class BaseWeatherStrategy(BaseStrategy):
         market_dict = self._build_market_dict(market)
 
         title, description = self.build_title_description(
-            city, question, intent, model_prob, direction, side,
-            entry_price, yes_price, edge_percent, extra_metadata,
+            city,
+            question,
+            intent,
+            model_prob,
+            direction,
+            side,
+            entry_price,
+            yes_price,
+            edge_percent,
+            extra_metadata,
         )
 
         return self._build_opportunity(
@@ -255,7 +282,9 @@ class BaseWeatherStrategy(BaseStrategy):
     # ==================================================================
 
     def compute_model_probability(
-        self, intent: dict, cfg: dict,
+        self,
+        intent: dict,
+        cfg: dict,
     ) -> tuple[Optional[float], dict]:
         """Return (model_prob, extra_metadata).
 
@@ -358,7 +387,10 @@ class BaseWeatherStrategy(BaseStrategy):
     # ==================================================================
 
     def _compute_confidence_value(
-        self, intent: dict, model_prob: float, extra_metadata: dict,
+        self,
+        intent: dict,
+        model_prob: float,
+        extra_metadata: dict,
     ) -> float:
         """Compute confidence from intent data.  Subclasses may override."""
         agreement = float(intent.get("model_agreement", 0))
@@ -382,14 +414,14 @@ class BaseWeatherStrategy(BaseStrategy):
         """Resolve the CLOB token ID for the given direction."""
         token_id = None
         if market.clob_token_ids:
-            idx = 0 if direction == "buy_yes" else (
-                1 if len(market.clob_token_ids) > 1 else 0
-            )
+            idx = 0 if direction == "buy_yes" else (1 if len(market.clob_token_ids) > 1 else 0)
             token_id = market.clob_token_ids[idx]
         return token_id
 
     def _compute_profit(
-        self, entry_price: float, target_price: float,
+        self,
+        entry_price: float,
+        target_price: float,
     ) -> dict:
         """Compute profit numbers.  Returns dict with all fields."""
         expected_payout = target_price

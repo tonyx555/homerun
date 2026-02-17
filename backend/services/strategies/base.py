@@ -27,6 +27,7 @@ def make_aware(dt: Optional[datetime]) -> Optional[datetime]:
 @dataclass
 class DecisionCheck:
     """A single check/gate in the evaluate decision."""
+
     key: str
     label: str
     passed: bool
@@ -38,6 +39,7 @@ class DecisionCheck:
 @dataclass
 class StrategyDecision:
     """Result of evaluate() — whether to trade a signal."""
+
     decision: str  # selected | skipped | blocked | failed
     reason: str
     score: float = None
@@ -49,6 +51,7 @@ class StrategyDecision:
 @dataclass
 class ExitDecision:
     """Result of should_exit() — whether to close a position."""
+
     action: str  # "close" | "hold" | "reduce"
     reason: str
     close_price: float = None
@@ -162,7 +165,13 @@ class BaseStrategy(ABC):
 
         checks = [
             DecisionCheck("edge", "Edge threshold", edge >= min_edge, score=edge, detail=f"min={min_edge:.1f}"),
-            DecisionCheck("confidence", "Confidence threshold", confidence >= min_conf, score=confidence, detail=f"min={min_conf:.2f}"),
+            DecisionCheck(
+                "confidence",
+                "Confidence threshold",
+                confidence >= min_conf,
+                score=confidence,
+                detail=f"min={min_conf:.2f}",
+            ),
         ]
 
         if not all(c.passed for c in checks):
@@ -264,12 +273,16 @@ class BaseStrategy(ABC):
         if trailing is not None and float(trailing) > 0 and highest > entry_price:
             trigger_price = highest * (1.0 - float(trailing) / 100.0)
             if current_price <= trigger_price:
-                return ExitDecision("close", f"Trailing stop ({current_price:.4f} <= {trigger_price:.4f})", close_price=current_price)
+                return ExitDecision(
+                    "close", f"Trailing stop ({current_price:.4f} <= {trigger_price:.4f})", close_price=current_price
+                )
 
         # Max hold
         max_hold = config.get("max_hold_minutes")
         if max_hold is not None and age_minutes >= float(max_hold):
-            return ExitDecision("close", f"Max hold exceeded ({age_minutes:.0f} >= {max_hold} min)", close_price=current_price)
+            return ExitDecision(
+                "close", f"Max hold exceeded ({age_minutes:.0f} >= {max_hold} min)", close_price=current_price
+            )
 
         # Market inactive
         if not market_state.get("market_tradable", True) and config.get("close_on_inactive_market", False):

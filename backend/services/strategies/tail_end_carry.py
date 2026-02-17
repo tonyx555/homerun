@@ -122,7 +122,10 @@ class TailEndCarryStrategy(BaseStrategy):
                 continue
             if _safe_float(getattr(market, "liquidity", 0.0)) < min_liquidity:
                 continue
-            if len(list(getattr(market, "clob_token_ids", []) or [])) < 2 and len(list(getattr(market, "outcome_prices", []) or [])) < 2:
+            if (
+                len(list(getattr(market, "clob_token_ids", []) or [])) < 2
+                and len(list(getattr(market, "outcome_prices", []) or [])) < 2
+            ):
                 continue
 
             end_date = make_aware(getattr(market, "end_date", None))

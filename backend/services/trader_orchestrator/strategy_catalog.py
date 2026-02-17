@@ -71,14 +71,36 @@ SYSTEM_TRADER_STRATEGY_SEEDS: list[SystemTraderStrategySeed] = [
         },
         param_schema={
             "param_fields": [
-                {"key": "strategy_mode", "label": "Strategy Mode", "type": "enum", "options": ["auto", "directional", "pure_arb", "rebalance"]},
+                {
+                    "key": "strategy_mode",
+                    "label": "Strategy Mode",
+                    "type": "enum",
+                    "options": ["auto", "directional", "pure_arb", "rebalance"],
+                },
                 {"key": "target_assets", "label": "Target Assets", "type": "array[string]"},
                 {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
                 {"key": "direction_guardrail_enabled", "label": "Direction Guardrail Enabled", "type": "boolean"},
-                {"key": "direction_guardrail_prob_floor", "label": "Direction Guardrail Prob Floor", "type": "number", "min": 0, "max": 1},
-                {"key": "direction_guardrail_price_floor", "label": "Direction Guardrail Price Floor", "type": "number", "min": 0, "max": 1},
-                {"key": "direction_guardrail_regimes", "label": "Direction Guardrail Regimes", "type": "array[string]", "options": ["opening", "mid", "closing"]},
+                {
+                    "key": "direction_guardrail_prob_floor",
+                    "label": "Direction Guardrail Prob Floor",
+                    "type": "number",
+                    "min": 0,
+                    "max": 1,
+                },
+                {
+                    "key": "direction_guardrail_price_floor",
+                    "label": "Direction Guardrail Price Floor",
+                    "type": "number",
+                    "min": 0,
+                    "max": 1,
+                },
+                {
+                    "key": "direction_guardrail_regimes",
+                    "label": "Direction Guardrail Regimes",
+                    "type": "array[string]",
+                    "options": ["opening", "mid", "closing"],
+                },
                 {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
                 {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
@@ -107,14 +129,36 @@ SYSTEM_TRADER_STRATEGY_SEEDS: list[SystemTraderStrategySeed] = [
         },
         param_schema={
             "param_fields": [
-                {"key": "strategy_mode", "label": "Strategy Mode", "type": "enum", "options": ["auto", "directional", "pure_arb", "rebalance"]},
+                {
+                    "key": "strategy_mode",
+                    "label": "Strategy Mode",
+                    "type": "enum",
+                    "options": ["auto", "directional", "pure_arb", "rebalance"],
+                },
                 {"key": "target_assets", "label": "Target Assets", "type": "array[string]"},
                 {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
                 {"key": "direction_guardrail_enabled", "label": "Direction Guardrail Enabled", "type": "boolean"},
-                {"key": "direction_guardrail_prob_floor", "label": "Direction Guardrail Prob Floor", "type": "number", "min": 0, "max": 1},
-                {"key": "direction_guardrail_price_floor", "label": "Direction Guardrail Price Floor", "type": "number", "min": 0, "max": 1},
-                {"key": "direction_guardrail_regimes", "label": "Direction Guardrail Regimes", "type": "array[string]", "options": ["opening", "mid", "closing"]},
+                {
+                    "key": "direction_guardrail_prob_floor",
+                    "label": "Direction Guardrail Prob Floor",
+                    "type": "number",
+                    "min": 0,
+                    "max": 1,
+                },
+                {
+                    "key": "direction_guardrail_price_floor",
+                    "label": "Direction Guardrail Price Floor",
+                    "type": "number",
+                    "min": 0,
+                    "max": 1,
+                },
+                {
+                    "key": "direction_guardrail_regimes",
+                    "label": "Direction Guardrail Regimes",
+                    "type": "array[string]",
+                    "options": ["opening", "mid", "closing"],
+                },
                 {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
                 {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
@@ -143,14 +187,36 @@ SYSTEM_TRADER_STRATEGY_SEEDS: list[SystemTraderStrategySeed] = [
         },
         param_schema={
             "param_fields": [
-                {"key": "strategy_mode", "label": "Strategy Mode", "type": "enum", "options": ["auto", "directional", "pure_arb", "rebalance"]},
+                {
+                    "key": "strategy_mode",
+                    "label": "Strategy Mode",
+                    "type": "enum",
+                    "options": ["auto", "directional", "pure_arb", "rebalance"],
+                },
                 {"key": "target_assets", "label": "Target Assets", "type": "array[string]"},
                 {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
                 {"key": "direction_guardrail_enabled", "label": "Direction Guardrail Enabled", "type": "boolean"},
-                {"key": "direction_guardrail_prob_floor", "label": "Direction Guardrail Prob Floor", "type": "number", "min": 0, "max": 1},
-                {"key": "direction_guardrail_price_floor", "label": "Direction Guardrail Price Floor", "type": "number", "min": 0, "max": 1},
-                {"key": "direction_guardrail_regimes", "label": "Direction Guardrail Regimes", "type": "array[string]", "options": ["opening", "mid", "closing"]},
+                {
+                    "key": "direction_guardrail_prob_floor",
+                    "label": "Direction Guardrail Prob Floor",
+                    "type": "number",
+                    "min": 0,
+                    "max": 1,
+                },
+                {
+                    "key": "direction_guardrail_price_floor",
+                    "label": "Direction Guardrail Price Floor",
+                    "type": "number",
+                    "min": 0,
+                    "max": 1,
+                },
+                {
+                    "key": "direction_guardrail_regimes",
+                    "label": "Direction Guardrail Regimes",
+                    "type": "array[string]",
+                    "options": ["opening", "mid", "closing"],
+                },
                 {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
                 {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
@@ -179,14 +245,36 @@ SYSTEM_TRADER_STRATEGY_SEEDS: list[SystemTraderStrategySeed] = [
         },
         param_schema={
             "param_fields": [
-                {"key": "strategy_mode", "label": "Strategy Mode", "type": "enum", "options": ["auto", "directional", "pure_arb", "rebalance"]},
+                {
+                    "key": "strategy_mode",
+                    "label": "Strategy Mode",
+                    "type": "enum",
+                    "options": ["auto", "directional", "pure_arb", "rebalance"],
+                },
                 {"key": "target_assets", "label": "Target Assets", "type": "array[string]"},
                 {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
                 {"key": "direction_guardrail_enabled", "label": "Direction Guardrail Enabled", "type": "boolean"},
-                {"key": "direction_guardrail_prob_floor", "label": "Direction Guardrail Prob Floor", "type": "number", "min": 0, "max": 1},
-                {"key": "direction_guardrail_price_floor", "label": "Direction Guardrail Price Floor", "type": "number", "min": 0, "max": 1},
-                {"key": "direction_guardrail_regimes", "label": "Direction Guardrail Regimes", "type": "array[string]", "options": ["opening", "mid", "closing"]},
+                {
+                    "key": "direction_guardrail_prob_floor",
+                    "label": "Direction Guardrail Prob Floor",
+                    "type": "number",
+                    "min": 0,
+                    "max": 1,
+                },
+                {
+                    "key": "direction_guardrail_price_floor",
+                    "label": "Direction Guardrail Price Floor",
+                    "type": "number",
+                    "min": 0,
+                    "max": 1,
+                },
+                {
+                    "key": "direction_guardrail_regimes",
+                    "label": "Direction Guardrail Regimes",
+                    "type": "array[string]",
+                    "options": ["opening", "mid", "closing"],
+                },
                 {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
                 {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
@@ -219,8 +307,19 @@ SYSTEM_TRADER_STRATEGY_SEEDS: list[SystemTraderStrategySeed] = [
                 {"key": "min_abs_move_5m", "label": "Min |5m Move| (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "max_abs_move_2h", "label": "Max |2h Move| (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "require_reversion_shape", "label": "Require Reversion Shape", "type": "boolean"},
-                {"key": "sizing_policy", "label": "Sizing Policy", "type": "enum", "options": ["fixed", "linear", "adaptive", "kelly"]},
-                {"key": "kelly_fractional_scale", "label": "Kelly Fractional Scale", "type": "number", "min": 0.05, "max": 1},
+                {
+                    "key": "sizing_policy",
+                    "label": "Sizing Policy",
+                    "type": "enum",
+                    "options": ["fixed", "linear", "adaptive", "kelly"],
+                },
+                {
+                    "key": "kelly_fractional_scale",
+                    "label": "Kelly Fractional Scale",
+                    "type": "number",
+                    "min": 0.05,
+                    "max": 1,
+                },
                 {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
                 {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
@@ -313,8 +412,19 @@ SYSTEM_TRADER_STRATEGY_SEEDS: list[SystemTraderStrategySeed] = [
                 {"key": "min_liquidity", "label": "Min Liquidity", "type": "number", "min": 0},
                 {"key": "min_abs_move_5m", "label": "Min |5m Move| (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "require_crash_alignment", "label": "Require Crash Alignment", "type": "boolean"},
-                {"key": "sizing_policy", "label": "Sizing Policy", "type": "enum", "options": ["fixed", "linear", "adaptive", "kelly"]},
-                {"key": "kelly_fractional_scale", "label": "Kelly Fractional Scale", "type": "number", "min": 0.05, "max": 1},
+                {
+                    "key": "sizing_policy",
+                    "label": "Sizing Policy",
+                    "type": "enum",
+                    "options": ["fixed", "linear", "adaptive", "kelly"],
+                },
+                {
+                    "key": "kelly_fractional_scale",
+                    "label": "Kelly Fractional Scale",
+                    "type": "number",
+                    "min": 0.05,
+                    "max": 1,
+                },
                 {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
                 {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
@@ -350,7 +460,12 @@ SYSTEM_TRADER_STRATEGY_SEEDS: list[SystemTraderStrategySeed] = [
                 {"key": "max_entry_price", "label": "Max Entry Price", "type": "number", "min": 0.01, "max": 1},
                 {"key": "min_days_to_resolution", "label": "Min Days To Resolution", "type": "number", "min": 0},
                 {"key": "max_days_to_resolution", "label": "Max Days To Resolution", "type": "number", "min": 0},
-                {"key": "sizing_policy", "label": "Sizing Policy", "type": "enum", "options": ["fixed", "linear", "adaptive", "kelly"]},
+                {
+                    "key": "sizing_policy",
+                    "label": "Sizing Policy",
+                    "type": "enum",
+                    "options": ["fixed", "linear", "adaptive", "kelly"],
+                },
                 {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
                 {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
@@ -398,7 +513,13 @@ SYSTEM_TRADER_STRATEGY_SEEDS: list[SystemTraderStrategySeed] = [
             "param_fields": [
                 {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
-                {"key": "min_confluence_strength", "label": "Min Confluence Strength", "type": "number", "min": 0, "max": 1},
+                {
+                    "key": "min_confluence_strength",
+                    "label": "Min Confluence Strength",
+                    "type": "number",
+                    "min": 0,
+                    "max": 1,
+                },
                 {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
                 {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
@@ -527,15 +648,7 @@ async def ensure_system_trader_strategies_seeded(session: AsyncSession) -> int:
     existing = {
         row.slug: row
         for row in (
-            (
-                await session.execute(
-                    select(Strategy).where(
-                        Strategy.slug.in_(list(seed_by_key.keys()))
-                    )
-                )
-            )
-            .scalars()
-            .all()
+            (await session.execute(select(Strategy).where(Strategy.slug.in_(list(seed_by_key.keys()))))).scalars().all()
         )
     }
 

@@ -724,9 +724,7 @@ class OpportunityJudge:
         sections.append(f"**Strategy:** {opportunity.strategy if opportunity.strategy else 'unknown'}")
         sections.append(f"**Title:** {opportunity.title}")
         sections.append(f"**Description:** {opportunity.description}")
-        sections.append(
-            f"**Guaranteed arbitrage:** {'yes' if bool(opportunity.is_guaranteed) else 'no'}"
-        )
+        sections.append(f"**Guaranteed arbitrage:** {'yes' if bool(opportunity.is_guaranteed) else 'no'}")
         if opportunity.roi_type:
             sections.append(f"**ROI type:** {opportunity.roi_type}")
 
@@ -791,21 +789,13 @@ class OpportunityJudge:
         market_count = len(opportunity.markets or [])
         sections.append("\n### Evidence Coverage")
         sections.append(f"- Market rows provided: {market_count}")
-        sections.append(
-            "- Independent catalyst/related-market quotes provided: "
-            f"{'yes' if market_count > 1 else 'no'}"
-        )
-        sections.append(
-            "- External performance/news fundamentals: "
-            "not provided unless explicitly listed above"
-        )
+        sections.append(f"- Independent catalyst/related-market quotes provided: {'yes' if market_count > 1 else 'no'}")
+        sections.append("- External performance/news fundamentals: not provided unless explicitly listed above")
 
         weather = self._extract_weather_context(opportunity)
         if weather:
             sections.append("\n### Weather Context")
-            sections.append(
-                f"- Report-only mode: {'yes' if self._is_report_only_opportunity(opportunity) else 'no'}"
-            )
+            sections.append(f"- Report-only mode: {'yes' if self._is_report_only_opportunity(opportunity) else 'no'}")
             if weather.get("location"):
                 sections.append(f"- Location: {weather.get('location')}")
             if weather.get("target_time"):
@@ -813,25 +803,15 @@ class OpportunityJudge:
             if isinstance(weather.get("source_count"), (int, float)):
                 sections.append(f"- Forecast sources: {int(weather.get('source_count') or 0)}")
             if isinstance(weather.get("consensus_probability"), (int, float)):
-                sections.append(
-                    f"- Model probability (YES): {float(weather.get('consensus_probability')):.3f}"
-                )
+                sections.append(f"- Model probability (YES): {float(weather.get('consensus_probability')):.3f}")
             if isinstance(weather.get("market_probability"), (int, float)):
-                sections.append(
-                    f"- Market probability (selected side): {float(weather.get('market_probability')):.3f}"
-                )
+                sections.append(f"- Market probability (selected side): {float(weather.get('market_probability')):.3f}")
             if isinstance(weather.get("consensus_temp_f"), (int, float)):
-                sections.append(
-                    f"- Consensus temperature: {float(weather.get('consensus_temp_f')):.1f}F"
-                )
+                sections.append(f"- Consensus temperature: {float(weather.get('consensus_temp_f')):.1f}F")
             if isinstance(weather.get("market_implied_temp_f"), (int, float)):
-                sections.append(
-                    f"- Market-implied temperature: {float(weather.get('market_implied_temp_f')):.1f}F"
-                )
+                sections.append(f"- Market-implied temperature: {float(weather.get('market_implied_temp_f')):.1f}F")
             if isinstance(weather.get("agreement"), (int, float)):
-                sections.append(
-                    f"- Model agreement: {float(weather.get('agreement')):.3f}"
-                )
+                sections.append(f"- Model agreement: {float(weather.get('agreement')):.3f}")
 
             raw_sources = weather.get("forecast_sources")
             if isinstance(raw_sources, list) and raw_sources:
@@ -843,22 +823,10 @@ class OpportunityJudge:
                     src_prob = src.get("probability")
                     src_temp = src.get("value_f")
                     src_weight = src.get("weight")
-                    prob_txt = (
-                        f"{float(src_prob):.3f}" if isinstance(src_prob, (int, float)) else "n/a"
-                    )
-                    temp_txt = (
-                        f"{float(src_temp):.1f}F"
-                        if isinstance(src_temp, (int, float))
-                        else "n/a"
-                    )
-                    weight_txt = (
-                        f"{float(src_weight):.2f}"
-                        if isinstance(src_weight, (int, float))
-                        else "n/a"
-                    )
-                    sections.append(
-                        f"  - {source_id}: prob={prob_txt}, temp={temp_txt}, weight={weight_txt}"
-                    )
+                    prob_txt = f"{float(src_prob):.3f}" if isinstance(src_prob, (int, float)) else "n/a"
+                    temp_txt = f"{float(src_temp):.1f}F" if isinstance(src_temp, (int, float)) else "n/a"
+                    weight_txt = f"{float(src_weight):.2f}" if isinstance(src_weight, (int, float)) else "n/a"
+                    sections.append(f"  - {source_id}: prob={prob_txt}, temp={temp_txt}, weight={weight_txt}")
 
         # Event context
         if opportunity.event_title:
@@ -923,9 +891,7 @@ class OpportunityJudge:
         sections.append(f"- ID: {opportunity.id}")
         sections.append(f"- Title: {opportunity.title}")
         sections.append(f"- Description: {opportunity.description}")
-        sections.append(
-            f"- Report-only: {'yes' if self._is_report_only_opportunity(opportunity) else 'no'}"
-        )
+        sections.append(f"- Report-only: {'yes' if self._is_report_only_opportunity(opportunity) else 'no'}")
         sections.append(
             f"- Liquidity: min_liquidity=${opportunity.min_liquidity:.2f}, "
             f"max_position_size=${opportunity.max_position_size:.2f}"
@@ -936,19 +902,15 @@ class OpportunityJudge:
             f"net_profit=${opportunity.net_profit:.4f}, roi={opportunity.roi_percent:.2f}%"
         )
         if opportunity.risk_factors:
-            sections.append(
-                f"- Risk factors: {'; '.join(str(x) for x in opportunity.risk_factors[:6])}"
-            )
+            sections.append(f"- Risk factors: {'; '.join(str(x) for x in opportunity.risk_factors[:6])}")
 
         if opportunity.positions_to_take:
             pos = opportunity.positions_to_take[0]
             sections.append(
-                f"- Proposed leg: {pos.get('action', 'BUY')} {pos.get('outcome', 'N/A')} "
-                f"@ {pos.get('price', 'N/A')}"
+                f"- Proposed leg: {pos.get('action', 'BUY')} {pos.get('outcome', 'N/A')} @ {pos.get('price', 'N/A')}"
             )
         sections.append(
-            "- Independent related-market quotes provided: "
-            f"{'yes' if len(opportunity.markets or []) > 1 else 'no'}"
+            f"- Independent related-market quotes provided: {'yes' if len(opportunity.markets or []) > 1 else 'no'}"
         )
 
         weather = self._extract_weather_context(opportunity) or {}
@@ -1034,16 +996,10 @@ class OpportunityJudge:
         if resolution_utc:
             lines.append(f"- Resolution date (UTC): {resolution_utc.isoformat()}")
             days_to_resolution = (resolution_utc - now_utc).total_seconds() / 86400.0
-            lines.append(
-                f"- Days until resolution (from current UTC): {days_to_resolution:.2f}"
-            )
+            lines.append(f"- Days until resolution (from current UTC): {days_to_resolution:.2f}")
             if detected_utc:
-                days_from_detection = (
-                    resolution_utc - detected_utc
-                ).total_seconds() / 86400.0
-                lines.append(
-                    f"- Days from detection to resolution: {days_from_detection:.2f}"
-                )
+                days_from_detection = (resolution_utc - detected_utc).total_seconds() / 86400.0
+                lines.append(f"- Days from detection to resolution: {days_from_detection:.2f}")
         return lines
 
     @staticmethod
@@ -1075,18 +1031,14 @@ class OpportunityJudge:
 
     def _report_only_judgment(self, opportunity: "ArbitrageOpportunity") -> dict:
         reason_bits = []
-        for rf in (opportunity.risk_factors or []):
+        for rf in opportunity.risk_factors or []:
             text = str(rf).strip()
             if not text:
                 continue
             reason_bits.append(text)
             if len(reason_bits) >= 4:
                 break
-        reason_tail = (
-            " Key blockers: " + "; ".join(reason_bits)
-            if reason_bits
-            else ""
-        )
+        reason_tail = " Key blockers: " + "; ".join(reason_bits) if reason_bits else ""
         return {
             "overall_score": 0.12,
             "profit_viability": 0.30,

@@ -442,10 +442,10 @@ async def cleanup_trader_positions(
             },
         )
 
-    if (
-        request.method == TraderPositionCleanupMethod.mark_to_market
-        and request.scope not in {TraderPositionCleanupScope.paper, TraderPositionCleanupScope.live}
-    ):
+    if request.method == TraderPositionCleanupMethod.mark_to_market and request.scope not in {
+        TraderPositionCleanupScope.paper,
+        TraderPositionCleanupScope.live,
+    }:
         raise HTTPException(
             status_code=422,
             detail="mark_to_market cleanup supports paper and live scopes (use scope=paper or scope=live)",
@@ -511,9 +511,7 @@ async def cleanup_trader_positions(
         trader_id=trader_id,
         event_type="trader_positions_cleanup",
         severity=(
-            "warn"
-            if request.scope in {TraderPositionCleanupScope.live, TraderPositionCleanupScope.all}
-            else "info"
+            "warn" if request.scope in {TraderPositionCleanupScope.live, TraderPositionCleanupScope.all} else "info"
         ),
         source="operator",
         message="Trader position cleanup executed" if not request.dry_run else "Trader position cleanup dry-run",

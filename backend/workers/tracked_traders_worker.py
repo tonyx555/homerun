@@ -138,12 +138,8 @@ async def _pool_runtime_settings() -> dict[str, Any]:
             config["target_pool_size"] = (
                 row.discovery_pool_target_size if row.discovery_pool_target_size is not None else 500
             )
-            config["min_pool_size"] = (
-                row.discovery_pool_min_size if row.discovery_pool_min_size is not None else 400
-            )
-            config["max_pool_size"] = (
-                row.discovery_pool_max_size if row.discovery_pool_max_size is not None else 600
-            )
+            config["min_pool_size"] = row.discovery_pool_min_size if row.discovery_pool_min_size is not None else 400
+            config["max_pool_size"] = row.discovery_pool_max_size if row.discovery_pool_max_size is not None else 600
             config["active_window_hours"] = (
                 row.discovery_pool_active_window_hours if row.discovery_pool_active_window_hours is not None else 72
             )
@@ -349,7 +345,9 @@ async def _run_loop() -> None:
             except Exception as exc:
                 logger.warning("Failed to apply pool recompute mode '%s': %s", pool_config.get("recompute_mode"), exc)
             full_sweep_interval = timedelta(
-                seconds=max(10, int(pool_config.get("full_sweep_interval_seconds") or FULL_SWEEP_INTERVAL.total_seconds()))
+                seconds=max(
+                    10, int(pool_config.get("full_sweep_interval_seconds") or FULL_SWEEP_INTERVAL.total_seconds())
+                )
             )
             incremental_refresh_interval = timedelta(
                 seconds=max(

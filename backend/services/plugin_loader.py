@@ -19,6 +19,7 @@ Unified strategies may additionally implement:
 The loader validates, compiles, and instantiates plugins at runtime, making
 them available to the scanner alongside the built-in strategies.
 """
+
 from __future__ import annotations
 
 import ast

@@ -302,7 +302,9 @@ async def expire_source_signals_except(
         TradeSignal.status.in_(tuple(SIGNAL_ACTIVE_STATUSES)),
     )
     if signal_types:
-        normalized_signal_types = [str(value or "").strip().lower() for value in signal_types if str(value or "").strip()]
+        normalized_signal_types = [
+            str(value or "").strip().lower() for value in signal_types if str(value or "").strip()
+        ]
         if normalized_signal_types:
             query = query.where(func.lower(func.coalesce(TradeSignal.signal_type, "")).in_(normalized_signal_types))
     if keep:
@@ -416,25 +418,21 @@ async def refresh_trade_signal_snapshots(session: AsyncSession) -> list[dict[str
     """Recompute per-source snapshot rows from ``trade_signals``."""
 
     rows = (
-        (
-            await session.execute(
-                select(
-                    TradeSignal.source,
-                    TradeSignal.status,
-                    func.count(TradeSignal.id),
-                    func.max(TradeSignal.created_at),
-                    func.min(
-                        case(
-                            (TradeSignal.status == "pending", TradeSignal.created_at),
-                            else_=None,
-                        )
-                    ),
-                )
-                .group_by(TradeSignal.source, TradeSignal.status)
-            )
+        await session.execute(
+            select(
+                TradeSignal.source,
+                TradeSignal.status,
+                func.count(TradeSignal.id),
+                func.max(TradeSignal.created_at),
+                func.min(
+                    case(
+                        (TradeSignal.status == "pending", TradeSignal.created_at),
+                        else_=None,
+                    )
+                ),
+            ).group_by(TradeSignal.source, TradeSignal.status)
         )
-        .all()
-    )
+    ).all()
 
     source_stats: dict[str, dict[str, Any]] = {}
     for source, status, count, latest_created, oldest_pending in rows:
@@ -456,20 +454,13 @@ async def refresh_trade_signal_snapshots(session: AsyncSession) -> list[dict[str
         key = f"{status}_count"
         if key in stats:
             stats[key] = int(count or 0)
-        if latest_created and (
-            stats["latest_signal_at"] is None or latest_created > stats["latest_signal_at"]
-        ):
+        if latest_created and (stats["latest_signal_at"] is None or latest_created > stats["latest_signal_at"]):
             stats["latest_signal_at"] = latest_created
-        if oldest_pending and (
-            stats["oldest_pending_at"] is None
-            or oldest_pending < stats["oldest_pending_at"]
-        ):
+        if oldest_pending and (stats["oldest_pending_at"] is None or oldest_pending < stats["oldest_pending_at"]):
             stats["oldest_pending_at"] = oldest_pending
 
     now = _utc_now()
-    existing_rows = (
-        (await session.execute(select(TradeSignalSnapshot))).scalars().all()
-    )
+    existing_rows = (await session.execute(select(TradeSignalSnapshot))).scalars().all()
     existing_by_source = {r.source: r for r in existing_rows}
 
     for source, stats in source_stats.items():
@@ -492,9 +483,7 @@ async def refresh_trade_signal_snapshots(session: AsyncSession) -> list[dict[str
         row.latest_signal_at = stats.get("latest_signal_at")
         row.oldest_pending_at = stats.get("oldest_pending_at")
         row.freshness_seconds = (
-            (now - stats["latest_signal_at"]).total_seconds()
-            if stats.get("latest_signal_at")
-            else None
+            (now - stats["latest_signal_at"]).total_seconds() if stats.get("latest_signal_at") else None
         )
         row.updated_at = now
         row.stats_json = {
@@ -516,9 +505,7 @@ async def refresh_trade_signal_snapshots(session: AsyncSession) -> list[dict[str
 
     out: list[dict[str, Any]] = []
     snapshot_rows = (
-        (await session.execute(select(TradeSignalSnapshot).order_by(TradeSignalSnapshot.source.asc())))
-        .scalars()
-        .all()
+        (await session.execute(select(TradeSignalSnapshot).order_by(TradeSignalSnapshot.source.asc()))).scalars().all()
     )
     for row in snapshot_rows:
         out.append(
@@ -744,9 +731,7 @@ async def emit_tracked_trader_signals(
                     pool_addresses.add(address.lower())
 
             tracked_rows = await session.execute(
-                select(TrackedWallet.address).where(
-                    TrackedWallet.address.in_(list(all_wallets))
-                )
+                select(TrackedWallet.address).where(TrackedWallet.address.in_(list(all_wallets)))
             )
             for (address,) in tracked_rows.all():
                 if address:
@@ -801,11 +786,7 @@ async def emit_tracked_trader_signals(
         active_dedupe_keys.add(dedupe_key)
 
         # Classify signal source from wallet membership.
-        sig_wallets = {
-            addr.lower()
-            for addr in (sig.get("wallets") or [])
-            if isinstance(addr, str) and addr
-        }
+        sig_wallets = {addr.lower() for addr in (sig.get("wallets") or []) if isinstance(addr, str) and addr}
         from_pool = bool(sig_wallets & pool_addresses)
         from_tracked = bool(sig_wallets & tracked_addresses)
         if from_tracked and from_pool:
@@ -1035,9 +1016,7 @@ async def emit_crypto_market_signals(
                 "rebalance": rebalance_no,
             }
         )
-        weighted_components = {
-            key: selected_components[key] * weights[key] for key in selected_components
-        }
+        weighted_components = {key: selected_components[key] * weights[key] for key in selected_components}
         dominant_strategy = max(weighted_components, key=lambda key: weighted_components[key])
         dominant_weighted_edge = weighted_components[dominant_strategy]
         edge_gap = abs(net_yes - net_no)

@@ -379,9 +379,7 @@ async def create_strategy(req: UnifiedStrategyCreateRequest):
             detail={"message": "Strategy validation failed", "errors": validation["errors"]},
         )
 
-    strategy_name = (
-        req.name or validation["strategy_name"] or slug.replace("_", " ").title()
-    ).strip()
+    strategy_name = (req.name or validation["strategy_name"] or slug.replace("_", " ").title()).strip()
     strategy_description = req.description if req.description is not None else validation["strategy_description"]
     class_name = req.class_name or validation["class_name"]
 
@@ -390,9 +388,7 @@ async def create_strategy(req: UnifiedStrategyCreateRequest):
     error_message = None
 
     async with AsyncSessionLocal() as session:
-        existing = await session.execute(
-            select(Strategy).where(Strategy.slug == slug)
-        )
+        existing = await session.execute(select(Strategy).where(Strategy.slug == slug))
         if existing.scalar_one_or_none():
             raise HTTPException(status_code=409, detail=f"A strategy with slug '{slug}' already exists.")
 

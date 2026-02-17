@@ -236,8 +236,7 @@ def validate_trader_strategy_source(source_code: str, class_name: str | None = N
     )
     if not has_evaluate_method and not has_detect_method:
         result["warnings"].append(
-            "Class does not define evaluate() or detect() directly; "
-            "loader will validate inherited methods at runtime."
+            "Class does not define evaluate() or detect() directly; loader will validate inherited methods at runtime."
         )
 
     result["class_name"] = picked_name
@@ -381,9 +380,7 @@ class StrategyDBLoader:
 
             instance = strategy_class()
             if not self._signature_valid(instance):
-                raise TraderStrategyValidationError(
-                    "Strategy evaluate() must support evaluate(signal, context)."
-                )
+                raise TraderStrategyValidationError("Strategy evaluate() must support evaluate(signal, context).")
 
             source_hash = hashlib.sha256((row.source_code or "").encode("utf-8")).hexdigest()[:16]
             aliases_raw = row.aliases if isinstance(row.aliases, list) else []

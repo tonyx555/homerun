@@ -148,9 +148,7 @@ class StageBudgetTracker:
         self.event_extraction_budget = max(1, int(math.floor(self.total_calls * self._event_frac)))
         self.reranking_budget = max(1, int(math.floor(self.total_calls * self._rerank_frac)))
         # Give edge estimation the remainder so rounding doesn't lose calls.
-        self.edge_estimation_budget = max(
-            1, self.total_calls - self.event_extraction_budget - self.reranking_budget
-        )
+        self.edge_estimation_budget = max(1, self.total_calls - self.event_extraction_budget - self.reranking_budget)
 
     def finish_event_extraction(self) -> None:
         """Redistribute leftover event extraction budget to reranking (idempotent)."""
@@ -356,6 +354,7 @@ class WorkflowOrchestrator:
             )
             clusters = article_clusterer.cluster(articles, max_clusters=None)
             if len(clusters) > cluster_limit:
+
                 def _cluster_rank(cluster):
                     newest = self._coerce_datetime(getattr(cluster, "newest_ts", None))
                     recency = newest.timestamp() if newest else 0.0
@@ -562,7 +561,9 @@ class WorkflowOrchestrator:
             all_findings: list[WorkflowFinding] = []
             market_sources_seen: dict[str, set[str]] = defaultdict(set)
             cycle_deadline = started_at + timedelta(
-                seconds=float(wf_settings.get("max_cycle_seconds", _MAX_WORKFLOW_CYCLE_SECONDS) or _MAX_WORKFLOW_CYCLE_SECONDS)
+                seconds=float(
+                    wf_settings.get("max_cycle_seconds", _MAX_WORKFLOW_CYCLE_SECONDS) or _MAX_WORKFLOW_CYCLE_SECONDS
+                )
             )
             time_budget_exhausted = False
 
@@ -571,7 +572,10 @@ class WorkflowOrchestrator:
                     time_budget_exhausted = True
                     logger.warning(
                         "News workflow cycle hit time budget (%.1fs); ending current cycle early.",
-                        float(wf_settings.get("max_cycle_seconds", _MAX_WORKFLOW_CYCLE_SECONDS) or _MAX_WORKFLOW_CYCLE_SECONDS),
+                        float(
+                            wf_settings.get("max_cycle_seconds", _MAX_WORKFLOW_CYCLE_SECONDS)
+                            or _MAX_WORKFLOW_CYCLE_SECONDS
+                        ),
                     )
                     break
                 article = cluster.representative
@@ -712,9 +716,7 @@ class WorkflowOrchestrator:
                         self._assign_finding_keys(rejected)
                         all_findings.append(rejected)
                         alignment_dropped += 1
-                        self._negative_cache.put(
-                            cluster.article_key, rc.candidate.market_id, "temporal_mismatch"
-                        )
+                        self._negative_cache.put(cluster.article_key, rc.candidate.market_id, "temporal_mismatch")
                         continue
 
                     if self._has_event_market_alignment(event, rc.candidate):
@@ -849,8 +851,7 @@ class WorkflowOrchestrator:
                         finding,
                         reason="insufficient_article_support",
                         details=(
-                            "Need at least two corroborating articles in the supporting cluster "
-                            f"(got {article_count})."
+                            f"Need at least two corroborating articles in the supporting cluster (got {article_count})."
                         ),
                     )
                     continue
@@ -859,10 +860,7 @@ class WorkflowOrchestrator:
                     self._mark_finding_rejected(
                         finding,
                         reason="insufficient_source_diversity",
-                        details=(
-                            "Need at least two distinct outlets in supporting evidence "
-                            f"(got {source_count})."
-                        ),
+                        details=(f"Need at least two distinct outlets in supporting evidence (got {source_count})."),
                     )
 
             actionable = [f for f in deduped_findings if f.actionable]
@@ -1332,8 +1330,7 @@ class WorkflowOrchestrator:
             #       -> treat like a budget-skip (penalize, don't reject).
             rationale_lower = (getattr(rc, "rationale", "") or "").lower()
             is_budget_skip = any(
-                hint in rationale_lower
-                for hint in ("unavailable", "budget", "fallback", "retrieval score")
+                hint in rationale_lower for hint in ("unavailable", "budget", "fallback", "retrieval score")
             )
 
             if is_budget_skip:
@@ -1422,10 +1419,7 @@ class WorkflowOrchestrator:
             return
 
         market_id = str(
-            market_metadata.get("id")
-            or market_metadata.get("market_id")
-            or getattr(finding, "market_id", "")
-            or ""
+            market_metadata.get("id") or market_metadata.get("market_id") or getattr(finding, "market_id", "") or ""
         ).strip()
         if not market_id:
             return
@@ -1436,11 +1430,8 @@ class WorkflowOrchestrator:
             "event_slug": str(market_metadata.get("event_slug") or "").strip() or None,
             "event_ticker": str(market_metadata.get("event_ticker") or "").strip() or None,
             "platform": str(market_metadata.get("platform") or "").strip().lower() or None,
-            "question": str(
-                market_metadata.get("question")
-                or getattr(finding, "market_question", "")
-                or ""
-            ).strip() or None,
+            "question": str(market_metadata.get("question") or getattr(finding, "market_question", "") or "").strip()
+            or None,
         }
         if not any(v for k, v in market_meta.items() if k != "id"):
             return

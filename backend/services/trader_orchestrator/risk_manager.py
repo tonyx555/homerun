@@ -157,9 +157,7 @@ def evaluate_risk(
             key="trader_loss_streak",
             passed=(not halt_on_losses) or trader_consecutive_losses < max_consecutive_losses,
             detail=(
-                f"streak={trader_consecutive_losses} max={max_consecutive_losses}"
-                if halt_on_losses
-                else "disabled"
+                f"streak={trader_consecutive_losses} max={max_consecutive_losses}" if halt_on_losses else "disabled"
             ),
             score=float(trader_consecutive_losses),
         )

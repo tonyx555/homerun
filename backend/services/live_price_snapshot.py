@@ -128,11 +128,7 @@ def normalize_binary_price_history(
             else (
                 raw.get("ts")
                 if raw.get("ts") is not None
-                else (
-                    raw.get("time")
-                    if raw.get("time") is not None
-                    else raw.get("timestamp")
-                )
+                else (raw.get("time") if raw.get("time") is not None else raw.get("timestamp"))
             )
         )
         if ts_ms is None:

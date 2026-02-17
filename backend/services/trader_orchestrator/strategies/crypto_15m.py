@@ -184,9 +184,7 @@ class BaseCryptoTimeframeStrategy(BaseTraderStrategy):
             0.5,
             min(1.0, _to_float(params.get("direction_guardrail_price_floor", 0.80), 0.80)),
         )
-        guardrail_regimes = _normalize_regime_scope(
-            params.get("direction_guardrail_regimes", ["mid", "closing"])
-        )
+        guardrail_regimes = _normalize_regime_scope(params.get("direction_guardrail_regimes", ["mid", "closing"]))
         if not guardrail_regimes:
             guardrail_regimes = {"mid", "closing"}
 
@@ -194,9 +192,7 @@ class BaseCryptoTimeframeStrategy(BaseTraderStrategy):
         payload = _payload_dict(signal)
         direction = str(getattr(signal, "direction", "") or "").strip().lower()
         regime = _normalize_regime(payload.get("regime"))
-        signal_asset = _normalize_asset(
-            payload.get("asset") or payload.get("coin") or payload.get("symbol")
-        )
+        signal_asset = _normalize_asset(payload.get("asset") or payload.get("coin") or payload.get("symbol"))
         signal_timeframe = _normalize_timeframe(
             payload.get("timeframe") or payload.get("cadence") or payload.get("interval")
         )
@@ -218,9 +214,7 @@ class BaseCryptoTimeframeStrategy(BaseTraderStrategy):
             ),
             _normalize_timeframe,
         )
-        asset_scope_ok = (not target_assets) or (
-            bool(signal_asset) and signal_asset in target_assets
-        )
+        asset_scope_ok = (not target_assets) or (bool(signal_asset) and signal_asset in target_assets)
         expected_timeframe = self._normalized_expected_timeframe()
         strategy_timeframe_ok = (not signal_timeframe) or signal_timeframe == expected_timeframe
         timeframe_scope_ok = (not target_timeframes) or (
@@ -233,10 +227,9 @@ class BaseCryptoTimeframeStrategy(BaseTraderStrategy):
 
         source_ok = str(getattr(signal, "source", "")) == "crypto"
         signal_type = str(getattr(signal, "signal_type", "") or "").strip().lower()
-        origin_ok = (
-            str(payload.get("strategy_origin") or "").strip().lower() == "crypto_worker"
-            or signal_type.startswith("crypto_worker")
-        )
+        origin_ok = str(
+            payload.get("strategy_origin") or ""
+        ).strip().lower() == "crypto_worker" or signal_type.startswith("crypto_worker")
         edge = max(0.0, _to_float(getattr(signal, "edge_percent", 0.0), 0.0))
         confidence = _normalize_confidence(getattr(signal, "confidence", 0.0), 0.0)
         mode_edge = _get_component_edge(payload, direction, active_mode)
@@ -248,11 +241,7 @@ class BaseCryptoTimeframeStrategy(BaseTraderStrategy):
         oracle_available = bool(payload.get("oracle_available")) or payload.get("oracle_delta_pct") is not None
 
         required_edge = min_edge * _EDGE_MODE_FACTORS.get(regime, {}).get(active_mode, 1.0)
-        required_conf = (
-            min_conf
-            * _CONF_MODE_FACTORS.get(active_mode, 1.0)
-            * _REGIME_CONF_FACTORS.get(regime, 1.0)
-        )
+        required_conf = min_conf * _CONF_MODE_FACTORS.get(active_mode, 1.0) * _REGIME_CONF_FACTORS.get(regime, 1.0)
 
         guardrail_blocked = False
         guardrail_detail = "disabled"
@@ -291,17 +280,13 @@ class BaseCryptoTimeframeStrategy(BaseTraderStrategy):
                 "asset_scope",
                 "Asset target scope",
                 asset_scope_ok,
-                detail=(
-                    f"asset={signal_asset or 'unknown'} targets={','.join(target_assets) or 'all'}"
-                ),
+                detail=(f"asset={signal_asset or 'unknown'} targets={','.join(target_assets) or 'all'}"),
             ),
             DecisionCheck(
                 "timeframe_scope",
                 "Cadence target scope",
                 timeframe_scope_ok,
-                detail=(
-                    f"timeframe={signal_timeframe or 'unknown'} targets={','.join(target_timeframes) or 'all'}"
-                ),
+                detail=(f"timeframe={signal_timeframe or 'unknown'} targets={','.join(target_timeframes) or 'all'}"),
             ),
             DecisionCheck(
                 "strategy_timeframe",

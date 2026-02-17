@@ -131,11 +131,27 @@ class OpportunityFlashReversionStrategy(BaseTraderStrategy):
 
         checks = [
             DecisionCheck("source", "Scanner source", source == "scanner", detail="Requires source=scanner."),
-            DecisionCheck("strategy", "Flash reversion strategy type", strategy_ok, detail="strategy=flash_crash_reversion"),
+            DecisionCheck(
+                "strategy", "Flash reversion strategy type", strategy_ok, detail="strategy=flash_crash_reversion"
+            ),
             DecisionCheck("edge", "Edge threshold", edge >= min_edge, score=edge, detail=f"min={min_edge:.2f}"),
-            DecisionCheck("confidence", "Confidence threshold", confidence >= min_conf, score=confidence, detail=f"min={min_conf:.2f}"),
-            DecisionCheck("risk", "Risk ceiling", risk_score <= max_risk, score=risk_score, detail=f"max={max_risk:.2f}"),
-            DecisionCheck("liquidity", "Liquidity floor", liquidity >= min_liquidity, score=liquidity, detail=f"min={min_liquidity:.0f}"),
+            DecisionCheck(
+                "confidence",
+                "Confidence threshold",
+                confidence >= min_conf,
+                score=confidence,
+                detail=f"min={min_conf:.2f}",
+            ),
+            DecisionCheck(
+                "risk", "Risk ceiling", risk_score <= max_risk, score=risk_score, detail=f"max={max_risk:.2f}"
+            ),
+            DecisionCheck(
+                "liquidity",
+                "Liquidity floor",
+                liquidity >= min_liquidity,
+                score=liquidity,
+                detail=f"min={min_liquidity:.0f}",
+            ),
             DecisionCheck(
                 "alignment_5m",
                 "Crash alignment (5m move)",
@@ -237,9 +253,23 @@ class OpportunityTailCarryStrategy(BaseTraderStrategy):
             DecisionCheck("source", "Scanner source", source == "scanner", detail="Requires source=scanner."),
             DecisionCheck("strategy", "Tail carry strategy type", strategy_ok, detail="strategy=tail_end_carry"),
             DecisionCheck("edge", "Edge threshold", edge >= min_edge, score=edge, detail=f"min={min_edge:.2f}"),
-            DecisionCheck("confidence", "Confidence threshold", confidence >= min_conf, score=confidence, detail=f"min={min_conf:.2f}"),
-            DecisionCheck("risk", "Risk ceiling", risk_score <= max_risk, score=risk_score, detail=f"max={max_risk:.2f}"),
-            DecisionCheck("entry", "Entry probability band", min_entry <= entry_price <= max_entry, score=entry_price, detail=f"[{min_entry:.3f}, {max_entry:.3f}]"),
+            DecisionCheck(
+                "confidence",
+                "Confidence threshold",
+                confidence >= min_conf,
+                score=confidence,
+                detail=f"min={min_conf:.2f}",
+            ),
+            DecisionCheck(
+                "risk", "Risk ceiling", risk_score <= max_risk, score=risk_score, detail=f"max={max_risk:.2f}"
+            ),
+            DecisionCheck(
+                "entry",
+                "Entry probability band",
+                min_entry <= entry_price <= max_entry,
+                score=entry_price,
+                detail=f"[{min_entry:.3f}, {max_entry:.3f}]",
+            ),
             DecisionCheck(
                 "resolution_window",
                 "Resolution window",

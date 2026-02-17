@@ -231,12 +231,30 @@ async def test_run_trader_once_blocks_stacking_when_allow_averaging_false(monkey
     monkeypatch.setattr(
         trader_orchestrator_worker,
         "reconcile_paper_positions",
-        AsyncMock(return_value={"matched": 0, "closed": 0, "held": 0, "skipped": 0, "total_realized_pnl": 0.0, "by_status": {}}),
+        AsyncMock(
+            return_value={
+                "matched": 0,
+                "closed": 0,
+                "held": 0,
+                "skipped": 0,
+                "total_realized_pnl": 0.0,
+                "by_status": {},
+            }
+        ),
     )
     monkeypatch.setattr(
         trader_orchestrator_worker,
         "reconcile_live_positions",
-        AsyncMock(return_value={"matched": 0, "closed": 0, "held": 0, "skipped": 0, "total_realized_pnl": 0.0, "by_status": {}}),
+        AsyncMock(
+            return_value={
+                "matched": 0,
+                "closed": 0,
+                "held": 0,
+                "skipped": 0,
+                "total_realized_pnl": 0.0,
+                "by_status": {},
+            }
+        ),
     )
     monkeypatch.setattr(trader_orchestrator_worker, "sync_trader_position_inventory", AsyncMock(return_value={}))
     monkeypatch.setattr(trader_orchestrator_worker, "get_open_position_count_for_trader", AsyncMock(return_value=1))
@@ -329,12 +347,30 @@ async def test_run_trader_once_allows_reentry_when_allow_averaging_true(monkeypa
     monkeypatch.setattr(
         trader_orchestrator_worker,
         "reconcile_paper_positions",
-        AsyncMock(return_value={"matched": 0, "closed": 0, "held": 0, "skipped": 0, "total_realized_pnl": 0.0, "by_status": {}}),
+        AsyncMock(
+            return_value={
+                "matched": 0,
+                "closed": 0,
+                "held": 0,
+                "skipped": 0,
+                "total_realized_pnl": 0.0,
+                "by_status": {},
+            }
+        ),
     )
     monkeypatch.setattr(
         trader_orchestrator_worker,
         "reconcile_live_positions",
-        AsyncMock(return_value={"matched": 0, "closed": 0, "held": 0, "skipped": 0, "total_realized_pnl": 0.0, "by_status": {}}),
+        AsyncMock(
+            return_value={
+                "matched": 0,
+                "closed": 0,
+                "held": 0,
+                "skipped": 0,
+                "total_realized_pnl": 0.0,
+                "by_status": {},
+            }
+        ),
     )
     monkeypatch.setattr(trader_orchestrator_worker, "sync_trader_position_inventory", AsyncMock(return_value={}))
     monkeypatch.setattr(trader_orchestrator_worker, "get_open_position_count_for_trader", AsyncMock(return_value=1))
@@ -486,7 +522,16 @@ async def test_run_trader_once_blocks_unavailable_strategy_only(monkeypatch):
     monkeypatch.setattr(
         trader_orchestrator_worker,
         "reconcile_paper_positions",
-        AsyncMock(return_value={"matched": 0, "closed": 0, "held": 0, "skipped": 0, "total_realized_pnl": 0.0, "by_status": {}}),
+        AsyncMock(
+            return_value={
+                "matched": 0,
+                "closed": 0,
+                "held": 0,
+                "skipped": 0,
+                "total_realized_pnl": 0.0,
+                "by_status": {},
+            }
+        ),
     )
     monkeypatch.setattr(trader_orchestrator_worker, "sync_trader_position_inventory", AsyncMock(return_value={}))
     monkeypatch.setattr(trader_orchestrator_worker, "get_open_position_count_for_trader", AsyncMock(return_value=0))
@@ -527,7 +572,4 @@ async def test_run_trader_once_blocks_unavailable_strategy_only(monkeypatch):
     assert blocked[0]["reason"] == "strategy_unavailable:crypto_15m"
     assert len(selected) == 1
     assert any(entry[0] == "signal-1" and entry[1] == "skipped" for entry in statuses)
-    assert any(
-        c.get("signal_id") == "signal-1" and c.get("outcome") == "blocked"
-        for c in consumptions
-    )
+    assert any(c.get("signal_id") == "signal-1" and c.get("outcome") == "blocked" for c in consumptions)

@@ -193,8 +193,7 @@ async def _fetch_enabled_strategy_catalog(
                     Strategy.source_key,
                 ).where(Strategy.enabled == True)  # noqa: E712
             )
-        )
-        .all()
+        ).all()
     )
     if not rows:
         fallback_rows = build_system_strategy_rows()
@@ -279,8 +278,7 @@ def _validate_traders_scope(scope: dict[str, Any]) -> None:
     invalid = [mode for mode in modes if mode not in _TRADER_SCOPE_MODES]
     if invalid:
         raise ValueError(
-            f"Invalid traders_scope.modes: {', '.join(invalid)}. "
-            f"Allowed: {', '.join(sorted(_TRADER_SCOPE_MODES))}"
+            f"Invalid traders_scope.modes: {', '.join(invalid)}. Allowed: {', '.join(sorted(_TRADER_SCOPE_MODES))}"
         )
     if "individual" in modes and not list(scope.get("individual_wallets") or []):
         raise ValueError("traders_scope.individual_wallets is required when mode 'individual' is selected")
@@ -336,8 +334,7 @@ async def _validate_source_strategy_pair(
     if strategy_key not in valid_strategies:
         allowed = ", ".join(sorted(valid_strategies))
         raise ValueError(
-            f"Invalid strategy_key '{strategy_key}' for source_key '{source_key}'. "
-            f"Allowed strategies: {allowed}"
+            f"Invalid strategy_key '{strategy_key}' for source_key '{source_key}'. Allowed strategies: {allowed}"
         )
 
 
@@ -352,9 +349,7 @@ async def _validate_source_configs(
         strategy_key = _normalize_strategy_key(source_config.get("strategy_key"))
         await _validate_source_strategy_pair(session, source_key, strategy_key)
         if source_key == "traders":
-            _validate_traders_scope(
-                _normalize_traders_scope(source_config.get("traders_scope"))
-            )
+            _validate_traders_scope(_normalize_traders_scope(source_config.get("traders_scope")))
 
 
 def _legacy_source_configs_from_fields(
@@ -1517,13 +1512,14 @@ async def sync_trader_position_inventory(
     if mode is not None:
         mode_key = _normalize_mode_key(mode)
         if mode_key == "other":
-            existing_query = existing_query.where(func.lower(func.coalesce(TraderPosition.mode, "")).not_in(["paper", "live"]))
+            existing_query = existing_query.where(
+                func.lower(func.coalesce(TraderPosition.mode, "")).not_in(["paper", "live"])
+            )
         else:
             existing_query = existing_query.where(func.lower(func.coalesce(TraderPosition.mode, "")) == mode_key)
     existing_rows = list((await session.execute(existing_query)).scalars().all())
     existing_by_identity = {
-        _position_identity_key(row.mode, row.market_id, row.direction): row
-        for row in existing_rows
+        _position_identity_key(row.mode, row.market_id, row.direction): row for row in existing_rows
     }
 
     now = _now()
@@ -1876,14 +1872,11 @@ async def get_market_exposure(session: AsyncSession, market_id: str, mode: Optio
 
 
 async def get_gross_exposure(session: AsyncSession, mode: Optional[str] = None) -> float:
-    query = (
-        select(
-            TraderOrder.mode,
-            TraderOrder.status,
-            func.coalesce(func.sum(func.abs(TraderOrder.notional_usd)), 0.0).label("notional_abs"),
-        )
-        .group_by(TraderOrder.mode, TraderOrder.status)
-    )
+    query = select(
+        TraderOrder.mode,
+        TraderOrder.status,
+        func.coalesce(func.sum(func.abs(TraderOrder.notional_usd)), 0.0).label("notional_abs"),
+    ).group_by(TraderOrder.mode, TraderOrder.status)
     if mode is not None:
         mode_key = _normalize_mode_key(mode)
         if mode_key == "other":
@@ -1985,11 +1978,7 @@ async def get_unrealized_pnl(
             continue
 
         payload = order.payload_json or {}
-        token_id = str(
-            payload.get("token_id")
-            or payload.get("selected_token_id")
-            or ""
-        ).strip()
+        token_id = str(payload.get("token_id") or payload.get("selected_token_id") or "").strip()
         if not token_id:
             continue
 

@@ -206,11 +206,14 @@ async def write_weather_snapshot(
             "stats": stats if stats is not None else status.get("stats", {}),
         }
         await event_bus.publish("weather_status", weather_status_data)
-        await event_bus.publish("weather_update", {
-            "count": len(opportunities),
-            "status": weather_status_data,
-            "source": "weather_snapshot_write",
-        })
+        await event_bus.publish(
+            "weather_update",
+            {
+                "count": len(opportunities),
+                "status": weather_status_data,
+                "source": "weather_snapshot_write",
+            },
+        )
     except Exception:
         pass  # fire-and-forget
 
@@ -319,11 +322,7 @@ async def get_weather_opportunities_from_db(
         opportunities = [o for o in opportunities if _opportunity_target_date(o) == target_date]
 
     if not include_report_only:
-        opportunities = [
-            o
-            for o in opportunities
-            if (o.max_position_size or 0.0) > 0.0 and bool(o.positions_to_take)
-        ]
+        opportunities = [o for o in opportunities if (o.max_position_size or 0.0) > 0.0 and bool(o.positions_to_take)]
 
     if opportunities and require_tradable_markets:
         market_ids: set[str] = set()
@@ -588,15 +587,21 @@ async def get_weather_settings(session: AsyncSession) -> dict[str, Any]:
     return {
         "enabled": bool(getattr(db, "weather_workflow_enabled", True) or True),
         "auto_run": bool(getattr(db, "weather_workflow_auto_run", True) or True),
-        "scan_interval_seconds": _i("weather_workflow_scan_interval_seconds", app_settings.WEATHER_WORKFLOW_SCAN_INTERVAL_SECONDS),
+        "scan_interval_seconds": _i(
+            "weather_workflow_scan_interval_seconds", app_settings.WEATHER_WORKFLOW_SCAN_INTERVAL_SECONDS
+        ),
         "entry_max_price": _f("weather_workflow_entry_max_price", app_settings.WEATHER_WORKFLOW_ENTRY_MAX_PRICE),
         "take_profit_price": _f("weather_workflow_take_profit_price", app_settings.WEATHER_WORKFLOW_TAKE_PROFIT_PRICE),
         "stop_loss_pct": _f("weather_workflow_stop_loss_pct", app_settings.WEATHER_WORKFLOW_STOP_LOSS_PCT),
         "min_edge_percent": _f("weather_workflow_min_edge_percent", app_settings.WEATHER_WORKFLOW_MIN_EDGE_PERCENT),
         "min_confidence": _f("weather_workflow_min_confidence", app_settings.WEATHER_WORKFLOW_MIN_CONFIDENCE),
-        "min_model_agreement": _f("weather_workflow_min_model_agreement", app_settings.WEATHER_WORKFLOW_MIN_MODEL_AGREEMENT),
+        "min_model_agreement": _f(
+            "weather_workflow_min_model_agreement", app_settings.WEATHER_WORKFLOW_MIN_MODEL_AGREEMENT
+        ),
         "min_liquidity": _f("weather_workflow_min_liquidity", app_settings.WEATHER_WORKFLOW_MIN_LIQUIDITY),
-        "max_markets_per_scan": _i("weather_workflow_max_markets_per_scan", app_settings.WEATHER_WORKFLOW_MAX_MARKETS_PER_SCAN),
+        "max_markets_per_scan": _i(
+            "weather_workflow_max_markets_per_scan", app_settings.WEATHER_WORKFLOW_MAX_MARKETS_PER_SCAN
+        ),
         "orchestrator_enabled": bool(getattr(db, "weather_workflow_orchestrator_enabled", True) or True),
         "orchestrator_min_edge": _f("weather_workflow_orchestrator_min_edge", 10.0),
         "orchestrator_max_age_minutes": _i("weather_workflow_orchestrator_max_age_minutes", 240),

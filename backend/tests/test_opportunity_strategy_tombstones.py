@@ -45,13 +45,7 @@ async def test_seed_skips_tombstoned_system_slug(tmp_path):
             assert changed == expected
 
             basic_row = (
-                (
-                    await session.execute(
-                        select(StrategyPlugin).where(StrategyPlugin.slug == "basic")
-                    )
-                )
-                .scalars()
-                .first()
+                (await session.execute(select(StrategyPlugin).where(StrategyPlugin.slug == "basic"))).scalars().first()
             )
             assert basic_row is None
     finally:
@@ -67,13 +61,7 @@ async def test_delete_system_strategy_creates_tombstone_and_blocks_reseed(tmp_pa
         async with session_factory() as session:
             await ensure_system_opportunity_strategies_seeded(session)
             basic_row = (
-                (
-                    await session.execute(
-                        select(StrategyPlugin).where(StrategyPlugin.slug == "basic")
-                    )
-                )
-                .scalars()
-                .one()
+                (await session.execute(select(StrategyPlugin).where(StrategyPlugin.slug == "basic"))).scalars().one()
             )
             basic_id = basic_row.id
 
@@ -85,25 +73,13 @@ async def test_delete_system_strategy_creates_tombstone_and_blocks_reseed(tmp_pa
             assert tombstone is not None
 
             deleted_row = (
-                (
-                    await session.execute(
-                        select(StrategyPlugin).where(StrategyPlugin.slug == "basic")
-                    )
-                )
-                .scalars()
-                .first()
+                (await session.execute(select(StrategyPlugin).where(StrategyPlugin.slug == "basic"))).scalars().first()
             )
             assert deleted_row is None
 
             await ensure_system_opportunity_strategies_seeded(session)
             reseeded = (
-                (
-                    await session.execute(
-                        select(StrategyPlugin).where(StrategyPlugin.slug == "basic")
-                    )
-                )
-                .scalars()
-                .first()
+                (await session.execute(select(StrategyPlugin).where(StrategyPlugin.slug == "basic"))).scalars().first()
             )
             assert reseeded is None
     finally:

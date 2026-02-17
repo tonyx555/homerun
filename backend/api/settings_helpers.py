@@ -562,15 +562,9 @@ def world_intelligence_payload(settings: AppSettings) -> dict[str, Any]:
     if "gdelt_news_enabled" not in stored:
         stored = {
             **stored,
-            "gdelt_news_enabled": getattr(
-                settings, "world_intel_gdelt_news_enabled", None
-            ),
-            "gdelt_news_timespan_hours": getattr(
-                settings, "world_intel_gdelt_news_timespan_hours", None
-            ),
-            "gdelt_news_max_records": getattr(
-                settings, "world_intel_gdelt_news_max_records", None
-            ),
+            "gdelt_news_enabled": getattr(settings, "world_intel_gdelt_news_enabled", None),
+            "gdelt_news_timespan_hours": getattr(settings, "world_intel_gdelt_news_timespan_hours", None),
+            "gdelt_news_max_records": getattr(settings, "world_intel_gdelt_news_max_records", None),
         }
 
     payload = {
@@ -583,12 +577,8 @@ def world_intelligence_payload(settings: AppSettings) -> dict[str, Any]:
             "acled_email": getattr(settings, "world_intel_acled_email", None),
             "opensky_username": getattr(settings, "world_intel_opensky_username", None),
             "opensky_password": mask_stored_secret(settings.world_intel_opensky_password),
-            "aisstream_api_key": mask_stored_secret(
-                settings.world_intel_aisstream_api_key
-            ),
-            "cloudflare_radar_token": mask_stored_secret(
-                settings.world_intel_cloudflare_radar_token
-            ),
+            "aisstream_api_key": mask_stored_secret(settings.world_intel_aisstream_api_key),
+            "cloudflare_radar_token": mask_stored_secret(settings.world_intel_cloudflare_radar_token),
         }
     )
     return payload
@@ -750,16 +740,10 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
         settings.discovery_trader_opps_side_filter = (
             str(discovery.trader_opps_side_filter or "all").strip().lower() or "all"
         )
-        settings.discovery_trader_opps_confluence_limit = (
-            discovery.trader_opps_confluence_limit
-        )
+        settings.discovery_trader_opps_confluence_limit = discovery.trader_opps_confluence_limit
         settings.discovery_trader_opps_insider_limit = discovery.trader_opps_insider_limit
-        settings.discovery_trader_opps_insider_min_confidence = (
-            discovery.trader_opps_insider_min_confidence
-        )
-        settings.discovery_trader_opps_insider_max_age_minutes = (
-            discovery.trader_opps_insider_max_age_minutes
-        )
+        settings.discovery_trader_opps_insider_min_confidence = discovery.trader_opps_insider_min_confidence
+        settings.discovery_trader_opps_insider_max_age_minutes = discovery.trader_opps_insider_max_age_minutes
         settings.discovery_pool_recompute_mode = (
             str(discovery.pool_recompute_mode or "quality_only").strip().lower() or "quality_only"
         )
@@ -782,9 +766,7 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
         settings.discovery_pool_slo_min_analyzed_pct = discovery.pool_slo_min_analyzed_pct
         settings.discovery_pool_slo_min_profitable_pct = discovery.pool_slo_min_profitable_pct
         settings.discovery_pool_leaderboard_wallet_trade_sample = discovery.pool_leaderboard_wallet_trade_sample
-        settings.discovery_pool_incremental_wallet_trade_sample = (
-            discovery.pool_incremental_wallet_trade_sample
-        )
+        settings.discovery_pool_incremental_wallet_trade_sample = discovery.pool_incremental_wallet_trade_sample
         settings.discovery_pool_full_sweep_interval_seconds = discovery.pool_full_sweep_interval_seconds
         settings.discovery_pool_incremental_refresh_interval_seconds = (
             discovery.pool_incremental_refresh_interval_seconds
@@ -844,17 +826,11 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
         )
 
         if getattr(world_intelligence, "acled_api_key", None) is not None:
-            set_encrypted_secret(
-                settings, "world_intel_acled_api_key", world_intelligence.acled_api_key
-            )
+            set_encrypted_secret(settings, "world_intel_acled_api_key", world_intelligence.acled_api_key)
         if getattr(world_intelligence, "acled_email", None) is not None:
-            settings.world_intel_acled_email = (
-                str(world_intelligence.acled_email or "").strip() or None
-            )
+            settings.world_intel_acled_email = str(world_intelligence.acled_email or "").strip() or None
         if getattr(world_intelligence, "opensky_username", None) is not None:
-            settings.world_intel_opensky_username = (
-                str(world_intelligence.opensky_username or "").strip() or None
-            )
+            settings.world_intel_opensky_username = str(world_intelligence.opensky_username or "").strip() or None
         if getattr(world_intelligence, "opensky_password", None) is not None:
             set_encrypted_secret(
                 settings,

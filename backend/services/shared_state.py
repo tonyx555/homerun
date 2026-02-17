@@ -134,10 +134,13 @@ async def write_scanner_snapshot(
             "current_activity": status.get("current_activity"),
         }
         await event_bus.publish("scanner_status", scanner_status)
-        await event_bus.publish("opportunities_update", {
-            "count": len(opportunities),
-            "source": "scanner_snapshot_write",
-        })
+        await event_bus.publish(
+            "opportunities_update",
+            {
+                "count": len(opportunities),
+                "source": "scanner_snapshot_write",
+            },
+        )
     except Exception:
         pass  # fire-and-forget
 

@@ -81,9 +81,7 @@ class SimulationService:
             async with AsyncSessionLocal() as session:
                 try:
                     if is_sqlite:
-                        await session.execute(
-                            text(f"PRAGMA busy_timeout={self.SQLITE_LOCK_BUSY_TIMEOUT_MS}")
-                        )
+                        await session.execute(text(f"PRAGMA busy_timeout={self.SQLITE_LOCK_BUSY_TIMEOUT_MS}"))
 
                     account = SimulationAccount(
                         id=str(uuid.uuid4()),

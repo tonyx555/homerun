@@ -130,12 +130,15 @@ async def write_news_snapshot(
         }
         await event_bus.publish("news_workflow_status", news_status_data)
         resolved_stats = stats if stats is not None else (status.get("stats") or {})
-        await event_bus.publish("news_workflow_update", {
-            "status": news_status_data,
-            "findings": int(resolved_stats.get("findings", 0) or 0),
-            "intents": int(resolved_stats.get("intents", 0) or 0),
-            "pending_intents": 0,
-        })
+        await event_bus.publish(
+            "news_workflow_update",
+            {
+                "status": news_status_data,
+                "findings": int(resolved_stats.get("findings", 0) or 0),
+                "intents": int(resolved_stats.get("intents", 0) or 0),
+                "pending_intents": 0,
+            },
+        )
     except Exception:
         pass  # fire-and-forget
 

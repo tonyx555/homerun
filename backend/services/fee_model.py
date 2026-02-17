@@ -124,11 +124,7 @@ class FeeModel:
         if effective_maker_mode:
             spread_cost = ZERO
         else:
-            effective_spread_bps = (
-                _to_decimal(spread_bps)
-                if spread_bps is not None
-                else self.default_spread_bps
-            )
+            effective_spread_bps = _to_decimal(spread_bps) if spread_bps is not None else self.default_spread_bps
             spread_cost = total_cost_dec * (effective_spread_bps / BPS_DENOMINATOR)
 
         # 4. Multi-leg slippage: depth-aware model
@@ -159,11 +155,7 @@ class FeeModel:
         total_fees = winner_fee + gas_cost_usd + spread_cost + multi_leg_slippage
 
         # Express total fees as percentage of expected payout
-        fee_as_pct = (
-            (total_fees / expected_payout_dec * ONE_HUNDRED)
-            if expected_payout_dec > ZERO
-            else ZERO
-        )
+        fee_as_pct = (total_fees / expected_payout_dec * ONE_HUNDRED) if expected_payout_dec > ZERO else ZERO
 
         return FeeBreakdown(
             winner_fee=float(winner_fee),
