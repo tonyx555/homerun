@@ -47,22 +47,22 @@ The scanner runs continuously, pushes results to a real-time dashboard, and supp
 ```bash
 git clone https://github.com/braedonsaunders/homerun.git
 cd homerun
-./run.sh
+./scripts/run.sh
 ```
 
 Open **http://localhost:3000**. The scanner starts immediately with a virtual $10k paper account.
 
 No `.env` file. No database setup. No API keys. SQLite is created automatically on first run.
 
-> **Windows?** Run `.\run.ps1` in PowerShell, or double-click `Homerun.bat`.
+> **Windows?** Run `.\scripts\run.ps1` in PowerShell, or double-click `scripts\Homerun.bat`.
 
 <details>
 <summary><strong>One-click launchers</strong></summary>
 <br/>
 
-- **macOS:** `Homerun.command`
-- **Windows:** `Homerun.bat`
-- **Linux:** `Homerun.desktop` (run `chmod +x run.sh Homerun.desktop` first)
+- **macOS:** `scripts/Homerun.command`
+- **Windows:** `scripts/Homerun.bat`
+- **Linux:** `scripts/Homerun.desktop` (run `chmod +x scripts/run.sh scripts/Homerun.desktop` first)
 
 </details>
 
@@ -422,20 +422,20 @@ tui.py                           # Terminal UI (Textual + Rich)
 
 ## Contributing
 
-PRs welcome. See [**CONTRIBUTING.md**](CONTRIBUTING.md) for the full guide.
+PRs welcome. See [**CONTRIBUTING.md**](../docs/CONTRIBUTING.md) for the full guide.
 
 ```bash
 git clone https://github.com/braedonsaunders/homerun.git
 cd homerun
-./setup.sh
-./run.sh
+./scripts/setup.sh
+./scripts/run.sh
 ```
 
 <br/>
 
 ## Security
 
-Found a vulnerability? **Do not open a public issue.** See [**SECURITY.md**](SECURITY.md) for responsible disclosure.
+Found a vulnerability? **Do not open a public issue.** See [**SECURITY.md**](../docs/SECURITY.md) for responsible disclosure.
 
 <br/>
 

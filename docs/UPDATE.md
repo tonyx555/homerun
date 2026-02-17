@@ -13,10 +13,10 @@ This guide covers how to update Homerun to the latest version.
 git pull origin main
 
 # 3. Re-run setup to install any new dependencies
-./setup.sh
+./scripts/setup.sh
 
 # 4. Launch the app
-./run.sh
+./scripts/run.sh
 ```
 
 The database now runs versioned Alembic migrations on startup (`upgrade head`), including schema/data backfills needed for legacy databases.
@@ -39,7 +39,7 @@ Pull the latest version which includes Alembic migrations:
 
 ```bash
 git pull origin main
-./run.sh
+./scripts/run.sh
 ```
 
 The app now upgrades the database to the latest migration revision on startup.
@@ -50,7 +50,7 @@ If you want a clean start:
 
 ```bash
 rm -f data/arbitrage.db
-./run.sh
+./scripts/run.sh
 ```
 
 This deletes the old database. A fresh one will be created on startup.
@@ -66,10 +66,10 @@ This deletes the old database. A fresh one will be created on startup.
 git pull origin main
 
 # 3. Re-run setup
-.\setup.ps1
+.\scripts\setup.ps1
 
 # 4. Launch the app
-.\run.ps1
+.\scripts\run.ps1
 ```
 
 Or manually:

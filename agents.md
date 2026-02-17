@@ -72,8 +72,12 @@ homerun/
 ├── alembic/                    # Database migrations
 │   └── versions/               # Timestamped migration files
 ├── data/                       # SQLite database (auto-created)
+├── scripts/                    # Run/setup scripts and OS launchers
+│   ├── run.sh / run.ps1        # Application launchers
+│   ├── setup.sh / setup.ps1    # Environment setup
+│   └── Homerun.*               # OS-specific click-to-run launchers
 ├── tui.py                      # Terminal UI (Textual + Rich)
-└── docs/                       # Strategy research documentation
+└── docs/                       # Documentation and strategy research
 ```
 
 ---

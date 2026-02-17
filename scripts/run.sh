@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# Navigate to project root (parent of scripts/)
+cd "$(dirname "$0")/.."
+
 # Colors
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
@@ -60,7 +63,7 @@ PY
 
 if needs_setup; then
     echo -e "${YELLOW}Setup missing or stale. Running setup...${NC}"
-    ./setup.sh
+    ./scripts/setup.sh
 fi
 
 # Ensure TUI dependencies are installed

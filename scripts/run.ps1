@@ -1,7 +1,10 @@
 # Homerun - Windows Run Script (TUI)
-# Run: .\run.ps1
+# Run: .\scripts\run.ps1
 
 $ErrorActionPreference = "Stop"
+
+# Navigate to project root (parent of scripts\)
+Set-Location (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))
 
 function Test-NeedsSetup {
     if (-not (Test-Path "backend\venv")) { return $true }
@@ -32,7 +35,7 @@ function Test-NeedsSetup {
 
 if (Test-NeedsSetup) {
     Write-Host "Setup missing or stale. Running setup..." -ForegroundColor Yellow
-    & .\setup.ps1
+    & .\scripts\setup.ps1
 }
 
 # Activate venv
