@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.database import Strategy, StrategyPluginTombstone
+from models.database import Strategy, StrategyTombstone
 
 
 _RELATIVE_IMPORT_RE = re.compile(r"(?m)^(\s*)from\s+\.([A-Za-z_][A-Za-z0-9_]*)\s+import\s+")
@@ -758,8 +758,8 @@ async def ensure_system_opportunity_strategies_seeded(session: AsyncSession) -> 
         tombstoned_slugs = set(
             (
                 await session.execute(
-                    select(StrategyPluginTombstone.slug).where(
-                        StrategyPluginTombstone.slug.in_(list(seed_by_slug.keys()))
+                    select(StrategyTombstone.slug).where(
+                        StrategyTombstone.slug.in_(list(seed_by_slug.keys()))
                     )
                 )
             )

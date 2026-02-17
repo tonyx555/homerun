@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models.database import (
     AsyncSessionLocal,
     Strategy,
-    StrategyPluginTombstone,
+    StrategyTombstone,
     get_db_session,
 )
 from services.opportunity_strategy_catalog import (
@@ -520,10 +520,10 @@ async def delete_strategy(strategy_id: str):
             raise HTTPException(status_code=404, detail="Strategy not found")
 
         if bool(row.is_system):
-            tombstone = await session.get(StrategyPluginTombstone, row.slug)
+            tombstone = await session.get(StrategyTombstone, row.slug)
             if tombstone is None:
                 session.add(
-                    StrategyPluginTombstone(
+                    StrategyTombstone(
                         slug=row.slug,
                         deleted_at=datetime.utcnow(),
                         reason="user_deleted_system_strategy",

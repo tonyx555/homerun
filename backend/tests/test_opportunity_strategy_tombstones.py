@@ -11,7 +11,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from api import routes_plugins
-from models.database import Base, StrategyPlugin, StrategyPluginTombstone
+from models.database import Base, Strategy, StrategyTombstone
 from services.opportunity_strategy_catalog import (
     SYSTEM_OPPORTUNITY_STRATEGY_SEEDS,
     ensure_system_opportunity_strategies_seeded,
@@ -33,7 +33,7 @@ async def test_seed_skips_tombstoned_system_slug(tmp_path):
     try:
         async with session_factory() as session:
             session.add(
-                StrategyPluginTombstone(
+                StrategyTombstone(
                     slug="basic",
                     reason="test_tombstone",
                 )
@@ -45,7 +45,13 @@ async def test_seed_skips_tombstoned_system_slug(tmp_path):
             assert changed == expected
 
             basic_row = (
-                (await session.execute(select(StrategyPlugin).where(StrategyPlugin.slug == "basic"))).scalars().first()
+                (
+                    await session.execute(
+                        select(Strategy).where(Strategy.slug == "basic")
+                    )
+                )
+                .scalars()
+                .first()
             )
             assert basic_row is None
     finally:
@@ -61,7 +67,13 @@ async def test_delete_system_strategy_creates_tombstone_and_blocks_reseed(tmp_pa
         async with session_factory() as session:
             await ensure_system_opportunity_strategies_seeded(session)
             basic_row = (
-                (await session.execute(select(StrategyPlugin).where(StrategyPlugin.slug == "basic"))).scalars().one()
+                (
+                    await session.execute(
+                        select(Strategy).where(Strategy.slug == "basic")
+                    )
+                )
+                .scalars()
+                .one()
             )
             basic_id = basic_row.id
 
@@ -69,17 +81,29 @@ async def test_delete_system_strategy_creates_tombstone_and_blocks_reseed(tmp_pa
         assert result["status"] == "success"
 
         async with session_factory() as session:
-            tombstone = await session.get(StrategyPluginTombstone, "basic")
+            tombstone = await session.get(StrategyTombstone, "basic")
             assert tombstone is not None
 
             deleted_row = (
-                (await session.execute(select(StrategyPlugin).where(StrategyPlugin.slug == "basic"))).scalars().first()
+                (
+                    await session.execute(
+                        select(Strategy).where(Strategy.slug == "basic")
+                    )
+                )
+                .scalars()
+                .first()
             )
             assert deleted_row is None
 
             await ensure_system_opportunity_strategies_seeded(session)
             reseeded = (
-                (await session.execute(select(StrategyPlugin).where(StrategyPlugin.slug == "basic"))).scalars().first()
+                (
+                    await session.execute(
+                        select(Strategy).where(Strategy.slug == "basic")
+                    )
+                )
+                .scalars()
+                .first()
             )
             assert reseeded is None
     finally:

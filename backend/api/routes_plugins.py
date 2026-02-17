@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 from sqlalchemy import select
-from models.database import AsyncSessionLocal, Strategy, StrategyPluginTombstone
+from models.database import AsyncSessionLocal, Strategy, StrategyTombstone
 from services.opportunity_strategy_catalog import ensure_system_opportunity_strategies_seeded
 from services.plugin_loader import (
     plugin_loader,
@@ -899,10 +899,10 @@ async def delete_plugin(plugin_id: str):
             raise HTTPException(status_code=404, detail="Plugin not found")
 
         if bool(plugin.is_system):
-            tombstone = await session.get(StrategyPluginTombstone, plugin.slug)
+            tombstone = await session.get(StrategyTombstone, plugin.slug)
             if tombstone is None:
                 session.add(
-                    StrategyPluginTombstone(
+                    StrategyTombstone(
                         slug=plugin.slug,
                         deleted_at=datetime.utcnow(),
                         reason="user_deleted_system_strategy",
