@@ -20,12 +20,18 @@ import {
   TrendingUp,
   DollarSign,
   X,
+  Sparkles,
+  Brain,
+  Cpu,
+  Bot,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
-import { Card } from './ui/card'
+import { Card, CardContent, CardHeader, CardTitle } from './ui/card'
 import { Button } from './ui/button'
 import { Badge } from './ui/badge'
 import { Input } from './ui/input'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs'
+import { ScrollArea } from './ui/scroll-area'
 import {
   getAIStatus,
   analyzeResolution,
@@ -44,12 +50,20 @@ import {
 
 type AITab = 'analyze' | 'judgments' | 'system'
 type AnalysisTool = 'resolution' | 'market' | 'news'
+type MetricTone = 'good' | 'bad' | 'warn' | 'neutral' | 'info'
+
+const TONE_CLASSES: Record<MetricTone, string> = {
+  good: 'border-emerald-300 bg-emerald-100 text-emerald-900 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-200',
+  bad: 'border-red-300 bg-red-100 text-red-900 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-200',
+  warn: 'border-amber-300 bg-amber-100 text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200',
+  neutral: 'border-border/70 bg-background/35 text-foreground',
+  info: 'border-purple-300 bg-purple-100 text-purple-900 dark:border-purple-500/30 dark:bg-purple-500/10 dark:text-purple-200',
+}
 
 export default function AIPanel() {
   const [activeTab, setActiveTab] = useState<AITab>('analyze')
   const [analysisTool, setAnalysisTool] = useState<AnalysisTool>('resolution')
 
-  // Listen for navigation events from command bar (maps old section names to new tabs)
   useEffect(() => {
     const handler = (e: Event) => {
       const section = (e as CustomEvent).detail as string
@@ -66,50 +80,69 @@ export default function AIPanel() {
     return () => window.removeEventListener('navigate-ai-section', handler)
   }, [])
 
-  const tabs = [
-    { id: 'analyze' as const, label: 'Analyze', icon: Search },
-    { id: 'judgments' as const, label: 'Judgments', icon: Target },
-    { id: 'system' as const, label: 'System', icon: Activity },
-  ]
-
   return (
     <div className="space-y-5">
-      <StatusHeader />
+      <HeroHeader />
 
-      {/* Tab Navigation */}
-      <div className="flex items-center gap-1 p-1 bg-muted/50 rounded-xl border border-border w-fit">
-        {tabs.map(({ id, label, icon: Icon }) => (
-          <button
-            key={id}
-            onClick={() => setActiveTab(id)}
-            className={cn(
-              'flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all',
-              activeTab === id
-                ? 'bg-background text-foreground shadow-sm border border-border'
-                : 'text-muted-foreground hover:text-foreground'
-            )}
+      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as AITab)} className="space-y-4">
+        <TabsList className="h-auto w-full justify-start gap-2 rounded-xl border border-border/60 bg-card/70 p-1.5">
+          <TabsTrigger
+            value="analyze"
+            className="h-auto min-w-[200px] items-start justify-start rounded-lg px-3 py-2 data-[state=active]:border data-[state=active]:border-purple-300 data-[state=active]:bg-purple-100 data-[state=active]:text-purple-900 dark:data-[state=active]:border-purple-500/40 dark:data-[state=active]:bg-purple-500/10 dark:data-[state=active]:text-purple-100"
           >
-            <Icon className="w-4 h-4" />
-            {label}
-          </button>
-        ))}
-      </div>
+            <div className="flex items-start gap-2 text-left">
+              <Brain className="mt-0.5 h-4 w-4 text-purple-700 dark:text-purple-300" />
+              <div>
+                <p className="text-sm font-medium">Analyze</p>
+                <p className="text-[11px] text-muted-foreground">Resolution, market, and news sentiment</p>
+              </div>
+            </div>
+          </TabsTrigger>
+          <TabsTrigger
+            value="judgments"
+            className="h-auto min-w-[200px] items-start justify-start rounded-lg px-3 py-2 data-[state=active]:border data-[state=active]:border-cyan-300 data-[state=active]:bg-cyan-100 data-[state=active]:text-cyan-900 dark:data-[state=active]:border-cyan-500/40 dark:data-[state=active]:bg-cyan-500/10 dark:data-[state=active]:text-cyan-100"
+          >
+            <div className="flex items-start gap-2 text-left">
+              <Target className="mt-0.5 h-4 w-4 text-cyan-700 dark:text-cyan-300" />
+              <div>
+                <p className="text-sm font-medium">Judgments</p>
+                <p className="text-[11px] text-muted-foreground">ML vs LLM agreement and history</p>
+              </div>
+            </div>
+          </TabsTrigger>
+          <TabsTrigger
+            value="system"
+            className="h-auto min-w-[200px] items-start justify-start rounded-lg px-3 py-2 data-[state=active]:border data-[state=active]:border-emerald-300 data-[state=active]:bg-emerald-100 data-[state=active]:text-emerald-900 dark:data-[state=active]:border-emerald-500/40 dark:data-[state=active]:bg-emerald-500/10 dark:data-[state=active]:text-emerald-100"
+          >
+            <div className="flex items-start gap-2 text-left">
+              <Cpu className="mt-0.5 h-4 w-4 text-emerald-700 dark:text-emerald-300" />
+              <div>
+                <p className="text-sm font-medium">System</p>
+                <p className="text-[11px] text-muted-foreground">Usage, sessions, and skills</p>
+              </div>
+            </div>
+          </TabsTrigger>
+        </TabsList>
 
-      {/* Tab Content */}
-      {activeTab === 'analyze' && (
-        <AnalyzeSection tool={analysisTool} onToolChange={setAnalysisTool} />
-      )}
-      {activeTab === 'judgments' && <JudgmentsSection />}
-      {activeTab === 'system' && <SystemSection />}
+        <TabsContent value="analyze" className="mt-0 space-y-4">
+          <AnalyzeSection tool={analysisTool} onToolChange={setAnalysisTool} />
+        </TabsContent>
+        <TabsContent value="judgments" className="mt-0 space-y-4">
+          <JudgmentsSection />
+        </TabsContent>
+        <TabsContent value="system" className="mt-0 space-y-4">
+          <SystemSection />
+        </TabsContent>
+      </Tabs>
     </div>
   )
 }
 
 // ============================================================
-// Status Header (always visible, compact)
+// Hero Header
 // ============================================================
 
-function StatusHeader() {
+function HeroHeader() {
   const { data: status, isLoading, error } = useQuery({
     queryKey: ['ai-status'],
     queryFn: async () => {
@@ -121,23 +154,31 @@ function StatusHeader() {
 
   if (isLoading) {
     return (
-      <div className="flex items-center gap-3 px-4 py-3 bg-muted/50 rounded-xl border border-border">
-        <RefreshCw className="w-3.5 h-3.5 animate-spin text-muted-foreground" />
-        <span className="text-sm text-muted-foreground">Connecting to AI...</span>
-      </div>
+      <Card className="overflow-hidden border-border/80 bg-card/80">
+        <CardContent className="p-5">
+          <div className="flex items-center gap-3">
+            <RefreshCw className="w-4 h-4 animate-spin text-purple-400" />
+            <span className="text-sm text-muted-foreground">Connecting to AI module...</span>
+          </div>
+        </CardContent>
+      </Card>
     )
   }
 
   if (error || !status?.enabled) {
     return (
-      <div className="flex items-center gap-3 px-4 py-3 bg-yellow-500/5 rounded-xl border border-yellow-500/20">
-        <div className="w-2 h-2 rounded-full bg-yellow-500 flex-shrink-0" />
-        <span className="text-sm text-yellow-400">
-          {error
-            ? 'Unable to connect to AI module. Check that the backend is running.'
-            : 'Configure an LLM provider (OpenAI or Anthropic) in Settings to enable AI features.'}
-        </span>
-      </div>
+      <Card className="overflow-hidden border-amber-500/20 bg-amber-500/5">
+        <CardContent className="p-5">
+          <div className="flex items-center gap-3">
+            <div className="w-2 h-2 rounded-full bg-amber-500 flex-shrink-0" />
+            <span className="text-sm text-amber-400">
+              {error
+                ? 'Unable to connect to AI module. Check that the backend is running.'
+                : 'Configure an LLM provider (OpenAI or Anthropic) in Settings to enable AI features.'}
+            </span>
+          </div>
+        </CardContent>
+      </Card>
     )
   }
 
@@ -146,50 +187,68 @@ function StatusHeader() {
   const spendPct = spendLimit ? (cost / spendLimit) * 100 : null
 
   return (
-    <div className="flex items-center justify-between gap-4 px-4 py-3 bg-muted/50 rounded-xl border border-border">
-      <div className="flex items-center gap-3 min-w-0">
-        <div className="flex items-center gap-2 flex-shrink-0">
-          <div className="w-2 h-2 rounded-full bg-green-500" />
-          <span className="text-sm font-medium">AI Active</span>
-        </div>
-        <div className="h-4 w-px bg-border flex-shrink-0" />
-        <span className="text-xs text-muted-foreground truncate">
-          {status.providers_configured?.join(', ') || 'No providers'}
-        </span>
-        <div className="h-4 w-px bg-border flex-shrink-0" />
-        <span className="text-xs text-muted-foreground flex-shrink-0">
-          {status.skills_available ?? 0} skills
-        </span>
-      </div>
-      <div className="flex items-center gap-4 flex-shrink-0">
-        <div className="hidden sm:flex items-center gap-3 text-xs text-muted-foreground">
-          <span>{status.usage?.total_requests ?? 0} req</span>
-          <span>{formatNumber(status.usage?.total_tokens ?? 0)} tok</span>
-          <span className="font-medium text-foreground">${cost.toFixed(2)}</span>
-        </div>
-        {spendPct != null && (
-          <div className="flex items-center gap-2">
-            <div className="w-16 bg-muted rounded-full h-1.5 border border-border">
-              <div
-                className={cn(
-                  'h-full rounded-full transition-all',
-                  spendPct >= 90 ? 'bg-red-500' : spendPct >= 70 ? 'bg-yellow-500' : 'bg-green-500'
-                )}
-                style={{ width: `${Math.min(100, spendPct)}%` }}
-              />
+    <Card className="overflow-hidden border-border/80 bg-card/80">
+      <CardContent className="p-5">
+        <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+          <div>
+            <div className="inline-flex items-center gap-1.5 rounded-full border border-purple-300 bg-purple-100 px-2.5 py-1 text-[10px] uppercase tracking-wider text-purple-800 dark:border-purple-500/25 dark:bg-purple-500/10 dark:text-purple-200">
+              <Sparkles className="h-3 w-3" />
+              AI Command Center
             </div>
-            <span className="text-[10px] text-muted-foreground whitespace-nowrap">
-              / ${spendLimit!.toFixed(0)}
-            </span>
+            <h2 className="mt-2 flex items-center gap-2 text-xl font-semibold">
+              <Brain className="h-5 w-5 text-purple-700 dark:text-purple-300" />
+              AI Intelligence
+            </h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Resolution analysis, market intelligence, judgment quality, and system diagnostics.
+            </p>
           </div>
-        )}
-      </div>
-    </div>
+
+          <div className="flex flex-wrap items-center gap-2 text-[11px]">
+            <Badge variant="outline" className="gap-1.5 border-emerald-300 bg-emerald-100 text-emerald-800 dark:border-emerald-500/25 dark:bg-emerald-500/10 dark:text-emerald-200">
+              <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+              Active
+            </Badge>
+            <Badge variant="outline" className="border-purple-300 bg-purple-100 text-purple-800 dark:border-purple-500/25 dark:bg-purple-500/10 dark:text-purple-200">
+              {status.providers_configured?.join(', ') || 'No providers'}
+            </Badge>
+            <Badge variant="outline" className="border-border bg-background/60 text-muted-foreground">
+              {status.skills_available ?? 0} skills
+            </Badge>
+            <Badge variant="outline" className="border-border bg-background/60 text-muted-foreground font-data">
+              {status.usage?.total_requests ?? 0} req
+            </Badge>
+            <Badge variant="outline" className="border-border bg-background/60 text-muted-foreground font-data">
+              {formatNumber(status.usage?.total_tokens ?? 0)} tok
+            </Badge>
+            <Badge variant="outline" className="border-amber-300 bg-amber-100 text-amber-800 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-200 font-data">
+              ${cost.toFixed(2)}
+            </Badge>
+            {spendPct != null && (
+              <div className="flex items-center gap-2">
+                <div className="w-20 bg-muted rounded-full h-1.5 border border-border">
+                  <div
+                    className={cn(
+                      'h-full rounded-full transition-all',
+                      spendPct >= 90 ? 'bg-red-500' : spendPct >= 70 ? 'bg-amber-500' : 'bg-emerald-500'
+                    )}
+                    style={{ width: `${Math.min(100, spendPct)}%` }}
+                  />
+                </div>
+                <span className="text-[10px] text-muted-foreground whitespace-nowrap font-data">
+                  / ${spendLimit!.toFixed(0)}
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
   )
 }
 
 // ============================================================
-// Analyze Section (Resolution + Market + News unified)
+// Analyze Section
 // ============================================================
 
 function AnalyzeSection({
@@ -199,7 +258,6 @@ function AnalyzeSection({
   tool: AnalysisTool
   onToolChange: (t: AnalysisTool) => void
 }) {
-  // --- Resolution state ---
   const [marketId, setMarketId] = useState('')
   const [question, setQuestion] = useState('')
   const [description, setDescription] = useState('')
@@ -213,19 +271,16 @@ function AnalyzeSection({
   const searchRef = useRef<HTMLDivElement>(null)
   const debounceRef = useRef<ReturnType<typeof setTimeout>>()
 
-  // --- Market analysis state ---
   const [marketQuery, setMarketQuery] = useState('')
   const [marketAnalysisId, setMarketAnalysisId] = useState('')
   const [marketAnalysisQuestion, setMarketAnalysisQuestion] = useState('')
   const [showMarketAdvanced, setShowMarketAdvanced] = useState(false)
 
-  // --- News state ---
   const [newsQuery, setNewsQuery] = useState('')
   const [newsContext, setNewsContext] = useState('')
   const [maxArticles, setMaxArticles] = useState(5)
   const [showNewsAdvanced, setShowNewsAdvanced] = useState(false)
 
-  // Market-selected event from command bar
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail as MarketSearchResult
@@ -241,7 +296,6 @@ function AnalyzeSection({
     return () => window.removeEventListener('market-selected', handler)
   }, [onToolChange])
 
-  // Click outside to close search dropdown
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
       if (searchRef.current && !searchRef.current.contains(e.target as Node)) {
@@ -252,7 +306,6 @@ function AnalyzeSection({
     return () => document.removeEventListener('mousedown', handleClick)
   }, [])
 
-  // Debounced market search
   const doSearch = useCallback(async (query: string) => {
     if (query.length < 2) {
       setSearchResults([])
@@ -291,7 +344,6 @@ function AnalyzeSection({
     setMarketSearch('')
   }
 
-  // --- Mutations ---
   const resolutionMutation = useMutation({
     mutationFn: async () => {
       const { data } = await analyzeResolution({
@@ -328,52 +380,65 @@ function AnalyzeSection({
     },
   })
 
-  // Tool definitions
   const tools = [
-    { id: 'resolution' as const, label: 'Resolution', icon: Shield, desc: 'Analyze resolution criteria' },
-    { id: 'market' as const, label: 'Market', icon: TrendingUp, desc: 'Deep-dive market analysis' },
-    { id: 'news' as const, label: 'News', icon: Newspaper, desc: 'News sentiment analysis' },
+    { id: 'resolution' as const, label: 'Resolution Analysis', icon: Shield, desc: 'Evaluate resolution criteria, ambiguities, and edge cases', color: 'purple' },
+    { id: 'market' as const, label: 'Market Intelligence', icon: TrendingUp, desc: 'Deep-dive analysis with economic indicators and context', color: 'blue' },
+    { id: 'news' as const, label: 'News Sentiment', icon: Newspaper, desc: 'Aggregate and analyze news sentiment for market impact', color: 'orange' },
   ]
 
-  const toolColors: Record<AnalysisTool, { bg: string; text: string; border: string; ring: string }> = {
-    resolution: { bg: 'bg-purple-500/10', text: 'text-purple-400', border: 'border-purple-500/30', ring: 'focus-visible:ring-purple-500' },
-    market: { bg: 'bg-blue-500/10', text: 'text-blue-400', border: 'border-blue-500/30', ring: 'focus-visible:ring-blue-500' },
-    news: { bg: 'bg-orange-500/10', text: 'text-orange-400', border: 'border-orange-500/30', ring: 'focus-visible:ring-orange-500' },
+  const toolAccent: Record<AnalysisTool, { bg: string; border: string; text: string; bar: string; ring: string }> = {
+    resolution: { bg: 'bg-purple-500/10', border: 'border-purple-500/30', text: 'text-purple-400', bar: 'bg-purple-400', ring: 'focus-visible:ring-purple-500' },
+    market: { bg: 'bg-blue-500/10', border: 'border-blue-500/30', text: 'text-blue-400', bar: 'bg-blue-400', ring: 'focus-visible:ring-blue-500' },
+    news: { bg: 'bg-orange-500/10', border: 'border-orange-500/30', text: 'text-orange-400', bar: 'bg-orange-400', ring: 'focus-visible:ring-orange-500' },
   }
 
   return (
     <div className="space-y-4">
       {/* Tool Picker */}
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 card-stagger">
         {tools.map((t) => {
           const active = tool === t.id
-          const c = toolColors[t.id]
+          const accent = toolAccent[t.id]
           return (
-            <button
+            <Card
               key={t.id}
-              onClick={() => onToolChange(t.id)}
               className={cn(
-                'flex items-center gap-3 p-3 rounded-xl border transition-all text-left',
-                active
-                  ? `${c.bg} ${c.border}`
-                  : 'bg-muted/50 border-border hover:bg-muted hover:border-border'
+                'overflow-hidden cursor-pointer transition-all hover:shadow-lg hover:shadow-black/10',
+                active ? `${accent.border}` : 'border-border/60 hover:border-border'
               )}
+              onClick={() => onToolChange(t.id)}
             >
-              <t.icon className={cn('w-5 h-5 flex-shrink-0', active ? c.text : 'text-muted-foreground')} />
-              <div className="min-w-0">
-                <p className={cn('text-sm font-medium', active ? 'text-foreground' : 'text-muted-foreground')}>{t.label}</p>
-                <p className="text-[11px] text-muted-foreground truncate">{t.desc}</p>
-              </div>
-            </button>
+              <div className={cn('h-0.5', active ? accent.bar : 'bg-transparent')} />
+              <CardContent className="p-4">
+                <div className="flex items-start gap-3">
+                  <div className={cn(
+                    'flex items-center justify-center w-9 h-9 rounded-lg shrink-0',
+                    active ? accent.bg : 'bg-muted/60'
+                  )}>
+                    <t.icon className={cn('w-4.5 h-4.5', active ? accent.text : 'text-muted-foreground')} />
+                  </div>
+                  <div className="min-w-0">
+                    <p className={cn('text-sm font-medium', active ? 'text-foreground' : 'text-muted-foreground')}>{t.label}</p>
+                    <p className="text-[11px] text-muted-foreground mt-0.5 line-clamp-2">{t.desc}</p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
           )
         })}
       </div>
 
-      {/* ---- Resolution Tool ---- */}
+      {/* Resolution Tool */}
       {tool === 'resolution' && (
-        <Card className="p-5">
-          <div className="space-y-3">
-            {/* Market Search */}
+        <Card className="overflow-hidden border-border/60 bg-card/80">
+          <div className="h-0.5 bg-purple-400" />
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base font-semibold">
+              <Shield className="h-4 w-4 text-purple-400" />
+              Resolution Analysis
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
             <div ref={searchRef} className="relative">
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
@@ -386,34 +451,34 @@ function AnalyzeSection({
                   }}
                   onFocus={() => searchResults.length > 0 && setShowSearchResults(true)}
                   placeholder="Search markets... (e.g., Bitcoin, Fed rate, Trump)"
-                  className="pl-10 bg-muted rounded-xl focus-visible:ring-purple-500"
+                  className="pl-10 bg-muted/60 rounded-lg border-border focus-visible:ring-purple-500"
                 />
               </div>
               {showSearchResults && searchResults.length > 0 && (
-                <div className="absolute z-10 w-full mt-1 bg-background border border-border rounded-xl shadow-2xl max-h-64 overflow-y-auto">
+                <div className="absolute z-10 w-full mt-1 bg-background border border-border rounded-xl shadow-2xl shadow-black/20 max-h-64 overflow-y-auto">
                   {searchResults.map((m) => (
                     <button
                       key={m.market_id}
                       onClick={() => selectMarket(m)}
-                      className="w-full text-left px-3 py-2.5 hover:bg-muted transition-colors border-b border-border last:border-0"
+                      className="w-full text-left px-3 py-2.5 hover:bg-muted/60 transition-colors border-b border-border/50 last:border-0"
                     >
                       <p className="text-sm text-foreground truncate">{m.question}</p>
-                      <p className="text-xs text-muted-foreground mt-0.5">
-                        {m.event_title && <span>{m.event_title} | </span>}
-                        {m.category && <span className="capitalize">{m.category} | </span>}
-                        YES: ${m.yes_price?.toFixed(2)} | Liq: ${m.liquidity?.toFixed(0)}
-                      </p>
+                      <div className="flex items-center gap-2 mt-0.5 text-[10px] text-muted-foreground font-data">
+                        {m.event_title && <span className="truncate max-w-[200px]">{m.event_title}</span>}
+                        {m.category && <Badge variant="outline" className="text-[9px] h-4 px-1.5 capitalize">{m.category}</Badge>}
+                        <span>YES: ${m.yes_price?.toFixed(2)}</span>
+                        <span>Liq: ${m.liquidity?.toFixed(0)}</span>
+                      </div>
                     </button>
                   ))}
                 </div>
               )}
             </div>
 
-            {/* Selected market indicator */}
             {marketId && (
-              <div className="bg-purple-500/5 border border-purple-500/20 rounded-lg px-3 py-2 flex items-center gap-2">
+              <div className="bg-purple-500/5 border border-purple-500/20 rounded-lg px-3 py-2.5 flex items-center gap-2">
                 <CheckCircle className="w-4 h-4 text-purple-400 flex-shrink-0" />
-                <span className="text-xs text-purple-400 truncate flex-1">
+                <span className="text-xs text-purple-300 truncate flex-1 font-medium">
                   {question || marketId.slice(0, 30)}
                 </span>
                 <button
@@ -426,17 +491,16 @@ function AnalyzeSection({
             )}
 
             <div>
-              <label className="block text-xs text-muted-foreground mb-1">Question *</label>
+              <label className="block text-[10px] uppercase tracking-wide text-muted-foreground mb-1.5">Question *</label>
               <Input
                 type="text"
                 value={question}
                 onChange={(e) => setQuestion(e.target.value)}
                 placeholder="Auto-filled from search, or type manually"
-                className="bg-muted rounded-lg focus-visible:ring-purple-500"
+                className="bg-muted/60 rounded-lg focus-visible:ring-purple-500"
               />
             </div>
 
-            {/* Advanced fields */}
             <button
               onClick={() => setShowResolutionAdvanced(!showResolutionAdvanced)}
               className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
@@ -446,57 +510,39 @@ function AnalyzeSection({
             </button>
 
             {showResolutionAdvanced && (
-              <div className="space-y-3 pl-3 border-l-2 border-border">
+              <div className="space-y-3 pl-3 border-l-2 border-purple-500/20">
                 <div>
-                  <label className="block text-xs text-muted-foreground mb-1">Market ID</label>
+                  <label className="block text-[10px] uppercase tracking-wide text-muted-foreground mb-1.5">Market ID</label>
                   <Input
                     type="text"
                     value={marketId}
                     onChange={(e) => setMarketId(e.target.value)}
                     placeholder="Auto-filled from search"
-                    className="bg-muted rounded-lg focus-visible:ring-purple-500"
+                    className="bg-muted/60 rounded-lg focus-visible:ring-purple-500"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs text-muted-foreground mb-1">Description</label>
+                  <label className="block text-[10px] uppercase tracking-wide text-muted-foreground mb-1.5">Description</label>
                   <textarea
                     value={description}
                     onChange={(e) => setDescription(e.target.value)}
                     placeholder="Market description and resolution criteria..."
                     rows={2}
-                    className="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-purple-500 resize-none"
+                    className="w-full bg-muted/60 border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-purple-500 resize-none"
                   />
                 </div>
                 <div className="grid grid-cols-3 gap-3">
                   <div>
-                    <label className="block text-xs text-muted-foreground mb-1">End Date</label>
-                    <Input
-                      type="text"
-                      value={endDate}
-                      onChange={(e) => setEndDate(e.target.value)}
-                      placeholder="2025-12-31"
-                      className="bg-muted rounded-lg focus-visible:ring-purple-500"
-                    />
+                    <label className="block text-[10px] uppercase tracking-wide text-muted-foreground mb-1.5">End Date</label>
+                    <Input type="text" value={endDate} onChange={(e) => setEndDate(e.target.value)} placeholder="2025-12-31" className="bg-muted/60 rounded-lg focus-visible:ring-purple-500" />
                   </div>
                   <div>
-                    <label className="block text-xs text-muted-foreground mb-1">Resolution Source</label>
-                    <Input
-                      type="text"
-                      value={resolutionSource}
-                      onChange={(e) => setResolutionSource(e.target.value)}
-                      placeholder="e.g., CoinGecko"
-                      className="bg-muted rounded-lg focus-visible:ring-purple-500"
-                    />
+                    <label className="block text-[10px] uppercase tracking-wide text-muted-foreground mb-1.5">Resolution Source</label>
+                    <Input type="text" value={resolutionSource} onChange={(e) => setResolutionSource(e.target.value)} placeholder="e.g., CoinGecko" className="bg-muted/60 rounded-lg focus-visible:ring-purple-500" />
                   </div>
                   <div>
-                    <label className="block text-xs text-muted-foreground mb-1">Outcomes</label>
-                    <Input
-                      type="text"
-                      value={outcomes}
-                      onChange={(e) => setOutcomes(e.target.value)}
-                      placeholder="Yes, No"
-                      className="bg-muted rounded-lg focus-visible:ring-purple-500"
-                    />
+                    <label className="block text-[10px] uppercase tracking-wide text-muted-foreground mb-1.5">Outcomes</label>
+                    <Input type="text" value={outcomes} onChange={(e) => setOutcomes(e.target.value)} placeholder="Yes, No" className="bg-muted/60 rounded-lg focus-visible:ring-purple-500" />
                   </div>
                 </div>
               </div>
@@ -512,29 +558,32 @@ function AnalyzeSection({
                   : 'bg-purple-500 hover:bg-purple-600 text-white'
               )}
             >
-              {resolutionMutation.isPending ? (
-                <RefreshCw className="w-4 h-4 animate-spin" />
-              ) : (
-                <Shield className="w-4 h-4" />
-              )}
+              {resolutionMutation.isPending ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Shield className="w-4 h-4" />}
               Analyze Resolution
             </Button>
-          </div>
+          </CardContent>
         </Card>
       )}
 
-      {/* ---- Market Analysis Tool ---- */}
+      {/* Market Analysis Tool */}
       {tool === 'market' && (
-        <Card className="p-5">
-          <div className="space-y-3">
+        <Card className="overflow-hidden border-border/60 bg-card/80">
+          <div className="h-0.5 bg-blue-400" />
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base font-semibold">
+              <TrendingUp className="h-4 w-4 text-blue-400" />
+              Market Intelligence
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
             <div>
-              <label className="block text-xs text-muted-foreground mb-1">Query *</label>
+              <label className="block text-[10px] uppercase tracking-wide text-muted-foreground mb-1.5">Query *</label>
               <textarea
                 value={marketQuery}
                 onChange={(e) => setMarketQuery(e.target.value)}
                 placeholder="e.g., What are the chances of a Fed rate cut in March? Analyze recent economic indicators..."
                 rows={3}
-                className="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500 resize-none"
+                className="w-full bg-muted/60 border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500 resize-none"
               />
             </div>
 
@@ -547,26 +596,14 @@ function AnalyzeSection({
             </button>
 
             {showMarketAdvanced && (
-              <div className="grid grid-cols-2 gap-3 pl-3 border-l-2 border-border">
+              <div className="grid grid-cols-2 gap-3 pl-3 border-l-2 border-blue-500/20">
                 <div>
-                  <label className="block text-xs text-muted-foreground mb-1">Market ID</label>
-                  <Input
-                    type="text"
-                    value={marketAnalysisId}
-                    onChange={(e) => setMarketAnalysisId(e.target.value)}
-                    placeholder="Link to specific market"
-                    className="bg-muted rounded-lg focus-visible:ring-blue-500"
-                  />
+                  <label className="block text-[10px] uppercase tracking-wide text-muted-foreground mb-1.5">Market ID</label>
+                  <Input type="text" value={marketAnalysisId} onChange={(e) => setMarketAnalysisId(e.target.value)} placeholder="Link to specific market" className="bg-muted/60 rounded-lg focus-visible:ring-blue-500" />
                 </div>
                 <div>
-                  <label className="block text-xs text-muted-foreground mb-1">Market Question</label>
-                  <Input
-                    type="text"
-                    value={marketAnalysisQuestion}
-                    onChange={(e) => setMarketAnalysisQuestion(e.target.value)}
-                    placeholder="Market question for context"
-                    className="bg-muted rounded-lg focus-visible:ring-blue-500"
-                  />
+                  <label className="block text-[10px] uppercase tracking-wide text-muted-foreground mb-1.5">Market Question</label>
+                  <Input type="text" value={marketAnalysisQuestion} onChange={(e) => setMarketAnalysisQuestion(e.target.value)} placeholder="Market question for context" className="bg-muted/60 rounded-lg focus-visible:ring-blue-500" />
                 </div>
               </div>
             )}
@@ -581,40 +618,43 @@ function AnalyzeSection({
                   : 'bg-blue-500 hover:bg-blue-600 text-white'
               )}
             >
-              {marketMutation.isPending ? (
-                <RefreshCw className="w-4 h-4 animate-spin" />
-              ) : (
-                <TrendingUp className="w-4 h-4" />
-              )}
-              Analyze
+              {marketMutation.isPending ? <RefreshCw className="w-4 h-4 animate-spin" /> : <TrendingUp className="w-4 h-4" />}
+              Analyze Market
             </Button>
-          </div>
+          </CardContent>
         </Card>
       )}
 
-      {/* ---- News Sentiment Tool ---- */}
+      {/* News Sentiment Tool */}
       {tool === 'news' && (
-        <Card className="p-5">
-          <div className="space-y-3">
+        <Card className="overflow-hidden border-border/60 bg-card/80">
+          <div className="h-0.5 bg-orange-400" />
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base font-semibold">
+              <Newspaper className="h-4 w-4 text-orange-400" />
+              News Sentiment Analysis
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
             <div>
-              <label className="block text-xs text-muted-foreground mb-1">Search Query *</label>
+              <label className="block text-[10px] uppercase tracking-wide text-muted-foreground mb-1.5">Search Query *</label>
               <Input
                 type="text"
                 value={newsQuery}
                 onChange={(e) => setNewsQuery(e.target.value)}
                 placeholder="e.g., Federal Reserve interest rate decision"
-                className="bg-muted rounded-lg focus-visible:ring-orange-500"
+                className="bg-muted/60 rounded-lg focus-visible:ring-orange-500"
               />
             </div>
 
             <div>
-              <label className="block text-xs text-muted-foreground mb-1">Market Context</label>
+              <label className="block text-[10px] uppercase tracking-wide text-muted-foreground mb-1.5">Market Context</label>
               <Input
                 type="text"
                 value={newsContext}
                 onChange={(e) => setNewsContext(e.target.value)}
                 placeholder="e.g., Will the Fed cut rates in March 2025?"
-                className="bg-muted rounded-lg focus-visible:ring-orange-500"
+                className="bg-muted/60 rounded-lg focus-visible:ring-orange-500"
               />
             </div>
 
@@ -627,16 +667,9 @@ function AnalyzeSection({
             </button>
 
             {showNewsAdvanced && (
-              <div className="pl-3 border-l-2 border-border">
-                <label className="block text-xs text-muted-foreground mb-1">Max Articles</label>
-                <Input
-                  type="number"
-                  value={maxArticles}
-                  onChange={(e) => setMaxArticles(parseInt(e.target.value) || 5)}
-                  min={1}
-                  max={20}
-                  className="bg-muted rounded-lg focus-visible:ring-orange-500 w-24"
-                />
+              <div className="pl-3 border-l-2 border-orange-500/20">
+                <label className="block text-[10px] uppercase tracking-wide text-muted-foreground mb-1.5">Max Articles</label>
+                <Input type="number" value={maxArticles} onChange={(e) => setMaxArticles(parseInt(e.target.value) || 5)} min={1} max={20} className="bg-muted/60 rounded-lg focus-visible:ring-orange-500 w-24" />
               </div>
             )}
 
@@ -650,93 +683,134 @@ function AnalyzeSection({
                   : 'bg-orange-500 hover:bg-orange-600 text-white'
               )}
             >
-              {newsMutation.isPending ? (
-                <RefreshCw className="w-4 h-4 animate-spin" />
-              ) : (
-                <Search className="w-4 h-4" />
-              )}
+              {newsMutation.isPending ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
               Search & Analyze
             </Button>
-          </div>
+          </CardContent>
         </Card>
       )}
 
-      {/* ---- Results ---- */}
-
-      {/* Resolution results */}
+      {/* Resolution Results */}
       {tool === 'resolution' && resolutionMutation.data && (
-        <Card className="p-5">
-          <h4 className="text-sm font-semibold text-muted-foreground mb-3">Analysis Result</h4>
-          <div className="grid grid-cols-4 gap-3 mb-4">
-            <ScoreCard label="Clarity" value={resolutionMutation.data.clarity_score} />
-            <ScoreCard label="Risk" value={resolutionMutation.data.risk_score} />
-            <ScoreCard label="Confidence" value={resolutionMutation.data.confidence} />
-            <ScoreCard label="Resolution" value={resolutionMutation.data.resolution_likelihood} />
-          </div>
-          <div className="space-y-3">
-            <div>
-              <p className="text-xs text-muted-foreground mb-1">Recommendation</p>
-              <p className="text-sm bg-muted p-3 rounded-lg border border-border">
-                {resolutionMutation.data.recommendation}
-              </p>
+        <Card className="overflow-hidden border-border/60 bg-card/80">
+          <div className="h-0.5 bg-purple-400" />
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base font-semibold">
+              <CheckCircle className="h-4 w-4 text-purple-400" />
+              Resolution Analysis Result
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 card-stagger">
+              <AIMetricTile
+                label="Clarity"
+                value={resolutionMutation.data.clarity_score?.toFixed(2) ?? 'N/A'}
+                icon={<Shield className="h-3.5 w-3.5" />}
+                tone={scoreTone(resolutionMutation.data.clarity_score)}
+              />
+              <AIMetricTile
+                label="Risk"
+                value={resolutionMutation.data.risk_score?.toFixed(2) ?? 'N/A'}
+                icon={<AlertCircle className="h-3.5 w-3.5" />}
+                tone={inverseScoreTone(resolutionMutation.data.risk_score)}
+              />
+              <AIMetricTile
+                label="Confidence"
+                value={resolutionMutation.data.confidence?.toFixed(2) ?? 'N/A'}
+                icon={<Target className="h-3.5 w-3.5" />}
+                tone={scoreTone(resolutionMutation.data.confidence)}
+              />
+              <AIMetricTile
+                label="Resolution"
+                value={resolutionMutation.data.resolution_likelihood?.toFixed(2) ?? 'N/A'}
+                icon={<CheckCircle className="h-3.5 w-3.5" />}
+                tone={scoreTone(resolutionMutation.data.resolution_likelihood)}
+              />
             </div>
-            <div>
-              <p className="text-xs text-muted-foreground mb-1">Summary</p>
-              <p className="text-sm bg-muted p-3 rounded-lg border border-border">
-                {resolutionMutation.data.summary}
-              </p>
+
+            <div className="space-y-3">
+              <div className="rounded-lg border border-purple-500/20 bg-purple-500/5 p-4">
+                <p className="text-[10px] uppercase tracking-wide text-purple-400 mb-1.5">Recommendation</p>
+                <p className="text-sm text-foreground">{resolutionMutation.data.recommendation}</p>
+              </div>
+              <div className="rounded-lg border border-border/60 bg-muted/30 p-4">
+                <p className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1.5">Summary</p>
+                <p className="text-sm text-foreground/90">{resolutionMutation.data.summary}</p>
+              </div>
+              {resolutionMutation.data.ambiguities?.length > 0 && (
+                <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-4">
+                  <p className="text-[10px] uppercase tracking-wide text-amber-400 mb-2">Ambiguities</p>
+                  <div className="space-y-1.5">
+                    {resolutionMutation.data.ambiguities.map((a: string, i: number) => (
+                      <div key={i} className="flex items-start gap-2">
+                        <AlertCircle className="w-3 h-3 text-amber-400 mt-0.5 shrink-0" />
+                        <p className="text-sm text-amber-300/90">{a}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {resolutionMutation.data.edge_cases?.length > 0 && (
+                <div className="rounded-lg border border-orange-500/20 bg-orange-500/5 p-4">
+                  <p className="text-[10px] uppercase tracking-wide text-orange-400 mb-2">Edge Cases</p>
+                  <div className="space-y-1.5">
+                    {resolutionMutation.data.edge_cases.map((e: string, i: number) => (
+                      <div key={i} className="flex items-start gap-2">
+                        <Zap className="w-3 h-3 text-orange-400 mt-0.5 shrink-0" />
+                        <p className="text-sm text-orange-300/90">{e}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
-            {resolutionMutation.data.ambiguities?.length > 0 && (
-              <div>
-                <p className="text-xs text-muted-foreground mb-1">Ambiguities</p>
-                <ul className="list-disc list-inside text-sm bg-muted p-3 rounded-lg border border-border space-y-1">
-                  {resolutionMutation.data.ambiguities.map((a: string, i: number) => (
-                    <li key={i} className="text-yellow-400">{a}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-            {resolutionMutation.data.edge_cases?.length > 0 && (
-              <div>
-                <p className="text-xs text-muted-foreground mb-1">Edge Cases</p>
-                <ul className="list-disc list-inside text-sm bg-muted p-3 rounded-lg border border-border space-y-1">
-                  {resolutionMutation.data.edge_cases.map((e: string, i: number) => (
-                    <li key={i} className="text-orange-400">{e}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </div>
+          </CardContent>
         </Card>
       )}
       {tool === 'resolution' && resolutionMutation.error && (
         <ErrorBanner message={(resolutionMutation.error as Error).message} />
       )}
 
-      {/* Market analysis results */}
+      {/* Market Analysis Results */}
       {tool === 'market' && marketMutation.data && (
-        <Card className="p-5">
-          <h4 className="text-sm font-semibold text-muted-foreground mb-3">Analysis Result</h4>
-          <div className="bg-muted p-4 rounded-lg border border-border whitespace-pre-wrap text-sm">
-            {typeof marketMutation.data === 'string'
-              ? marketMutation.data
-              : marketMutation.data.analysis || marketMutation.data.result || JSON.stringify(marketMutation.data, null, 2)}
-          </div>
+        <Card className="overflow-hidden border-border/60 bg-card/80">
+          <div className="h-0.5 bg-blue-400" />
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base font-semibold">
+              <TrendingUp className="h-4 w-4 text-blue-400" />
+              Market Analysis Result
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="bg-muted/30 p-4 rounded-lg border border-border/60 whitespace-pre-wrap text-sm leading-relaxed">
+              {typeof marketMutation.data === 'string'
+                ? marketMutation.data
+                : marketMutation.data.analysis || marketMutation.data.result || JSON.stringify(marketMutation.data, null, 2)}
+            </div>
+          </CardContent>
         </Card>
       )}
       {tool === 'market' && marketMutation.error && (
         <ErrorBanner message={(marketMutation.error as Error).message} />
       )}
 
-      {/* News sentiment results */}
+      {/* News Sentiment Results */}
       {tool === 'news' && newsMutation.data && (
-        <Card className="p-5">
-          <h4 className="text-sm font-semibold text-muted-foreground mb-3">Sentiment Result</h4>
-          <div className="bg-muted p-4 rounded-lg border border-border whitespace-pre-wrap text-sm">
-            {typeof newsMutation.data === 'string'
-              ? newsMutation.data
-              : newsMutation.data.summary || newsMutation.data.analysis || JSON.stringify(newsMutation.data, null, 2)}
-          </div>
+        <Card className="overflow-hidden border-border/60 bg-card/80">
+          <div className="h-0.5 bg-orange-400" />
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base font-semibold">
+              <Newspaper className="h-4 w-4 text-orange-400" />
+              Sentiment Analysis Result
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="bg-muted/30 p-4 rounded-lg border border-border/60 whitespace-pre-wrap text-sm leading-relaxed">
+              {typeof newsMutation.data === 'string'
+                ? newsMutation.data
+                : newsMutation.data.summary || newsMutation.data.analysis || JSON.stringify(newsMutation.data, null, 2)}
+            </div>
+          </CardContent>
         </Card>
       )}
       {tool === 'news' && newsMutation.error && (
@@ -769,62 +843,113 @@ function JudgmentsSection() {
 
   if (isLoading) return <LoadingSpinner />
 
+  const agRate = agreementStats?.agreement_rate ?? 0
+  const avgScore = agreementStats?.avg_score ?? 0
+
   return (
     <div className="space-y-4">
       {/* Agreement Stats */}
       {agreementStats && (
-        <Card className="p-5">
-          <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
-            <Activity className="w-4 h-4 text-cyan-400" />
-            ML vs LLM Agreement
-          </h3>
-          <div className="grid grid-cols-4 gap-3">
-            <MiniStat label="Total Judged" value={agreementStats.total_judged ?? 0} />
-            <MiniStat label="Agreement Rate" value={`${((agreementStats.agreement_rate ?? 0) * 100).toFixed(1)}%`} />
-            <MiniStat label="ML Overrides" value={agreementStats.ml_overrides ?? 0} />
-            <MiniStat label="Avg Score" value={(agreementStats.avg_score ?? 0).toFixed(2)} />
-          </div>
+        <Card className="overflow-hidden border-border/60 bg-card/80">
+          <div className="h-0.5 bg-cyan-400" />
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base font-semibold">
+              <Activity className="h-4 w-4 text-cyan-400" />
+              ML vs LLM Agreement
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 card-stagger">
+              <AIMetricTile
+                label="Total Judged"
+                value={String(agreementStats.total_judged ?? 0)}
+                icon={<BarChart3 className="h-3.5 w-3.5" />}
+                tone="info"
+              />
+              <AIMetricTile
+                label="Agreement Rate"
+                value={`${(agRate * 100).toFixed(1)}%`}
+                icon={<Target className="h-3.5 w-3.5" />}
+                tone={agRate >= 0.7 ? 'good' : agRate >= 0.4 ? 'warn' : 'bad'}
+              />
+              <AIMetricTile
+                label="ML Overrides"
+                value={String(agreementStats.ml_overrides ?? 0)}
+                icon={<Zap className="h-3.5 w-3.5" />}
+                tone="neutral"
+              />
+              <AIMetricTile
+                label="Avg Score"
+                value={avgScore.toFixed(2)}
+                icon={<Activity className="h-3.5 w-3.5" />}
+                tone={avgScore >= 0.7 ? 'good' : avgScore >= 0.4 ? 'warn' : 'neutral'}
+              />
+            </div>
+          </CardContent>
         </Card>
       )}
 
       {/* Judgment History */}
-      <Card className="p-5">
-        <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
-          <Target className="w-4 h-4 text-green-400" />
-          Recent Judgments
-        </h3>
-
-        {!history || history.length === 0 ? (
-          <EmptyState message="No opportunity judgments yet. AI will judge opportunities during scans when enabled." />
-        ) : (
-          <div className="space-y-2 max-h-[500px] overflow-y-auto">
-            {(Array.isArray(history) ? history : []).map((j: any, i: number) => (
-              <div
-                key={j.opportunity_id || i}
-                className="flex items-center justify-between bg-muted p-3 rounded-lg border border-border"
-              >
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium truncate">{j.opportunity_id}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {j.recommendation} | {j.strategy_type ?? 'unknown'}
-                  </p>
-                </div>
-                <div className="flex items-center gap-2 ml-4">
-                  <ScoreBadge label="Score" value={j.overall_score} />
-                  <ScoreBadge label="Profit" value={j.profit_viability} />
-                  <ScoreBadge label="Safety" value={j.resolution_safety} />
-                </div>
+      <Card className="overflow-hidden border-border/60 bg-card/80">
+        <div className="h-0.5 bg-emerald-400" />
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center gap-2 text-base font-semibold">
+            <Target className="h-4 w-4 text-emerald-400" />
+            Recent Judgments
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {!history || history.length === 0 ? (
+            <EmptyState message="No opportunity judgments yet. AI will judge opportunities during scans when enabled." />
+          ) : (
+            <ScrollArea className="h-[480px] pr-3">
+              <div className="space-y-2">
+                {(Array.isArray(history) ? history : []).map((j: any, i: number) => (
+                  <div
+                    key={j.opportunity_id || i}
+                    className="rounded-lg border border-border/55 bg-background/30 p-3 hover:border-border/80 transition-colors"
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium truncate">{j.opportunity_id}</p>
+                        <div className="flex items-center gap-2 mt-1">
+                          <Badge variant="outline" className="text-[9px] h-4 px-1.5 bg-muted/30 border-border/40">
+                            {j.strategy_type ?? 'unknown'}
+                          </Badge>
+                          <Badge
+                            variant="outline"
+                            className={cn(
+                              'text-[9px] h-4 px-1.5',
+                              j.recommendation === 'take' || j.recommendation === 'buy'
+                                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                                : j.recommendation === 'skip' || j.recommendation === 'avoid'
+                                  ? 'bg-red-500/10 text-red-400 border-red-500/20'
+                                  : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                            )}
+                          >
+                            {j.recommendation}
+                          </Badge>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 ml-4 shrink-0">
+                        <ScoreBadge label="Score" value={j.overall_score} />
+                        <ScoreBadge label="Profit" value={j.profit_viability} />
+                        <ScoreBadge label="Safety" value={j.resolution_safety} />
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-        )}
+            </ScrollArea>
+          )}
+        </CardContent>
       </Card>
     </div>
   )
 }
 
 // ============================================================
-// System Section (Usage + Sessions + Skills)
+// System Section
 // ============================================================
 
 function SystemSection() {
@@ -840,7 +965,6 @@ function SystemSection() {
 // --- Usage Block ---
 
 function UsageBlock() {
-  // Reuse usage from ai-status when available (avoids duplicate /ai/usage and extra DB load)
   const { data: status, isLoading: statusLoading, error: statusError } = useQuery({
     queryKey: ['ai-status'],
     queryFn: async () => {
@@ -865,150 +989,131 @@ function UsageBlock() {
 
   if (statusError || usageError) {
     return (
-      <Card className="p-5">
-        <div className="flex items-center gap-3 text-muted-foreground">
-          <AlertCircle className="w-4 h-4" />
-          <span className="text-sm">Unable to fetch usage stats.</span>
-        </div>
+      <Card className="overflow-hidden border-border/60 bg-card/80">
+        <CardContent className="p-5">
+          <div className="flex items-center gap-3 text-muted-foreground">
+            <AlertCircle className="w-4 h-4" />
+            <span className="text-sm">Unable to fetch usage stats.</span>
+          </div>
+        </CardContent>
       </Card>
     )
   }
 
   if (!usage) {
     return (
-      <Card className="p-5">
-        <EmptyState message="No usage data available yet." />
+      <Card className="overflow-hidden border-border/60 bg-card/80">
+        <CardContent className="p-5">
+          <EmptyState message="No usage data available yet." />
+        </CardContent>
       </Card>
     )
   }
 
+  const cost = usage.estimated_cost ?? usage.total_cost_usd ?? 0
+  const failedReq = usage.failed_requests ?? usage.error_count ?? 0
+
   return (
-    <Card className="p-5">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-semibold flex items-center gap-2">
-          <BarChart3 className="w-4 h-4 text-yellow-400" />
-          Usage
-        </h3>
-        {usage.active_model && (
-          <span className="text-xs font-mono text-purple-400 bg-purple-500/10 px-2 py-0.5 rounded border border-purple-500/20">
-            {usage.active_model}
+    <Card className="overflow-hidden border-border/60 bg-card/80">
+      <div className="h-0.5 bg-amber-400" />
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center justify-between gap-3 text-base font-semibold">
+          <span className="flex items-center gap-2">
+            <BarChart3 className="h-4 w-4 text-amber-400" />
+            Usage Telemetry
           </span>
-        )}
-      </div>
+          {usage.active_model && (
+            <Badge variant="outline" className="text-xs font-mono border-purple-500/25 bg-purple-500/10 text-purple-300">
+              {usage.active_model}
+            </Badge>
+          )}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 card-stagger">
+          <AIMetricTile label="Requests" value={String(usage.total_requests ?? 0)} icon={<Zap className="h-3.5 w-3.5" />} tone="info" />
+          <AIMetricTile label="Input Tokens" value={formatNumber(usage.total_input_tokens ?? 0)} icon={<FileText className="h-3.5 w-3.5" />} tone="info" />
+          <AIMetricTile label="Output Tokens" value={formatNumber(usage.total_output_tokens ?? 0)} icon={<FileText className="h-3.5 w-3.5" />} tone="info" />
+          <AIMetricTile label="Est. Cost" value={`$${cost.toFixed(4)}`} icon={<DollarSign className="h-3.5 w-3.5" />} tone={cost > 5 ? 'warn' : 'neutral'} />
+          <AIMetricTile label="Avg Latency" value={`${(usage.avg_latency_ms ?? 0).toFixed(0)}ms`} icon={<Clock className="h-3.5 w-3.5" />} tone={(usage.avg_latency_ms ?? 0) > 5000 ? 'warn' : 'good'} />
+          <AIMetricTile label="Total Tokens" value={formatNumber(usage.total_tokens ?? 0)} icon={<Activity className="h-3.5 w-3.5" />} tone="neutral" />
+          <AIMetricTile label="Successful" value={String(usage.successful_requests ?? usage.total_requests ?? 0)} icon={<CheckCircle className="h-3.5 w-3.5" />} tone="good" />
+          <AIMetricTile label="Failed" value={String(failedReq)} icon={<AlertCircle className="h-3.5 w-3.5" />} tone={failedReq > 0 ? 'bad' : 'good'} />
+        </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-        <UsageStat
-          icon={<Zap className="w-3.5 h-3.5 text-blue-400" />}
-          label="Requests"
-          value={usage.total_requests ?? 0}
-        />
-        <UsageStat
-          icon={<FileText className="w-3.5 h-3.5 text-green-400" />}
-          label="Input Tokens"
-          value={formatNumber(usage.total_input_tokens ?? 0)}
-        />
-        <UsageStat
-          icon={<FileText className="w-3.5 h-3.5 text-purple-400" />}
-          label="Output Tokens"
-          value={formatNumber(usage.total_output_tokens ?? 0)}
-        />
-        <UsageStat
-          icon={<DollarSign className="w-3.5 h-3.5 text-yellow-400" />}
-          label="Est. Cost"
-          value={`$${(usage.estimated_cost ?? usage.total_cost_usd ?? 0).toFixed(4)}`}
-        />
-        <UsageStat
-          icon={<Clock className="w-3.5 h-3.5 text-cyan-400" />}
-          label="Avg Latency"
-          value={`${(usage.avg_latency_ms ?? 0).toFixed(0)}ms`}
-        />
-        <UsageStat
-          icon={<Activity className="w-3.5 h-3.5 text-orange-400" />}
-          label="Total Tokens"
-          value={formatNumber(usage.total_tokens ?? 0)}
-        />
-        <UsageStat
-          icon={<CheckCircle className="w-3.5 h-3.5 text-green-400" />}
-          label="Successful"
-          value={usage.successful_requests ?? usage.total_requests ?? 0}
-        />
-        <UsageStat
-          icon={<AlertCircle className="w-3.5 h-3.5 text-red-400" />}
-          label="Failed"
-          value={usage.failed_requests ?? usage.error_count ?? 0}
-        />
-      </div>
-
-      {/* Spend Limit */}
-      {usage.spend_limit_usd != null && (
-        <div className="p-3 bg-muted rounded-lg border border-border mb-4">
-          <div className="flex items-center justify-between mb-2">
-            <div className="flex items-center gap-2">
-              <Shield className="w-3.5 h-3.5 text-blue-400" />
-              <span className="text-xs font-medium">Monthly Spend Limit</span>
+        {/* Spend Limit */}
+        {usage.spend_limit_usd != null && (
+          <div className="rounded-lg border border-border/60 bg-muted/30 p-4">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <Shield className="w-3.5 h-3.5 text-blue-400" />
+                <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Monthly Spend Limit</span>
+              </div>
+              <span className="text-xs font-semibold font-data">
+                ${cost.toFixed(2)} / ${usage.spend_limit_usd.toFixed(2)}
+              </span>
             </div>
-            <span className="text-xs font-semibold">
-              ${(usage.estimated_cost ?? usage.total_cost_usd ?? 0).toFixed(2)} / ${usage.spend_limit_usd.toFixed(2)}
-            </span>
+            <div className="w-full bg-background rounded-full h-2 border border-border">
+              <div
+                className={cn(
+                  'h-full rounded-full transition-all',
+                  (cost / usage.spend_limit_usd) >= 0.9
+                    ? 'bg-red-500'
+                    : (cost / usage.spend_limit_usd) >= 0.7
+                      ? 'bg-amber-500'
+                      : 'bg-emerald-500'
+                )}
+                style={{ width: `${Math.min(100, (cost / usage.spend_limit_usd) * 100)}%` }}
+              />
+            </div>
+            <div className="flex items-center justify-between mt-1.5">
+              <span className="text-[10px] text-muted-foreground font-data">
+                ${(usage.spend_remaining_usd ?? 0).toFixed(2)} remaining
+              </span>
+              <span className="text-[10px] text-muted-foreground">
+                {usage.month_start ? `Since ${new Date(usage.month_start).toLocaleDateString()}` : ''}
+              </span>
+            </div>
           </div>
-          <div className="w-full bg-background rounded-full h-2 border border-border">
-            <div
-              className={cn(
-                'h-full rounded-full transition-all',
-                ((usage.estimated_cost ?? usage.total_cost_usd ?? 0) / usage.spend_limit_usd) >= 0.9
-                  ? 'bg-red-500'
-                  : ((usage.estimated_cost ?? usage.total_cost_usd ?? 0) / usage.spend_limit_usd) >= 0.7
-                    ? 'bg-yellow-500'
-                    : 'bg-green-500'
-              )}
-              style={{ width: `${Math.min(100, ((usage.estimated_cost ?? usage.total_cost_usd ?? 0) / usage.spend_limit_usd) * 100)}%` }}
-            />
-          </div>
-          <div className="flex items-center justify-between mt-1">
-            <span className="text-[10px] text-muted-foreground">
-              ${(usage.spend_remaining_usd ?? 0).toFixed(2)} remaining
-            </span>
-            <span className="text-[10px] text-muted-foreground">
-              {usage.month_start ? `Since ${new Date(usage.month_start).toLocaleDateString()}` : ''}
-            </span>
-          </div>
-        </div>
-      )}
+        )}
 
-      {/* By Model */}
-      {usage.by_model && typeof usage.by_model === 'object' && Object.keys(usage.by_model).length > 0 && (
-        <div>
-          <p className="text-xs text-muted-foreground mb-2">By Model</p>
-          <div className="space-y-1.5">
-            {Object.entries(usage.by_model).map(([model, stats]: [string, any]) => {
-              const isActive = usage.active_model && model === usage.active_model
-              return (
-                <div
-                  key={model}
-                  className={cn(
-                    'flex items-center justify-between p-2.5 rounded-lg border',
-                    isActive ? 'bg-purple-500/5 border-purple-500/20' : 'bg-muted border-border'
-                  )}
-                >
-                  <div className="flex items-center gap-2">
-                    <p className="text-xs font-medium font-mono">{model}</p>
-                    {isActive && (
-                      <span className="text-[9px] text-purple-400 bg-purple-500/10 px-1 py-0.5 rounded border border-purple-500/20">
-                        active
-                      </span>
+        {/* By Model */}
+        {usage.by_model && typeof usage.by_model === 'object' && Object.keys(usage.by_model).length > 0 && (
+          <div>
+            <p className="text-[10px] uppercase tracking-wide text-muted-foreground mb-2">By Model</p>
+            <div className="space-y-1.5">
+              {Object.entries(usage.by_model).map(([model, stats]: [string, any]) => {
+                const isActive = usage.active_model && model === usage.active_model
+                return (
+                  <div
+                    key={model}
+                    className={cn(
+                      'flex items-center justify-between p-3 rounded-lg border transition-colors',
+                      isActive
+                        ? 'bg-purple-500/5 border-purple-500/20 shadow-sm shadow-purple-500/5'
+                        : 'bg-background/30 border-border/55 hover:border-border/80'
                     )}
+                  >
+                    <div className="flex items-center gap-2">
+                      <p className="text-xs font-medium font-mono">{model}</p>
+                      {isActive && (
+                        <Badge variant="outline" className="text-[9px] h-4 px-1.5 border-purple-500/20 bg-purple-500/10 text-purple-400">
+                          active
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-3 text-[11px] text-muted-foreground font-data">
+                      <span>{stats.requests ?? 0} req</span>
+                      <span>{formatNumber(stats.tokens ?? 0)} tok</span>
+                      <span className="font-medium text-foreground/80">${(stats.cost ?? 0).toFixed(4)}</span>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
-                    <span>{stats.requests ?? 0} req</span>
-                    <span>{formatNumber(stats.tokens ?? 0)} tok</span>
-                    <span>${(stats.cost ?? 0).toFixed(4)}</span>
-                  </div>
-                </div>
-              )
-            })}
+                )
+              })}
+            </div>
           </div>
-        </div>
-      )}
+        )}
+      </CardContent>
     </Card>
   )
 }
@@ -1042,20 +1147,23 @@ function SessionsBlock() {
   })
 
   return (
-    <Card className="p-5">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="flex items-center justify-between w-full mb-1"
-      >
-        <h3 className="text-sm font-semibold flex items-center gap-2">
-          <BookOpen className="w-4 h-4 text-indigo-400" />
-          Research Sessions
-        </h3>
-        {expanded ? <ChevronDown className="w-4 h-4 text-muted-foreground" /> : <ChevronRight className="w-4 h-4 text-muted-foreground" />}
-      </button>
+    <Card className="overflow-hidden border-border/60 bg-card/80">
+      <div className="h-0.5 bg-indigo-400" />
+      <CardHeader className="pb-1">
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="flex items-center justify-between w-full"
+        >
+          <CardTitle className="flex items-center gap-2 text-base font-semibold">
+            <BookOpen className="h-4 w-4 text-indigo-400" />
+            Research Sessions
+          </CardTitle>
+          {expanded ? <ChevronDown className="w-4 h-4 text-muted-foreground" /> : <ChevronRight className="w-4 h-4 text-muted-foreground" />}
+        </button>
+      </CardHeader>
 
       {expanded && (
-        <div className="mt-3">
+        <CardContent className="pt-3">
           {isLoading ? (
             <LoadingSpinner />
           ) : (
@@ -1064,7 +1172,7 @@ function SessionsBlock() {
                 <select
                   value={sessionTypeFilter}
                   onChange={(e) => setSessionTypeFilter(e.target.value)}
-                  className="bg-muted border border-border rounded-lg px-3 py-1.5 text-xs"
+                  className="bg-muted/60 border border-border rounded-lg px-3 py-1.5 text-xs h-8"
                 >
                   <option value="">All Types</option>
                   <option value="resolution_analysis">Resolution Analysis</option>
@@ -1077,55 +1185,64 @@ function SessionsBlock() {
               {!sessions || (Array.isArray(sessions) && sessions.length === 0) ? (
                 <EmptyState message="No research sessions found." />
               ) : (
-                <div className="space-y-1.5 max-h-72 overflow-y-auto">
-                  {(Array.isArray(sessions) ? sessions : []).map((s: any) => {
-                    const id = s.session_id || s.id
-                    const isSelected = selectedSessionId === id
-                    return (
-                      <div key={id}>
-                        <button
-                          onClick={() => setSelectedSessionId(isSelected ? null : id)}
-                          className={cn(
-                            'w-full text-left p-2.5 rounded-lg border transition-colors',
-                            isSelected
-                              ? 'bg-indigo-500/10 border-indigo-500/30'
-                              : 'bg-muted border-border hover:border-border'
-                          )}
-                        >
-                          <div className="flex items-center justify-between">
-                            <div className="flex-1 min-w-0">
-                              <p className="text-xs font-medium truncate">{s.session_type || 'Unknown'}</p>
-                              <p className="text-[10px] text-muted-foreground truncate">{id}</p>
-                            </div>
-                            <div className="flex items-center gap-2 ml-3">
-                              <span className="text-[10px] text-muted-foreground whitespace-nowrap">
-                                {s.created_at ? new Date(s.created_at).toLocaleString() : ''}
-                              </span>
-                              {isSelected ? <ChevronDown className="w-3 h-3 text-muted-foreground" /> : <ChevronRight className="w-3 h-3 text-muted-foreground" />}
-                            </div>
-                          </div>
-                        </button>
-                        {isSelected && (
-                          <div className="mt-1 ml-3 border-l-2 border-border pl-3">
-                            {detailLoading ? (
-                              <div className="py-3"><RefreshCw className="w-4 h-4 animate-spin text-muted-foreground" /></div>
-                            ) : sessionDetail ? (
-                              <pre className="text-[11px] text-muted-foreground whitespace-pre-wrap overflow-auto max-h-48 py-2">
-                                {JSON.stringify(sessionDetail, null, 2)}
-                              </pre>
-                            ) : (
-                              <p className="text-xs text-muted-foreground py-2">Session not found.</p>
+                <ScrollArea className="h-72">
+                  <div className="space-y-1.5 pr-3">
+                    {(Array.isArray(sessions) ? sessions : []).map((s: any) => {
+                      const id = s.session_id || s.id
+                      const isSelected = selectedSessionId === id
+                      return (
+                        <div key={id}>
+                          <button
+                            onClick={() => setSelectedSessionId(isSelected ? null : id)}
+                            className={cn(
+                              'w-full text-left p-2.5 rounded-lg border transition-colors',
+                              isSelected
+                                ? 'bg-indigo-500/10 border-indigo-500/30'
+                                : 'bg-background/30 border-border/55 hover:border-border/80'
                             )}
-                          </div>
-                        )}
-                      </div>
-                    )
-                  })}
-                </div>
+                          >
+                            <div className="flex items-center justify-between">
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <p className="text-xs font-medium truncate">{s.session_type || 'Unknown'}</p>
+                                  <Badge variant="outline" className="text-[9px] h-4 px-1.5 bg-indigo-500/10 text-indigo-400 border-indigo-500/20">
+                                    {s.session_type?.split('_')[0] || 'session'}
+                                  </Badge>
+                                </div>
+                                <p className="text-[10px] text-muted-foreground truncate mt-0.5 font-mono">{id}</p>
+                              </div>
+                              <div className="flex items-center gap-2 ml-3">
+                                <span className="text-[10px] text-muted-foreground whitespace-nowrap font-data">
+                                  {s.created_at ? new Date(s.created_at).toLocaleString() : ''}
+                                </span>
+                                {isSelected ? <ChevronDown className="w-3 h-3 text-muted-foreground" /> : <ChevronRight className="w-3 h-3 text-muted-foreground" />}
+                              </div>
+                            </div>
+                          </button>
+                          {isSelected && (
+                            <div className="mt-1 ml-3 border-l-2 border-indigo-500/20 pl-3">
+                              {detailLoading ? (
+                                <div className="py-3"><RefreshCw className="w-4 h-4 animate-spin text-indigo-400" /></div>
+                              ) : sessionDetail ? (
+                                <ScrollArea className="h-48">
+                                  <pre className="text-[11px] text-muted-foreground whitespace-pre-wrap py-2 font-mono">
+                                    {JSON.stringify(sessionDetail, null, 2)}
+                                  </pre>
+                                </ScrollArea>
+                              ) : (
+                                <p className="text-xs text-muted-foreground py-2">Session not found.</p>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                </ScrollArea>
               )}
             </>
           )}
-        </div>
+        </CardContent>
       )}
     </Card>
   )
@@ -1164,20 +1281,23 @@ function SkillsBlock() {
   })
 
   return (
-    <Card className="p-5">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="flex items-center justify-between w-full mb-1"
-      >
-        <h3 className="text-sm font-semibold flex items-center gap-2">
-          <Layers className="w-4 h-4 text-emerald-400" />
-          AI Skills
-        </h3>
-        {expanded ? <ChevronDown className="w-4 h-4 text-muted-foreground" /> : <ChevronRight className="w-4 h-4 text-muted-foreground" />}
-      </button>
+    <Card className="overflow-hidden border-border/60 bg-card/80">
+      <div className="h-0.5 bg-emerald-400" />
+      <CardHeader className="pb-1">
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="flex items-center justify-between w-full"
+        >
+          <CardTitle className="flex items-center gap-2 text-base font-semibold">
+            <Layers className="h-4 w-4 text-emerald-400" />
+            AI Skills
+          </CardTitle>
+          {expanded ? <ChevronDown className="w-4 h-4 text-muted-foreground" /> : <ChevronRight className="w-4 h-4 text-muted-foreground" />}
+        </button>
+      </CardHeader>
 
       {expanded && (
-        <div className="mt-3">
+        <CardContent className="pt-3">
           {isLoading ? (
             <LoadingSpinner />
           ) : !skills || (Array.isArray(skills) && skills.length === 0) ? (
@@ -1189,16 +1309,24 @@ function SkillsBlock() {
                   <button
                     onClick={() => setSelectedSkill(skill.name === selectedSkill ? null : skill.name)}
                     className={cn(
-                      'w-full text-left p-2.5 rounded-lg border cursor-pointer transition-colors',
+                      'w-full text-left p-3 rounded-lg border cursor-pointer transition-colors',
                       selectedSkill === skill.name
                         ? 'bg-emerald-500/10 border-emerald-500/30'
-                        : 'bg-muted border-border hover:border-border'
+                        : 'bg-background/30 border-border/55 hover:border-border/80'
                     )}
                   >
                     <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-xs font-medium">{skill.name}</p>
-                        <p className="text-[10px] text-muted-foreground">{skill.description || 'No description'}</p>
+                      <div className="flex items-center gap-2">
+                        <div className={cn(
+                          'flex items-center justify-center w-7 h-7 rounded-md shrink-0',
+                          selectedSkill === skill.name ? 'bg-emerald-500/15' : 'bg-muted/40'
+                        )}>
+                          <Zap className={cn('w-3.5 h-3.5', selectedSkill === skill.name ? 'text-emerald-400' : 'text-muted-foreground')} />
+                        </div>
+                        <div>
+                          <p className="text-xs font-medium">{skill.name}</p>
+                          <p className="text-[10px] text-muted-foreground">{skill.description || 'No description'}</p>
+                        </div>
                       </div>
                       {selectedSkill === skill.name ? (
                         <ChevronDown className="w-3 h-3 text-muted-foreground" />
@@ -1208,17 +1336,16 @@ function SkillsBlock() {
                     </div>
                   </button>
 
-                  {/* Execution form inline */}
                   {selectedSkill === skill.name && (
-                    <div className="mt-2 ml-3 pl-3 border-l-2 border-border space-y-2">
+                    <div className="mt-2 ml-3 pl-3 border-l-2 border-emerald-500/20 space-y-2">
                       <div>
-                        <label className="block text-[10px] text-muted-foreground mb-1">Context (JSON)</label>
+                        <label className="block text-[10px] uppercase tracking-wide text-muted-foreground mb-1.5">Context (JSON)</label>
                         <textarea
                           value={skillContext}
                           onChange={(e) => setSkillContext(e.target.value)}
                           placeholder='{"market_id": "...", "question": "..."}'
                           rows={3}
-                          className="w-full bg-muted border border-border rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:border-emerald-500 resize-none"
+                          className="w-full bg-muted/60 border border-border rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:border-emerald-500 resize-none"
                         />
                       </div>
                       <Button
@@ -1232,20 +1359,18 @@ function SkillsBlock() {
                             : 'bg-emerald-500 hover:bg-emerald-600 text-white'
                         )}
                       >
-                        {executeMutation.isPending ? (
-                          <RefreshCw className="w-3 h-3 animate-spin" />
-                        ) : (
-                          <Zap className="w-3 h-3" />
-                        )}
+                        {executeMutation.isPending ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
                         Execute
                       </Button>
 
                       {executeMutation.data && (
-                        <pre className="text-[11px] text-muted-foreground bg-muted p-3 rounded-lg border border-border whitespace-pre-wrap overflow-auto max-h-48">
-                          {typeof executeMutation.data === 'string'
-                            ? executeMutation.data
-                            : JSON.stringify(executeMutation.data, null, 2)}
-                        </pre>
+                        <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3">
+                          <pre className="text-[11px] text-muted-foreground whitespace-pre-wrap overflow-auto max-h-48 font-mono">
+                            {typeof executeMutation.data === 'string'
+                              ? executeMutation.data
+                              : JSON.stringify(executeMutation.data, null, 2)}
+                          </pre>
+                        </div>
                       )}
 
                       {executeMutation.error && (
@@ -1257,7 +1382,7 @@ function SkillsBlock() {
               ))}
             </div>
           )}
-        </div>
+        </CardContent>
       )}
     </Card>
   )
@@ -1267,18 +1392,45 @@ function SkillsBlock() {
 // Shared Components
 // ============================================================
 
+function AIMetricTile({
+  label,
+  value,
+  icon,
+  tone,
+  helper,
+}: {
+  label: string
+  value: string
+  icon: React.ReactNode
+  tone: MetricTone
+  helper?: string
+}) {
+  return (
+    <Card className={cn('border', TONE_CLASSES[tone])}>
+      <CardContent className="p-3">
+        <div className="flex items-start justify-between gap-2">
+          <p className="text-[10px] uppercase tracking-wide opacity-85">{label}</p>
+          <span className="opacity-80">{icon}</span>
+        </div>
+        <p className="mt-2 font-data text-lg font-semibold">{value}</p>
+        {helper && <p className="mt-1 text-[11px] opacity-85">{helper}</p>}
+      </CardContent>
+    </Card>
+  )
+}
+
 function LoadingSpinner() {
   return (
     <div className="flex items-center justify-center py-8">
-      <RefreshCw className="w-6 h-6 animate-spin text-muted-foreground" />
+      <RefreshCw className="w-6 h-6 animate-spin text-purple-400" />
     </div>
   )
 }
 
 function EmptyState({ message }: { message: string }) {
   return (
-    <div className="text-center py-6">
-      <AlertCircle className="w-8 h-8 text-muted-foreground mx-auto mb-2" />
+    <div className="text-center py-8">
+      <Bot className="w-10 h-10 text-muted-foreground/30 mx-auto mb-3" />
       <p className="text-xs text-muted-foreground">{message}</p>
     </div>
   )
@@ -1295,51 +1447,30 @@ function ErrorBanner({ message }: { message: string }) {
   )
 }
 
-function MiniStat({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div className="bg-muted rounded-lg p-3 border border-border">
-      <p className="text-[10px] text-muted-foreground">{label}</p>
-      <p className="text-sm font-semibold mt-0.5">{value}</p>
-    </div>
-  )
-}
-
-function ScoreCard({ label, value }: { label: string; value: number }) {
-  const color = value >= 0.7 ? 'text-green-400' : value >= 0.4 ? 'text-yellow-400' : 'text-red-400'
-  return (
-    <div className="bg-muted rounded-lg p-3 border border-border text-center">
-      <p className="text-[10px] text-muted-foreground">{label}</p>
-      <p className={cn('text-lg font-bold mt-0.5', color)}>
-        {typeof value === 'number' ? value.toFixed(2) : value ?? 'N/A'}
-      </p>
-    </div>
-  )
-}
-
 function ScoreBadge({ label, value }: { label: string; value: number }) {
   const color =
     value >= 0.7
-      ? 'bg-green-500/10 text-green-400 border-green-500/20'
+      ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
       : value >= 0.4
-        ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20'
+        ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
         : 'bg-red-500/10 text-red-400 border-red-500/20'
   return (
-    <Badge variant="outline" className={cn('rounded border-transparent text-[10px]', color)}>
+    <Badge variant="outline" className={cn('rounded text-[10px]', color)}>
       {label}: {typeof value === 'number' ? value.toFixed(2) : 'N/A'}
     </Badge>
   )
 }
 
-function UsageStat({ icon, label, value }: { icon: React.ReactNode; label: string; value: string | number }) {
-  return (
-    <div className="bg-muted rounded-lg p-3 border border-border">
-      <div className="flex items-center gap-1.5 mb-0.5">
-        {icon}
-        <p className="text-[10px] text-muted-foreground">{label}</p>
-      </div>
-      <p className="text-sm font-semibold">{value}</p>
-    </div>
-  )
+function scoreTone(value: number): MetricTone {
+  if (value >= 0.7) return 'good'
+  if (value >= 0.4) return 'warn'
+  return 'bad'
+}
+
+function inverseScoreTone(value: number): MetricTone {
+  if (value >= 0.7) return 'bad'
+  if (value >= 0.4) return 'warn'
+  return 'good'
 }
 
 function formatNumber(num: number): string {
