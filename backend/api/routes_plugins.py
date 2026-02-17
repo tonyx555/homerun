@@ -105,7 +105,7 @@ class PluginResponse(BaseModel):
     runtime: Optional[dict] = None
 
 
-def _extract_config_schema(p: StrategyPlugin) -> dict | None:
+def _extract_config_schema(p: StrategyPlugin) -> Optional[dict]:
     """Extract config_schema from the config._schema key or seed catalog."""
     cfg = p.config or {}
     if isinstance(cfg, dict) and "_schema" in cfg:
@@ -376,6 +376,8 @@ async def get_plugin_docs():
             {"module": "services.ws_feeds", "items": "Realtime feed helpers"},
             {"module": "services.chainlink_feed", "items": "Chainlink-derived helpers"},
             {"module": "services.fee_model", "items": "fee_model"},
+            {"module": "services.ai", "items": "LLM provider (get_llm_manager, LLMMessage, LLMResponse)"},
+            {"module": "services.strategy_sdk", "items": "High-level strategy helpers (StrategySDK)"},
             {"module": "config", "items": "settings (app configuration)"},
             {"module": "httpx", "items": "HTTP client"},
             {"module": "asyncio", "items": "Async orchestration"},
@@ -405,6 +407,131 @@ async def get_plugin_docs():
             "multiprocessing — No process-based concurrency",
             "importlib, inspect, ast — No code introspection",
         ],
+        "ai_integration": {
+            "description": (
+                "Strategy plugins can make LLM calls using the AI provider system. "
+                "This supports OpenAI, Anthropic, Google (Gemini), xAI (Grok), DeepSeek, Ollama, and LM Studio. "
+                "API keys are managed in the app settings — your strategy code does not need to handle keys."
+            ),
+            "usage": (
+                "from services.ai import get_llm_manager\n"
+                "from services.ai.llm_provider import LLMMessage\n\n"
+                "async def _ask_llm(self, prompt: str) -> str:\n"
+                "    manager = get_llm_manager()\n"
+                "    if not manager.is_available():\n"
+                "        return ''\n"
+                "    response = await manager.chat(\n"
+                "        messages=[LLMMessage(role='user', content=prompt)],\n"
+                "        model='gpt-4o-mini',\n"
+                "        purpose='custom_strategy',\n"
+                "    )\n"
+                "    return response.content"
+            ),
+            "structured_output": (
+                "from services.ai import get_llm_manager\n"
+                "from services.ai.llm_provider import LLMMessage\n\n"
+                "schema = {'type': 'object', 'properties': {'score': {'type': 'number'}, 'reasoning': {'type': 'string'}}}\n"
+                "result = await manager.structured_output(\n"
+                "    messages=[LLMMessage(role='system', content='You are a market analyst.'),\n"
+                "             LLMMessage(role='user', content='Rate this opportunity...')],\n"
+                "    schema=schema,\n"
+                "    model='gpt-4o-mini',\n"
+                "    purpose='custom_strategy',\n"
+                ")\n"
+                "score = result.get('score', 0)"
+            ),
+            "available_classes": {
+                "LLMMessage": "LLMMessage(role, content) — 'system', 'user', or 'assistant'",
+                "LLMResponse": "LLMResponse(content, tool_calls, usage, model, provider, latency_ms)",
+                "ToolDefinition": "ToolDefinition(name, description, parameters) — for function calling",
+                "ToolCall": "ToolCall(id, name, arguments) — parsed tool call from response",
+            },
+            "notes": [
+                "LLM calls are async — use asyncio.get_event_loop().run_until_complete() if called from sync detect()",
+                "Calls respect the global pause state — they are blocked when the system is paused",
+                "Usage is logged automatically to the LLMUsageLog table with cost tracking",
+                "Always set purpose='custom_strategy' for usage attribution",
+            ],
+        },
+        "strategy_sdk": {
+            "description": (
+                "The strategy SDK module provides high-level helpers that wrap common operations. "
+                "Import it with: from services.strategy_sdk import StrategySDK"
+            ),
+            "methods": {
+                "get_live_price(market, prices)": "Get the best available mid price for a market",
+                "get_spread_bps(market, prices)": "Get the bid-ask spread in basis points",
+                "ask_llm(prompt, model, purpose)": "Send a simple prompt to an LLM and get the text response",
+                "ask_llm_json(prompt, schema, model, purpose)": "Get structured JSON from an LLM",
+                "get_chainlink_price(asset)": "Get the latest Chainlink oracle price for BTC/ETH/SOL/XRP",
+                "get_news_for_market(market)": "Get recent news articles matched to a market",
+                "calculate_fees(cost, payout, n_legs)": "Calculate comprehensive fees for a trade",
+            },
+        },
+        "cookbook": {
+            "description": "Common patterns and recipes for strategy development",
+            "recipes": {
+                "iterate_markets_with_live_prices": (
+                    "for market in markets:\n"
+                    "    if market.closed or not market.active:\n"
+                    "        continue\n"
+                    "    if len(market.outcome_prices) != 2:\n"
+                    "        continue\n"
+                    "    yes_id = market.clob_token_ids[0] if market.clob_token_ids else None\n"
+                    "    no_id = market.clob_token_ids[1] if len(market.clob_token_ids or []) > 1 else None\n"
+                    "    yes_price = prices.get(yes_id, {}).get('mid', market.yes_price) if yes_id else market.yes_price\n"
+                    "    no_price = prices.get(no_id, {}).get('mid', market.no_price) if no_id else market.no_price"
+                ),
+                "group_markets_by_event": (
+                    "from collections import defaultdict\n"
+                    "event_markets = defaultdict(list)\n"
+                    "for event in events:\n"
+                    "    for market in event.markets:\n"
+                    "        if market.active and not market.closed:\n"
+                    "            event_markets[event.id].append(market)"
+                ),
+                "check_spread_before_trading": (
+                    "from services.ws_feeds import get_feed_manager\n"
+                    "feed = get_feed_manager()\n"
+                    "spread_bps = feed.cache.get_spread_bps(token_id)\n"
+                    "if spread_bps is not None and spread_bps > 200:  # 2% spread\n"
+                    "    continue  # Skip wide-spread markets"
+                ),
+                "use_chainlink_oracle_prices": (
+                    "from services.chainlink_feed import get_chainlink_feed\n"
+                    "feed = get_chainlink_feed()\n"
+                    "btc = feed.get_price('BTC')\n"
+                    "if btc:\n"
+                    "    current_btc_price = btc.price  # e.g. 97234.56"
+                ),
+                "filter_by_category": (
+                    "crypto_events = [e for e in events if e.category == 'crypto']\n"
+                    "politics_markets = [m for m in markets if any(\n"
+                    "    e.category == 'politics' for e in events if any(em.id == m.id for em in e.markets)\n"
+                    ")]"
+                ),
+                "create_multi_leg_opportunity": (
+                    "positions = []\n"
+                    "total_cost = 0.0\n"
+                    "involved_markets = []\n"
+                    "for market, side, price in legs:\n"
+                    "    token_idx = 0 if side == 'YES' else 1\n"
+                    "    token_id = market.clob_token_ids[token_idx] if len(market.clob_token_ids) > token_idx else None\n"
+                    "    positions.append({'action': 'BUY', 'outcome': side, 'price': price, 'token_id': token_id})\n"
+                    "    total_cost += price\n"
+                    "    involved_markets.append(market)\n"
+                    "opp = self.create_opportunity(\n"
+                    "    title='Multi-leg edge',\n"
+                    "    description='Cross-market structural opportunity',\n"
+                    "    total_cost=total_cost,\n"
+                    "    markets=involved_markets,\n"
+                    "    positions=positions,\n"
+                    "    expected_payout=1.0,\n"
+                    "    is_guaranteed=True,\n"
+                    ")"
+                ),
+            },
+        },
     }
 
 

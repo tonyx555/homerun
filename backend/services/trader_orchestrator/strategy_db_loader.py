@@ -23,6 +23,14 @@ ALLOWED_IMPORT_PREFIXES = {
     # Strategy runtime APIs
     "services.trader_orchestrator.strategies.base",
     "services.trader_orchestrator.strategies",
+    # Platform services
+    "services.ai",
+    "services.ws_feeds",
+    "services.chainlink_feed",
+    "services.fee_model",
+    "services.strategy_sdk",
+    "config",
+    "models",
     # Safe stdlib subset
     "math",
     "statistics",
@@ -34,6 +42,7 @@ ALLOWED_IMPORT_PREFIXES = {
     "hashlib",
     "itertools",
     "json",
+    "logging",
     "operator",
     "re",
     "typing",

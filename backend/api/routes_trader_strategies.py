@@ -171,34 +171,169 @@ async def get_trader_strategy_docs():
             "title": "Trader Strategy API Reference",
             "description": (
                 "Trader strategies are DB-hosted executable classes evaluated by the orchestrator "
-                "for each trade signal."
+                "for each trade signal. They decide whether a detected signal should be traded, "
+                "at what size, and with what confidence."
             ),
         },
         "class_structure": {
             "required_base_class": "BaseTraderStrategy",
             "required_method": "evaluate(self, signal, context) -> StrategyDecision",
             "required_attributes": {
-                "key": "Unique strategy key string",
+                "key": "str — Unique strategy key (e.g. 'my_custom_strategy')",
             },
+            "imports": (
+                "from services.trader_orchestrator.strategies.base import "
+                "BaseTraderStrategy, StrategyDecision, DecisionCheck"
+            ),
         },
         "evaluate_method": {
             "signature": "def evaluate(self, signal, context) -> StrategyDecision",
+            "description": "Called for each pending trade signal. Return a decision.",
             "parameters": {
-                "signal": "TradeSignal ORM row with source/market/edge/confidence payload",
-                "context": "Dict containing trader, source config, strategy params, and runtime hints",
+                "signal": {
+                    "type": "TradeSignal ORM row",
+                    "fields": {
+                        "source": "str — Signal source (e.g. 'scanner', 'crypto', 'news', 'weather', 'traders')",
+                        "signal_type": "str — Type of signal (e.g. 'scanner_opportunity', 'crypto_worker_multistrat')",
+                        "direction": "str — 'BUY' or 'SELL'",
+                        "edge_percent": "float — Estimated edge as a percentage",
+                        "confidence": "float — Confidence score (0-1)",
+                        "entry_price": "float — Suggested entry price",
+                        "liquidity": "float — Market liquidity in USD",
+                        "payload_json": "dict — Source-specific payload with extra data",
+                        "created_at": "datetime — When the signal was emitted",
+                        "market_id": "str — The market this signal targets",
+                    },
+                },
+                "context": {
+                    "type": "dict",
+                    "fields": {
+                        "params": "dict — Strategy parameters (defaults merged with user overrides from UI)",
+                        "trader": "ORM row — The trader this strategy is evaluating for",
+                        "mode": "str — 'paper' or 'live'",
+                        "live_market": "dict | None — Live market context when in live mode",
+                        "source_config": "dict — The source configuration for this signal type",
+                    },
+                },
             },
-            "returns": "StrategyDecision(decision='approved|blocked|skipped', reason, score, checks, payload)",
+            "returns": {
+                "type": "StrategyDecision",
+                "fields": {
+                    "decision": "str — 'selected' | 'skipped' | 'blocked' | 'failed'",
+                    "reason": "str — Human-readable explanation",
+                    "score": "float — Numeric ranking score (higher = stronger signal)",
+                    "size_usd": "float | None — Trade size in USD (when selected)",
+                    "checks": "list[DecisionCheck] — Gate results explaining the decision",
+                    "payload": "dict — Arbitrary diagnostic data",
+                },
+            },
         },
         "decision_checks": {
-            "description": "Attach DecisionCheck rows to explain each gate in the final decision.",
-            "signature": "DecisionCheck(key, label, passed, detail=None, value=None)",
+            "description": (
+                "Attach DecisionCheck rows to explain each gate/filter in the decision. "
+                "These are shown in the UI as a checklist for transparency."
+            ),
+            "signature": "DecisionCheck(key, label, passed, score=None, detail=None, payload=None)",
+            "example": (
+                "checks = [\n"
+                "    DecisionCheck('edge_gate', 'Minimum edge', signal.edge_percent >= min_edge,\n"
+                "                  score=signal.edge_percent, detail=f'{signal.edge_percent:.1f}% vs {min_edge}% min'),\n"
+                "    DecisionCheck('confidence_gate', 'Confidence threshold', signal.confidence >= 0.6,\n"
+                "                  score=signal.confidence, detail=f'{signal.confidence:.0%} confidence'),\n"
+                "    DecisionCheck('liquidity_gate', 'Minimum liquidity', signal.liquidity >= 1000,\n"
+                "                  detail=f'${signal.liquidity:,.0f} available'),\n"
+                "]"
+            ),
         },
+        "sizing": {
+            "description": (
+                "Set size_usd on your StrategyDecision to control trade sizing. "
+                "The risk manager may further cap this based on portfolio limits."
+            ),
+            "example": (
+                "base_size = context['params'].get('base_size_usd', 25.0)\n"
+                "size = base_size * signal.confidence * min(signal.edge_percent / 5.0, 2.0)\n"
+                "return StrategyDecision(\n"
+                "    decision='selected',\n"
+                "    reason=f'Edge {signal.edge_percent:.1f}% with {signal.confidence:.0%} confidence',\n"
+                "    score=signal.edge_percent * signal.confidence,\n"
+                "    size_usd=round(size, 2),\n"
+                "    checks=checks,\n"
+                ")"
+            ),
+        },
+        "allowed_imports": [
+            {"module": "services.trader_orchestrator.strategies.base", "items": "BaseTraderStrategy, StrategyDecision, DecisionCheck"},
+            {"module": "services.trader_orchestrator.strategies", "items": "Built-in trader strategy modules"},
+            {"module": "math", "items": "Standard math functions"},
+            {"module": "statistics", "items": "Statistical functions"},
+            {"module": "collections", "items": "defaultdict, Counter, etc."},
+            {"module": "datetime", "items": "datetime, timedelta"},
+            {"module": "json", "items": "JSON parsing"},
+            {"module": "re", "items": "Regular expressions"},
+            {"module": "typing", "items": "Type hints"},
+            {"module": "dataclasses", "items": "Dataclass decorators"},
+            {"module": "random", "items": "Random number generation"},
+        ],
+        "blocked_imports": [
+            "os, sys, subprocess — No filesystem or process access",
+            "httpx, requests, aiohttp — No direct HTTP (use services layer)",
+            "numpy, scipy — Not available in trader strategies",
+            "asyncio, threading — No async/concurrent operations",
+            "pickle, marshal — No serialization",
+        ],
         "safety": {
             "description": "Source code is validated with AST restrictions before compile/load.",
             "notes": [
-                "Unsafe imports are blocked.",
-                "Invalid strategies are marked error and blocked per strategy key.",
+                "Unsafe imports are blocked at load time via AST inspection",
+                "Blocked function calls: exec(), eval(), compile(), __import__(), open(), input()",
+                "Invalid strategies are marked with error status and skipped",
             ],
+        },
+        "cookbook": {
+            "description": "Common patterns for trader strategy development",
+            "recipes": {
+                "basic_edge_confidence_strategy": (
+                    "def evaluate(self, signal, context):\n"
+                    "    params = context['params']\n"
+                    "    min_edge = params.get('min_edge', 3.0)\n"
+                    "    min_confidence = params.get('min_confidence', 0.6)\n"
+                    "    checks = [\n"
+                    "        DecisionCheck('edge', 'Min edge', signal.edge_percent >= min_edge,\n"
+                    "                      detail=f'{signal.edge_percent:.1f}%'),\n"
+                    "        DecisionCheck('confidence', 'Min confidence', signal.confidence >= min_confidence,\n"
+                    "                      detail=f'{signal.confidence:.0%}'),\n"
+                    "    ]\n"
+                    "    if all(c.passed for c in checks):\n"
+                    "        return StrategyDecision('selected', 'Passed all gates',\n"
+                    "                                signal.edge_percent * signal.confidence,\n"
+                    "                                checks=checks, size_usd=25.0)\n"
+                    "    return StrategyDecision('skipped', 'Failed gates', 0, checks=checks)"
+                ),
+                "source_specific_logic": (
+                    "def evaluate(self, signal, context):\n"
+                    "    source = signal.source\n"
+                    "    payload = signal.payload_json or {}\n"
+                    "    if source == 'scanner':\n"
+                    "        roi = payload.get('roi_percent', 0)\n"
+                    "        guaranteed = payload.get('is_guaranteed', False)\n"
+                    "        # Structural arb: lower threshold\n"
+                    "        min_edge = 1.5 if guaranteed else 5.0\n"
+                    "    elif source == 'crypto':\n"
+                    "        mode = payload.get('mode', 'directional')\n"
+                    "        min_edge = 2.0 if mode == 'pure_arb' else 4.0\n"
+                    "    else:\n"
+                    "        min_edge = 5.0"
+                ),
+                "mode_aware_sizing": (
+                    "mode = context.get('mode', 'paper')\n"
+                    "base_size = context['params'].get('base_size_usd', 25.0)\n"
+                    "if mode == 'live':\n"
+                    "    # More conservative in live mode\n"
+                    "    base_size *= 0.5\n"
+                    "size = base_size * min(signal.confidence, 1.0)"
+                ),
+            },
         },
     }
 

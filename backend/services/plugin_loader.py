@@ -166,6 +166,8 @@ ALLOWED_IMPORT_PREFIXES = {
     "services.ws_feeds",
     "services.chainlink_feed",
     "services.fee_model",
+    "services.ai",
+    "services.strategy_sdk",
     "config",
     "utils",
     # Standard library (safe subset)

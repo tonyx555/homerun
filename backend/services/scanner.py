@@ -818,7 +818,7 @@ class ArbitrageScanner:
 
     async def scan_once(
         self,
-        targeted_condition_ids: list[str] | None = None,
+        targeted_condition_ids: Optional[list] = None,
     ) -> list[ArbitrageOpportunity]:
         """Perform a single scan for arbitrage opportunities.
 
