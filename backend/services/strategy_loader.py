@@ -785,6 +785,16 @@ class StrategyLoader:
             for row in rows:
                 slug = str(row.slug or "").strip().lower()
 
+                # Compute hash of the incoming source code for change detection
+                new_source_hash = hashlib.sha256((row.source_code or "").encode("utf-8")).hexdigest()[:16]
+                current_loaded = next_loaded.get(slug)
+
+                # Skip reload if already loaded with identical source and still enabled
+                if current_loaded and current_loaded.source_hash == new_source_hash and bool(row.enabled):
+                    row.status = "loaded"
+                    row.updated_at = utcnow()
+                    continue
+
                 # Clear previous state for this slug
                 if slug in next_loaded:
                     self.unload(slug)

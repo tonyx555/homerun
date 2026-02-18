@@ -564,7 +564,7 @@ export interface CryptoMarket {
 
 export const getCryptoMarkets = async (params?: { viewer_active?: boolean }): Promise<CryptoMarket[]> => {
   const { data } = await api.get('/crypto/markets', { params })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 // ==================== OPPORTUNITY COUNTS ====================
@@ -585,7 +585,7 @@ export const getOpportunityCounts = async (params?: {
   category?: string
 }): Promise<OpportunityCounts> => {
   const { data } = await api.get('/opportunities/counts', { params })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const searchPolymarketOpportunities = async (params: {
@@ -602,46 +602,46 @@ export const searchPolymarketOpportunities = async (params: {
 
 export const evaluateSearchResults = async (conditionIds: string[]): Promise<{ status: string; count: number; message: string }> => {
   const { data } = await api.post('/opportunities/search-polymarket/evaluate', { condition_ids: conditionIds })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const triggerScan = async () => {
   const { data } = await api.post('/scan')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const clearOpportunities = async () => {
   const { data } = await api.delete('/opportunities')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 // ==================== SCANNER ====================
 
 export const getScannerStatus = async (): Promise<ScannerStatus> => {
   const { data } = await api.get('/scanner/status')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const startScanner = async (): Promise<ScannerStatus> => {
   const { data } = await api.post('/scanner/start')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const pauseScanner = async (): Promise<ScannerStatus> => {
   const { data } = await api.post('/scanner/pause')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const setScannerInterval = async (intervalSeconds: number): Promise<ScannerStatus> => {
   const { data } = await api.post('/scanner/interval', null, {
     params: { interval_seconds: intervalSeconds }
   })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getStrategies = async (): Promise<Strategy[]> => {
   const { data } = await api.get('/strategies')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 // ==================== PLUGINS ====================
@@ -692,7 +692,7 @@ export interface PluginValidation {
 
 export const getPlugins = async (): Promise<StrategyPlugin[]> => {
   const { data } = await api.get('/strategy-manager')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const createPlugin = async (plugin: {
@@ -705,7 +705,7 @@ export const createPlugin = async (plugin: {
   enabled?: boolean
 }): Promise<StrategyPlugin> => {
   const { data } = await api.post('/strategy-manager', plugin)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const updatePlugin = async (
@@ -721,7 +721,7 @@ export const updatePlugin = async (
   }>
 ): Promise<StrategyPlugin> => {
   const { data } = await api.put(`/strategy-manager/${id}`, updates)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const deletePlugin = async (id: string): Promise<void> => {
@@ -730,7 +730,7 @@ export const deletePlugin = async (id: string): Promise<void> => {
 
 export const validatePlugin = async (source_code: string): Promise<PluginValidation> => {
   const { data } = await api.post('/strategy-manager/validate', { source_code })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getPluginTemplate = async (): Promise<{
@@ -739,7 +739,7 @@ export const getPluginTemplate = async (): Promise<{
   available_imports: string[]
 }> => {
   const { data } = await api.get('/strategy-manager/template')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const reloadPlugin = async (id: string): Promise<{
@@ -748,13 +748,16 @@ export const reloadPlugin = async (id: string): Promise<{
   runtime: PluginRuntime | null
 }> => {
   const { data } = await api.post(`/strategy-manager/${id}/reload`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const getPluginDocs = async (): Promise<Record<string, any>> => {
   const { data } = await api.get('/strategy-manager/docs')
-  return data
+  if (Array.isArray(data)) {
+    return {}
+  }
+  return (data?.items && !Array.isArray(data.items) ? data.items : data) ?? {}
 }
 
 export type OpportunityStrategyDefinition = StrategyPlugin
@@ -809,26 +812,29 @@ export const deleteOpportunityStrategy = async (id: string): Promise<void> => {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const getTraderStrategyDocs = async (): Promise<Record<string, any>> => {
   const { data } = await api.get('/strategy-manager/docs')
-  return data
+  if (Array.isArray(data)) {
+    return {}
+  }
+  return (data?.items && !Array.isArray(data.items) ? data.items : data) ?? {}
 }
 
 // ==================== WALLETS ====================
 
 export const getWallets = async (): Promise<Wallet[]> => {
   const { data } = await api.get('/wallets')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const addWallet = async (address: string, label?: string): Promise<{ status: string; address: string; label: string | null }> => {
   const { data } = await api.post('/wallets', null, {
     params: { address, label }
   })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const removeWallet = async (address: string): Promise<{ status: string; message: string }> => {
   const { data } = await api.delete(`/wallets/${address}`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 // Recent trades from tracked wallets
@@ -903,7 +909,7 @@ export const getRecentTradesFromWallets = async (params?: {
   hours?: number
 }): Promise<RecentTradesResponse> => {
   const { data } = await api.get('/wallets/recent-trades/all', { params })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getTrackedTraderOpportunities = async (params?: {
@@ -913,19 +919,19 @@ export const getTrackedTraderOpportunities = async (params?: {
   const { data } = await api.get('/discovery/opportunities/tracked-traders', {
     params,
   })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getWalletPositions = async (address: string): Promise<{ address: string; positions: WalletPosition[] }> => {
   const { data } = await api.get(`/wallets/${address}/positions`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getWalletTrades = async (address: string, limit = 100): Promise<{ address: string; trades: WalletTrade[] }> => {
   const { data } = await api.get(`/wallets/${address}/trades`, {
     params: { limit }
   })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 // ==================== MARKETS ====================
@@ -936,7 +942,7 @@ export const getMarkets = async (params?: {
   offset?: number
 }): Promise<Market[]> => {
   const { data } = await api.get('/markets', { params })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getEvents = async (params?: {
@@ -945,7 +951,7 @@ export const getEvents = async (params?: {
   offset?: number
 }): Promise<Record<string, any>[]> => {
   const { data } = await api.get('/events', { params })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 // ==================== SIMULATION ====================
@@ -957,32 +963,32 @@ export const createSimulationAccount = async (params: {
   max_positions?: number
 }): Promise<{ account_id: string; name: string; initial_capital: number; message: string }> => {
   const { data } = await api.post('/simulation/accounts', params, { timeout: 20_000 })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getSimulationAccounts = async (): Promise<SimulationAccount[]> => {
   const { data } = await api.get('/simulation/accounts')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getSimulationAccount = async (accountId: string): Promise<SimulationAccount> => {
   const { data } = await api.get(`/simulation/accounts/${accountId}`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const deleteSimulationAccount = async (accountId: string): Promise<{ message: string; account_id: string }> => {
   const { data } = await api.delete(`/simulation/accounts/${accountId}`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getAccountPositions = async (accountId: string): Promise<SimulationPosition[]> => {
   const { data } = await api.get(`/simulation/accounts/${accountId}/positions`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getAccountTrades = async (accountId: string, limit = 50): Promise<SimulationTrade[]> => {
   const { data } = await api.get(`/simulation/accounts/${accountId}/trades`, { params: { limit } })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const executeOpportunity = async (
@@ -998,24 +1004,24 @@ export const executeOpportunity = async (
     take_profit_price: takeProfitPrice,
     stop_loss_price: stopLossPrice
   })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getAccountPerformance = async (accountId: string): Promise<Record<string, any>> => {
   const { data } = await api.get(`/simulation/accounts/${accountId}/performance`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getAccountEquityHistory = async (accountId: string): Promise<EquityHistoryResponse> => {
   const { data } = await api.get(`/simulation/accounts/${accountId}/equity-history`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 // ==================== COPY TRADING ====================
 
 export const getCopyConfigs = async (accountId?: string): Promise<CopyConfig[]> => {
   const { data } = await api.get('/copy-trading/configs', { params: { account_id: accountId } })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const createCopyConfig = async (params: {
@@ -1033,12 +1039,12 @@ export const createCopyConfig = async (params: {
   copy_sells?: boolean
 }): Promise<{ config_id: string; source_type: CopySourceType; source_wallet: string | null; account_id: string; enabled: boolean; copy_mode: string; message: string }> => {
   const { data } = await api.post('/copy-trading/configs', params)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getActiveCopyMode = async (): Promise<ActiveCopyMode> => {
   const { data } = await api.get('/copy-trading/configs/active-mode')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const updateCopyConfig = async (configId: string, params: {
@@ -1054,27 +1060,27 @@ export const updateCopyConfig = async (configId: string, params: {
   copy_sells?: boolean
 }): Promise<{ message: string; config_id: string }> => {
   const { data } = await api.patch(`/copy-trading/configs/${configId}`, params)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const deleteCopyConfig = async (configId: string): Promise<{ message: string; config_id: string }> => {
   const { data } = await api.delete(`/copy-trading/configs/${configId}`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const enableCopyConfig = async (configId: string): Promise<{ message: string; config_id: string }> => {
   const { data } = await api.post(`/copy-trading/configs/${configId}/enable`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const disableCopyConfig = async (configId: string): Promise<{ message: string; config_id: string }> => {
   const { data } = await api.post(`/copy-trading/configs/${configId}/disable`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const forceSyncCopyConfig = async (configId: string): Promise<Record<string, any>> => {
   const { data } = await api.post(`/copy-trading/configs/${configId}/sync`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getCopyTrades = async (params?: {
@@ -1084,19 +1090,19 @@ export const getCopyTrades = async (params?: {
   offset?: number
 }): Promise<CopiedTrade[]> => {
   const { data } = await api.get('/copy-trading/trades', { params })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getCopyTradingStatus = async (): Promise<CopyTradingStatus> => {
   const { data } = await api.get('/copy-trading/status')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 // ==================== ANOMALY DETECTION ====================
 
 export const analyzeWallet = async (address: string): Promise<WalletAnalysis> => {
   const { data } = await api.get(`/anomaly/analyze/${address}`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const findProfitableWallets = async (params?: {
@@ -1106,7 +1112,7 @@ export const findProfitableWallets = async (params?: {
   max_anomaly_score?: number
 }): Promise<{ count: number; wallets: WalletAnalysis[] }> => {
   const { data } = await api.post('/anomaly/find-profitable', params || {})
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getAnomalies = async (params?: {
@@ -1115,34 +1121,34 @@ export const getAnomalies = async (params?: {
   limit?: number
 }): Promise<{ count: number; anomalies: Anomaly[] }> => {
   const { data } = await api.get('/anomaly/anomalies', { params })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const quickCheckWallet = async (address: string): Promise<{ wallet: string; is_suspicious: boolean; anomaly_score: number; critical_anomalies: number; win_rate: number; total_pnl: number; verdict: string; summary: string }> => {
   const { data } = await api.get(`/anomaly/check/${address}`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getWalletTradesAnalysis = async (address: string, limit = 100): Promise<{ wallet: string; total: number; trades: WalletTrade[] }> => {
   const { data } = await api.get(`/anomaly/wallet/${address}/trades`, { params: { limit } })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getWalletPositionsAnalysis = async (address: string): Promise<{ wallet: string; total_positions: number; total_value: number; total_unrealized_pnl: number; positions: WalletPosition[] }> => {
   const { data } = await api.get(`/anomaly/wallet/${address}/positions`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getWalletSummary = async (address: string): Promise<WalletSummary> => {
   const { data } = await api.get(`/anomaly/wallet/${address}/summary`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 // ==================== HEALTH ====================
 
 export const getHealthStatus = async (): Promise<Record<string, any>> => {
   const { data } = await api.get('/health/detailed')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 // ==================== TRADER DISCOVERY ====================
@@ -1211,7 +1217,7 @@ export interface WalletPnL {
 
 export const getLeaderboard = async (filters?: LeaderboardFilters) => {
   const { data } = await api.get('/discover/leaderboard', { params: filters })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const discoverTopTraders = async (
@@ -1226,26 +1232,26 @@ export const discoverTopTraders = async (
       ...filters
     }
   })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const discoverByWinRate = async (filters?: WinRateFilters): Promise<DiscoveredTrader[]> => {
   const { data } = await api.get('/discover/by-win-rate', { params: filters })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getWalletWinRate = async (address: string, timePeriod?: TimePeriod): Promise<WalletWinRate> => {
   const { data } = await api.get(`/discover/wallet/${address}/win-rate`, {
     params: timePeriod ? { time_period: timePeriod } : undefined
   })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const analyzeWalletPnL = async (address: string, timePeriod?: TimePeriod): Promise<WalletPnL> => {
   const { data } = await api.get(`/discover/wallet/${address}`, {
     params: timePeriod ? { time_period: timePeriod } : undefined
   })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export interface WalletProfile {
@@ -1258,7 +1264,7 @@ export interface WalletProfile {
 
 export const getWalletProfile = async (address: string): Promise<WalletProfile> => {
   const { data } = await api.get(`/wallets/${address}/profile`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 // Add time-filtered wallet PnL (for future time filter support)
@@ -1266,7 +1272,7 @@ export const analyzeWalletPnLWithFilter = async (address: string, timePeriod?: T
   const { data } = await api.get(`/discover/wallet/${address}`, {
     params: timePeriod ? { time_period: timePeriod } : undefined
   })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const analyzeAndTrackWallet = async (params: {
@@ -1276,7 +1282,7 @@ export const analyzeAndTrackWallet = async (params: {
   simulation_account_id?: string
 }) => {
   const { data } = await api.post('/discover/analyze-and-track', null, { params })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 // ==================== TRADING ====================
@@ -1322,12 +1328,12 @@ export interface Order {
 
 export const getTradingStatus = async (): Promise<TradingStatus> => {
   const { data } = await api.get('/trading/status')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const initializeTrading = async (): Promise<{ status: string; message: string }> => {
   const { data } = await api.post('/trading/initialize')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const placeOrder = async (params: {
@@ -1339,37 +1345,37 @@ export const placeOrder = async (params: {
   market_question?: string
 }): Promise<Order> => {
   const { data } = await api.post('/trading/orders', params)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getOrders = async (limit = 100, status?: string): Promise<Order[]> => {
   const { data } = await api.get('/trading/orders', { params: { limit, status } })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getOpenOrders = async (): Promise<Order[]> => {
   const { data } = await api.get('/trading/orders/open')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const cancelOrder = async (orderId: string): Promise<{ status: string; order_id: string }> => {
   const { data } = await api.delete(`/trading/orders/${orderId}`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const cancelAllOrders = async (): Promise<{ status: string; cancelled_count: number }> => {
   const { data } = await api.delete('/trading/orders')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getTradingPositions = async (): Promise<TradingPosition[]> => {
   const { data } = await api.get('/trading/positions')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getTradingBalance = async (): Promise<{ balance: number; available: number; reserved: number; currency: string; timestamp: string }> => {
   const { data } = await api.get('/trading/balance')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const executeOpportunityLive = async (params: {
@@ -1378,12 +1384,12 @@ export const executeOpportunityLive = async (params: {
   size_usd: number
 }): Promise<{ status: string; orders: Order[]; message?: string }> => {
   const { data } = await api.post('/trading/execute-opportunity', params)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const emergencyStopTrading = async (): Promise<{ status: string; cancelled_orders: number; message: string }> => {
   const { data } = await api.post('/trading/emergency-stop')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 // ==================== TRADER ORCHESTRATOR ====================
@@ -1610,7 +1616,7 @@ const mapOverviewToStatus = (overview: TraderOrchestratorOverview): TraderOrches
 
 export const getTraderOrchestratorOverview = async (): Promise<TraderOrchestratorOverview> => {
   const { data } = await api.get('/trader-orchestrator/overview')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getTraderOrchestratorStatus = async (): Promise<TraderOrchestratorStatus> => {
@@ -1648,7 +1654,7 @@ export const runTraderOrchestratorLivePreflight = async (payload?: {
     mode: payload?.mode || 'live',
     requested_by: payload?.requested_by,
   })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const armTraderOrchestratorLiveStart = async (payload: {
@@ -1661,7 +1667,7 @@ export const armTraderOrchestratorLiveStart = async (payload: {
     ttl_seconds: payload.ttl_seconds ?? 300,
     requested_by: payload.requested_by,
   })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const startTraderOrchestratorLive = async (payload: {
@@ -1674,14 +1680,14 @@ export const startTraderOrchestratorLive = async (payload: {
     mode: payload.mode || 'live',
     requested_by: payload.requested_by,
   })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const stopTraderOrchestratorLive = async (requestedBy?: string) => {
   const { data } = await api.post('/trader-orchestrator/live/stop', {
     requested_by: requestedBy,
   })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const setTraderOrchestratorLiveKillSwitch = async (enabled: boolean, requestedBy?: string) => {
@@ -1689,7 +1695,7 @@ export const setTraderOrchestratorLiveKillSwitch = async (enabled: boolean, requ
     enabled,
     requested_by: requestedBy,
   })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export type TraderSourceKey = 'scanner' | 'crypto' | 'news' | 'weather' | 'traders'
@@ -1976,22 +1982,22 @@ export const deleteTrader = async (
   message?: string
 }> => {
   const { data } = await api.delete(`/traders/${traderId}`, { params: options })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const startTrader = async (traderId: string): Promise<Trader> => {
   const { data } = await api.post(`/traders/${traderId}/start`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const pauseTrader = async (traderId: string): Promise<Trader> => {
   const { data } = await api.post(`/traders/${traderId}/pause`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const runTraderOnce = async (traderId: string): Promise<Trader> => {
   const { data } = await api.post(`/traders/${traderId}/run-once`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getTraderDecisions = async (
@@ -2043,7 +2049,7 @@ export const getTraderEvents = async (
 
 export const getTraderDecisionDetail = async (decisionId: string): Promise<TraderDecisionDetail> => {
   const { data } = await api.get(`/traders/decisions/${decisionId}`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getTraderTemplates = async (): Promise<TraderTemplate[]> => {
@@ -2057,7 +2063,7 @@ export const createTraderFromTemplate = async (payload: {
   requested_by?: string
 }): Promise<Trader> => {
   const { data } = await api.post('/traders/from-template', payload)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getTraderSources = async (): Promise<TraderSource[]> => {
@@ -2067,7 +2073,7 @@ export const getTraderSources = async (): Promise<TraderSource[]> => {
 
 export const getTraderConfigSchema = async (): Promise<TraderConfigSchema> => {
   const { data } = await api.get('/trader-sources/schema')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 // Trader strategy functions now proxy to the unified /strategy-manager API.
@@ -2122,7 +2128,7 @@ export const createTraderStrategy = async (payload: {
     config_schema: payload.param_schema_json || {},
     enabled: payload.enabled ?? true,
   })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const updateTraderStrategy = async (
@@ -2150,7 +2156,7 @@ export const updateTraderStrategy = async (
   if (payload.enabled !== undefined) unified.enabled = payload.enabled
   if (payload.unlock_system !== undefined) unified.unlock_system = payload.unlock_system
   const { data } = await api.put(`/strategy-manager/${id}`, unified)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const validateTraderStrategy = async (
@@ -2176,7 +2182,7 @@ export const reloadTraderStrategy = async (id: string): Promise<{
   strategy: TraderStrategyDefinition
 }> => {
   const { data } = await api.post(`/strategy-manager/${id}/reload`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const cloneTraderStrategy = async (
@@ -2230,7 +2236,7 @@ export const getSignals = async (params?: {
   offset?: number
 }): Promise<{ total: number; offset: number; limit: number; signals: TradeSignal[] }> => {
   const { data } = await api.get('/signals', { params })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getSignalStats = async (): Promise<{
@@ -2238,37 +2244,37 @@ export const getSignalStats = async (): Promise<{
   sources: Array<Record<string, any>>
 }> => {
   const { data } = await api.get('/signals/stats')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getWorkersStatus = async (): Promise<{ workers: WorkerStatus[] }> => {
   const { data } = await api.get('/workers/status')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const pauseAllWorkers = async (): Promise<{ status: string; workers: WorkerStatus[] }> => {
   const { data } = await api.post('/workers/pause-all')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const resumeAllWorkers = async (): Promise<{ status: string; workers: WorkerStatus[] }> => {
   const { data } = await api.post('/workers/resume-all')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const startWorker = async (worker: string) => {
   const { data } = await api.post(`/workers/${worker}/start`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const pauseWorker = async (worker: string) => {
   const { data } = await api.post(`/workers/${worker}/pause`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const runWorkerOnce = async (worker: string) => {
   const { data } = await api.post(`/workers/${worker}/run-once`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export type DatabaseFlushTarget = 'scanner' | 'weather' | 'news' | 'trader_orchestrator' | 'all'
@@ -2287,14 +2293,14 @@ export const flushDatabaseData = async (target: DatabaseFlushTarget): Promise<Da
     target,
     confirm: true,
   })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const setWorkerInterval = async (worker: string, intervalSeconds: number) => {
   const { data } = await api.post(`/workers/${worker}/interval`, null, {
     params: { interval_seconds: intervalSeconds },
   })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 // ==================== SETTINGS ====================
@@ -2614,52 +2620,52 @@ export interface UpdateSettingsRequest {
 
 export const getSettings = async (): Promise<AllSettings> => {
   const { data } = await api.get('/settings')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const updateSettings = async (settings: UpdateSettingsRequest): Promise<{ status: string; message: string; updated_at: string }> => {
   const { data } = await api.put('/settings', settings)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const updatePolymarketSettings = async (settings: Partial<PolymarketSettings>): Promise<{ status: string; message: string }> => {
   const { data } = await api.put('/settings/polymarket', settings)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const updateLLMSettings = async (settings: Partial<LLMSettings>): Promise<{ status: string; message: string }> => {
   const { data } = await api.put('/settings/llm', settings)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const updateNotificationSettings = async (settings: Partial<NotificationSettings>): Promise<{ status: string; message: string }> => {
   const { data } = await api.put('/settings/notifications', settings)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const updateScannerSettings = async (settings: Partial<ScannerSettings>): Promise<{ status: string; message: string }> => {
   const { data } = await api.put('/settings/scanner', settings)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const updateTradingSettings = async (settings: Partial<TradingSettingsConfig>): Promise<{ status: string; message: string }> => {
   const { data } = await api.put('/settings/trading', settings)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const updateMaintenanceSettings = async (settings: Partial<MaintenanceSettings>): Promise<{ status: string; message: string }> => {
   const { data } = await api.put('/settings/maintenance', settings)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getDiscoverySettings = async (): Promise<DiscoverySettings> => {
   const { data } = await api.get('/settings/discovery')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const updateDiscoverySettings = async (settings: Partial<DiscoverySettings>): Promise<{ status: string; message: string }> => {
   const { data } = await api.put('/settings/discovery', settings)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export interface LLMModelOption {
@@ -2679,27 +2685,27 @@ export interface RefreshModelsResponse {
 
 export const getLLMModels = async (provider?: string): Promise<LLMModelsResponse> => {
   const { data } = await api.get('/settings/llm/models', { params: provider ? { provider } : undefined })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const refreshLLMModels = async (provider?: string): Promise<RefreshModelsResponse> => {
   const { data } = await api.post('/settings/llm/models/refresh', null, { params: provider ? { provider } : undefined })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const testPolymarketConnection = async (): Promise<{ status: string; message: string }> => {
   const { data } = await api.post('/settings/test/polymarket')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const testTelegramConnection = async (): Promise<{ status: string; message: string }> => {
   const { data } = await api.post('/settings/test/telegram')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const testTradingProxy = async (): Promise<{ status: string; message: string; proxy_enabled?: boolean; proxy_ip?: string; direct_ip?: string; vpn_active?: boolean }> => {
   const { data } = await api.post('/settings/test/trading-proxy')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 // ==================== VALIDATION / BACKTESTING ====================
@@ -2822,7 +2828,7 @@ export interface ValidationStrategyHealth {
 
 export const getValidationOverview = async (): Promise<ValidationOverview> => {
   const { data } = await api.get('/validation/overview')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const runValidationBacktest = async (payload?: BacktestRequest): Promise<{
@@ -2830,7 +2836,7 @@ export const runValidationBacktest = async (payload?: BacktestRequest): Promise<
   job_id: string
 }> => {
   const { data } = await api.post('/validation/jobs/backtest', payload || {})
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const runValidationOptimization = async (payload?: OptimizationRequest): Promise<{
@@ -2838,7 +2844,7 @@ export const runValidationOptimization = async (payload?: OptimizationRequest): 
   job_id: string
 }> => {
   const { data } = await api.post('/validation/jobs/optimize', payload || {})
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export interface ExecutionSimulationRequest {
@@ -2899,17 +2905,17 @@ export const runExecutionSimulationJob = async (
   payload: ExecutionSimulationRequest
 ): Promise<{ status: string; job_id: string }> => {
   const { data } = await api.post('/validation/simulator/jobs', payload)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getExecutionSimulationRuns = async (limit = 50): Promise<{ runs: ExecutionSimRun[] }> => {
   const { data } = await api.get('/validation/simulator/runs', { params: { limit } })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getExecutionSimulationRun = async (runId: string): Promise<ExecutionSimRun> => {
   const { data } = await api.get(`/validation/simulator/runs/${runId}`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getExecutionSimulationEvents = async (
@@ -2917,42 +2923,42 @@ export const getExecutionSimulationEvents = async (
   params?: { limit?: number; offset?: number }
 ): Promise<{ events: ExecutionSimEvent[] }> => {
   const { data } = await api.get(`/validation/simulator/runs/${runId}/events`, { params })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getValidationJobs = async (limit = 50): Promise<{ jobs: ValidationJob[] }> => {
   const { data } = await api.get('/validation/jobs', { params: { limit } })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getValidationJob = async (jobId: string): Promise<ValidationJob> => {
   const { data } = await api.get(`/validation/jobs/${jobId}`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const cancelValidationJob = async (jobId: string): Promise<{ status: string; job_id: string }> => {
   const { data } = await api.post(`/validation/jobs/${jobId}/cancel`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getValidationGuardrailConfig = async (): Promise<ValidationGuardrailConfig> => {
   const { data } = await api.get('/validation/guardrails/config')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const updateValidationGuardrailConfig = async (patch: Partial<ValidationGuardrailConfig>): Promise<ValidationGuardrailConfig> => {
   const { data } = await api.put('/validation/guardrails/config', patch)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const evaluateValidationGuardrails = async (): Promise<Record<string, unknown>> => {
   const { data } = await api.post('/validation/guardrails/evaluate')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getValidationStrategyHealth = async (): Promise<{ strategy_health: ValidationStrategyHealth[] }> => {
   const { data } = await api.get('/validation/strategy-health')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const overrideValidationStrategy = async (
@@ -2963,12 +2969,12 @@ export const overrideValidationStrategy = async (
   const { data } = await api.post(`/validation/strategy-health/${strategyType}/override`, null, {
     params: { status, note }
   })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const clearValidationStrategyOverride = async (strategyType: string): Promise<Record<string, unknown>> => {
   const { data } = await api.delete(`/validation/strategy-health/${strategyType}/override`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getOptimizationResults = async (topK = 50): Promise<{
@@ -2976,7 +2982,7 @@ export const getOptimizationResults = async (topK = 50): Promise<{
   results: Array<Record<string, unknown>>
 }> => {
   const { data } = await api.get('/validation/optimization-results', { params: { top_k: topK } })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getValidationParameterSets = async (): Promise<{
@@ -2984,7 +2990,7 @@ export const getValidationParameterSets = async (): Promise<{
   parameter_sets: Array<Record<string, unknown>>
 }> => {
   const { data } = await api.get('/validation/parameter-sets')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const activateValidationParameterSet = async (setId: string): Promise<{
@@ -2992,7 +2998,7 @@ export const activateValidationParameterSet = async (setId: string): Promise<{
   active_set_id: string
 }> => {
   const { data } = await api.post(`/validation/parameter-sets/${setId}/activate`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 // ==================== AI INTELLIGENCE ====================
@@ -3034,12 +3040,12 @@ export interface NewsFeedStatus {
 
 export const getNewsFeedStatus = async (): Promise<NewsFeedStatus> => {
   const { data } = await api.get('/news/feed/status')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const triggerNewsFetch = async (): Promise<{ new_articles: number; total_articles: number; articles: Array<{ title: string; source: string; feed_source: string; url: string; published: string | null; category: string }> }> => {
   const { data } = await api.post('/news/feed/fetch')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getNewsArticles = async (params?: {
@@ -3049,7 +3055,7 @@ export const getNewsArticles = async (params?: {
   offset?: number
 }): Promise<{ total: number; offset: number; limit: number; has_more: boolean; articles: NewsArticle[] }> => {
   const { data } = await api.get('/news/feed/articles', { params })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const searchNewsArticles = async (params: {
@@ -3058,12 +3064,12 @@ export const searchNewsArticles = async (params: {
   limit?: number
 }): Promise<{ query: string; total: number; articles: NewsArticle[] }> => {
   const { data } = await api.get('/news/feed/search', { params })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const clearNewsArticles = async (): Promise<{ cleared: number }> => {
   const { data } = await api.delete('/news/feed/clear')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const listSkills = () => api.get('/ai/skills')
@@ -3086,7 +3092,7 @@ export interface MarketSearchResult {
 
 export const searchMarkets = async (q: string, limit = 10): Promise<{ results: MarketSearchResult[]; total: number }> => {
   const { data } = await api.get('/ai/markets/search', { params: { q, limit } })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export interface OpportunityAISummary {
@@ -3114,7 +3120,7 @@ export interface OpportunityAISummary {
 
 export const getOpportunityAISummary = async (opportunityId: string): Promise<OpportunityAISummary> => {
   const { data } = await api.get(`/ai/opportunity/${opportunityId}/summary`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export interface AIChatMessage {
@@ -3137,7 +3143,7 @@ export const sendAIChat = async (params: {
   history?: AIChatMessage[]
 }): Promise<AIChatResponse> => {
   const { data } = await api.post('/ai/chat', params, AI_TIMEOUT)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export interface AIChatSession {
@@ -3164,17 +3170,17 @@ export const listAIChatSessions = async (params?: {
   limit?: number
 }): Promise<{ sessions: AIChatSession[]; total: number }> => {
   const { data } = await api.get('/ai/chat/sessions', { params })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getAIChatSession = async (sessionId: string): Promise<AIChatSessionDetail> => {
   const { data } = await api.get(`/ai/chat/sessions/${sessionId}`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const archiveAIChatSession = async (sessionId: string): Promise<{ status: string; session_id: string }> => {
   const { data } = await api.delete(`/ai/chat/sessions/${sessionId}`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 // ==================== KALSHI ACCOUNT ====================
@@ -3209,7 +3215,7 @@ export interface KalshiPosition {
 
 export const getKalshiStatus = async (): Promise<KalshiAccountStatus> => {
   const { data } = await api.get('/kalshi/status')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const loginKalshi = async (params: {
@@ -3218,27 +3224,27 @@ export const loginKalshi = async (params: {
   api_key?: string
 }): Promise<{ status: string; message: string; authenticated: boolean; member_id?: string }> => {
   const { data } = await api.post('/kalshi/login', params)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const logoutKalshi = async (): Promise<{ status: string; message: string }> => {
   const { data } = await api.post('/kalshi/logout')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getKalshiBalance = async (): Promise<{ balance: number; available: number; reserved: number; currency: string }> => {
   const { data } = await api.get('/kalshi/balance')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getKalshiPositions = async (): Promise<KalshiPosition[]> => {
   const { data } = await api.get('/kalshi/positions')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const updateKalshiSettings = async (settings: Partial<KalshiSettings>): Promise<{ status: string; message: string }> => {
   const { data } = await api.put('/settings/kalshi', settings)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 // ==================== NEWS WORKFLOW (Independent Pipeline) ====================
@@ -3416,29 +3422,29 @@ export interface NewsWorkflowSettings {
 
 export const getNewsWorkflowStatus = async (): Promise<NewsWorkflowStatus> => {
   const { data } = await api.get('/news-workflow/status')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const runNewsWorkflow = async (): Promise<Record<string, unknown>> => {
   const { data } = await api.post('/news-workflow/run')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const startNewsWorkflow = async (): Promise<NewsWorkflowStatus> => {
   const { data } = await api.post('/news-workflow/start')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const pauseNewsWorkflow = async (): Promise<NewsWorkflowStatus> => {
   const { data } = await api.post('/news-workflow/pause')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const setNewsWorkflowInterval = async (intervalSeconds: number): Promise<NewsWorkflowStatus> => {
   const { data } = await api.post('/news-workflow/interval', null, {
     params: { interval_seconds: intervalSeconds },
   })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getNewsWorkflowFindings = async (params?: {
@@ -3450,7 +3456,7 @@ export const getNewsWorkflowFindings = async (params?: {
   offset?: number
 }): Promise<{ total: number; offset: number; limit: number; findings: NewsWorkflowFinding[] }> => {
   const { data } = await api.get('/news-workflow/findings', { params })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getNewsWorkflowIntents = async (params?: {
@@ -3458,24 +3464,24 @@ export const getNewsWorkflowIntents = async (params?: {
   limit?: number
 }): Promise<{ total: number; intents: NewsTradeIntent[] }> => {
   const { data } = await api.get('/news-workflow/intents', { params })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const skipNewsWorkflowIntent = async (intentId: string): Promise<{ status: string; intent_id: string }> => {
   const { data } = await api.post(`/news-workflow/intents/${intentId}/skip`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getNewsWorkflowSettings = async (): Promise<NewsWorkflowSettings> => {
   const { data } = await api.get('/news-workflow/settings')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const updateNewsWorkflowSettings = async (
   settings: Partial<NewsWorkflowSettings>
 ): Promise<{ status: string; settings: NewsWorkflowSettings }> => {
   const { data } = await api.put('/news-workflow/settings', settings)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 // ==================== WEATHER WORKFLOW (Independent Pipeline) ====================
@@ -3550,22 +3556,22 @@ export interface WeatherOpportunityDateBucket {
 
 export const getWeatherWorkflowStatus = async (): Promise<WeatherWorkflowStatus> => {
   const { data } = await api.get('/weather-workflow/status')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const runWeatherWorkflow = async (): Promise<Record<string, unknown>> => {
   const { data } = await api.post('/weather-workflow/run')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const startWeatherWorkflow = async (): Promise<WeatherWorkflowStatus> => {
   const { data } = await api.post('/weather-workflow/start')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const pauseWeatherWorkflow = async (): Promise<WeatherWorkflowStatus> => {
   const { data } = await api.post('/weather-workflow/pause')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const setWeatherWorkflowInterval = async (
@@ -3574,7 +3580,7 @@ export const setWeatherWorkflowInterval = async (
   const { data } = await api.post('/weather-workflow/interval', null, {
     params: { interval_seconds: intervalSeconds }
   })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getWeatherWorkflowOpportunities = async (params?: {
@@ -3588,7 +3594,7 @@ export const getWeatherWorkflowOpportunities = async (params?: {
   offset?: number
 }): Promise<{ total: number; offset: number; limit: number; opportunities: Opportunity[] }> => {
   const { data } = await api.get('/weather-workflow/opportunities', { params })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getWeatherWorkflowOpportunityDates = async (params?: {
@@ -3599,7 +3605,7 @@ export const getWeatherWorkflowOpportunityDates = async (params?: {
   include_report_only?: boolean
 }): Promise<{ total_dates: number; dates: WeatherOpportunityDateBucket[] }> => {
   const { data } = await api.get('/weather-workflow/opportunity-dates', { params })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getWeatherWorkflowIntents = async (params?: {
@@ -3607,24 +3613,24 @@ export const getWeatherWorkflowIntents = async (params?: {
   limit?: number
 }): Promise<{ total: number; intents: WeatherTradeIntent[] }> => {
   const { data } = await api.get('/weather-workflow/intents', { params })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const skipWeatherWorkflowIntent = async (intentId: string): Promise<{ status: string; intent_id: string }> => {
   const { data } = await api.post(`/weather-workflow/intents/${intentId}/skip`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getWeatherWorkflowSettings = async (): Promise<WeatherWorkflowSettings> => {
   const { data } = await api.get('/weather-workflow/settings')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const updateWeatherWorkflowSettings = async (
   settings: Partial<WeatherWorkflowSettings>
 ): Promise<{ status: string; settings: WeatherWorkflowSettings }> => {
   const { data } = await api.put('/weather-workflow/settings', settings)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getWeatherWorkflowPerformance = async (
@@ -3633,7 +3639,7 @@ export const getWeatherWorkflowPerformance = async (
   const { data } = await api.get('/weather-workflow/performance', {
     params: { lookback_days: lookbackDays }
   })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export default api
@@ -3680,7 +3686,7 @@ export const getUnifiedStrategies = async (params?: {
 
 export const getUnifiedStrategy = async (id: string): Promise<UnifiedStrategy> => {
   const { data } = await api.get(`/strategy-manager/${id}`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const createUnifiedStrategy = async (payload: {
@@ -3696,7 +3702,7 @@ export const createUnifiedStrategy = async (payload: {
   enabled?: boolean
 }): Promise<UnifiedStrategy> => {
   const { data } = await api.post('/strategy-manager', payload)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const updateUnifiedStrategy = async (
@@ -3716,7 +3722,7 @@ export const updateUnifiedStrategy = async (
   }>
 ): Promise<UnifiedStrategy> => {
   const { data } = await api.put(`/strategy-manager/${id}`, payload)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const deleteUnifiedStrategy = async (id: string): Promise<void> => {
@@ -3732,7 +3738,7 @@ export const validateUnifiedStrategy = async (source_code: string, class_name?: 
   warnings: string[]
 }> => {
   const { data } = await api.post('/strategy-manager/validate', { source_code, class_name })
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const reloadUnifiedStrategy = async (id: string): Promise<{
@@ -3741,7 +3747,7 @@ export const reloadUnifiedStrategy = async (id: string): Promise<{
   runtime?: Record<string, any>
 }> => {
   const { data } = await api.post(`/strategy-manager/${id}/reload`)
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getUnifiedStrategyTemplate = async (): Promise<{
@@ -3750,11 +3756,10 @@ export const getUnifiedStrategyTemplate = async (): Promise<{
   available_imports: string[]
 }> => {
   const { data } = await api.get('/strategy-manager/template')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
 
 export const getUnifiedStrategyDocs = async (): Promise<Record<string, any>> => {
   const { data } = await api.get('/strategy-manager/docs')
-  return data
+  return Array.isArray(data) ? data : (data.items ?? [])
 }
-

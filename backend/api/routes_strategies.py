@@ -302,12 +302,11 @@ async def get_unified_docs():
                         "positions, event=None, expected_payout=1.0, is_guaranteed=True, "
                         "vwap_total_cost=None, spread_bps=None, fill_probability=None, "
                         "min_liquidity_hard=None, min_position_size=None, min_absolute_profit=None) "
-                        "-> Optional[ArbitrageOpportunity]"
+                        "-> ArbitrageOpportunity"
                     ),
                     "description": (
-                        "Creates an ArbitrageOpportunity after applying hard rejection filters: "
-                        "ROI threshold, min liquidity, min position size, min absolute profit, "
-                        "annualized ROI, max resolution timeframe. Returns None if any filter rejects."
+                        "Always returns an ArbitrageOpportunity. Hard rejection filters run in "
+                        "QualityFilterPipeline after detection."
                     ),
                 },
                 "calculate_risk_score()": {
@@ -1073,7 +1072,7 @@ async def get_unified_docs():
 @router.post("/validate")
 async def validate_unified_source(req: UnifiedValidateRequest):
     """Validate strategy source code without saving."""
-    plugin_result = validate_strategy_source(req.source_code)
+    plugin_result = validate_strategy_source(req.source_code, class_name=req.class_name)
     capabilities = _detect_capabilities(req.source_code)
     inferred_type = _infer_strategy_type(capabilities)
 

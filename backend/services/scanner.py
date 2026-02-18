@@ -740,24 +740,6 @@ class ArbitrageScanner:
         st = getattr(strategy, "strategy_type", "")
         return st if isinstance(st, str) else getattr(st, "value", "")
 
-    async def _get_effective_strategies(self) -> list:
-        """Apply validation guardrails (demoted strategies are skipped)."""
-        all_strategies = self._get_all_strategies()
-        try:
-            from services.validation_service import validation_service
-
-            demoted = await validation_service.get_demoted_strategy_types()
-        except Exception:
-            demoted = set()
-        if not demoted:
-            return all_strategies
-
-        filtered = [s for s in all_strategies if self._strategy_key(s) not in demoted]
-        skipped = len(all_strategies) - len(filtered)
-        if skipped > 0:
-            print(f"  Validation guardrails: skipped {skipped} demoted strategies")
-        return filtered
-
     async def scan_once(
         self,
         targeted_condition_ids: Optional[list] = None,
@@ -1215,6 +1197,17 @@ class ArbitrageScanner:
             fast_opportunities = await event_dispatcher.dispatch(fast_data_event)
 
             fast_opportunities = self._deduplicate_cross_strategy(fast_opportunities)
+            fast_quality_reports: dict = {}
+            fast_filtered: list = []
+            for opp in fast_opportunities:
+                strategy_instance = strategy_loader.get_instance(opp.strategy)
+                overrides = getattr(strategy_instance, "quality_filter_overrides", None) if strategy_instance else None
+                report = quality_filter.evaluate(opp, overrides=overrides)
+                fast_quality_reports[opp.stable_id or opp.id] = report
+                if report.passed:
+                    fast_filtered.append(opp)
+            fast_opportunities = fast_filtered
+            self._quality_reports.update(fast_quality_reports)
             fast_opportunities.sort(key=lambda x: x.roi_percent, reverse=True)
             fast_opportunities = self._apply_opportunity_caps(fast_opportunities)
 

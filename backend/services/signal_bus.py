@@ -551,7 +551,6 @@ async def emit_scanner_signals(
             opp.stable_id,
             opp.strategy,
             market_id,
-            round(float(opp.roi_percent or 0.0), 4),
         )
         expires = opp.resolution_date or (_utc_now() + timedelta(minutes=default_ttl_minutes))
 

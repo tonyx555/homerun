@@ -1026,9 +1026,6 @@ class StrategyTombstone(Base):
     )
 
 
-# Backward-compat alias — code that imported the old name still works.
-StrategyPluginTombstone = StrategyTombstone
-
 
 
 
