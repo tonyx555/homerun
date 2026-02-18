@@ -2,6 +2,10 @@
 
 Worker pipelines emit into ``trade_signals`` and consumers (trader orchestrator/UI)
 read from one normalized contract.
+
+# Helpers for WRITING/UPSERTING signals to DB from opportunities.
+# For helpers that READ signal data back from DB TradeSignal rows (e.g. for
+# strategy evaluate/should_exit), see utils/signal_helpers.py (signal_payload).
 """
 
 from __future__ import annotations
@@ -284,6 +288,8 @@ async def upsert_trade_signal(
     expires_at: Optional[datetime],
     payload_json: Optional[dict[str, Any]],
     strategy_context_json: Optional[dict[str, Any]] = None,
+    quality_passed: Optional[bool] = None,
+    quality_rejection_reasons: Optional[list] = None,
     dedupe_key: str,
     commit: bool = True,
 ) -> TradeSignal:
@@ -326,6 +332,8 @@ async def upsert_trade_signal(
             expires_at=_to_utc_naive(expires_at),
             payload_json=_safe_json(payload_json),
             strategy_context_json=_safe_json(strategy_context_json),
+            quality_passed=quality_passed,
+            quality_rejection_reasons=quality_rejection_reasons if quality_rejection_reasons else None,
             dedupe_key=dedupe_key,
             status="pending",
             created_at=_utc_now(),
@@ -353,6 +361,9 @@ async def upsert_trade_signal(
             row.expires_at = _to_utc_naive(expires_at)
             row.payload_json = _safe_json(payload_json)
             row.strategy_context_json = _safe_json(strategy_context_json)
+            if quality_passed is not None:
+                row.quality_passed = quality_passed
+                row.quality_rejection_reasons = quality_rejection_reasons if quality_rejection_reasons else None
             row.updated_at = _utc_now()
             await _record_signal_emission(
                 session,
@@ -1004,6 +1015,7 @@ async def emit_scanner_signals(
     opportunities: list[ArbitrageOpportunity],
     *,
     default_ttl_minutes: int = 120,
+    quality_reports: Optional[dict] = None,
 ) -> int:
     emitted = 0
     for opp in opportunities:
@@ -1019,6 +1031,17 @@ async def emit_scanner_signals(
             market_id,
         )
         expires = opp.resolution_date or (_utc_now() + timedelta(minutes=default_ttl_minutes))
+
+        opp_key = opp.stable_id or opp.id
+        report = (quality_reports or {}).get(opp_key)
+        if report is not None:
+            opp_quality_passed = bool(report.passed)
+            opp_rejection_reasons = list(report.rejection_reasons) if not report.passed else None
+        else:
+            # All opportunities reaching this function have passed the scanner's
+            # quality filter; mark them as passed when no explicit report is given.
+            opp_quality_passed = True
+            opp_rejection_reasons = None
 
         await upsert_trade_signal(
             session,
@@ -1036,6 +1059,8 @@ async def emit_scanner_signals(
             expires_at=expires,
             payload_json=payload_json,
             strategy_context_json=strategy_context_json,
+            quality_passed=opp_quality_passed,
+            quality_rejection_reasons=opp_rejection_reasons,
             dedupe_key=dedupe_key,
             commit=False,
         )

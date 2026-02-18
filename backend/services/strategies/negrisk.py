@@ -331,32 +331,6 @@ class NegRiskStrategy(BaseStrategy):
         ]
         return any(kw in title_lower for kw in open_ended_keywords)
 
-    def _detect_date_sweep(self, event: Event, prices: dict[str, dict]) -> ArbitrageOpportunity | None:
-        """
-        DEPRECATED - DO NOT USE
-
-        This method was REMOVED because it incorrectly classified speculative bets as arbitrage.
-
-        WHY IT'S WRONG:
-        "By X date" markets are CUMULATIVE, not mutually exclusive:
-        - "Event by March" YES → "Event by June" YES → "Event by December" YES
-        - If you buy NO on all dates and the event happens early, ALL positions lose
-        - This is a SPECULATIVE BET with 100% correlated downside, NOT arbitrage
-
-        Example of the bug:
-        - Buy NO on "Cabinet member out by March" @ $0.002
-        - Buy NO on "Cabinet member out by June" @ $0.002
-        - Buy NO on "Cabinet member out by December" @ $0.002
-        - If cabinet member leaves in February: ALL THREE NO positions = $0
-        - Total loss: 100% of investment
-
-        True arbitrage requires MUTUALLY EXCLUSIVE outcomes where exactly one wins.
-        Date-based "by X" markets fail this requirement.
-        """
-        # This method is intentionally disabled
-        # Returning None ensures it never produces false arbitrage signals
-        return None
-
     def _is_independent_betting_market(self, question: str) -> bool:
         """
         Check if a market is an independent betting type (spread, over/under, etc.)

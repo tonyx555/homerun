@@ -16,7 +16,7 @@ from models import (
 )
 from config import settings
 from services.fee_model import fee_model
-from services.data_events import DataEvent, EventType
+from services.data_events import BlockReason, DataEvent, EventType
 
 from utils.converters import to_float, to_confidence
 from utils.signal_helpers import signal_payload
@@ -111,6 +111,28 @@ class SizingConfig:
     market_scale_cap: int = 4
 
 
+@dataclass
+class EvaluateContext:
+    """Typed context passed to strategy.evaluate(). All fields are guaranteed present."""
+
+    params: dict
+    trader: Any
+    mode: str
+    live_market: dict
+    source_config: dict
+
+    def get(self, key: str, default=None):
+        """Backward-compat dict-style access. Prefer direct attribute access."""
+        return getattr(self, key, default)
+
+    def __getitem__(self, key: str):
+        """Backward-compat dict-style subscript access."""
+        try:
+            return getattr(self, key)
+        except AttributeError:
+            raise KeyError(key)
+
+
 class StrategyContext(TypedDict, total=False):
     """Typed structure for strategy context stored alongside every TradeSignal.
 
@@ -152,6 +174,20 @@ def _has_custom_detect_async(strategy: "BaseStrategy") -> bool:
     if method is None:
         return False
     base_method = getattr(BaseStrategy, "detect_async", None)
+    return method is not base_method
+
+
+def _has_custom_detect_sync(strategy: "BaseStrategy") -> bool:
+    """Return True if *strategy* provides its own ``detect_sync`` override.
+
+    The base class ``detect_sync`` delegates to ``detect()``. We use this to
+    detect strategies that opted into the new detect_sync() naming convention
+    so the scanner can call detect_sync() directly (in the thread-pool).
+    """
+    method = getattr(type(strategy), "detect_sync", None)
+    if method is None:
+        return False
+    base_method = getattr(BaseStrategy, "detect_sync", None)
     return method is not base_method
 
 
@@ -295,14 +331,37 @@ class BaseStrategy(ABC):
     def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[ArbitrageOpportunity]:
         """Detect arbitrage opportunities (sync).
 
+        Backward-compatible name. Prefer overriding detect_sync() for new strategies.
+
         Called every scan cycle with the full set of active events, markets,
         and live CLOB prices.  Override this for CPU-bound strategies that
         don't need async I/O.
 
         The default implementation returns an empty list.  Subclasses should
-        override this method or ``detect_async()`` (or both).
+        override ``detect_sync()`` (or ``detect_async()`` for I/O-bound work).
         """
         return []
+
+    def detect_sync(
+        self,
+        events: list,
+        markets: list,
+        prices: dict,
+    ) -> list:
+        """Detect arbitrage opportunities (sync, preferred name for new strategies).
+
+        Alias for detect(). Override detect_sync() or detect_async() — not both.
+
+        detect_sync() runs in a thread pool executor. Use it for CPU-bound or
+        simple synchronous detection logic.
+
+        detect_async() runs directly in the event loop. Use it for I/O-bound
+        detection (HTTP calls, DB queries, etc.).
+
+        The scanner prefers detect_async() if overridden, otherwise falls back
+        to detect_sync() (which delegates to detect() for backward compatibility).
+        """
+        return self.detect(events, markets, prices)
 
     async def detect_async(
         self,
@@ -347,11 +406,17 @@ class BaseStrategy(ABC):
             list of ArbitrageOpportunity objects (empty list if no opportunities).
         """
         if event.event_type == EventType.MARKET_DATA_REFRESH:
-            # Prefer detect_async() if the subclass provides its own override;
-            # otherwise run the synchronous detect() off the event loop.
+            # Priority:
+            # 1. detect_async() if the subclass provides its own override → run on event loop
+            # 2. detect_sync() if the subclass provides its own override → run in thread-pool
+            # 3. detect() (backward-compat name) → run in thread-pool
             if _has_custom_detect_async(self):
                 return await self.detect_async(event.events or [], event.markets or [], event.prices or {})
             loop = asyncio.get_running_loop()
+            if _has_custom_detect_sync(self):
+                return await loop.run_in_executor(
+                    None, self.detect_sync, event.events or [], event.markets or [], event.prices or {}
+                )
             return await loop.run_in_executor(
                 None, self.detect, event.events or [], event.markets or [], event.prices or {}
             )
@@ -361,24 +426,17 @@ class BaseStrategy(ABC):
         self,
         signal: Any,
         reason: str,
-        context: dict[str, Any],
+        context: "EvaluateContext | dict",
     ) -> None:
-        """Notification hook called when the platform blocks a signal from this strategy.
-
-        Called by the orchestrator worker when a selected signal is subsequently
-        blocked by a trading-window check, risk check, or stacking guard. Use
-        this to log, track, or update internal state (e.g. recording that a
-        signal was blocked so the next detection cycle can account for it).
-
-        The return value is **ignored** — this hook cannot override the block.
-        It is a pure notification, not a control hook.
+        """Called by the platform whenever a signal is blocked at any gate.
 
         Args:
-            signal: The TradeSignal that was blocked.
-            reason: Human-readable reason the platform blocked this signal.
-            context: Partial orchestrator context (varies by block type —
-                     may contain ``trading_window``, ``risk_snapshot``, or
-                     ``market_id`` depending on which check blocked it).
+            signal: The TradeSignal that was blocked
+            reason: A BlockReason constant (e.g. BlockReason.TRADING_WINDOW)
+            context: The EvaluateContext for this signal
+
+        Override this to log, alert, or update internal state when your signals are blocked.
+        The default implementation does nothing.
         """
 
     def on_size_capped(
@@ -403,7 +461,13 @@ class BaseStrategy(ABC):
         """
 
     def configure(self, config: dict) -> None:
-        """Apply user config overrides. Called by the loader after instantiation."""
+        """Apply merged config. Called by the loader after instantiation.
+
+        Config cascade: default_config (class attribute) -> DB config (user overrides).
+        The loader merges both levels before calling configure(), so ``config``
+        here is already the fully-resolved dict. Access config values via
+        ``self.config["key"]`` or ``self.config.get("key", default)``.
+        """
         merged = dict(self.default_config)
         if config:
             merged.update(config)
@@ -428,8 +492,10 @@ class BaseStrategy(ABC):
 
     # ── Execution phase (optional override) ──────────────────
 
-    def evaluate(self, signal: Any, context: dict) -> StrategyDecision:
+    def evaluate(self, signal: Any, context: "EvaluateContext | dict") -> StrategyDecision:
         """Decide whether to trade a signal RIGHT NOW.
+
+        ``context`` is an ``EvaluateContext`` in all platform calls.
 
         If scoring_weights is set, uses the composable pipeline
         (custom_checks + compute_score + compute_size). Otherwise
@@ -439,22 +505,19 @@ class BaseStrategy(ABC):
             return self._base_evaluate(signal, context)
         return self._pipeline_evaluate(signal, context)
 
-    def _base_evaluate(self, signal: Any, context: dict) -> StrategyDecision:
+    def _base_evaluate(self, signal: Any, context: "EvaluateContext | dict") -> StrategyDecision:
         """Base passthrough evaluate — trusts detection layer's edge/confidence.
 
         Called by the orchestrator when a pending signal from this strategy
         is ready for execution. Override to add custom gating logic.
 
+        ``context`` is an ``EvaluateContext`` in all platform calls.
+
         Args:
             signal: TradeSignal object with .edge_percent, .confidence,
                     .direction, .entry_price, .payload_json, .strategy_context
-            context: {
-                "params": dict,        # Strategy config (merged default + user overrides)
-                "trader": object,      # Trader ORM row
-                "mode": str,           # "paper" or "live"
-                "live_market": dict,   # Live CLOB prices (if available)
-                "source_config": dict, # Source config from trader
-            }
+            context: EvaluateContext (or dict for backward compat) with
+                     params, trader, mode, live_market, source_config fields.
 
         Returns:
             StrategyDecision with decision="selected"|"skipped"|"blocked"|"failed"
@@ -503,7 +566,7 @@ class BaseStrategy(ABC):
 
     # ── Composable evaluate pipeline ─────────────────────────
 
-    def custom_checks(self, signal: Any, context: dict, params: dict, payload: dict) -> list[DecisionCheck]:
+    def custom_checks(self, signal: Any, context: "EvaluateContext | dict", params: dict, payload: dict) -> list[DecisionCheck]:
         """Override to add strategy-specific checks beyond the standard pipeline.
 
         Called during the composable evaluate pipeline after the standard
@@ -554,7 +617,7 @@ class BaseStrategy(ABC):
         )
         return max(1.0, min(max_size, size))
 
-    def _pipeline_evaluate(self, signal: Any, context: dict) -> StrategyDecision:
+    def _pipeline_evaluate(self, signal: Any, context: "EvaluateContext | dict") -> StrategyDecision:
         """Composable evaluate pipeline implementation."""
         params = context.get("params") or {}
         payload = signal_payload(signal)

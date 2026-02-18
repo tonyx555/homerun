@@ -211,7 +211,7 @@ async def run_strategy_backtest(
 
             for opp in opps or []:
                 try:
-                    report = qf_pipeline.evaluate(opp)
+                    report = qf_pipeline.evaluate_opportunity(opp)
                     result.quality_reports.append(
                         {
                             "opportunity_id": report.opportunity_id,

@@ -714,6 +714,8 @@ class AppSettings(Base):
     market_fetch_page_size = Column(Integer, default=200)
     market_fetch_order = Column(String, default="volume")
     min_liquidity = Column(Float, default=1000.0)
+    scanner_max_opportunities_total = Column(Integer, default=500)
+    scanner_max_opportunities_per_strategy = Column(Integer, default=120)
 
     # Discovery Engine Settings
     discovery_max_discovered_wallets = Column(Integer, default=20_000)
@@ -1077,7 +1079,7 @@ class DataSource(Base):
     id = Column(String, primary_key=True)
     slug = Column(String, unique=True, nullable=False)
     source_key = Column(String, nullable=False, default="custom")
-    source_kind = Column(String, nullable=False, default="python")  # python | rss | bridge
+    source_kind = Column(String, nullable=False, default="python")  # python | rss | gdelt | bridge
     name = Column(String, nullable=False)
     description = Column(Text, nullable=True)
     source_code = Column(Text, nullable=False, default="")
@@ -2029,6 +2031,8 @@ class TradeSignal(Base):
     )  # pending | selected | submitted | executed | skipped | expired | failed
     payload_json = Column(JSON, nullable=True)
     strategy_context_json = Column(JSON, nullable=True)  # Context from detect() for evaluate()/should_exit()
+    quality_passed = Column(Boolean, nullable=True)  # True = passed quality filter at signal creation
+    quality_rejection_reasons = Column(JSON, nullable=True)  # List of rejection reason strings
     dedupe_key = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

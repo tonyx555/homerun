@@ -31,7 +31,7 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("EMBEDDING_DEVICE", "cpu")
 
 from utils.utcnow import utcnow
-from config import settings
+from config import settings, apply_search_filters
 from models.database import AsyncSessionLocal, init_database
 from services.scanner import scanner
 from services.signal_bus import emit_scanner_signals
@@ -268,6 +268,11 @@ async def _run_scan_loop() -> None:
         async with AsyncSessionLocal() as session:
             control = await read_scanner_control(session)
             try:
+                # Rehydrate DB-backed scanner/search strategy settings each loop.
+                await apply_search_filters()
+            except Exception as exc:
+                logger.warning("Failed to refresh scanner runtime settings from DB: %s", exc)
+            try:
                 await refresh_strategy_runtime_if_needed(
                     session,
                     source_keys=["scanner"],
@@ -471,7 +476,7 @@ async def _run_scan_loop() -> None:
 
                 market_history = scanner.get_market_history_for_opportunities(opps)
                 await write_scanner_snapshot(session, opps, status, market_history=market_history)
-                emitted = await emit_scanner_signals(session, opps)
+                emitted = await emit_scanner_signals(session, opps, quality_reports=scanner.quality_reports)
                 await clear_scan_request(session)
                 await write_worker_snapshot(
                     session,
@@ -519,6 +524,10 @@ async def _run_scan_loop() -> None:
 async def main() -> None:
     """Init DB and run scan loop."""
     await init_database()
+    try:
+        await apply_search_filters()
+    except Exception as exc:
+        logger.warning("Initial scanner runtime settings refresh failed: %s", exc)
     logger.info("Database initialized")
     try:
         await _run_scan_loop()

@@ -109,12 +109,18 @@ class QualityFilterPipeline:
     individual threshold for a specific strategy's opportunities.
     """
 
-    def evaluate(
+    def evaluate_opportunity(
         self,
         opp: Any,
         overrides: Optional[QualityFilterOverrides] = None,
     ) -> QualityReport:
         """Run all quality filters on an opportunity.
+
+        Named evaluate_opportunity() to distinguish it from strategy.evaluate()
+        (execution gating) and POST /evaluate (API route). This method performs
+        opportunity quality assessment — checking ROI thresholds, liquidity,
+        resolution timeframe, and other structural filters before an opportunity
+        enters the signal pipeline.
 
         Args:
             opp: ArbitrageOpportunity with fields: roi_percent, is_guaranteed,

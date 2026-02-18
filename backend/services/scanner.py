@@ -1468,7 +1468,7 @@ class ArbitrageScanner:
                 for opp in all_opportunities:
                     strategy_instance = strategy_loader.get_instance(opp.strategy)
                     overrides = getattr(strategy_instance, "quality_filter_overrides", None) if strategy_instance else None
-                    report = quality_filter.evaluate(opp, overrides=overrides)
+                    report = quality_filter.evaluate_opportunity(opp, overrides=overrides)
                     _quality_reports[opp.stable_id or opp.id] = report
                     if report.passed:
                         filtered_opportunities.append(opp)
@@ -1728,7 +1728,7 @@ class ArbitrageScanner:
             for opp in fast_opportunities:
                 strategy_instance = strategy_loader.get_instance(opp.strategy)
                 overrides = getattr(strategy_instance, "quality_filter_overrides", None) if strategy_instance else None
-                report = quality_filter.evaluate(opp, overrides=overrides)
+                report = quality_filter.evaluate_opportunity(opp, overrides=overrides)
                 fast_quality_reports[opp.stable_id or opp.id] = report
                 if report.passed:
                     fast_filtered.append(opp)

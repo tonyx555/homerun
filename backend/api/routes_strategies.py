@@ -31,6 +31,7 @@ from services.strategy_loader import (
     strategy_loader,
     validate_strategy_source,
 )
+from services.strategy_sdk import StrategySDK
 from services.strategy_runtime import bump_strategy_runtime_revisions
 from utils.logger import get_logger
 
@@ -100,33 +101,45 @@ class UnifiedValidateRequest(BaseModel):
 
 
 def _detect_capabilities(source_code: str) -> dict:
-    """Inspect source code to determine which lifecycle methods are present.
+    """Detect strategy capabilities from source code using AST analysis.
 
-    All strategy business logic must be in the user-editable source code,
-    so a simple regex scan of the source is sufficient.  BaseStrategy
-    provides default evaluate/should_exit, so any subclass inherits those.
+    Delegates to strategy_loader's AST-based helpers for accurate detection
+    instead of fragile regex matching. BaseStrategy provides default
+    on_event(), evaluate(), and should_exit() for all subclasses, so those
+    flags are set to True whenever the class extends BaseStrategy.
     """
-    has_detect = bool(re.search(r"\bdef detect\s*\(", source_code))
-    has_detect_async = bool(re.search(r"\basync\s+def detect_async\s*\(", source_code))
-    has_on_event = bool(re.search(r"\basync\s+def on_event\s*\(", source_code))
-    has_evaluate = bool(re.search(r"\bdef evaluate\s*\(", source_code))
-    has_should_exit = bool(re.search(r"\bdef should_exit\s*\(", source_code))
+    from services.strategy_loader import _find_strategy_class, _extract_class_capabilities
 
-    # BaseStrategy provides default on_event, evaluate(), and should_exit() for
-    # ALL strategies. Any class extending BaseStrategy has working defaults.
-    extends_base = bool(re.search(r"\bBaseStrategy\b", source_code))
-    if extends_base:
-        has_on_event = True
-        has_evaluate = True
-        has_should_exit = True
-
-    return {
-        "has_detect": has_detect,
-        "has_detect_async": has_detect_async,
-        "has_on_event": has_on_event,
-        "has_evaluate": has_evaluate,
-        "has_should_exit": has_should_exit,
+    # Fallback result if AST parsing fails
+    _fallback = {
+        "has_detect": False,
+        "has_detect_async": False,
+        "has_on_event": False,
+        "has_evaluate": False,
+        "has_should_exit": False,
     }
+
+    try:
+        import ast as _ast
+
+        tree = _ast.parse(source_code)
+        class_name = _find_strategy_class(tree)
+        if not class_name:
+            return _fallback
+
+        caps = _extract_class_capabilities(tree, class_name)
+
+        # BaseStrategy provides default on_event, evaluate(), and should_exit()
+        # for ALL strategies. Any class extending BaseStrategy has working defaults.
+        extends_base = bool(re.search(r"\bBaseStrategy\b", source_code))
+        if extends_base:
+            caps["has_on_event"] = True
+            caps["has_evaluate"] = True
+            caps["has_should_exit"] = True
+
+        return caps
+    except Exception:
+        return _fallback
 
 
 def _infer_strategy_type(capabilities: dict) -> str:
@@ -148,6 +161,7 @@ def _infer_strategy_type(capabilities: dict) -> str:
 def _strategy_to_dict(row: Strategy) -> dict:
     """Convert a Strategy ORM row to the API response dict."""
     capabilities = _detect_capabilities(row.source_code or "")
+    config_file_path = StrategySDK.get_strategy_config_path(row.slug)
     return {
         "id": row.id,
         "slug": row.slug,
@@ -166,6 +180,8 @@ def _strategy_to_dict(row: Strategy) -> dict:
         "strategy_type": _infer_strategy_type(capabilities),
         "capabilities": capabilities,
         "aliases": [],
+        "config_file_path": config_file_path,
+        "config_file_exists": bool(StrategySDK.get_strategy_config_mtime_ns(row.slug)),
         "sort_order": row.sort_order or 0,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
@@ -199,7 +215,7 @@ async def get_unified_template():
             "services.fee_model (fee_model)",
             "services.ai (get_llm_manager, LLMMessage, LLMResponse)",
             "services.strategy_sdk (StrategySDK)",
-            "services.data_source_sdk (DataSourceSDK)",
+            "services.data_source_sdk (DataSourceSDK: list/get/validate/create/update/delete/reload/run/read)",
             "config (settings)",
             "math, statistics, collections, datetime, re, json, random, threading, asyncio, calendar, pathlib, etc.",
             "httpx",
@@ -780,8 +796,12 @@ async def get_unified_docs():
                 "services.ws_feeds": "WebSocket market data feeds",
                 "services.chainlink_feed": "Chainlink oracle price feeds",
                 "services.fee_model": "Fee calculation model",
-                "services.strategy_sdk": "Strategy development utilities",
-                "services.data_source_sdk": "Read normalized data-source records in strategies",
+                "services.strategy_sdk": (
+                    "Strategy utilities including full data-source workflows via StrategySDK.*"
+                ),
+                "services.data_source_sdk": (
+                    "Full source SDK: list/get/validate/create/update/delete/reload/run and record access"
+                ),
                 "config": "Application settings (settings object)",
                 "utils": "Shared utility functions",
             },
@@ -1192,6 +1212,9 @@ async def create_strategy(req: UnifiedStrategyCreateRequest):
         if existing.scalar_one_or_none():
             raise HTTPException(status_code=409, detail=f"A strategy with slug '{slug}' already exists.")
 
+        if not StrategySDK.write_strategy_config_file(slug, req.config or {}):
+            raise HTTPException(status_code=500, detail=f"Failed to persist strategy config file for '{slug}'.")
+
         if req.enabled:
             try:
                 strategy_loader.load(slug, req.source_code, req.config or None)
@@ -1296,6 +1319,19 @@ async def update_strategy(strategy_id: str, req: UnifiedStrategyUpdateRequest):
             row.enabled = req.enabled
             enabled_changed = True
 
+        if slug_changed and req.config is None:
+            if not StrategySDK.rename_strategy_config_file(original_slug, row.slug):
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to rename strategy config file '{original_slug}' -> '{row.slug}'.",
+                )
+
+        if req.config is not None:
+            if slug_changed:
+                StrategySDK.delete_strategy_config_file(original_slug)
+            if not StrategySDK.write_strategy_config_file(row.slug, row.config or {}):
+                raise HTTPException(status_code=500, detail=f"Failed to persist strategy config file for '{row.slug}'.")
+
         if enabled_changed or code_changed or slug_changed:
             if slug_changed:
                 strategy_loader.unload(original_slug)
@@ -1328,6 +1364,7 @@ async def update_strategy(strategy_id: str, req: UnifiedStrategyUpdateRequest):
 @router.delete("/{strategy_id}")
 async def delete_strategy(strategy_id: str):
     """Delete a strategy (with tombstone for system strategies)."""
+    deleted_slug: str | None = None
     async with AsyncSessionLocal() as session:
         row = await session.get(Strategy, strategy_id)
         if row is None:
@@ -1355,6 +1392,10 @@ async def delete_strategy(strategy_id: str):
             commit=False,
         )
         await session.commit()
+        deleted_slug = str(row.slug or "").strip().lower()
+
+    if deleted_slug:
+        StrategySDK.delete_strategy_config_file(deleted_slug)
 
     return {"status": "success", "message": "Strategy deleted"}
 
@@ -1422,6 +1463,9 @@ async def reset_strategy_to_factory_endpoint(strategy_id: str):
 
         # Reload into the unified loader after reset
         if result.get("status") in ("reset", "created"):
+            await session.refresh(row)
+            if not StrategySDK.write_strategy_config_file(row.slug, row.config or {}):
+                raise HTTPException(status_code=500, detail=f"Failed to persist strategy config file for '{row.slug}'.")
             try:
                 strategy_loader.load(row.slug, row.source_code, row.config or None)
             except Exception:

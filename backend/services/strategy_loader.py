@@ -502,6 +502,7 @@ class LoadedStrategy:
     class_name: str
     source_hash: str
     loaded_at: datetime
+    module_name: str = ""
     run_count: int = 0
     error_count: int = 0
     total_opportunities: int = 0
@@ -623,11 +624,17 @@ class StrategyLoader:
             # Set key for orchestrator lookups
             instance.key = slug
 
-            # Apply config
-            instance.configure(config or {})
+            # Config cascade (2-level, deterministic):
+            #   1. strategy.default_config  — class-level defaults defined in strategy source code
+            #   2. DB Strategy.config       — user overrides via UI (takes precedence)
+            #
+            # Previously a 3rd level (file-based overrides) existed but was removed.
+            # All strategy config should be managed through the UI.
+            merged_config = {**(instance.default_config or {}), **(config or {})}
+            instance.configure(merged_config)
 
             # Source hash for change detection
-            source_hash = _strategy_runtime_hash(source_code, config or {})
+            source_hash = _strategy_runtime_hash(source_code, merged_config)
 
             loaded = LoadedStrategy(
                 slug=slug,
@@ -635,6 +642,7 @@ class StrategyLoader:
                 class_name=class_name,
                 source_hash=source_hash,
                 loaded_at=datetime.now(timezone.utc),
+                module_name=module_name,
             )
             self._loaded[slug] = loaded
 
@@ -669,10 +677,11 @@ class StrategyLoader:
         event_dispatcher.unsubscribe_all(slug)
         loaded = self._loaded.pop(slug, None)
         if loaded:
-            # Clean up module from sys.modules
-            for name in list(sys.modules.keys()):
-                if name.startswith(f"_strategy_{slug}_"):
-                    sys.modules.pop(name, None)
+            # Clean up the tracked module from sys.modules to prevent namespace leak.
+            # Use the exact module_name stored on LoadedStrategy for O(1) targeted deletion
+            # rather than scanning all of sys.modules.
+            if loaded.module_name and loaded.module_name in sys.modules:
+                del sys.modules[loaded.module_name]
             logger.info("Strategy unloaded: %s", slug)
 
     # ── DB reload ────────────────────────────────────────────

@@ -29,6 +29,7 @@ from services.trader_orchestrator.session_engine import ExecutionSessionEngine
 from services.trader_orchestrator.position_lifecycle import reconcile_live_positions, reconcile_paper_positions
 from services.simulation import simulation_service
 from services.trader_orchestrator.risk_manager import evaluate_risk
+from services.data_events import BlockReason
 from services.trader_orchestrator.decision_gates import (
     apply_platform_decision_gates,
     is_within_trading_window_utc,
@@ -46,7 +47,7 @@ from services.trader_orchestrator_state import (
     create_trader_decision,
     create_trader_decision_checks,
     create_trader_event,
-    create_trader_order,
+    create_trader_order as _create_trader_order,
     get_consecutive_loss_count,
     get_daily_realized_pnl,
     get_gross_exposure,
@@ -71,6 +72,7 @@ from utils.secrets import decrypt_secret
 
 logger = logging.getLogger("trader_orchestrator_worker")
 strategy_db_loader = strategy_loader
+create_trader_order = _create_trader_order
 _RESUME_POLICIES = {"resume_full", "manage_only", "flatten_then_start"}
 _PAPER_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
 _ORPHAN_CLEANUP_MAX_TRADERS_PER_CYCLE = 32

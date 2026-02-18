@@ -2,6 +2,10 @@
 
 These utilities parse signal data, extract nested payloads, and compute
 time-based metrics used across all unified strategies.
+
+# Helpers for READING signal data from DB TradeSignal rows.
+# For helpers that BUILD/WRITE signal payloads from ArbitrageOpportunity objects,
+# see services/signal_bus.py (build_signal_contract_from_opportunity).
 """
 
 from __future__ import annotations

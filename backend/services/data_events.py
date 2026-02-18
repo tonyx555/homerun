@@ -123,3 +123,20 @@ class DataEvent:
     changed_token_ids: Optional[list[str]] = None
     changed_market_ids: Optional[list[str]] = None
     affected_market_ids: Optional[list[str]] = None
+
+
+class BlockReason:
+    """Standard reason codes passed to strategy.on_blocked(). All platform gates use these."""
+
+    QUALITY_FILTER = "quality_filter"
+    RISK_DAILY_LOSS = "risk_daily_loss"
+    RISK_GROSS_EXPOSURE = "risk_gross_exposure"
+    RISK_CONSECUTIVE_LOSS = "risk_consecutive_loss"
+    RISK_TRADE_NOTIONAL = "risk_trade_notional"
+    RISK_OPEN_POSITIONS = "risk_open_positions"
+    RISK_MARKET_EXPOSURE = "risk_market_exposure"
+    TRADING_WINDOW = "trading_window"
+    STACKING_GUARD = "stacking_guard"
+    SIGNAL_EXPIRED = "signal_expired"
+    SCANNER_POOL_CAPACITY = "scanner_pool_capacity"
+    DEDUPLICATION = "deduplication"

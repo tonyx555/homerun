@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Callable
 
+from services.data_events import BlockReason
 from utils.converters import safe_float
 
 
@@ -42,6 +43,30 @@ def is_within_trading_window_utc(metadata: dict[str, Any], now_utc: datetime) ->
     if start_minutes < end_minutes:
         return start_minutes <= now_minutes < end_minutes
     return now_minutes >= start_minutes or now_minutes < end_minutes
+
+
+_RISK_CHECK_KEY_TO_BLOCK_REASON: dict[str, str] = {
+    "global_daily_loss": BlockReason.RISK_DAILY_LOSS,
+    "trader_daily_loss": BlockReason.RISK_DAILY_LOSS,
+    "global_daily_total_loss": BlockReason.RISK_DAILY_LOSS,
+    "trader_daily_total_loss": BlockReason.RISK_DAILY_LOSS,
+    "global_gross_exposure": BlockReason.RISK_GROSS_EXPOSURE,
+    "trader_loss_streak": BlockReason.RISK_CONSECUTIVE_LOSS,
+    "trader_cooldown": BlockReason.RISK_CONSECUTIVE_LOSS,
+    "trader_trade_notional": BlockReason.RISK_TRADE_NOTIONAL,
+    "trader_orders_per_cycle": BlockReason.RISK_OPEN_POSITIONS,
+    "trader_open_positions": BlockReason.RISK_OPEN_POSITIONS,
+    "trader_market_exposure": BlockReason.RISK_MARKET_EXPOSURE,
+}
+
+
+def _risk_block_reason(risk_result: Any) -> str:
+    for check in getattr(risk_result, "checks", []) or []:
+        if not getattr(check, "passed", True):
+            mapped = _RISK_CHECK_KEY_TO_BLOCK_REASON.get(str(getattr(check, "key", "") or ""))
+            if mapped:
+                return mapped
+    return BlockReason.RISK_DAILY_LOSS
 
 
 def _risk_checks_payload(risk_result: Any) -> list[dict[str, Any]]:
@@ -102,7 +127,7 @@ def apply_platform_decision_gates(
                 if hasattr(strategy, "on_blocked"):
                     strategy.on_blocked(
                         runtime_signal,
-                        final_reason,
+                        BlockReason.TRADING_WINDOW,
                         {"trading_window": trading_window_config},
                     )
     else:
@@ -194,7 +219,7 @@ def apply_platform_decision_gates(
                 if hasattr(strategy, "on_blocked"):
                     strategy.on_blocked(
                         runtime_signal,
-                        f"Risk: {final_reason}",
+                        _risk_block_reason(risk_result),
                         {"risk_snapshot": risk_snapshot},
                     )
     else:
@@ -242,7 +267,7 @@ def apply_platform_decision_gates(
             )
             if invoke_hooks and strategy is not None:
                 if hasattr(strategy, "on_blocked"):
-                    strategy.on_blocked(runtime_signal, final_reason, {"market_id": signal_market_id})
+                    strategy.on_blocked(runtime_signal, BlockReason.STACKING_GUARD, {"market_id": signal_market_id})
         else:
             platform_gates.append(
                 {

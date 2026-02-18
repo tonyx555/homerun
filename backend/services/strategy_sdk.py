@@ -11,7 +11,11 @@ All methods are designed to be safe and handle missing data gracefully.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
+import warnings
+from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -34,6 +38,139 @@ class StrategySDK:
             StrategySDK.ask_llm("Analyze this market situation...")
         )
     """
+
+    _CONFIG_SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{1,48}[a-z0-9]$")
+
+    @staticmethod
+    def _normalize_strategy_slug(slug: str) -> str:
+        value = str(slug or "").strip().lower()
+        if not value:
+            return ""
+        if StrategySDK._CONFIG_SLUG_RE.match(value):
+            return value
+        value = re.sub(r"[^a-z0-9_]", "_", value)
+        value = value.strip("_")
+        if not value:
+            return ""
+        if not value[0].isalpha():
+            value = f"s_{value}"
+        if len(value) > 50:
+            value = value[:50].rstrip("_")
+        if value and not value[-1].isalnum():
+            value = f"{value}0"
+        if StrategySDK._CONFIG_SLUG_RE.match(value):
+            return value
+        return ""
+
+    @staticmethod
+    def _strategy_config_dir() -> Path:
+        return Path(__file__).resolve().parents[1] / "strategy_configs"
+
+    @staticmethod
+    def _strategy_config_path(slug: str) -> Optional[Path]:
+        normalized = StrategySDK._normalize_strategy_slug(slug)
+        if not normalized:
+            return None
+        return StrategySDK._strategy_config_dir() / f"{normalized}.json"
+
+    @staticmethod
+    def get_strategy_config_path(slug: str) -> Optional[str]:
+        """Return the absolute JSON config path for a strategy slug."""
+        path = StrategySDK._strategy_config_path(slug)
+        if path is None:
+            return None
+        return str(path)
+
+    @staticmethod
+    def get_strategy_config_mtime_ns(slug: str) -> int:
+        """Return config file mtime (ns), or 0 when no file exists."""
+        path = StrategySDK._strategy_config_path(slug)
+        if path is None or not path.exists():
+            return 0
+        try:
+            return int(path.stat().st_mtime_ns)
+        except Exception:
+            return 0
+
+    @staticmethod
+    def read_strategy_config_file(slug: str) -> dict[str, Any]:
+        """Read JSON config overrides from backend/strategy_configs/<slug>.json.
+
+        .. deprecated::
+            File-based config overrides are no longer applied by the strategy
+            loader. Config is now managed exclusively via the DB (UI). This
+            function is retained for compatibility but has no effect on strategy
+            runtime config.
+        """
+        warnings.warn(
+            "read_strategy_config_file() is deprecated. Config is now managed exclusively via the DB. "
+            "File-based overrides are no longer applied by the strategy loader.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        path = StrategySDK._strategy_config_path(slug)
+        if path is None or not path.exists():
+            return {}
+        try:
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(parsed, dict):
+                return parsed
+            logger.warning("Strategy config file is not an object: %s", path)
+            return {}
+        except Exception as e:
+            logger.warning("Failed to read strategy config file %s: %s", path, e)
+            return {}
+
+    @staticmethod
+    def write_strategy_config_file(slug: str, config: dict[str, Any]) -> bool:
+        """Write config overrides to backend/strategy_configs/<slug>.json."""
+        path = StrategySDK._strategy_config_path(slug)
+        if path is None:
+            return False
+        payload = config if isinstance(config, dict) else {}
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            encoded = json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True)
+            path.write_text(f"{encoded}\n", encoding="utf-8")
+            return True
+        except Exception as e:
+            logger.warning("Failed to write strategy config file %s: %s", path, e)
+            return False
+
+    @staticmethod
+    def rename_strategy_config_file(old_slug: str, new_slug: str) -> bool:
+        """Rename a strategy config file when strategy slug changes."""
+        old_path = StrategySDK._strategy_config_path(old_slug)
+        new_path = StrategySDK._strategy_config_path(new_slug)
+        if old_path is None or new_path is None or old_path == new_path:
+            return True
+        if not old_path.exists():
+            return True
+        try:
+            new_path.parent.mkdir(parents=True, exist_ok=True)
+            old_path.replace(new_path)
+            return True
+        except Exception as e:
+            logger.warning(
+                "Failed to rename strategy config file %s -> %s: %s",
+                old_path,
+                new_path,
+                e,
+            )
+            return False
+
+    @staticmethod
+    def delete_strategy_config_file(slug: str) -> bool:
+        """Delete backend/strategy_configs/<slug>.json if it exists."""
+        path = StrategySDK._strategy_config_path(slug)
+        if path is None or not path.exists():
+            return True
+        try:
+            path.unlink()
+            return True
+        except Exception as e:
+            logger.warning("Failed to delete strategy config file %s: %s", path, e)
+            return False
 
     # ── Price helpers ──────────────────────────────────────────────
 
@@ -608,3 +745,172 @@ class StrategySDK:
         except Exception as e:
             logger.warning("StrategySDK.run_data_source failed: %s", e)
             return {}
+
+    @staticmethod
+    async def list_data_sources(
+        enabled_only: bool = True,
+        source_key: str | None = None,
+        include_code: bool = False,
+    ) -> list[dict]:
+        """List DB-backed data sources."""
+        try:
+            from services.data_source_sdk import DataSourceSDK
+
+            return await DataSourceSDK.list_sources(
+                enabled_only=enabled_only,
+                source_key=source_key,
+                include_code=include_code,
+            )
+        except Exception as e:
+            logger.warning("StrategySDK.list_data_sources failed: %s", e)
+            return []
+
+    @staticmethod
+    async def get_data_source(source_slug: str, include_code: bool = True) -> dict:
+        """Fetch one DB-backed data source by slug."""
+        try:
+            from services.data_source_sdk import DataSourceSDK
+
+            return await DataSourceSDK.get_source(source_slug=source_slug, include_code=include_code)
+        except Exception as e:
+            logger.warning("StrategySDK.get_data_source failed: %s", e)
+            return {}
+
+    @staticmethod
+    def validate_data_source(source_code: str, class_name: str | None = None) -> dict:
+        """Validate source code before create/update."""
+        try:
+            from services.data_source_sdk import DataSourceSDK
+
+            return DataSourceSDK.validate_source(source_code=source_code, class_name=class_name)
+        except Exception as e:
+            logger.warning("StrategySDK.validate_data_source failed: %s", e)
+            return {
+                "valid": False,
+                "errors": [str(e)],
+                "warnings": [],
+                "class_name": None,
+                "source_name": None,
+                "source_description": None,
+                "capabilities": {"has_fetch": False, "has_fetch_async": False, "has_transform": False},
+            }
+
+    @staticmethod
+    async def create_data_source(
+        *,
+        slug: str,
+        source_code: str,
+        source_key: str = "custom",
+        source_kind: str = "python",
+        name: str | None = None,
+        description: str | None = None,
+        class_name: str | None = None,
+        config: dict[str, Any] | None = None,
+        config_schema: dict[str, Any] | None = None,
+        enabled: bool = True,
+        is_system: bool = False,
+        sort_order: int = 0,
+    ) -> dict:
+        """Create a new DB-backed data source."""
+        try:
+            from services.data_source_sdk import DataSourceSDK
+
+            return await DataSourceSDK.create_source(
+                slug=slug,
+                source_code=source_code,
+                source_key=source_key,
+                source_kind=source_kind,
+                name=name,
+                description=description,
+                class_name=class_name,
+                config=config,
+                config_schema=config_schema,
+                enabled=enabled,
+                is_system=is_system,
+                sort_order=sort_order,
+            )
+        except Exception as e:
+            logger.warning("StrategySDK.create_data_source failed: %s", e)
+            return {}
+
+    @staticmethod
+    async def update_data_source(
+        source_slug: str,
+        *,
+        slug: str | None = None,
+        source_key: str | None = None,
+        source_kind: str | None = None,
+        name: str | None = None,
+        description: str | None = None,
+        source_code: str | None = None,
+        class_name: str | None = None,
+        config: dict[str, Any] | None = None,
+        config_schema: dict[str, Any] | None = None,
+        enabled: bool | None = None,
+        unlock_system: bool = False,
+    ) -> dict:
+        """Update an existing DB-backed data source."""
+        try:
+            from services.data_source_sdk import DataSourceSDK
+
+            return await DataSourceSDK.update_source(
+                source_slug=source_slug,
+                slug=slug,
+                source_key=source_key,
+                source_kind=source_kind,
+                name=name,
+                description=description,
+                source_code=source_code,
+                class_name=class_name,
+                config=config,
+                config_schema=config_schema,
+                enabled=enabled,
+                unlock_system=unlock_system,
+            )
+        except Exception as e:
+            logger.warning("StrategySDK.update_data_source failed: %s", e)
+            return {}
+
+    @staticmethod
+    async def delete_data_source(
+        source_slug: str,
+        *,
+        tombstone_system_source: bool = True,
+        unlock_system: bool = False,
+        reason: str = "deleted_via_strategy_sdk",
+    ) -> dict:
+        """Delete a data source by slug."""
+        try:
+            from services.data_source_sdk import DataSourceSDK
+
+            return await DataSourceSDK.delete_source(
+                source_slug=source_slug,
+                tombstone_system_source=tombstone_system_source,
+                unlock_system=unlock_system,
+                reason=reason,
+            )
+        except Exception as e:
+            logger.warning("StrategySDK.delete_data_source failed: %s", e)
+            return {}
+
+    @staticmethod
+    async def reload_data_source(source_slug: str) -> dict:
+        """Reload a data source runtime by slug."""
+        try:
+            from services.data_source_sdk import DataSourceSDK
+
+            return await DataSourceSDK.reload_source(source_slug=source_slug)
+        except Exception as e:
+            logger.warning("StrategySDK.reload_data_source failed: %s", e)
+            return {}
+
+    @staticmethod
+    async def get_data_source_runs(source_slug: str, limit: int = 20) -> list[dict]:
+        """Read recent run history for a source."""
+        try:
+            from services.data_source_sdk import DataSourceSDK
+
+            return await DataSourceSDK.get_recent_runs(source_slug=source_slug, limit=limit)
+        except Exception as e:
+            logger.warning("StrategySDK.get_data_source_runs failed: %s", e)
+            return []
