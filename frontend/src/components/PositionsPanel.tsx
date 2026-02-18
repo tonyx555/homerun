@@ -39,8 +39,8 @@ import {
 } from '../services/api'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
-import { Card, CardContent } from './ui/card'
 import { Input } from './ui/input'
+import { ScrollArea } from './ui/scroll-area'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
 import { Tabs, TabsList, TabsTrigger } from './ui/tabs'
 import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from './ui/table'
@@ -176,18 +176,6 @@ function formatRelativeTime(value: string | null): string {
 
   const days = Math.floor(hours / 24)
   return `${days}d ago`
-}
-
-function formatTimestamp(value: string | null): string {
-  if (!value) return 'n/a'
-  const ts = toTimestamp(value)
-  if (!ts) return 'n/a'
-  return new Date(ts).toLocaleString(undefined, {
-    month: 'short',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
 }
 
 function normalizeDirection(raw: string | null | undefined): string {
@@ -730,12 +718,6 @@ export default function PositionsPanel() {
     })
   }, [sortedRows])
 
-  const riskRows = useMemo(() => {
-    return [...sortedRows]
-      .sort((left, right) => right.marketValue - left.marketValue)
-      .slice(0, 6)
-  }, [sortedRows])
-
   const totalExposure = metrics.totalMarketValue
 
   const isLoading = (
@@ -771,595 +753,411 @@ export default function PositionsPanel() {
     setSortDirection('desc')
   }
 
-  const rowPaddingClass = 'px-3 py-2'
-  const secondaryRowPaddingClass = 'px-3 py-1.5'
-
   return (
-    <div className="flex flex-col h-full min-h-0">
-      {/* Fixed header: title, badges, filters */}
-      <div className="shrink-0 space-y-3 pb-3">
-        <Card className="overflow-hidden border-border/80 bg-gradient-to-br from-card via-card to-card/70">
-          <CardContent className="p-4 sm:p-5">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <h2 className="text-xl font-bold flex items-center gap-2">
-                  <Briefcase className="w-5 h-5 text-blue-400" />
-                  Positions Intelligence Grid
-                </h2>
-                <p className="text-sm text-muted-foreground">
-                  High-density command view for sandbox, autotrader paper, and live venue risk.
-                </p>
-              </div>
-              <div className="flex items-center gap-2">
-                <Button variant="secondary" onClick={handleRefresh} disabled={isLoading} className="h-9">
-                  <RefreshCw className={cn('w-4 h-4 mr-2', isLoading && 'animate-spin')} />
-                  Refresh
-                </Button>
-              </div>
-            </div>
-
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <Badge className="rounded-md border-transparent bg-muted text-muted-foreground">
-                {sortedRows.length} / {baseRows.length} in focus
+    <div className="h-full min-h-0 flex flex-col gap-1.5">
+      {/* Control Strip */}
+      <div className="shrink-0 space-y-2">
+        {/* Row 1: Title + badges + refresh */}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-3">
+            <h2 className="text-base font-semibold flex items-center gap-2">
+              <Briefcase className="w-4 h-4 text-blue-400" />
+              Positions
+            </h2>
+            <Badge className="rounded-md border-transparent bg-muted text-muted-foreground text-xs">
+              {sortedRows.length} / {baseRows.length}
+            </Badge>
+            {sortedRows.length > 0 && (
+              <Badge className={cn('rounded-md border-transparent text-xs', metrics.totalUnrealizedPnl >= 0 ? 'bg-emerald-500/15 text-emerald-300' : 'bg-red-500/15 text-red-300')}>
+                {formatSignedUsd(metrics.totalUnrealizedPnl)}
               </Badge>
-              <Badge className="rounded-md border-transparent bg-blue-500/15 text-blue-300">
-                Mark coverage {metrics.markCoverage.toFixed(0)}%
-              </Badge>
-              <Badge className="rounded-md border-transparent bg-amber-500/15 text-amber-300">
-                {metrics.staleRows} aged positions
-              </Badge>
-              <Badge className="rounded-md border-transparent bg-emerald-500/15 text-emerald-300">
-                Effective slots {metrics.effectivePositions.toFixed(1)}
-              </Badge>
-            </div>
+            )}
+          </div>
+          <Button variant="ghost" size="sm" onClick={handleRefresh} disabled={isLoading} className="h-7 px-2">
+            <RefreshCw className={cn('w-3.5 h-3.5', isLoading && 'animate-spin')} />
+          </Button>
+        </div>
 
-            <div className="mt-4 space-y-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <Tabs value={viewMode} onValueChange={(value) => setViewMode(value as ViewMode)}>
-                  <TabsList>
-                    <TabsTrigger value="all">All Books</TabsTrigger>
-                    <TabsTrigger value="sandbox">Sandbox + Paper</TabsTrigger>
-                    <TabsTrigger value="live">Live Venues</TabsTrigger>
-                  </TabsList>
-                </Tabs>
+        {/* Row 2: View tabs + venue selectors */}
+        <div className="flex flex-wrap items-center gap-2">
+          <Tabs value={viewMode} onValueChange={(value) => setViewMode(value as ViewMode)}>
+            <TabsList className="h-8">
+              <TabsTrigger value="all" className="text-xs h-7 px-3">All</TabsTrigger>
+              <TabsTrigger value="sandbox" className="text-xs h-7 px-3">Sandbox</TabsTrigger>
+              <TabsTrigger value="live" className="text-xs h-7 px-3">Live</TabsTrigger>
+            </TabsList>
+          </Tabs>
 
-                {shouldShowSandbox && (
-                  <Select value={selectedSandboxAccount ?? 'all'} onValueChange={(value) => setSelectedSandboxAccount(value === 'all' ? null : value)}>
-                    <SelectTrigger className="h-9 min-w-[220px] bg-background/60 text-xs">
-                      <SelectValue placeholder="Sandbox Account" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All Sandbox Accounts</SelectItem>
-                      {accounts.map((account) => (
-                        <SelectItem key={account.id} value={account.id}>{account.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                )}
+          {shouldShowSandbox && (
+            <Select value={selectedSandboxAccount ?? 'all'} onValueChange={(value) => setSelectedSandboxAccount(value === 'all' ? null : value)}>
+              <SelectTrigger className="h-8 w-[180px] bg-background/60 text-xs">
+                <SelectValue placeholder="Sandbox Account" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Sandbox</SelectItem>
+                {accounts.map((account) => (
+                  <SelectItem key={account.id} value={account.id}>{account.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
 
-                {shouldShowLive && (
-                  <Select value={liveVenueFilter} onValueChange={(value) => setLiveVenueFilter(value as LiveVenueFilter)}>
-                    <SelectTrigger className="h-9 min-w-[190px] bg-background/60 text-xs">
-                      <SelectValue placeholder="Live Venue" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All Live Venues</SelectItem>
-                      <SelectItem value="polymarket">Polymarket Live</SelectItem>
-                      <SelectItem value="kalshi">Kalshi Live</SelectItem>
-                    </SelectContent>
-                  </Select>
-                )}
-              </div>
+          {shouldShowLive && (
+            <Select value={liveVenueFilter} onValueChange={(value) => setLiveVenueFilter(value as LiveVenueFilter)}>
+              <SelectTrigger className="h-8 w-[160px] bg-background/60 text-xs">
+                <SelectValue placeholder="Live Venue" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Live</SelectItem>
+                <SelectItem value="polymarket">Polymarket</SelectItem>
+                <SelectItem value="kalshi">Kalshi</SelectItem>
+              </SelectContent>
+            </Select>
+          )}
+        </div>
 
-              <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-6">
-                <ControlField label="Search">
-                  <div className="relative">
-                    <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                    <Input
-                      value={searchQuery}
-                      onChange={(event) => setSearchQuery(event.target.value)}
-                      placeholder="Market, account, venue, side"
-                      className="h-9 bg-background/60 pl-8 text-xs"
-                    />
-                  </div>
-                </ControlField>
+        {/* Row 3: Filters */}
+        <div className="flex flex-wrap items-end gap-2">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Search..."
+              className="h-7 w-[180px] bg-background/60 pl-7 text-xs"
+            />
+          </div>
 
-                <ControlField label="Side">
-                  <Select value={sideFilter} onValueChange={(value) => setSideFilter(value as SideFilter)}>
-                    <SelectTrigger className="h-9 bg-background/60 text-xs">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All Sides</SelectItem>
-                      <SelectItem value="yes">YES Only</SelectItem>
-                      <SelectItem value="no">NO Only</SelectItem>
-                      <SelectItem value="other">Other / Unknown</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </ControlField>
+          <Select value={sideFilter} onValueChange={(value) => setSideFilter(value as SideFilter)}>
+            <SelectTrigger className="h-7 w-[100px] bg-background/60 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Sides</SelectItem>
+              <SelectItem value="yes">YES</SelectItem>
+              <SelectItem value="no">NO</SelectItem>
+              <SelectItem value="other">Other</SelectItem>
+            </SelectContent>
+          </Select>
 
-                <ControlField label="Marks">
-                  <Select value={markFilter} onValueChange={(value) => setMarkFilter(value as MarkFilter)}>
-                    <SelectTrigger className="h-9 bg-background/60 text-xs">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All Marks</SelectItem>
-                      <SelectItem value="live">Live Marked</SelectItem>
-                      <SelectItem value="entry_estimate">Entry Estimated</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </ControlField>
+          <Select value={markFilter} onValueChange={(value) => setMarkFilter(value as MarkFilter)}>
+            <SelectTrigger className="h-7 w-[110px] bg-background/60 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Marks</SelectItem>
+              <SelectItem value="live">Live</SelectItem>
+              <SelectItem value="entry_estimate">Estimated</SelectItem>
+            </SelectContent>
+          </Select>
 
-                <ControlField label="Desk">
-                  <Select value={effectiveAccountFilter} onValueChange={setAccountFilter}>
-                    <SelectTrigger className="h-9 bg-background/60 text-xs">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All Desks</SelectItem>
-                      {accountOptions.map((account) => (
-                        <SelectItem key={account} value={account}>{account}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </ControlField>
+          <Select value={effectiveAccountFilter} onValueChange={setAccountFilter}>
+            <SelectTrigger className="h-7 w-[120px] bg-background/60 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Desks</SelectItem>
+              {accountOptions.map((account) => (
+                <SelectItem key={account} value={account}>{account}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
 
-                <ControlField label="Exposure Floor">
-                  <Select value={exposureFloor} onValueChange={(value) => setExposureFloor(value as ExposureFloor)}>
-                    <SelectTrigger className="h-9 bg-background/60 text-xs">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">Any Size</SelectItem>
-                      <SelectItem value="100">$100+</SelectItem>
-                      <SelectItem value="500">$500+</SelectItem>
-                      <SelectItem value="1000">$1K+</SelectItem>
-                      <SelectItem value="5000">$5K+</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </ControlField>
+          <Select value={exposureFloor} onValueChange={(value) => setExposureFloor(value as ExposureFloor)}>
+            <SelectTrigger className="h-7 w-[90px] bg-background/60 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Any Size</SelectItem>
+              <SelectItem value="100">$100+</SelectItem>
+              <SelectItem value="500">$500+</SelectItem>
+              <SelectItem value="1000">$1K+</SelectItem>
+              <SelectItem value="5000">$5K+</SelectItem>
+            </SelectContent>
+          </Select>
 
-                <ControlField label="Sort">
-                  <div className="flex gap-2">
-                    <Select value={sortField} onValueChange={(value) => setSortField(value as SortField)}>
-                      <SelectTrigger className="h-9 flex-1 bg-background/60 text-xs">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="exposure">Exposure</SelectItem>
-                        <SelectItem value="unrealized">Unrealized</SelectItem>
-                        <SelectItem value="pnl_percent">P&L %</SelectItem>
-                        <SelectItem value="cost_basis">Cost Basis</SelectItem>
-                        <SelectItem value="updated">Updated</SelectItem>
-                        <SelectItem value="market">Market</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <Button
-                      variant="outline"
-                      className="h-9 w-9 px-0"
-                      onClick={() => setSortDirection((current) => current === 'asc' ? 'desc' : 'asc')}
-                      title={sortDirection === 'asc' ? 'Ascending' : 'Descending'}
-                    >
-                      {sortDirection === 'asc' ? <ArrowUpAZ className="w-4 h-4" /> : <ArrowDownAZ className="w-4 h-4" />}
-                    </Button>
-                  </div>
-                </ControlField>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-
-        {simulationPayload.failedAccounts.length > 0 && (
-          <Card className="border-amber-500/30 bg-amber-500/10">
-            <CardContent className="p-3 text-sm text-amber-100 flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 text-amber-300 shrink-0" />
-              Positions could not load for: {simulationPayload.failedAccounts.join(', ')}
-            </CardContent>
-          </Card>
-        )}
-
-        {shouldFetchKalshiLive && !kalshiStatusLoading && !kalshiStatus?.authenticated && (
-          <Card className="border-indigo-500/30 bg-indigo-500/10">
-            <CardContent className="p-3 text-sm text-indigo-100">
-              Kalshi is not authenticated, so live Kalshi positions are unavailable in this panel.
-            </CardContent>
-          </Card>
-        )}
+          <div className="flex items-center gap-1">
+            <Select value={sortField} onValueChange={(value) => setSortField(value as SortField)}>
+              <SelectTrigger className="h-7 w-[100px] bg-background/60 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="exposure">Exposure</SelectItem>
+                <SelectItem value="unrealized">Unrealized</SelectItem>
+                <SelectItem value="pnl_percent">P&L %</SelectItem>
+                <SelectItem value="cost_basis">Cost Basis</SelectItem>
+                <SelectItem value="updated">Updated</SelectItem>
+                <SelectItem value="market">Market</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button
+              variant="ghost"
+              className="h-7 w-7 px-0"
+              onClick={() => setSortDirection((current) => current === 'asc' ? 'desc' : 'asc')}
+            >
+              {sortDirection === 'asc' ? <ArrowUpAZ className="w-3.5 h-3.5" /> : <ArrowDownAZ className="w-3.5 h-3.5" />}
+            </Button>
+          </div>
+        </div>
       </div>
 
-      {/* Scrollable content area */}
-      <div className="flex-1 min-h-0 overflow-y-auto space-y-3">
+      {/* Metric Strip */}
+      {!isLoading && sortedRows.length > 0 && (
+        <div className="shrink-0 flex flex-wrap items-center gap-x-4 gap-y-1 border-y border-border/50 py-1.5 px-0.5">
+          <MetricChip icon={<Layers className="w-3.5 h-3.5 text-blue-300" />} label="Risk" value={sortedRows.length.toString()} />
+          <MetricChip icon={<CircleDollarSign className="w-3.5 h-3.5 text-blue-300" />} label="Exposure" value={formatCompactUsd(metrics.totalMarketValue)} detail={formatUsd(metrics.totalMarketValue)} />
+          <MetricChip icon={<Shield className="w-3.5 h-3.5 text-amber-300" />} label="Cost" value={formatCompactUsd(metrics.totalCostBasis)} detail={formatUsd(metrics.totalCostBasis)} />
+          <MetricChip
+            icon={metrics.totalUnrealizedPnl >= 0 ? <TrendingUp className="w-3.5 h-3.5 text-emerald-300" /> : <TrendingDown className="w-3.5 h-3.5 text-red-300" />}
+            label="Unrealized"
+            value={formatSignedUsd(metrics.totalUnrealizedPnl)}
+            detail={formatSignedPct(metrics.pnlPercent)}
+            valueClassName={metrics.totalUnrealizedPnl >= 0 ? 'text-emerald-300' : 'text-red-300'}
+          />
+          <MetricChip
+            icon={<Sigma className="w-3.5 h-3.5 text-cyan-300" />}
+            label="Net"
+            value={formatSignedUsd(metrics.directionalNet)}
+            valueClassName={metrics.directionalNet >= 0 ? 'text-emerald-300' : 'text-red-300'}
+          />
+          <MetricChip
+            icon={<Gauge className="w-3.5 h-3.5 text-purple-300" />}
+            label="HHI"
+            value={`${(metrics.concentrationHhi * 100).toFixed(1)}%`}
+            valueClassName={metrics.concentrationHhi >= 0.24 ? 'text-red-300' : metrics.concentrationHhi >= 0.14 ? 'text-amber-300' : 'text-emerald-300'}
+          />
+          <MetricChip
+            icon={<CheckCircle2 className="w-3.5 h-3.5 text-emerald-300" />}
+            label="Mark"
+            value={`${metrics.markCoverage.toFixed(0)}%`}
+            valueClassName={metrics.markCoverage >= 80 ? 'text-emerald-300' : metrics.markCoverage >= 45 ? 'text-amber-300' : 'text-red-300'}
+          />
+          <MetricChip
+            icon={<Target className="w-3.5 h-3.5 text-orange-300" />}
+            label="Largest"
+            value={metrics.largestPosition ? formatCompactUsd(metrics.largestPosition.marketValue) : '$0'}
+            detail={metrics.largestPosition?.marketQuestion}
+          />
+        </div>
+      )}
+
+      {/* Main content — fills remaining space */}
+      <div className="flex-1 min-h-0">
         {isLoading ? (
-          <div className="flex justify-center py-14">
+          <div className="flex h-full items-center justify-center">
             <RefreshCw className="w-8 h-8 animate-spin text-muted-foreground" />
           </div>
+        ) : sortedRows.length === 0 ? (
+          <div className="flex h-full flex-col items-center justify-center">
+            <Briefcase className="w-10 h-10 text-muted-foreground/50 mb-3" />
+            <p className="text-sm text-muted-foreground">No positions match the current filters.</p>
+            <Button variant="outline" size="sm" className="mt-3" onClick={clearFilters}>Clear filters</Button>
+          </div>
         ) : (
-          <>
-            <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-3 card-stagger">
-              <PortfolioMetricCard
-                icon={<Layers className="w-4 h-4 text-blue-300" />}
-                label="Open Risk"
-                value={sortedRows.length.toString()}
-                detail={`${baseRows.length} loaded`}
-              />
-              <PortfolioMetricCard
-                icon={<CircleDollarSign className="w-4 h-4 text-blue-300" />}
-                label="Exposure"
-                value={formatCompactUsd(metrics.totalMarketValue)}
-                detail={formatUsd(metrics.totalMarketValue)}
-              />
-              <PortfolioMetricCard
-                icon={<Shield className="w-4 h-4 text-amber-300" />}
-                label="Cost Basis"
-                value={formatCompactUsd(metrics.totalCostBasis)}
-                detail={formatUsd(metrics.totalCostBasis)}
-              />
-              <PortfolioMetricCard
-                icon={metrics.totalUnrealizedPnl >= 0
-                  ? <TrendingUp className="w-4 h-4 text-emerald-300" />
-                  : <TrendingDown className="w-4 h-4 text-red-300" />
-                }
-                label="Unrealized"
-                value={formatSignedUsd(metrics.totalUnrealizedPnl)}
-                detail={formatSignedPct(metrics.pnlPercent)}
-                valueClassName={metrics.totalUnrealizedPnl >= 0 ? 'text-emerald-300' : 'text-red-300'}
-              />
-              <PortfolioMetricCard
-                icon={<Sigma className="w-4 h-4 text-cyan-300" />}
-                label="Directional Net"
-                value={formatSignedUsd(metrics.directionalNet)}
-                detail={`YES ${formatCompactUsd(metrics.yesExposure)} · NO ${formatCompactUsd(metrics.noExposure)}`}
-                valueClassName={metrics.directionalNet >= 0 ? 'text-emerald-300' : 'text-red-300'}
-              />
-              <PortfolioMetricCard
-                icon={<Gauge className="w-4 h-4 text-purple-300" />}
-                label="Concentration"
-                value={`${(metrics.concentrationHhi * 100).toFixed(1)}%`}
-                detail={`Effective slots ${metrics.effectivePositions.toFixed(1)}`}
-                valueClassName={metrics.concentrationHhi >= 0.24 ? 'text-red-300' : metrics.concentrationHhi >= 0.14 ? 'text-amber-300' : 'text-emerald-300'}
-              />
-              <PortfolioMetricCard
-                icon={<CheckCircle2 className="w-4 h-4 text-emerald-300" />}
-                label="Mark Quality"
-                value={`${metrics.markCoverage.toFixed(0)}%`}
-                detail={`${metrics.estimatedRows} estimated`}
-                valueClassName={metrics.markCoverage >= 80 ? 'text-emerald-300' : metrics.markCoverage >= 45 ? 'text-amber-300' : 'text-red-300'}
-              />
-              <PortfolioMetricCard
-                icon={<Target className="w-4 h-4 text-orange-300" />}
-                label="Largest Position"
-                value={metrics.largestPosition ? formatCompactUsd(metrics.largestPosition.marketValue) : '$0'}
-                detail={metrics.largestPosition ? metrics.largestPosition.marketQuestion : 'n/a'}
-              />
-            </div>
+          <div className="h-full grid gap-2 xl:grid-cols-[minmax(0,1fr)_280px]">
+            {/* Left: Position Table */}
+            <ScrollArea className="h-full rounded-md border border-border/60">
+              <Table className="min-w-[1200px]">
+                <TableHeader>
+                  <TableRow className="sticky top-0 z-10 bg-card/95 backdrop-blur-sm">
+                    <TableHead className="w-[40px]">#</TableHead>
+                    <TableHead className="w-[320px]">Market</TableHead>
+                    <TableHead className="w-[160px]">Desk</TableHead>
+                    <TableHead className="text-center w-[70px]">Side</TableHead>
+                    <TableHead className="text-right w-[90px]">Size</TableHead>
+                    <TableHead className="text-right w-[90px]">Entry</TableHead>
+                    <TableHead className="text-right w-[90px]">Mark</TableHead>
+                    <TableHead className="text-right w-[100px]">Cost</TableHead>
+                    <TableHead className="text-right w-[110px]">Exposure</TableHead>
+                    <TableHead className="text-right w-[100px]">Move</TableHead>
+                    <TableHead className="text-right w-[120px]">Unrealized</TableHead>
+                    <TableHead className="text-right w-[120px]">Updated</TableHead>
+                    <TableHead className="text-right w-[42px]" />
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {sortedRows.map((row, index) => {
+                    const share = totalExposure > 0 ? (row.marketValue / totalExposure) * 100 : 0
+                    const priceMove = row.currentPrice !== null && row.entryPrice !== null
+                      ? row.currentPrice - row.entryPrice
+                      : null
 
-            <div className="grid gap-3 xl:grid-cols-12">
-              <Card className="xl:col-span-5 border-border/80">
-                <CardContent className="p-4">
-                  <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <p className="text-sm font-semibold">Book Contribution Matrix</p>
-                      <p className="text-xs text-muted-foreground">Exposure and known P&L share by source book.</p>
-                    </div>
-                    <Badge className="rounded-md border-transparent bg-muted text-muted-foreground text-[11px]">
-                      {sourceBreakdown.filter((row) => row.rows > 0).length} active books
-                    </Badge>
-                  </div>
-                  <div className="mt-3 space-y-2.5">
-                    {sourceBreakdown.map((book) => (
-                      <BreakdownLane
-                        key={book.venue}
-                        label={book.label}
-                        rowCount={book.rows}
-                        share={book.share}
-                        exposure={book.exposure}
-                        pnl={book.knownPnl}
-                        liveMarks={book.liveMarks}
-                      />
-                    ))}
-                  </div>
-                </CardContent>
-              </Card>
+                    return (
+                      <TableRow key={row.key}>
+                        <TableCell className="px-2 py-1.5 font-mono text-[11px] text-muted-foreground">{index + 1}</TableCell>
 
-              <Card className="xl:col-span-3 border-border/80">
-                <CardContent className="p-4">
-                  <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <p className="text-sm font-semibold">Directional Pressure</p>
-                      <p className="text-xs text-muted-foreground">Net exposure by outcome side.</p>
-                    </div>
-                    <ArrowDownUp className="w-4 h-4 text-muted-foreground" />
-                  </div>
-                  <div className="mt-3 space-y-2.5">
-                    <PressureLane label="YES" value={metrics.yesExposure} total={totalExposure} tone="green" />
-                    <PressureLane label="NO" value={metrics.noExposure} total={totalExposure} tone="red" />
-                    <PressureLane label="OTHER" value={metrics.otherExposure} total={totalExposure} tone="neutral" />
-                  </div>
-                  <div className="mt-4 rounded-lg border border-border/80 bg-muted/25 p-2.5">
-                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Net Bias</p>
-                    <p className={cn('mt-1 text-base font-semibold font-mono', metrics.directionalNet >= 0 ? 'text-emerald-300' : 'text-red-300')}>
-                      {formatSignedUsd(metrics.directionalNet)}
-                    </p>
-                    <p className="mt-1 text-[11px] text-muted-foreground">
-                      {metrics.directionalNet >= 0 ? 'YES side dominates current risk.' : 'NO side dominates current risk.'}
-                    </p>
-                  </div>
-                </CardContent>
-              </Card>
-
-              <Card className="xl:col-span-4 border-border/80">
-                <CardContent className="p-4">
-                  <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <p className="text-sm font-semibold">Risk Radar</p>
-                      <p className="text-xs text-muted-foreground">Top concentrations in the current lens.</p>
-                    </div>
-                    <Badge className="rounded-md border-transparent bg-muted text-muted-foreground text-[11px]">
-                      top {riskRows.length}
-                    </Badge>
-                  </div>
-
-                  {riskRows.length === 0 ? (
-                    <div className="mt-6 text-center text-sm text-muted-foreground">No positions in the current filter lens.</div>
-                  ) : (
-                    <div className="mt-3 space-y-2">
-                      {riskRows.map((row, index) => {
-                        const share = totalExposure > 0 ? (row.marketValue / totalExposure) * 100 : 0
-                        return (
-                          <div key={row.key} className="rounded-lg border border-border/75 bg-muted/25 px-2.5 py-2">
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="flex min-w-0 items-center gap-2">
-                                <span className="text-[10px] font-mono text-muted-foreground">#{index + 1}</span>
-                                <Badge className={cn('rounded border px-1.5 py-0 text-[10px] uppercase', sideBadgeClass(row.side))}>
-                                  {row.side}
-                                </Badge>
-                                <p className="truncate text-xs">{row.marketQuestion}</p>
-                              </div>
-                              <span className="font-mono text-xs">{formatCompactUsd(row.marketValue)}</span>
-                            </div>
-                            <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
-                              <span>{share.toFixed(1)}% of focused book</span>
-                              <span className={cn(
-                                'font-mono',
-                                (row.unrealizedPnl ?? 0) >= 0 ? 'text-emerald-300' : 'text-red-300'
-                              )}>
-                                {row.unrealizedPnl === null ? 'n/a' : formatSignedUsd(row.unrealizedPnl)}
-                              </span>
-                            </div>
-                            <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
-                              <div className="h-full rounded-full bg-blue-400" style={{ width: `${Math.max(2, Math.min(100, share))}%` }} />
-                            </div>
+                        <TableCell className="px-2 py-1.5">
+                          <p className="text-xs leading-tight line-clamp-2">{row.marketQuestion}</p>
+                          <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground mt-0.5">
+                            <span className="font-mono truncate max-w-[120px]">{row.marketId}</span>
+                            {row.status && <span className="uppercase">{row.status}</span>}
                           </div>
-                        )
-                      })}
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-            </div>
+                        </TableCell>
 
-            <Card className="overflow-hidden border-border/80">
-              <CardContent className="p-0">
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-3 bg-muted/25">
+                        <TableCell className="px-2 py-1.5">
+                          <Badge className={cn('rounded border px-1 py-0 text-[10px] uppercase', venueBadgeClass(row.venue))}>
+                            {row.venueLabel}
+                          </Badge>
+                          <p className="text-[10px] text-muted-foreground mt-0.5">{row.accountLabel}</p>
+                        </TableCell>
+
+                        <TableCell className="px-2 py-1.5 text-center">
+                          <Badge className={cn('rounded border px-1.5 py-0 text-[10px] uppercase', sideBadgeClass(row.side))}>
+                            {row.side}
+                          </Badge>
+                        </TableCell>
+
+                        <TableCell className="px-2 py-1.5 text-right font-mono text-xs">{formatSize(row.size)}</TableCell>
+                        <TableCell className="px-2 py-1.5 text-right font-mono text-xs">{formatOptionalPrice(row.entryPrice)}</TableCell>
+
+                        <TableCell className="px-2 py-1.5 text-right font-mono text-xs">
+                          {formatOptionalPrice(row.currentPrice)}
+                          <div className="text-[9px] text-muted-foreground">{row.markMode === 'live' ? 'live' : 'est'}</div>
+                        </TableCell>
+
+                        <TableCell className="px-2 py-1.5 text-right font-mono text-xs">{formatUsd(row.costBasis)}</TableCell>
+
+                        <TableCell className="px-2 py-1.5 text-right">
+                          <div className="font-mono text-xs">{formatUsd(row.marketValue)}</div>
+                          <div className="text-[9px] text-muted-foreground">{share.toFixed(1)}%</div>
+                        </TableCell>
+
+                        <TableCell className="px-2 py-1.5 text-right">
+                          {priceMove === null ? (
+                            <span className="text-[11px] text-muted-foreground">n/a</span>
+                          ) : (
+                            <div className={cn('font-mono text-xs', priceMove >= 0 ? 'text-emerald-300' : 'text-red-300')}>
+                              {priceMove >= 0 ? '+' : '-'}${Math.abs(priceMove).toFixed(4)}
+                            </div>
+                          )}
+                        </TableCell>
+
+                        <TableCell className="px-2 py-1.5 text-right">
+                          {row.unrealizedPnl === null ? (
+                            <span className="text-[11px] text-muted-foreground">n/a</span>
+                          ) : (
+                            <>
+                              <div className={cn('font-mono text-xs', row.unrealizedPnl >= 0 ? 'text-emerald-300' : 'text-red-300')}>
+                                {formatSignedUsd(row.unrealizedPnl)}
+                              </div>
+                              <div className="text-[9px] text-muted-foreground">
+                                {row.pnlPercent === null ? '' : formatSignedPct(row.pnlPercent)}
+                              </div>
+                            </>
+                          )}
+                        </TableCell>
+
+                        <TableCell className="px-2 py-1.5 text-right">
+                          <div className="text-[11px] text-muted-foreground">{formatRelativeTime(row.openedAt)}</div>
+                        </TableCell>
+
+                        <TableCell className="px-2 py-1.5 text-right">
+                          {row.marketUrl ? (
+                            <a
+                              href={row.marketUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex h-6 w-6 items-center justify-center rounded border border-border text-muted-foreground hover:text-foreground hover:border-blue-400/50"
+                            >
+                              <ExternalLink className="w-3 h-3" />
+                            </a>
+                          ) : null}
+                        </TableCell>
+                      </TableRow>
+                    )
+                  })}
+                </TableBody>
+                <TableFooter>
+                  <TableRow>
+                    <TableCell colSpan={7} className="px-2 py-1.5 text-xs text-muted-foreground">
+                      Totals · {sortedRows.length} rows
+                    </TableCell>
+                    <TableCell className="px-2 py-1.5 text-right font-mono text-xs">{formatUsd(metrics.totalCostBasis)}</TableCell>
+                    <TableCell className="px-2 py-1.5 text-right font-mono text-xs">{formatUsd(metrics.totalMarketValue)}</TableCell>
+                    <TableCell className="px-2 py-1.5 text-right text-xs text-muted-foreground">-</TableCell>
+                    <TableCell className="px-2 py-1.5 text-right font-mono text-xs">
+                      <span className={cn(metrics.totalUnrealizedPnl >= 0 ? 'text-emerald-300' : 'text-red-300')}>
+                        {formatSignedUsd(metrics.totalUnrealizedPnl)}
+                      </span>
+                    </TableCell>
+                    <TableCell colSpan={2} className="px-2 py-1.5 text-right text-xs text-muted-foreground">
+                      {metrics.markCoverage.toFixed(0)}% marked
+                    </TableCell>
+                  </TableRow>
+                </TableFooter>
+              </Table>
+            </ScrollArea>
+
+            {/* Right: Analytics Sidebar */}
+            <div className="hidden xl:flex flex-col gap-2 min-h-0">
+              <ScrollArea className="h-full">
+                <div className="space-y-3 pr-2">
+                  {/* Book Contribution */}
                   <div>
-                    <p className="text-sm font-semibold">Unified Position Grid</p>
-                    <p className="text-xs text-muted-foreground">
-                      Data-dense execution view with mark quality, concentration share, and link-outs.
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {metrics.worstPnlPosition && (
-                      <Badge className="rounded-md border-transparent bg-red-500/15 text-red-300 text-[11px]">
-                        Drawdown hotspot {formatSignedUsd(metrics.worstPnlPosition.unrealizedPnl ?? 0)}
+                    <div className="flex items-center justify-between gap-2 mb-2">
+                      <p className="text-xs font-semibold">Book Contribution</p>
+                      <Badge className="rounded-md border-transparent bg-muted text-muted-foreground text-[10px]">
+                        {sourceBreakdown.filter((row) => row.rows > 0).length} active
                       </Badge>
-                    )}
-                    <Badge className="rounded-md border-transparent bg-muted text-muted-foreground text-[11px]">
-                      {sortedRows.length} rows
-                    </Badge>
+                    </div>
+                    <div className="space-y-2">
+                      {sourceBreakdown.map((book) => (
+                        <BreakdownLane
+                          key={book.venue}
+                          label={book.label}
+                          rowCount={book.rows}
+                          share={book.share}
+                          exposure={book.exposure}
+                          pnl={book.knownPnl}
+                          liveMarks={book.liveMarks}
+                        />
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Directional Pressure */}
+                  <div className="border-t border-border/50 pt-3">
+                    <div className="flex items-center justify-between gap-2 mb-2">
+                      <p className="text-xs font-semibold">Directional Pressure</p>
+                      <ArrowDownUp className="w-3.5 h-3.5 text-muted-foreground" />
+                    </div>
+                    <div className="space-y-2">
+                      <PressureLane label="YES" value={metrics.yesExposure} total={totalExposure} tone="green" />
+                      <PressureLane label="NO" value={metrics.noExposure} total={totalExposure} tone="red" />
+                      <PressureLane label="OTHER" value={metrics.otherExposure} total={totalExposure} tone="neutral" />
+                    </div>
+                    <div className="mt-3 rounded-lg border border-border/60 bg-muted/25 p-2">
+                      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Net Bias</p>
+                      <p className={cn('mt-0.5 text-sm font-semibold font-mono', metrics.directionalNet >= 0 ? 'text-emerald-300' : 'text-red-300')}>
+                        {formatSignedUsd(metrics.directionalNet)}
+                      </p>
+                    </div>
                   </div>
                 </div>
-
-                {sortedRows.length === 0 ? (
-                  <div className="py-14 text-center">
-                    <Briefcase className="w-10 h-10 mx-auto text-muted-foreground/50 mb-3" />
-                    <p className="text-sm text-muted-foreground">No positions match the current filters.</p>
-                    <Button variant="outline" size="sm" className="mt-3" onClick={clearFilters}>Clear filters</Button>
-                  </div>
-                ) : (
-                  <div className="overflow-x-auto">
-                    <Table className="min-w-[1400px]">
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead className="w-[52px]">#</TableHead>
-                          <TableHead className="w-[390px]">Market</TableHead>
-                          <TableHead className="w-[220px]">Desk</TableHead>
-                          <TableHead className="text-center w-[90px]">Side</TableHead>
-                          <TableHead className="text-right w-[110px]">Size</TableHead>
-                          <TableHead className="text-right w-[110px]">Entry</TableHead>
-                          <TableHead className="text-right w-[110px]">Mark</TableHead>
-                          <TableHead className="text-right w-[120px]">Cost Basis</TableHead>
-                          <TableHead className="text-right w-[130px]">Exposure</TableHead>
-                          <TableHead className="text-right w-[130px]">Price Move</TableHead>
-                          <TableHead className="text-right w-[155px]">Unrealized</TableHead>
-                          <TableHead className="text-right w-[170px]">Updated</TableHead>
-                          <TableHead className="text-right w-[58px]">Link</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {sortedRows.map((row, index) => {
-                          const share = totalExposure > 0 ? (row.marketValue / totalExposure) * 100 : 0
-                          const priceMove = row.currentPrice !== null && row.entryPrice !== null
-                            ? row.currentPrice - row.entryPrice
-                            : null
-                          const priceMovePct = priceMove !== null && row.entryPrice && row.entryPrice > 0
-                            ? (priceMove / row.entryPrice) * 100
-                            : null
-
-                          return (
-                            <TableRow key={row.key}>
-                              <TableCell className={cn(rowPaddingClass, 'font-mono text-xs text-muted-foreground')}>#{index + 1}</TableCell>
-
-                              <TableCell className={rowPaddingClass}>
-                                <div className="space-y-0.5 min-w-0">
-                                  <p className="leading-tight line-clamp-2">{row.marketQuestion}</p>
-                                  <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-                                    <span className="font-mono truncate">{row.marketId}</span>
-                                    {row.status && (
-                                      <span className="uppercase tracking-wide text-[10px]">{row.status}</span>
-                                    )}
-                                  </div>
-                                </div>
-                              </TableCell>
-
-                              <TableCell className={rowPaddingClass}>
-                                <div className="space-y-1">
-                                  <Badge className={cn('w-fit rounded border px-1.5 py-0 text-[10px] uppercase tracking-wide', venueBadgeClass(row.venue))}>
-                                    {row.venueLabel}
-                                  </Badge>
-                                  <p className="text-[11px] text-muted-foreground">{row.accountLabel}</p>
-                                </div>
-                              </TableCell>
-
-                              <TableCell className={cn(rowPaddingClass, 'text-center')}>
-                                <Badge className={cn('rounded border px-2 py-0.5 text-[10px] uppercase', sideBadgeClass(row.side))}>
-                                  {row.side}
-                                </Badge>
-                              </TableCell>
-
-                              <TableCell className={cn(rowPaddingClass, 'text-right font-mono')}>
-                                {formatSize(row.size)}
-                              </TableCell>
-
-                              <TableCell className={cn(rowPaddingClass, 'text-right font-mono')}>
-                                {formatOptionalPrice(row.entryPrice)}
-                              </TableCell>
-
-                              <TableCell className={cn(rowPaddingClass, 'text-right font-mono')}>
-                                <div>
-                                  {formatOptionalPrice(row.currentPrice)}
-                                </div>
-                                <div className="text-[10px] text-muted-foreground">
-                                  {row.markMode === 'live' ? 'live' : 'estimated'}
-                                </div>
-                              </TableCell>
-
-                              <TableCell className={cn(rowPaddingClass, 'text-right font-mono')}>
-                                {formatUsd(row.costBasis)}
-                              </TableCell>
-
-                              <TableCell className={cn(rowPaddingClass, 'text-right')}>
-                                <div className="font-mono">{formatUsd(row.marketValue)}</div>
-                                <div className="mt-1 h-1.5 w-[88px] ml-auto overflow-hidden rounded-full bg-muted">
-                                  <div
-                                    className="h-full rounded-full bg-blue-400"
-                                    style={{ width: `${Math.max(2, Math.min(100, share))}%` }}
-                                  />
-                                </div>
-                                <div className="text-[10px] text-muted-foreground mt-0.5">{share.toFixed(1)}%</div>
-                              </TableCell>
-
-                              <TableCell className={cn(rowPaddingClass, 'text-right')}>
-                                {priceMove === null ? (
-                                  <span className="text-xs text-muted-foreground">n/a</span>
-                                ) : (
-                                  <>
-                                    <div className={cn('font-mono', priceMove >= 0 ? 'text-emerald-300' : 'text-red-300')}>
-                                      {priceMove >= 0 ? '+' : '-'}${Math.abs(priceMove).toFixed(4)}
-                                    </div>
-                                    <div className="text-[10px] text-muted-foreground">
-                                      {priceMovePct === null ? 'n/a' : formatSignedPct(priceMovePct)}
-                                    </div>
-                                  </>
-                                )}
-                              </TableCell>
-
-                              <TableCell className={cn(rowPaddingClass, 'text-right')}>
-                                {row.unrealizedPnl === null ? (
-                                  <span className="text-xs text-muted-foreground">n/a</span>
-                                ) : (
-                                  <>
-                                    <div className={cn('font-mono', row.unrealizedPnl >= 0 ? 'text-emerald-300' : 'text-red-300')}>
-                                      {formatSignedUsd(row.unrealizedPnl)}
-                                    </div>
-                                    <div className="text-[10px] text-muted-foreground">
-                                      {row.pnlPercent === null ? 'n/a' : formatSignedPct(row.pnlPercent)}
-                                    </div>
-                                  </>
-                                )}
-                              </TableCell>
-
-                              <TableCell className={cn(rowPaddingClass, 'text-right')}>
-                                <div className="text-xs text-muted-foreground">{formatRelativeTime(row.openedAt)}</div>
-                                <div className="text-[10px] text-muted-foreground">{formatTimestamp(row.openedAt)}</div>
-                              </TableCell>
-
-                              <TableCell className={cn(rowPaddingClass, 'text-right')}>
-                                {row.marketUrl ? (
-                                  <a
-                                    href={row.marketUrl}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:text-foreground hover:border-blue-400/50"
-                                  >
-                                    <ExternalLink className="w-3.5 h-3.5" />
-                                  </a>
-                                ) : (
-                                  <span className="text-xs text-muted-foreground">n/a</span>
-                                )}
-                              </TableCell>
-                            </TableRow>
-                          )
-                        })}
-                      </TableBody>
-                      <TableFooter>
-                        <TableRow>
-                          <TableCell colSpan={7} className={cn(secondaryRowPaddingClass, 'text-xs text-muted-foreground')}>
-                            Totals · {sortedRows.length} rows
-                          </TableCell>
-                          <TableCell className={cn(secondaryRowPaddingClass, 'text-right font-mono')}>
-                            {formatUsd(metrics.totalCostBasis)}
-                          </TableCell>
-                          <TableCell className={cn(secondaryRowPaddingClass, 'text-right font-mono')}>
-                            {formatUsd(metrics.totalMarketValue)}
-                          </TableCell>
-                          <TableCell className={cn(secondaryRowPaddingClass, 'text-right')}>
-                            <span className="text-xs text-muted-foreground">-</span>
-                          </TableCell>
-                          <TableCell className={cn(secondaryRowPaddingClass, 'text-right font-mono')}>
-                            <span className={cn(metrics.totalUnrealizedPnl >= 0 ? 'text-emerald-300' : 'text-red-300')}>
-                              {formatSignedUsd(metrics.totalUnrealizedPnl)}
-                            </span>
-                            <div className="text-[10px] text-muted-foreground">{formatSignedPct(metrics.pnlPercent)}</div>
-                          </TableCell>
-                          <TableCell className={cn(secondaryRowPaddingClass, 'text-right text-xs text-muted-foreground')}>
-                            {metrics.markCoverage.toFixed(0)}% marked
-                          </TableCell>
-                          <TableCell className={secondaryRowPaddingClass} />
-                        </TableRow>
-                      </TableFooter>
-                    </Table>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          </>
+              </ScrollArea>
+            </div>
+          </div>
         )}
       </div>
+
+      {/* Error alerts */}
+      {simulationPayload.failedAccounts.length > 0 && (
+        <div className="shrink-0 flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+          <AlertTriangle className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+          Failed: {simulationPayload.failedAccounts.join(', ')}
+        </div>
+      )}
+
+      {shouldFetchKalshiLive && !kalshiStatusLoading && !kalshiStatus?.authenticated && (
+        <div className="shrink-0 rounded-md border border-indigo-500/30 bg-indigo-500/10 px-3 py-2 text-xs text-indigo-100">
+          Kalshi not authenticated — live positions unavailable.
+        </div>
+      )}
     </div>
   )
 }
 
-function ControlField({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="space-y-1">
-      <p className="text-[10px] uppercase tracking-wide text-muted-foreground/80">{label}</p>
-      {children}
-    </div>
-  )
-}
-
-function PortfolioMetricCard({
+function MetricChip({
   icon,
   label,
   value,
@@ -1373,18 +1171,11 @@ function PortfolioMetricCard({
   valueClassName?: string
 }) {
   return (
-    <Card className="border-border/75">
-      <CardContent className="p-3">
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          {icon}
-          <span>{label}</span>
-        </div>
-        <p className={cn('mt-1 text-sm font-semibold font-mono', valueClassName)}>{value}</p>
-        {detail && (
-          <p className="mt-1 text-[11px] text-muted-foreground line-clamp-1">{detail}</p>
-        )}
-      </CardContent>
-    </Card>
+    <div className="flex items-center gap-1.5 text-xs" title={detail || undefined}>
+      {icon}
+      <span className="text-muted-foreground">{label}</span>
+      <span className={cn('font-mono font-semibold', valueClassName)}>{value}</span>
+    </div>
   )
 }
 

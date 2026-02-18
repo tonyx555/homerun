@@ -7,8 +7,6 @@ import {
   BarChart3,
   Calendar,
   RefreshCw,
-  ShieldCheck,
-  Sparkles,
   Target,
   TrendingDown,
   TrendingUp,
@@ -36,7 +34,6 @@ import {
 } from '../services/api'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from './ui/card'
 import { ScrollArea } from './ui/scroll-area'
 import {
   Table,
@@ -46,7 +43,6 @@ import {
   TableHeader,
   TableRow,
 } from './ui/table'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs'
 import ValidationEnginePanel from './ValidationEnginePanel'
 
 type ViewMode = 'simulation' | 'live' | 'all'
@@ -418,395 +414,314 @@ export default function PerformancePanel() {
     }
   }
 
-  const viewModeLabel = viewMode === 'all'
-    ? 'Unified stream'
-    : viewMode === 'simulation'
-      ? 'Sandbox stream'
-      : 'Live stream'
-
   return (
-    <Tabs value={activeSubTab} onValueChange={(value) => setActiveSubTab(value as PerformanceSubTab)} className="flex flex-col h-full min-h-0">
-      {/* Fixed header: title + badges */}
-      <div className="shrink-0 space-y-3 pb-3">
-        <Card className="overflow-hidden border-border/80 bg-card/80">
-          <CardContent className="p-5">
-            <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-              <div>
-                <div className="inline-flex items-center gap-1.5 rounded-full border border-cyan-300 bg-cyan-100 px-2.5 py-1 text-[10px] uppercase tracking-wider text-cyan-800 dark:border-cyan-500/25 dark:bg-cyan-500/10 dark:text-cyan-200">
-                  <Sparkles className="h-3 w-3" />
-                  Performance Command Center
-                </div>
-                <h2 className="mt-2 flex items-center gap-2 text-xl font-semibold">
-                  <BarChart3 className="h-5 w-5 text-cyan-700 dark:text-cyan-300" />
-                  Performance Intelligence
-                </h2>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Data-dense execution telemetry, trade quality diagnostics, and validation controls in one surface.
-                </p>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2 text-[11px]">
-                <Badge variant="outline" className="border-cyan-300 bg-cyan-100 text-cyan-800 dark:border-cyan-500/25 dark:bg-cyan-500/10 dark:text-cyan-200">
-                  {viewModeLabel}
-                </Badge>
-                <Badge variant="outline" className="border-emerald-300 bg-emerald-100 text-emerald-800 dark:border-emerald-500/25 dark:bg-emerald-500/10 dark:text-emerald-200">
-                  {summary.totalTrades} trades in scope
-                </Badge>
-                <Badge variant="outline" className="border-amber-300 bg-amber-100 text-amber-800 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-200">
-                  Range: {RANGE_OPTIONS.find((option) => option.id === timeRange)?.label}
-                </Badge>
-              </div>
+    <div className="h-full min-h-0 flex flex-col gap-1.5">
+      {/* Control Strip */}
+      <div className="shrink-0 space-y-2">
+        {/* Row 1: Title + view toggle + refresh */}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-3">
+            <h2 className="text-base font-semibold flex items-center gap-2">
+              <BarChart3 className="w-4 h-4 text-cyan-300" />
+              Performance
+            </h2>
+            <div className="flex items-center gap-1 rounded-md border border-border/60 bg-card/50 p-0.5">
+              <button
+                type="button"
+                onClick={() => setActiveSubTab('overview')}
+                className={cn(
+                  'h-6 rounded px-2.5 text-xs transition-colors',
+                  activeSubTab === 'overview'
+                    ? 'bg-cyan-500/15 text-cyan-200 font-medium'
+                    : 'text-muted-foreground hover:text-foreground'
+                )}
+              >
+                Overview
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveSubTab('validation')}
+                className={cn(
+                  'h-6 rounded px-2.5 text-xs transition-colors',
+                  activeSubTab === 'validation'
+                    ? 'bg-emerald-500/15 text-emerald-200 font-medium'
+                    : 'text-muted-foreground hover:text-foreground'
+                )}
+              >
+                Validation
+              </button>
             </div>
-          </CardContent>
-        </Card>
-
-        {/* Tab navigation - pinned */}
-        <TabsList className="h-auto w-full justify-start gap-2 rounded-xl border border-border/60 bg-card/70 p-1.5">
-          <TabsTrigger
-            value="overview"
-            className="h-auto min-w-[220px] items-start justify-start rounded-lg px-3 py-2 data-[state=active]:border data-[state=active]:border-cyan-300 data-[state=active]:bg-cyan-100 data-[state=active]:text-cyan-900 dark:data-[state=active]:border-cyan-500/40 dark:data-[state=active]:bg-cyan-500/10 dark:data-[state=active]:text-cyan-100"
-          >
-            <div className="flex items-start gap-2 text-left">
-              <BarChart3 className="mt-0.5 h-4 w-4 text-cyan-700 dark:text-cyan-300" />
-              <div>
-                <p className="text-sm font-medium">Overview Grid</p>
-                <p className="text-[11px] text-muted-foreground">P&L, strategy mix, and trade tape</p>
-              </div>
-            </div>
-          </TabsTrigger>
-          <TabsTrigger
-            value="validation"
-            className="h-auto min-w-[220px] items-start justify-start rounded-lg px-3 py-2 data-[state=active]:border data-[state=active]:border-emerald-300 data-[state=active]:bg-emerald-100 data-[state=active]:text-emerald-900 dark:data-[state=active]:border-emerald-500/40 dark:data-[state=active]:bg-emerald-500/10 dark:data-[state=active]:text-emerald-100"
-          >
-            <div className="flex items-start gap-2 text-left">
-              <ShieldCheck className="mt-0.5 h-4 w-4 text-emerald-700 dark:text-emerald-300" />
-              <div>
-                <p className="text-sm font-medium">Validation Ops</p>
-                <p className="text-[11px] text-muted-foreground">Jobs, guardrails, and strategy health</p>
-              </div>
-            </div>
-          </TabsTrigger>
-        </TabsList>
-      </div>
-
-      {/* Scrollable content area */}
-      <div className="flex-1 min-h-0 overflow-y-auto">
-        <TabsContent value="overview" className="mt-0 space-y-4">
-          <Card className="border-border/60 bg-card/75">
-            <CardContent className="p-4">
-              <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-                <div className="space-y-2">
-                  <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Data Scope</p>
-                  <div className="flex flex-wrap gap-2">
-                    {VIEW_MODE_OPTIONS.map((option) => (
-                      <button
-                        key={option.id}
-                        type="button"
-                        onClick={() => setViewMode(option.id)}
-                        className={cn(
-                          'h-8 rounded-md border px-3 text-xs transition-colors',
-                          viewMode === option.id
-                            ? 'border-cyan-300 bg-cyan-100 text-cyan-900 dark:border-cyan-500/40 dark:bg-cyan-500/15 dark:text-cyan-100'
-                            : 'border-border bg-background/60 text-muted-foreground hover:text-foreground'
-                        )}
-                      >
-                        {option.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Time Horizon</p>
-                  <div className="flex flex-wrap gap-2">
-                    {RANGE_OPTIONS.map((option) => (
-                      <button
-                        key={option.id}
-                        type="button"
-                        onClick={() => setTimeRange(option.id)}
-                        className={cn(
-                          'h-8 rounded-md border px-3 text-xs transition-colors',
-                          timeRange === option.id
-                            ? 'border-emerald-300 bg-emerald-100 text-emerald-900 dark:border-emerald-500/40 dark:bg-emerald-500/15 dark:text-emerald-100'
-                            : 'border-border bg-background/60 text-muted-foreground hover:text-foreground'
-                        )}
-                      >
-                        {option.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2">
-                  {(viewMode === 'simulation' || viewMode === 'all') && accounts.length > 0 && (
-                    <select
-                      value={selectedAccount || ''}
-                      onChange={(event) => setSelectedAccount(event.target.value || null)}
-                      className="h-8 rounded-md border border-border bg-background/80 px-2.5 text-xs"
-                    >
-                      <option value="">All simulation accounts</option>
-                      {accounts.map((account: SimulationAccount) => (
-                        <option key={account.id} value={account.id}>
-                          {account.name}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    onClick={handleRefresh}
-                    disabled={isLoading}
-                    className="h-8"
-                  >
-                    <RefreshCw className={cn('mr-1.5 h-3.5 w-3.5', isLoading && 'animate-spin')} />
-                    Refresh
-                  </Button>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6 card-stagger">
-            <PerformanceMetricTile
-              label="Net P&L"
-              value={formatSignedCurrency(summary.totalPnl, true)}
-              helper={formatCurrency(summary.totalPnl)}
-              icon={summary.totalPnl >= 0 ? TrendingUp : TrendingDown}
-              tone={summary.totalPnl >= 0 ? 'good' : 'bad'}
-            />
-            <PerformanceMetricTile
-              label="ROI"
-              value={formatPercent(summary.roi)}
-              helper={summary.totalCost > 0 ? `on ${formatCurrency(summary.totalCost, true)} deployed` : 'no deployed capital'}
-              icon={Target}
-              tone={summary.roi >= 0 ? 'good' : 'bad'}
-            />
-            <PerformanceMetricTile
-              label="Win Rate"
-              value={formatPercent(summary.winRate)}
-              helper={`${summary.wins}W / ${summary.losses}L`}
-              icon={Activity}
-              tone={summary.winRate >= 50 ? 'good' : 'warn'}
-            />
-            <PerformanceMetricTile
-              label="Open Trades"
-              value={String(summary.openTrades)}
-              helper={`${summary.resolvedTrades} resolved`}
-              icon={Calendar}
-              tone={summary.openTrades > 0 ? 'info' : 'neutral'}
-            />
-            <PerformanceMetricTile
-              label="Avg Trade P&L"
-              value={formatSignedCurrency(summary.avgPnl)}
-              helper={`${summary.totalTrades} total trades`}
-              icon={summary.avgPnl >= 0 ? ArrowUpRight : ArrowDownRight}
-              tone={summary.avgPnl >= 0 ? 'good' : 'bad'}
-            />
-            <PerformanceMetricTile
-              label="Max Drawdown"
-              value={formatCurrency(maxDrawdown, true)}
-              helper={
-                Number.isFinite(summary.profitFactor)
-                  ? `profit factor ${summary.profitFactor === Infinity ? '∞' : summary.profitFactor.toFixed(2)}`
-                  : 'profit factor n/a'
-              }
-              icon={TrendingDown}
-              tone={maxDrawdown > 0 ? 'warn' : 'neutral'}
-            />
+            <Badge variant="outline" className="text-[10px] border-border/50">
+              {summary.totalTrades} trades
+            </Badge>
           </div>
 
-          <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
-            <Card className="xl:col-span-8 border-border/60 bg-card/80">
-              <CardHeader className="pb-3">
-                <CardTitle className="flex items-center justify-between gap-3 text-base font-semibold">
-                  <span className="flex items-center gap-2">
-                    <BarChart3 className="h-4 w-4 text-cyan-700 dark:text-cyan-300" />
-                    Cumulative P&L Stream
-                  </span>
-                  {orchestratorStats?.last_trade_at && (
-                    <span className="text-[11px] font-normal text-muted-foreground">
-                      last orchestrator trade: {new Date(orchestratorStats.last_trade_at).toLocaleString()}
-                    </span>
+          <Button variant="ghost" size="sm" onClick={handleRefresh} disabled={isLoading} className="h-7 px-2">
+            <RefreshCw className={cn('w-3.5 h-3.5', isLoading && 'animate-spin')} />
+          </Button>
+        </div>
+
+        {/* Row 2: Scope + time range + account (overview only) */}
+        {activeSubTab === 'overview' && (
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-1">
+              {VIEW_MODE_OPTIONS.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  onClick={() => setViewMode(option.id)}
+                  className={cn(
+                    'h-7 rounded-md border px-2.5 text-xs transition-colors',
+                    viewMode === option.id
+                      ? 'border-cyan-500/40 bg-cyan-500/15 text-cyan-100'
+                      : 'border-border bg-background/60 text-muted-foreground hover:text-foreground'
                   )}
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="w-px h-5 bg-border/50" />
+
+            <div className="flex items-center gap-1">
+              {RANGE_OPTIONS.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  onClick={() => setTimeRange(option.id)}
+                  className={cn(
+                    'h-7 rounded-md border px-2.5 text-xs transition-colors',
+                    timeRange === option.id
+                      ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-100'
+                      : 'border-border bg-background/60 text-muted-foreground hover:text-foreground'
+                  )}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+
+            {(viewMode === 'simulation' || viewMode === 'all') && accounts.length > 0 && (
+              <>
+                <div className="w-px h-5 bg-border/50" />
+                <select
+                  value={selectedAccount || ''}
+                  onChange={(event) => setSelectedAccount(event.target.value || null)}
+                  className="h-7 rounded-md border border-border bg-background/80 px-2 text-xs"
+                >
+                  <option value="">All accounts</option>
+                  {accounts.map((account: SimulationAccount) => (
+                    <option key={account.id} value={account.id}>{account.name}</option>
+                  ))}
+                </select>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Metric Strip (overview only) */}
+      {activeSubTab === 'overview' && (
+        <div className="shrink-0 flex flex-wrap items-center gap-x-4 gap-y-1 border-y border-border/50 py-1.5 px-0.5">
+          <MetricChip
+            label="P&L"
+            value={formatSignedCurrency(summary.totalPnl, true)}
+            detail={formatCurrency(summary.totalPnl)}
+            icon={summary.totalPnl >= 0 ? TrendingUp : TrendingDown}
+            valueClassName={summary.totalPnl >= 0 ? 'text-emerald-300' : 'text-red-300'}
+          />
+          <MetricChip
+            label="ROI"
+            value={formatPercent(summary.roi)}
+            detail={`on ${formatCurrency(summary.totalCost, true)}`}
+            icon={Target}
+            valueClassName={summary.roi >= 0 ? 'text-emerald-300' : 'text-red-300'}
+          />
+          <MetricChip
+            label="Win Rate"
+            value={formatPercent(summary.winRate)}
+            detail={`${summary.wins}W / ${summary.losses}L`}
+            icon={Activity}
+            valueClassName={summary.winRate >= 50 ? 'text-emerald-300' : 'text-amber-300'}
+          />
+          <MetricChip
+            label="Open"
+            value={String(summary.openTrades)}
+            detail={`${summary.resolvedTrades} resolved`}
+            icon={Calendar}
+          />
+          <MetricChip
+            label="Avg P&L"
+            value={formatSignedCurrency(summary.avgPnl)}
+            icon={summary.avgPnl >= 0 ? ArrowUpRight : ArrowDownRight}
+            valueClassName={summary.avgPnl >= 0 ? 'text-emerald-300' : 'text-red-300'}
+          />
+          <MetricChip
+            label="Drawdown"
+            value={formatCurrency(maxDrawdown, true)}
+            detail={Number.isFinite(summary.profitFactor) ? `PF ${summary.profitFactor === Infinity ? '∞' : summary.profitFactor.toFixed(2)}` : ''}
+            icon={TrendingDown}
+            valueClassName={maxDrawdown > 0 ? 'text-amber-300' : undefined}
+          />
+        </div>
+      )}
+
+      {/* Main content */}
+      {activeSubTab === 'overview' ? (
+        <div className="flex-1 min-h-0 flex flex-col gap-2">
+          {/* Chart + Leaderboard */}
+          <div className="shrink-0 h-[260px] grid gap-2 xl:grid-cols-12">
+            <div className="xl:col-span-8 rounded-md border border-border/60 bg-card/80 p-3 flex flex-col">
+              <div className="shrink-0 flex items-center justify-between gap-2 mb-2">
+                <p className="text-xs font-semibold flex items-center gap-1.5">
+                  <BarChart3 className="h-3.5 w-3.5 text-cyan-300" />
+                  Cumulative P&L
+                </p>
+                {orchestratorStats?.last_trade_at && (
+                  <span className="text-[10px] text-muted-foreground">
+                    last trade: {new Date(orchestratorStats.last_trade_at).toLocaleString()}
+                  </span>
+                )}
+              </div>
+              <div className="flex-1 min-h-0">
                 {cumulativePnlData.length === 0 ? (
-                  <div className="flex h-64 items-center justify-center rounded-lg border border-dashed border-border/60 bg-background/20 text-sm text-muted-foreground">
-                    No trade history in the selected range.
+                  <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+                    No trade history in range.
                   </div>
                 ) : (
-                  <div className="h-72">
-                    <PerformancePnlChart data={cumulativePnlData} viewMode={viewMode} />
-                  </div>
+                  <PerformancePnlChart data={cumulativePnlData} viewMode={viewMode} />
                 )}
-              </CardContent>
-            </Card>
+              </div>
+            </div>
 
-            <Card className="xl:col-span-4 border-border/60 bg-card/80">
-              <CardHeader className="pb-3">
-                <CardTitle className="text-base font-semibold">Strategy Leaderboard</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-2">
-                {strategyLeaderboard.length === 0 && (
-                  <div className="rounded-md border border-dashed border-border/60 bg-background/20 px-3 py-5 text-center text-sm text-muted-foreground">
-                    No strategy activity yet.
-                  </div>
-                )}
-
-                {strategyLeaderboard.slice(0, 12).map((row) => {
-                  const denominator = Math.max(1, summary.totalTrades)
-                  const volumeShare = (row.trades / denominator) * 100
-                  const winRate = row.wins + row.losses > 0
-                    ? (row.wins / (row.wins + row.losses)) * 100
-                    : 0
-                  return (
-                    <div key={row.strategy} className="rounded-lg border border-border/55 bg-background/30 p-2.5">
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="truncate text-sm font-medium">{row.strategy}</p>
-                        <p className={cn(
-                          'text-xs font-data',
-                          row.pnl >= 0 ? 'text-emerald-700 dark:text-emerald-300' : 'text-red-700 dark:text-red-300'
-                        )}>
-                          {formatSignedCurrency(row.pnl, true)}
-                        </p>
-                      </div>
-                      <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
-                        <span>{row.trades} trades</span>
-                        <span>•</span>
-                        <span>{formatPercent(winRate)} hit rate</span>
-                        <span>•</span>
-                        <span>{row.liveTrades} live / {row.sandboxTrades} sandbox</span>
-                      </div>
-                      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-border/40">
-                        <div
-                          className={cn(
-                            'h-full rounded-full',
-                            row.pnl >= 0 ? 'bg-emerald-500/75 dark:bg-emerald-400/80' : 'bg-red-500/75 dark:bg-red-400/80'
-                          )}
-                          style={{ width: `${Math.max(6, Math.min(100, volumeShare))}%` }}
-                        />
-                      </div>
-                    </div>
-                  )
-                })}
-              </CardContent>
-            </Card>
+            <div className="xl:col-span-4 rounded-md border border-border/60 bg-card/80 p-3 flex flex-col">
+              <p className="shrink-0 text-xs font-semibold mb-2">Strategy Leaderboard</p>
+              <ScrollArea className="flex-1 min-h-0">
+                <div className="space-y-1.5 pr-2">
+                  {strategyLeaderboard.length === 0 ? (
+                    <div className="text-xs text-muted-foreground text-center py-4">No strategy activity.</div>
+                  ) : (
+                    strategyLeaderboard.slice(0, 12).map((row) => {
+                      const winRate = row.wins + row.losses > 0 ? (row.wins / (row.wins + row.losses)) * 100 : 0
+                      return (
+                        <div key={row.strategy} className="rounded border border-border/50 bg-background/30 px-2 py-1.5">
+                          <div className="flex items-center justify-between gap-1">
+                            <p className="truncate text-xs">{row.strategy}</p>
+                            <p className={cn('text-[11px] font-mono', row.pnl >= 0 ? 'text-emerald-300' : 'text-red-300')}>
+                              {formatSignedCurrency(row.pnl, true)}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground mt-0.5">
+                            <span>{row.trades}t</span>
+                            <span>{formatPercent(winRate)}</span>
+                            <span>{row.liveTrades}L/{row.sandboxTrades}S</span>
+                          </div>
+                        </div>
+                      )
+                    })
+                  )}
+                </div>
+              </ScrollArea>
+            </div>
           </div>
 
-          <Card className="border-border/60 bg-card/80">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base font-semibold">Trade Tape</CardTitle>
-            </CardHeader>
-            <CardContent className="pt-0">
-              <ScrollArea className="h-[420px] pr-3">
-                <Table>
-                  <TableHeader>
-                    <TableRow className="border-border/60 bg-background/30">
-                      <TableHead className="h-9 py-2 text-[11px] uppercase tracking-wide">Timestamp</TableHead>
-                      <TableHead className="h-9 py-2 text-[11px] uppercase tracking-wide">Source</TableHead>
-                      <TableHead className="h-9 py-2 text-[11px] uppercase tracking-wide">Strategy</TableHead>
-                      <TableHead className="h-9 py-2 text-[11px] uppercase tracking-wide">Status</TableHead>
-                      <TableHead className="h-9 py-2 text-right text-[11px] uppercase tracking-wide">Cost</TableHead>
-                      <TableHead className="h-9 py-2 text-right text-[11px] uppercase tracking-wide">P&L</TableHead>
-                      <TableHead className="h-9 py-2 text-[11px] uppercase tracking-wide">Account</TableHead>
+          {/* Trade Tape — fills remaining space */}
+          <div className="flex-1 min-h-0 rounded-md border border-border/60 bg-card/80 flex flex-col">
+            <div className="shrink-0 flex items-center justify-between gap-2 px-3 py-2 border-b border-border/40">
+              <p className="text-xs font-semibold">Trade Tape</p>
+              <span className="text-[10px] text-muted-foreground">{unifiedTrades.length} trades</span>
+            </div>
+            <ScrollArea className="flex-1 min-h-0">
+              <Table>
+                <TableHeader>
+                  <TableRow className="sticky top-0 z-10 bg-card/95 backdrop-blur-sm">
+                    <TableHead className="h-7 py-1 text-[10px] uppercase tracking-wide">Timestamp</TableHead>
+                    <TableHead className="h-7 py-1 text-[10px] uppercase tracking-wide">Source</TableHead>
+                    <TableHead className="h-7 py-1 text-[10px] uppercase tracking-wide">Strategy</TableHead>
+                    <TableHead className="h-7 py-1 text-[10px] uppercase tracking-wide">Status</TableHead>
+                    <TableHead className="h-7 py-1 text-right text-[10px] uppercase tracking-wide">Cost</TableHead>
+                    <TableHead className="h-7 py-1 text-right text-[10px] uppercase tracking-wide">P&L</TableHead>
+                    <TableHead className="h-7 py-1 text-[10px] uppercase tracking-wide">Account</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {unifiedTrades.slice(0, 150).map((trade) => (
+                    <TableRow key={trade.id} className="border-border/40">
+                      <TableCell className="py-1.5 font-mono text-[11px] text-muted-foreground">
+                        {new Date(trade.executedAt).toLocaleString()}
+                      </TableCell>
+                      <TableCell className="py-1.5">
+                        <Badge
+                          variant="outline"
+                          className={cn(
+                            'text-[9px] uppercase',
+                            trade.source === 'sandbox'
+                              ? 'border-amber-500/30 bg-amber-500/10 text-amber-200'
+                              : 'border-cyan-500/30 bg-cyan-500/10 text-cyan-200'
+                          )}
+                        >
+                          {trade.source}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="py-1.5 text-xs">{trade.strategy}</TableCell>
+                      <TableCell className="py-1.5">
+                        <Badge variant="outline" className={cn('text-[9px] uppercase', getTradeStatusClass(trade.status))}>
+                          {trade.status.replace(/_/g, ' ')}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="py-1.5 text-right font-mono text-[11px]">{formatCurrency(trade.cost)}</TableCell>
+                      <TableCell className={cn(
+                        'py-1.5 text-right font-mono text-[11px]',
+                        (trade.pnl ?? 0) >= 0 ? 'text-emerald-300' : 'text-red-300'
+                      )}>
+                        {trade.pnl == null ? '—' : formatSignedCurrency(trade.pnl)}
+                      </TableCell>
+                      <TableCell className="py-1.5 text-[11px] text-muted-foreground">
+                        {trade.accountName || (trade.source === 'live' ? 'Orchestrator' : '—')}
+                      </TableCell>
                     </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {unifiedTrades.slice(0, 150).map((trade) => (
-                      <TableRow key={trade.id} className="border-border/45">
-                        <TableCell className="py-2 font-data text-xs text-muted-foreground">
-                          {new Date(trade.executedAt).toLocaleString()}
-                        </TableCell>
-                        <TableCell className="py-2">
-                          <Badge
-                            variant="outline"
-                            className={cn(
-                              'text-[10px] uppercase tracking-wide',
-                              trade.source === 'sandbox'
-                                ? 'border-amber-300 bg-amber-100 text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200'
-                                : 'border-cyan-300 bg-cyan-100 text-cyan-800 dark:border-cyan-500/30 dark:bg-cyan-500/10 dark:text-cyan-200'
-                            )}
-                          >
-                            {trade.source}
-                          </Badge>
-                        </TableCell>
-                        <TableCell className="py-2 text-sm">{trade.strategy}</TableCell>
-                        <TableCell className="py-2">
-                          <Badge variant="outline" className={cn('text-[10px] uppercase', getTradeStatusClass(trade.status))}>
-                            {trade.status.replace(/_/g, ' ')}
-                          </Badge>
-                        </TableCell>
-                        <TableCell className="py-2 text-right font-data text-xs">
-                          {formatCurrency(trade.cost)}
-                        </TableCell>
-                        <TableCell className={cn(
-                          'py-2 text-right font-data text-xs',
-                          (trade.pnl ?? 0) >= 0 ? 'text-emerald-700 dark:text-emerald-300' : 'text-red-700 dark:text-red-300'
-                        )}>
-                          {trade.pnl == null ? '—' : formatSignedCurrency(trade.pnl)}
-                        </TableCell>
-                        <TableCell className="py-2 text-xs text-muted-foreground">
-                          {trade.accountName || (trade.source === 'live' ? 'Orchestrator' : '—')}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                    {unifiedTrades.length === 0 && (
-                      <TableRow>
-                        <TableCell colSpan={7} className="py-8 text-center text-sm text-muted-foreground">
-                          No trades found for this view and range.
-                        </TableCell>
-                      </TableRow>
-                    )}
-                  </TableBody>
-                </Table>
-              </ScrollArea>
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        <TabsContent value="validation" className="mt-0 space-y-4">
+                  ))}
+                  {unifiedTrades.length === 0 && (
+                    <TableRow>
+                      <TableCell colSpan={7} className="py-6 text-center text-xs text-muted-foreground">
+                        No trades for this view and range.
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </ScrollArea>
+          </div>
+        </div>
+      ) : (
+        <div className="flex-1 min-h-0 overflow-y-auto">
           <ValidationEnginePanel />
-        </TabsContent>
-      </div>
-    </Tabs>
+        </div>
+      )}
+    </div>
   )
 }
 
-function PerformanceMetricTile({
+function MetricChip({
   label,
   value,
-  helper,
+  detail,
   icon: Icon,
-  tone,
+  valueClassName,
 }: {
   label: string
   value: string
-  helper: string
+  detail?: string
   icon: React.ElementType
-  tone: 'good' | 'bad' | 'warn' | 'neutral' | 'info'
+  valueClassName?: string
 }) {
-  const toneClasses: Record<typeof tone, string> = {
-    good: 'border-emerald-300 bg-emerald-100 text-emerald-900 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-200',
-    bad: 'border-red-300 bg-red-100 text-red-900 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-200',
-    warn: 'border-amber-300 bg-amber-100 text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200',
-    neutral: 'border-border/70 bg-background/35 text-foreground',
-    info: 'border-cyan-300 bg-cyan-100 text-cyan-900 dark:border-cyan-500/30 dark:bg-cyan-500/10 dark:text-cyan-200',
-  }
-
   return (
-    <Card className={cn('border', toneClasses[tone])}>
-      <CardContent className="p-3">
-        <div className="flex items-start justify-between gap-2">
-          <p className="text-[10px] uppercase tracking-wide opacity-85">{label}</p>
-          <Icon className="h-3.5 w-3.5 opacity-80" />
-        </div>
-        <p className="mt-2 font-data text-lg font-semibold">{value}</p>
-        <p className="mt-1 text-[11px] opacity-85">{helper}</p>
-      </CardContent>
-    </Card>
+    <div className="flex items-center gap-1.5 text-xs" title={detail || undefined}>
+      <Icon className="w-3.5 h-3.5 opacity-70" />
+      <span className="text-muted-foreground">{label}</span>
+      <span className={cn('font-mono font-semibold', valueClassName)}>{value}</span>
+    </div>
   )
 }
 
