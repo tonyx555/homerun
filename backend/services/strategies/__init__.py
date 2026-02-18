@@ -12,6 +12,11 @@ from .temporal_decay import TemporalDecayStrategy
 from .correlation_arb import CorrelationArbStrategy
 from .flash_crash_reversion import FlashCrashReversionStrategy
 from .tail_end_carry import TailEndCarryStrategy
+from .flb_exploiter import FLBExploiterStrategy
+from .term_premium import TermPremiumStrategy
+from .vpin_toxicity import VPINToxicityStrategy
+from .prob_surface_arb import ProbSurfaceArbStrategy
+from .bias_fader import BiasFaderStrategy
 
 __all__ = [
     "BasicArbStrategy",
@@ -28,4 +33,9 @@ __all__ = [
     "CorrelationArbStrategy",
     "FlashCrashReversionStrategy",
     "TailEndCarryStrategy",
+    "FLBExploiterStrategy",
+    "TermPremiumStrategy",
+    "VPINToxicityStrategy",
+    "ProbSurfaceArbStrategy",
+    "BiasFaderStrategy",
 ]

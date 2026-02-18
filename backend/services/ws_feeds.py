@@ -43,6 +43,18 @@ except ImportError:
 
 logger = get_logger("ws_feeds")
 
+
+def _is_expected_close(exc: Exception) -> bool:
+    """Return True for expected lifecycle closures from remote peers."""
+
+    if not WEBSOCKETS_AVAILABLE:
+        return False
+
+    if isinstance(exc, (websockets.exceptions.ConnectionClosedOK, websockets.exceptions.ConnectionClosedError)):
+        close_code = getattr(exc, "code", None)
+        return close_code in {1000, 1001}
+    return False
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -142,6 +154,15 @@ class CachedEntry:
     updated_at: float = 0.0  # monotonic timestamp
 
 
+@dataclass
+class TradeRecord:
+    """A single executed trade from the CLOB."""
+    price: float
+    size: float        # in shares
+    side: str          # "BUY" or "SELL"
+    timestamp: float   # epoch seconds
+
+
 class PriceCache:
     """Thread-safe in-memory cache of latest prices and full order books.
 
@@ -164,6 +185,9 @@ class PriceCache:
         self._entries: Dict[str, CachedEntry] = {}
         self._history: Dict[str, deque[tuple[float, float, float, float]]] = {}
         self._on_change_callbacks: List[Callable[[str, float, float], None]] = []
+        self._trades: Dict[str, deque] = {}
+        self._trades_max = 500
+        self._on_trade_callbacks: List[Callable] = []
 
     def add_on_change_callback(self, callback: Callable[[str, float, float], None]) -> None:
         """Register a callback invoked on significant price changes.
@@ -235,6 +259,58 @@ class PriceCache:
         with self._lock:
             self._entries.pop(token_id, None)
             self._history.pop(token_id, None)
+
+    def add_on_trade_callback(self, callback: Callable) -> None:
+        """Register a callback invoked on each trade. Receives (token_id, TradeRecord)."""
+        self._on_trade_callbacks.append(callback)
+
+    def record_trade(self, token_id: str, price: float, size: float, side: str, timestamp: float) -> None:
+        """Record a trade execution."""
+        trade = TradeRecord(price=price, size=size, side=side.upper(), timestamp=timestamp)
+        with self._lock:
+            if token_id not in self._trades:
+                self._trades[token_id] = deque(maxlen=self._trades_max)
+            self._trades[token_id].append(trade)
+        # Fire callbacks outside the lock
+        for cb in self._on_trade_callbacks:
+            try:
+                cb(token_id, trade)
+            except Exception:
+                pass
+
+    def get_recent_trades(self, token_id: str, max_trades: int = 100) -> List["TradeRecord"]:
+        """Return up to max_trades most recent trades for a token."""
+        with self._lock:
+            trades = self._trades.get(token_id)
+            if not trades:
+                return []
+            return list(trades)[-max_trades:]
+
+    def get_trade_volume(self, token_id: str, lookback_seconds: float = 300.0) -> Dict[str, float]:
+        """Return buy/sell/total volume over the lookback window."""
+        cutoff = time.time() - lookback_seconds
+        buy_vol = 0.0
+        sell_vol = 0.0
+        count = 0
+        with self._lock:
+            trades = self._trades.get(token_id)
+            if trades:
+                for t in trades:
+                    if t.timestamp >= cutoff:
+                        if t.side == "BUY":
+                            buy_vol += t.size * t.price
+                        else:
+                            sell_vol += t.size * t.price
+                        count += 1
+        return {"buy_volume": buy_vol, "sell_volume": sell_vol, "total": buy_vol + sell_vol, "trade_count": count}
+
+    def get_buy_sell_imbalance(self, token_id: str, lookback_seconds: float = 300.0) -> float:
+        """Return buy/sell imbalance in [-1, 1]. +1 = all buys, -1 = all sells."""
+        vol = self.get_trade_volume(token_id, lookback_seconds)
+        total = vol["total"]
+        if total <= 0:
+            return 0.0
+        return (vol["buy_volume"] - vol["sell_volume"]) / total
 
     def clear(self) -> None:
         """Drop everything."""
@@ -545,9 +621,17 @@ class PolymarketWSFeed:
                     self._reconnect_base_delay * (DEFAULT_RECONNECT_MULTIPLIER ** (attempt - 1)),
                     self._reconnect_max_delay,
                 )
-                logger.warning(
-                    f"Polymarket WS disconnected ({exc!r}), reconnecting in {delay:.1f}s (attempt {attempt})"
-                )
+                if _is_expected_close(exc):
+                    logger.info(
+                        "Polymarket WS disconnected cleanly; reconnecting",
+                        delay=round(delay, 1),
+                        attempt=attempt,
+                        close_code=getattr(exc, "code", None),
+                    )
+                else:
+                    logger.warning(
+                        f"Polymarket WS disconnected ({exc!r}), reconnecting in {delay:.1f}s (attempt {attempt})"
+                    )
                 self._state = ConnectionState.DISCONNECTED
                 try:
                     await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
@@ -623,7 +707,7 @@ class PolymarketWSFeed:
             "type": "subscribe",
             "markets": condition_ids if condition_ids else [],
             "assets_ids": token_ids if token_ids else [],
-            "channels": ["book"],
+            "channels": ["book", "trades"],
         }
         try:
             await self._ws.send(json.dumps(msg))
@@ -658,6 +742,14 @@ class PolymarketWSFeed:
 
     def _handle_message(self, data: dict, recv_time: float) -> None:
         """Route an incoming WebSocket message to the right handler."""
+        # Trade execution messages (from "trades" channel)
+        event_type = data.get("event_type", "")
+        if event_type == "trade" or (
+            "price" in data and "size" in data and "side" in data and "bids" not in data
+        ):
+            self._apply_trade(data, recv_time)
+            return
+
         # Polymarket book messages typically carry an "event_type" or can be
         # identified by the presence of bids/asks at the top level or nested
         # inside a "market" key.  We handle the common shapes:
@@ -706,6 +798,29 @@ class PolymarketWSFeed:
                 self.stats.last_latency_ms = (recv_time - server_time) * 1000
             except (TypeError, ValueError):
                 pass
+
+    def _apply_trade(self, data: dict, recv_time: float) -> None:
+        """Parse a trade execution message and record it."""
+        asset_id = data.get("asset_id") or data.get("token_id") or data.get("market", "")
+        if not asset_id:
+            return
+        try:
+            price = float(data.get("price", 0))
+            size = float(data.get("size", 0))
+            side = str(data.get("side", "")).upper()
+            if side not in ("BUY", "SELL"):
+                side = "BUY"  # default
+            ts = data.get("timestamp")
+            if ts is not None:
+                timestamp = float(ts)
+                if timestamp > 1e12:
+                    timestamp /= 1000.0  # ms -> s
+            else:
+                timestamp = recv_time
+            if price > 0 and size > 0:
+                self._cache.record_trade(asset_id, price, size, side, timestamp)
+        except (TypeError, ValueError):
+            pass
 
     @staticmethod
     def _parse_levels(raw: list) -> List[OrderBookLevel]:
@@ -863,7 +978,15 @@ class KalshiWSFeed:
                     self._reconnect_base_delay * (DEFAULT_RECONNECT_MULTIPLIER ** (attempt - 1)),
                     self._reconnect_max_delay,
                 )
-                logger.warning(f"Kalshi WS disconnected ({exc!r}), reconnecting in {delay:.1f}s (attempt {attempt})")
+                if _is_expected_close(exc):
+                    logger.info(
+                        "Kalshi WS disconnected cleanly; reconnecting",
+                        delay=round(delay, 1),
+                        attempt=attempt,
+                        close_code=getattr(exc, "code", None),
+                    )
+                else:
+                    logger.warning(f"Kalshi WS disconnected ({exc!r}), reconnecting in {delay:.1f}s (attempt {attempt})")
                 self._state = ConnectionState.DISCONNECTED
                 try:
                     await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
@@ -1087,6 +1210,7 @@ class FeedManager:
         self._debounce_task: Optional[asyncio.Task] = None
         self._debounce_seconds: float = 2.0  # coalesce changes over 2s window
         self._cache.add_on_change_callback(self._on_price_change)
+        self._cache.add_on_trade_callback(self._on_trade)
 
     @classmethod
     def get_instance(cls) -> "FeedManager":
@@ -1190,6 +1314,30 @@ class FeedManager:
                 token_id=token_id,
                 old_price=old_mid,
                 new_price=new_mid,
+            )
+            loop = asyncio.get_running_loop()
+            loop.create_task(event_dispatcher.dispatch(event))
+        except RuntimeError:
+            pass  # No running event loop
+
+    def _on_trade(self, token_id: str, trade: "TradeRecord") -> None:
+        """Dispatch a TRADE_EXECUTION DataEvent for each trade."""
+        try:
+            from services.data_events import DataEvent
+            from services.event_dispatcher import event_dispatcher
+            from utils.utcnow import utcnow
+
+            event = DataEvent(
+                event_type="trade_execution",
+                source="polymarket_ws",
+                timestamp=utcnow(),
+                token_id=token_id,
+                payload={
+                    "price": trade.price,
+                    "size": trade.size,
+                    "side": trade.side,
+                    "timestamp": trade.timestamp,
+                },
             )
             loop = asyncio.get_running_loop()
             loop.create_task(event_dispatcher.dispatch(event))

@@ -252,6 +252,20 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         config_schema=_COMMON_SCANNER_SCHEMA,
     ),
     SystemOpportunityStrategySeed(
+        slug="vpin_toxicity",
+        source_key="scanner",
+        import_module="services.strategies.vpin_toxicity",
+        sort_order=115,
+        config_schema=_COMMON_SCANNER_SCHEMA,
+    ),
+    SystemOpportunityStrategySeed(
+        slug="flb_exploiter",
+        source_key="scanner",
+        import_module="services.strategies.flb_exploiter",
+        sort_order=125,
+        config_schema=_COMMON_SCANNER_SCHEMA,
+    ),
+    SystemOpportunityStrategySeed(
         slug="temporal_decay",
         source_key="scanner",
         import_module="services.strategies.temporal_decay",
@@ -266,11 +280,32 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         config_schema=_COMMON_SCANNER_SCHEMA,
     ),
     SystemOpportunityStrategySeed(
+        slug="term_premium",
+        source_key="scanner",
+        import_module="services.strategies.term_premium",
+        sort_order=145,
+        config_schema=_COMMON_SCANNER_SCHEMA,
+    ),
+    SystemOpportunityStrategySeed(
+        slug="prob_surface_arb",
+        source_key="scanner",
+        import_module="services.strategies.prob_surface_arb",
+        sort_order=155,
+        config_schema=_COMMON_SCANNER_SCHEMA,
+    ),
+    SystemOpportunityStrategySeed(
         slug="market_making",
         source_key="scanner",
         import_module="services.strategies.market_making",
         sort_order=160,
         config_schema=_SCANNER_SCHEMA_WITH_LIQ_HOLD,
+    ),
+    SystemOpportunityStrategySeed(
+        slug="bias_fader",
+        source_key="scanner",
+        import_module="services.strategies.bias_fader",
+        sort_order=165,
+        config_schema=_COMMON_SCANNER_SCHEMA,
     ),
     SystemOpportunityStrategySeed(
         slug="stat_arb",

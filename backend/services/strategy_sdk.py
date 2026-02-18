@@ -146,17 +146,8 @@ class StrategySDK:
     @staticmethod
     def normalize_trader_tier(value: Any, default: str = "low") -> str:
         normalized = str(value or "").strip().lower()
-        aliases = {
-            "watch": "low",
-            "low": "low",
-            "medium": "medium",
-            "mid": "medium",
-            "high": "high",
-            "extreme": "extreme",
-        }
-        tier = aliases.get(normalized, "")
-        if tier in StrategySDK.TRADER_TIER_CANONICAL:
-            return tier
+        if normalized in StrategySDK.TRADER_TIER_CANONICAL:
+            return normalized
         fallback = str(default or "low").strip().lower()
         if fallback in StrategySDK.TRADER_TIER_CANONICAL:
             return fallback
@@ -165,20 +156,8 @@ class StrategySDK:
     @staticmethod
     def normalize_trader_side(value: Any, default: str = "all") -> str:
         normalized = str(value or "").strip().lower()
-        aliases = {
-            "all": "all",
-            "buy": "buy",
-            "buy_yes": "buy",
-            "yes": "buy",
-            "long": "buy",
-            "sell": "sell",
-            "buy_no": "sell",
-            "no": "sell",
-            "short": "sell",
-        }
-        side = aliases.get(normalized, "")
-        if side in StrategySDK.TRADER_SIDE_CANONICAL:
-            return side
+        if normalized in StrategySDK.TRADER_SIDE_CANONICAL:
+            return normalized
         fallback = str(default or "all").strip().lower()
         if fallback in StrategySDK.TRADER_SIDE_CANONICAL:
             return fallback
@@ -187,16 +166,8 @@ class StrategySDK:
     @staticmethod
     def normalize_trader_source_scope(value: Any, default: str = "all") -> str:
         normalized = str(value or "").strip().lower()
-        aliases = {
-            "all": "all",
-            "confluence": "all",
-            "tracked": "tracked",
-            "pool": "pool",
-            "insider": "pool",
-        }
-        scope = aliases.get(normalized, "")
-        if scope in StrategySDK.TRADER_SOURCE_SCOPE_CANONICAL:
-            return scope
+        if normalized in StrategySDK.TRADER_SOURCE_SCOPE_CANONICAL:
+            return normalized
         fallback = str(default or "all").strip().lower()
         if fallback in StrategySDK.TRADER_SOURCE_SCOPE_CANONICAL:
             return fallback
@@ -637,6 +608,82 @@ class StrategySDK:
             logger.warning("StrategySDK.calculate_fees failed: %s", e)
             return None
 
+    @staticmethod
+    def resolve_min_position_size(
+        signal: dict[str, Any] | None = None,
+        *,
+        default_min_size: float = 0.0,
+    ) -> float:
+        """Resolve minimum executable position size from strategy signal payload.
+
+        Priority:
+        1) Explicit signal override: ``min_position_size_usd`` / ``min_position_size``
+        2) Suggested size hint: ``suggested_size_usd`` (caps default floor downward)
+        3) Fallback default floor supplied by caller.
+        """
+        min_size = max(0.0, float(default_min_size or 0.0))
+        payload = signal if isinstance(signal, dict) else {}
+
+        explicit = payload.get("min_position_size_usd")
+        if explicit is None:
+            explicit = payload.get("min_position_size")
+        try:
+            explicit_value = float(explicit) if explicit is not None else None
+        except Exception:
+            explicit_value = None
+        if explicit_value is not None and explicit_value > 0:
+            return explicit_value
+
+        suggested = payload.get("suggested_size_usd")
+        try:
+            suggested_value = float(suggested) if suggested is not None else None
+        except Exception:
+            suggested_value = None
+        if suggested_value is not None and suggested_value > 0:
+            min_size = min(min_size, suggested_value) if min_size > 0 else suggested_value
+
+        return max(0.0, min_size)
+
+    @staticmethod
+    def resolve_position_sizing(
+        *,
+        liquidity_usd: float,
+        liquidity_fraction: float,
+        hard_cap_usd: float,
+        signal: dict[str, Any] | None = None,
+        default_min_size: float = 0.0,
+    ) -> dict[str, Any]:
+        """Resolve max/min position size and tradeability from one SDK call."""
+        try:
+            liquidity = max(0.0, float(liquidity_usd or 0.0))
+        except Exception:
+            liquidity = 0.0
+        try:
+            fraction = max(0.0, float(liquidity_fraction or 0.0))
+        except Exception:
+            fraction = 0.0
+        try:
+            hard_cap = max(0.0, float(hard_cap_usd or 0.0))
+        except Exception:
+            hard_cap = 0.0
+
+        max_position = liquidity * fraction
+        if hard_cap > 0:
+            max_position = min(max_position, hard_cap)
+
+        min_position = StrategySDK.resolve_min_position_size(
+            signal,
+            default_min_size=default_min_size,
+        )
+        tradeable = max_position >= min_position if min_position > 0 else max_position > 0
+
+        return {
+            "liquidity_usd": liquidity,
+            "max_position_size": max_position,
+            "min_position_size": min_position,
+            "is_tradeable": bool(tradeable),
+        }
+
     # ── Market filtering helpers ──────────────────────────────────
 
     @staticmethod
@@ -845,6 +892,49 @@ class StrategySDK:
         except Exception:
             pass
         return None
+
+    # ── Trade tape access ──────────────────────────────────────
+
+    @staticmethod
+    def get_recent_trades(token_id: str, max_trades: int = 100) -> list:
+        """Return recent trades for a token from the WebSocket trade tape.
+
+        Returns list of TradeRecord objects with price, size, side, timestamp.
+        Returns empty list if trade data is unavailable.
+        """
+        try:
+            from services.ws_feeds import FeedManager
+            mgr = FeedManager.get_instance()
+            return mgr.cache.get_recent_trades(token_id, max_trades)
+        except Exception:
+            return []
+
+    @staticmethod
+    def get_trade_volume(token_id: str, lookback_seconds: float = 300.0) -> dict:
+        """Return buy/sell volume over a lookback window.
+
+        Returns dict with keys: buy_volume, sell_volume, total, trade_count.
+        Returns zero-volume dict if trade data is unavailable.
+        """
+        try:
+            from services.ws_feeds import FeedManager
+            mgr = FeedManager.get_instance()
+            return mgr.cache.get_trade_volume(token_id, lookback_seconds)
+        except Exception:
+            return {"buy_volume": 0.0, "sell_volume": 0.0, "total": 0.0, "trade_count": 0}
+
+    @staticmethod
+    def get_buy_sell_imbalance(token_id: str, lookback_seconds: float = 300.0) -> float:
+        """Return buy/sell order flow imbalance in [-1, 1].
+
+        +1 = all buys, -1 = all sells, 0 = balanced or no data.
+        """
+        try:
+            from services.ws_feeds import FeedManager
+            mgr = FeedManager.get_instance()
+            return mgr.cache.get_buy_sell_imbalance(token_id, lookback_seconds)
+        except Exception:
+            return 0.0
 
     # ── News data access ───────────────────────────────────────
 

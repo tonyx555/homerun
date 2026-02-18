@@ -58,8 +58,8 @@ class EventType:
     }
     """
 
-    WORLD_INTEL_UPDATE: str = "world_intel_update"
-    """Geopolitical and world event signals from the world intelligence worker.
+    EVENTS_UPDATE: str = "events_update"
+    """Geopolitical and world event signals from the events worker.
 
     payload = {
         "signals": [
@@ -91,6 +91,17 @@ class EventType:
     }
     """
 
+    TRADE_EXECUTION: str = "trade_execution"
+    """A trade was executed on the CLOB (from WebSocket trade tape).
+
+    payload = {
+        "price": float,       # execution price
+        "size": float,        # size in shares
+        "side": str,          # "BUY" or "SELL"
+        "timestamp": float,   # epoch seconds
+    }
+    """
+
     _ALL: frozenset[str] = frozenset(
         {
             "price_change",
@@ -101,8 +112,9 @@ class EventType:
             "trader_activity",
             "news_update",
             "news_event",
-            "world_intel_update",
+            "events_update",
             "data_source_update",
+            "trade_execution",
         }
     )
 
@@ -120,8 +132,9 @@ class DataEvent:
         EventType.TRADER_ACTIVITY       - Smart wallet / copy trading signal
         EventType.NEWS_UPDATE           - News intent signal from news worker
         EventType.NEWS_EVENT            - Breaking news signal from news worker
-        EventType.WORLD_INTEL_UPDATE    - Geopolitical signals from world intel worker
+        EventType.EVENTS_UPDATE    - Geopolitical signals from events worker
         EventType.DATA_SOURCE_UPDATE    - DB data source completed a fetch cycle
+        EventType.TRADE_EXECUTION       - A trade executed on the CLOB
     """
 
     event_type: str
