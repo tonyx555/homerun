@@ -112,6 +112,7 @@ type LayerToggles = {
   convergences: boolean
   hotspots: boolean
   chokepoints: boolean
+  earthquakes: boolean
 }
 
 type CountryMetric = {
@@ -133,6 +134,8 @@ const SIGNAL_COLORS_DARK: SignalPalette = {
   anomaly: '#22d3ee',
   military: '#60a5fa',
   infrastructure: '#34d399',
+  earthquake: '#f59e0b',
+  news: '#a78bfa',
 }
 
 const SIGNAL_COLORS_LIGHT: SignalPalette = {
@@ -143,6 +146,8 @@ const SIGNAL_COLORS_LIGHT: SignalPalette = {
   anomaly: '#0e7490',
   military: '#2563eb',
   infrastructure: '#15803d',
+  earthquake: '#d97706',
+  news: '#7c3aed',
 }
 
 const CLICKABLE_LAYERS = [
@@ -161,6 +166,7 @@ const CLICKABLE_LAYERS = [
   'hotspots-fill',
   'hotspots-outline',
   'chokepoints-icon',
+  'earthquakes-dot',
 ] as const
 
 const DEFAULT_LAYER_TOGGLES: LayerToggles = {
@@ -173,6 +179,7 @@ const DEFAULT_LAYER_TOGGLES: LayerToggles = {
   convergences: true,
   hotspots: true,
   chokepoints: true,
+  earthquakes: true,
 }
 
 const LAYER_GROUPS: Record<keyof LayerToggles, readonly string[]> = {
@@ -190,6 +197,7 @@ const LAYER_GROUPS: Record<keyof LayerToggles, readonly string[]> = {
   convergences: ['convergences-fill', 'convergences-ring'],
   hotspots: ['hotspots-fill', 'hotspots-outline'],
   chokepoints: ['chokepoints-icon'],
+  earthquakes: ['earthquakes-dot'],
 }
 
 const COUNTRY_BOUNDARY_URL = `${import.meta.env.BASE_URL}data/world_countries.geojson`
@@ -508,6 +516,13 @@ function signalsToGeoJSON(
           return null
         }
 
+        const detectedAt = signal.detected_at ? new Date(signal.detected_at).getTime() : null
+        const ageHours = detectedAt ? (Date.now() - detectedAt) / 3_600_000 : 24
+        const isFresh = ageHours < 6
+
+        // Serialize metadata as JSON string so MapLibre can store it in feature properties
+        const metadataJson = JSON.stringify(signal.metadata || {})
+
         return {
           type: 'Feature',
           geometry: {
@@ -525,6 +540,10 @@ function signalsToGeoJSON(
             color: palette[signal.signal_type] || '#64748b',
             geocode_mode: geocodeMode,
             activity_type: activityType,
+            age_hours: Number(ageHours.toFixed(1)),
+            is_fresh: isFresh,
+            detected_at: signal.detected_at || null,
+            metadata_json: metadataJson,
           },
         } as PointFeature
       })
@@ -970,13 +989,10 @@ function addDataLayers(map: any, theme: 'dark' | 'light') {
     source: 'tension-arcs',
     paint: {
       'line-color': [
-        'interpolate',
-        ['linear'],
-        ['coalesce', ['get', 'tension_score'], 0],
-        0, theme === 'light' ? '#facc15' : '#f59e0b',
-        40, '#f97316',
-        70, '#ef4444',
-        100, '#991b1b',
+        'match', ['coalesce', ['get', 'trend'], 'stable'],
+        'rising', theme === 'light' ? '#ef4444' : '#f87171',
+        'falling', theme === 'light' ? '#2563eb' : '#60a5fa',
+        /* stable default */ theme === 'light' ? '#ca8a04' : '#facc15',
       ],
       'line-width': [
         'interpolate',
@@ -1157,11 +1173,17 @@ function addDataLayers(map: any, theme: 'dark' | 'light') {
     filter: [
       'all',
       ['!=', ['get', 'signal_type'], 'military'],
+      ['!=', ['get', 'signal_type'], 'earthquake'],
     ],
     paint: {
       'circle-radius': ['interpolate', ['linear'], ['get', 'severity'], 0, 10, 0.5, 16, 1, 24],
       'circle-color': ['get', 'color'],
-      'circle-opacity': 0.2,
+      'circle-opacity': [
+        'interpolate', ['linear'], ['coalesce', ['get', 'age_hours'], 24],
+        0, 0.28,
+        6, 0.22,
+        24, 0.12,
+      ],
       'circle-blur': 1,
     },
   })
@@ -1172,11 +1194,17 @@ function addDataLayers(map: any, theme: 'dark' | 'light') {
     filter: [
       'all',
       ['!=', ['get', 'signal_type'], 'military'],
+      ['!=', ['get', 'signal_type'], 'earthquake'],
     ],
     paint: {
       'circle-radius': ['interpolate', ['linear'], ['get', 'severity'], 0, 4, 0.5, 6, 1, 9],
       'circle-color': ['get', 'color'],
-      'circle-opacity': 0.95,
+      'circle-opacity': [
+        'interpolate', ['linear'], ['coalesce', ['get', 'age_hours'], 24],
+        0, 0.98,
+        6, 0.90,
+        24, 0.60,
+      ],
       'circle-stroke-color': theme === 'light' ? '#ffffff' : '#020617',
       'circle-stroke-width': 1,
     },
@@ -1246,6 +1274,37 @@ function addDataLayers(map: any, theme: 'dark' | 'light') {
       'circle-opacity': 0.85,
     },
   })
+
+  // Earthquakes: separate layer from generic signals, sized by magnitude
+  // Uses the 'signals' source filtered to signal_type === 'earthquake'
+  map.addLayer({
+    id: 'earthquakes-dot',
+    type: 'circle',
+    source: 'signals',
+    filter: ['==', ['get', 'signal_type'], 'earthquake'],
+    paint: {
+      'circle-radius': [
+        'interpolate', ['linear'],
+        ['coalesce', ['get', 'severity'], 0.15],
+        0.15, 6,
+        0.4, 9,
+        0.65, 13,
+        0.85, 18,
+        1.0, 22,
+      ],
+      'circle-color': theme === 'light' ? '#d97706' : '#f59e0b',
+      'circle-opacity': [
+        'interpolate', ['linear'], ['coalesce', ['get', 'age_hours'], 24],
+        0, 0.88,
+        12, 0.70,
+        24, 0.45,
+      ],
+      'circle-stroke-color': theme === 'light' ? '#92400e' : '#fde68a',
+      'circle-stroke-width': 1.5,
+      'circle-stroke-opacity': 0.5,
+      'circle-blur': 0.15,
+    },
+  })
 }
 
 function updateSourceData(map: any, sourceId: string, data: unknown) {
@@ -1298,7 +1357,15 @@ function MapLegend({ colors }: { colors: SignalPalette }) {
             </div>
             <div className="flex items-center gap-1.5">
               <span className="w-3 h-0.5 shrink-0 bg-red-500" />
-              <span className="text-muted-foreground">Tension arc</span>
+              <span className="text-muted-foreground">Tension arc (rising)</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="w-3 h-0.5 shrink-0 bg-yellow-400" />
+              <span className="text-muted-foreground">Tension arc (stable)</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="w-3 h-0.5 shrink-0 bg-blue-400" />
+              <span className="text-muted-foreground">Tension arc (falling)</span>
             </div>
             <div className="flex items-center gap-1.5">
               <span className="w-2.5 h-2.5 shrink-0 border border-sky-500/70 bg-sky-500/10" />
@@ -1341,20 +1408,65 @@ function MapStats({
   geocodedSignalCount,
   convergenceCount,
   hotspotCount,
+  byType,
+  criticalCount,
+  oldestSignalHours,
+  lastCollection,
+  colors,
 }: {
   signalCount: number
   signalTotal: number
   geocodedSignalCount: number
   convergenceCount: number
   hotspotCount: number
+  byType: Record<string, number>
+  criticalCount: number
+  oldestSignalHours: number | null
+  lastCollection: string | null
+  colors: SignalPalette
 }) {
+  const [expanded, setExpanded] = useState(false)
+
+  const oldestLabel = oldestSignalHours == null
+    ? null
+    : oldestSignalHours < 1
+      ? '<1h'
+      : oldestSignalHours < 24
+        ? `${Math.round(oldestSignalHours)}h`
+        : `${Math.round(oldestSignalHours / 24)}d`
+
+  const collectionLabel = lastCollection
+    ? (() => {
+        try {
+          return new Date(lastCollection).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        } catch {
+          return null
+        }
+      })()
+    : null
+
+  const typeEntries = Object.entries(byType).filter(([, count]) => count > 0)
+
   return (
-    <div className="absolute bottom-3 right-3 bg-background/90 backdrop-blur-sm border border-border rounded-lg p-2.5 text-[10px] z-10 space-y-1">
+    <div className="absolute bottom-3 right-3 bg-background/90 backdrop-blur-sm border border-border rounded-lg p-2.5 text-[10px] z-10 space-y-1 min-w-[150px]">
+      <div className="flex items-center justify-between gap-3">
+        <div className="font-mono">
+          <span className="text-muted-foreground">Signals:</span>{' '}
+          <span className="text-foreground font-bold">
+            {signalTotal > signalCount ? `${signalCount}/${signalTotal}` : signalCount}
+          </span>
+        </div>
+        <button
+          type="button"
+          onClick={() => setExpanded((p) => !p)}
+          className="text-[9px] rounded border border-border px-1 py-0.5 text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-colors leading-none"
+        >
+          {expanded ? '▲' : '▼'}
+        </button>
+      </div>
       <div className="font-mono">
-        <span className="text-muted-foreground">Signals:</span>{' '}
-        <span className="text-foreground font-bold">
-          {signalTotal > signalCount ? `${signalCount}/${signalTotal}` : signalCount}
-        </span>
+        <span className="text-muted-foreground">Critical:</span>{' '}
+        <span className={criticalCount > 0 ? 'text-red-400 font-bold' : 'text-foreground font-bold'}>{criticalCount}</span>
       </div>
       <div className="font-mono">
         <span className="text-muted-foreground">Geocoded:</span>{' '}
@@ -1368,6 +1480,32 @@ function MapStats({
         <span className="text-muted-foreground">Hotspots:</span>{' '}
         <span className="text-blue-500 font-bold">{hotspotCount}</span>
       </div>
+      {oldestLabel ? (
+        <div className="font-mono">
+          <span className="text-muted-foreground">Oldest:</span>{' '}
+          <span className="text-foreground">{oldestLabel} ago</span>
+        </div>
+      ) : null}
+      {collectionLabel ? (
+        <div className="font-mono">
+          <span className="text-muted-foreground">Updated:</span>{' '}
+          <span className="text-foreground">{collectionLabel}</span>
+        </div>
+      ) : null}
+      {expanded && typeEntries.length > 0 ? (
+        <div className="border-t border-border pt-1 mt-0.5 space-y-0.5">
+          {typeEntries.map(([type, count]) => (
+            <div key={type} className="flex items-center gap-1.5 font-mono">
+              <span
+                className="w-1.5 h-1.5 rounded-full shrink-0"
+                style={{ backgroundColor: colors[type] || '#64748b' }}
+              />
+              <span className="text-muted-foreground capitalize">{type}</span>
+              <span className="ml-auto text-foreground font-bold">{count}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -1387,6 +1525,7 @@ function LayerControls({
     { key: 'countryBoundaries', label: 'Country boundaries' },
     { key: 'conflictZones', label: 'Conflict zones' },
     { key: 'signals', label: 'Signals' },
+    { key: 'earthquakes', label: 'Earthquakes' },
     { key: 'convergences', label: 'Convergences' },
     { key: 'hotspots', label: 'Hotspots' },
     { key: 'chokepoints', label: 'Chokepoints' },
@@ -1494,6 +1633,13 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
   const [mapReady, setMapReady] = useState(false)
   const [mapInitError, setMapInitError] = useState<string | null>(null)
   const [layerToggles, setLayerToggles] = useState<LayerToggles>(DEFAULT_LAYER_TOGGLES)
+  const [hoverTooltip, setHoverTooltip] = useState<{
+    x: number
+    y: number
+    name: string
+    instability: number
+    tension: number
+  } | null>(null)
   const pollingInterval = isConnected ? false : 180000
 
   const { data: signalsData, isLoading: signalsLoading } = useQuery({
@@ -1663,6 +1809,24 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
     [geocodedSignalsGeoJSON]
   )
   const geocodedSignalCount = geocodedSignalsGeoJSON.features.length
+
+  const signalStatsExtra = useMemo(() => {
+    const byType: Record<string, number> = {}
+    let criticalCount = 0
+    let oldestMs: number | null = null
+    for (const signal of signals) {
+      byType[signal.signal_type] = (byType[signal.signal_type] || 0) + 1
+      if ((signal.severity || 0) >= 0.7) criticalCount++
+      if (signal.detected_at) {
+        const ms = new Date(signal.detected_at).getTime()
+        if (!Number.isNaN(ms)) {
+          if (oldestMs == null || ms < oldestMs) oldestMs = ms
+        }
+      }
+    }
+    const oldestSignalHours = oldestMs != null ? (Date.now() - oldestMs) / 3_600_000 : null
+    return { byType, criticalCount, oldestSignalHours }
+  }, [signals])
 
   const signalCountByIso3 = useMemo(() => {
     const out: Record<string, number> = {}
@@ -1905,12 +2069,61 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
       const props = (feature.properties || {}) as Record<string, unknown>
       const coords = featurePointCoordinates(feature)
       if (!coords) return
+
+      const signalType = String(props.signal_type || 'unknown')
+      const severity = Math.round((Number(props.severity) || 0) * 100)
+      const ageHours = Number(props.age_hours || 0)
+      const ageLabel = ageHours < 1 ? '<1h ago' : ageHours < 24 ? `${Math.round(ageHours)}h ago` : `${Math.round(ageHours / 24)}d ago`
+
+      let meta: Record<string, unknown> = {}
+      try {
+        meta = JSON.parse(String(props.metadata_json || '{}'))
+      } catch {
+        meta = {}
+      }
+
+      let metaDetails = ''
+      if (signalType === 'conflict') {
+        const fatalities = meta.fatalities != null ? `Fatalities: ${meta.fatalities}` : ''
+        const eventType = meta.event_type ? String(meta.event_type) : ''
+        const subType = meta.sub_event_type ? String(meta.sub_event_type) : ''
+        metaDetails = [eventType, subType, fatalities].filter(Boolean).join(' · ')
+      } else if (signalType === 'tension') {
+        const trend = meta.trend ? `Trend: ${meta.trend}` : ''
+        const count = meta.event_count != null ? `${meta.event_count} events` : ''
+        metaDetails = [trend, count].filter(Boolean).join(' · ')
+      } else if (signalType === 'earthquake') {
+        const mag = meta.magnitude != null ? `M${Number(meta.magnitude).toFixed(1)}` : ''
+        const depth = meta.depth_km != null ? `${Number(meta.depth_km).toFixed(0)}km depth` : ''
+        const tsunami = meta.tsunami ? '⚠ Tsunami warning' : ''
+        metaDetails = [mag, depth, tsunami].filter(Boolean).join(' · ')
+      } else if (signalType === 'military') {
+        const aircraft = meta.aircraft_type ? String(meta.aircraft_type) : ''
+        const actType = meta.activity_type ? String(meta.activity_type) : ''
+        const region = meta.region ? String(meta.region) : ''
+        metaDetails = [aircraft, actType, region].filter(Boolean).join(' · ')
+      } else if (signalType === 'convergence') {
+        const types = Array.isArray(meta.signal_types) ? meta.signal_types.join(', ') : ''
+        const count = meta.signal_count != null ? `${meta.signal_count} signals` : ''
+        metaDetails = [types, count].filter(Boolean).join(' · ')
+      } else if (signalType === 'news') {
+        const url = meta.url ? String(meta.url).replace(/^https?:\/\//, '').split('/')[0] : ''
+        const category = meta.category ? String(meta.category) : ''
+        metaDetails = [category, url].filter(Boolean).join(' · ')
+      }
+
+      const bodyParts = [
+        `${signalType}${props.activity_type ? `/${String(props.activity_type)}` : ''} · ${severity}% severity`,
+        metaDetails,
+        ageLabel,
+      ].filter(Boolean)
+
       openPopup(
         coords,
         <PopupCard
           title={String(props.title || 'Signal')}
           subtitle={`${props.country_name ? `${String(props.country_name)} · ` : ''}${String(props.source || '')}`}
-          body={`Type: ${String(props.signal_type || 'unknown')}${props.activity_type ? `/${String(props.activity_type)}` : ''} · Severity: ${Math.round((Number(props.severity) || 0) * 100)}% · Geocode: ${String(props.geocode_mode || 'native')}`}
+          body={bodyParts.join(' · ')}
         />
       )
     },
@@ -2017,6 +2230,40 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
     [openPopup]
   )
 
+  const handleCountryHover = useCallback(
+    (event: LayerClickEvent & { point?: { x: number; y: number } }) => {
+      if (!event.features?.length || !containerRef.current) {
+        setHoverTooltip(null)
+        return
+      }
+      const feature = event.features[0]
+      const props = (feature.properties || {}) as Record<string, unknown>
+      const iso3 = normalizeCountryCode(String((feature as any).id || props.id || ''))
+      const metrics = iso3 ? countryMetricsByIso3[iso3] : undefined
+      if (!metrics && !iso3) {
+        setHoverTooltip(null)
+        return
+      }
+      const point = (event as any).point as { x: number; y: number } | undefined
+      if (!point) {
+        setHoverTooltip(null)
+        return
+      }
+      setHoverTooltip({
+        x: point.x + 14,
+        y: point.y - 14,
+        name: metrics?.country_name || formatCountry(iso3 || ''),
+        instability: metrics?.instability_score || 0,
+        tension: metrics?.tension_score || 0,
+      })
+    },
+    [countryMetricsByIso3]
+  )
+
+  const handleCountryHoverLeave = useCallback(() => {
+    setHoverTooltip(null)
+  }, [])
+
   const handleCountryClick = useCallback(
     (event: LayerClickEvent) => {
       if (!event.features?.length) return
@@ -2099,6 +2346,33 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
     [openPopup]
   )
 
+  const handleEarthquakeClick = useCallback(
+    (event: LayerClickEvent) => {
+      if (!event.features?.length) return
+      const feature = event.features[0]
+      const props = (feature.properties || {}) as Record<string, unknown>
+      const coords = featurePointCoordinates(feature) || (
+        event.lngLat ? [event.lngLat.lng, event.lngLat.lat] : [0, 0]
+      )
+      let meta: Record<string, unknown> = {}
+      try { meta = JSON.parse(String(props.metadata_json || '{}')) } catch { meta = {} }
+      const mag = meta.magnitude != null ? `M${Number(meta.magnitude).toFixed(1)}` : ''
+      const depth = meta.depth_km != null ? `${Number(meta.depth_km).toFixed(0)}km depth` : ''
+      const tsunami = meta.tsunami ? '⚠ Tsunami warning' : ''
+      const alert = meta.alert ? `Alert: ${meta.alert}` : ''
+      const bodyParts = [mag, depth, tsunami, alert].filter(Boolean)
+      openPopup(
+        coords,
+        <PopupCard
+          title={String(props.title || 'Earthquake')}
+          subtitle={`${String(props.country_name || 'Unknown')} · USGS`}
+          body={bodyParts.join(' · ') || `Severity: ${Math.round((Number(props.severity) || 0) * 100)}%`}
+        />
+      )
+    },
+    [openPopup]
+  )
+
   useEffect(() => {
     const map = mapRef.current
     if (!mapReady || !map) return
@@ -2125,6 +2399,10 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
     map.on('click', 'hotspots-fill', handleHotspotClick)
     map.on('click', 'hotspots-outline', handleHotspotClick)
     map.on('click', 'chokepoints-icon', handleChokepointClick)
+    map.on('click', 'earthquakes-dot', handleEarthquakeClick)
+
+    map.on('mousemove', 'countries-fill-intensity', handleCountryHover)
+    map.on('mouseleave', 'countries-fill-intensity', handleCountryHoverLeave)
 
     for (const layerId of CLICKABLE_LAYERS) {
       map.on('mouseenter', layerId, cursorOn)
@@ -2147,6 +2425,9 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
       map.off('click', 'hotspots-fill', handleHotspotClick)
       map.off('click', 'hotspots-outline', handleHotspotClick)
       map.off('click', 'chokepoints-icon', handleChokepointClick)
+      map.off('click', 'earthquakes-dot', handleEarthquakeClick)
+      map.off('mousemove', 'countries-fill-intensity', handleCountryHover)
+      map.off('mouseleave', 'countries-fill-intensity', handleCountryHoverLeave)
       for (const layerId of CLICKABLE_LAYERS) {
         map.off('mouseenter', layerId, cursorOn)
         map.off('mouseleave', layerId, cursorOff)
@@ -2155,12 +2436,15 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
   }, [
     mapReady,
     handleCountryClick,
+    handleCountryHover,
+    handleCountryHoverLeave,
     handleTensionArcClick,
     handleConflictClick,
     handleSignalClick,
     handleConvergenceClick,
     handleHotspotClick,
     handleChokepointClick,
+    handleEarthquakeClick,
   ])
 
   const loading =
@@ -2189,6 +2473,11 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
         geocodedSignalCount={geocodedSignalCount}
         convergenceCount={convergences.length}
         hotspotCount={hotspots.length}
+        byType={signalStatsExtra.byType}
+        criticalCount={signalStatsExtra.criticalCount}
+        oldestSignalHours={signalStatsExtra.oldestSignalHours}
+        lastCollection={stableSignalsData.last_collection}
+        colors={colors}
       />
 
       {coreError ? (
@@ -2204,6 +2493,25 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
           <div className="px-3 py-2 rounded-md border border-border bg-background/90 text-xs text-muted-foreground">
             No active world signals detected yet.
           </div>
+        </div>
+      ) : null}
+
+      {hoverTooltip ? (
+        <div
+          className="pointer-events-none absolute z-20 rounded border border-border bg-background/95 backdrop-blur-sm px-2 py-1 text-[10px] space-y-0.5 shadow-md"
+          style={{ left: hoverTooltip.x, top: hoverTooltip.y }}
+        >
+          <div className="font-semibold text-foreground text-[11px]">{hoverTooltip.name}</div>
+          {hoverTooltip.instability > 0 ? (
+            <div className="text-muted-foreground font-mono">
+              Instability: <span className="text-orange-400">{hoverTooltip.instability.toFixed(1)}</span>
+            </div>
+          ) : null}
+          {hoverTooltip.tension > 0 ? (
+            <div className="text-muted-foreground font-mono">
+              Tension: <span className="text-red-400">{hoverTooltip.tension.toFixed(1)}</span>
+            </div>
+          ) : null}
         </div>
       ) : null}
 

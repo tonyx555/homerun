@@ -577,6 +577,56 @@ async def _run_loop() -> None:
             signals = await signal_aggregator.run_collection_cycle()
             cycle_duration = (datetime.now(timezone.utc) - cycle_start).total_seconds()
 
+            # Emit DataEvent for strategy SDK consumption.
+            # Note: due to the P0 process-boundary limitation (this worker runs as a
+            # separate OS process from the API), event_dispatcher subscriptions in the
+            # API process won't fire. The emission is correct and ready for when IPC
+            # is implemented to bridge across process boundaries.
+            try:
+                from services.event_dispatcher import event_dispatcher
+                from services.data_events import DataEvent, EventType
+                from utils.utcnow import utcnow
+
+                if signals:
+                    by_type: dict[str, int] = {}
+                    for s in signals:
+                        by_type[s.signal_type] = by_type.get(s.signal_type, 0) + 1
+                    world_event = DataEvent(
+                        event_type=EventType.WORLD_INTEL_UPDATE,
+                        source="world_intelligence",
+                        timestamp=utcnow(),
+                        payload={
+                            "signals": [
+                                {
+                                    "signal_id": s.signal_id,
+                                    "signal_type": s.signal_type,
+                                    "severity": s.severity,
+                                    "country": s.country,
+                                    "latitude": s.latitude,
+                                    "longitude": s.longitude,
+                                    "title": s.title,
+                                    "description": s.description,
+                                    "source": s.source,
+                                    "detected_at": s.detected_at.isoformat() if s.detected_at else None,
+                                    "related_market_ids": list(s.related_market_ids or []),
+                                    "market_relevance_score": s.market_relevance_score,
+                                    "metadata": s.metadata,
+                                }
+                                for s in signals
+                            ],
+                            "summary": {
+                                "total": len(signals),
+                                "critical": sum(1 for s in signals if s.severity >= 0.7),
+                                "by_type": by_type,
+                                "collection_duration_seconds": round(cycle_duration, 2),
+                            },
+                        },
+                    )
+                    await event_dispatcher.dispatch(world_event)
+                    logger.debug("World intel DataEvent dispatched: %d signals", len(signals))
+            except Exception as exc:
+                logger.debug("World intel DataEvent dispatch failed: %s", exc)
+
             # Persist results
             persisted_signals = await _persist_signals(signals)
 

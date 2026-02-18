@@ -1,6 +1,6 @@
 {
-  "version": 1,
-  "updated_at": "2026-02-12T00:00:00Z",
+  "version": 2,
+  "updated_at": "2026-02-17T00:00:00Z",
   "world_signal_types": [
     "conflict",
     "tension",
@@ -8,7 +8,9 @@
     "convergence",
     "anomaly",
     "military",
-    "infrastructure"
+    "infrastructure",
+    "earthquake",
+    "news"
   ],
   "convergence_signal_types": [
     "conflict",
@@ -29,13 +31,47 @@
     "conflict_events"
   ],
   "market_keyword_map": {
-    "conflict": ["war", "conflict", "attack", "ceasefire", "invasion"],
-    "tension": ["sanctions", "diplomacy", "tensions", "relations"],
-    "instability": ["coup", "revolution", "collapse", "crisis"],
-    "military": ["military", "defense", "nato", "nuclear", "missile"],
-    "infrastructure": ["internet", "outage", "pipeline", "trade", "shipping"],
-    "anomaly": ["surge", "spike", "unusual"],
-    "convergence": ["escalation", "crisis"]
+    "conflict": [
+      "war", "conflict", "attack", "ceasefire", "invasion",
+      "offensive", "airstrikes", "casualties", "shelling", "troops",
+      "missile", "drone", "battlefield", "hostilities", "combat"
+    ],
+    "tension": [
+      "sanctions", "diplomacy", "tensions", "relations",
+      "treaty", "negotiations", "bilateral", "tariff", "embargo",
+      "expel", "ambassador", "dispute", "standoff", "confrontation"
+    ],
+    "instability": [
+      "coup", "revolution", "collapse", "crisis", "protest",
+      "unrest", "overthrow", "resignation", "election", "martial law",
+      "emergency", "destabilize", "uprising", "revolt", "turmoil"
+    ],
+    "military": [
+      "military", "defense", "nato", "nuclear", "missile",
+      "deployment", "exercise", "drills", "submarine", "carrier",
+      "buildup", "mobilization", "arsenal", "warship", "troops"
+    ],
+    "infrastructure": [
+      "internet", "outage", "pipeline", "trade", "shipping",
+      "port", "canal", "cable", "blackout", "disruption",
+      "supply chain", "energy", "grid", "fiber", "transit"
+    ],
+    "anomaly": [
+      "surge", "spike", "unusual", "unprecedented", "historic",
+      "record", "abnormal", "outlier", "unexpected", "extreme"
+    ],
+    "convergence": [
+      "escalation", "crisis", "flashpoint", "hotspot",
+      "multifaceted", "compound", "simultaneous"
+    ],
+    "earthquake": [
+      "earthquake", "seismic", "tsunami", "richter",
+      "tremor", "aftershock", "magnitude", "quake", "epicenter"
+    ],
+    "news": [
+      "breaking", "update", "announced", "confirmed", "reports",
+      "statement", "developing", "exclusive", "alert"
+    ]
   },
   "convergence_market_keyword_map": {
     "conflict": ["war", "conflict", "attack", "military"],
@@ -51,7 +87,12 @@
     "war",
     "attack",
     "threat",
-    "nuclear"
+    "nuclear",
+    "troops",
+    "invasion",
+    "ceasefire",
+    "diplomacy",
+    "embargo"
   ],
   "convergence_signal_map": {
     "protests": "protest",

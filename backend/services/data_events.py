@@ -44,6 +44,39 @@ class EventType:
     NEWS_EVENT: str = "news_event"
     """Breaking news signal from the news worker (alias for compatibility)."""
 
+    WORLD_INTEL_UPDATE: str = "world_intel_update"
+    """Geopolitical and world event signals from the world intelligence worker.
+
+    payload = {
+        "signals": [
+            {
+                "signal_id": str,           # stable hash ID: wi_{hash}
+                "signal_type": str,         # conflict|tension|instability|military|
+                                            #   infrastructure|anomaly|convergence|
+                                            #   earthquake|news
+                "severity": float,          # 0.0-1.0 normalized
+                "country": str | None,      # ISO3 or "ISO3A-ISO3B" for tension pairs
+                "latitude": float | None,
+                "longitude": float | None,
+                "title": str,
+                "description": str,
+                "source": str,              # acled|gdelt|military|usgs|rss_news|...
+                "detected_at": str,         # ISO datetime UTC
+                "related_market_ids": list[str],
+                "market_relevance_score": float,  # 0.0-1.0
+                "metadata": dict,           # signal-type-specific enrichment
+            },
+            ...
+        ],
+        "summary": {
+            "total": int,
+            "critical": int,               # signals with severity >= 0.7
+            "by_type": dict[str, int],     # count per signal_type
+            "collection_duration_seconds": float,
+        },
+    }
+    """
+
     _ALL: frozenset[str] = frozenset({
         "price_change",
         "market_data_refresh",
@@ -53,6 +86,7 @@ class EventType:
         "trader_activity",
         "news_update",
         "news_event",
+        "world_intel_update",
     })
 
 
@@ -69,6 +103,7 @@ class DataEvent:
         EventType.TRADER_ACTIVITY       - Smart wallet / copy trading signal
         EventType.NEWS_UPDATE           - News intent signal from news worker
         EventType.NEWS_EVENT            - Breaking news signal from news worker
+        EventType.WORLD_INTEL_UPDATE    - Geopolitical signals from world intel worker
     """
     event_type: str
     source: str
@@ -81,3 +116,7 @@ class DataEvent:
     markets: Optional[list] = None
     events: Optional[list] = None
     prices: Optional[dict] = None
+    scan_mode: Optional[str] = None
+    changed_token_ids: Optional[list[str]] = None
+    changed_market_ids: Optional[list[str]] = None
+    affected_market_ids: Optional[list[str]] = None

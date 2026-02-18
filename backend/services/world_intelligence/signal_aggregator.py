@@ -27,6 +27,7 @@ from .military_monitor import military_monitor, MilitaryActivity
 from .chokepoint_feed import chokepoint_feed
 from .gdelt_news_source import gdelt_world_news_service, GDELTWorldArticle
 from .military_catalog import military_catalog
+from .rss_monitor import rss_monitor
 from .tension_tracker import tension_tracker, CountryPairTension
 from .usgs_client import usgs_client, Earthquake
 from .taxonomy_catalog import taxonomy_catalog
@@ -296,7 +297,7 @@ def _gdelt_article_to_signal(article: GDELTWorldArticle) -> WorldSignal:
 def _earthquake_to_signal(quake: Earthquake) -> WorldSignal:
     return WorldSignal(
         signal_id=_stable_signal_id("usgs", quake.event_id),
-        signal_type="anomaly",
+        signal_type="earthquake",
         severity=max(0.15, min(1.0, float(quake.severity_score or 0.0))),
         country=_normalize_iso3(quake.country) or None,
         latitude=quake.latitude,
@@ -314,6 +315,33 @@ def _earthquake_to_signal(quake: Earthquake) -> WorldSignal:
             "tsunami": quake.tsunami,
             "alert": quake.alert,
             "url": quake.url,
+        },
+    )
+
+
+def _news_to_signal(article: dict[str, Any]) -> WorldSignal:
+    """Convert a news article dict (from WorldIntelRSSMonitor) to a WorldSignal."""
+    title = str(article.get("title") or "").strip()
+    source = str(article.get("source") or "rss").strip()
+    detected_at = article.get("detected_at")
+    if not isinstance(detected_at, datetime):
+        detected_at = datetime.now(timezone.utc)
+    country = article.get("country") or None
+    if country:
+        country = _normalize_iso3(country) or country
+    return WorldSignal(
+        signal_id=_stable_signal_id("rss_news", str(article.get("article_id") or title)),
+        signal_type="news",
+        severity=float(article.get("severity") or 0.35),
+        country=country,
+        title=f"{source}: {title}" if source and source not in title else title,
+        description=str(article.get("summary") or title)[:300],
+        source="rss_news",
+        detected_at=detected_at,
+        metadata={
+            "feed_source": article.get("feed_source"),
+            "category": article.get("category"),
+            "url": article.get("url"),
         },
     )
 
@@ -617,7 +645,27 @@ class WorldSignalAggregator:
             logger.error("USGS collection failed: %s", exc)
             _record_source("usgs", started, 0, error=exc)
 
-        # 7. Chokepoint feed refresh (no direct signal emission).
+        # 7. RSS/news articles from NewsArticleCache (populated by news_worker)
+        rss_articles: list[dict[str, Any]] = []
+        started = datetime.now(timezone.utc)
+        try:
+            rss_articles = await rss_monitor.fetch_signals(max_age_hours=3.0, limit=200)
+            for article in rss_articles:
+                signals.append(_news_to_signal(article))
+            rss_health = rss_monitor.get_health()
+            rss_error = str(rss_health.get("last_error") or "").strip() or None
+            _record_source(
+                "rss_news",
+                started,
+                len(rss_articles),
+                ok=rss_health.get("ok", True),
+                error_message=rss_error,
+            )
+        except Exception as exc:
+            logger.error("RSS news collection failed: %s", exc)
+            _record_source("rss_news", started, 0, error=exc)
+
+        # 8. Chokepoint feed refresh (no direct signal emission).
         started = datetime.now(timezone.utc)
         try:
             chokepoint_rows = await chokepoint_feed.refresh(force=False)
@@ -640,7 +688,7 @@ class WorldSignalAggregator:
                 extra=chokepoint_feed.get_health(),
             )
 
-        # 8. Convergence detection
+        # 9. Convergence detection
         started = datetime.now(timezone.utc)
         try:
             signal_map = taxonomy_catalog.convergence_signal_map()
@@ -702,7 +750,7 @@ class WorldSignalAggregator:
             logger.error("Convergence detection failed: %s", exc)
             _record_source("convergence", started, 0, error=exc)
 
-        # 9. Anomaly detection
+        # 10. Anomaly detection
         started = datetime.now(timezone.utc)
         try:
             conflict_counts = acled_client.get_country_event_counts(conflict_events)
@@ -743,6 +791,10 @@ class WorldSignalAggregator:
                 if not iso3:
                     continue
                 news_counts[iso3] = news_counts.get(iso3, 0) + 1
+            for article in rss_articles:
+                iso3 = str(article.get("country") or "").strip().upper()
+                if len(iso3) == 3:
+                    news_counts[iso3] = news_counts.get(iso3, 0) + 1
             for iso3, count in news_counts.items():
                 anomaly_detector.record_observation("news_velocity", iso3, float(count))
 
@@ -754,7 +806,7 @@ class WorldSignalAggregator:
             logger.error("Anomaly detection failed: %s", exc)
             _record_source("anomaly", started, 0, error=exc)
 
-        # 10. Instability scores
+        # 11. Instability scores
         started = datetime.now(timezone.utc)
         try:
             news_velocity: dict[str, float] = {}
@@ -763,6 +815,10 @@ class WorldSignalAggregator:
                 if not iso3:
                     continue
                 news_velocity[iso3] = news_velocity.get(iso3, 0.0) + 1.0
+            for article in rss_articles:
+                iso3 = str(article.get("country") or "").strip().upper()
+                if len(iso3) == 3:
+                    news_velocity[iso3] = news_velocity.get(iso3, 0.0) + 1.0
             scores = await instability_scorer.compute_scores(
                 conflict_events=conflict_events,
                 military_events=military_events,
@@ -790,7 +846,7 @@ class WorldSignalAggregator:
             logger.error("Instability scoring failed: %s", exc)
             _record_source("instability", started, 0, error=exc)
 
-        # 11. Market relevance matching (DB cache only; no trader orchestrator coupling)
+        # 12. Market relevance matching (DB cache only; no trader orchestrator coupling)
         started = datetime.now(timezone.utc)
         try:
             active_markets = await self._load_active_markets()

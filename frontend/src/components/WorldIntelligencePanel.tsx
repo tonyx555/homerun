@@ -46,6 +46,8 @@ const SIGNAL_TYPE_CONFIG: Record<string, { icon: React.ElementType; color: strin
   anomaly: { icon: Zap, color: 'text-cyan-400', label: 'Anomaly' },
   military: { icon: Shield, color: 'text-blue-400', label: 'Military' },
   infrastructure: { icon: Wifi, color: 'text-emerald-400', label: 'Infrastructure' },
+  earthquake: { icon: Zap, color: 'text-amber-400', label: 'Earthquake' },
+  news: { icon: Radio, color: 'text-violet-400', label: 'News' },
 }
 
 function SeverityBadge({ severity }: { severity: number }) {
