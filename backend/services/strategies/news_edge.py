@@ -71,6 +71,37 @@ class NewsEdgeStrategy(BaseStrategy):
         """
         return []
 
+    @staticmethod
+    def _market_from_intent(intent: dict) -> Market:
+        """Deserialize a news intent dict into a typed Market object.
+
+        Intent dicts crossing the DataEvent boundary carry all the fields
+        needed to construct a Market. We do this immediately at the boundary
+        so every downstream code path (create_opportunity, fee model, risk
+        scoring) sees a typed object — never a raw dict.
+        """
+        market_id = str(intent.get("market_id") or "")
+        question = intent.get("market_question") or ""
+        entry_price = float(intent.get("entry_price") or 0.0)
+        # outcome_prices: [yes_price, no_price] — derive from direction + entry
+        direction = intent.get("direction") or ""
+        if direction == "buy_yes":
+            yes_price = entry_price
+            no_price = round(1.0 - entry_price, 6)
+        else:
+            no_price = entry_price
+            yes_price = round(1.0 - entry_price, 6)
+        liquidity = float(intent.get("liquidity") or intent.get("market_liquidity") or 500.0)
+        return Market(
+            id=market_id,
+            condition_id=market_id,
+            question=question,
+            slug=intent.get("market_slug") or market_id,
+            outcome_prices=[yes_price, no_price],
+            liquidity=liquidity,
+            platform="polymarket",
+        )
+
     async def on_event(self, event: DataEvent) -> list[ArbitrageOpportunity]:
         """Convert news intents dispatched by the news worker into opportunities."""
         if event.event_type != "news_update":
@@ -96,37 +127,33 @@ class NewsEdgeStrategy(BaseStrategy):
 
             side = "YES" if direction == "buy_yes" else "NO"
             target_price = entry_price + (edge_percent / 100.0) if entry_price > 0 else 0.0
-            net_profit = (target_price - entry_price) - (target_price * self.fee) if target_price > entry_price else 0.0
 
-            # NOTE: markets are pre-enriched dicts (only market_id/question from intent payload);
-            # no ORM Market object is available here, so cannot route through create_opportunity().
-            opp = ArbitrageOpportunity(
-                strategy=self.strategy_type,
+            # Deserialize intent dict into a typed Market at the event boundary.
+            # All downstream logic (fee model, risk scoring, create_opportunity)
+            # sees a typed Market — never a raw dict.
+            market = self._market_from_intent(intent)
+
+            opp = self.create_opportunity(
                 title=f"News Edge: {question[:50]}",
                 description=f"News-driven {side} at ${entry_price:.2f} (edge: {edge_percent:.1f}%)",
                 total_cost=entry_price,
                 expected_payout=target_price,
-                gross_profit=target_price - entry_price,
-                fee=target_price * self.fee,
-                net_profit=net_profit,
-                roi_percent=edge_percent,
-                is_guaranteed=False,
-                roi_type="directional_payout",
-                risk_score=max(0.0, min(1.0, 1.0 - confidence)),
-                risk_factors=["News-driven informational edge"],
-                confidence=confidence,
-                markets=[{"id": market_id, "question": question}],
-                min_liquidity=0.0,
-                max_position_size=500.0,
-                positions_to_take=[{
+                markets=[market],
+                positions=[{
                     "action": "BUY",
                     "outcome": side,
                     "price": entry_price,
+                    "news_metadata": metadata,
                 }],
-                mispricing_type=MispricingType.NEWS_INFORMATION,
-                strategy_context={"news_metadata": metadata},
+                is_guaranteed=False,
+                skip_fee_model=True,          # News edge uses its own net_profit calc
+                custom_roi_percent=edge_percent,
+                custom_risk_score=1.0 - confidence,
+                confidence=confidence,
             )
-            opportunities.append(opp)
+            if opp is not None:
+                opp.mispricing_type = MispricingType.NEWS_INFORMATION
+                opportunities.append(opp)
         return opportunities
 
     async def detect_async(

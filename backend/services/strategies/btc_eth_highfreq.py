@@ -2199,6 +2199,43 @@ class BtcEthHighFreqStrategy(BaseStrategy):
 
         return self._detect_from_crypto_markets(markets)
 
+    @staticmethod
+    def _market_from_crypto_dict(d: dict) -> Market:
+        """Deserialize a crypto worker market dict into a typed Market object.
+
+        Crypto worker dicts use non-standard keys (condition_id, up_price,
+        down_price, end_time). We map them to Market fields immediately at
+        the DataEvent boundary so every downstream code path sees only typed
+        objects — never raw dicts.
+        """
+        market_id = str(d.get("condition_id") or d.get("id") or "")
+        up_price = float(d.get("up_price") or 0.0)
+        down_price = float(d.get("down_price") or 0.0)
+        liquidity = max(0.0, float(d.get("liquidity") or 0.0))
+        slug = d.get("slug") or market_id
+        question = d.get("question") or slug
+
+        end_date = None
+        end_time_raw = d.get("end_time")
+        if isinstance(end_time_raw, str) and end_time_raw.strip():
+            try:
+                from datetime import datetime as _dt
+                end_date = _dt.fromisoformat(end_time_raw.replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                pass
+
+        return Market(
+            id=market_id,
+            condition_id=market_id,
+            question=question,
+            slug=slug,
+            # yes_price = up_price (market-implied prob of going Up)
+            outcome_prices=[up_price, down_price],
+            liquidity=liquidity,
+            end_date=end_date,
+            platform="polymarket",
+        )
+
     def _detect_from_crypto_markets(self, markets: list[dict]) -> list[ArbitrageOpportunity]:
         """Replicate the multi-strategy signal logic from the former emit_crypto_market_signals.
 
@@ -2327,15 +2364,13 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 confidence = clamp(confidence * 0.75, 0.05, 0.85)
 
             side = "YES" if direction == "buy_yes" else "NO"
-            question = market.get("question") or market.get("slug") or market_id
             slug = market.get("slug") or market_id
 
-            # NOTE: ``markets`` here are raw dicts from the crypto worker, not ORM
-            # Market objects. create_opportunity() requires ORM Market objects for fee
-            # model and risk scoring, so we construct directly and inline those calcs.
-            # This is the same pattern as news_edge.py's on_event() path.
-            opp = ArbitrageOpportunity(
-                strategy=self.strategy_type,
+            # Deserialize the crypto worker dict into a typed Market at the
+            # event boundary. All downstream logic sees a typed object.
+            typed_market = self._market_from_crypto_dict(market)
+
+            opp = self.create_opportunity(
                 title=f"Crypto HF: {slug} {side}",
                 description=(
                     f"{regime} regime, {dominant_strategy} dominant | "
@@ -2343,46 +2378,37 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 ),
                 total_cost=entry_price,
                 expected_payout=entry_price + (edge_percent / 100.0),
-                gross_profit=edge_percent / 100.0,
-                fee=entry_price * (0.0156 if fees_enabled else 0.0),
-                net_profit=(edge_percent / 100.0) - entry_price * (0.0156 if fees_enabled else 0.0),
-                roi_percent=edge_percent,
-                is_guaranteed=False,
-                roi_type="directional_payout",
-                risk_score=max(0.0, min(1.0, 1.0 - confidence)),
-                risk_factors=[
-                    f"Crypto {regime} regime",
-                    f"Dominant: {dominant_strategy} ({dominant_weighted_edge:.1f}%)",
-                    f"Oracle: {'available' if has_oracle else 'unavailable'}",
-                ],
-                confidence=confidence,
-                markets=[{
-                    "id": market_id,
-                    "slug": slug,
-                    "question": question,
-                    "yes_price": up_price,
-                    "no_price": down_price,
-                    "liquidity": liquidity,
-                }],
-                min_liquidity=liquidity,
-                max_position_size=min(liquidity * 0.1, 500.0),
-                positions_to_take=[{
+                markets=[typed_market],
+                positions=[{
                     "action": "BUY",
                     "outcome": side,
                     "price": entry_price,
+                    # Carry crypto-specific context through positions payload
+                    "_crypto_context": {
+                        "signal_version": "crypto_worker_v2",
+                        "signal_family": "crypto_multistrategy",
+                        "strategy_origin": "crypto_worker",
+                        "selected_direction": direction,
+                        "regime": regime,
+                        "oracle_available": has_oracle,
+                        "dominant_strategy": dominant_strategy,
+                        "execution_penalty_percent": round(execution_penalty, 6),
+                    },
                 }],
-                strategy_context={
-                    "signal_version": "crypto_worker_v2",
-                    "signal_family": "crypto_multistrategy",
-                    "strategy_origin": "crypto_worker",
-                    "selected_direction": direction,
-                    "regime": regime,
-                    "oracle_available": has_oracle,
-                    "dominant_strategy": dominant_strategy,
-                    "execution_penalty_percent": round(execution_penalty, 6),
-                },
+                is_guaranteed=False,
+                skip_fee_model=True,              # Crypto uses its own execution penalty model
+                custom_roi_percent=edge_percent,
+                custom_risk_score=1.0 - confidence,
+                confidence=confidence,
             )
-            opportunities.append(opp)
+            if opp is not None:
+                # Attach crypto-specific risk factors (bypassed by custom_risk_score)
+                opp.risk_factors = [
+                    f"Crypto {regime} regime",
+                    f"Dominant: {dominant_strategy} ({dominant_weighted_edge:.1f}%)",
+                    f"Oracle: {'available' if has_oracle else 'unavailable'}",
+                ]
+                opportunities.append(opp)
 
         return opportunities
 
