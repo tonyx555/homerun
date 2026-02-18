@@ -1066,6 +1066,20 @@ class Strategy(Base):
         Index("idx_strategy_status", "status"),
     )
 
+class StrategyRuntimeRevision(Base):
+    """Revision counters used by workers for strategy hot-reload polling."""
+
+    __tablename__ = "strategy_runtime_revisions"
+
+    scope = Column(String, primary_key=True)  # "__all__" or source_key
+    revision = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_strategy_runtime_revisions_updated", "updated_at"),
+    )
+
+
 # ==================== LLM MODELS CACHE ====================
 
 
@@ -2330,6 +2344,173 @@ class TraderOrder(Base):
         Index("idx_trader_orders_created", "created_at"),
         Index("idx_trader_orders_status", "status"),
         Index("idx_trader_orders_trader_created", "trader_id", "created_at"),
+    )
+
+
+class ExecutionSession(Base):
+    """Persistent multi-leg execution session owned by the trader orchestrator."""
+
+    __tablename__ = "execution_sessions"
+
+    id = Column(String, primary_key=True)
+    trader_id = Column(
+        String,
+        ForeignKey("traders.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    signal_id = Column(
+        String,
+        ForeignKey("trade_signals.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    decision_id = Column(
+        String,
+        ForeignKey("trader_decisions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    source = Column(String, nullable=False, index=True)
+    strategy_key = Column(String, nullable=True, index=True)
+    mode = Column(String, nullable=False, default="paper")
+    status = Column(String, nullable=False, default="pending")
+    policy = Column(String, nullable=True)
+    plan_id = Column(String, nullable=True, index=True)
+    market_ids_json = Column(JSON, default=list)
+    legs_total = Column(Integer, nullable=False, default=0)
+    legs_completed = Column(Integer, nullable=False, default=0)
+    legs_failed = Column(Integer, nullable=False, default=0)
+    legs_open = Column(Integer, nullable=False, default=0)
+    requested_notional_usd = Column(Float, nullable=True)
+    executed_notional_usd = Column(Float, nullable=False, default=0.0)
+    max_unhedged_notional_usd = Column(Float, nullable=False, default=0.0)
+    unhedged_notional_usd = Column(Float, nullable=False, default=0.0)
+    trace_id = Column(String, nullable=True, index=True)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+    error_message = Column(Text, nullable=True)
+    payload_json = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_execution_sessions_created", "created_at"),
+        Index("idx_execution_sessions_status", "status"),
+        Index("idx_execution_sessions_trader_status", "trader_id", "status"),
+    )
+
+
+class ExecutionSessionLeg(Base):
+    """Plan leg state for an execution session."""
+
+    __tablename__ = "execution_session_legs"
+
+    id = Column(String, primary_key=True)
+    session_id = Column(
+        String,
+        ForeignKey("execution_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    leg_index = Column(Integer, nullable=False)
+    leg_id = Column(String, nullable=False)
+    market_id = Column(String, nullable=False, index=True)
+    market_question = Column(Text, nullable=True)
+    token_id = Column(String, nullable=True)
+    side = Column(String, nullable=False, default="buy")
+    outcome = Column(String, nullable=True)
+    price_policy = Column(String, nullable=False, default="maker_limit")
+    time_in_force = Column(String, nullable=False, default="GTC")
+    target_price = Column(Float, nullable=True)
+    requested_notional_usd = Column(Float, nullable=True)
+    requested_shares = Column(Float, nullable=True)
+    filled_notional_usd = Column(Float, nullable=False, default=0.0)
+    filled_shares = Column(Float, nullable=False, default=0.0)
+    avg_fill_price = Column(Float, nullable=True)
+    status = Column(String, nullable=False, default="pending")
+    last_error = Column(Text, nullable=True)
+    metadata_json = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("session_id", "leg_index", name="uq_execution_session_leg_index"),
+        Index("idx_execution_session_legs_session_status", "session_id", "status"),
+    )
+
+
+class ExecutionSessionOrder(Base):
+    """Order-level activity emitted while a session leg is being worked."""
+
+    __tablename__ = "execution_session_orders"
+
+    id = Column(String, primary_key=True)
+    session_id = Column(
+        String,
+        ForeignKey("execution_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    leg_id = Column(
+        String,
+        ForeignKey("execution_session_legs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    trader_order_id = Column(
+        String,
+        ForeignKey("trader_orders.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    provider_order_id = Column(String, nullable=True, index=True)
+    provider_clob_order_id = Column(String, nullable=True, index=True)
+    action = Column(String, nullable=False, default="submit")
+    side = Column(String, nullable=False)
+    price = Column(Float, nullable=True)
+    size = Column(Float, nullable=True)
+    notional_usd = Column(Float, nullable=True)
+    status = Column(String, nullable=False, default="submitted")
+    reason = Column(Text, nullable=True)
+    payload_json = Column(JSON, default=dict)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_execution_session_orders_session_created", "session_id", "created_at"),
+        Index("idx_execution_session_orders_leg_created", "leg_id", "created_at"),
+    )
+
+
+class ExecutionSessionEvent(Base):
+    """Immutable event stream for session state transitions and policy actions."""
+
+    __tablename__ = "execution_session_events"
+
+    id = Column(String, primary_key=True)
+    session_id = Column(
+        String,
+        ForeignKey("execution_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    leg_id = Column(
+        String,
+        ForeignKey("execution_session_legs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    event_type = Column(String, nullable=False, index=True)
+    severity = Column(String, nullable=False, default="info")
+    message = Column(Text, nullable=True)
+    payload_json = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    __table_args__ = (
+        Index("idx_execution_session_events_session_created", "session_id", "created_at"),
     )
 
 

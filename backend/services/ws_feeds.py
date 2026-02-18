@@ -16,6 +16,8 @@ Key classes:
 from __future__ import annotations
 
 import asyncio
+from collections import deque
+from datetime import datetime, timezone
 import json
 import time
 from dataclasses import dataclass
@@ -157,8 +159,10 @@ class PriceCache:
     ) -> None:
         self._stale_ttl = stale_ttl
         self._change_threshold_pct = change_threshold_pct
+        self._history_max_snapshots = max(50, int(settings.WS_PRICE_HISTORY_MAX_SNAPSHOTS or 1500))
         self._lock = Lock()
         self._entries: Dict[str, CachedEntry] = {}
+        self._history: Dict[str, deque[tuple[float, float, float, float]]] = {}
         self._on_change_callbacks: List[Callable[[str, float, float], None]] = []
 
     def add_on_change_callback(self, callback: Callable[[str, float, float], None]) -> None:
@@ -187,11 +191,13 @@ class PriceCache:
 
         new_mid = (best_bid + best_ask) / 2.0 if best_bid > 0 and best_ask > 0 else best_bid or best_ask
 
+        now_mono = time.monotonic()
+        now_epoch = time.time()
         entry = CachedEntry(
             best_bid=best_bid,
             best_ask=best_ask,
             order_book=book,
-            updated_at=time.monotonic(),
+            updated_at=now_mono,
         )
 
         old_mid = 0.0
@@ -204,6 +210,12 @@ class PriceCache:
                     else prev.best_bid or prev.best_ask
                 )
             self._entries[token_id] = entry
+            if new_mid > 0:
+                history = self._history.get(token_id)
+                if history is None:
+                    history = deque(maxlen=self._history_max_snapshots)
+                    self._history[token_id] = history
+                history.append((now_epoch, new_mid, best_bid, best_ask))
 
         # Fire change callbacks outside the lock
         if (
@@ -222,11 +234,13 @@ class PriceCache:
         """Remove a token from the cache."""
         with self._lock:
             self._entries.pop(token_id, None)
+            self._history.pop(token_id, None)
 
     def clear(self) -> None:
         """Drop everything."""
         with self._lock:
             self._entries.clear()
+            self._history.clear()
 
     # -- queries ------------------------------------------------------------
 
@@ -299,6 +313,65 @@ class PriceCache:
         """Return a snapshot of all cached token IDs."""
         with self._lock:
             return list(self._entries.keys())
+
+    def get_price_history(self, token_id: str, max_snapshots: int = 60) -> List[dict]:
+        """Return recent price snapshots for a token (newest first)."""
+        limit = max(1, int(max_snapshots))
+        with self._lock:
+            raw = list(self._history.get(token_id, []))
+        if not raw:
+            return []
+        out = [
+            {
+                "timestamp": datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(),
+                "mid": mid,
+                "bid": bid,
+                "ask": ask,
+            }
+            for ts, mid, bid, ask in raw[-limit:]
+        ]
+        out.reverse()
+        return out
+
+    def get_price_change(self, token_id: str, lookback_seconds: int = 300) -> Optional[dict]:
+        """Return absolute/percent price move over a lookback window."""
+        lookback = max(1, int(lookback_seconds))
+        cutoff = time.time() - lookback
+        with self._lock:
+            history = list(self._history.get(token_id, []))
+        if len(history) < 2:
+            return None
+        current_ts, current_mid, _, _ = history[-1]
+        if current_mid <= 0:
+            return None
+
+        prior = None
+        for snap in reversed(history[:-1]):
+            if snap[0] <= cutoff and snap[1] > 0:
+                prior = snap
+                break
+        if prior is None:
+            for snap in history:
+                if snap[1] > 0:
+                    prior = snap
+                    break
+        if prior is None:
+            return None
+
+        prior_ts, prior_mid, _, _ = prior
+        if prior_mid <= 0:
+            return None
+        change_abs = current_mid - prior_mid
+        change_pct = (change_abs / prior_mid) * 100.0
+        return {
+            "current_mid": current_mid,
+            "prior_mid": prior_mid,
+            "change_abs": change_abs,
+            "change_pct": change_pct,
+            "snapshots_in_window": sum(1 for snap in history if snap[0] >= cutoff),
+            "current_timestamp": datetime.fromtimestamp(current_ts, tz=timezone.utc).isoformat(),
+            "prior_timestamp": datetime.fromtimestamp(prior_ts, tz=timezone.utc).isoformat(),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -1010,7 +1083,7 @@ class FeedManager:
         self._started = False
         # Reactive scan: accumulate changed tokens and debounce trigger
         self._changed_tokens: Set[str] = set()
-        self._reactive_scan_callback: Optional[Callable[[], Coroutine]] = None
+        self._reactive_scan_callback: Optional[Callable[[Set[str]], Coroutine[Any, Any, None]]] = None
         self._debounce_task: Optional[asyncio.Task] = None
         self._debounce_seconds: float = 2.0  # coalesce changes over 2s window
         self._cache.add_on_change_callback(self._on_price_change)
@@ -1081,7 +1154,7 @@ class FeedManager:
 
     def set_reactive_scan_callback(
         self,
-        callback: Callable[[], Coroutine],
+        callback: Callable[[Set[str]], Coroutine[Any, Any, None]],
         debounce_seconds: float = 2.0,
     ) -> None:
         """Register an async callback to trigger when prices change significantly.
@@ -1127,11 +1200,12 @@ class FeedManager:
         await asyncio.sleep(self._debounce_seconds)
         if not self._reactive_scan_callback or not self._changed_tokens:
             return
-        changed_count = len(self._changed_tokens)
+        changed_tokens = set(self._changed_tokens)
+        changed_count = len(changed_tokens)
         self._changed_tokens.clear()
         try:
             logger.debug(f"Reactive scan triggered by {changed_count} price changes")
-            await self._reactive_scan_callback()
+            await self._reactive_scan_callback(changed_tokens)
         except Exception as exc:
             logger.warning(f"Reactive scan callback failed: {exc!r}")
 
@@ -1206,6 +1280,7 @@ class FeedManager:
             },
             "cache": {
                 "token_count": len(self._cache.all_token_ids()),
+                "pending_reactive_tokens": len(self._changed_tokens),
             },
         }
 

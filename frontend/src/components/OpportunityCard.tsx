@@ -1,4 +1,6 @@
-import { memo, useState, useMemo } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { AnimatePresence, motion } from 'framer-motion'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ChevronDown,
@@ -14,6 +16,8 @@ import {
   Clock,
   CalendarDays,
   Layers,
+  Maximize2,
+  Minimize2,
   Newspaper,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
@@ -355,13 +359,23 @@ interface Props {
   onExecute?: (opportunity: Opportunity) => void
   onOpenCopilot?: (opportunity: Opportunity) => void
   onSearchNews?: (opportunity: Opportunity) => void
+  isModalView?: boolean
+  onCloseModal?: () => void
 }
 
 // ─── Main Component ───────────────────────────────────────
 
-function OpportunityCard({ opportunity, onExecute, onOpenCopilot, onSearchNews }: Props) {
-  const [expanded, setExpanded] = useState(false)
+function OpportunityCard({
+  opportunity,
+  onExecute,
+  onOpenCopilot,
+  onSearchNews,
+  isModalView = false,
+  onCloseModal,
+}: Props) {
+  const [expanded, setExpanded] = useState(isModalView)
   const [aiExpanded, setAiExpanded] = useState(false)
+  const [modalOpen, setModalOpen] = useState(false)
   const queryClient = useQueryClient()
 
   // Temperature unit preference
@@ -604,11 +618,40 @@ function OpportunityCard({ opportunity, onExecute, onOpenCopilot, onSearchNews }
 
   // ROI direction
   const roiPositive = opportunity.roi_percent >= 0
+  const closeModal = () => setModalOpen(false)
+
+  useEffect(() => {
+    if (!isModalView) return
+    setExpanded(true)
+    setAiExpanded(true)
+  }, [isModalView])
+
+  useEffect(() => {
+    if (isModalView || !modalOpen) return undefined
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = previousOverflow
+    }
+  }, [isModalView, modalOpen])
+
+  useEffect(() => {
+    if (isModalView || !modalOpen) return undefined
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        closeModal()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [isModalView, modalOpen])
 
   return (
+    <>
     <Card className={cn(
       "overflow-hidden relative group transition-all duration-200",
-      "hover:shadow-lg hover:shadow-black/20 hover:border-border/80",
+      !isModalView && "hover:shadow-lg hover:shadow-black/20 hover:border-border/80",
+      isModalView && "w-[min(1100px,calc(100vw-2rem))] max-h-[90vh] overflow-y-auto rounded-2xl border-border/70 bg-background shadow-[0_40px_120px_rgba(0,0,0,0.55)] [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden",
       bgGradient && `bg-gradient-to-r ${bgGradient}`
     )}>
       {/* Left accent bar */}
@@ -947,12 +990,42 @@ function OpportunityCard({ opportunity, onExecute, onOpenCopilot, onSearchNews }
               News
             </button>
           )}
-          <div
-            className="ml-auto flex items-center gap-1 text-[10px] text-muted-foreground cursor-pointer hover:text-foreground transition-colors"
-            onClick={() => setExpanded(!expanded)}
-          >
-            {expanded ? 'Less' : 'More'}
-            {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+          <div className="ml-auto flex items-center gap-2">
+            {!isModalView ? (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setModalOpen(true)
+                }}
+                className="inline-flex items-center gap-1 h-6 px-2 text-[10px] rounded border bg-violet-500/10 text-violet-300 border-violet-500/20 hover:bg-violet-500/20 transition-colors font-medium"
+                title="Expand this card"
+              >
+                <Maximize2 className="w-2.5 h-2.5" />
+                Expand
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onCloseModal?.()
+                }}
+                className="inline-flex items-center gap-1 h-6 px-2 text-[10px] rounded border bg-violet-500/10 text-violet-300 border-violet-500/20 hover:bg-violet-500/20 transition-colors font-medium"
+                title="Return to list"
+              >
+                <Minimize2 className="w-2.5 h-2.5" />
+                Pop In
+              </button>
+            )}
+            <button
+              type="button"
+              className="flex items-center gap-1 text-[10px] text-muted-foreground cursor-pointer hover:text-foreground transition-colors"
+              onClick={() => setExpanded(!expanded)}
+            >
+              {expanded ? 'Less' : 'More'}
+              {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+            </button>
           </div>
         </div>
 
@@ -1257,6 +1330,50 @@ function OpportunityCard({ opportunity, onExecute, onOpenCopilot, onSearchNews }
         </>
       )}
     </Card>
+      {!isModalView && typeof document !== 'undefined' && createPortal(
+        <AnimatePresence>
+          {modalOpen && (
+            <motion.div
+              key={`opportunity-modal-${opportunity.id}`}
+              className="fixed inset-0 z-[120] flex items-center justify-center p-4 sm:p-6"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+            >
+              <motion.div
+                className="absolute inset-0 bg-black/70 backdrop-blur-[2px]"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.2 }}
+                onClick={closeModal}
+                aria-hidden
+              />
+              <motion.div
+                className="relative z-10"
+                role="dialog"
+                aria-modal="true"
+                aria-label={`Expanded opportunity: ${opportunity.title}`}
+                initial={{ scale: 0.94, opacity: 0, y: 22 }}
+                animate={{ scale: 1, opacity: 1, y: 0 }}
+                exit={{ scale: 0.97, opacity: 0, y: 14 }}
+                transition={{ type: 'spring', stiffness: 260, damping: 28, mass: 0.9 }}
+              >
+                <OpportunityCard
+                  opportunity={opportunity}
+                  onExecute={onExecute}
+                  onOpenCopilot={onOpenCopilot}
+                  onSearchNews={onSearchNews}
+                  isModalView
+                  onCloseModal={closeModal}
+                />
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>,
+        document.body
+      )}
+    </>
   )
 }
 

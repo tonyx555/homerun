@@ -15,20 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.opportunity import ArbitrageOpportunity
 from services.signal_bus import (
+    build_signal_contract_from_opportunity,
     make_dedupe_key,
     refresh_trade_signal_snapshots,
     upsert_trade_signal,
 )
 from utils.utcnow import utcnow
-
-
-def _direction_from_outcome(outcome: str | None) -> str | None:
-    val = (outcome or "").lower().strip()
-    if val in {"yes", "buy_yes"}:
-        return "buy_yes"
-    if val in {"no", "buy_no"}:
-        return "buy_no"
-    return None
 
 
 async def bridge_opportunities_to_signals(
@@ -50,9 +42,9 @@ async def bridge_opportunities_to_signals(
     emitted = 0
 
     for opp in opportunities:
-        market = (opp.markets or [{}])[0]
-        position = (opp.positions_to_take or [{}])[0]
-        market_id = str(market.get("id") or opp.event_id or opp.id)
+        market_id, direction, entry_price, market_question, payload_json, strategy_context_json = (
+            build_signal_contract_from_opportunity(opp)
+        )
         if not market_id:
             continue
 
@@ -70,15 +62,15 @@ async def bridge_opportunities_to_signals(
             signal_type=f"{source}_opportunity",
             strategy_type=opp.strategy,
             market_id=market_id,
-            market_question=market.get("question") or opp.title,
-            direction=_direction_from_outcome(position.get("outcome")),
-            entry_price=position.get("price"),
+            market_question=market_question,
+            direction=direction,
+            entry_price=entry_price,
             edge_percent=float(opp.roi_percent or 0.0),
             confidence=float(opp.confidence),
             liquidity=float(opp.min_liquidity or 0.0),
             expires_at=expires,
-            payload_json=opp.model_dump(mode="json"),
-            strategy_context_json=opp.strategy_context or None,
+            payload_json=payload_json,
+            strategy_context_json=strategy_context_json,
             dedupe_key=dedupe_key,
             commit=False,
         )

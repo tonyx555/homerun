@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
+import { createPortal } from 'react-dom'
+import { AnimatePresence, motion } from 'framer-motion'
 import {
   CheckCircle2,
   ChevronDown,
@@ -12,6 +14,8 @@ import {
   TrendingDown,
   Users,
   Wallet,
+  Maximize2,
+  Minimize2,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { buildPolymarketMarketUrl } from '../lib/marketUrls'
@@ -444,12 +448,17 @@ function TraderSignalCard({
   signal,
   onNavigateToWallet,
   onOpenCopilot,
+  isModalView = false,
+  onCloseModal,
 }: {
   signal: UnifiedTraderSignal
   onNavigateToWallet?: (address: string) => void
   onOpenCopilot?: (signal: UnifiedTraderSignal) => void
+  isModalView?: boolean
+  onCloseModal?: () => void
 }) {
-  const [expanded, setExpanded] = useState(false)
+  const [expanded, setExpanded] = useState(isModalView)
+  const [modalOpen, setModalOpen] = useState(false)
   const chartRef = useRef<HTMLDivElement>(null)
   const [chartWidth, setChartWidth] = useState(280)
   const isBuy = signal.direction === 'BUY'
@@ -513,8 +522,10 @@ function TraderSignalCard({
       : signal.tier === 'HIGH'
         ? 'from-orange-500/[0.04] via-transparent to-transparent'
         : 'from-yellow-500/[0.03] via-transparent to-transparent'
+  const closeModal = () => setModalOpen(false)
 
   useEffect(() => {
+    if (isModalView) return undefined
     if (!chartRef.current) return
     const measure = () => {
       if (!chartRef.current) return
@@ -524,12 +535,35 @@ function TraderSignalCard({
     const ro = new ResizeObserver(measure)
     ro.observe(chartRef.current)
     return () => ro.disconnect()
-  }, [])
+  }, [isModalView])
+
+  useEffect(() => {
+    if (isModalView || !modalOpen) return undefined
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = previousOverflow
+    }
+  }, [isModalView, modalOpen])
+
+  useEffect(() => {
+    if (isModalView || !modalOpen) return undefined
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        closeModal()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [isModalView, modalOpen])
 
   return (
+    <>
     <div
       className={cn(
-        'relative rounded-lg border bg-card/80 overflow-hidden transition-all hover:shadow-md cursor-pointer',
+        'relative rounded-lg border bg-card/80 overflow-hidden transition-all cursor-pointer',
+        !isModalView && 'hover:shadow-md',
+        isModalView && 'w-[min(1100px,calc(100vw-2rem))] max-h-[90vh] overflow-y-auto rounded-2xl border-border/70 bg-background shadow-[0_40px_120px_rgba(0,0,0,0.55)] [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden',
         TIER_BORDER_COLORS[signal.tier],
       )}
       onClick={() => setExpanded(!expanded)}
@@ -832,6 +866,31 @@ function TraderSignalCard({
               Copilot
             </button>
           )}
+          {!isModalView ? (
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                setModalOpen(true)
+              }}
+              className="inline-flex items-center gap-1 text-xs text-violet-300 hover:text-violet-200"
+              title="Expand this card"
+            >
+              <Maximize2 className="w-3 h-3" />
+              Expand
+            </button>
+          ) : (
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                onCloseModal?.()
+              }}
+              className="inline-flex items-center gap-1 text-xs text-violet-300 hover:text-violet-200"
+              title="Return to grid"
+            >
+              <Minimize2 className="w-3 h-3" />
+              Pop In
+            </button>
+          )}
           <div className="ml-auto">
             {expanded ? (
               <ChevronUp className="w-4 h-4 text-muted-foreground/60" />
@@ -950,6 +1009,49 @@ function TraderSignalCard({
         )}
       </div>
     </div>
+      {!isModalView && typeof document !== 'undefined' && createPortal(
+        <AnimatePresence>
+          {modalOpen && (
+            <motion.div
+              key={`trader-signal-modal-${signal.id}`}
+              className="fixed inset-0 z-[120] flex items-center justify-center p-4 sm:p-6"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+            >
+              <motion.div
+                className="absolute inset-0 bg-black/70 backdrop-blur-[2px]"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.2 }}
+                onClick={closeModal}
+                aria-hidden
+              />
+              <motion.div
+                className="relative z-10"
+                role="dialog"
+                aria-modal="true"
+                aria-label={`Expanded trader signal: ${marketLabel}`}
+                initial={{ scale: 0.94, opacity: 0, y: 22 }}
+                animate={{ scale: 1, opacity: 1, y: 0 }}
+                exit={{ scale: 0.97, opacity: 0, y: 14 }}
+                transition={{ type: 'spring', stiffness: 260, damping: 28, mass: 0.9 }}
+              >
+                <TraderSignalCard
+                  signal={signal}
+                  onNavigateToWallet={onNavigateToWallet}
+                  onOpenCopilot={onOpenCopilot}
+                  isModalView
+                  onCloseModal={closeModal}
+                />
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>,
+        document.body
+      )}
+    </>
   )
 }
 

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from utils.utcnow import utcnow
-from typing import Optional, Callable, List
+from typing import Optional, Callable, List, Set
 
 from config import settings
 from interfaces import MarketDataProvider
@@ -19,7 +20,7 @@ from utils.converters import to_iso
 from services.market_prioritizer import market_prioritizer, MarketTier
 from services.ws_feeds import get_feed_manager
 from services.quality_filter import quality_filter
-from services.data_events import DataEvent
+from services.data_events import DataEvent, EventType
 from services.event_dispatcher import event_dispatcher
 from sqlalchemy import select
 
@@ -70,7 +71,11 @@ class ArbitrageScanner:
         # Cached full market/event data for use between full scans
         self._cached_events: list = []
         self._cached_markets: list = []
+        self._cached_market_by_id: dict[str, object] = {}
         self._cached_prices: dict = {}
+        self._token_to_market_ids: dict[str, set[str]] = {}
+        self._market_to_event_id: dict[str, str] = {}
+        self._event_to_market_ids: dict[str, set[str]] = {}
 
         # Real yes/no price history for opportunity card sparklines.
         # market_id -> [{t: epoch_ms, yes: float, no: float}, ...]
@@ -97,6 +102,12 @@ class ArbitrageScanner:
         # Reactive scanning: event set by WS price changes to trigger immediate scan
         self._reactive_trigger = asyncio.Event()
         self._reactive_scan_registered = False
+        self._reactive_tokens_lock = asyncio.Lock()
+        self._pending_reactive_tokens: dict[str, float] = {}
+        self._reactive_backpressure_dropped_tokens: int = 0
+        self._reactive_backpressure_dropped_markets: int = 0
+        self._last_reactive_batch_tokens: int = 0
+        self._last_reactive_batch_markets: int = 0
 
         # Quality filter audit trail from the last scan cycle
         self._quality_reports: dict = {}
@@ -327,6 +338,284 @@ class ArbitrageScanner:
                 if token_pair is None:
                     continue
                 self._market_token_ids[market_id] = token_pair
+
+    def _rebuild_realtime_graph(self, events: list, markets: list) -> None:
+        """Build token->market and event<->market routing maps from cached snapshot."""
+        market_by_id: dict[str, object] = {}
+        token_to_market_ids: dict[str, set[str]] = {}
+        market_to_event_id: dict[str, str] = {}
+        event_to_market_ids: dict[str, set[str]] = {}
+
+        for market in markets:
+            market_id = str(getattr(market, "id", "") or "")
+            if not market_id:
+                continue
+            market_by_id[market_id] = market
+            for token_id in getattr(market, "clob_token_ids", None) or []:
+                token = str(token_id or "").strip()
+                if not token:
+                    continue
+                token_to_market_ids.setdefault(token, set()).add(market_id)
+
+        for event in events:
+            event_id = str(getattr(event, "id", "") or getattr(event, "slug", "") or "")
+            if not event_id:
+                continue
+            mids: set[str] = set()
+            for market in getattr(event, "markets", None) or []:
+                market_id = str(getattr(market, "id", "") or "")
+                if not market_id:
+                    continue
+                mids.add(market_id)
+                market_to_event_id[market_id] = event_id
+                if market_id not in market_by_id:
+                    market_by_id[market_id] = market
+                for token_id in getattr(market, "clob_token_ids", None) or []:
+                    token = str(token_id or "").strip()
+                    if not token:
+                        continue
+                    token_to_market_ids.setdefault(token, set()).add(market_id)
+            if mids:
+                event_to_market_ids[event_id] = mids
+
+        self._cached_market_by_id = market_by_id
+        self._token_to_market_ids = token_to_market_ids
+        self._market_to_event_id = market_to_event_id
+        self._event_to_market_ids = event_to_market_ids
+
+    @staticmethod
+    def _collect_polymarket_tokens(markets: list) -> list[str]:
+        """Collect unique polymarket token IDs from markets in stable order."""
+        seen: set[str] = set()
+        out: list[str] = []
+        for market in markets:
+            for token_id in getattr(market, "clob_token_ids", None) or []:
+                token = str(token_id or "").strip()
+                if not token or len(token) <= 20 or token in seen:
+                    continue
+                seen.add(token)
+                out.append(token)
+        return out
+
+    def _snapshot_ws_prices(self, token_ids: list[str]) -> dict[str, dict]:
+        """Return fresh WS mid/bid/ask snapshots for token IDs."""
+        if not token_ids or not settings.WS_FEED_ENABLED:
+            return {}
+        try:
+            feed_mgr = get_feed_manager()
+            if not feed_mgr._started:
+                return {}
+            out: dict[str, dict] = {}
+            for token_id in token_ids:
+                if not feed_mgr.is_fresh(token_id):
+                    continue
+                mid = feed_mgr.cache.get_mid_price(token_id)
+                if mid is None:
+                    continue
+                bba = feed_mgr.cache.get_best_bid_ask(token_id)
+                if bba is None:
+                    out[token_id] = {"mid": float(mid), "bid": float(mid), "ask": float(mid)}
+                else:
+                    bid, ask = bba
+                    out[token_id] = {"mid": float(mid), "bid": float(bid), "ask": float(ask)}
+            return out
+        except Exception:
+            return {}
+
+    def _apply_live_prices_to_markets(self, markets: list, prices: dict[str, dict]) -> int:
+        """Mutate market outcome prices from live token prices to keep fingerprints current."""
+        updated = 0
+        for market in markets:
+            token_ids = getattr(market, "clob_token_ids", None) or []
+            if len(token_ids) < 2:
+                continue
+            yes_token = str(token_ids[0] or "")
+            no_token = str(token_ids[1] or "")
+            if not yes_token or not no_token:
+                continue
+
+            yes_price = self._price_value(prices.get(yes_token))
+            no_price = self._price_value(prices.get(no_token))
+            if yes_price is None and no_price is None:
+                continue
+            if yes_price is None and no_price is not None and 0 <= no_price <= 1:
+                yes_price = 1.0 - no_price
+            if no_price is None and yes_price is not None and 0 <= yes_price <= 1:
+                no_price = 1.0 - yes_price
+            if yes_price is None or no_price is None:
+                continue
+
+            yes_val = float(round(min(1.0, max(0.0, yes_price)), 6))
+            no_val = float(round(min(1.0, max(0.0, no_price)), 6))
+            raw = list(getattr(market, "outcome_prices", None) or [])
+            if (
+                len(raw) >= 2
+                and abs(float(raw[0]) - yes_val) < 1e-9
+                and abs(float(raw[1]) - no_val) < 1e-9
+            ):
+                continue
+
+            market.outcome_prices = [yes_val, no_val]
+            tokens = getattr(market, "tokens", None) or []
+            if len(tokens) >= 2:
+                try:
+                    tokens[0].price = yes_val
+                    tokens[1].price = no_val
+                except Exception:
+                    pass
+            updated += 1
+        return updated
+
+    def _resolve_affected_market_ids(self, changed_token_ids: list[str]) -> list[str]:
+        """Resolve changed tokens to a bounded market batch, expanded by event peers."""
+        if not changed_token_ids:
+            return []
+        ordered: list[str] = []
+        seen: set[str] = set()
+
+        for token_id in changed_token_ids:
+            for market_id in sorted(self._token_to_market_ids.get(token_id, set())):
+                if market_id in seen:
+                    continue
+                seen.add(market_id)
+                ordered.append(market_id)
+
+        direct_ids = list(ordered)
+        for market_id in direct_ids:
+            event_id = self._market_to_event_id.get(market_id)
+            if not event_id:
+                continue
+            for peer_id in sorted(self._event_to_market_ids.get(event_id, set())):
+                if peer_id in seen:
+                    continue
+                seen.add(peer_id)
+                ordered.append(peer_id)
+
+        cap = max(10, int(settings.REALTIME_SCAN_MAX_BATCH_MARKETS or 800))
+        if len(ordered) > cap:
+            self._reactive_backpressure_dropped_markets += len(ordered) - cap
+            ordered = ordered[:cap]
+        return ordered
+
+    async def _queue_reactive_tokens(self, changed_tokens: Set[str]) -> None:
+        """Queue changed tokens from WS callbacks with bounded backpressure."""
+        if not changed_tokens:
+            return
+        now = time.monotonic()
+        cap = max(50, int(settings.REALTIME_SCAN_MAX_PENDING_TOKENS or 2000))
+        async with self._reactive_tokens_lock:
+            for token_id in changed_tokens:
+                token = str(token_id or "").strip()
+                if token:
+                    self._pending_reactive_tokens[token] = now
+            if len(self._pending_reactive_tokens) > cap:
+                overflow = len(self._pending_reactive_tokens) - cap
+                newest = sorted(
+                    self._pending_reactive_tokens.items(),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )[:cap]
+                self._pending_reactive_tokens = dict(newest)
+                self._reactive_backpressure_dropped_tokens += overflow
+        self._reactive_trigger.set()
+
+    async def consume_reactive_tokens(self, max_tokens: Optional[int] = None) -> list[str]:
+        """Consume up to max_tokens pending reactive token IDs (newest first)."""
+        limit = max(1, int(max_tokens or settings.REALTIME_SCAN_MAX_BATCH_TOKENS or 500))
+        async with self._reactive_tokens_lock:
+            if not self._pending_reactive_tokens:
+                self._last_reactive_batch_tokens = 0
+                return []
+            ordered = sorted(
+                self._pending_reactive_tokens.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+            selected = ordered[:limit]
+            remaining = ordered[limit:]
+            self._pending_reactive_tokens = dict(remaining)
+            tokens = [token for token, _ in selected]
+            self._last_reactive_batch_tokens = len(tokens)
+            if remaining:
+                self._reactive_trigger.set()
+            return tokens
+
+    def _partition_market_refresh_strategies(self) -> tuple[set[str], set[str]]:
+        """Split scanner market_data_refresh strategies into incremental vs full sets."""
+        incremental: set[str] = set()
+        full_snapshot: set[str] = set()
+        within_market = str(MispricingType.WITHIN_MARKET.value).lower()
+
+        for slug, loaded in strategy_loader._loaded.items():
+            instance = loaded.instance
+            if getattr(instance, "worker_affinity", "scanner") != "scanner":
+                continue
+            subscriptions = set(getattr(instance, "subscriptions", None) or [])
+            if "*" in subscriptions:
+                full_snapshot.add(slug)
+                continue
+            if EventType.MARKET_DATA_REFRESH not in subscriptions:
+                continue
+
+            mode = str(getattr(instance, "realtime_processing_mode", "auto") or "auto").strip().lower()
+            if mode == "incremental":
+                incremental.add(slug)
+                continue
+            if mode == "full_snapshot":
+                full_snapshot.add(slug)
+                continue
+
+            mispricing = str(getattr(instance, "mispricing_type", "") or "").strip().lower()
+            if mispricing == within_market:
+                incremental.add(slug)
+            else:
+                full_snapshot.add(slug)
+
+        return incremental, full_snapshot
+
+    async def _dispatch_market_refresh(
+        self,
+        event: DataEvent,
+        *,
+        full_market_snapshot: Optional[list] = None,
+    ) -> list[ArbitrageOpportunity]:
+        """Dispatch market_data_refresh with per-strategy incremental/full routing."""
+        incremental_slugs, full_slugs = self._partition_market_refresh_strategies()
+        if not incremental_slugs and not full_slugs:
+            return await event_dispatcher.dispatch(event)
+
+        all_opportunities: list[ArbitrageOpportunity] = []
+        if incremental_slugs:
+            all_opportunities.extend(
+                await event_dispatcher.dispatch(event, include_strategies=incremental_slugs)
+            )
+
+        if full_slugs:
+            snapshot_markets = list(full_market_snapshot if full_market_snapshot is not None else (event.markets or []))
+            payload = dict(event.payload or {})
+            payload["strategy_batch"] = "full_snapshot"
+            full_event = DataEvent(
+                event_type=event.event_type,
+                source=event.source,
+                timestamp=event.timestamp,
+                market_id=event.market_id,
+                token_id=event.token_id,
+                payload=payload,
+                old_price=event.old_price,
+                new_price=event.new_price,
+                markets=snapshot_markets,
+                events=event.events,
+                prices=event.prices,
+                scan_mode=event.scan_mode,
+                changed_token_ids=event.changed_token_ids,
+                changed_market_ids=event.changed_market_ids,
+                affected_market_ids=event.affected_market_ids,
+            )
+            all_opportunities.extend(
+                await event_dispatcher.dispatch(full_event, include_strategies=full_slugs)
+            )
+
+        return all_opportunities
 
     def _merge_market_history_points(self, market_id: str, incoming: list[dict[str, float]], now_ms: int) -> int:
         """Merge incoming history into in-memory store and return merged length."""
@@ -700,12 +989,16 @@ class ArbitrageScanner:
         except Exception as e:
             print(f"Error saving scanner settings: {e}")
 
-    async def load_plugins(self):
+    async def load_plugins(self, source_keys: Optional[list[str]] = None):
         """Load all enabled strategies from the database via unified loader."""
         try:
             async with AsyncSessionLocal() as session:
                 await ensure_system_opportunity_strategies_seeded(session)
-                result = await strategy_loader.refresh_all_from_db(session=session)
+                result = await strategy_loader.refresh_all_from_db(
+                    session=session,
+                    source_keys=source_keys,
+                    prune_unlisted=bool(source_keys),
+                )
 
             loaded_count = len(result.get("loaded", []))
             error_count = len(result.get("errors", {}))
@@ -884,12 +1177,14 @@ class ArbitrageScanner:
 
             # Overlay WebSocket real-time prices where available
             prices = self._merge_ws_prices(prices, sorted_token_ids[:PRICE_BATCH_CAP])
+            self._apply_live_prices_to_markets(markets, prices)
 
             # Cache full data for fast scans between full scans
             self._cached_events = list(events)
             self._cached_markets = list(markets)
             self._cached_prices = dict(prices)
             self._remember_market_tokens(markets)
+            self._rebuild_realtime_graph(events, markets)
             self._update_market_price_history(markets, prices, now)
 
             # Subscribe to WebSocket feeds for active market tokens
@@ -962,14 +1257,18 @@ class ArbitrageScanner:
             await self._set_activity(f"Dispatching market_data_refresh to strategies...")
 
             data_event = DataEvent(
-                event_type="market_data_refresh",
+                event_type=EventType.MARKET_DATA_REFRESH,
                 source="scanner_refresh",
                 timestamp=utcnow(),
                 markets=markets_to_evaluate,
                 events=list(events),
                 prices=dict(prices),
+                scan_mode="full_reconcile",
             )
-            all_opportunities = await event_dispatcher.dispatch(data_event)
+            all_opportunities = await self._dispatch_market_refresh(
+                data_event,
+                full_market_snapshot=markets,
+            )
 
             # Update prioritizer state after evaluation (CPU-bound, run in thread)
             if settings.TIERED_SCANNING_ENABLED:
@@ -1084,27 +1383,23 @@ class ArbitrageScanner:
             await self._set_activity(f"Scan error: {e}")
             raise
 
-    async def scan_fast(self) -> list[ArbitrageOpportunity]:
-        """Fast-path scan targeting only HOT-tier and changed markets.
-
-        This runs every FAST_SCAN_INTERVAL_SECONDS (default 15s) between
-        full scans. It:
-          1. Incrementally fetches only recently created markets (delta)
-          2. Uses cached data from the last full scan for existing markets
-          3. Re-fetches prices only for HOT-tier markets
-          4. Runs strategies only on markets whose prices have changed
-          5. Merges results into the main opportunity pool
-
-        Much cheaper than a full scan: fewer API calls, fewer strategy runs.
-        """
+    async def scan_fast(self, reactive_token_ids: Optional[list[str]] = None) -> list[ArbitrageOpportunity]:
+        """Fast scan with reactive token batching + timed HOT-tier fallback."""
         now = datetime.now(timezone.utc)
-        print(f"[{now.isoformat()}] Starting fast scan (hot-tier + incremental)...")
-        await self._set_activity("Fast scan: fetching recent markets...")
+        reactive_tokens = [str(t or "").strip() for t in (reactive_token_ids or []) if str(t or "").strip()]
+        reactive_mode = bool(reactive_tokens)
+        mode_label = "reactive" if reactive_mode else "timer"
+        print(f"[{now.isoformat()}] Starting fast scan ({mode_label})...")
+
+        if not self._cached_markets:
+            print("  Fast scan cache empty; running full scan bootstrap")
+            return await self.scan_once()
+
+        await self._set_activity("Fast scan: preparing market batch...")
 
         try:
-            # 1. Incremental fetch: get only recently created markets
             new_markets: list = []
-            if settings.INCREMENTAL_FETCH_ENABLED:
+            if settings.INCREMENTAL_FETCH_ENABLED and not reactive_mode:
                 try:
                     new_markets = await self.market_data.get_recent_markets(since_minutes=5)
                     if new_markets:
@@ -1112,14 +1407,14 @@ class ArbitrageScanner:
                 except Exception as e:
                     print(f"  Incremental fetch failed (non-fatal): {e}")
 
-            # 2. Merge incremental markets into cached data
             cached_market_ids = {m.id for m in self._cached_markets}
             truly_new = [m for m in new_markets if m.id not in cached_market_ids]
             if truly_new:
                 self._cached_markets.extend(truly_new)
                 print(f"  Added {len(truly_new)} brand-new markets to cache")
+                self._remember_market_tokens(truly_new)
+                self._rebuild_realtime_graph(self._cached_events, self._cached_markets)
 
-            # 3. Update MarketMonitor with the new markets to generate alerts
             try:
                 from services.market_monitor import market_monitor
 
@@ -1127,74 +1422,129 @@ class ArbitrageScanner:
             except Exception:
                 pass
 
-            # 4. Classify all cached markets into tiers (CPU-bound, run in thread)
             loop = asyncio.get_running_loop()
 
-            def _classify_cached(prioritizer, mkts, ts):
-                prioritizer.update_stability_scores()
-                return prioritizer.classify_all(mkts, ts)
+            affected_market_ids: list[str] = []
+            candidate_markets: list = []
+            if reactive_mode:
+                affected_market_ids = self._resolve_affected_market_ids(reactive_tokens)
+                self._last_reactive_batch_markets = len(affected_market_ids)
+                candidate_markets = [
+                    self._cached_market_by_id[mid]
+                    for mid in affected_market_ids
+                    if mid in self._cached_market_by_id
+                ]
+                candidate_markets = [
+                    m for m in candidate_markets
+                    if m.end_date is None or _make_aware(m.end_date) > now
+                ]
+                if not candidate_markets:
+                    print("  Reactive batch had no currently cached/active markets; falling back to HOT-tier timer path")
+                    reactive_mode = False
 
-            tier_map = await loop.run_in_executor(None, _classify_cached, self._prioritizer, self._cached_markets, now)
-            hot_markets = tier_map[MarketTier.HOT]
+            if not reactive_mode:
+                self._last_reactive_batch_markets = 0
 
-            if not hot_markets:
-                print("  No HOT-tier markets, skipping fast scan")
-                self._last_fast_scan = now
-                return self._opportunities
+                def _classify_cached(prioritizer, mkts, ts):
+                    prioritizer.update_stability_scores()
+                    return prioritizer.classify_all(mkts, ts)
 
-            # 5. Re-fetch prices for HOT-tier markets only
-            hot_token_ids = []
-            for market in hot_markets:
-                for tid in market.clob_token_ids:
-                    if len(tid) > 20:  # Polymarket tokens only
-                        hot_token_ids.append(tid)
+                tier_map = await loop.run_in_executor(None, _classify_cached, self._prioritizer, self._cached_markets, now)
+                candidate_markets = tier_map[MarketTier.HOT]
+                affected_market_ids = [str(getattr(m, "id", "") or "") for m in candidate_markets]
+                if not candidate_markets:
+                    print("  No HOT-tier markets, skipping fast scan")
+                    self._last_fast_scan = now
+                    return self._opportunities
 
-            hot_prices = {}
-            if hot_token_ids:
-                await self._set_activity(
-                    f"Fast scan: fetching prices for {min(len(hot_token_ids), 200)} hot-tier tokens..."
-                )
-                hot_prices = await self.market_data.get_prices_batch(hot_token_ids[:200])
-                print(f"  Fetched prices for {len(hot_prices)} hot-tier tokens")
+            candidate_token_ids = self._collect_polymarket_tokens(candidate_markets)
+            live_prices: dict[str, dict] = {}
+            if reactive_mode:
+                ws_prices = self._snapshot_ws_prices(candidate_token_ids)
+                live_prices.update(ws_prices)
+                fallback_cap = max(0, int(settings.REALTIME_SCAN_HTTP_PRICE_FALLBACK_CAP or 200))
+                missing_tokens = [tid for tid in candidate_token_ids if tid not in ws_prices]
+                if missing_tokens and fallback_cap > 0:
+                    token_sample = missing_tokens[:fallback_cap]
+                    try:
+                        http_prices = await self.market_data.get_prices_batch(token_sample)
+                        live_prices.update(http_prices)
+                    except Exception:
+                        pass
+                if ws_prices:
+                    print(
+                        f"  Reactive WS overlay: {len(ws_prices)}/{len(candidate_token_ids)} tokens"
+                    )
+            else:
+                token_sample = candidate_token_ids[:200]
+                if token_sample:
+                    await self._set_activity(f"Fast scan: fetching prices for {len(token_sample)} hot-tier tokens...")
+                    live_prices = await self.market_data.get_prices_batch(token_sample)
+                    print(f"  Fetched prices for {len(live_prices)} hot-tier tokens")
+                    live_prices = self._merge_ws_prices(live_prices, token_sample)
 
-            # Overlay WebSocket real-time prices where available
-            hot_prices = self._merge_ws_prices(hot_prices, hot_token_ids[:200])
+            merged_prices = {**self._cached_prices, **live_prices}
+            if live_prices:
+                self._cached_prices.update(live_prices)
+            self._apply_live_prices_to_markets(candidate_markets, merged_prices)
+            self._update_market_price_history(candidate_markets, merged_prices, now)
 
-            # Merge with cached prices
-            merged_prices = {**self._cached_prices, **hot_prices}
-            self._remember_market_tokens(self._cached_markets)
-            self._update_market_price_history(hot_markets, merged_prices, now)
-
-            # 6. Change detection: only evaluate markets whose prices moved (CPU-bound)
-            changed_markets = await loop.run_in_executor(None, self._prioritizer.get_changed_markets, hot_markets)
+            changed_markets = await loop.run_in_executor(None, self._prioritizer.get_changed_markets, candidate_markets)
             if not changed_markets:
-                print(f"  All {len(hot_markets)} hot-tier markets unchanged, skipping strategies")
-                await self._set_activity(f"Fast scan: {len(hot_markets)} markets unchanged, skipping")
-                self._prioritizer.update_after_evaluation(hot_markets, now)
+                print(f"  All {len(candidate_markets)} candidate markets unchanged, skipping strategies")
+                await self._set_activity(f"Fast scan: {len(candidate_markets)} markets unchanged, skipping")
+                self._prioritizer.update_after_evaluation(candidate_markets, now)
                 self._last_scan = now
                 self._last_fast_scan = now
                 return self._opportunities
 
-            print(f"  {len(changed_markets)}/{len(hot_markets)} hot-tier markets have price changes")
-            await self._set_activity(f"Fast scan: running strategies on {len(changed_markets)} changed markets...")
+            if reactive_mode:
+                markets_for_strategies = candidate_markets
+                source = "scanner_fast_reactive"
+                scan_mode = "realtime_reactive"
+            else:
+                markets_for_strategies = changed_markets
+                source = "scanner_fast_timer"
+                scan_mode = "fast_timer"
 
-            # 7. Run strategies on changed markets only (full events kept for context)
-            all_markets_for_strategies = [
-                m for m in changed_markets if m.end_date is None or _make_aware(m.end_date) > now
+            markets_for_strategies = [
+                m for m in markets_for_strategies
+                if m.end_date is None or _make_aware(m.end_date) > now
             ]
-            events_for_strategies = self._cached_events
+            changed_market_ids = [str(getattr(m, "id", "") or "") for m in changed_markets]
+            affected_ids_payload = [str(getattr(m, "id", "") or "") for m in markets_for_strategies]
 
+            print(
+                f"  Fast scan batch: {len(changed_market_ids)} changed / "
+                f"{len(affected_ids_payload)} dispatched markets ({scan_mode})"
+            )
+            await self._set_activity(
+                f"Fast scan: running strategies on {len(affected_ids_payload)} markets ({scan_mode})..."
+            )
             await self._ensure_runtime_strategies_loaded()
 
             fast_data_event = DataEvent(
-                event_type="market_data_refresh",
-                source="scanner_fast",
+                event_type=EventType.MARKET_DATA_REFRESH,
+                source=source,
                 timestamp=utcnow(),
-                markets=all_markets_for_strategies,
-                events=list(events_for_strategies),
+                payload={
+                    "scan_mode": scan_mode,
+                    "changed_token_count": len(reactive_tokens) if reactive_mode else 0,
+                    "changed_market_count": len(changed_market_ids),
+                    "affected_market_count": len(affected_ids_payload),
+                },
+                markets=markets_for_strategies,
+                events=list(self._cached_events),
                 prices=dict(merged_prices),
+                scan_mode=scan_mode,
+                changed_token_ids=list(reactive_tokens) if reactive_mode else None,
+                changed_market_ids=changed_market_ids,
+                affected_market_ids=affected_ids_payload,
             )
-            fast_opportunities = await event_dispatcher.dispatch(fast_data_event)
+            fast_opportunities = await self._dispatch_market_refresh(
+                fast_data_event,
+                full_market_snapshot=self._cached_markets,
+            )
 
             fast_opportunities = self._deduplicate_cross_strategy(fast_opportunities)
             fast_quality_reports: dict = {}
@@ -1211,15 +1561,19 @@ class ArbitrageScanner:
             fast_opportunities.sort(key=lambda x: x.roi_percent, reverse=True)
             fast_opportunities = self._apply_opportunity_caps(fast_opportunities)
 
-            # 8. Update prioritizer state (CPU-bound, run in thread)
             def _update_prioritizer_state(prioritizer, mkts, ts):
-                unch = prioritizer.update_after_evaluation(mkts, ts)
+                unchanged_count = prioritizer.update_after_evaluation(mkts, ts)
                 prioritizer.compute_attention_scores(mkts)
-                return unch
+                return unchanged_count
 
-            unchanged = await loop.run_in_executor(None, _update_prioritizer_state, self._prioritizer, hot_markets, now)
+            unchanged = await loop.run_in_executor(
+                None,
+                _update_prioritizer_state,
+                self._prioritizer,
+                candidate_markets,
+                now,
+            )
 
-            # 9. Merge into main pool
             if fast_opportunities:
                 await self._attach_ai_judgments(fast_opportunities)
                 self._opportunities = self._merge_opportunities(fast_opportunities)
@@ -1237,7 +1591,6 @@ class ArbitrageScanner:
             self._last_fast_scan = now
             self._fast_scan_cycle += 1
 
-            # Notify callbacks
             for callback in self._scan_callbacks:
                 try:
                     await callback(fast_opportunities)
@@ -1245,7 +1598,7 @@ class ArbitrageScanner:
                     print(f"  Callback error: {e}")
 
             print(
-                f"[{now.isoformat()}] Fast scan complete. "
+                f"[{now.isoformat()}] Fast scan complete ({scan_mode}). "
                 f"{len(fast_opportunities)} detected, "
                 f"{len(self._opportunities)} total in pool "
                 f"({unchanged} unchanged markets skipped)"
@@ -1555,10 +1908,13 @@ class ArbitrageScanner:
             feed_mgr = get_feed_manager()
             if feed_mgr._started:
 
-                async def _trigger_reactive():
-                    self._reactive_trigger.set()
+                async def _trigger_reactive(changed_tokens: Set[str]):
+                    await self._queue_reactive_tokens(changed_tokens)
 
-                feed_mgr.set_reactive_scan_callback(_trigger_reactive, debounce_seconds=2.0)
+                feed_mgr.set_reactive_scan_callback(
+                    _trigger_reactive,
+                    debounce_seconds=float(settings.REALTIME_SCAN_DEBOUNCE_SECONDS),
+                )
                 self._reactive_scan_registered = True
                 print("  Reactive scanning registered (WS price-change triggers)")
         except Exception as e:
@@ -1616,7 +1972,8 @@ class ArbitrageScanner:
                         print("  [TRIGGER] Crypto market creation imminent — fast scan")
 
                     try:
-                        await self.scan_fast()
+                        reactive_tokens = await self.consume_reactive_tokens()
+                        await self.scan_fast(reactive_token_ids=reactive_tokens)
                     except Exception as e:
                         print(f"Fast scan error: {e}")
                 else:
@@ -1627,7 +1984,10 @@ class ArbitrageScanner:
                         print(f"Full scan error (first run): {e}")
 
             # Wait for either the timer OR a reactive price-change trigger
-            self._reactive_trigger.clear()
+            if self._pending_reactive_tokens:
+                self._reactive_trigger.set()
+            else:
+                self._reactive_trigger.clear()
             sleep_seconds = settings.FAST_SCAN_INTERVAL_SECONDS
             await self._set_activity(f"Idle — next scan in ≤{sleep_seconds}s (or on price change)")
             try:
@@ -1811,11 +2171,17 @@ class ArbitrageScanner:
                 "enabled": True,
                 "fast_scan_interval": settings.FAST_SCAN_INTERVAL_SECONDS,
                 "full_scan_interval": settings.FULL_SCAN_INTERVAL_SECONDS,
+                "realtime_debounce_seconds": settings.REALTIME_SCAN_DEBOUNCE_SECONDS,
                 "fast_scan_cycle": self._fast_scan_cycle,
                 "last_full_scan": to_iso(self._last_full_scan),
                 "last_fast_scan": to_iso(self._last_fast_scan),
                 "cached_markets": len(self._cached_markets),
                 "cached_events": len(self._cached_events),
+                "pending_reactive_tokens": len(self._pending_reactive_tokens),
+                "last_reactive_batch_tokens": self._last_reactive_batch_tokens,
+                "last_reactive_batch_markets": self._last_reactive_batch_markets,
+                "dropped_reactive_tokens": self._reactive_backpressure_dropped_tokens,
+                "dropped_reactive_markets": self._reactive_backpressure_dropped_markets,
                 **prioritizer_stats,
             }
 

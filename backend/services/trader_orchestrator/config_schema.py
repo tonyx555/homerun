@@ -36,6 +36,36 @@ _SHARED_RISK_FIELDS: list[dict[str, Any]] = [
     {"key": "max_per_market_exposure_usd", "label": "Max Per-Market Exposure (USD)", "type": "number", "min": 1},
     {"key": "max_daily_loss_usd", "label": "Max Daily Loss (USD)", "type": "number", "min": 1},
     {"key": "cooldown_seconds", "label": "Cooldown (seconds)", "type": "integer", "min": 0},
+    {
+        "key": "max_unhedged_notional_usd",
+        "label": "Max Unhedged Notional (USD)",
+        "type": "number",
+        "min": 0,
+    },
+    {"key": "hedge_timeout_seconds", "label": "Hedge Timeout (seconds)", "type": "integer", "min": 1, "max": 3600},
+    {
+        "key": "session_timeout_seconds",
+        "label": "Session Timeout (seconds)",
+        "type": "integer",
+        "min": 1,
+        "max": 86400,
+    },
+    {"key": "max_reprice_attempts", "label": "Max Reprice Attempts", "type": "integer", "min": 0, "max": 50},
+    {"key": "leg_fill_tolerance_ratio", "label": "Leg Fill Tolerance Ratio", "type": "number", "min": 0, "max": 1},
+    {"key": "pair_lock", "label": "Pair Lock", "type": "boolean"},
+    {
+        "key": "execution_policy",
+        "label": "Execution Policy",
+        "type": "enum",
+        "options": [
+            "SINGLE_LEG",
+            "PARALLEL_MAKER",
+            "SEQUENTIAL_HEDGE",
+            "REPRICE_LOOP",
+            "TIMEBOX_EXIT",
+            "PAIR_LOCK",
+        ],
+    },
 ]
 
 _SHARED_EXIT_FIELDS: list[dict[str, Any]] = [

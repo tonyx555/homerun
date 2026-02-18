@@ -350,7 +350,39 @@ async def run_evaluate_backtest(
     # 4. Run evaluate() on each signal
     eval_start = time.monotonic()
     try:
-        params = dict(config or {})
+        from datetime import datetime, timezone
+        from services.trader_orchestrator.decision_gates import (
+            apply_platform_decision_gates,
+            is_within_trading_window_utc,
+        )
+        from services.trader_orchestrator.risk_manager import evaluate_risk
+
+        merged_config = dict(config or {})
+        platform_overrides = merged_config.pop("__platform__", {})
+        platform_overrides = platform_overrides if isinstance(platform_overrides, dict) else {}
+        params = dict(merged_config)
+        platform_global_risk = (
+            dict(platform_overrides.get("global_risk", {}))
+            if isinstance(platform_overrides.get("global_risk", {}), dict)
+            else {}
+        )
+        platform_risk_limits = (
+            dict(platform_overrides.get("risk_limits", {}))
+            if isinstance(platform_overrides.get("risk_limits", {}), dict)
+            else {}
+        )
+        platform_metadata = (
+            {"trading_window_utc": platform_overrides.get("trading_window_utc")}
+            if isinstance(platform_overrides.get("trading_window_utc"), dict)
+            else {}
+        )
+        platform_allow_averaging = bool(platform_overrides.get("allow_averaging", False))
+        platform_open_market_ids = {
+            str(value or "").strip()
+            for value in (platform_overrides.get("open_market_ids") or [])
+            if str(value or "").strip()
+        }
+
         for sig in signals:
             try:
                 context = {
@@ -359,27 +391,80 @@ async def run_evaluate_backtest(
                     "source_config": {},
                 }
                 decision = strategy.evaluate(sig, context)
-                decision_str = getattr(decision, "decision", str(decision))
-                reason_str = getattr(decision, "reason", "")
-                checks = []
-                if hasattr(decision, "checks"):
-                    for c in (decision.checks or []):
-                        checks.append({
-                            "check_key": getattr(c, "check_key", ""),
-                            "check_label": getattr(c, "check_label", ""),
-                            "passed": getattr(c, "passed", False),
+                checks_payload: list[dict[str, Any]] = []
+                for c in (getattr(decision, "checks", None) or []):
+                    checks_payload.append(
+                        {
+                            "check_key": str(getattr(c, "key", "") or getattr(c, "check_key", "")),
+                            "check_label": str(getattr(c, "label", "") or getattr(c, "check_label", "")),
+                            "passed": bool(getattr(c, "passed", False)),
                             "score": getattr(c, "score", None),
-                            "detail": getattr(c, "detail", ""),
-                        })
+                            "detail": str(getattr(c, "detail", "") or ""),
+                        }
+                    )
+
+                def _backtest_risk_evaluator(size_for_eval: float):
+                    risk_result = evaluate_risk(
+                        size_usd=size_for_eval,
+                        gross_exposure_usd=0.0,
+                        trader_open_positions=0,
+                        market_exposure_usd=0.0,
+                        global_limits=platform_global_risk,
+                        trader_limits=platform_risk_limits,
+                        global_daily_realized_pnl_usd=0.0,
+                        trader_daily_realized_pnl_usd=0.0,
+                        global_unrealized_pnl_usd=0.0,
+                        trader_unrealized_pnl_usd=0.0,
+                        trader_consecutive_losses=0,
+                        cycle_orders_placed=0,
+                        cooldown_active=False,
+                        mode="backtest",
+                    )
+                    return risk_result, {
+                        "global_daily_realized_pnl_usd": 0.0,
+                        "trader_daily_realized_pnl_usd": 0.0,
+                        "global_unrealized_pnl_usd": 0.0,
+                        "trader_unrealized_pnl_usd": 0.0,
+                        "intra_cycle_committed_usd": 0.0,
+                        "adjusted_global_daily_pnl_usd": 0.0,
+                        "adjusted_trader_daily_pnl_usd": 0.0,
+                        "trader_consecutive_losses": 0,
+                        "cooldown_seconds": 0,
+                        "cooldown_active": False,
+                        "cooldown_remaining_seconds": 0,
+                        "trader_open_positions": 0,
+                    }
+
+                gate_result = apply_platform_decision_gates(
+                    decision_obj=decision,
+                    runtime_signal=sig,
+                    strategy=None,
+                    checks_payload=checks_payload,
+                    trading_window_ok=is_within_trading_window_utc(platform_metadata, datetime.now(timezone.utc)),
+                    trading_window_config=platform_metadata.get("trading_window_utc"),
+                    global_limits=platform_global_risk,
+                    effective_risk_limits=platform_risk_limits,
+                    allow_averaging=platform_allow_averaging,
+                    open_market_ids=platform_open_market_ids,
+                    risk_evaluator=_backtest_risk_evaluator,
+                    invoke_hooks=False,
+                )
+
+                decision_str = str(gate_result["final_decision"])
+                reason_str = str(gate_result["final_reason"])
 
                 result.decisions.append({
                     "signal_id": getattr(sig, "id", None),
                     "source": getattr(sig, "source", ""),
                     "strategy_type": getattr(sig, "strategy_type", ""),
+                    "strategy_decision": gate_result["strategy_decision"],
+                    "strategy_reason": gate_result["strategy_reason"],
                     "decision": decision_str,
                     "reason": reason_str,
-                    "size_usd": getattr(decision, "size_usd", None),
-                    "checks": checks,
+                    "size_usd": gate_result["size_usd"],
+                    "checks": gate_result["checks_payload"],
+                    "platform_gates": gate_result["platform_gates"],
+                    "risk_snapshot": gate_result["risk_snapshot"],
                 })
 
                 if decision_str == "selected":

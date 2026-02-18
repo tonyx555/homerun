@@ -1,5 +1,7 @@
 import { useState, useMemo, useEffect, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { AnimatePresence, motion } from 'framer-motion'
 import {
   Newspaper,
   RefreshCw,
@@ -15,6 +17,8 @@ import {
   X,
   Radio,
   Zap,
+  Maximize2,
+  Minimize2,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import {
@@ -538,8 +542,17 @@ function ArticleRow({ article }: { article: NewsArticle }) {
   )
 }
 
-function FindingCard({ finding }: { finding: NewsWorkflowFinding }) {
+function FindingCard({
+  finding,
+  isModalView = false,
+  onCloseModal,
+}: {
+  finding: NewsWorkflowFinding
+  isModalView?: boolean
+  onCloseModal?: () => void
+}) {
   const [expandedArticles, setExpandedArticles] = useState(false)
+  const [modalOpen, setModalOpen] = useState(false)
   const evidence = finding.evidence as Record<string, unknown> | null
   const cluster = (evidence?.cluster && typeof evidence.cluster === 'object')
     ? (evidence.cluster as Record<string, unknown>)
@@ -596,9 +609,35 @@ function FindingCard({ finding }: { finding: NewsWorkflowFinding }) {
     : dedupedSupportingArticles.slice(0, 2)
   const isBuyYes = finding.direction === 'buy_yes'
   const directionLabel = isBuyYes ? yesOutcomeLabel : noOutcomeLabel
+  const closeModal = () => setModalOpen(false)
+
+  useEffect(() => {
+    if (isModalView || !modalOpen) return undefined
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = previousOverflow
+    }
+  }, [isModalView, modalOpen])
+
+  useEffect(() => {
+    if (isModalView || !modalOpen) return undefined
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        closeModal()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [isModalView, modalOpen])
 
   return (
-    <Card className="overflow-hidden border-border/40 hover:border-border/80 hover:shadow-lg hover:shadow-black/20 transition-all group">
+    <>
+    <Card className={cn(
+      "overflow-hidden border-border/40 transition-all group",
+      !isModalView && "hover:border-border/80 hover:shadow-lg hover:shadow-black/20",
+      isModalView && "w-[min(1100px,calc(100vw-2rem))] max-h-[90vh] overflow-y-auto rounded-2xl border-border/70 bg-background shadow-[0_40px_120px_rgba(0,0,0,0.55)] [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden",
+    )}>
       <div className={cn('h-0.5', finding.actionable ? (finding.edge_percent >= 15 ? 'bg-green-400' : 'bg-yellow-400') : 'bg-muted')} />
       <div className="p-4">
         <div className="flex items-start justify-between gap-2 mb-2">
@@ -739,7 +778,12 @@ function FindingCard({ finding }: { finding: NewsWorkflowFinding }) {
           </div>
         </div>
 
-        <div className="text-[10px] text-muted-foreground mb-2 line-clamp-2">{finding.reasoning}</div>
+        <div className={cn(
+          "text-[10px] text-muted-foreground mb-2",
+          !isModalView && "line-clamp-2",
+        )}>
+          {finding.reasoning}
+        </div>
 
         <div className="flex items-center justify-between text-[10px] text-muted-foreground">
           <div className="flex items-center gap-2">
@@ -749,10 +793,74 @@ function FindingCard({ finding }: { finding: NewsWorkflowFinding }) {
               </Badge>
             ))}
           </div>
-          <span className="font-data">{timeAgo(finding.created_at)}</span>
+          <div className="flex items-center gap-2">
+            {!isModalView ? (
+              <button
+                type="button"
+                onClick={() => setModalOpen(true)}
+                className="inline-flex items-center gap-1 h-6 px-2 text-[10px] rounded border bg-violet-500/10 text-violet-300 border-violet-500/20 hover:bg-violet-500/20 transition-colors font-medium"
+                title="Expand this card"
+              >
+                <Maximize2 className="w-2.5 h-2.5" />
+                Expand
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => onCloseModal?.()}
+                className="inline-flex items-center gap-1 h-6 px-2 text-[10px] rounded border bg-violet-500/10 text-violet-300 border-violet-500/20 hover:bg-violet-500/20 transition-colors font-medium"
+                title="Return to grid"
+              >
+                <Minimize2 className="w-2.5 h-2.5" />
+                Pop In
+              </button>
+            )}
+            <span className="font-data">{timeAgo(finding.created_at)}</span>
+          </div>
         </div>
       </div>
     </Card>
+      {!isModalView && typeof document !== 'undefined' && createPortal(
+        <AnimatePresence>
+          {modalOpen && (
+            <motion.div
+              key={`news-finding-modal-${finding.id}`}
+              className="fixed inset-0 z-[120] flex items-center justify-center p-4 sm:p-6"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+            >
+              <motion.div
+                className="absolute inset-0 bg-black/70 backdrop-blur-[2px]"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.2 }}
+                onClick={closeModal}
+                aria-hidden
+              />
+              <motion.div
+                className="relative z-10"
+                role="dialog"
+                aria-modal="true"
+                aria-label={`Expanded news finding: ${finding.market_question}`}
+                initial={{ scale: 0.94, opacity: 0, y: 22 }}
+                animate={{ scale: 1, opacity: 1, y: 0 }}
+                exit={{ scale: 0.97, opacity: 0, y: 14 }}
+                transition={{ type: 'spring', stiffness: 260, damping: 28, mass: 0.9 }}
+              >
+                <FindingCard
+                  finding={finding}
+                  isModalView
+                  onCloseModal={closeModal}
+                />
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>,
+        document.body
+      )}
+    </>
   )
 }
 

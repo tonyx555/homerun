@@ -25,7 +25,9 @@ from models.database import AsyncSessionLocal, AppSettings, init_database
 from services.insider_detector import insider_detector
 from services.data_events import DataEvent
 from services.event_dispatcher import event_dispatcher
+from services.opportunity_strategy_catalog import ensure_all_strategies_seeded
 from services.strategy_signal_bridge import bridge_opportunities_to_signals
+from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.market_cache import market_cache_service
 from services.smart_wallet_pool import smart_wallet_pool
 from services.traders_firehose_pipeline import apply_traders_firehose_strategy
@@ -267,6 +269,17 @@ async def _run_loop() -> None:
     worker_name = "tracked_traders"
     logger.info("Tracked-traders worker started")
 
+    try:
+        async with AsyncSessionLocal() as session:
+            await ensure_all_strategies_seeded(session)
+            await refresh_strategy_runtime_if_needed(
+                session,
+                source_keys=["traders"],
+                force=True,
+            )
+    except Exception as exc:
+        logger.warning("Tracked-traders strategy startup sync failed: %s", exc)
+
     now = utcnow()
     next_full_sweep = now
     next_incremental = now
@@ -302,6 +315,13 @@ async def _run_loop() -> None:
     while True:
         async with AsyncSessionLocal() as session:
             control = await read_worker_control(session, worker_name, default_interval=30)
+            try:
+                await refresh_strategy_runtime_if_needed(
+                    session,
+                    source_keys=["traders"],
+                )
+            except Exception as exc:
+                logger.warning("Tracked-traders strategy refresh check failed: %s", exc)
 
         interval = max(10, min(3600, int(control.get("interval_seconds") or 60)))
         paused = bool(control.get("is_paused", False))

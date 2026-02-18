@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models.database import get_db_session
 from services.pause_state import global_pause_state
 from services.trader_orchestrator.position_lifecycle import reconcile_live_positions, reconcile_paper_positions
+from services.trader_orchestrator.session_engine import ExecutionSessionEngine
 from services.trader_orchestrator_state import (
     cleanup_trader_open_orders,
     create_config_revision,
@@ -22,8 +23,10 @@ from services.trader_orchestrator_state import (
     get_trader,
     get_trader_decision_detail,
     get_open_position_summary_for_trader,
+    get_serialized_execution_session_detail,
     list_serialized_trader_decisions,
     list_serialized_trader_events,
+    list_serialized_execution_sessions,
     list_serialized_trader_orders,
     list_trader_templates,
     list_traders,
@@ -107,6 +110,10 @@ class TraderPositionCleanupRequest(BaseModel):
     target_status: str = Field(default="cancelled", min_length=1, max_length=64)
     reason: Optional[str] = None
     confirm_live: bool = False
+
+
+class TraderExecutionSessionControlRequest(BaseModel):
+    reason: Optional[str] = None
 
 
 def _assert_not_globally_paused() -> None:
@@ -587,6 +594,75 @@ async def get_events(
         event_types=event_types or None,
     )
     return {"events": events, "next_cursor": next_cursor}
+
+
+@router.get("/{trader_id}/execution-sessions")
+async def get_execution_sessions(
+    trader_id: str,
+    status: Optional[str] = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=1000),
+    session: AsyncSession = Depends(get_db_session),
+):
+    trader = await get_trader(session, trader_id)
+    if trader is None:
+        raise HTTPException(status_code=404, detail="Trader not found")
+    return {
+        "sessions": await list_serialized_execution_sessions(
+            session,
+            trader_id=trader_id,
+            status=status,
+            limit=limit,
+        )
+    }
+
+
+@router.get("/execution-sessions/{session_id}")
+async def get_execution_session(
+    session_id: str,
+    session: AsyncSession = Depends(get_db_session),
+):
+    detail = await get_serialized_execution_session_detail(session, session_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Execution session not found")
+    return detail
+
+
+@router.post("/execution-sessions/{session_id}/cancel")
+async def cancel_execution_session(
+    session_id: str,
+    request: TraderExecutionSessionControlRequest = TraderExecutionSessionControlRequest(),
+    session: AsyncSession = Depends(get_db_session),
+):
+    engine = ExecutionSessionEngine(session)
+    reason = str(request.reason or "manual_cancel").strip()
+    ok = await engine.cancel_session(session_id=session_id, reason=reason)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Execution session not found")
+    return {"status": "cancelled", "session_id": session_id}
+
+
+@router.post("/execution-sessions/{session_id}/pause")
+async def pause_execution_session(
+    session_id: str,
+    session: AsyncSession = Depends(get_db_session),
+):
+    engine = ExecutionSessionEngine(session)
+    ok = await engine.pause_session(session_id=session_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Execution session not found")
+    return {"status": "paused", "session_id": session_id}
+
+
+@router.post("/execution-sessions/{session_id}/resume")
+async def resume_execution_session(
+    session_id: str,
+    session: AsyncSession = Depends(get_db_session),
+):
+    engine = ExecutionSessionEngine(session)
+    ok = await engine.resume_session(session_id=session_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Execution session not found")
+    return {"status": "working", "session_id": session_id}
 
 
 @router.get("/decisions/{decision_id}")

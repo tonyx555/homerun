@@ -7,6 +7,7 @@ from sqlalchemy import select
 from services import shared_state, wallet_tracker
 from services.news import shared_state as news_shared_state
 from services.trader_orchestrator_state import (
+    list_serialized_execution_sessions,
     list_traders,
     read_orchestrator_snapshot,
 )
@@ -71,6 +72,12 @@ async def handle_websocket(websocket: WebSocket):
         worker_statuses = await list_worker_snapshots(session)
         orchestrator_status = await read_orchestrator_snapshot(session)
         traders = await list_traders(session)
+        execution_sessions = await list_serialized_execution_sessions(
+            session,
+            trader_id=None,
+            status=None,
+            limit=100,
+        )
         world_snapshot = (
             (await session.execute(select(WorldIntelligenceSnapshot).where(WorldIntelligenceSnapshot.id == "latest")))
             .scalars()
@@ -92,6 +99,7 @@ async def handle_websocket(websocket: WebSocket):
                 "workers_status": worker_statuses,
                 "trader_orchestrator_status": orchestrator_status,
                 "traders": traders,
+                "execution_sessions": execution_sessions,
                 "world_intelligence_status": {
                     "status": (world_snapshot.status if world_snapshot else {}) or {},
                     "stats": (world_snapshot.stats if world_snapshot else {}) or {},

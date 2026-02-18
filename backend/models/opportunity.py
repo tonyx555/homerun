@@ -48,6 +48,52 @@ class AIAnalysis(BaseModel):
     resolution_analyses: list[dict] = []
 
 
+class ExecutionLeg(BaseModel):
+    leg_id: str
+    market_id: str
+    market_question: Optional[str] = None
+    token_id: Optional[str] = None
+    side: str = "buy"
+    outcome: Optional[str] = None
+    limit_price: Optional[float] = None
+    price_policy: str = "maker_limit"
+    time_in_force: str = "GTC"
+    notional_weight: float = Field(default=1.0, gt=0.0)
+    min_fill_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
+    metadata: dict = Field(default_factory=dict)
+
+
+class ExecutionConstraints(BaseModel):
+    max_unhedged_notional_usd: float = Field(default=0.0, ge=0.0)
+    hedge_timeout_seconds: int = Field(default=20, ge=1)
+    session_timeout_seconds: int = Field(default=300, ge=1)
+    max_reprice_attempts: int = Field(default=3, ge=0, le=100)
+    pair_lock: bool = True
+    leg_fill_tolerance_ratio: float = Field(default=0.02, ge=0.0, le=1.0)
+
+
+class ExecutionPlan(BaseModel):
+    plan_id: str = Field(default_factory=lambda: "")
+    policy: str = "PARALLEL_MAKER"
+    time_in_force: str = "GTC"
+    legs: list[ExecutionLeg] = Field(default_factory=list)
+    constraints: ExecutionConstraints = Field(default_factory=ExecutionConstraints)
+    metadata: dict = Field(default_factory=dict)
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        if self.plan_id:
+            return
+        leg_fingerprint = "|".join(
+            sorted(
+                f"{leg.market_id}:{leg.token_id or ''}:{leg.side}:{leg.outcome or ''}"
+                for leg in self.legs
+            )
+        )
+        digest = hashlib.sha256(leg_fingerprint.encode("utf-8")).hexdigest()[:16]
+        self.plan_id = f"plan_{digest}"
+
+
 class ArbitrageOpportunity(BaseModel):
     """Represents a detected arbitrage opportunity"""
 
@@ -99,6 +145,7 @@ class ArbitrageOpportunity(BaseModel):
 
     # Execution details
     positions_to_take: list[dict] = []  # What to buy
+    execution_plan: Optional[ExecutionPlan] = None
 
     # Inline AI analysis (populated by scanner, persisted across scans)
     ai_analysis: Optional[AIAnalysis] = None

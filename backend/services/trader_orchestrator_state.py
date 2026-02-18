@@ -12,6 +12,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import settings
 from models.database import (
     AppSettings,
+    ExecutionSession,
+    ExecutionSessionEvent,
+    ExecutionSessionLeg,
+    ExecutionSessionOrder,
     TradeSignal,
     Strategy,
     Trader,
@@ -54,6 +58,8 @@ CLEANUP_ELIGIBLE_ORDER_STATUSES = {"submitted", "executed", "open"}
 RESOLVED_ORDER_STATUSES = {"resolved_win", "resolved_loss"}
 ACTIVE_POSITION_STATUS = "open"
 INACTIVE_POSITION_STATUS = "closed"
+ACTIVE_EXECUTION_SESSION_STATUSES = {"pending", "placing", "working", "partial", "hedging", "paused"}
+TERMINAL_EXECUTION_SESSION_STATUSES = {"completed", "failed", "cancelled", "expired"}
 _STRATEGY_KEY_ALIASES: dict[str, str] = {}
 _RESUME_POLICY_VALUES = {"resume_full", "manage_only", "flatten_then_start"}
 _TRADER_SCOPE_MODES = {"tracked", "pool", "individual", "group"}
@@ -544,6 +550,100 @@ def _serialize_order(row: TraderOrder) -> dict[str, Any]:
         "created_at": to_iso(row.created_at),
         "executed_at": to_iso(row.executed_at),
         "updated_at": to_iso(row.updated_at),
+    }
+
+
+def _serialize_execution_session(row: ExecutionSession) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "trader_id": row.trader_id,
+        "signal_id": row.signal_id,
+        "decision_id": row.decision_id,
+        "source": row.source,
+        "strategy_key": row.strategy_key,
+        "mode": row.mode,
+        "status": row.status,
+        "policy": row.policy,
+        "plan_id": row.plan_id,
+        "market_ids": row.market_ids_json or [],
+        "legs_total": int(row.legs_total or 0),
+        "legs_completed": int(row.legs_completed or 0),
+        "legs_failed": int(row.legs_failed or 0),
+        "legs_open": int(row.legs_open or 0),
+        "requested_notional_usd": float(row.requested_notional_usd or 0.0),
+        "executed_notional_usd": float(row.executed_notional_usd or 0.0),
+        "max_unhedged_notional_usd": float(row.max_unhedged_notional_usd or 0.0),
+        "unhedged_notional_usd": float(row.unhedged_notional_usd or 0.0),
+        "trace_id": row.trace_id,
+        "started_at": to_iso(row.started_at),
+        "completed_at": to_iso(row.completed_at),
+        "expires_at": to_iso(row.expires_at),
+        "error_message": row.error_message,
+        "payload": row.payload_json or {},
+        "created_at": to_iso(row.created_at),
+        "updated_at": to_iso(row.updated_at),
+    }
+
+
+def _serialize_execution_leg(row: ExecutionSessionLeg) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "session_id": row.session_id,
+        "leg_index": int(row.leg_index or 0),
+        "leg_id": row.leg_id,
+        "market_id": row.market_id,
+        "market_question": row.market_question,
+        "token_id": row.token_id,
+        "side": row.side,
+        "outcome": row.outcome,
+        "price_policy": row.price_policy,
+        "time_in_force": row.time_in_force,
+        "target_price": row.target_price,
+        "requested_notional_usd": row.requested_notional_usd,
+        "requested_shares": row.requested_shares,
+        "filled_notional_usd": float(row.filled_notional_usd or 0.0),
+        "filled_shares": float(row.filled_shares or 0.0),
+        "avg_fill_price": row.avg_fill_price,
+        "status": row.status,
+        "last_error": row.last_error,
+        "metadata": row.metadata_json or {},
+        "created_at": to_iso(row.created_at),
+        "updated_at": to_iso(row.updated_at),
+    }
+
+
+def _serialize_execution_order(row: ExecutionSessionOrder) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "session_id": row.session_id,
+        "leg_id": row.leg_id,
+        "trader_order_id": row.trader_order_id,
+        "provider_order_id": row.provider_order_id,
+        "provider_clob_order_id": row.provider_clob_order_id,
+        "action": row.action,
+        "side": row.side,
+        "price": row.price,
+        "size": row.size,
+        "notional_usd": row.notional_usd,
+        "status": row.status,
+        "reason": row.reason,
+        "payload": row.payload_json or {},
+        "error_message": row.error_message,
+        "created_at": to_iso(row.created_at),
+        "updated_at": to_iso(row.updated_at),
+    }
+
+
+def _serialize_execution_event(row: ExecutionSessionEvent) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "session_id": row.session_id,
+        "leg_id": row.leg_id,
+        "event_type": row.event_type,
+        "severity": row.severity,
+        "message": row.message,
+        "payload": row.payload_json or {},
+        "created_at": to_iso(row.created_at),
     }
 
 
@@ -1286,6 +1386,424 @@ async def create_trader_order(
         await event_bus.publish("trader_order", _serialize_order(row))
     except Exception:
         pass  # fire-and-forget
+
+    return row
+
+
+async def _refresh_execution_session_rollups(
+    session: AsyncSession,
+    *,
+    session_id: str,
+) -> ExecutionSession | None:
+    row = await session.get(ExecutionSession, session_id)
+    if row is None:
+        return None
+
+    legs = (
+        (
+            await session.execute(
+                select(ExecutionSessionLeg).where(
+                    ExecutionSessionLeg.session_id == session_id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    total = len(legs)
+    completed = 0
+    failed = 0
+    open_count = 0
+    buy_notional = 0.0
+    sell_notional = 0.0
+    executed_notional = 0.0
+
+    for leg in legs:
+        status_key = str(leg.status or "").strip().lower()
+        leg_notional = abs(safe_float(leg.filled_notional_usd, 0.0))
+        executed_notional += leg_notional
+        side_key = str(leg.side or "").strip().lower()
+        if side_key == "sell":
+            sell_notional += leg_notional
+        else:
+            buy_notional += leg_notional
+
+        if status_key == "completed":
+            completed += 1
+        elif status_key in {"failed", "cancelled", "expired"}:
+            failed += 1
+        elif status_key in {"open", "submitted", "placing", "working", "partial", "hedging", "pending"}:
+            open_count += 1
+
+    row.legs_total = total
+    row.legs_completed = completed
+    row.legs_failed = failed
+    row.legs_open = open_count
+    row.executed_notional_usd = executed_notional
+    row.unhedged_notional_usd = abs(buy_notional - sell_notional)
+    row.updated_at = _now()
+    await session.flush()
+    return row
+
+
+async def create_execution_session(
+    session: AsyncSession,
+    *,
+    trader_id: str,
+    signal: TradeSignal,
+    decision_id: str | None,
+    strategy_key: str | None,
+    mode: str,
+    policy: str,
+    plan_id: str | None,
+    legs: list[dict[str, Any]],
+    requested_notional_usd: float,
+    max_unhedged_notional_usd: float,
+    expires_at: datetime | None,
+    payload: dict[str, Any] | None = None,
+    trace_id: str | None = None,
+    commit: bool = True,
+) -> ExecutionSession:
+    row = ExecutionSession(
+        id=_new_id(),
+        trader_id=trader_id,
+        signal_id=signal.id,
+        decision_id=decision_id,
+        source=str(signal.source),
+        strategy_key=str(strategy_key or "") or None,
+        mode=str(mode),
+        status="pending",
+        policy=str(policy or "SINGLE_LEG"),
+        plan_id=str(plan_id or "") or None,
+        market_ids_json=sorted(
+            {
+                str(leg.get("market_id") or "").strip()
+                for leg in legs
+                if str(leg.get("market_id") or "").strip()
+            }
+        ),
+        legs_total=0,
+        legs_completed=0,
+        legs_failed=0,
+        legs_open=0,
+        requested_notional_usd=float(max(0.0, requested_notional_usd)),
+        executed_notional_usd=0.0,
+        max_unhedged_notional_usd=float(max(0.0, max_unhedged_notional_usd)),
+        unhedged_notional_usd=0.0,
+        trace_id=trace_id,
+        started_at=_now(),
+        completed_at=None,
+        expires_at=expires_at,
+        payload_json=payload or {},
+        created_at=_now(),
+        updated_at=_now(),
+    )
+    session.add(row)
+    await session.flush()
+
+    for index, leg in enumerate(legs):
+        target_price = safe_float(leg.get("limit_price"), None)
+        requested_notional = safe_float(leg.get("requested_notional_usd"), None)
+        requested_shares = safe_float(leg.get("requested_shares"), None)
+        session.add(
+            ExecutionSessionLeg(
+                id=_new_id(),
+                session_id=row.id,
+                leg_index=index,
+                leg_id=str(leg.get("leg_id") or f"leg_{index + 1}"),
+                market_id=str(leg.get("market_id") or signal.market_id),
+                market_question=str(leg.get("market_question") or signal.market_question or ""),
+                token_id=str(leg.get("token_id") or "").strip() or None,
+                side=str(leg.get("side") or "buy"),
+                outcome=str(leg.get("outcome") or "").strip() or None,
+                price_policy=str(leg.get("price_policy") or "maker_limit"),
+                time_in_force=str(leg.get("time_in_force") or "GTC"),
+                target_price=target_price,
+                requested_notional_usd=requested_notional,
+                requested_shares=requested_shares,
+                filled_notional_usd=0.0,
+                filled_shares=0.0,
+                avg_fill_price=None,
+                status="pending",
+                last_error=None,
+                metadata_json=dict(leg.get("metadata") or {}),
+                created_at=_now(),
+                updated_at=_now(),
+            )
+        )
+
+    await session.flush()
+    await _refresh_execution_session_rollups(session, session_id=row.id)
+    if commit:
+        await session.commit()
+        await session.refresh(row)
+
+    try:
+        await event_bus.publish("execution_session", _serialize_execution_session(row))
+    except Exception:
+        pass
+
+    return row
+
+
+async def list_execution_sessions(
+    session: AsyncSession,
+    *,
+    trader_id: str | None = None,
+    status: str | None = None,
+    limit: int = 200,
+) -> list[ExecutionSession]:
+    query = select(ExecutionSession).order_by(desc(ExecutionSession.created_at))
+    if trader_id:
+        query = query.where(ExecutionSession.trader_id == trader_id)
+    if status:
+        query = query.where(func.lower(func.coalesce(ExecutionSession.status, "")) == str(status).strip().lower())
+    query = query.limit(max(1, min(limit, 1000)))
+    return list((await session.execute(query)).scalars().all())
+
+
+async def list_active_execution_sessions(
+    session: AsyncSession,
+    *,
+    trader_id: str | None = None,
+    mode: str | None = None,
+    limit: int = 500,
+) -> list[ExecutionSession]:
+    query = select(ExecutionSession).where(
+        func.lower(func.coalesce(ExecutionSession.status, "")).in_(tuple(ACTIVE_EXECUTION_SESSION_STATUSES))
+    )
+    if trader_id:
+        query = query.where(ExecutionSession.trader_id == trader_id)
+    if mode is not None:
+        mode_key = _normalize_mode_key(mode)
+        if mode_key == "other":
+            query = query.where(func.lower(func.coalesce(ExecutionSession.mode, "")).not_in(["paper", "live"]))
+        else:
+            query = query.where(func.lower(func.coalesce(ExecutionSession.mode, "")) == mode_key)
+    query = query.order_by(ExecutionSession.created_at.asc()).limit(max(1, min(limit, 2000)))
+    return list((await session.execute(query)).scalars().all())
+
+
+async def get_execution_session_detail(
+    session: AsyncSession,
+    session_id: str,
+) -> dict[str, Any] | None:
+    row = await session.get(ExecutionSession, session_id)
+    if row is None:
+        return None
+    legs = (
+        (
+            await session.execute(
+                select(ExecutionSessionLeg)
+                .where(ExecutionSessionLeg.session_id == session_id)
+                .order_by(ExecutionSessionLeg.leg_index.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    orders = (
+        (
+            await session.execute(
+                select(ExecutionSessionOrder)
+                .where(ExecutionSessionOrder.session_id == session_id)
+                .order_by(desc(ExecutionSessionOrder.created_at))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    events = (
+        (
+            await session.execute(
+                select(ExecutionSessionEvent)
+                .where(ExecutionSessionEvent.session_id == session_id)
+                .order_by(desc(ExecutionSessionEvent.created_at))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {
+        "session": _serialize_execution_session(row),
+        "legs": [_serialize_execution_leg(leg) for leg in legs],
+        "orders": [_serialize_execution_order(order) for order in orders],
+        "events": [_serialize_execution_event(event) for event in events],
+    }
+
+
+async def update_execution_session_status(
+    session: AsyncSession,
+    *,
+    session_id: str,
+    status: str,
+    error_message: str | None = None,
+    payload_patch: dict[str, Any] | None = None,
+    commit: bool = True,
+) -> ExecutionSession | None:
+    row = await session.get(ExecutionSession, session_id)
+    if row is None:
+        return None
+    now = _now()
+    row.status = str(status)
+    row.error_message = error_message
+    if payload_patch:
+        merged = dict(row.payload_json or {})
+        merged.update(payload_patch)
+        row.payload_json = merged
+    if str(status).strip().lower() in TERMINAL_EXECUTION_SESSION_STATUSES:
+        row.completed_at = now
+    row.updated_at = now
+    await _refresh_execution_session_rollups(session, session_id=session_id)
+    if commit:
+        await session.commit()
+        await session.refresh(row)
+
+    try:
+        await event_bus.publish("execution_session", _serialize_execution_session(row))
+    except Exception:
+        pass
+
+    return row
+
+
+async def update_execution_leg(
+    session: AsyncSession,
+    *,
+    leg_row_id: str,
+    status: str | None = None,
+    filled_notional_usd: float | None = None,
+    filled_shares: float | None = None,
+    avg_fill_price: float | None = None,
+    last_error: str | None = None,
+    metadata_patch: dict[str, Any] | None = None,
+    commit: bool = True,
+) -> ExecutionSessionLeg | None:
+    row = await session.get(ExecutionSessionLeg, leg_row_id)
+    if row is None:
+        return None
+    if status is not None:
+        row.status = str(status)
+    if filled_notional_usd is not None:
+        row.filled_notional_usd = float(max(0.0, filled_notional_usd))
+    if filled_shares is not None:
+        row.filled_shares = float(max(0.0, filled_shares))
+    if avg_fill_price is not None:
+        row.avg_fill_price = float(avg_fill_price)
+    if last_error is not None:
+        row.last_error = last_error
+    if metadata_patch:
+        merged = dict(row.metadata_json or {})
+        merged.update(metadata_patch)
+        row.metadata_json = merged
+    row.updated_at = _now()
+
+    session_row = await _refresh_execution_session_rollups(session, session_id=row.session_id)
+    if commit:
+        await session.commit()
+        await session.refresh(row)
+        if session_row is not None:
+            await session.refresh(session_row)
+
+    try:
+        await event_bus.publish("execution_leg", _serialize_execution_leg(row))
+    except Exception:
+        pass
+    if session_row is not None:
+        try:
+            await event_bus.publish("execution_session", _serialize_execution_session(session_row))
+        except Exception:
+            pass
+
+    return row
+
+
+async def create_execution_session_order(
+    session: AsyncSession,
+    *,
+    session_id: str,
+    leg_id: str,
+    trader_order_id: str | None,
+    provider_order_id: str | None,
+    provider_clob_order_id: str | None,
+    action: str,
+    side: str,
+    price: float | None,
+    size: float | None,
+    notional_usd: float | None,
+    status: str,
+    reason: str | None = None,
+    payload: dict[str, Any] | None = None,
+    error_message: str | None = None,
+    commit: bool = True,
+) -> ExecutionSessionOrder:
+    row = ExecutionSessionOrder(
+        id=_new_id(),
+        session_id=session_id,
+        leg_id=leg_id,
+        trader_order_id=trader_order_id,
+        provider_order_id=provider_order_id,
+        provider_clob_order_id=provider_clob_order_id,
+        action=str(action),
+        side=str(side),
+        price=price,
+        size=size,
+        notional_usd=notional_usd,
+        status=str(status),
+        reason=reason,
+        payload_json=payload or {},
+        error_message=error_message,
+        created_at=_now(),
+        updated_at=_now(),
+    )
+    session.add(row)
+    if commit:
+        await session.commit()
+        await session.refresh(row)
+    else:
+        await session.flush()
+
+    try:
+        await event_bus.publish("execution_order", _serialize_execution_order(row))
+    except Exception:
+        pass
+
+    return row
+
+
+async def create_execution_session_event(
+    session: AsyncSession,
+    *,
+    session_id: str,
+    event_type: str,
+    severity: str = "info",
+    leg_id: str | None = None,
+    message: str | None = None,
+    payload: dict[str, Any] | None = None,
+    commit: bool = True,
+) -> ExecutionSessionEvent:
+    row = ExecutionSessionEvent(
+        id=_new_id(),
+        session_id=session_id,
+        leg_id=leg_id,
+        event_type=str(event_type),
+        severity=str(severity or "info"),
+        message=message,
+        payload_json=payload or {},
+        created_at=_now(),
+    )
+    session.add(row)
+    if commit:
+        await session.commit()
+        await session.refresh(row)
+    else:
+        await session.flush()
+
+    try:
+        await event_bus.publish("execution_session_event", _serialize_execution_event(row))
+    except Exception:
+        pass
 
     return row
 
@@ -2052,6 +2570,19 @@ async def compute_orchestrator_metrics(session: AsyncSession) -> dict[str, Any]:
     )
     decisions_count = int((await session.execute(select(func.count(TraderDecision.id)))).scalar() or 0)
     orders_count = int((await session.execute(select(func.count(TraderOrder.id)))).scalar() or 0)
+    execution_sessions_count = int((await session.execute(select(func.count(ExecutionSession.id)))).scalar() or 0)
+    active_execution_sessions = int(
+        (
+            await session.execute(
+                select(func.count(ExecutionSession.id)).where(
+                    func.lower(func.coalesce(ExecutionSession.status, "")).in_(
+                        tuple(ACTIVE_EXECUTION_SESSION_STATUSES)
+                    )
+                )
+            )
+        ).scalar()
+        or 0
+    )
     open_rows = (
         await session.execute(
             select(
@@ -2072,6 +2603,8 @@ async def compute_orchestrator_metrics(session: AsyncSession) -> dict[str, Any]:
         "traders_running": traders_running,
         "decisions_count": decisions_count,
         "orders_count": orders_count,
+        "execution_sessions_count": execution_sessions_count,
+        "active_execution_sessions": active_execution_sessions,
         "open_orders": open_orders,
         "gross_exposure_usd": await get_gross_exposure(session),
         "daily_pnl": daily_pnl,
@@ -2105,6 +2638,7 @@ async def get_orchestrator_overview(session: AsyncSession) -> dict[str, Any]:
         "config": await compose_trader_orchestrator_config(session),
         "metrics": await compute_orchestrator_metrics(session),
         "traders": await list_traders(session),
+        "execution_sessions": await list_serialized_execution_sessions(session, limit=200),
     }
 
 
@@ -2329,3 +2863,28 @@ async def list_serialized_trader_events(
         event_types=event_types,
     )
     return ([_serialize_event(row) for row in rows], next_cursor)
+
+
+async def list_serialized_execution_sessions(
+    session: AsyncSession,
+    *,
+    trader_id: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    return [
+        _serialize_execution_session(row)
+        for row in await list_execution_sessions(
+            session,
+            trader_id=trader_id,
+            status=status,
+            limit=limit,
+        )
+    ]
+
+
+async def get_serialized_execution_session_detail(
+    session: AsyncSession,
+    session_id: str,
+) -> dict[str, Any] | None:
+    return await get_execution_session_detail(session, session_id)

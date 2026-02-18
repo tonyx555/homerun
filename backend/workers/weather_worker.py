@@ -22,7 +22,9 @@ from config import settings
 from models.database import AsyncSessionLocal, init_database
 from services.data_events import DataEvent
 from services.event_dispatcher import event_dispatcher
+from services.opportunity_strategy_catalog import ensure_all_strategies_seeded
 from services.strategy_signal_bridge import bridge_opportunities_to_signals
+from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.weather.workflow_orchestrator import weather_workflow_orchestrator
 from services.weather import shared_state
 from services.worker_state import write_worker_snapshot
@@ -36,6 +38,17 @@ logger = logging.getLogger("weather_worker")
 
 async def _run_loop() -> None:
     logger.info("Weather worker started")
+
+    try:
+        async with AsyncSessionLocal() as session:
+            await ensure_all_strategies_seeded(session)
+            await refresh_strategy_runtime_if_needed(
+                session,
+                source_keys=["weather"],
+                force=True,
+            )
+    except Exception as exc:
+        logger.warning("Weather worker strategy startup sync failed: %s", exc)
 
     # Ensure initial snapshot exists for UI status.
     try:
@@ -72,6 +85,13 @@ async def _run_loop() -> None:
         async with AsyncSessionLocal() as session:
             control = await shared_state.read_weather_control(session)
             wf_settings = await shared_state.get_weather_settings(session)
+            try:
+                await refresh_strategy_runtime_if_needed(
+                    session,
+                    source_keys=["weather"],
+                )
+            except Exception as exc:
+                logger.warning("Weather worker strategy refresh check failed: %s", exc)
 
         interval = int(
             max(
@@ -98,7 +118,12 @@ async def _run_loop() -> None:
         if not should_run:
             try:
                 async with AsyncSessionLocal() as session:
-                    pending = len(await shared_state.list_weather_intents(session, status_filter="pending", limit=2000))
+                    try:
+                        pending = len(
+                            await shared_state.list_weather_intents(session, status_filter="pending", limit=2000)
+                        )
+                    except Exception:
+                        pending = 0
                     await write_worker_snapshot(
                         session,
                         "weather",
@@ -122,7 +147,10 @@ async def _run_loop() -> None:
             async with AsyncSessionLocal() as session:
                 result = await weather_workflow_orchestrator.run_cycle(session)
                 await shared_state.clear_weather_scan_request(session)
-                pending_rows = await shared_state.list_weather_intents(session, status_filter="pending", limit=2000)
+                try:
+                    pending_rows = await shared_state.list_weather_intents(session, status_filter="pending", limit=2000)
+                except Exception:
+                    pending_rows = []
 
             # Serialize intents to dicts for strategy consumption
             intent_dicts = []
@@ -187,35 +215,44 @@ async def _run_loop() -> None:
             raise
         except Exception as exc:
             logger.exception("Weather workflow cycle failed: %s", exc)
-            async with AsyncSessionLocal() as session:
-                existing, status = await shared_state.read_weather_snapshot(session)
-                await shared_state.write_weather_snapshot(
-                    session,
-                    opportunities=existing,
-                    status={
-                        "running": True,
-                        "enabled": not paused,
-                        "interval_seconds": interval,
-                        "last_scan": datetime.now(timezone.utc).isoformat(),
-                        "current_activity": f"Last weather scan error: {exc}",
-                    },
-                    stats=status.get("stats") or {},
-                )
-                pending = len(await shared_state.list_weather_intents(session, status_filter="pending", limit=2000))
-                await write_worker_snapshot(
-                    session,
-                    "weather",
-                    running=True,
-                    enabled=enabled and not paused,
-                    current_activity=f"Last weather scan error: {exc}",
-                    interval_seconds=interval,
-                    last_run_at=datetime.now(timezone.utc).replace(tzinfo=None),
-                    last_error=str(exc),
-                    stats={
-                        "pending_intents": int(pending),
-                        "signals_emitted_last_run": 0,
-                    },
-                )
+            try:
+                async with AsyncSessionLocal() as session:
+                    try:
+                        existing, status = await shared_state.read_weather_snapshot(session)
+                    except Exception:
+                        existing, status = [], {}
+                    await shared_state.write_weather_snapshot(
+                        session,
+                        opportunities=existing,
+                        status={
+                            "running": True,
+                            "enabled": not paused,
+                            "interval_seconds": interval,
+                            "last_scan": datetime.now(timezone.utc).isoformat(),
+                            "current_activity": f"Last weather scan error: {exc}",
+                        },
+                        stats=status.get("stats") or {},
+                    )
+                    try:
+                        pending = len(await shared_state.list_weather_intents(session, status_filter="pending", limit=2000))
+                    except Exception:
+                        pending = 0
+                    await write_worker_snapshot(
+                        session,
+                        "weather",
+                        running=True,
+                        enabled=enabled and not paused,
+                        current_activity=f"Last weather scan error: {exc}",
+                        interval_seconds=interval,
+                        last_run_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                        last_error=str(exc),
+                        stats={
+                            "pending_intents": int(pending),
+                            "signals_emitted_last_run": 0,
+                        },
+                    )
+            except Exception:
+                pass
 
         await asyncio.sleep(min(10, interval))
 

@@ -35,6 +35,7 @@ from config import settings
 from models.database import AsyncSessionLocal, init_database
 from services import scanner
 from services.signal_bus import emit_scanner_signals
+from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.shared_state import (
     clear_scan_request,
     pop_targeted_condition_ids,
@@ -166,7 +167,7 @@ async def _reattach_inline_ai_from_snapshot(opps: list) -> int:
 async def _run_scan_loop() -> None:
     """Load scanner, then loop: read control -> scan -> write snapshot -> sleep."""
     await scanner.load_settings()
-    await scanner.load_plugins()
+    await scanner.load_plugins(source_keys=["scanner"])
     restored_count = await _hydrate_scanner_pool_from_snapshot()
     scanner._running = True
     scanner._enabled = True
@@ -266,6 +267,13 @@ async def _run_scan_loop() -> None:
     while True:
         async with AsyncSessionLocal() as session:
             control = await read_scanner_control(session)
+            try:
+                await refresh_strategy_runtime_if_needed(
+                    session,
+                    source_keys=["scanner"],
+                )
+            except Exception as exc:
+                logger.warning("Scanner strategy refresh check failed: %s", exc)
         interval = max(10, min(3600, control["scan_interval_seconds"] or 60))
         paused = control.get("is_paused", False)
         requested = control.get("requested_scan_at")
@@ -307,7 +315,8 @@ async def _run_scan_loop() -> None:
 
         try:
             if settings.TIERED_SCANNING_ENABLED and not run_full_scan and scanner._cached_markets:
-                await scanner.scan_fast()
+                reactive_tokens = await scanner.consume_reactive_tokens()
+                await scanner.scan_fast(reactive_token_ids=reactive_tokens)
             else:
                 await scanner.scan_once(targeted_condition_ids=targeted_ids or None)
         except asyncio.CancelledError:
@@ -491,7 +500,10 @@ async def _run_scan_loop() -> None:
         if settings.TIERED_SCANNING_ENABLED and not requested:
             try:
                 scanner._register_reactive_scanning()
-                scanner._reactive_trigger.clear()
+                if scanner._pending_reactive_tokens:
+                    scanner._reactive_trigger.set()
+                else:
+                    scanner._reactive_trigger.clear()
                 await asyncio.wait_for(
                     scanner._reactive_trigger.wait(),
                     timeout=sleep_seconds,

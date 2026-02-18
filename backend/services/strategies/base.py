@@ -6,7 +6,14 @@ from dataclasses import dataclass, field
 from typing import Any, Optional, TypedDict
 from datetime import datetime, timezone
 
-from models import Market, Event, ArbitrageOpportunity
+from models import (
+    ArbitrageOpportunity,
+    Event,
+    ExecutionConstraints,
+    ExecutionLeg,
+    ExecutionPlan,
+    Market,
+)
 from config import settings
 from services.fee_model import fee_model
 from services.data_events import DataEvent, EventType
@@ -206,6 +213,11 @@ class BaseStrategy(ABC):
     # Use EventType.* constants (e.g. EventType.MARKET_DATA_REFRESH).
     # Unknown values are rejected at registration time by the EventDispatcher.
     subscriptions: list[str] = []
+    # Realtime scanner routing for MARKET_DATA_REFRESH batches:
+    # - "incremental": run on affected-market batches in reactive fast scans
+    # - "full_snapshot": always run on the full cached market snapshot
+    # - "auto": scanner decides based on strategy metadata (default)
+    realtime_processing_mode: str = "auto"
 
     # Composable evaluate pipeline — set scoring_weights to opt in.
     # When scoring_weights is None, evaluate() uses the base passthrough.
@@ -254,6 +266,13 @@ class BaseStrategy(ABC):
                         f"Valid types: {sorted(EventType._ALL)}. "
                         f"Use EventType.* constants from services.data_events."
                     )
+        own_realtime_mode = cls.__dict__.get("realtime_processing_mode")
+        if own_realtime_mode is not None:
+            if own_realtime_mode not in {"auto", "incremental", "full_snapshot"}:
+                raise TypeError(
+                    f"{cls.__name__}.realtime_processing_mode must be one of "
+                    f"['auto', 'incremental', 'full_snapshot']"
+                )
         # Only validate strategy_type if this class explicitly declares it.
         # Intermediate base classes (e.g. BaseWeatherStrategy) do not declare
         # strategy_type in their own __dict__ — their concrete subclasses do.
@@ -761,6 +780,87 @@ class BaseStrategy(ABC):
         days_until = max((resolution_aware - utcnow()).total_seconds() / 86400.0, 1.0)
         return roi_percent * (365.0 / days_until)
 
+    def _build_execution_plan(
+        self,
+        *,
+        positions: list[dict[str, Any]],
+        markets: list[Market],
+    ) -> ExecutionPlan | None:
+        if not positions:
+            return None
+
+        config = getattr(self, "config", {}) or {}
+        market_by_id = {str(m.id): m for m in markets}
+        legs: list[ExecutionLeg] = []
+
+        for index, position in enumerate(positions):
+            market_id = str(
+                position.get("market_id")
+                or position.get("id")
+                or position.get("market")
+                or (markets[index].id if index < len(markets) else "")
+            ).strip()
+            if not market_id:
+                continue
+
+            market = market_by_id.get(market_id)
+            action = str(position.get("action") or position.get("side") or "").strip().lower()
+            side = "sell" if action.startswith("sell") else "buy"
+            outcome = str(position.get("outcome") or "").strip().lower() or None
+            limit_price = to_float(position.get("price"), 0.0)
+            token_id = str(position.get("token_id") or "").strip() or None
+            notional_weight = max(0.0001, to_float(position.get("notional_weight"), 1.0))
+            min_fill_ratio = max(0.0, min(1.0, to_float(position.get("min_fill_ratio"), 0.0)))
+
+            legs.append(
+                ExecutionLeg(
+                    leg_id=f"leg_{index + 1}",
+                    market_id=market_id,
+                    market_question=str(
+                        position.get("market_question")
+                        or (market.question if market is not None else "")
+                    )
+                    or None,
+                    token_id=token_id,
+                    side=side,
+                    outcome=outcome,
+                    limit_price=limit_price if limit_price > 0 else None,
+                    price_policy=str(position.get("price_policy") or config.get("price_policy") or "maker_limit"),
+                    time_in_force=str(position.get("time_in_force") or config.get("time_in_force") or "GTC"),
+                    notional_weight=notional_weight,
+                    min_fill_ratio=min_fill_ratio,
+                    metadata={
+                        "position_index": index,
+                        "raw_action": action or None,
+                    },
+                )
+            )
+
+        if not legs:
+            return None
+
+        policy = str(config.get("execution_policy") or ("PARALLEL_MAKER" if len(legs) > 1 else "SINGLE_LEG"))
+        return ExecutionPlan(
+            policy=policy,
+            time_in_force=str(config.get("time_in_force") or "GTC"),
+            legs=legs,
+            constraints=ExecutionConstraints(
+                max_unhedged_notional_usd=max(0.0, to_float(config.get("max_unhedged_notional_usd"), 0.0)),
+                hedge_timeout_seconds=max(1, int(to_float(config.get("hedge_timeout_seconds"), 20))),
+                session_timeout_seconds=max(1, int(to_float(config.get("session_timeout_seconds"), 300))),
+                max_reprice_attempts=max(0, int(to_float(config.get("max_reprice_attempts"), 3))),
+                pair_lock=bool(config.get("pair_lock", len(legs) > 1)),
+                leg_fill_tolerance_ratio=max(
+                    0.0,
+                    min(1.0, to_float(config.get("leg_fill_tolerance_ratio"), 0.02)),
+                ),
+            ),
+            metadata={
+                "strategy_type": self.strategy_type,
+                "generated_by": "base_strategy.create_opportunity",
+            },
+        )
+
     def create_opportunity(
         self,
         title: str,
@@ -948,4 +1048,8 @@ class BaseStrategy(ABC):
             max_position_size=max_position,
             resolution_date=resolution_date,
             positions_to_take=enriched_positions,
+            execution_plan=self._build_execution_plan(
+                positions=enriched_positions,
+                markets=markets,
+            ),
         )

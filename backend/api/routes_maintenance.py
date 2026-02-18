@@ -13,6 +13,10 @@ from utils.utcnow import utcnow
 
 from services.maintenance import maintenance_service
 from models.database import (
+    ExecutionSession,
+    ExecutionSessionEvent,
+    ExecutionSessionLeg,
+    ExecutionSessionOrder,
     NewsArticleCache,
     NewsMarketWatcher,
     NewsTradeIntent,
@@ -208,6 +212,10 @@ async def _flush_trader_orchestrator_runtime_data(session: AsyncSession) -> dict
         control.requested_run_at = None
 
     return {
+        "execution_session_events": await _delete_rows(session, ExecutionSessionEvent),
+        "execution_session_orders": await _delete_rows(session, ExecutionSessionOrder),
+        "execution_session_legs": await _delete_rows(session, ExecutionSessionLeg),
+        "execution_sessions": await _delete_rows(session, ExecutionSession),
         "trade_signal_snapshots": await _delete_rows(session, TradeSignalSnapshot),
         "trade_signals_orphaned": orphan_signals_cleared,
         "trader_signal_consumption": await _delete_rows(session, TraderSignalConsumption),

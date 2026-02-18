@@ -14,7 +14,7 @@ from services.trader_orchestrator import order_manager  # noqa: E402
 
 
 @pytest.mark.asyncio
-async def test_submit_order_live_uses_execution_adapter(monkeypatch):
+async def test_submit_execution_leg_live_uses_execution_adapter(monkeypatch):
     execution_mock = AsyncMock(
         return_value=LiveOrderExecution(
             status="open",
@@ -35,24 +35,31 @@ async def test_submit_order_live_uses_execution_adapter(monkeypatch):
         payload_json={"selected_token_id": "123456789012345678901"},
     )
 
-    status, effective_price, error_message, payload = await order_manager.submit_order(
+    result = await order_manager.submit_execution_leg(
         mode="live",
         signal=signal,
-        size_usd=41.0,
+        leg={
+            "leg_id": "leg_1",
+            "market_id": signal.market_id,
+            "market_question": signal.market_question,
+            "side": "buy",
+            "outcome": "yes",
+            "limit_price": signal.entry_price,
+        },
+        notional_usd=41.0,
     )
 
-    assert status == "open"
-    assert effective_price == 0.41
-    assert error_message is None
-    assert payload["mode"] == "live"
-    assert payload["market_id"] == "123456789012345678"
-    assert payload["shares"] == pytest.approx(102.5, rel=1e-6)
-    assert payload["token_id_source"] == "payload.selected_token_id"
+    assert result.status == "open"
+    assert result.effective_price == 0.41
+    assert result.error_message is None
+    assert result.payload["mode"] == "live"
+    assert result.payload["shares"] == pytest.approx(102.5, rel=1e-6)
+    assert result.payload["token_id_source"] == "payload.selected_token_id"
     execution_mock.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_submit_order_live_fails_without_token_id():
+async def test_submit_execution_leg_live_fails_without_token_id():
     signal = SimpleNamespace(
         id="sig-2",
         market_id="0x" + ("a" * 64),  # condition id, not directly executable token id
@@ -62,19 +69,27 @@ async def test_submit_order_live_fails_without_token_id():
         payload_json={},
     )
 
-    status, _price, error_message, payload = await order_manager.submit_order(
+    result = await order_manager.submit_execution_leg(
         mode="live",
         signal=signal,
-        size_usd=40.0,
+        leg={
+            "leg_id": "leg_1",
+            "market_id": signal.market_id,
+            "market_question": signal.market_question,
+            "side": "buy",
+            "outcome": "yes",
+            "limit_price": signal.entry_price,
+        },
+        notional_usd=40.0,
     )
 
-    assert status == "failed"
-    assert "token_id" in str(error_message or "")
-    assert payload["reason"] == "missing_token_id"
+    assert result.status == "failed"
+    assert "token_id" in str(result.error_message or "")
+    assert result.payload["reason"] == "missing_token_id"
 
 
 @pytest.mark.asyncio
-async def test_submit_order_live_does_not_fallback_to_market_id_token():
+async def test_submit_execution_leg_live_does_not_fallback_to_market_id_token():
     signal = SimpleNamespace(
         id="sig-2b",
         market_id="123456789012345678901",
@@ -84,19 +99,27 @@ async def test_submit_order_live_does_not_fallback_to_market_id_token():
         payload_json={},
     )
 
-    status, _price, error_message, payload = await order_manager.submit_order(
+    result = await order_manager.submit_execution_leg(
         mode="live",
         signal=signal,
-        size_usd=40.0,
+        leg={
+            "leg_id": "leg_1",
+            "market_id": signal.market_id,
+            "market_question": signal.market_question,
+            "side": "buy",
+            "outcome": "yes",
+            "limit_price": signal.entry_price,
+        },
+        notional_usd=40.0,
     )
 
-    assert status == "failed"
-    assert "token_id" in str(error_message or "")
-    assert payload["reason"] == "missing_token_id"
+    assert result.status == "failed"
+    assert "token_id" in str(result.error_message or "")
+    assert result.payload["reason"] == "missing_token_id"
 
 
 @pytest.mark.asyncio
-async def test_submit_order_paper_still_simulates_execution():
+async def test_submit_execution_leg_paper_still_simulates_execution():
     signal = SimpleNamespace(
         id="sig-3",
         market_id="m3",
@@ -106,13 +129,21 @@ async def test_submit_order_paper_still_simulates_execution():
         payload_json={},
     )
 
-    status, effective_price, error_message, payload = await order_manager.submit_order(
+    result = await order_manager.submit_execution_leg(
         mode="paper",
         signal=signal,
-        size_usd=25.0,
+        leg={
+            "leg_id": "leg_1",
+            "market_id": signal.market_id,
+            "market_question": signal.market_question,
+            "side": "buy",
+            "outcome": "no",
+            "limit_price": signal.entry_price,
+        },
+        notional_usd=25.0,
     )
 
-    assert status == "executed"
-    assert effective_price == 0.55
-    assert error_message is None
-    assert payload["submission"] == "simulated"
+    assert result.status == "executed"
+    assert result.effective_price == 0.55
+    assert result.error_message is None
+    assert result.payload["submission"] == "simulated"

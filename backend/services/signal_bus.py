@@ -52,6 +52,164 @@ def _safe_json(value: Any) -> Any:
         return {"raw": str(value)}
 
 
+def _normalize_execution_plan(opportunity: ArbitrageOpportunity) -> dict[str, Any] | None:
+    existing = getattr(opportunity, "execution_plan", None)
+    if existing is not None:
+        if hasattr(existing, "model_dump"):
+            dumped = existing.model_dump(mode="json")
+            if isinstance(dumped, dict) and list(dumped.get("legs") or []):
+                return dumped
+        elif isinstance(existing, dict) and list(existing.get("legs") or []):
+            return dict(existing)
+
+    positions = list(getattr(opportunity, "positions_to_take", None) or [])
+    if not positions:
+        return None
+
+    markets = list(getattr(opportunity, "markets", None) or [])
+    market_by_id: dict[str, dict[str, Any]] = {}
+    for market in markets:
+        if not isinstance(market, dict):
+            continue
+        market_id = str(market.get("id") or "").strip()
+        if market_id:
+            market_by_id[market_id] = market
+
+    legs: list[dict[str, Any]] = []
+    for index, position in enumerate(positions):
+        if not isinstance(position, dict):
+            continue
+        market_id = str(
+            position.get("market_id")
+            or position.get("id")
+            or position.get("market")
+            or (markets[index].get("id") if index < len(markets) and isinstance(markets[index], dict) else "")
+            or ""
+        ).strip()
+        if not market_id:
+            continue
+        market = market_by_id.get(market_id) or (
+            markets[index] if index < len(markets) and isinstance(markets[index], dict) else {}
+        )
+        action = str(position.get("action") or position.get("side") or "").strip().lower()
+        limit_price = position.get("price")
+        try:
+            parsed_price = float(limit_price)
+            if parsed_price <= 0:
+                parsed_price = None
+        except Exception:
+            parsed_price = None
+
+        legs.append(
+            {
+                "leg_id": str(position.get("leg_id") or f"leg_{index + 1}"),
+                "market_id": market_id,
+                "market_question": str(
+                    position.get("market_question")
+                    or market.get("question")
+                    or opportunity.title
+                ),
+                "token_id": str(position.get("token_id") or "").strip() or None,
+                "side": "sell" if action.startswith("sell") else "buy",
+                "outcome": str(position.get("outcome") or "").strip().lower() or None,
+                "limit_price": parsed_price,
+                "price_policy": str(position.get("price_policy") or "maker_limit"),
+                "time_in_force": str(position.get("time_in_force") or "GTC"),
+                "notional_weight": max(0.0001, float(position.get("notional_weight") or 1.0)),
+                "min_fill_ratio": max(
+                    0.0,
+                    min(1.0, float(position.get("min_fill_ratio") or 0.0)),
+                ),
+                "metadata": {
+                    "position_index": index,
+                },
+            }
+        )
+
+    if not legs:
+        return None
+
+    packed = "|".join(
+        sorted(
+            f"{leg['market_id']}:{leg.get('token_id') or ''}:{leg.get('outcome') or ''}:{leg.get('side') or ''}"
+            for leg in legs
+        )
+    )
+    plan_hash = hashlib.sha256(packed.encode("utf-8")).hexdigest()[:16]
+
+    return {
+        "plan_id": f"plan_{plan_hash}",
+        "policy": "PARALLEL_MAKER" if len(legs) > 1 else "SINGLE_LEG",
+        "time_in_force": "GTC",
+        "legs": legs,
+        "constraints": {
+            "max_unhedged_notional_usd": 0.0,
+            "hedge_timeout_seconds": 20,
+            "session_timeout_seconds": 300,
+            "max_reprice_attempts": 3,
+            "pair_lock": len(legs) > 1,
+            "leg_fill_tolerance_ratio": 0.02,
+        },
+        "metadata": {
+            "strategy_type": str(getattr(opportunity, "strategy", "") or ""),
+            "source_item_id": str(getattr(opportunity, "stable_id", "") or ""),
+        },
+    }
+
+
+def _primary_plan_leg(plan: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(plan, dict):
+        return None
+    legs = [leg for leg in (plan.get("legs") or []) if isinstance(leg, dict)]
+    if not legs:
+        return None
+    buy_legs = [leg for leg in legs if str(leg.get("side") or "").strip().lower() == "buy"]
+    if buy_legs:
+        return buy_legs[0]
+    return legs[0]
+
+
+def build_signal_contract_from_opportunity(
+    opportunity: ArbitrageOpportunity,
+) -> tuple[str, str | None, float | None, str | None, dict[str, Any], dict[str, Any] | None]:
+    plan = _normalize_execution_plan(opportunity)
+    primary_leg = _primary_plan_leg(plan) or {}
+    first_market = (opportunity.markets or [{}])[0]
+
+    market_id = str(
+        primary_leg.get("market_id")
+        or first_market.get("id")
+        or opportunity.event_id
+        or opportunity.id
+    )
+    market_question = str(
+        primary_leg.get("market_question")
+        or first_market.get("question")
+        or opportunity.title
+    )
+    direction = _direction_from_outcome(primary_leg.get("outcome"))
+    entry_price = primary_leg.get("limit_price")
+    if entry_price is None:
+        first_position = (opportunity.positions_to_take or [{}])[0]
+        entry_price = first_position.get("price")
+
+    payload = opportunity.model_dump(mode="json")
+    if plan is not None:
+        payload["execution_plan"] = plan
+    strategy_context = dict(opportunity.strategy_context or {})
+    if plan is not None:
+        strategy_context["execution_plan"] = plan
+
+    return (
+        market_id,
+        direction,
+        entry_price,
+        market_question,
+        payload,
+        strategy_context or None,
+    )
+
+
 async def _record_signal_emission(
     session: AsyncSession,
     row: TradeSignal,
@@ -541,9 +699,9 @@ async def emit_scanner_signals(
 ) -> int:
     emitted = 0
     for opp in opportunities:
-        market = (opp.markets or [{}])[0]
-        position = (opp.positions_to_take or [{}])[0]
-        market_id = str(market.get("id") or opp.event_id or opp.id)
+        market_id, direction, entry_price, market_question, payload_json, strategy_context_json = (
+            build_signal_contract_from_opportunity(opp)
+        )
         if not market_id:
             continue
 
@@ -561,15 +719,15 @@ async def emit_scanner_signals(
             signal_type="scanner_opportunity",
             strategy_type=opp.strategy,
             market_id=market_id,
-            market_question=market.get("question") or opp.title,
-            direction=_direction_from_outcome(position.get("outcome")),
-            entry_price=position.get("price"),
+            market_question=market_question,
+            direction=direction,
+            entry_price=entry_price,
             edge_percent=float(opp.roi_percent or 0.0),
             confidence=float(opp.confidence),
             liquidity=float(opp.min_liquidity or 0.0),
             expires_at=expires,
-            payload_json=opp.model_dump(mode="json"),
-            strategy_context_json=opp.strategy_context or None,
+            payload_json=payload_json,
+            strategy_context_json=strategy_context_json,
             dedupe_key=dedupe_key,
             commit=False,
         )
@@ -578,5 +736,4 @@ async def emit_scanner_signals(
     await session.commit()
     await refresh_trade_signal_snapshots(session)
     return emitted
-
 

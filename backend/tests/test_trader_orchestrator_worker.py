@@ -193,9 +193,19 @@ async def test_run_trader_once_blocks_stacking_when_allow_averaging_false(monkey
     async def _create_decision_checks(session, *, checks, **kwargs):
         decision_checks.append(checks)
 
-    async def _submit_order(**kwargs):
+    async def _execute_signal(self, **kwargs):
         submit_calls["count"] += 1
-        return "executed", 0.4, None, {}
+        return SimpleNamespace(
+            session_id="session-1",
+            status="completed",
+            effective_price=0.4,
+            error_message=None,
+            orders_written=1,
+            payload={},
+        )
+
+    async def _reconcile_active_sessions(self, *, mode, trader_id=None):
+        return {"active_seen": 0, "expired": 0, "completed": 0, "failed": 0}
 
     monkeypatch.setattr(trader_orchestrator_worker, "AsyncSessionLocal", lambda: _DummySessionContext())
     monkeypatch.setattr(trader_orchestrator_worker, "_query_sources_for_configs", lambda *_: ["crypto"])
@@ -273,7 +283,16 @@ async def test_run_trader_once_blocks_stacking_when_allow_averaging_false(monkey
     monkeypatch.setattr(trader_orchestrator_worker, "get_market_exposure", AsyncMock(return_value=0.0))
     monkeypatch.setattr(trader_orchestrator_worker, "create_trader_decision", _create_decision)
     monkeypatch.setattr(trader_orchestrator_worker, "create_trader_decision_checks", _create_decision_checks)
-    monkeypatch.setattr(trader_orchestrator_worker, "submit_order", _submit_order)
+    monkeypatch.setattr(
+        trader_orchestrator_worker.ExecutionSessionEngine,
+        "execute_signal",
+        _execute_signal,
+    )
+    monkeypatch.setattr(
+        trader_orchestrator_worker.ExecutionSessionEngine,
+        "reconcile_active_sessions",
+        _reconcile_active_sessions,
+    )
     monkeypatch.setattr(trader_orchestrator_worker, "set_trade_signal_status", AsyncMock(return_value=True))
     monkeypatch.setattr(trader_orchestrator_worker, "create_trader_order", AsyncMock(return_value=None))
     monkeypatch.setattr(trader_orchestrator_worker, "record_signal_consumption", AsyncMock(return_value=None))
@@ -309,9 +328,19 @@ async def test_run_trader_once_allows_reentry_when_allow_averaging_true(monkeypa
         decisions.append(kwargs)
         return SimpleNamespace(id="decision-1")
 
-    async def _submit_order(**kwargs):
+    async def _execute_signal(self, **kwargs):
         submit_calls["count"] += 1
-        return "executed", 0.4, None, {}
+        return SimpleNamespace(
+            session_id="session-1",
+            status="completed",
+            effective_price=0.4,
+            error_message=None,
+            orders_written=1,
+            payload={},
+        )
+
+    async def _reconcile_active_sessions(self, *, mode, trader_id=None):
+        return {"active_seen": 0, "expired": 0, "completed": 0, "failed": 0}
 
     monkeypatch.setattr(trader_orchestrator_worker, "AsyncSessionLocal", lambda: _DummySessionContext())
     monkeypatch.setattr(trader_orchestrator_worker, "_query_sources_for_configs", lambda *_: ["crypto"])
@@ -389,7 +418,16 @@ async def test_run_trader_once_allows_reentry_when_allow_averaging_true(monkeypa
     monkeypatch.setattr(trader_orchestrator_worker, "get_market_exposure", AsyncMock(return_value=0.0))
     monkeypatch.setattr(trader_orchestrator_worker, "create_trader_decision", _create_decision)
     monkeypatch.setattr(trader_orchestrator_worker, "create_trader_decision_checks", AsyncMock(return_value=None))
-    monkeypatch.setattr(trader_orchestrator_worker, "submit_order", _submit_order)
+    monkeypatch.setattr(
+        trader_orchestrator_worker.ExecutionSessionEngine,
+        "execute_signal",
+        _execute_signal,
+    )
+    monkeypatch.setattr(
+        trader_orchestrator_worker.ExecutionSessionEngine,
+        "reconcile_active_sessions",
+        _reconcile_active_sessions,
+    )
     monkeypatch.setattr(trader_orchestrator_worker, "set_trade_signal_status", AsyncMock(return_value=True))
     monkeypatch.setattr(trader_orchestrator_worker, "create_trader_order", AsyncMock(return_value=None))
     monkeypatch.setattr(trader_orchestrator_worker, "record_signal_consumption", AsyncMock(return_value=None))
@@ -437,9 +475,19 @@ async def test_run_trader_once_blocks_unavailable_strategy_only(monkeypatch):
         decisions.append(kwargs)
         return SimpleNamespace(id=f"decision-{len(decisions)}")
 
-    async def _submit_order(**kwargs):
+    async def _execute_signal(self, **kwargs):
         submit_calls["count"] += 1
-        return "executed", 0.4, None, {}
+        return SimpleNamespace(
+            session_id="session-1",
+            status="completed",
+            effective_price=0.4,
+            error_message=None,
+            orders_written=1,
+            payload={},
+        )
+
+    async def _reconcile_active_sessions(self, *, mode, trader_id=None):
+        return {"active_seen": 0, "expired": 0, "completed": 0, "failed": 0}
 
     async def _set_status(_session, *, signal_id, status, **_kwargs):
         statuses.append((str(signal_id), str(status)))
@@ -503,7 +551,7 @@ async def test_run_trader_once_blocks_unavailable_strategy_only(monkeypatch):
     monkeypatch.setattr(
         trader_orchestrator_worker.strategy_db_loader,
         "get_strategy",
-        lambda strategy_key: None if strategy_key == "crypto_15m" else _SelectedStrategy(),
+        lambda strategy_key: _SelectedStrategy() if strategy_key in {"news_reaction", "news"} else None,
     )
     monkeypatch.setattr(
         trader_orchestrator_worker,
@@ -550,7 +598,16 @@ async def test_run_trader_once_blocks_unavailable_strategy_only(monkeypatch):
     monkeypatch.setattr(trader_orchestrator_worker, "get_market_exposure", AsyncMock(return_value=0.0))
     monkeypatch.setattr(trader_orchestrator_worker, "create_trader_decision", _create_decision)
     monkeypatch.setattr(trader_orchestrator_worker, "create_trader_decision_checks", AsyncMock(return_value=None))
-    monkeypatch.setattr(trader_orchestrator_worker, "submit_order", _submit_order)
+    monkeypatch.setattr(
+        trader_orchestrator_worker.ExecutionSessionEngine,
+        "execute_signal",
+        _execute_signal,
+    )
+    monkeypatch.setattr(
+        trader_orchestrator_worker.ExecutionSessionEngine,
+        "reconcile_active_sessions",
+        _reconcile_active_sessions,
+    )
     monkeypatch.setattr(trader_orchestrator_worker, "set_trade_signal_status", _set_status)
     monkeypatch.setattr(trader_orchestrator_worker, "create_trader_order", AsyncMock(return_value=None))
     monkeypatch.setattr(trader_orchestrator_worker, "record_signal_consumption", _record_consumption)

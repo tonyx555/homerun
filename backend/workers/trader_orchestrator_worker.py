@@ -21,19 +21,25 @@ from models.database import (
     TraderGroupMember,
     init_database,
 )
-from services.trader_orchestrator.order_manager import submit_order
 from services.trader_orchestrator.live_market_context import (
     RuntimeTradeSignalView,
     build_live_signal_contexts,
 )
+from services.trader_orchestrator.session_engine import ExecutionSessionEngine
 from services.trader_orchestrator.position_lifecycle import reconcile_live_positions, reconcile_paper_positions
 from services.simulation import simulation_service
 from services.trader_orchestrator.risk_manager import evaluate_risk
+from services.trader_orchestrator.decision_gates import (
+    apply_platform_decision_gates,
+    is_within_trading_window_utc,
+)
 from services.trader_orchestrator.sources.registry import (
     list_source_aliases,
     normalize_source_key,
 )
+from services.opportunity_strategy_catalog import ensure_all_strategies_seeded
 from services.strategy_loader import strategy_loader
+from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.trader_orchestrator_state import (
     cleanup_trader_open_orders,
     compute_orchestrator_metrics,
@@ -64,11 +70,38 @@ from utils.converters import safe_float, safe_int
 from utils.secrets import decrypt_secret
 
 logger = logging.getLogger("trader_orchestrator_worker")
+strategy_db_loader = strategy_loader
 _RESUME_POLICIES = {"resume_full", "manage_only", "flatten_then_start"}
 _PAPER_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
 _ORPHAN_CLEANUP_MAX_TRADERS_PER_CYCLE = 32
 _ORCHESTRATOR_CYCLE_LOCK_KEY = 0x54524F5243485354  # "TRORCHST"
 _orchestrator_lock_ctx: tuple[Any, Any] | None = None
+
+
+async def submit_order(
+    *,
+    session_engine: ExecutionSessionEngine,
+    trader_id: str,
+    signal: RuntimeTradeSignalView,
+    decision_id: str,
+    strategy_key: str,
+    strategy_params: dict[str, Any],
+    risk_limits: dict[str, Any],
+    mode: str,
+    size_usd: float,
+    reason: str,
+):
+    return await session_engine.execute_signal(
+        trader_id=trader_id,
+        signal=signal,
+        decision_id=decision_id,
+        strategy_key=strategy_key,
+        strategy_params=strategy_params,
+        risk_limits=risk_limits,
+        mode=mode,
+        size_usd=size_usd,
+        reason=reason,
+    )
 
 
 def _parse_iso(ts: str | None) -> datetime | None:
@@ -81,44 +114,6 @@ def _parse_iso(ts: str | None) -> datetime | None:
         return parsed
     except Exception:
         return None
-
-
-def _parse_hhmm_utc(value: Any) -> tuple[int, int] | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    parts = text.split(":")
-    if len(parts) != 2:
-        return None
-    try:
-        hour = int(parts[0])
-        minute = int(parts[1])
-    except Exception:
-        return None
-    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
-        return None
-    return hour, minute
-
-
-def _is_within_trading_window_utc(metadata: dict[str, Any], now_utc: datetime) -> bool:
-    window = metadata.get("trading_window_utc")
-    if not isinstance(window, dict):
-        return True
-
-    start = _parse_hhmm_utc(window.get("start"))
-    end = _parse_hhmm_utc(window.get("end"))
-    if start is None or end is None:
-        return True
-
-    start_minutes = (start[0] * 60) + start[1]
-    end_minutes = (end[0] * 60) + end[1]
-    now_minutes = (now_utc.hour * 60) + now_utc.minute
-
-    if start_minutes == end_minutes:
-        return True
-    if start_minutes < end_minutes:
-        return start_minutes <= now_minutes < end_minutes
-    return now_minutes >= start_minutes or now_minutes < end_minutes
 
 
 def _supports_live_market_context(signal: Any) -> bool:
@@ -203,6 +198,15 @@ def _normalize_source_configs(trader: dict[str, Any]) -> dict[str, dict[str, Any
             "traders_scope": dict(raw.get("traders_scope") or {}),
         }
     return normalized
+
+
+def _strategy_instance_from_loaded(candidate: Any) -> Any:
+    if candidate is None:
+        return None
+    instance = getattr(candidate, "instance", None)
+    if instance is not None:
+        return instance
+    return candidate
 
 
 async def _try_acquire_orchestrator_cycle_lock(session: Any) -> bool:
@@ -582,6 +586,22 @@ async def _run_trader_once(
             trader_id=trader_id,
             mode=run_mode,
         )
+        session_engine = ExecutionSessionEngine(session)
+        if hasattr(session, "execute"):
+            reconcile_result = await session_engine.reconcile_active_sessions(
+                mode=run_mode,
+                trader_id=trader_id,
+            )
+            if reconcile_result.get("expired", 0) > 0:
+                await create_trader_event(
+                    session,
+                    trader_id=trader_id,
+                    event_type="execution_sessions_expired",
+                    severity="warn",
+                    source="worker",
+                    message=f"Expired {int(reconcile_result['expired'])} execution session(s)",
+                    payload=reconcile_result,
+                )
         open_positions = await get_open_position_count_for_trader(
             session,
             trader_id,
@@ -687,7 +707,7 @@ async def _run_trader_once(
         )
 
         now_utc = datetime.now(timezone.utc)
-        trading_window_ok = _is_within_trading_window_utc(metadata, now_utc)
+        trading_window_ok = is_within_trading_window_utc(metadata, now_utc)
         global_limits = dict((control.get("settings") or {}).get("global_risk") or {})
         effective_risk_limits = dict(risk_limits)
         if "max_orders_per_cycle" not in effective_risk_limits:
@@ -834,24 +854,25 @@ async def _run_trader_once(
                     # 1. Try the configured strategy_key
                     if strategy_status.available:
                         loaded = strategy_loader.get_strategy(resolved_strategy_key)
-                        if loaded:
-                            strategy = loaded.instance
+                        strategy = _strategy_instance_from_loaded(loaded)
 
                     # 2. Fallback: try the signal's strategy_type slug
-                    if strategy is None:
+                    if strategy is None and strategy_status.available:
                         signal_strategy_type = str(
                             getattr(signal, "strategy_type", "") or ""
                         ).strip().lower()
                         if signal_strategy_type:
                             loaded = strategy_loader.get_strategy(signal_strategy_type)
-                            if loaded and hasattr(loaded.instance, "evaluate"):
-                                strategy = loaded.instance
+                            candidate = _strategy_instance_from_loaded(loaded)
+                            if candidate is not None and hasattr(candidate, "evaluate"):
+                                strategy = candidate
 
                     # 3. Final fallback: try source key as slug
-                    if strategy is None:
+                    if strategy is None and strategy_status.available:
                         loaded = strategy_loader.get_strategy(signal_source)
-                        if loaded and hasattr(loaded.instance, "evaluate"):
-                            strategy = loaded.instance
+                        candidate = _strategy_instance_from_loaded(loaded)
+                        if candidate is not None and hasattr(candidate, "evaluate"):
+                            strategy = candidate
 
                     if strategy is None:
                         blocked_reason = f"strategy_unavailable:{resolved_strategy_key}"
@@ -1075,55 +1096,25 @@ async def _run_trader_once(
                             }
                         )
 
-                    final_decision = decision_obj.decision
-                    final_reason = decision_obj.reason
-                    score = decision_obj.score
-                    size_usd = float(max(1.0, decision_obj.size_usd or 10.0))
-                    risk_snapshot = {}
+                    risk_runtime_payload = {
+                        "global_daily_realized_pnl_usd": global_daily_pnl,
+                        "trader_daily_realized_pnl_usd": trader_daily_pnl,
+                        "intra_cycle_committed_usd": intra_cycle_committed_usd,
+                        "trader_consecutive_losses": trader_loss_streak,
+                        "cooldown_seconds": cooldown_seconds,
+                        "cooldown_active": cooldown_active,
+                        "cooldown_remaining_seconds": cooldown_remaining_seconds,
+                        "trader_open_positions": open_positions,
+                        "trading_window_ok": trading_window_ok,
+                    }
 
-                    if final_decision == "selected" and not trading_window_ok:
-                        final_decision = "blocked"
-                        final_reason = "Outside configured trading window (UTC)"
-                        if strategy is not None:
-                            strategy.on_blocked(runtime_signal, final_reason, {"trading_window": metadata.get("trading_window_utc")})
-
-                    # ── Size cap: clamp to max_trade_notional before risk eval ──
-                    if final_decision == "selected":
-                        _gross_cap = safe_float(global_limits.get("max_gross_exposure_usd"), 5000.0)
-                        _notional_default = max(50.0, _gross_cap * 0.10)
-                        max_trade_notional = max(1.0, safe_float(effective_risk_limits.get("max_trade_notional_usd"), _notional_default))
-                        if size_usd > max_trade_notional:
-                            original_size = size_usd
-                            size_usd = max_trade_notional
-                            if strategy is not None:
-                                strategy.on_size_capped(original_size, size_usd, "Max position size exceeded")
-
-                    if final_decision == "selected":
+                    risk_evaluator = None
+                    if decision_obj.decision == "selected" and trading_window_ok:
                         gross_exposure = await get_gross_exposure(session, mode=run_mode)
                         market_exposure = await get_market_exposure(session, str(signal.market_id), mode=run_mode)
-                        # Adjust PnL by intra-cycle committed exposure so risk
-                        # checks treat pending notional as a worst-case loss.
                         adjusted_global_daily_pnl = global_daily_pnl - intra_cycle_committed_usd
                         adjusted_trader_daily_pnl = trader_daily_pnl - intra_cycle_committed_usd
-                        risk_result = evaluate_risk(
-                            size_usd=size_usd,
-                            gross_exposure_usd=gross_exposure,
-                            trader_open_positions=open_positions,
-                            market_exposure_usd=market_exposure,
-                            global_limits=global_limits,
-                            trader_limits=effective_risk_limits,
-                            global_daily_realized_pnl_usd=adjusted_global_daily_pnl,
-                            trader_daily_realized_pnl_usd=adjusted_trader_daily_pnl,
-                            global_unrealized_pnl_usd=global_unrealized_pnl,
-                            trader_unrealized_pnl_usd=trader_unrealized_pnl,
-                            trader_consecutive_losses=trader_loss_streak,
-                            cycle_orders_placed=orders_written,
-                            cooldown_active=cooldown_active,
-                            mode=run_mode,
-                        )
-                        risk_snapshot = {
-                            "allowed": risk_result.allowed,
-                            "reason": risk_result.reason,
+                        risk_snapshot_base = {
                             "global_daily_realized_pnl_usd": global_daily_pnl,
                             "trader_daily_realized_pnl_usd": trader_daily_pnl,
                             "global_unrealized_pnl_usd": global_unrealized_pnl,
@@ -1136,58 +1127,49 @@ async def _run_trader_once(
                             "cooldown_active": cooldown_active,
                             "cooldown_remaining_seconds": cooldown_remaining_seconds,
                             "trader_open_positions": open_positions,
-                            "checks": [
-                                {
-                                    "check_key": check.key,
-                                    "check_label": check.key,
-                                    "passed": check.passed,
-                                    "score": check.score,
-                                    "detail": check.detail,
-                                }
-                                for check in risk_result.checks
-                            ],
                         }
-                        checks_payload.extend(
-                            {
-                                "check_key": check.key,
-                                "check_label": check.key,
-                                "passed": check.passed,
-                                "score": check.score,
-                                "detail": check.detail,
-                            }
-                            for check in risk_result.checks
-                        )
-                        if not risk_result.allowed:
-                            final_decision = "blocked"
-                            final_reason = risk_result.reason
-                            if strategy is not None:
-                                strategy.on_blocked(runtime_signal, f"Risk: {risk_result.reason}", {"risk_snapshot": risk_snapshot})
 
-                    if final_decision == "selected" and not allow_averaging:
-                        signal_market_id = str(getattr(runtime_signal, "market_id", "") or "").strip()
-                        stacking_blocked = bool(signal_market_id) and signal_market_id in open_market_ids
-                        checks_payload.append(
-                            {
-                                "check_key": "stacking_guard",
-                                "check_label": "One active entry per market",
-                                "passed": not stacking_blocked,
-                                "score": None,
-                                "detail": (
-                                    "allow_averaging=false and market already has an open position"
-                                    if stacking_blocked
-                                    else "allow_averaging=false and no open position exists for this market"
-                                ),
-                                "payload": {
-                                    "allow_averaging": False,
-                                    "market_id": signal_market_id or None,
-                                },
-                            }
-                        )
-                        if stacking_blocked:
-                            final_decision = "blocked"
-                            final_reason = "Stacking guard: market already open while allow_averaging=false"
-                            if strategy is not None:
-                                strategy.on_blocked(runtime_signal, final_reason, {"market_id": signal_market_id})
+                        def _evaluate_runtime_risk(size_for_eval: float):
+                            risk_result = evaluate_risk(
+                                size_usd=size_for_eval,
+                                gross_exposure_usd=gross_exposure,
+                                trader_open_positions=open_positions,
+                                market_exposure_usd=market_exposure,
+                                global_limits=global_limits,
+                                trader_limits=effective_risk_limits,
+                                global_daily_realized_pnl_usd=adjusted_global_daily_pnl,
+                                trader_daily_realized_pnl_usd=adjusted_trader_daily_pnl,
+                                global_unrealized_pnl_usd=global_unrealized_pnl,
+                                trader_unrealized_pnl_usd=trader_unrealized_pnl,
+                                trader_consecutive_losses=trader_loss_streak,
+                                cycle_orders_placed=orders_written,
+                                cooldown_active=cooldown_active,
+                                mode=run_mode,
+                            )
+                            return risk_result, dict(risk_snapshot_base)
+
+                        risk_evaluator = _evaluate_runtime_risk
+
+                    gate_result = apply_platform_decision_gates(
+                        decision_obj=decision_obj,
+                        runtime_signal=runtime_signal,
+                        strategy=strategy,
+                        checks_payload=checks_payload,
+                        trading_window_ok=trading_window_ok,
+                        trading_window_config=metadata.get("trading_window_utc"),
+                        global_limits=global_limits,
+                        effective_risk_limits=effective_risk_limits,
+                        allow_averaging=allow_averaging,
+                        open_market_ids=open_market_ids,
+                        risk_evaluator=risk_evaluator,
+                        invoke_hooks=True,
+                    )
+                    final_decision = gate_result["final_decision"]
+                    final_reason = gate_result["final_reason"]
+                    score = gate_result["score"]
+                    size_usd = gate_result["size_usd"]
+                    checks_payload = gate_result["checks_payload"]
+                    risk_snapshot = gate_result["risk_snapshot"]
 
                     decision_row = await create_trader_decision(
                         session,
@@ -1203,6 +1185,11 @@ async def _run_trader_once(
                             "source_key": signal_source,
                             "source_config": source_config,
                             "strategy_payload": decision_obj.payload,
+                            "strategy_decision": {
+                                "decision": gate_result["strategy_decision"],
+                                "reason": gate_result["strategy_reason"],
+                            },
+                            "platform_gates": gate_result["platform_gates"],
                             "size_usd": size_usd,
                             "traders_scope": traders_scope_payload,
                             "live_market": {
@@ -1218,15 +1205,15 @@ async def _run_trader_once(
                                 "history_tail": live_context.get("history_tail") or [],
                             },
                             "risk_runtime": {
-                                "global_daily_realized_pnl_usd": global_daily_pnl,
-                                "trader_daily_realized_pnl_usd": trader_daily_pnl,
-                                "intra_cycle_committed_usd": intra_cycle_committed_usd,
-                                "trader_consecutive_losses": trader_loss_streak,
-                                "cooldown_seconds": cooldown_seconds,
-                                "cooldown_active": cooldown_active,
-                                "cooldown_remaining_seconds": cooldown_remaining_seconds,
-                                "trader_open_positions": open_positions,
-                                "trading_window_ok": trading_window_ok,
+                                "global_daily_realized_pnl_usd": risk_runtime_payload["global_daily_realized_pnl_usd"],
+                                "trader_daily_realized_pnl_usd": risk_runtime_payload["trader_daily_realized_pnl_usd"],
+                                "intra_cycle_committed_usd": risk_runtime_payload["intra_cycle_committed_usd"],
+                                "trader_consecutive_losses": risk_runtime_payload["trader_consecutive_losses"],
+                                "cooldown_seconds": risk_runtime_payload["cooldown_seconds"],
+                                "cooldown_active": risk_runtime_payload["cooldown_active"],
+                                "cooldown_remaining_seconds": risk_runtime_payload["cooldown_remaining_seconds"],
+                                "trader_open_positions": risk_runtime_payload["trader_open_positions"],
+                                "trading_window_ok": risk_runtime_payload["trading_window_ok"],
                             },
                         },
                         commit=False,
@@ -1248,153 +1235,36 @@ async def _run_trader_once(
                             status="selected",
                             commit=False,
                         )
-                        status, effective_price, error_message, execution_payload = await submit_order(
-                            mode=str(control.get("mode", "paper")),
-                            signal=runtime_signal,
-                            size_usd=size_usd,
-                        )
-                        normalized_order_status = str(status or "").strip().lower()
-
-                        if run_mode == "paper" and normalized_order_status in {"submitted", "executed", "open"}:
-                            if not paper_account_id:
-                                status = "failed"
-                                normalized_order_status = "failed"
-                                error_message = "Paper account is not configured; set paper_account_id to execute paper trades."
-                            else:
-                                entry_price = safe_float(effective_price, None)
-                                if entry_price is None or entry_price <= 0:
-                                    entry_price = safe_float(getattr(runtime_signal, "entry_price", None), None)
-                                if entry_price is None or entry_price <= 0:
-                                    live_price = None
-                                    if isinstance(live_context, dict):
-                                        live_price = safe_float(live_context.get("live_selected_price"), None)
-                                    entry_price = live_price
-
-                                signal_payload = getattr(runtime_signal, "payload_json", None)
-                                signal_payload = signal_payload if isinstance(signal_payload, dict) else {}
-                                signal_live_context = (
-                                    runtime_signal.live_context
-                                    if isinstance(runtime_signal.live_context, dict)
-                                    else {}
-                                )
-                                token_id = (
-                                    str(
-                                        signal_live_context.get("selected_token_id")
-                                        or signal_payload.get("selected_token_id")
-                                        or signal_payload.get("token_id")
-                                        or ""
-                                    ).strip()
-                                    or None
-                                )
-
-                                if entry_price is None or entry_price <= 0:
-                                    status = "failed"
-                                    normalized_order_status = "failed"
-                                    error_message = "Paper execution missing a valid entry price."
-                                else:
-                                    try:
-                                        ledger_entry = await simulation_service.record_orchestrator_paper_fill(
-                                            account_id=paper_account_id,
-                                            trader_id=trader_id,
-                                            signal_id=signal_id,
-                                            market_id=str(getattr(runtime_signal, "market_id", "") or ""),
-                                            market_question=str(getattr(runtime_signal, "market_question", "") or ""),
-                                            direction=str(getattr(runtime_signal, "direction", "") or ""),
-                                            notional_usd=size_usd,
-                                            entry_price=float(entry_price),
-                                            strategy_type=resolved_strategy_key,
-                                            token_id=token_id,
-                                            payload={
-                                                "source": signal_source,
-                                                "edge_percent": safe_float(getattr(runtime_signal, "edge_percent", None), 0.0) or 0.0,
-                                                "confidence": safe_float(getattr(runtime_signal, "confidence", None), 0.0) or 0.0,
-                                            },
-                                            session=session,
-                                            commit=False,
-                                        )
-                                        payload_copy = dict(execution_payload or {})
-                                        payload_copy["simulation_ledger"] = ledger_entry
-                                        execution_payload = payload_copy
-                                    except Exception as exc:
-                                        logger.warning(
-                                            "Paper simulation ledger write failed for trader %s signal %s: %s",
-                                            trader_id,
-                                            signal_id,
-                                            exc,
-                                        )
-                                        status = "failed"
-                                        normalized_order_status = "failed"
-                                        error_message = str(exc)
-                                        payload_copy = dict(execution_payload or {})
-                                        payload_copy["simulation_ledger_error"] = str(exc)
-                                        execution_payload = payload_copy
-
-                        # ── Enrich order payload with strategy context & exit config ──
-                        # so position_lifecycle can invoke strategy-based should_exit().
-                        order_payload = dict(execution_payload or {})
-                        order_payload["strategy_type"] = str(
-                            getattr(signal, "strategy_type", "") or ""
-                        ).strip().lower()
-                        order_payload["strategy_context"] = (
-                            getattr(signal, "strategy_context_json", None)
-                            or getattr(signal, "strategy_context", None)
-                            or {}
-                        )
-                        _exit_param_keys = {
-                            "take_profit_pct",
-                            "stop_loss_pct",
-                            "trailing_stop_pct",
-                            "max_hold_minutes",
-                            "min_hold_minutes",
-                            "resolve_only",
-                            "close_on_inactive_market",
-                        }
-                        order_payload["strategy_exit_config"] = {
-                            k: v
-                            for k, v in (strategy_params or {}).items()
-                            if k in _exit_param_keys
-                        }
-
-                        await create_trader_order(
-                            session,
+                        submit_result = await submit_order(
+                            session_engine=session_engine,
                             trader_id=trader_id,
                             signal=runtime_signal,
                             decision_id=decision_row.id,
+                            strategy_key=resolved_strategy_key,
+                            strategy_params=strategy_params,
+                            risk_limits=effective_risk_limits,
                             mode=str(control.get("mode", "paper")),
-                            status=status,
-                            notional_usd=size_usd,
-                            effective_price=effective_price,
+                            size_usd=size_usd,
                             reason=final_reason,
-                            payload=order_payload,
-                            error_message=error_message,
-                            commit=False,
                         )
-                        if normalized_order_status in {"submitted", "open"}:
-                            await set_trade_signal_status(
-                                session,
-                                signal_id=signal_id,
-                                status="submitted",
-                                effective_price=effective_price,
-                                commit=False,
-                            )
-                        elif normalized_order_status == "executed":
-                            await set_trade_signal_status(
-                                session,
-                                signal_id=signal_id,
-                                status="executed",
-                                effective_price=effective_price,
-                                commit=False,
-                            )
-                        elif normalized_order_status == "failed":
-                            await set_trade_signal_status(
-                                session,
-                                signal_id=signal_id,
-                                status="failed",
-                                effective_price=effective_price,
-                                commit=False,
-                            )
+                        if isinstance(submit_result, tuple):
+                            normalized_order_status = str(submit_result[0] or "").strip().lower()
+                            order_status = normalized_order_status
+                            if normalized_order_status in {
+                                "executed",
+                                "completed",
+                                "working",
+                                "hedging",
+                                "partial",
+                                "open",
+                            }:
+                                orders_written += 1
+                        else:
+                            normalized_order_status = str(submit_result.status or "").strip().lower()
+                            order_status = normalized_order_status
+                            orders_written += int(submit_result.orders_written or 0)
 
-                        if normalized_order_status in {"submitted", "executed", "open"}:
+                        if normalized_order_status in {"completed", "working", "hedging", "partial"}:
                             open_positions = await get_open_position_count_for_trader(
                                 session,
                                 trader_id,
@@ -1403,12 +1273,7 @@ async def _run_trader_once(
                             opened_market_id = str(getattr(runtime_signal, "market_id", "") or "").strip()
                             if opened_market_id:
                                 open_market_ids.add(opened_market_id)
-                            # Accumulate committed notional for intra-cycle
-                            # PnL adjustment so subsequent risk checks treat
-                            # this exposure as worst-case unrealized loss.
                             intra_cycle_committed_usd += size_usd
-                        orders_written += 1
-                        order_status = status
 
                     await record_signal_consumption(
                         session,
@@ -1627,6 +1492,13 @@ async def run_worker_loop() -> None:
     logger.info("Starting trader orchestrator worker loop")
 
     try:
+        async with AsyncSessionLocal() as session:
+            await ensure_all_strategies_seeded(session)
+            await refresh_strategy_runtime_if_needed(session, source_keys=None, force=True)
+    except Exception as exc:
+        logger.warning("Orchestrator strategy startup sync failed: %s", exc)
+
+    try:
         while True:
             try:
                 if not await _ensure_orchestrator_cycle_lock_owner():
@@ -1639,9 +1511,9 @@ async def run_worker_loop() -> None:
                 async with AsyncSessionLocal() as session:
                     await expire_stale_signals(session)
                     try:
-                        await strategy_loader.refresh_all_from_db(session=session)
+                        await refresh_strategy_runtime_if_needed(session, source_keys=None)
                     except Exception as exc:
-                        logger.warning("Failed to refresh DB strategy registry: %s", exc)
+                        logger.warning("Failed strategy runtime refresh pass: %s", exc)
 
                     try:
                         orphan_cleanup = await _reconcile_orphan_open_orders(session)

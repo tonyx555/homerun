@@ -24,7 +24,9 @@ from models.database import AsyncSessionLocal, init_database
 from services.news import shared_state
 from services.data_events import DataEvent
 from services.event_dispatcher import event_dispatcher
+from services.opportunity_strategy_catalog import ensure_all_strategies_seeded
 from services.strategy_signal_bridge import bridge_opportunities_to_signals
+from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.news.workflow_orchestrator import workflow_orchestrator
 from services.worker_state import write_worker_snapshot
 
@@ -35,6 +37,10 @@ logging.basicConfig(
 logger = logging.getLogger("news_worker")
 
 _IDLE_SLEEP_SECONDS = 5
+
+
+async def emit_news_intent_signals(session, opportunities: list) -> int:
+    return await bridge_opportunities_to_signals(session, opportunities, source="news")
 
 
 def _interval_from_control_and_settings(control: dict, wf_settings: dict) -> int:
@@ -69,6 +75,17 @@ def _next_scan_for_state(
 async def _run_loop() -> None:
     logger.info("News worker started")
     owner = f"{socket.gethostname()}:{os.getpid()}"
+
+    try:
+        async with AsyncSessionLocal() as session:
+            await ensure_all_strategies_seeded(session)
+            await refresh_strategy_runtime_if_needed(
+                session,
+                source_keys=["news"],
+                force=True,
+            )
+    except Exception as exc:
+        logger.warning("News worker strategy startup sync failed: %s", exc)
 
     try:
         from services.ai import initialize_ai
@@ -137,6 +154,13 @@ async def _run_loop() -> None:
         async with AsyncSessionLocal() as session:
             control = await shared_state.read_news_control(session)
             wf_settings = await shared_state.get_news_settings(session)
+            try:
+                await refresh_strategy_runtime_if_needed(
+                    session,
+                    source_keys=["news"],
+                )
+            except Exception as exc:
+                logger.warning("News worker strategy refresh check failed: %s", exc)
 
         interval = _interval_from_control_and_settings(control, wf_settings)
         paused = bool(control.get("is_paused", False))
@@ -310,9 +334,7 @@ async def _run_loop() -> None:
             )
             opportunities = await event_dispatcher.dispatch(news_event)
             async with AsyncSessionLocal() as session:
-                emitted = await bridge_opportunities_to_signals(
-                    session, opportunities, source="news",
-                )
+                emitted = await emit_news_intent_signals(session, opportunities)
                 await write_worker_snapshot(
                     session,
                     "news",

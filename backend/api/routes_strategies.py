@@ -31,6 +31,7 @@ from services.strategy_loader import (
     strategy_loader,
     validate_strategy_source,
 )
+from services.strategy_runtime import bump_strategy_runtime_revisions
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -556,23 +557,43 @@ async def get_unified_docs():
         # ── Section 5c: Event Subscriptions ─────────────────────────
         "event_subscriptions": {
             "description": (
-                "Strategies can subscribe to real-time data events for event-driven "
-                "detection. Instead of (or in addition to) polling via detect(), "
-                "strategies react to events as they arrive."
+                "Strategies subscribe to scanner/worker data events. The scanner now "
+                "runs a hybrid loop: periodic full reconciliation plus reactive "
+                "market_data_refresh micro-batches triggered by WebSocket price moves."
             ),
             "how_to_subscribe": (
-                "Set subscriptions = ['price_change', 'market_data_refresh'] on your class. "
-                "Then implement on_event(self, event: DataEvent) -> list[ArbitrageOpportunity] "
-                "to react to those events."
+                "Set subscriptions = [EventType.MARKET_DATA_REFRESH] (or other EventType constants) "
+                "on your class. Implement on_event(self, event: DataEvent) -> list[ArbitrageOpportunity]. "
+                "For scanner strategies, set realtime_processing_mode = 'incremental' | 'full_snapshot' | 'auto' "
+                "to control reactive batch routing."
             ),
+            "realtime_processing_mode": {
+                "auto": (
+                    "Default. Scanner routes WITHIN_MARKET strategies on incremental batches "
+                    "and others on full snapshots."
+                ),
+                "incremental": "Always run this strategy on reactive affected-market batches.",
+                "full_snapshot": "Always run this strategy on the full cached market snapshot.",
+            },
             "data_event_types": {
                 "price_change": {
-                    "description": "A market's price changed (from WS feed)",
-                    "payload_fields": "market_id, token_id, old_price, new_price",
+                    "description": "Low-level token price update from WS feed",
+                    "payload_fields": "token_id, old_price, new_price, source",
                 },
                 "market_data_refresh": {
-                    "description": "Periodic batch of all market data (replaces scanner poll)",
-                    "payload_fields": "markets, events, prices (full snapshot)",
+                    "description": (
+                        "Scanner strategy batch event. Emitted as full reconciliation and as "
+                        "reactive/timer fast-scan batches."
+                    ),
+                    "scan_modes": [
+                        "full_reconcile",
+                        "fast_timer",
+                        "realtime_reactive",
+                    ],
+                    "payload_fields": (
+                        "markets, events, prices, scan_mode, changed_token_ids, "
+                        "changed_market_ids, affected_market_ids"
+                    ),
                 },
                 "market_resolved": {
                     "description": "A market outcome was determined",
@@ -610,6 +631,10 @@ async def get_unified_docs():
                     "markets": "list | None — Full market list (for market_data_refresh)",
                     "events": "list | None — Full event list (for market_data_refresh)",
                     "prices": "dict | None — Full price dict (for market_data_refresh)",
+                    "scan_mode": "str | None — full_reconcile | fast_timer | realtime_reactive",
+                    "changed_token_ids": "list[str] | None — Tokens that moved in reactive batches",
+                    "changed_market_ids": "list[str] | None — Markets whose prices changed",
+                    "affected_market_ids": "list[str] | None — Markets passed into this strategy batch",
                 },
             },
             "on_event_method": {
@@ -1188,6 +1213,11 @@ async def create_strategy(req: UnifiedStrategyCreateRequest):
             sort_order=0,
         )
         session.add(row)
+        await bump_strategy_runtime_revisions(
+            session,
+            source_keys=[source_key],
+            commit=False,
+        )
         await session.commit()
         await session.refresh(row)
         return _strategy_to_dict(row)
@@ -1200,6 +1230,7 @@ async def update_strategy(strategy_id: str, req: UnifiedStrategyUpdateRequest):
         row = await session.get(Strategy, strategy_id)
         if row is None:
             raise HTTPException(status_code=404, detail="Strategy not found")
+        original_source_key = str(row.source_key or "").strip().lower()
 
         if bool(row.is_system) and not req.unlock_system:
             raise HTTPException(
@@ -1275,6 +1306,14 @@ async def update_strategy(strategy_id: str, req: UnifiedStrategyUpdateRequest):
                 row.status = "unloaded"
                 row.error_message = None
 
+        await bump_strategy_runtime_revisions(
+            session,
+            source_keys=[
+                original_source_key,
+                str(row.source_key or "").strip().lower(),
+            ],
+            commit=False,
+        )
         await session.commit()
         await session.refresh(row)
         return _strategy_to_dict(row)
@@ -1304,6 +1343,11 @@ async def delete_strategy(strategy_id: str):
 
         strategy_loader.unload(row.slug)
         await session.delete(row)
+        await bump_strategy_runtime_revisions(
+            session,
+            source_keys=[str(row.source_key or "").strip().lower()],
+            commit=False,
+        )
         await session.commit()
 
     return {"status": "success", "message": "Strategy deleted"}
@@ -1327,6 +1371,11 @@ async def reload_strategy(strategy_id: str):
             strategy_loader.load(row.slug, row.source_code, row.config or None)
             row.status = "loaded"
             row.error_message = None
+            await bump_strategy_runtime_revisions(
+                session,
+                source_keys=[str(row.source_key or "").strip().lower()],
+                commit=False,
+            )
             await session.commit()
             return {
                 "status": "success",
@@ -1371,5 +1420,10 @@ async def reset_strategy_to_factory_endpoint(strategy_id: str):
                 strategy_loader.load(row.slug, row.source_code, row.config or None)
             except Exception:
                 pass
+            await bump_strategy_runtime_revisions(
+                session,
+                source_keys=[str(row.source_key or "").strip().lower()],
+                commit=True,
+            )
 
         return result

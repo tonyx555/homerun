@@ -18,6 +18,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import hashlib
+import json
 import sys
 import traceback
 import types
@@ -511,6 +512,14 @@ class LoadedStrategy:
     last_error: Optional[str] = None
 
 
+def _strategy_runtime_hash(source_code: str, config: Optional[dict]) -> str:
+    """Hash strategy source + config so config-only changes trigger reloads."""
+    normalized_config = config if isinstance(config, dict) else {}
+    serialized = json.dumps(normalized_config, sort_keys=True, separators=(",", ":"))
+    payload = f"{source_code}\n{serialized}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
 # ---------------------------------------------------------------------------
 # Strategy Loader
 # ---------------------------------------------------------------------------
@@ -628,7 +637,7 @@ class StrategyLoader:
             instance.configure(config or {})
 
             # Source hash for change detection
-            source_hash = hashlib.sha256(source_code.encode("utf-8")).hexdigest()[:16]
+            source_hash = _strategy_runtime_hash(source_code, config or {})
 
             loaded = LoadedStrategy(
                 slug=slug,
@@ -749,6 +758,8 @@ class StrategyLoader:
         *,
         session: "AsyncSession",
         strategy_keys: Optional[list[str]] = None,
+        source_keys: Optional[list[str]] = None,
+        prune_unlisted: bool = False,
     ) -> dict[str, Any]:
         """Bulk-load all enabled strategies from the DB.
 
@@ -759,12 +770,15 @@ class StrategyLoader:
             session: SQLAlchemy async session (caller manages commit/close).
             strategy_keys: Optional subset of slugs to refresh. If None,
                 refreshes all rows.
+            source_keys: Optional subset of source keys to refresh.
+            prune_unlisted: If True, unload loaded strategies not present in
+                the selected result set. Full refreshes always prune deletions.
 
         Returns:
             Dict with ``"loaded"``, ``"errors"`` keys.
         """
         from models.database import Strategy
-        from sqlalchemy import select
+        from sqlalchemy import func, select
         from utils.utcnow import utcnow
 
         keys_filter = {
@@ -772,27 +786,61 @@ class StrategyLoader:
             for key in (strategy_keys or [])
             if str(key or "").strip()
         }
+        source_filter = {
+            str(key or "").strip().lower()
+            for key in (source_keys or [])
+            if str(key or "").strip()
+        }
 
         async with self.refresh_lock:
             query = select(Strategy).order_by(Strategy.slug.asc())
             if keys_filter:
-                query = query.where(Strategy.slug.in_(tuple(sorted(keys_filter))))
+                query = query.where(func.lower(func.coalesce(Strategy.slug, "")).in_(tuple(sorted(keys_filter))))
+            if source_filter:
+                query = query.where(
+                    func.lower(func.coalesce(Strategy.source_key, "")).in_(tuple(sorted(source_filter)))
+                )
             rows = list((await session.execute(query)).scalars().all())
 
             next_loaded = dict(self._loaded)
             next_errors = dict(self._errors)
+            db_state_changed = False
+            selected_slugs = {
+                str(row.slug or "").strip().lower()
+                for row in rows
+                if str(row.slug or "").strip()
+            }
+
+            is_filtered_refresh = bool(keys_filter or source_filter)
+            should_prune = bool(prune_unlisted or not is_filtered_refresh)
+            if should_prune:
+                for loaded_slug in list(next_loaded.keys()):
+                    if loaded_slug in selected_slugs:
+                        continue
+                    self.unload(loaded_slug)
+                    next_loaded.pop(loaded_slug, None)
+                    next_errors.pop(loaded_slug, None)
 
             for row in rows:
                 slug = str(row.slug or "").strip().lower()
+                row_config = row.config if isinstance(row.config, dict) else {}
 
                 # Compute hash of the incoming source code for change detection
-                new_source_hash = hashlib.sha256((row.source_code or "").encode("utf-8")).hexdigest()[:16]
+                new_source_hash = _strategy_runtime_hash(row.source_code or "", row_config)
                 current_loaded = next_loaded.get(slug)
 
                 # Skip reload if already loaded with identical source and still enabled
                 if current_loaded and current_loaded.source_hash == new_source_hash and bool(row.enabled):
-                    row.status = "loaded"
-                    row.updated_at = utcnow()
+                    row_changed = False
+                    if row.status != "loaded":
+                        row.status = "loaded"
+                        row_changed = True
+                    if row.error_message is not None:
+                        row.error_message = None
+                        row_changed = True
+                    if row_changed:
+                        row.updated_at = utcnow()
+                        db_state_changed = True
                     continue
 
                 # Clear previous state for this slug
@@ -802,34 +850,56 @@ class StrategyLoader:
                 next_errors.pop(slug, None)
 
                 if not bool(row.enabled):
-                    row.status = "disabled"
-                    row.error_message = None
-                    row.updated_at = utcnow()
+                    row_changed = False
+                    if row.status != "disabled":
+                        row.status = "disabled"
+                        row_changed = True
+                    if row.error_message is not None:
+                        row.error_message = None
+                        row_changed = True
+                    if row_changed:
+                        row.updated_at = utcnow()
+                        db_state_changed = True
                     continue
 
                 try:
-                    config = row.config if isinstance(row.config, dict) else {}
                     loaded = self.load(
                         slug=slug,
                         source_code=row.source_code or "",
-                        config=config,
+                        config=row_config,
                     )
                     next_loaded[slug] = loaded
-                    row.status = "loaded"
-                    row.error_message = None
-                    row.updated_at = utcnow()
+                    row_changed = False
+                    if row.status != "loaded":
+                        row.status = "loaded"
+                        row_changed = True
+                    if row.error_message is not None:
+                        row.error_message = None
+                        row_changed = True
+                    if row_changed:
+                        row.updated_at = utcnow()
+                        db_state_changed = True
                 except Exception as exc:
                     error_message = str(exc)
                     tb = traceback.format_exc()
                     next_errors[slug] = error_message
-                    row.status = "error"
-                    row.error_message = f"{error_message}\n{tb}"
-                    row.updated_at = utcnow()
+                    formatted_error = f"{error_message}\n{tb}"
+                    row_changed = False
+                    if row.status != "error":
+                        row.status = "error"
+                        row_changed = True
+                    if row.error_message != formatted_error:
+                        row.error_message = formatted_error
+                        row_changed = True
+                    if row_changed:
+                        row.updated_at = utcnow()
+                        db_state_changed = True
 
             self._loaded = next_loaded
             self._errors = next_errors
 
-            await session.commit()
+            if db_state_changed:
+                await session.commit()
 
             return {
                 "loaded": sorted(self._loaded.keys()),

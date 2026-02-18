@@ -280,6 +280,11 @@ class Settings(BaseSettings):
     TIERED_SCANNING_ENABLED: bool = True  # Enable tiered scan loop
     FAST_SCAN_INTERVAL_SECONDS: int = 15  # Hot-tier poll frequency
     FULL_SCAN_INTERVAL_SECONDS: int = 120  # Full (baseline) scan frequency
+    REALTIME_SCAN_DEBOUNCE_SECONDS: float = 0.25  # WS change coalescing window
+    REALTIME_SCAN_MAX_PENDING_TOKENS: int = 2000  # Backpressure cap for queued changed tokens
+    REALTIME_SCAN_MAX_BATCH_TOKENS: int = 500  # Max changed tokens consumed per fast scan
+    REALTIME_SCAN_MAX_BATCH_MARKETS: int = 800  # Max affected markets evaluated per fast scan
+    REALTIME_SCAN_HTTP_PRICE_FALLBACK_CAP: int = 200  # Max HTTP token lookups in reactive scans
     # Opportunity card sparkline history (longer-term trend, not tick-level noise)
     SCANNER_SPARKLINE_WINDOW_HOURS: int = 6
     SCANNER_SPARKLINE_SAMPLE_SECONDS: int = 120
@@ -291,6 +296,7 @@ class Settings(BaseSettings):
     THIN_BOOK_LIQUIDITY_THRESHOLD: float = 500.0  # Below this = thin book (HOT signal)
     CRYPTO_PREDICTION_WINDOW_SECONDS: int = 30  # Pre-position this far before predicted creation
     INCREMENTAL_FETCH_ENABLED: bool = True  # Use delta fetching for new market detection
+    WS_PRICE_HISTORY_MAX_SNAPSHOTS: int = 1500  # Per-token in-memory ring buffer for strategy SDK history
 
     # Combinatorial Validation
     COMBINATORIAL_MIN_CONFIDENCE: float = 0.75  # Min LLM confidence for trades

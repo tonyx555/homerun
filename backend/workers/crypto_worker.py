@@ -27,7 +27,9 @@ from services.chainlink_feed import get_chainlink_feed
 from services.crypto_service import get_crypto_service
 from services.data_events import DataEvent
 from services.event_dispatcher import event_dispatcher
+from services.opportunity_strategy_catalog import ensure_all_strategies_seeded
 from services.strategy_signal_bridge import bridge_opportunities_to_signals
+from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.event_bus import event_bus
 from services.worker_state import (
     clear_worker_run_request,
@@ -95,6 +97,8 @@ def _collect_ws_prices_for_markets(feed_manager, markets: list) -> dict[str, flo
     ws_prices: dict[str, float] = {}
     price_cache = getattr(feed_manager, "cache", None)
     if price_cache is None:
+        price_cache = getattr(feed_manager, "price_cache", None)
+    if price_cache is None:
         return ws_prices
 
     for market in markets:
@@ -105,7 +109,10 @@ def _collect_ws_prices_for_markets(feed_manager, markets: list) -> dict[str, flo
             try:
                 if not price_cache.is_fresh(token):
                     continue
-                mid = price_cache.get_mid_price(token)
+                if hasattr(price_cache, "get_mid_price"):
+                    mid = price_cache.get_mid_price(token)
+                else:
+                    mid = price_cache.get_mid(token)
             except Exception as exc:
                 logger.debug("WS price cache read failed for token %s: %s", token, exc)
                 continue
@@ -333,6 +340,17 @@ async def _run_loop() -> None:
     logger.info("Crypto worker started")
     worker_name = "crypto"
 
+    try:
+        async with AsyncSessionLocal() as session:
+            await ensure_all_strategies_seeded(session)
+            await refresh_strategy_runtime_if_needed(
+                session,
+                source_keys=["crypto"],
+                force=True,
+            )
+    except Exception as exc:
+        logger.warning("Crypto worker strategy startup sync failed: %s", exc)
+
     startup_stats = {"market_count": 0, "signals_emitted_last_run": 0, "markets": []}
     async with AsyncSessionLocal() as session:
         await ensure_worker_control(session, worker_name, default_interval=2)
@@ -419,6 +437,13 @@ async def _run_loop() -> None:
         async with AsyncSessionLocal() as session:
             control = await read_worker_control(session, worker_name, default_interval=2)
             autotrader_active = await _is_autotrader_active(session)
+            try:
+                await refresh_strategy_runtime_if_needed(
+                    session,
+                    source_keys=["crypto"],
+                )
+            except Exception as exc:
+                logger.warning("Crypto worker strategy refresh check failed: %s", exc)
 
         configured_interval = max(1, min(60, int(control.get("interval_seconds") or 2)))
         paused = bool(control.get("is_paused", False))

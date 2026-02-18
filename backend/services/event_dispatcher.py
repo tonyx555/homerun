@@ -63,7 +63,7 @@ class EventDispatcher:
             ]
         self._subscriptions.pop(strategy_slug, None)
 
-    async def dispatch(self, event: DataEvent) -> list:
+    async def dispatch(self, event: DataEvent, include_strategies: Set[str] | None = None) -> list:
         """Dispatch an event to all subscribed handlers.
 
         Returns a flat list of all results (ArbitrageOpportunity objects)
@@ -73,6 +73,12 @@ class EventDispatcher:
         handlers = list(self._handlers.get(event.event_type, []))
         # Also dispatch to wildcard subscribers
         handlers.extend(self._handlers.get("*", []))
+        if include_strategies is not None:
+            handlers = [
+                (slug, handler)
+                for slug, handler in handlers
+                if slug in include_strategies
+            ]
 
         if not handlers:
             return []

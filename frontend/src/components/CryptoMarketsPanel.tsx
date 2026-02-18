@@ -1,5 +1,8 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
+import { createPortal } from 'react-dom'
+import { AnimatePresence, motion } from 'framer-motion'
 import { useQuery } from '@tanstack/react-query'
+import { useAtomValue } from 'jotai'
 import {
   TrendingUp,
   TrendingDown,
@@ -8,16 +11,21 @@ import {
   ChevronRight,
   ArrowUpDown,
   Settings,
+  Maximize2,
+  Minimize2,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { buildPolymarketMarketUrl } from '../lib/marketUrls'
 import { getCryptoMarkets, CryptoMarket } from '../services/api'
 import { useWebSocket } from '../hooks/useWebSocket'
+import { Liveline } from 'liveline'
+import type { LivelinePoint } from 'liveline'
 import { Card } from './ui/card'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import Sparkline from './Sparkline'
 import OpportunityEmptyState from './OpportunityEmptyState'
+import { themeAtom } from '../store/atoms'
 
 // ─── Constants ────────────────────────────────────────────
 
@@ -54,6 +62,12 @@ function formatPrice(n: number | null | undefined, decimals = 2): string {
 function toFiniteNumber(value: unknown): number | null {
   const n = Number(value)
   return Number.isFinite(n) ? n : null
+}
+
+function toUnixSeconds(value: number): number {
+  if (value > 1_000_000_000_000) return Math.floor(value / 1000)
+  if (value > 10_000_000_000) return Math.floor(value / 1000)
+  return Math.floor(value)
 }
 
 function clampProbability(value: number): number {
@@ -251,9 +265,21 @@ function OraclePriceDisplay({
 
 // ─── Market Card ─────────────────────────────────────────
 
-function CryptoMarketCard({ market }: { market: CryptoMarket }) {
+function CryptoMarketCard({
+  market,
+  themeMode,
+  isModalView = false,
+  onCloseModal,
+}: {
+  market: CryptoMarket
+  themeMode: 'dark' | 'light'
+  isModalView?: boolean
+  onCloseModal?: () => void
+}) {
   const chartRef = useRef<HTMLDivElement>(null)
   const [chartWidth, setChartWidth] = useState(300)
+  const [modalOpen, setModalOpen] = useState(false)
+  const closeModal = () => setModalOpen(false)
 
   useEffect(() => {
     if (!chartRef.current) return
@@ -266,6 +292,26 @@ function CryptoMarketCard({ market }: { market: CryptoMarket }) {
     return () => ro.disconnect()
   }, [])
 
+  useEffect(() => {
+    if (isModalView || !modalOpen) return undefined
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = previousOverflow
+    }
+  }, [isModalView, modalOpen])
+
+  useEffect(() => {
+    if (isModalView || !modalOpen) return undefined
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        closeModal()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [isModalView, modalOpen])
+
   const asset = market.asset
   const upPrice = toFiniteNumber(market.up_price)
   const downPrice = toFiniteNumber(market.down_price)
@@ -274,6 +320,7 @@ function CryptoMarketCard({ market }: { market: CryptoMarket }) {
   )
   const spread = combined !== null ? 1 - combined : null
   const takerFeePct = marketTakerFeePct(market)
+  const isDarkTheme = themeMode === 'dark'
 
   const polyUrl = buildPolymarketMarketUrl({
     eventSlug: market.event_slug,
@@ -293,13 +340,87 @@ function CryptoMarketCard({ market }: { market: CryptoMarket }) {
     return now !== null ? [now, now] : []
   }, [market.oracle_history, market.oracle_price])
 
+  const livelineData = useMemo<LivelinePoint[]>(() => {
+    const raw = Array.isArray(market.oracle_history) ? market.oracle_history : []
+    const rawPoints = raw
+      .map((point) => {
+        const value = toFiniteNumber((point as { p?: unknown; price?: unknown })?.p ?? (point as { price?: unknown })?.price)
+        const rawTime = toFiniteNumber((point as { t?: unknown; time?: unknown })?.t ?? (point as { time?: unknown })?.time)
+        if (value === null || rawTime === null) return null
+        return {
+          time: toUnixSeconds(rawTime),
+          value,
+        }
+      })
+      .filter((point): point is LivelinePoint => point !== null)
+      .sort((a, b) => a.time - b.time)
+
+    const current = toFiniteNumber(market.oracle_price)
+    const now = Math.floor(Date.now() / 1000)
+    if (rawPoints.length === 0) {
+      if (current === null) return []
+      return [
+        { time: now - 1, value: current },
+        { time: now, value: current },
+      ]
+    }
+
+    const normalized: LivelinePoint[] = []
+    for (const point of rawPoints) {
+      const previous = normalized[normalized.length - 1]
+      const safeTime = previous ? Math.max(point.time, previous.time + 1) : point.time
+      normalized.push({ time: safeTime, value: point.value })
+    }
+
+    if (current !== null) {
+      const last = normalized[normalized.length - 1]
+      const shouldAppendCurrent = Math.abs(last.value - current) > 1e-9 || now > last.time
+      if (shouldAppendCurrent) {
+        normalized.push({
+          time: Math.max(now, last.time + 1),
+          value: current,
+        })
+      }
+    }
+
+    const MAX_POINTS = 600
+    return normalized.length > MAX_POINTS
+      ? normalized.slice(normalized.length - MAX_POINTS)
+      : normalized
+  }, [market.oracle_history, market.oracle_price])
+
+  const livelineValue = (
+    toFiniteNumber(market.oracle_price)
+    ?? livelineData[livelineData.length - 1]?.value
+    ?? 0
+  )
+  const livelineWindow = (() => {
+    const tf = normalizeTimeframe(market.timeframe)
+    if (tf === '5m') return 300
+    if (tf === '15m') return 900
+    if (tf === '1h') return 3600
+    if (tf === '4h') return 14_400
+    return 900
+  })()
+  const livelineColor = (
+    market.oracle_price !== null && market.price_to_beat !== null
+      ? (
+        market.oracle_price >= market.price_to_beat
+          ? (isDarkTheme ? '#22c55e' : '#16a34a')
+          : (isDarkTheme ? '#f87171' : '#dc2626')
+      )
+      : (isDarkTheme ? '#60a5fa' : '#2563eb')
+  )
+
   // Parse time window from title (e.g. "Bitcoin Up or Down - February 10, 10:45AM-11:00AM ET")
   const timeWindow = market.event_title?.match(/(\d{1,2}:\d{2}[AP]M)-(\d{1,2}:\d{2}[AP]M)\s*ET/)?.[0] || ''
 
   return (
+    <>
     <Card className={cn(
       "overflow-hidden relative group transition-all duration-200",
-      "hover:shadow-lg hover:shadow-black/20 hover:border-border/80",
+      !isModalView && "hover:shadow-lg hover:shadow-black/20 hover:border-border/80",
+      isModalView && "w-[min(1100px,calc(100vw-2rem))] max-h-[90vh] overflow-y-auto rounded-2xl border-border/70 bg-background shadow-[0_40px_120px_rgba(0,0,0,0.55)] [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden",
       market.is_live && 'ring-1 ring-green-500/10',
     )}>
       {/* Asset color accent bar */}
@@ -307,15 +428,15 @@ function CryptoMarketCard({ market }: { market: CryptoMarket }) {
 
       <div className="pl-5 pr-4 py-4 space-y-3">
         {/* Header: Asset icon + name + status */}
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <img src={ASSET_ICONS[asset]} alt={asset} className="w-8 h-8 rounded-full" onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
-            <div>
-              <div className="flex items-center gap-2">
-              <h3 className="text-base font-semibold text-foreground">{asset} Up or Down</h3>
-              <Badge variant="outline" className="text-[9px] px-1.5 py-0 text-muted-foreground border-muted-foreground/20">
-                {market.timeframe.toUpperCase()}
-              </Badge>
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex min-w-0 items-start gap-3">
+            <img src={ASSET_ICONS[asset]} alt={asset} className="w-8 h-8 rounded-full shrink-0" onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
+            <div className="min-w-0">
+              <h3 className="text-base font-semibold text-foreground truncate">{asset} Up or Down</h3>
+              <div className="mt-0.5 flex items-center gap-1.5 flex-wrap">
+                <Badge variant="outline" className="text-[9px] px-1.5 py-0 text-muted-foreground border-muted-foreground/20">
+                  {market.timeframe.toUpperCase()}
+                </Badge>
                 {market.is_live ? (
                   <Badge variant="outline" className="text-[9px] px-1.5 py-0 font-bold text-green-400 bg-green-500/15 border-green-500/25">
                     <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse mr-1" />
@@ -325,15 +446,36 @@ function CryptoMarketCard({ market }: { market: CryptoMarket }) {
                   <Badge variant="outline" className="text-[9px] px-1.5 py-0 text-yellow-400 bg-yellow-500/10 border-yellow-500/20">NEXT</Badge>
                 )}
               </div>
-              <p className="text-[11px] text-muted-foreground font-data">{timeWindow}</p>
+              <p className="text-[11px] text-muted-foreground font-data truncate">{timeWindow}</p>
             </div>
           </div>
-          {polyUrl && (
-            <a href={polyUrl} target="_blank" rel="noopener noreferrer"
-              className="text-muted-foreground hover:text-foreground transition-colors p-1">
-              <ExternalLink className="w-4 h-4" />
-            </a>
-          )}
+          <div className="flex items-center gap-1">
+            {!isModalView ? (
+              <button
+                type="button"
+                onClick={() => setModalOpen(true)}
+                className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border/50 bg-background/40 text-muted-foreground transition-colors hover:border-border hover:bg-background/70 hover:text-foreground"
+                title="Expand this card"
+              >
+                <Maximize2 className="w-2.5 h-2.5" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => onCloseModal?.()}
+                className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border/50 bg-background/40 text-muted-foreground transition-colors hover:border-border hover:bg-background/70 hover:text-foreground"
+                title="Return to grid"
+              >
+                <Minimize2 className="w-2.5 h-2.5" />
+              </button>
+            )}
+            {polyUrl && (
+              <a href={polyUrl} target="_blank" rel="noopener noreferrer"
+                className="text-muted-foreground hover:text-foreground transition-colors p-1">
+                <ExternalLink className="w-4 h-4" />
+              </a>
+            )}
+          </div>
         </div>
 
         {/* Oracle price + Price to beat */}
@@ -345,30 +487,66 @@ function CryptoMarketCard({ market }: { market: CryptoMarket }) {
         />
 
         {/* Oracle price sparkline chart */}
-        <div ref={chartRef} className="relative h-14 w-full bg-muted/10 rounded-lg overflow-hidden">
-          {oracleSeries.length >= 2 ? (
-            <>
-              {market.price_to_beat !== null && (
-                <div className="absolute inset-0 flex items-center">
-                  <div className="w-full border-t border-dashed border-muted-foreground/20" />
-                </div>
-              )}
-              <Sparkline
-                data={oracleSeries}
-                width={chartWidth}
-                height={56}
-                color={market.oracle_price !== null && market.price_to_beat !== null
-                  ? (market.oracle_price >= market.price_to_beat ? '#4ade80' : '#f87171')
-                  : '#a1a1aa'}
-                animated={false}
+        {isModalView ? (
+          <div className={cn(
+            "relative h-56 w-full rounded-lg overflow-hidden border",
+            isDarkTheme
+              ? "border-slate-700/40 bg-gradient-to-b from-slate-900/75 via-slate-950/80 to-black/90"
+              : "border-slate-200/90 bg-gradient-to-b from-white via-slate-50 to-slate-100/70",
+          )}>
+            {livelineData.length >= 2 ? (
+              <Liveline
+                data={livelineData}
+                value={livelineValue}
+                color={livelineColor}
+                theme={isDarkTheme ? 'dark' : 'light'}
+                showValue
+                valueMomentumColor
+                grid
+                badge
+                badgeVariant={isDarkTheme ? 'default' : 'minimal'}
+                badgeTail={isDarkTheme}
+                pulse
+                fill
+                window={livelineWindow}
+                lerpSpeed={0.1}
+                padding={{ top: 16, right: 84, bottom: 30, left: 14 }}
+                tooltipOutline={isDarkTheme}
+                formatValue={(value) => formatPrice(value, 2)}
+                referenceLine={market.price_to_beat !== null ? { value: market.price_to_beat, label: 'Price to beat' } : undefined}
               />
-            </>
-          ) : (
-            <div className="flex items-center justify-center h-full text-[10px] text-muted-foreground/40">
-              Waiting for price data...
-            </div>
-          )}
-        </div>
+            ) : (
+              <div className="flex items-center justify-center h-full text-[10px] text-muted-foreground/40">
+                Waiting for price data...
+              </div>
+            )}
+          </div>
+        ) : (
+          <div ref={chartRef} className="relative h-14 w-full bg-muted/10 rounded-lg overflow-hidden">
+            {oracleSeries.length >= 2 ? (
+              <>
+                {market.price_to_beat !== null && (
+                  <div className="absolute inset-0 flex items-center">
+                    <div className="w-full border-t border-dashed border-muted-foreground/20" />
+                  </div>
+                )}
+                <Sparkline
+                  data={oracleSeries}
+                  width={chartWidth}
+                  height={56}
+                  color={market.oracle_price !== null && market.price_to_beat !== null
+                    ? (market.oracle_price >= market.price_to_beat ? '#4ade80' : '#f87171')
+                    : '#a1a1aa'}
+                  animated={false}
+                />
+              </>
+            ) : (
+              <div className="flex items-center justify-center h-full text-[10px] text-muted-foreground/40">
+                Waiting for price data...
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Countdown timer */}
         <div className="flex items-center justify-center py-2 bg-muted/20 rounded-lg">
@@ -488,6 +666,48 @@ function CryptoMarketCard({ market }: { market: CryptoMarket }) {
         )}
       </div>
     </Card>
+      {!isModalView && typeof document !== 'undefined' && createPortal(
+        <AnimatePresence>
+          {modalOpen && (
+            <motion.div
+              key={`crypto-market-modal-${market.id}`}
+              className="fixed inset-0 z-[120] flex items-center justify-center p-4 sm:p-6"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+            >
+              <motion.div
+                className="absolute inset-0 bg-black/70 backdrop-blur-[2px]"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.2 }}
+                onClick={closeModal}
+                aria-hidden
+              />
+              <motion.div
+                className="relative z-10"
+                role="dialog"
+                aria-modal="true"
+                aria-label={`Expanded crypto market: ${asset} ${market.timeframe}`}
+                initial={{ scale: 0.94, opacity: 0, y: 22 }}
+                animate={{ scale: 1, opacity: 1, y: 0 }}
+                exit={{ scale: 0.97, opacity: 0, y: 14 }}
+                transition={{ type: 'spring', stiffness: 260, damping: 28, mass: 0.9 }}
+              >
+                <CryptoMarketCard
+                  market={market}
+                  themeMode={themeMode}
+                  isModalView
+                  onCloseModal={closeModal}
+                />
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>,
+        document.body
+      )}
+    </>
   )
 }
 
@@ -501,6 +721,7 @@ interface Props {
 
 export default function CryptoMarketsPanel({ onExecute, onOpenCopilot, onOpenCryptoSettings }: Props) {
   const panelRef = useRef<HTMLDivElement>(null)
+  const themeMode = useAtomValue(themeAtom)
   const [timeframeFilter, setTimeframeFilter] = useState<TimeframeFilter>('all')
   const [isDocumentVisible, setIsDocumentVisible] = useState(
     () => (typeof document === 'undefined' ? true : document.visibilityState === 'visible')
@@ -778,7 +999,7 @@ export default function CryptoMarketsPanel({ onExecute, onOpenCopilot, onOpenCry
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
           {filteredMarkets.map((market) => (
-            <CryptoMarketCard key={market.id} market={market} />
+            <CryptoMarketCard key={market.id} market={market} themeMode={themeMode} />
           ))}
         </div>
       )}
