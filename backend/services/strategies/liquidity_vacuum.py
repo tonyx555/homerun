@@ -22,7 +22,6 @@ from typing import Any, Optional
 from models import Market, Event, ArbitrageOpportunity
 from config import settings
 from .base import BaseStrategy, DecisionCheck, StrategyDecision, ExitDecision, ScoringWeights, SizingConfig, utcnow, make_aware
-from services.data_events import DataEvent
 from utils.converters import to_float, to_confidence
 from utils.signal_helpers import signal_payload
 
@@ -45,10 +44,6 @@ class LiquidityVacuumStrategy(BaseStrategy):
     requires_order_book = True
     subscriptions = ["market_data_refresh"]
 
-    async def on_event(self, event: DataEvent) -> list[ArbitrageOpportunity]:
-        if event.event_type == "market_data_refresh":
-            return self.detect(event.events or [], event.markets or [], event.prices or {})
-        return []
 
     pipeline_defaults = {
         "min_edge_percent": 4.0,
@@ -589,3 +584,4 @@ class LiquidityVacuumStrategy(BaseStrategy):
 def market_liquidity_estimate(default: float = 0) -> float:
     """Placeholder for when we cannot determine depth from prices dict."""
     return default
+

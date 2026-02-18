@@ -33,24 +33,6 @@ def _make_aware(dt: Optional[datetime]) -> Optional[datetime]:
     return dt
 
 
-def _has_custom_detect_async(strategy) -> bool:
-    """Return True if *strategy* overrides detect_async from BaseStrategy.
-
-    We avoid calling the base-class default (which just delegates to sync
-    detect()) on the event loop — that would block async handlers.  Only
-    strategies that provide their own async implementation should be awaited
-    directly.
-    """
-    from services.strategies.base import BaseStrategy
-
-    method = getattr(type(strategy), "detect_async", None)
-    if method is None:
-        return False
-    # If the method is the one defined on BaseStrategy itself, it's not a
-    # custom override — fall through to the sync thread-pool path.
-    base_method = getattr(BaseStrategy, "detect_async", None)
-    return method is not base_method
-
 
 class ArbitrageScanner:
     """Main scanner that orchestrates arbitrage detection"""
@@ -1020,11 +1002,16 @@ class ArbitrageScanner:
             # ----------------------------------------------------------
             all_opportunities = self._deduplicate_cross_strategy(all_opportunities)
 
-            # Apply quality filters with full audit trail
+            # Apply quality filters with full audit trail.
+            # Pass per-strategy QualityFilterOverrides so strategies that
+            # set quality_filter_overrides on their class have those thresholds
+            # respected (e.g. directional strategies relaxing the ROI cap).
             _quality_reports: dict = {}
             filtered_opportunities: list = []
             for opp in all_opportunities:
-                report = quality_filter.evaluate(opp)
+                strategy_instance = strategy_loader.get_instance(opp.strategy)
+                overrides = getattr(strategy_instance, "quality_filter_overrides", None) if strategy_instance else None
+                report = quality_filter.evaluate(opp, overrides=overrides)
                 _quality_reports[opp.stable_id or opp.id] = report
                 if report.passed:
                     filtered_opportunities.append(opp)

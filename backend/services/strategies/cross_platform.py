@@ -44,7 +44,6 @@ import httpx
 from models import Market, Event, ArbitrageOpportunity
 from config import settings
 from .base import BaseStrategy, DecisionCheck, StrategyDecision, ExitDecision, ScoringWeights, SizingConfig
-from services.data_events import DataEvent
 from utils.converters import to_float, to_confidence
 from utils.signal_helpers import signal_payload
 from utils.logger import get_logger
@@ -735,10 +734,6 @@ class CrossPlatformStrategy(BaseStrategy):
     mispricing_type = "cross_market"
     subscriptions = ["market_data_refresh"]
 
-    async def on_event(self, event: DataEvent) -> list[ArbitrageOpportunity]:
-        if event.event_type == "market_data_refresh":
-            return self.detect(event.events or [], event.markets or [], event.prices or {})
-        return []
 
     pipeline_defaults = {
         "min_edge_percent": 4.0,
@@ -1192,3 +1187,4 @@ class CrossPlatformStrategy(BaseStrategy):
         if config.get("resolve_only", True):
             return ExitDecision("hold", "Cross-platform spread — holding to resolution")
         return self.default_exit_check(position, market_state)
+

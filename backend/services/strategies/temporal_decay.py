@@ -22,7 +22,6 @@ from typing import Any, Optional
 from models import Market, Event, ArbitrageOpportunity
 from config import settings
 from .base import BaseStrategy, DecisionCheck, StrategyDecision, ExitDecision, ScoringWeights, SizingConfig, utcnow, make_aware
-from services.data_events import DataEvent
 from utils.converters import to_float, to_confidence
 from utils.signal_helpers import signal_payload
 from utils.logger import get_logger
@@ -144,10 +143,6 @@ class TemporalDecayStrategy(BaseStrategy):
     requires_resolution_date = True
     subscriptions = ["market_data_refresh"]
 
-    async def on_event(self, event: DataEvent) -> list[ArbitrageOpportunity]:
-        if event.event_type == "market_data_refresh":
-            return self.detect(event.events or [], event.markets or [], event.prices or {})
-        return []
 
     pipeline_defaults = {
         "min_edge_percent": 2.5,
@@ -822,3 +817,4 @@ class TemporalDecayStrategy(BaseStrategy):
         if market_state.get("is_resolved"):
             return self.default_exit_check(position, market_state)
         return self.default_exit_check(position, market_state)
+

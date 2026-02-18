@@ -107,19 +107,22 @@ def _detect_capabilities(source_code: str) -> dict:
     """
     has_detect = bool(re.search(r"\bdef detect\s*\(", source_code))
     has_detect_async = bool(re.search(r"\basync\s+def detect_async\s*\(", source_code))
+    has_on_event = bool(re.search(r"\basync\s+def on_event\s*\(", source_code))
     has_evaluate = bool(re.search(r"\bdef evaluate\s*\(", source_code))
     has_should_exit = bool(re.search(r"\bdef should_exit\s*\(", source_code))
 
-    # BaseStrategy provides default evaluate() and should_exit() for ALL
-    # strategies.  Any class extending BaseStrategy has working defaults.
+    # BaseStrategy provides default on_event, evaluate(), and should_exit() for
+    # ALL strategies. Any class extending BaseStrategy has working defaults.
     extends_base = bool(re.search(r"\bBaseStrategy\b", source_code))
     if extends_base:
+        has_on_event = True
         has_evaluate = True
         has_should_exit = True
 
     return {
         "has_detect": has_detect,
         "has_detect_async": has_detect_async,
+        "has_on_event": has_on_event,
         "has_evaluate": has_evaluate,
         "has_should_exit": has_should_exit,
     }

@@ -24,7 +24,6 @@ class CryptoSpikeReversionStrategy(BaseStrategy):
     """Spike-reversion execution using live 5m/30m/2h movement context."""
 
     strategy_type = "crypto_spike_reversion"
-    key = "crypto_spike_reversion"
     name = "Crypto Spike Reversion"
     description = "Spike-reversion execution using live 5m/30m/2h movement context"
     mispricing_type = "within_market"
@@ -164,19 +163,12 @@ class CryptoSpikeReversionStrategy(BaseStrategy):
             },
         )
 
-    def should_exit(self, position: Any, context: dict[str, Any]) -> ExitDecision:
-        """Tight exit for spike reversion — short hold with trailing stop."""
-        params = context.get("params") or {}
-        tp = to_float(params.get("take_profit_pct", 8.0), 8.0)
-        sl = to_float(params.get("stop_loss_pct", 5.0), 5.0)
-        trailing = to_float(params.get("trailing_stop_pct", 3.0), 3.0)
-        max_hold_min = to_float(params.get("max_hold_minutes", 60.0), 60.0)
+    def should_exit(self, position: Any, market_state: dict) -> ExitDecision:
+        """Tight exit for spike reversion — short hold with trailing stop.
 
-        result = self.default_exit_check(
-            position, context,
-            take_profit_pct=tp,
-            stop_loss_pct=sl,
-            trailing_stop_pct=trailing,
-            max_hold_minutes=max_hold_min,
-        )
-        return result
+        TP/SL/trailing/max-hold defaults are applied via position.config, which
+        the lifecycle layer populates from strategy_exit_config in the signal
+        payload. Strategy-level defaults are set in default_config and applied
+        at configuration time.
+        """
+        return self.default_exit_check(position, market_state)

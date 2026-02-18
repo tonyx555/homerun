@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
+import asyncio
+from abc import ABC
 from dataclasses import dataclass, field
 from typing import Any, Optional, TypedDict
 from datetime import datetime, timezone
@@ -130,31 +131,40 @@ class StrategyContext(TypedDict, total=False):
     extra: dict                  # Strategy-specific extras (namespaced per strategy)
 
 
+def _has_custom_detect_async(strategy: "BaseStrategy") -> bool:
+    """Return True if *strategy* provides its own ``detect_async`` override.
+
+    The base class ``detect_async`` simply delegates to ``detect``. We skip
+    it here so scanner strategies that only implement ``detect`` run in the
+    thread-pool rather than on the event loop.
+    """
+    method = getattr(type(strategy), "detect_async", None)
+    if method is None:
+        return False
+    base_method = getattr(BaseStrategy, "detect_async", None)
+    return method is not base_method
+
+
 class BaseStrategy(ABC):
     """Base class for arbitrage detection strategies.
 
-    Strategies set strategy_type to their unique slug string.
+    Strategies set ``strategy_type`` to their unique slug string.
 
-    Subclasses must implement:
+    Implement **at least one** of:
 
-    * ``on_event()`` -- required entry point for event-driven detection.
+    * ``detect()`` — synchronous detection (run in thread-pool executor).
+    * ``detect_async()`` — async detection (preferred for I/O-bound work such
+      as LLM calls, HTTP requests, or database queries). Awaited on the event loop.
+    * Override ``on_event()`` — only needed when your strategy reacts to
+      non-standard event types (crypto, weather, news) with custom payload logic.
 
-    And at least one of:
-
-    * ``detect()`` -- synchronous detection, run in a thread-pool executor.
-    * ``detect_async()`` -- async detection (preferred for I/O-bound work
-      such as LLM calls, HTTP requests, or database queries).  Awaited
-      directly on the event loop.
-
-    If a strategy implements ``detect_async()``, the scanner will call it
-    instead of ``detect()``.  The default ``detect_async()`` falls back to
-    ``detect()`` so existing sync strategies work without changes.
+    Scanner strategies subscribe to ``EventType.MARKET_DATA_REFRESH`` and only
+    need to implement ``detect()`` — the default ``on_event()`` handles routing.
     """
 
-    strategy_type: str  # strategy slug identifier
+    strategy_type: str  # strategy slug identifier (set to slug by loader)
     name: str
     description: str
-    key: str = ""  # Set to strategy_type or slug; used by orchestrator for lookups
 
     # Default config (overridden by user settings in UI)
     default_config: dict = {}
@@ -292,22 +302,22 @@ class BaseStrategy(ABC):
         """
         return self.detect(events, markets, prices)
 
-    @abstractmethod
     async def on_event(self, event: DataEvent) -> list[ArbitrageOpportunity]:
-        """React to a subscribed DataEvent. **Must be implemented by every strategy.**
+        """React to a subscribed DataEvent.
 
         Called by the EventDispatcher when an event matching one of your
         ``subscriptions`` fires. Return a list of detected opportunities (may be
-        empty). The EventDispatcher collects all results and routes them through
-        the signal bridge.
+        empty).
 
-        Strategies that only implement ``detect()`` (scanner strategies) should
-        delegate here::
+        **Default behaviour**: delegates ``MARKET_DATA_REFRESH`` events to
+        ``detect()`` (sync, run in a thread-pool executor) or ``detect_async()``
+        if the subclass overrides it. All other event types return ``[]``.
 
-            async def on_event(self, event: DataEvent) -> list[ArbitrageOpportunity]:
-                if event.event_type == EventType.MARKET_DATA_REFRESH:
-                    return self.detect(event.events or [], event.markets or [], event.prices or {})
-                return []
+        Scanner strategies that only implement ``detect()`` do **not** need to
+        override this method. Override only when your strategy needs custom
+        routing — for example, reacting to ``CRYPTO_UPDATE`` or ``NEWS_UPDATE``
+        events where the payload structure differs from the standard
+        market-data batch.
 
         Args:
             event: Immutable DataEvent with event_type, source, payload, and
@@ -316,60 +326,63 @@ class BaseStrategy(ABC):
         Returns:
             list of ArbitrageOpportunity objects (empty list if no opportunities).
         """
+        if event.event_type == EventType.MARKET_DATA_REFRESH:
+            # Prefer detect_async() if the subclass provides its own override;
+            # otherwise run the synchronous detect() off the event loop.
+            if _has_custom_detect_async(self):
+                return await self.detect_async(
+                    event.events or [], event.markets or [], event.prices or {}
+                )
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None, self.detect, event.events or [], event.markets or [], event.prices or {}
+            )
+        return []
 
     def on_blocked(
         self,
         signal: Any,
         reason: str,
         context: dict[str, Any],
-    ) -> Optional[StrategyDecision]:
-        """Control hook called when the platform blocks a signal from this strategy.
+    ) -> None:
+        """Notification hook called when the platform blocks a signal from this strategy.
 
-        This is a **control hook** — return a new ``StrategyDecision`` to override
-        the block and substitute a different decision. Return ``None`` to accept
-        the block (default behavior).
+        Called by the orchestrator worker when a selected signal is subsequently
+        blocked by a trading-window check, risk check, or stacking guard. Use
+        this to log, track, or update internal state (e.g. recording that a
+        signal was blocked so the next detection cycle can account for it).
 
-        Common overrides:
-        - Retry with a smaller size: ``return StrategyDecision("selected", "retry_smaller", size_usd=10.0)``
-        - Force skip instead of block: ``return StrategyDecision("skipped", "downgraded_from_block")``
-        - Accept the block: ``return None`` (default)
+        The return value is **ignored** — this hook cannot override the block.
+        It is a pure notification, not a control hook.
 
         Args:
             signal: The TradeSignal that was blocked.
             reason: Human-readable reason the platform blocked this signal.
-            context: Full orchestrator context dict (params, trader, mode, etc.)
-
-        Returns:
-            A replacement ``StrategyDecision``, or ``None`` to accept the block.
+            context: Partial orchestrator context (varies by block type —
+                     may contain ``trading_window``, ``risk_snapshot``, or
+                     ``market_id`` depending on which check blocked it).
         """
-        return None
 
     def on_size_capped(
         self,
         original_size: float,
         capped_size: float,
         reason: str,
-    ) -> Optional[float]:
-        """Control hook called when the platform caps this strategy's position size.
+    ) -> None:
+        """Notification hook called when the platform caps this strategy's position size.
 
-        This is a **control hook** — return a float to override the cap with
-        your own accepted size. Return ``None`` to accept the platform's cap
-        (default behavior).
+        Called by the orchestrator worker when the strategy's ``evaluate()``
+        returns a size that exceeds the configured ``max_trade_notional_usd``.
+        Use this to log or track size caps for analysis.
 
-        Common overrides:
-        - Accept a different size: ``return max(capped_size, 5.0)``
-        - Accept the cap: ``return None`` (default)
+        The return value is **ignored** — this hook cannot override the cap.
+        It is a pure notification, not a control hook.
 
         Args:
             original_size: The size the strategy computed in ``evaluate()``.
-            capped_size: The size the platform is allowing (after risk/notional cap).
+            capped_size: The size the platform is allowing (after notional cap).
             reason: Human-readable reason for the cap.
-
-        Returns:
-            An accepted size (float) to use instead of ``capped_size``, or
-            ``None`` to accept the platform's cap.
         """
-        return None
 
     def configure(self, config: dict) -> None:
         """Apply user config overrides. Called by the loader after instantiation."""

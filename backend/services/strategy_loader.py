@@ -337,6 +337,7 @@ def _extract_class_capabilities(tree: ast.AST, class_name: str) -> dict:
     result = {
         "has_detect": False,
         "has_detect_async": False,
+        "has_on_event": False,
         "has_evaluate": False,
         "has_should_exit": False,
     }
@@ -348,6 +349,8 @@ def _extract_class_capabilities(tree: ast.AST, class_name: str) -> dict:
                         result["has_detect"] = True
                     elif item.name == "detect_async":
                         result["has_detect_async"] = True
+                    elif item.name == "on_event":
+                        result["has_on_event"] = True
                     elif item.name == "evaluate":
                         result["has_evaluate"] = True
                     elif item.name == "should_exit":
@@ -437,18 +440,24 @@ def validate_strategy_source(
     capabilities = _extract_class_capabilities(tree, found_class)
     result["capabilities"] = capabilities
 
-    # 6. Require at least one of detect, detect_async, or evaluate
+    # 6. Require at least one of detect, detect_async, on_event, or evaluate.
+    # - detect() / detect_async(): scanner strategies (base on_event routes to them)
+    # - on_event(): event-driven strategies reacting to non-scanner data
+    # - evaluate(): execution-only strategies (signals generated externally)
     has_any = (
         capabilities["has_detect"]
         or capabilities["has_detect_async"]
+        or capabilities["has_on_event"]
         or capabilities["has_evaluate"]
     )
     if not has_any:
         result["errors"].append(
             f"Class '{found_class}' must implement at least one of: detect(), "
-            f"detect_async(), or evaluate(). "
-            f"Use detect() for synchronous detection, detect_async() for async "
-            f"I/O-bound strategies, or evaluate() for execution-gating strategies."
+            f"detect_async(), on_event(), or evaluate(). "
+            f"Use detect() for synchronous scanner strategies, detect_async() for "
+            f"async I/O-bound strategies, on_event() for event-driven strategies "
+            f"reacting to crypto/weather/news data, or evaluate() for "
+            f"execution-gating of externally generated signals."
         )
         return result
 

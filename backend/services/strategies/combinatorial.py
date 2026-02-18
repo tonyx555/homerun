@@ -31,7 +31,6 @@ from typing import Any, Optional
 from config import settings
 from models import Market, Event, ArbitrageOpportunity
 from .base import BaseStrategy, DecisionCheck, StrategyDecision, ExitDecision, ScoringWeights, SizingConfig
-from services.data_events import DataEvent
 from utils.converters import to_float, to_confidence
 from utils.signal_helpers import signal_payload
 from utils.logger import get_logger
@@ -827,11 +826,6 @@ class CombinatorialStrategy(BaseStrategy):
     description = "Cross-market arbitrage via integer programming"
     mispricing_type = "cross_market"
     subscriptions = ["market_data_refresh"]
-
-    async def on_event(self, event: DataEvent) -> list[ArbitrageOpportunity]:
-        if event.event_type == "market_data_refresh":
-            return await self.detect_async(event.events or [], event.markets or [], event.prices or {})
-        return []
 
     scoring_weights = ScoringWeights(
         edge_weight=0.65,

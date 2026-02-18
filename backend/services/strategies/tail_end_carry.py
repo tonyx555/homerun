@@ -14,7 +14,6 @@ from config import settings
 from models import ArbitrageOpportunity, Event, Market
 from models.opportunity import MispricingType
 from services.strategies.base import BaseStrategy, DecisionCheck, StrategyDecision, ExitDecision, ScoringWeights, SizingConfig, make_aware, utcnow
-from services.data_events import DataEvent
 from utils.converters import to_float, to_confidence, clamp
 from utils.signal_helpers import signal_payload, days_to_resolution, selected_probability, live_move
 from utils.converters import safe_float
@@ -31,10 +30,6 @@ class TailEndCarryStrategy(BaseStrategy):
     requires_resolution_date = True
     subscriptions = ["market_data_refresh"]
 
-    async def on_event(self, event: DataEvent) -> list[ArbitrageOpportunity]:
-        if event.event_type == "market_data_refresh":
-            return self.detect(event.events or [], event.markets or [], event.prices or {})
-        return []
 
     pipeline_defaults = {
         "min_edge_percent": 1.6,
@@ -390,3 +385,4 @@ class TailEndCarryStrategy(BaseStrategy):
         config.setdefault("resolve_only", False)
         position.config = config
         return self.default_exit_check(position, market_state)
+

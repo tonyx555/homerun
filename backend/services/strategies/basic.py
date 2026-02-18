@@ -3,8 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from models import Market, Event, ArbitrageOpportunity
-from .base import BaseStrategy, DecisionCheck, StrategyDecision, ExitDecision, ScoringWeights, SizingConfig
-from services.data_events import DataEvent
+from .base import BaseStrategy, DecisionCheck, ExitDecision, ScoringWeights, SizingConfig
 from utils.converters import to_float, to_confidence
 from utils.signal_helpers import signal_payload
 
@@ -29,11 +28,6 @@ class BasicArbStrategy(BaseStrategy):
     description = "Buy YES and NO on same market when total < $1"
     mispricing_type = "within_market"
     subscriptions = ["market_data_refresh"]
-
-    async def on_event(self, event: DataEvent) -> list[ArbitrageOpportunity]:
-        if event.event_type == "market_data_refresh":
-            return self.detect(event.events or [], event.markets or [], event.prices or {})
-        return []
 
     scoring_weights = ScoringWeights(
         edge_weight=0.55,
@@ -137,8 +131,10 @@ class BasicArbStrategy(BaseStrategy):
         market_count = len(payload.get("markets") or [])
         position_count = len(payload.get("positions_to_take") or [])
 
-        # Stash signal liquidity for compute_score
-        payload["_signal_liquidity"] = liquidity
+        # Stash signal liquidity so the base compute_score can pick it up via
+        # payload["liquidity"] — overrides any opportunity-level liquidity value
+        # with the live signal's liquidity for more accurate scoring.
+        payload["liquidity"] = liquidity
 
         return [
             DecisionCheck("source", "Scanner source", source_ok, detail="Requires source=scanner."),
@@ -157,19 +153,6 @@ class BasicArbStrategy(BaseStrategy):
                 detail=f"markets={market_count}, positions={position_count}",
             ),
         ]
-
-    def compute_score(self, edge: float, confidence: float, risk_score: float,
-                      market_count: int, payload: dict) -> float:
-        liquidity = float(payload.get("_signal_liquidity", 0) or 0)
-        is_guaranteed = bool(payload.get("is_guaranteed", False))
-        return (
-            (edge * 0.55)
-            + (confidence * 30.0)
-            + (min(1.0, liquidity / 5000.0) * 8.0)
-            + (min(4, market_count) * 1.5)
-            + (2.0 if is_guaranteed else 0.0)
-            - (risk_score * 8.0)
-        )
 
     def should_exit(self, position: Any, market_state: dict) -> ExitDecision:
         """Guaranteed-spread: hold to resolution for maximum value."""

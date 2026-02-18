@@ -26,7 +26,6 @@ from typing import Any, Optional
 from models import Market, Event, ArbitrageOpportunity
 from config import settings
 from .base import BaseStrategy, DecisionCheck, StrategyDecision, ExitDecision, ScoringWeights, SizingConfig, utcnow
-from services.data_events import DataEvent
 from utils.converters import to_float, to_confidence
 from utils.signal_helpers import signal_payload
 
@@ -103,10 +102,6 @@ class StatArbStrategy(BaseStrategy):
     mispricing_type = "within_market"
     subscriptions = ["market_data_refresh"]
 
-    async def on_event(self, event: DataEvent) -> list[ArbitrageOpportunity]:
-        if event.event_type == "market_data_refresh":
-            return self.detect(event.events or [], event.markets or [], event.prices or {})
-        return []
 
     pipeline_defaults = {
         "min_edge_percent": 3.5,
@@ -638,3 +633,4 @@ class StatArbStrategy(BaseStrategy):
         if market_state.get("is_resolved"):
             return self.default_exit_check(position, market_state)
         return self.default_exit_check(position, market_state)
+

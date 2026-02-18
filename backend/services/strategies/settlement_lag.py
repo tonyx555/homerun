@@ -28,7 +28,6 @@ from typing import Any, Optional
 from models import Market, Event, ArbitrageOpportunity, MispricingType
 from config import settings
 from .base import BaseStrategy, DecisionCheck, StrategyDecision, ExitDecision, ScoringWeights, SizingConfig, utcnow, make_aware
-from services.data_events import DataEvent
 from utils.converters import to_float, to_confidence
 from utils.signal_helpers import signal_payload
 from utils.logger import get_logger
@@ -58,10 +57,6 @@ class SettlementLagStrategy(BaseStrategy):
     mispricing_type = "settlement_lag"
     subscriptions = ["market_data_refresh"]
 
-    async def on_event(self, event: DataEvent) -> list[ArbitrageOpportunity]:
-        if event.event_type == "market_data_refresh":
-            return self.detect(event.events or [], event.markets or [], event.prices or {})
-        return []
 
     scoring_weights = ScoringWeights(
         edge_weight=0.55,
@@ -443,3 +438,4 @@ class SettlementLagStrategy(BaseStrategy):
         if not config.get("resolve_only", True):
             return self.default_exit_check(position, market_state)
         return ExitDecision("hold", "Guaranteed spread — holding to resolution")
+
