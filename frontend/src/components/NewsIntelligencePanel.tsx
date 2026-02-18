@@ -14,6 +14,8 @@ import {
   Trash2,
   Loader2,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
   X,
   Radio,
   Zap,
@@ -119,6 +121,17 @@ const CATEGORY_ICONS: Record<string, string> = {
   world: '🌍',
   cryptocurrency: '₿',
   entertainment: '🎬',
+}
+
+const CATEGORY_NAMES: Record<string, string> = {
+  politics: 'Politics',
+  business: 'Business',
+  technology: 'Tech',
+  science: 'Science',
+  sports: 'Sports',
+  world: 'World',
+  cryptocurrency: 'Crypto',
+  entertainment: 'Entertainment',
 }
 
 const SPARKLINE_COLORS = [
@@ -513,32 +526,58 @@ function mergeFindingsByMarket(findings: NewsWorkflowFinding[]): NewsWorkflowFin
 }
 
 function ArticleRow({ article }: { article: NewsArticle }) {
+  const [expanded, setExpanded] = useState(false)
   const publishedAgo = timeAgo(article.published)
   const fetchedAgo = timeAgo(article.fetched_at)
   const timeStr = publishedAgo || fetchedAgo
   const timeLabel = publishedAgo ? `Published ${timeStr}` : `Added ${timeStr}`
+  const categoryName = CATEGORY_NAMES[article.category]
 
   return (
-    <div className="flex items-center gap-3 px-3 py-2.5 hover:bg-muted/30 rounded-lg transition-colors group">
-      <div className="shrink-0 text-base">{CATEGORY_ICONS[article.category] || '📰'}</div>
-      <div className="flex-1 min-w-0">
-        <a
-          href={article.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-sm text-foreground hover:text-orange-400 transition-colors line-clamp-1 font-medium"
-        >
-          {article.title}
-          <ExternalLink className="w-3 h-3 inline ml-1 opacity-0 group-hover:opacity-100 transition-opacity" />
-        </a>
-        <div className="flex items-center gap-2 mt-0.5">
-          <Badge variant="outline" className={cn("text-[9px] h-4 px-1.5", SOURCE_COLORS[article.feed_source] || 'bg-muted/50 text-muted-foreground border-border')}>
-            {article.feed_source.replace('_', ' ')}
-          </Badge>
-          <span className="text-[10px] text-muted-foreground truncate max-w-[180px]">{article.source}</span>
-          {timeStr && <span className="text-[10px] text-muted-foreground font-data shrink-0">{timeLabel}</span>}
+    <div
+      className="px-3 py-2.5 hover:bg-muted/30 rounded-lg transition-colors group cursor-pointer"
+      onClick={(e) => {
+        if ((e.target as HTMLElement).closest('a')) return
+        setExpanded((v) => !v)
+      }}
+    >
+      <div className="flex items-center gap-3">
+        <div className="shrink-0 text-base">{CATEGORY_ICONS[article.category] || '\ud83d\udcf0'}</div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1.5">
+            {categoryName && (
+              <span className="text-[10px] text-muted-foreground shrink-0">{categoryName}</span>
+            )}
+            <a
+              href={article.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-sm text-foreground hover:text-orange-400 transition-colors line-clamp-1 font-medium"
+            >
+              {article.title}
+              <ExternalLink className="w-3 h-3 inline ml-1 opacity-0 group-hover:opacity-100 transition-opacity" />
+            </a>
+          </div>
+          <div className="flex items-center gap-2 mt-0.5">
+            <Badge variant="outline" className={cn("text-[9px] h-4 px-1.5", SOURCE_COLORS[article.feed_source] || 'bg-muted/50 text-muted-foreground border-border')}>
+              {article.feed_source.replace('_', ' ')}
+            </Badge>
+            <span className="text-[10px] text-muted-foreground truncate max-w-[180px]">{article.source}</span>
+            {timeStr && <span className="text-[10px] text-muted-foreground font-data shrink-0">{timeLabel}</span>}
+            {article.has_embedding && (
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" title="Vector indexed" />
+            )}
+          </div>
+        </div>
+        <div className="shrink-0 text-muted-foreground p-1">
+          {expanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
         </div>
       </div>
+      {expanded && article.summary && (
+        <p className="mt-1.5 ml-9 text-xs text-muted-foreground line-clamp-3">
+          {article.summary}
+        </p>
+      )}
     </div>
   )
 }
@@ -972,6 +1011,28 @@ function IntentRow({ intent, onSkip, isSkipping }: { intent: NewsTradeIntent; on
           </Button>
         )}
       </div>
+    </div>
+  )
+}
+
+function SourceBreakdownBar({ sources }: { sources: Record<string, number> }) {
+  const entries = useMemo(
+    () => Object.entries(sources).sort((a, b) => b[1] - a[1]),
+    [sources],
+  )
+  if (entries.length === 0) return null
+
+  return (
+    <div className="flex items-center gap-1.5 flex-wrap mb-2">
+      {entries.map(([src, count]) => (
+        <Badge
+          key={src}
+          variant="outline"
+          className={cn('text-[9px] h-5 px-1.5 font-data', SOURCE_COLORS[src] || 'bg-muted/50 text-muted-foreground border-border')}
+        >
+          {src.replace('_', ' ')} {count}
+        </Badge>
+      ))}
     </div>
   )
 }
@@ -1446,6 +1507,8 @@ export default function NewsIntelligencePanel({ initialSearchQuery, mode = 'all'
                   {articlesTotalCount > articlesLoadedCount ? ` (${articlesTotalCount} total)` : ''}
                 </span>
               </div>
+
+              <SourceBreakdownBar sources={sourceBreakdown} />
 
               <div className="bg-card/40 rounded-xl border border-border/30 divide-y divide-border/20">
                 {filteredArticles.map((article) => (

@@ -1,7 +1,6 @@
-import { useState, lazy, Suspense } from 'react'
+import { useState, useMemo, lazy, Suspense } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
-  Globe,
   AlertTriangle,
   TrendingUp,
   Activity,
@@ -10,13 +9,15 @@ import {
   MapPin,
   Radio,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
   Swords,
   Wifi,
   Map as MapIcon,
   Settings,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
-import { formatCountry, formatCountryPair, normalizeCountryCode, parseCountryPair } from '../lib/worldCountries'
+import { formatCountry, normalizeCountryCode } from '../lib/worldCountries'
 import { Button } from './ui/button'
 import { Badge } from './ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
@@ -30,13 +31,10 @@ import {
   getTensionPairs,
   getConvergenceZones,
   getTemporalAnomalies,
-  getWorldIntelligenceSummary,
-  getWorldIntelligenceStatus,
-  getWorldSourceStatus,
   WorldSignal,
 } from '../services/worldIntelligenceApi'
 
-type WorldSubView = 'map' | 'overview' | 'signals' | 'countries' | 'tensions' | 'convergences' | 'anomalies'
+type WorldSubView = 'map' | 'signals' | 'countries' | 'tensions' | 'convergences' | 'anomalies'
 
 const SIGNAL_TYPE_CONFIG: Record<string, { icon: React.ElementType; color: string; label: string }> = {
   conflict: { icon: Swords, color: 'text-red-400', label: 'Conflict' },
@@ -48,6 +46,44 @@ const SIGNAL_TYPE_CONFIG: Record<string, { icon: React.ElementType; color: strin
   infrastructure: { icon: Wifi, color: 'text-emerald-400', label: 'Infrastructure' },
   earthquake: { icon: Zap, color: 'text-amber-400', label: 'Earthquake' },
   news: { icon: Radio, color: 'text-violet-400', label: 'News' },
+}
+
+const METADATA_CHIPS_CONFIG: Record<string, Array<{ key: string; label: string; format?: (v: unknown) => string }>> = {
+  earthquake: [
+    { key: 'magnitude', label: 'Mag', format: (v) => `M${Number(v).toFixed(1)}` },
+    { key: 'depth_km', label: 'Depth', format: (v) => `${Number(v).toFixed(0)}km` },
+    { key: 'tsunami', label: 'Tsunami', format: (v) => v ? 'Yes' : 'No' },
+    { key: 'alert', label: 'Alert' },
+  ],
+  military: [
+    { key: 'activity_type', label: 'Type' },
+    { key: 'callsign', label: 'Callsign' },
+    { key: 'aircraft_type', label: 'Aircraft' },
+    { key: 'region', label: 'Region' },
+    { key: 'is_unusual', label: 'Unusual', format: (v) => v ? 'Yes' : 'No' },
+  ],
+  anomaly: [
+    { key: 'z_score', label: 'Z', format: (v) => Number(v).toFixed(1) },
+    { key: 'current_value', label: 'Current', format: (v) => String(v) },
+    { key: 'baseline_mean', label: 'Baseline', format: (v) => Number(v).toFixed(1) },
+  ],
+  infrastructure: [
+    { key: 'event_type', label: 'Type' },
+    { key: 'affected_services', label: 'Services', format: (v) => Array.isArray(v) ? v.join(', ') : String(v) },
+    { key: 'cascade_risk_score', label: 'Cascade', format: (v) => `${(Number(v) * 100).toFixed(0)}%` },
+  ],
+  conflict: [
+    { key: 'event_type', label: 'Type' },
+    { key: 'sub_event_type', label: 'Sub-type' },
+    { key: 'fatalities', label: 'Fatalities', format: (v) => String(v) },
+  ],
+  tension: [
+    { key: 'trend', label: 'Trend' },
+    { key: 'event_count', label: 'Events', format: (v) => String(v) },
+  ],
+  convergence: [
+    { key: 'signal_count', label: 'Signals', format: (v) => String(v) },
+  ],
 }
 
 function SeverityBadge({ severity }: { severity: number }) {
@@ -71,288 +107,119 @@ function TrendIndicator({ trend }: { trend: string }) {
   return <Activity className="w-3 h-3 text-muted-foreground" />
 }
 
-function displayPair(pairText: string): string {
-  const pair = parseCountryPair(pairText)
-  if (pair) {
-    return formatCountryPair(pair[0], pair[1])
-  }
-  return pairText
-}
-
-function classifySourceTone(details: any): 'ok' | 'degraded' | 'error' {
-  if (details?.degraded) return 'degraded'
-  const hardError = details?.ok === false
-  if (!hardError) return 'ok'
-  const rawError = String(details?.error || details?.last_error || '').toLowerCase()
-  const degradedMarkers = [
-    'credentials_missing',
-    'missing_api_key',
-    'missing_api_token',
-    'disabled',
-    'rate-limited',
-    'rate limited',
-    'http 429',
-    "client error '429",
-    'status code 429',
-    "client error '403",
-    'status code 403',
-    '403 forbidden',
-    'soft rate-limit',
-    'soft rate-limited',
-    'nodename nor servname provided',
-    'name or service not known',
-    'temporary failure in name resolution',
-  ]
-  if (degradedMarkers.some((marker) => rawError.includes(marker))) {
-    return 'degraded'
-  }
-  return 'error'
-}
-
-function sourceToneClasses(tone: 'ok' | 'degraded' | 'error'): string {
-  if (tone === 'ok') return 'text-emerald-400'
-  if (tone === 'degraded') return 'text-yellow-400'
-  return 'text-red-400'
-}
-
-function sourceToneLabel(tone: 'ok' | 'degraded' | 'error', count: number): string {
-  if (tone === 'ok') return `ok (${count})`
-  if (tone === 'degraded') return `degraded (${count})`
-  return 'error'
-}
-
-// ==================== OVERVIEW SUB-VIEW ====================
-
-function OverviewView({ isConnected }: { isConnected: boolean }) {
-  const [showReferenceSources, setShowReferenceSources] = useState(false)
-  const { data: summary, isLoading, isError } = useQuery({
-    queryKey: ['world-intelligence-summary'],
-    queryFn: getWorldIntelligenceSummary,
-    refetchInterval: isConnected ? false : 180000,
-  })
-
-  const { data: signalsData } = useQuery({
-    queryKey: ['world-signals', { min_severity: 0.5, limit: 10 }],
-    queryFn: () => getWorldSignals({ min_severity: 0.5, limit: 10 }),
-    refetchInterval: isConnected ? false : 180000,
-  })
-
-  const { data: statusData } = useQuery({
-    queryKey: ['world-intelligence-status'],
-    queryFn: getWorldIntelligenceStatus,
-    refetchInterval: isConnected ? false : 120000,
-  })
-
-  const { data: sourceData } = useQuery({
-    queryKey: ['world-intelligence-sources'],
-    queryFn: getWorldSourceStatus,
-    refetchInterval: isConnected ? false : 180000,
-  })
-
-  if (isLoading) {
-    return <div className="flex items-center justify-center h-64 text-muted-foreground">Loading world intelligence...</div>
-  }
-
-  if (isError) {
-    return (
-      <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-500">
-        Unable to load world intelligence summary.
-      </div>
-    )
-  }
-
-  const stats = statusData?.stats || {}
-  const isRunning = statusData?.status?.running
-  const sourceStatus = sourceData?.sources || {}
-  const sourceErrors = sourceData?.errors || []
-  const criticalSignalCount = Number(summary?.signal_summary?.by_severity?.critical || 0)
-  const coreSourceNames = ['acled', 'gdelt_tensions', 'military', 'infrastructure', 'gdelt_news', 'usgs', 'chokepoints']
-  const referenceSourceNames = ['country_reference', 'ucdp_conflicts', 'mid_reference', 'trade_dependencies']
-  const coreSourceEntries: Array<[string, any]> = coreSourceNames
-    .filter((name) => Object.prototype.hasOwnProperty.call(sourceStatus, name))
-    .map((name) => [name, sourceStatus[name]] as [string, any])
-  const referenceSourceEntries: Array<[string, any]> = referenceSourceNames
-    .filter((name) => Object.prototype.hasOwnProperty.call(sourceStatus, name))
-    .map((name) => [name, sourceStatus[name]] as [string, any])
-
+function MarketRelevanceBadge({ score }: { score: number | null }) {
+  if (score == null) return null
+  const color = score >= 0.7
+    ? 'bg-green-500/20 text-green-400 border-green-500/30'
+    : score >= 0.3
+      ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30'
+      : 'bg-muted/40 text-muted-foreground border-border'
   return (
-    <div className="space-y-4">
-      {/* Status Bar */}
-      <div className="flex items-center gap-3 px-3 py-2 rounded-lg bg-card border border-border">
-        <div className={cn('w-2 h-2 rounded-full', isRunning ? 'bg-green-400 animate-pulse' : 'bg-muted-foreground')} />
-        <span className="text-xs text-muted-foreground">
-          {isRunning ? 'Collecting' : 'Offline'} · {stats.total_signals || 0} signals · Last: {summary?.last_collection ? new Date(summary.last_collection).toLocaleTimeString() : 'Never'}{statusData?.status?.stale ? ' · STALE' : ''}
-        </span>
-      </div>
-
-      <div className="p-3 rounded-lg bg-card border border-border">
-        <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Source Health</h3>
-        {Object.keys(sourceStatus).length > 0 ? (
-          <div className="space-y-2">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-              {(coreSourceEntries.length > 0 ? coreSourceEntries : (Object.entries(sourceStatus) as Array<[string, any]>)).map(([name, details]) => {
-                const tone = classifySourceTone(details)
-                const count = Number(details?.count ?? 0)
-                return (
-                  <div key={name} className="flex items-center justify-between rounded bg-background/50 px-2 py-1.5 text-[11px]">
-                    <span className="font-mono text-muted-foreground">{name}</span>
-                    <span className={cn('font-mono', sourceToneClasses(tone))}>
-                      {sourceToneLabel(tone, count)}
-                    </span>
-                  </div>
-                )
-              })}
-            </div>
-            {referenceSourceEntries.length > 0 && (
-              <div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setShowReferenceSources((prev) => !prev)}
-                  className="h-6 px-1 text-[10px] text-muted-foreground"
-                >
-                  {showReferenceSources ? 'Hide reference sources' : 'Show reference sources'}
-                </Button>
-                {showReferenceSources && (
-                  <div className="mt-1 grid grid-cols-1 md:grid-cols-2 gap-2">
-                    {referenceSourceEntries.map(([name, details]) => {
-                      const tone = classifySourceTone(details)
-                      const count = Number(details?.count ?? 0)
-                      return (
-                        <div key={name} className="flex items-center justify-between rounded bg-background/50 px-2 py-1.5 text-[11px]">
-                          <span className="font-mono text-muted-foreground">{name}</span>
-                          <span className={cn('font-mono', sourceToneClasses(tone))}>
-                            {sourceToneLabel(tone, count)}
-                          </span>
-                        </div>
-                      )
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        ) : (
-          <div className="text-[11px] text-muted-foreground">
-            Source telemetry not available yet.
-          </div>
-        )}
-        {sourceErrors.length > 0 && (
-          <div className="mt-2 text-[11px] text-red-400">
-            {sourceErrors[0]}
-          </div>
-        )}
-      </div>
-
-      {/* Stat Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <StatCard label="Critical Signals" value={criticalSignalCount} icon={AlertTriangle} color="text-red-400" />
-        <StatCard label="Countries at Risk" value={summary?.critical_countries?.length || 0} icon={Globe} color="text-orange-400" />
-        <StatCard label="High Tensions" value={summary?.high_tensions?.length || 0} icon={Swords} color="text-yellow-400" />
-        <StatCard label="Anomalies" value={summary?.critical_anomalies || 0} icon={Zap} color="text-cyan-400" />
-      </div>
-
-      {/* Critical Countries */}
-      {summary?.critical_countries && summary.critical_countries.length > 0 && (
-        <div className="p-3 rounded-lg bg-card border border-border">
-          <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Critical Countries (CII {'>'}60)</h3>
-          <div className="space-y-1.5">
-            {summary.critical_countries.map((c) => (
-              <div key={c.iso3} className="flex items-center justify-between py-1 px-2 rounded bg-background/50">
-                <div className="flex items-center gap-2">
-                  <span className="font-mono text-xs font-semibold">{normalizeCountryCode(c.iso3 || c.country || '') || c.iso3}</span>
-                  <span className="text-sm">{formatCountry(c.country || c.iso3)}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <TrendIndicator trend={c.trend} />
-                  <span className={cn('font-mono text-sm font-bold', c.score >= 80 ? 'text-red-400' : c.score >= 60 ? 'text-orange-400' : 'text-yellow-400')}>
-                    {c.score.toFixed(0)}
-                  </span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* High Tensions */}
-      {summary?.high_tensions && summary.high_tensions.length > 0 && (
-        <div className="p-3 rounded-lg bg-card border border-border">
-          <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Elevated Tensions</h3>
-          <div className="space-y-1.5">
-            {summary.high_tensions.map((t) => (
-              <div key={t.pair} className="flex items-center justify-between py-1 px-2 rounded bg-background/50">
-                <div className="flex items-center gap-2">
-                  <Swords className="w-3 h-3 text-orange-400" />
-                  <span className="text-sm">{displayPair(t.pair)}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <TrendIndicator trend={t.trend} />
-                  <span className="font-mono text-sm font-bold text-orange-400">{t.score.toFixed(0)}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Top Signals */}
-      {signalsData?.signals && signalsData.signals.length > 0 && (
-        <div className="p-3 rounded-lg bg-card border border-border">
-          <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Top Signals</h3>
-          <div className="space-y-2">
-            {signalsData.signals.map((s) => (
-              <SignalRow key={s.signal_id} signal={s} />
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-function StatCard({ label, value, icon: Icon, color }: { label: string; value: number; icon: React.ElementType; color: string }) {
-  return (
-    <div className="p-3 rounded-lg bg-card border border-border">
-      <div className="flex items-center gap-2 mb-1">
-        <Icon className={cn('w-3.5 h-3.5', color)} />
-        <span className="text-[10px] text-muted-foreground uppercase tracking-wider">{label}</span>
-      </div>
-      <span className="text-2xl font-mono font-bold">{value}</span>
-    </div>
+    <Badge variant="outline" className={cn('text-[10px] font-mono', color)}>
+      MR {(score * 100).toFixed(0)}%
+    </Badge>
   )
 }
 
 function SignalRow({ signal }: { signal: WorldSignal }) {
+  const [expanded, setExpanded] = useState(false)
   const config = SIGNAL_TYPE_CONFIG[signal.signal_type] || SIGNAL_TYPE_CONFIG.conflict
   const Icon = config.icon
 
+  const metadataChips = useMemo(() => {
+    const chipDefs = METADATA_CHIPS_CONFIG[signal.signal_type] || []
+    const meta = signal.metadata
+    if (!meta) return []
+    return chipDefs
+      .filter((def) => meta[def.key] != null && meta[def.key] !== '')
+      .map((def) => ({
+        key: def.key,
+        label: def.label,
+        value: def.format ? def.format(meta[def.key]) : String(meta[def.key]),
+      }))
+  }, [signal.signal_type, signal.metadata])
+
   return (
-    <div className="flex items-start gap-2 py-1.5 px-2 rounded bg-background/50 hover:bg-background/80 transition-colors">
-      <Icon className={cn('w-4 h-4 mt-0.5 shrink-0', config.color)} />
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium truncate">{signal.title}</span>
-          <SeverityBadge severity={signal.severity} />
-        </div>
-        <div className="flex items-center gap-2 text-[10px] text-muted-foreground mt-0.5">
-          {signal.country && <span>{formatCountry(signal.country)}</span>}
-          <span>·</span>
-          <span>{signal.source}</span>
-          {signal.detected_at && (
-            <>
-              <span>·</span>
-              <span>{new Date(signal.detected_at).toLocaleTimeString()}</span>
-            </>
+    <div
+      className="py-1.5 px-2 rounded bg-background/50 hover:bg-background/80 transition-colors cursor-pointer"
+      onClick={() => setExpanded((v) => !v)}
+    >
+      <div className="flex items-start gap-2">
+        <Icon className={cn('w-4 h-4 mt-0.5 shrink-0', config.color)} />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium truncate">{signal.title}</span>
+            <SeverityBadge severity={signal.severity} />
+            <MarketRelevanceBadge score={signal.market_relevance_score} />
+          </div>
+          <div className="flex items-center gap-2 text-[10px] text-muted-foreground mt-0.5">
+            {signal.country && <span>{formatCountry(signal.country)}</span>}
+            <span>·</span>
+            <span>{signal.source}</span>
+            {signal.detected_at && (
+              <>
+                <span>·</span>
+                <span>{new Date(signal.detected_at).toLocaleTimeString()}</span>
+              </>
+            )}
+          </div>
+          {signal.related_market_ids && signal.related_market_ids.length > 0 && (
+            <div className="flex items-center gap-1 mt-1">
+              <MapPin className="w-3 h-3 text-primary" />
+              <span className="text-[10px] text-primary">{signal.related_market_ids.length} related market{signal.related_market_ids.length > 1 ? 's' : ''}</span>
+            </div>
           )}
         </div>
-        {signal.related_market_ids && signal.related_market_ids.length > 0 && (
-          <div className="flex items-center gap-1 mt-1">
-            <MapPin className="w-3 h-3 text-primary" />
-            <span className="text-[10px] text-primary">{signal.related_market_ids.length} related market{signal.related_market_ids.length > 1 ? 's' : ''}</span>
-          </div>
-        )}
+        <div className="shrink-0 mt-0.5 text-muted-foreground">
+          {expanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+        </div>
       </div>
+      {expanded && (
+        <div className="mt-2 ml-6 space-y-1.5">
+          {signal.description && (
+            <p className="text-xs text-muted-foreground">{signal.description}</p>
+          )}
+          {metadataChips.length > 0 && (
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {metadataChips.map((chip) => (
+                <Badge key={chip.key} variant="outline" className="text-[9px] h-4 px-1.5 bg-muted/30 border-border/40 font-mono">
+                  {chip.label}: {chip.value}
+                </Badge>
+              ))}
+            </div>
+          )}
+          {signal.latitude != null && signal.longitude != null && (
+            <div className="text-[10px] text-muted-foreground font-mono">
+              {signal.latitude.toFixed(2)}, {signal.longitude.toFixed(2)}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SignalTypeSummaryBar({ signals }: { signals: WorldSignal[] }) {
+  const counts = useMemo(() => {
+    const map: Record<string, number> = {}
+    for (const s of signals) {
+      map[s.signal_type] = (map[s.signal_type] || 0) + 1
+    }
+    return Object.entries(map).sort((a, b) => b[1] - a[1])
+  }, [signals])
+
+  if (counts.length === 0) return null
+
+  return (
+    <div className="flex items-center gap-1.5 flex-wrap">
+      {counts.map(([type, count]) => {
+        const config = SIGNAL_TYPE_CONFIG[type] || SIGNAL_TYPE_CONFIG.conflict
+        return (
+          <Badge key={type} variant="outline" className={cn('text-[9px] h-5 px-1.5 gap-1 font-data', config.color, 'bg-transparent border-current/20')}>
+            {config.label} {count}
+          </Badge>
+        )
+      })}
     </div>
   )
 }
@@ -400,6 +267,10 @@ function SignalsView({ isConnected }: { isConnected: boolean }) {
           </SelectContent>
         </Select>
       </div>
+
+      {!isLoading && !isError && data?.signals && data.signals.length > 0 && (
+        <SignalTypeSummaryBar signals={data.signals} />
+      )}
 
       {isLoading ? (
         <div className="text-center text-muted-foreground py-8">Loading signals...</div>
@@ -605,13 +476,45 @@ function AnomaliesView({ isConnected }: { isConnected: boolean }) {
 
 const SUB_NAV: { id: WorldSubView; label: string; icon: React.ElementType }[] = [
   { id: 'map', label: 'Map', icon: MapIcon },
-  { id: 'overview', label: 'Overview', icon: Globe },
   { id: 'signals', label: 'Signals', icon: Radio },
 ]
 
-export default function WorldIntelligencePanel({ isConnected = true }: { isConnected?: boolean }) {
-  const [subView, setSubView] = useState<WorldSubView>('map')
+export default function WorldIntelligencePanel({
+  isConnected = true,
+  eventsOnly = false,
+}: {
+  isConnected?: boolean
+  eventsOnly?: boolean
+}) {
+  const [subView, setSubView] = useState<WorldSubView>(eventsOnly ? 'signals' : 'map')
   const [settingsOpen, setSettingsOpen] = useState(false)
+
+  if (eventsOnly) {
+    return (
+      <div className="h-full min-h-0 flex flex-col overflow-hidden">
+        <div className="flex items-center justify-end px-4 py-2 border-b border-border bg-card/50 shrink-0">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 text-xs gap-1 shrink-0"
+            onClick={() => setSettingsOpen(true)}
+          >
+            <Settings className="w-3.5 h-3.5" />
+            Settings
+          </Button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4">
+          <ErrorBoundary fallback={<div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-500">This world intelligence view failed to render.</div>}>
+            <SignalsView isConnected={isConnected} />
+          </ErrorBoundary>
+        </div>
+        <WorldIntelligenceSettingsFlyout
+          isOpen={settingsOpen}
+          onClose={() => setSettingsOpen(false)}
+        />
+      </div>
+    )
+  }
 
   return (
     <div className="h-full min-h-0 flex flex-col overflow-hidden">
@@ -652,7 +555,6 @@ export default function WorldIntelligencePanel({ isConnected = true }: { isConne
       ) : (
         <div className="flex-1 overflow-y-auto p-4">
           <ErrorBoundary fallback={<div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-500">This world intelligence view failed to render.</div>}>
-            {subView === 'overview' && <OverviewView isConnected={isConnected} />}
             {subView === 'signals' && <SignalsView isConnected={isConnected} />}
             {subView === 'countries' && <CountriesView isConnected={isConnected} />}
             {subView === 'tensions' && <TensionsView isConnected={isConnected} />}
