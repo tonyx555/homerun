@@ -139,25 +139,17 @@ WORKER_TAG_TO_NAME: dict[str, str] = {
 }
 
 WORKER_BACKEND_HINTS: tuple[tuple[str, str], ...] = (
-    # Workers now run in-process inside the API lifespan (Phase 4).
+    # Workers run in-process inside the API lifespan (Phase 4).
+    # Backend log lines are matched to worker panels via these hints.
+    ("scanner", "scanner"),
+    ("discovery", "discovery"),
+    ("weather", "weather"),
+    ("news_worker", "news"),
+    ("crypto_worker", "crypto"),
+    ("tracked_traders", "tracked_traders"),
+    ("orchestrator", "trader_orchestrator"),
+    ("world_intel", "world_intelligence"),
 )
-
-WORKER_PROCESS_SPECS: tuple[tuple[str, str, str, str, str], ...] = (
-    # Workers now run in-process inside the API lifespan (Phase 4).
-)
-WORKER_SPEC_BY_NAME: dict[str, dict[str, str]] = {
-    worker_name: {
-        "attr": attr,
-        "module_name": module_name,
-        "tag": tag,
-        "label": label,
-    }
-    for worker_name, attr, module_name, tag, label in WORKER_PROCESS_SPECS
-}
-WORKER_AUTORESTART_BASE_DELAY_SECONDS = 2.0
-WORKER_AUTORESTART_MAX_DELAY_SECONDS = 30.0
-WORKER_AUTORESTART_MAX_ATTEMPTS_PER_WINDOW = 6
-WORKER_AUTORESTART_WINDOW_SECONDS = 180.0
 
 SOURCE_FILTER_BY_BUTTON: dict[str, str] = {
     "src-all": "all",
@@ -733,15 +725,7 @@ class HomerunApp(App):
         Binding("ctrl+c", "copy_to_clip", "Copy", show=False, priority=True),
     ]
 
-    # Process handles
-    scanner_worker_proc: Optional[subprocess.Popen] = None
-    discovery_worker_proc: Optional[subprocess.Popen] = None
-    weather_worker_proc: Optional[subprocess.Popen] = None
-    news_worker_proc: Optional[subprocess.Popen] = None
-    crypto_worker_proc: Optional[subprocess.Popen] = None
-    tracked_worker_proc: Optional[subprocess.Popen] = None
-    trader_orchestrator_worker_proc: Optional[subprocess.Popen] = None
-    world_intel_worker_proc: Optional[subprocess.Popen] = None
+    # Process handles (workers run in-process inside the API; only backend + frontend are subprocesses)
     backend_proc: Optional[subprocess.Popen] = None
     frontend_proc: Optional[subprocess.Popen] = None
 
@@ -787,13 +771,6 @@ class HomerunApp(App):
         self._worker_last_state: dict[str, str] = {}
         self._worker_last_activity: dict[str, str] = {}
         self._worker_last_error: dict[str, str] = {}
-        self._worker_spawn_python: Optional[Path] = None
-        self._worker_spawn_env: Optional[dict[str, str]] = None
-        self._worker_restart_attempts: dict[str, collections.deque[float]] = {
-            name: collections.deque(maxlen=32) for name, _ in WORKER_STATUS_ORDER
-        }
-        self._worker_restart_scheduled: set[str] = set()
-        self._suppress_worker_autorestart = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -1397,7 +1374,6 @@ class HomerunApp(App):
         self._log_activity("[yellow]Restart requested[/]")
         self._enqueue_log(">>> Restarting services...", source="SYSTEM", level="INFO")
         self._frontend_starting = False
-        self._suppress_worker_autorestart = True
         self._kill_children()
         kill_port(BACKEND_PORT)
         kill_port(FRONTEND_PORT)
@@ -1518,7 +1494,6 @@ class HomerunApp(App):
             return
 
         self._frontend_starting = False
-        self._suppress_worker_autorestart = True
         self._kill_children()
         kill_port(BACKEND_PORT)
         kill_port(FRONTEND_PORT)
@@ -1533,151 +1508,6 @@ class HomerunApp(App):
         )
         self._service_op_in_progress = False
         self.call_from_thread(self._set_action_buttons_enabled, True)
-
-    def _spawn_worker_process(
-        self,
-        venv_python: Path,
-        env: dict[str, str],
-        module_name: str,
-        tag: str,
-        label: str,
-    ) -> Optional[subprocess.Popen]:
-        self._enqueue_log(
-            f">>> Starting {label} worker...", source="BACKEND", level="INFO"
-        )
-        try:
-            proc = subprocess.Popen(
-                [
-                    str(venv_python),
-                    "-m",
-                    module_name,
-                ],
-                cwd=str(BACKEND_DIR),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                env=env,
-            )
-            _assign_to_job(proc)
-            worker_stream = threading.Thread(
-                target=self._stream_output,
-                args=(proc, tag),
-                daemon=True,
-                name=f"{tag.lower()}-stream",
-            )
-            worker_stream.start()
-            return proc
-        except Exception as exc:
-            self._enqueue_log(
-                f"{label.capitalize()} worker failed to start (non-fatal): {exc}",
-                source="BACKEND",
-                level="WARNING",
-            )
-            return None
-
-    def _prune_worker_restart_attempts(self, worker_name: str, now_monotonic: float) -> collections.deque[float]:
-        history = self._worker_restart_attempts.setdefault(
-            worker_name,
-            collections.deque(maxlen=32),
-        )
-        cutoff = now_monotonic - WORKER_AUTORESTART_WINDOW_SECONDS
-        while history and history[0] < cutoff:
-            history.popleft()
-        return history
-
-    def _schedule_worker_restart(self, worker_name: str, *, reason: str) -> None:
-        if self._shutting_down or self._suppress_worker_autorestart:
-            return
-        if worker_name in self._worker_restart_scheduled:
-            return
-        spec = WORKER_SPEC_BY_NAME.get(worker_name)
-        if spec is None:
-            return
-
-        now_monotonic = time.monotonic()
-        history = self._prune_worker_restart_attempts(worker_name, now_monotonic)
-        if len(history) >= WORKER_AUTORESTART_MAX_ATTEMPTS_PER_WINDOW:
-            self._enqueue_log(
-                (
-                    f"[{worker_name}] Auto-restart paused after "
-                    f"{WORKER_AUTORESTART_MAX_ATTEMPTS_PER_WINDOW} attempts in "
-                    f"{int(WORKER_AUTORESTART_WINDOW_SECONDS)}s window."
-                ),
-                source="SYSTEM",
-                level="ERROR",
-            )
-            return
-
-        attempt = len(history) + 1
-        delay = min(
-            WORKER_AUTORESTART_MAX_DELAY_SECONDS,
-            WORKER_AUTORESTART_BASE_DELAY_SECONDS * (2 ** max(0, attempt - 1)),
-        )
-        history.append(now_monotonic)
-        self._worker_restart_scheduled.add(worker_name)
-        self._enqueue_log(
-            f"[{worker_name}] Auto-restart scheduled in {delay:.1f}s ({reason})",
-            source="SYSTEM",
-            level="WARNING",
-        )
-        self.set_timer(
-            delay,
-            lambda: self._restart_worker_now(worker_name),
-        )
-
-    def _restart_worker_now(self, worker_name: str) -> None:
-        self._worker_restart_scheduled.discard(worker_name)
-        if self._shutting_down or self._suppress_worker_autorestart:
-            return
-
-        spec = WORKER_SPEC_BY_NAME.get(worker_name)
-        if spec is None:
-            return
-
-        attr = spec["attr"]
-        proc: Optional[subprocess.Popen] = getattr(self, attr, None)
-        if proc is not None and proc.poll() is None:
-            return
-
-        if self._worker_spawn_python is None or self._worker_spawn_env is None:
-            self._enqueue_log(
-                f"[{worker_name}] Auto-restart skipped: worker spawn context unavailable.",
-                source="SYSTEM",
-                level="ERROR",
-            )
-            return
-
-        restarted = self._spawn_worker_process(
-            self._worker_spawn_python,
-            self._worker_spawn_env,
-            spec["module_name"],
-            spec["tag"],
-            spec["label"],
-        )
-        setattr(self, attr, restarted)
-        if restarted is None:
-            self._schedule_worker_restart(worker_name, reason="spawn_failed")
-
-    def _handle_worker_exit(self, tag: str, pid: int) -> None:
-        if self._shutting_down or self._suppress_worker_autorestart:
-            return
-
-        worker_name = WORKER_TAG_TO_NAME.get(tag)
-        if worker_name is None:
-            return
-
-        spec = WORKER_SPEC_BY_NAME.get(worker_name)
-        if spec is None:
-            return
-
-        attr = spec["attr"]
-        proc: Optional[subprocess.Popen] = getattr(self, attr, None)
-        if proc is not None and proc.pid != pid:
-            return
-        if proc is not None and proc.poll() is None:
-            return
-
-        setattr(self, attr, None)
-        self._schedule_worker_restart(worker_name, reason=f"process_exit pid={pid}")
 
     def _frontend_alive(self) -> bool:
         return self.frontend_proc is not None and self.frontend_proc.poll() is None
@@ -1696,12 +1526,14 @@ class HomerunApp(App):
     # ---- Start backend & frontend as subprocesses ----
     @work(thread=True)
     def _start_services(self) -> None:
+        """Start the backend (uvicorn) subprocess.
+
+        Workers run in-process inside the backend's asyncio event loop
+        (started as asyncio.create_task in main.py lifespan).  The TUI
+        only manages backend + frontend as OS-level subprocesses.
+        """
         self._log_activity("[bold cyan]Starting services...[/]")
         self.call_from_thread(self._reset_worker_telemetry)
-        self._suppress_worker_autorestart = True
-        self._worker_restart_scheduled.clear()
-        for queue in self._worker_restart_attempts.values():
-            queue.clear()
 
         # Kill stale processes
         kill_port(BACKEND_PORT)
@@ -1719,7 +1551,6 @@ class HomerunApp(App):
                 source="BACKEND",
                 level="ERROR",
             )
-            self._suppress_worker_autorestart = False
             return
 
         env = os.environ.copy()
@@ -1742,25 +1573,6 @@ class HomerunApp(App):
         env.setdefault("NEWS_FAISS_THREADS", "1")
         env.setdefault("TOKENIZERS_PARALLELISM", "false")
         env.setdefault("EMBEDDING_DEVICE", "cpu")
-        self._worker_spawn_python = venv_python
-        self._worker_spawn_env = dict(env)
-
-        for worker_name, attr, module_name, tag, label in WORKER_PROCESS_SPECS:
-            proc = self._spawn_worker_process(
-                venv_python,
-                env,
-                module_name,
-                tag,
-                label,
-            )
-            setattr(self, attr, proc)
-            if proc is None:
-                self.call_from_thread(
-                    lambda wn=worker_name: self._schedule_worker_restart(
-                        wn,
-                        reason="initial_spawn_failed",
-                    )
-                )
 
         self._enqueue_log(
             ">>> Starting backend (uvicorn)...", source="BACKEND", level="INFO"
@@ -1792,10 +1604,8 @@ class HomerunApp(App):
                 source="BACKEND",
                 level="ERROR",
             )
-            self._suppress_worker_autorestart = False
             return
 
-        self._suppress_worker_autorestart = False
         # Stream backend output in a thread
         self._stream_output(self.backend_proc, "BACKEND")
 
@@ -1861,11 +1671,6 @@ class HomerunApp(App):
                 self._frontend_starting = False
             if not self._shutting_down:
                 self._enqueue_log(f"[{tag}] Process exited", source=tag, level="INFO")
-                if tag in WORKER_TAG_TO_NAME:
-                    try:
-                        self.call_from_thread(self._handle_worker_exit, tag, int(proc.pid))
-                    except Exception:
-                        pass
 
     # ---- Activity hooks (reserved for future system feed) ----
     def _log_activity(self, text: str) -> None:
@@ -1962,31 +1767,27 @@ class HomerunApp(App):
         return by_name
 
     def _fallback_worker_snapshot(self, worker_name: str, services: dict) -> dict:
+        """Build a minimal worker snapshot from the services section of /health.
+
+        Workers run in-process inside the backend, so there are no separate
+        OS processes to check.  We infer running state from the services
+        sub-keys that the health endpoint already exposes.
+        """
         running = False
         if worker_name == "scanner":
             running = bool(services.get("scanner", {}).get("running", False))
         elif worker_name == "discovery":
             running = bool(services.get("wallet_discovery", {}).get("running", False))
-        elif worker_name == "weather":
-            running = bool(
-                self.weather_worker_proc is not None and self.weather_worker_proc.poll() is None
-            )
         elif worker_name == "news":
             running = bool(services.get("news_workflow", {}).get("running", False))
         elif worker_name == "trader_orchestrator":
             running = bool(services.get("trader_orchestrator", {}).get("running", False))
-        elif worker_name == "crypto":
-            running = bool(
-                self.crypto_worker_proc is not None and self.crypto_worker_proc.poll() is None
-            )
-        elif worker_name == "tracked_traders":
-            running = bool(
-                self.tracked_worker_proc is not None and self.tracked_worker_proc.poll() is None
-            )
-        elif worker_name == "world_intelligence":
-            running = bool(
-                self.world_intel_worker_proc is not None and self.world_intel_worker_proc.poll() is None
-            )
+        else:
+            # crypto, weather, tracked_traders, world_intelligence — no dedicated
+            # services key; they report via worker_snapshots which the main
+            # workers dict already covers.  If we got here, health didn't include
+            # a snapshot yet (worker hasn't completed its first cycle).
+            running = False
         return {
             "running": running,
             "enabled": True,
@@ -2049,25 +1850,13 @@ class HomerunApp(App):
             self._worker_state_cache[worker_name] = {}
             self._render_worker_panel(worker_name)
 
-    # Map worker names to their Popen attribute on self
-    _WORKER_PROC_ATTR: dict[str, str] = {
-        worker_name: attr for worker_name, attr, _module_name, _tag, _label in WORKER_PROCESS_SPECS
-    }
-
     def _update_workers_from_processes(self) -> None:
-        """Update worker panels based on whether their OS process is still alive.
+        """Mark all worker panels offline when backend health is unreachable.
 
-        This is used when the backend health endpoint is unreachable so we
-        cannot get rich telemetry, but the worker subprocesses may still be
-        running fine (they are independent of the API server).
+        Workers run in-process inside the backend, so if the backend is down,
+        workers are down too.
         """
-        for worker_name, _worker_label in WORKER_STATUS_ORDER:
-            attr = self._WORKER_PROC_ATTR.get(worker_name)
-            proc: Optional[subprocess.Popen] = getattr(self, attr, None) if attr else None
-            alive = proc is not None and proc.poll() is None
-            snapshot: dict = {"running": alive, "enabled": True}
-            self._worker_state_cache[worker_name] = snapshot
-            self._render_worker_panel(worker_name)
+        self._set_workers_offline()
 
     def _resolve_worker_state(self, snapshot: dict) -> tuple[str, str]:
         if not snapshot:
@@ -2195,32 +1984,23 @@ class HomerunApp(App):
     # ---- Cleanup ----
     def on_unmount(self) -> None:
         self._shutting_down = True
-        self._suppress_worker_autorestart = True
         self._kill_children()
 
     def action_quit(self) -> None:
         self._shutting_down = True
-        self._suppress_worker_autorestart = True
         self.notify("Shutting down...", severity="warning", timeout=10)
         self._kill_children()
         self.exit()
 
     def _kill_children(self) -> None:
-        """Kill child processes and close their pipes to unblock reader threads."""
+        """Kill child processes and close their pipes to unblock reader threads.
+
+        Workers run in-process inside the backend; killing the backend process
+        stops all workers too.  Only backend + frontend are OS subprocesses.
+        """
         procs = [
             p
-            for p in (
-                self.scanner_worker_proc,
-                self.discovery_worker_proc,
-                self.weather_worker_proc,
-                self.news_worker_proc,
-                self.crypto_worker_proc,
-                self.tracked_worker_proc,
-                self.trader_orchestrator_worker_proc,
-                self.world_intel_worker_proc,
-                self.backend_proc,
-                self.frontend_proc,
-            )
+            for p in (self.backend_proc, self.frontend_proc)
             if p and p.poll() is None
         ]
         # Kill all child processes (non-blocking).
