@@ -1,8 +1,16 @@
-"""Lightweight in-process async event bus.
+"""WebSocket broadcast bus — pushes real-time updates to connected frontend clients.
 
-Workers publish events when they produce new data; the SnapshotBroadcaster
-(and any other interested consumer) subscribes and reacts immediately rather
-than polling the database.
+**Purpose**: Workers publish events (scanner snapshot, signal updates, worker
+status changes) when they produce new data. The ``SnapshotBroadcaster``
+subscribes here and forwards deltas to all connected WebSocket clients so
+the frontend receives live updates without polling.
+
+**Not for strategy routing.** Strategies subscribe to ``DataEvent`` objects
+via ``event_dispatcher`` (``services.event_dispatcher``), not this bus.
+The two systems serve different purposes:
+
+- ``event_bus`` → frontend WebSocket broadcast (UI live updates)
+- ``event_dispatcher`` → strategy DataEvent routing (trading logic)
 
 Thread-safe: ``publish()`` can be called from any asyncio task in the same
 event loop.  Subscribers are invoked concurrently via ``asyncio.create_task``

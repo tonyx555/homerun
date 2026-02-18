@@ -41,7 +41,7 @@ from collections import defaultdict
 
 import httpx
 
-from models import Market, Event, ArbitrageOpportunity
+from models import Market, Event, Opportunity
 from config import settings
 from .base import BaseStrategy, ExitDecision, ScoringWeights, SizingConfig
 from utils.logger import get_logger
@@ -919,7 +919,7 @@ class CrossPlatformStrategy(BaseStrategy):
         events: list[Event],
         markets: list[Market],
         prices: dict[str, dict],
-    ) -> list[ArbitrageOpportunity]:
+    ) -> list[Opportunity]:
         """Detect cross-platform arbitrage opportunities.
 
         Takes Polymarket events/markets/prices as input (standard interface),
@@ -961,7 +961,7 @@ class CrossPlatformStrategy(BaseStrategy):
                 len(multiway_events),
             )
 
-        opportunities: list[ArbitrageOpportunity] = []
+        opportunities: list[Opportunity] = []
         pairs_checked = 0
         pairs_matched = 0
         outcome_rejections = 0

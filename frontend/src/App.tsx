@@ -113,13 +113,13 @@ const ITEMS_PER_PAGE = 20
 
 const NAV_ITEMS: { id: Tab; icon: React.ElementType; label: string; shortcut: string }[] = [
   { id: 'opportunities', icon: Zap, label: 'Opportunities', shortcut: '1' },
-  { id: 'data', icon: Database, label: 'Data', shortcut: 'D' },
-  { id: 'trading', icon: Bot, label: 'Trader', shortcut: '2' },
-  { id: 'strategies', icon: Layers3, label: 'Strategies', shortcut: '3' },
-  { id: 'accounts', icon: Wallet, label: 'Accounts', shortcut: '4' },
-  { id: 'traders', icon: Users, label: 'Traders', shortcut: '5' },
+  { id: 'trading', icon: Bot, label: 'Bots', shortcut: '2' },
   { id: 'positions', icon: Briefcase, label: 'Positions', shortcut: '6' },
   { id: 'performance', icon: BarChart3, label: 'Performance', shortcut: '7' },
+  { id: 'accounts', icon: Wallet, label: 'Accounts', shortcut: '4' },
+  { id: 'strategies', icon: Layers3, label: 'Strategies', shortcut: '3' },
+  { id: 'traders', icon: Users, label: 'Traders', shortcut: '5' },
+  { id: 'data', icon: Database, label: 'Data', shortcut: 'D' },
   { id: 'ai', icon: Brain, label: 'AI', shortcut: '8' },
   { id: 'settings', icon: Settings, label: 'Settings', shortcut: '9' },
 ]
@@ -874,13 +874,13 @@ function App() {
   // Keyboard shortcuts
   const shortcuts: Shortcut[] = useMemo(() => [
     { key: '1', description: 'Go to Opportunities', category: 'Navigation', action: () => setActiveTab('opportunities') },
-    { key: 'd', description: 'Go to Data', category: 'Navigation', action: () => setActiveTab('data') },
-    { key: '2', description: 'Go to Trading', category: 'Navigation', action: () => setActiveTab('trading') },
-    { key: '3', description: 'Go to Strategies', category: 'Navigation', action: () => setActiveTab('strategies') },
-    { key: '4', description: 'Go to Accounts', category: 'Navigation', action: () => setActiveTab('accounts') },
-    { key: '5', description: 'Go to Traders', category: 'Navigation', action: () => setActiveTab('traders') },
+    { key: '2', description: 'Go to Bots', category: 'Navigation', action: () => setActiveTab('trading') },
     { key: '6', description: 'Go to Positions', category: 'Navigation', action: () => setActiveTab('positions') },
     { key: '7', description: 'Go to Performance', category: 'Navigation', action: () => setActiveTab('performance') },
+    { key: '4', description: 'Go to Accounts', category: 'Navigation', action: () => setActiveTab('accounts') },
+    { key: '3', description: 'Go to Strategies', category: 'Navigation', action: () => setActiveTab('strategies') },
+    { key: '5', description: 'Go to Traders', category: 'Navigation', action: () => setActiveTab('traders') },
+    { key: 'd', description: 'Go to Data', category: 'Navigation', action: () => setActiveTab('data') },
     { key: '8', description: 'Go to AI', category: 'Navigation', action: () => setActiveTab('ai') },
     { key: '9', description: 'Go to Settings', category: 'Navigation', action: () => setActiveTab('settings') },
     { key: 'k', ctrl: true, description: 'Open AI Command Bar', category: 'Actions', action: () => setCommandBarOpen(v => !v) },

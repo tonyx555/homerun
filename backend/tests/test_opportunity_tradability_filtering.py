@@ -7,13 +7,13 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from models.opportunity import ArbitrageOpportunity
+from models.opportunity import Opportunity
 from services import market_tradability, shared_state
 from services.weather import shared_state as weather_shared_state
 
 
-def _opp(market_id: str) -> ArbitrageOpportunity:
-    return ArbitrageOpportunity(
+def _opp(market_id: str) -> Opportunity:
+    return Opportunity(
         strategy="basic",
         title=f"Opp {market_id}",
         description="test",
@@ -28,8 +28,8 @@ def _opp(market_id: str) -> ArbitrageOpportunity:
     )
 
 
-def _report_only_opp(market_id: str) -> ArbitrageOpportunity:
-    return ArbitrageOpportunity(
+def _report_only_opp(market_id: str) -> Opportunity:
+    return Opportunity(
         strategy="weather_edge",
         title=f"Report {market_id}",
         description="report only",

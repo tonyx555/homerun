@@ -37,7 +37,7 @@ homerun/
 │   │   ├── routes_crypto.py
 │   │   └── websocket.py        # WebSocket connection manager
 │   ├── models/
-│   │   ├── opportunity.py      # ArbitrageOpportunity Pydantic model
+│   │   ├── opportunity.py      # Opportunity Pydantic model
 │   │   └── database.py         # SQLAlchemy ORM models + session factory
 │   ├── services/
 │   │   ├── strategies/         # Arbitrage detection strategies
@@ -143,7 +143,7 @@ PositionSide: YES | NO
 CopyTradingMode: ALL_TRADES | ARB_ONLY
 ```
 
-### The Core Data Object: ArbitrageOpportunity
+### The Core Data Object: Opportunity
 
 Defined in `backend/models/opportunity.py`. This is the single most important model in the system. Every strategy produces these, every UI component consumes them. Key fields:
 
@@ -167,8 +167,8 @@ Every strategy extends `BaseStrategy` from `backend/services/strategies/base.py`
 
 Required:
 - Set class attributes: `strategy_type`, `name`, `description`
-- Implement `detect(events, markets, prices) -> list[ArbitrageOpportunity]` for sync work
-- OR implement `async detect_async(events, markets, prices) -> list[ArbitrageOpportunity]` for I/O-bound work
+- Implement `detect(events, markets, prices) -> list[Opportunity]` for sync work
+- OR implement `async detect_async(events, markets, prices) -> list[Opportunity]` for I/O-bound work
 
 Optional overrides:
 - `evaluate(signal, context) -> StrategyDecision` — execution gating during orchestrator phase

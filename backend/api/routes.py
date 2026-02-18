@@ -10,7 +10,7 @@ from utils.utcnow import utcnow, utcfromtimestamp
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sqlalchemy import select
-from models import ArbitrageOpportunity, OpportunityFilter
+from models import Opportunity, OpportunityFilter
 from models.database import (
     AsyncSessionLocal,
     Strategy,
@@ -549,7 +549,7 @@ async def get_opportunity_counts(
     }
 
 
-@router.get("/opportunities/{opportunity_id}", response_model=ArbitrageOpportunity)
+@router.get("/opportunities/{opportunity_id}", response_model=Opportunity)
 async def get_opportunity(
     opportunity_id: str,
     source: Literal["markets", "traders", "all"] = Query(

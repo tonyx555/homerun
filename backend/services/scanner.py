@@ -10,7 +10,7 @@ from typing import Optional, Callable, List, Set
 
 from config import settings
 from interfaces import MarketDataProvider
-from models import ArbitrageOpportunity, OpportunityFilter
+from models import Opportunity, OpportunityFilter
 from models.opportunity import AIAnalysis, MispricingType
 from models.database import AsyncSessionLocal, ScannerSettings, OpportunityJudgment
 from services.strategy_loader import strategy_loader
@@ -23,14 +23,6 @@ from services.ws_feeds import get_feed_manager
 from services.quality_filter import quality_filter
 from services.data_events import DataEvent, EventType
 from services.event_dispatcher import event_dispatcher
-from services.strategies.basic import BasicArbStrategy
-from services.strategies.combinatorial import CombinatorialStrategy
-from services.strategies.contradiction import ContradictionStrategy
-from services.strategies.miracle import MiracleStrategy
-from services.strategies.must_happen import MustHappenStrategy
-from services.strategies.mutually_exclusive import MutuallyExclusiveStrategy
-from services.strategies.negrisk import NegRiskStrategy
-from services.strategies.settlement_lag import SettlementLagStrategy
 from sqlalchemy import select
 
 
@@ -60,7 +52,7 @@ class ArbitrageScanner:
         self._last_scan: Optional[datetime] = None
         self._last_full_scan: Optional[datetime] = None
         self._last_fast_scan: Optional[datetime] = None
-        self._opportunities: list[ArbitrageOpportunity] = []
+        self._opportunities: list[Opportunity] = []
         self._scan_callbacks: List[Callable] = []
         self._status_callbacks: List[Callable] = []
         self._activity_callbacks: List[Callable] = []
@@ -127,21 +119,7 @@ class ArbitrageScanner:
 
         # Test/runtime override hook for strategy lists.
         self._strategy_overrides: Optional[list] = None
-        self._legacy_default_strategies = self._build_default_strategies()
-        self._runtime_strategies_loaded_for_instance = False
-
-    @staticmethod
-    def _build_default_strategies() -> list:
-        return [
-            BasicArbStrategy(),
-            NegRiskStrategy(),
-            MutuallyExclusiveStrategy(),
-            ContradictionStrategy(),
-            MustHappenStrategy(),
-            MiracleStrategy(),
-            CombinatorialStrategy(),
-            SettlementLagStrategy(),
-        ]
+        self._plugins_loaded: bool = False
 
     @property
     def strategies(self) -> list:
@@ -363,7 +341,7 @@ class ArbitrageScanner:
             return None
         return yes_token, no_token
 
-    def _remember_market_tokens_from_opportunities(self, opportunities: list[ArbitrageOpportunity]) -> None:
+    def _remember_market_tokens_from_opportunities(self, opportunities: list[Opportunity]) -> None:
         """Cache YES/NO token IDs from opportunity market dicts."""
         for opp in opportunities:
             for market in opp.markets:
@@ -625,13 +603,13 @@ class ArbitrageScanner:
         event: DataEvent,
         *,
         full_market_snapshot: Optional[list] = None,
-    ) -> list[ArbitrageOpportunity]:
+    ) -> list[Opportunity]:
         """Dispatch market_data_refresh with per-strategy incremental/full routing."""
         incremental_slugs, full_slugs = self._partition_market_refresh_strategies()
         if not incremental_slugs and not full_slugs:
             return await event_dispatcher.dispatch(event)
 
-        all_opportunities: list[ArbitrageOpportunity] = []
+        all_opportunities: list[Opportunity] = []
         if incremental_slugs:
             all_opportunities.extend(await event_dispatcher.dispatch(event, include_strategies=incremental_slugs))
 
@@ -705,7 +683,7 @@ class ArbitrageScanner:
         return len(merged)
 
     async def _backfill_market_history_for_opportunities(
-        self, opportunities: list[ArbitrageOpportunity], now: datetime
+        self, opportunities: list[Opportunity], now: datetime
     ) -> None:
         """Backfill multi-hour YES/NO history for visible opportunities."""
         if not opportunities:
@@ -910,7 +888,7 @@ class ArbitrageScanner:
             )
 
     def get_market_history_for_opportunities(
-        self, opportunities: list[ArbitrageOpportunity], max_points: Optional[int] = None
+        self, opportunities: list[Opportunity], max_points: Optional[int] = None
     ) -> dict[str, list[dict[str, float]]]:
         """Return compact market history map for markets present in opportunities."""
         market_ids: set[str] = set()
@@ -931,7 +909,7 @@ class ArbitrageScanner:
 
     async def attach_price_history_to_opportunities(
         self,
-        opportunities: list[ArbitrageOpportunity],
+        opportunities: list[Opportunity],
         *,
         now: Optional[datetime] = None,
         timeout_seconds: Optional[float] = 12.0,
@@ -1045,22 +1023,16 @@ class ArbitrageScanner:
 
             loaded_count = len(result.get("loaded", []))
             error_count = len(result.get("errors", {}))
-            loaded_scanner_strategies = [
-                instance
-                for instance in strategy_loader.get_all_instances()
-                if getattr(instance, "worker_affinity", "scanner") == "scanner"
-            ]
-            self._runtime_strategies_loaded_for_instance = bool(loaded_scanner_strategies)
+            self._plugins_loaded = True
             if loaded_count > 0:
                 print(f"Loaded {loaded_count} strategies ({error_count} errors)")
         except Exception as e:
             print(f"Error loading strategies: {e}")
-            self._runtime_strategies_loaded_for_instance = False
 
     async def _ensure_runtime_strategies_loaded(self) -> None:
         if self._strategy_overrides is not None:
             return
-        if self._runtime_strategies_loaded_for_instance:
+        if self._plugins_loaded:
             return
         await self.load_plugins()
 
@@ -1072,13 +1044,9 @@ class ArbitrageScanner:
         """
         if self._strategy_overrides is not None:
             return list(self._strategy_overrides)
-        if not self._runtime_strategies_loaded_for_instance:
-            return list(self._legacy_default_strategies)
         plugin_strategies = strategy_loader.get_all_instances()
         scanner_strategies = [s for s in plugin_strategies if getattr(s, "worker_affinity", "scanner") == "scanner"]
-        if scanner_strategies:
-            return scanner_strategies
-        return list(self._legacy_default_strategies)
+        return scanner_strategies
 
     def _get_news_edge_helper(self):
         """Return the news_edge strategy instance for prefetch utilities."""
@@ -1105,7 +1073,7 @@ class ArbitrageScanner:
             return MispricingType.NEWS_INFORMATION
         return MispricingType.WITHIN_MARKET
 
-    def _hydrate_opportunity_defaults(self, opportunity: ArbitrageOpportunity, strategy: object) -> None:
+    def _hydrate_opportunity_defaults(self, opportunity: Opportunity, strategy: object) -> None:
         if not opportunity.strategy:
             opportunity.strategy = str(self._strategy_key(strategy) or "")
         if opportunity.mispricing_type is None:
@@ -1115,19 +1083,20 @@ class ArbitrageScanner:
             if default_mispricing is not None:
                 opportunity.mispricing_type = default_mispricing
 
-    async def _run_legacy_detection_cycle(
+    async def _run_override_strategies(
         self,
         *,
         events: list,
         markets: list,
         prices: dict,
-    ) -> list[ArbitrageOpportunity]:
-        opportunities: list[ArbitrageOpportunity] = []
-        for strategy in self._get_all_strategies():
+    ) -> list[Opportunity]:
+        """Run strategy overrides (test mode). Calls detect() directly."""
+        opportunities: list[Opportunity] = []
+        for strategy in self._strategy_overrides or []:
             try:
                 detect_async = getattr(strategy, "detect_async", None)
                 detect = getattr(strategy, "detect", None)
-                strategy_opportunities: list[ArbitrageOpportunity] = []
+                strategy_opportunities: list[Opportunity] = []
 
                 if inspect.iscoroutinefunction(detect_async):
                     strategy_opportunities = await detect_async(events, markets, prices)
@@ -1138,7 +1107,7 @@ class ArbitrageScanner:
                         strategy_opportunities = detect(events, markets, prices)
 
                 for opportunity in strategy_opportunities or []:
-                    if not isinstance(opportunity, ArbitrageOpportunity):
+                    if not isinstance(opportunity, Opportunity):
                         continue
                     self._hydrate_opportunity_defaults(opportunity, strategy)
                     opportunities.append(opportunity)
@@ -1165,7 +1134,7 @@ class ArbitrageScanner:
                 }
             )
 
-        if self._runtime_strategies_loaded_for_instance:
+        if self._plugins_loaded:
             for strategy_key, error in strategy_loader._errors.items():
                 slug = str(strategy_key or "").strip().lower()
                 if not slug or slug in loaded_slugs:
@@ -1189,7 +1158,7 @@ class ArbitrageScanner:
     async def scan_once(
         self,
         targeted_condition_ids: Optional[list] = None,
-    ) -> list[ArbitrageOpportunity]:
+    ) -> list[Opportunity]:
         """Perform a single scan for arbitrage opportunities.
 
         If *targeted_condition_ids* is provided, only markets whose
@@ -1412,38 +1381,27 @@ class ArbitrageScanner:
 
             if self._strategy_overrides is not None:
                 await self._set_activity("Running scanner strategy overrides...")
-                all_opportunities = await self._run_legacy_detection_cycle(
+                all_opportunities = await self._run_override_strategies(
                     events=list(events),
                     markets=markets_to_evaluate,
                     prices=dict(prices),
                 )
             else:
-                # Dispatch market data to subscribed strategies via event dispatcher.
-                # Strategies subscribe to "market_data_refresh" and implement on_event()
-                # which delegates to their detect()/detect_async() methods.
                 await self._ensure_runtime_strategies_loaded()
-                if self._runtime_strategies_loaded_for_instance:
-                    await self._set_activity("Dispatching market_data_refresh to strategies...")
-                    data_event = DataEvent(
-                        event_type=EventType.MARKET_DATA_REFRESH,
-                        source="scanner_refresh",
-                        timestamp=utcnow(),
-                        markets=markets_to_evaluate,
-                        events=list(events),
-                        prices=dict(prices),
-                        scan_mode="full_reconcile",
-                    )
-                    all_opportunities = await self._dispatch_market_refresh(
-                        data_event,
-                        full_market_snapshot=markets,
-                    )
-                else:
-                    await self._set_activity("Running built-in scanner strategies...")
-                    all_opportunities = await self._run_legacy_detection_cycle(
-                        events=list(events),
-                        markets=markets_to_evaluate,
-                        prices=dict(prices),
-                    )
+                await self._set_activity("Dispatching market_data_refresh to strategies...")
+                data_event = DataEvent(
+                    event_type=EventType.MARKET_DATA_REFRESH,
+                    source="scanner_refresh",
+                    timestamp=utcnow(),
+                    markets=markets_to_evaluate,
+                    events=list(events),
+                    prices=dict(prices),
+                    scan_mode="full_reconcile",
+                )
+                all_opportunities = await self._dispatch_market_refresh(
+                    data_event,
+                    full_market_snapshot=markets,
+                )
 
             # Update prioritizer state after evaluation (CPU-bound, run in thread)
             if settings.TIERED_SCANNING_ENABLED:
@@ -1563,7 +1521,7 @@ class ArbitrageScanner:
             await self._set_activity(f"Scan error: {e}")
             raise
 
-    async def scan_fast(self, reactive_token_ids: Optional[list[str]] = None) -> list[ArbitrageOpportunity]:
+    async def scan_fast(self, reactive_token_ids: Optional[list[str]] = None) -> list[Opportunity]:
         """Fast scan with reactive token batching + timed HOT-tier fallback."""
         now = datetime.now(timezone.utc)
         reactive_tokens = [str(t or "").strip() for t in (reactive_token_ids or []) if str(t or "").strip()]
@@ -1845,7 +1803,7 @@ class ArbitrageScanner:
         except Exception as e:
             print(f"  News prefetch error: {e}")
 
-    def _deduplicate_cross_strategy(self, opportunities: list[ArbitrageOpportunity]) -> list[ArbitrageOpportunity]:
+    def _deduplicate_cross_strategy(self, opportunities: list[Opportunity]) -> list[Opportunity]:
         """Remove duplicate opportunities that cover the same underlying markets.
 
         When multiple strategies detect the same set of markets, keep only the one
@@ -1862,7 +1820,7 @@ class ArbitrageScanner:
             else:
                 candidates.append(opp)
 
-        seen: dict[str, ArbitrageOpportunity] = {}
+        seen: dict[str, Opportunity] = {}
         for opp in candidates:
             market_ids = sorted(m.get("id", "") for m in opp.markets)
             fingerprint = "|".join(market_ids)
@@ -1917,11 +1875,11 @@ class ArbitrageScanner:
             return fallback
         return self._strategy_cap_from_instance(strategy_loader.get_instance(key), fallback)
 
-    def _apply_opportunity_caps(self, opportunities: list[ArbitrageOpportunity]) -> list[ArbitrageOpportunity]:
+    def _apply_opportunity_caps(self, opportunities: list[Opportunity]) -> list[Opportunity]:
         """Limit pool size globally and per strategy to prevent strategy flood."""
         total_cap = int(getattr(settings, "SCANNER_MAX_OPPORTUNITIES_TOTAL", 0) or 0)
         per_strategy_cap = int(getattr(settings, "SCANNER_MAX_OPPORTUNITIES_PER_STRATEGY", 0) or 0)
-        kept: list[ArbitrageOpportunity] = []
+        kept: list[Opportunity] = []
         by_strategy: dict[str, int] = {}
         resolved_caps: dict[str, int] = {}
 
@@ -1947,7 +1905,7 @@ class ArbitrageScanner:
             )
         return kept
 
-    def _merge_opportunities(self, new_opportunities: list[ArbitrageOpportunity]) -> list[ArbitrageOpportunity]:
+    def _merge_opportunities(self, new_opportunities: list[Opportunity]) -> list[Opportunity]:
         """Merge newly detected opportunities into the existing pool.
 
         Instead of replacing all opportunities on each scan, this method:
@@ -1959,7 +1917,7 @@ class ArbitrageScanner:
         now = datetime.now(timezone.utc)
 
         # Index existing opportunities by stable_id
-        existing_map: dict[str, ArbitrageOpportunity] = {opp.stable_id: opp for opp in self._opportunities}
+        existing_map: dict[str, Opportunity] = {opp.stable_id: opp for opp in self._opportunities}
 
         new_count = 0
         updated_count = 0
@@ -1980,7 +1938,7 @@ class ArbitrageScanner:
             existing_map[new_opp.stable_id] = new_opp
 
         # Remove expired/stale opportunities
-        def _is_stale(opp: ArbitrageOpportunity) -> bool:
+        def _is_stale(opp: Opportunity) -> bool:
             if opp.last_seen_at is None:
                 return False
             strategy_instance = strategy_loader.get_instance(opp.strategy)
@@ -2060,7 +2018,7 @@ class ArbitrageScanner:
             sem = asyncio.Semaphore(self.AI_SCORE_CONCURRENCY)
             persist_lock = asyncio.Lock()
 
-            async def _persist_inline_analysis(opp: ArbitrageOpportunity) -> None:
+            async def _persist_inline_analysis(opp: Opportunity) -> None:
                 if not opp.ai_analysis:
                     return
                 # Serialize snapshot patch writes so concurrent scorers don't
@@ -2400,7 +2358,7 @@ class ArbitrageScanner:
 
         return status
 
-    def get_opportunities(self, filter: Optional[OpportunityFilter] = None) -> list[ArbitrageOpportunity]:
+    def get_opportunities(self, filter: Optional[OpportunityFilter] = None) -> list[Opportunity]:
         """Get current opportunities with optional filtering"""
         opps = self._opportunities
 

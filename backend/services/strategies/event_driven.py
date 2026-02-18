@@ -18,7 +18,7 @@ from __future__ import annotations
 import time
 from typing import Any, Optional
 
-from models import Market, Event, ArbitrageOpportunity
+from models import Market, Event, Opportunity
 from config import settings
 from .base import BaseStrategy, ExitDecision, ScoringWeights, SizingConfig
 from utils.logger import get_logger
@@ -188,12 +188,12 @@ class EventDrivenStrategy(BaseStrategy):
         # market_id -> Event (current scan snapshot)
         self._market_to_event_obj: dict[str, Event] = {}
 
-    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[ArbitrageOpportunity]:
+    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:
         if not settings.EVENT_DRIVEN_ENABLED:
             return []
 
         now = time.time()
-        opportunities: list[ArbitrageOpportunity] = []
+        opportunities: list[Opportunity] = []
 
         # Build event/category/keyword mappings from the current scan
         self._event_cache = {}
@@ -421,7 +421,7 @@ class EventDrivenStrategy(BaseStrategy):
         catalyst_magnitude: float,
         lagging_move: float,
         prices: dict[str, dict],
-    ) -> Optional[ArbitrageOpportunity]:
+    ) -> Optional[Opportunity]:
         """Create an opportunity from a catalyst-lag pair."""
         catalyst_market = self._market_cache.get(catalyst_id)
         lagging_market = self._market_cache.get(lagging_id)
@@ -542,9 +542,9 @@ class EventDrivenStrategy(BaseStrategy):
 
         return opp
 
-    def _deduplicate_by_question(self, opportunities: list[ArbitrageOpportunity]) -> list[ArbitrageOpportunity]:
+    def _deduplicate_by_question(self, opportunities: list[Opportunity]) -> list[Opportunity]:
         """Collapse duplicate markets with equivalent question text."""
-        deduped: dict[tuple[str, str], ArbitrageOpportunity] = {}
+        deduped: dict[tuple[str, str], Opportunity] = {}
         for opp in opportunities:
             market_rows = getattr(opp, "markets", []) or []
             if not market_rows:

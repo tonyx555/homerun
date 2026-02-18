@@ -123,6 +123,51 @@ function ConfigField({
         </div>
       )
 
+    case 'string':
+      return (
+        <div>
+          <Label className="text-[11px] text-muted-foreground">{field.label}</Label>
+          <Input
+            value={String(value || '')}
+            onChange={(e) => onChange(e.target.value)}
+            className="mt-1 h-8 text-xs"
+          />
+        </div>
+      )
+
+    case 'list':
+      return (
+        <div>
+          <Label className="text-[11px] text-muted-foreground">{field.label}</Label>
+          <Input
+            value={Array.isArray(value) ? (value as string[]).join(', ') : String(value || '')}
+            onChange={(e) => {
+              const items = e.target.value
+                .split(',')
+                .map((s) => s.trim())
+                .filter(Boolean)
+              onChange(items)
+            }}
+            className="mt-1 h-8 text-xs font-mono"
+            placeholder="value1, value2"
+          />
+        </div>
+      )
+
+    case 'url':
+      return (
+        <div>
+          <Label className="text-[11px] text-muted-foreground">{field.label}</Label>
+          <Input
+            type="url"
+            value={String(value || '')}
+            onChange={(e) => onChange(e.target.value)}
+            className="mt-1 h-8 text-xs font-mono"
+            placeholder="https://..."
+          />
+        </div>
+      )
+
     case 'number':
     default:
       return (

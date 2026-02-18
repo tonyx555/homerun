@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from config import settings as app_settings
-from models import ArbitrageOpportunity
+from models import Opportunity
 from models.opportunity import ROIType
 from services.polymarket import polymarket_client
 from utils.logger import get_logger
@@ -64,8 +64,8 @@ class WeatherWorkflowOrchestrator:
         configured_limit = int(settings.get("max_markets_per_scan", 200) or 200)
         market_limit = max(10, min(500, configured_limit))
         markets = await self._fetch_weather_markets(market_limit)
-        opportunities: list[ArbitrageOpportunity] = []
-        report_only_findings: list[ArbitrageOpportunity] = []
+        opportunities: list[Opportunity] = []
+        report_only_findings: list[Opportunity] = []
         intents_created = 0
         contracts_parsed = 0
         signals_generated = 0
@@ -563,7 +563,7 @@ class WeatherWorkflowOrchestrator:
         except Exception:
             return bool(getattr(market, "active", True)) and not bool(getattr(market, "closed", False))
 
-    async def _attach_market_price_history(self, opportunities: list[ArbitrageOpportunity]) -> None:
+    async def _attach_market_price_history(self, opportunities: list[Opportunity]) -> None:
         """Hydrate per-market YES/NO price history via scanner shared backfill."""
         if not opportunities:
             return
@@ -641,7 +641,7 @@ class WeatherWorkflowOrchestrator:
         return payload
 
     @staticmethod
-    def _is_executable_opportunity(opp: ArbitrageOpportunity) -> bool:
+    def _is_executable_opportunity(opp: Opportunity) -> bool:
         if (opp.max_position_size or 0.0) <= 0.0:
             return False
         description = str(opp.description or "").strip().lower()
@@ -649,7 +649,7 @@ class WeatherWorkflowOrchestrator:
 
     @staticmethod
     def _summarize_report_only_findings(
-        findings: list[ArbitrageOpportunity],
+        findings: list[Opportunity],
         *,
         top_n: int = 8,
     ) -> list[dict[str, Any]]:
@@ -674,7 +674,7 @@ class WeatherWorkflowOrchestrator:
         parsed,
         forecast,
         settings: dict[str, Any],
-    ) -> ArbitrageOpportunity:
+    ) -> Opportunity:
         outcome = "YES" if signal.direction == "buy_yes" else "NO"
         token_id = None
         if market.clob_token_ids and len(market.clob_token_ids) >= 2:
@@ -775,7 +775,7 @@ class WeatherWorkflowOrchestrator:
         ]
         risk_factors.extend(signal.notes or [])
 
-        return ArbitrageOpportunity(
+        return Opportunity(
             strategy="weather_edge",
             title=title,
             description=description,

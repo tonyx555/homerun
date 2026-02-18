@@ -9,17 +9,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import sys
 from datetime import datetime, timedelta, timezone
 
-_BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _BACKEND not in sys.path:
-    sys.path.insert(0, _BACKEND)
-if os.getcwd() != _BACKEND:
-    os.chdir(_BACKEND)
-
 from config import settings
-from models.database import AsyncSessionLocal, init_database
+from models.database import AsyncSessionLocal
 from services.data_events import DataEvent
 from services.event_dispatcher import event_dispatcher
 from services.opportunity_strategy_catalog import ensure_all_strategies_seeded
@@ -29,10 +22,11 @@ from services.weather.workflow_orchestrator import weather_workflow_orchestrator
 from services.weather import shared_state
 from services.worker_state import write_worker_snapshot
 
-logging.basicConfig(
-    level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO")),
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+if not logging.root.handlers:
+    logging.basicConfig(
+        level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO")),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
 logger = logging.getLogger("weather_worker")
 
 
@@ -261,14 +255,9 @@ async def _run_loop() -> None:
         await asyncio.sleep(min(10, interval))
 
 
-async def main() -> None:
-    await init_database()
-    logger.info("Database initialized")
+async def start_loop() -> None:
+    """Run the weather worker loop (called from API process lifespan)."""
     try:
         await _run_loop()
     except asyncio.CancelledError:
         logger.info("Weather worker shutting down")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

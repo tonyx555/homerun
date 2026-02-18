@@ -1,4 +1,4 @@
-"""Tests for Pydantic models: Market, Event, Token, ArbitrageOpportunity, OpportunityFilter."""
+"""Tests for Pydantic models: Market, Event, Token, Opportunity, OpportunityFilter."""
 
 import sys
 from pathlib import Path
@@ -12,7 +12,7 @@ from datetime import datetime
 
 from models.market import Market, Event, Token
 from models.opportunity import (
-    ArbitrageOpportunity,
+    Opportunity,
     MispricingType,
     OpportunityFilter,
 )
@@ -403,16 +403,16 @@ class TestToken:
 
 
 # ============================================================================
-# ArbitrageOpportunity
+# Opportunity
 # ============================================================================
 
 
-class TestArbitrageOpportunity:
-    """Tests for ArbitrageOpportunity model."""
+class TestOpportunity:
+    """Tests for Opportunity model."""
 
     def test_id_generation_from_strategy_and_markets(self):
         """ID is auto-generated from strategy + market IDs + timestamp."""
-        opp = ArbitrageOpportunity(
+        opp = Opportunity(
             strategy="basic",
             title="Test",
             description="Desc",
@@ -430,7 +430,7 @@ class TestArbitrageOpportunity:
 
     def test_id_generation_empty_markets(self):
         """ID with no markets still generates without error."""
-        opp = ArbitrageOpportunity(
+        opp = Opportunity(
             strategy="negrisk",
             title="Test",
             description="Desc",
@@ -445,7 +445,7 @@ class TestArbitrageOpportunity:
 
     def test_explicit_id_not_overwritten(self):
         """If an explicit id is provided, it is kept."""
-        opp = ArbitrageOpportunity(
+        opp = Opportunity(
             id="custom_id_123",
             strategy="basic",
             title="Test",
@@ -483,7 +483,7 @@ class TestArbitrageOpportunity:
 
     def test_default_values(self):
         """Default values for optional fields are sensible."""
-        opp = ArbitrageOpportunity(
+        opp = Opportunity(
             strategy="basic",
             title="T",
             description="D",

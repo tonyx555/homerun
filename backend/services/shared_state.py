@@ -20,7 +20,7 @@ from models.database import (
     OpportunityState,
     OpportunityEvent,
 )
-from models.opportunity import ArbitrageOpportunity, OpportunityFilter
+from models.opportunity import Opportunity, OpportunityFilter
 from services.event_bus import event_bus
 from services.market_tradability import get_market_tradability_map
 from utils.utcnow import utcnow
@@ -72,7 +72,7 @@ def _normalize_weather_edge_title(title: str) -> str:
 
 async def write_scanner_snapshot(
     session: AsyncSession,
-    opportunities: list[ArbitrageOpportunity],
+    opportunities: list[Opportunity],
     status: dict[str, Any],
     market_history: Optional[dict[str, list[dict[str, Any]]]] = None,
 ) -> None:
@@ -94,7 +94,7 @@ async def write_scanner_snapshot(
             if hasattr(o, "model_dump"):
                 payload.append(o.model_dump(mode="json"))
             else:
-                payload.append(ArbitrageOpportunity.model_validate(o).model_dump(mode="json"))
+                payload.append(Opportunity.model_validate(o).model_dump(mode="json"))
         except Exception as e:
             skipped += 1
             logger.debug("Skip unserializable opportunity in snapshot write: %s", e)
@@ -151,7 +151,7 @@ async def write_scanner_snapshot(
 
 async def write_traders_snapshot(
     session: AsyncSession,
-    opportunities: list[ArbitrageOpportunity],
+    opportunities: list[Opportunity],
     status: dict[str, Any],
 ) -> None:
     """Write trader opportunities into dedicated snapshot storage."""
@@ -171,7 +171,7 @@ async def write_traders_snapshot(
             item = (
                 o.model_dump(mode="json")
                 if hasattr(o, "model_dump")
-                else ArbitrageOpportunity.model_validate(o).model_dump(mode="json")
+                else Opportunity.model_validate(o).model_dump(mode="json")
             )
             if isinstance(item.get("strategy_context"), dict):
                 item["strategy_context"]["source_key"] = "traders"
@@ -383,18 +383,18 @@ async def update_scanner_activity(session: AsyncSession, activity: str) -> None:
 
 async def read_scanner_snapshot(
     session: AsyncSession,
-) -> tuple[list[ArbitrageOpportunity], dict[str, Any]]:
+) -> tuple[list[Opportunity], dict[str, Any]]:
     """Read latest opportunities and status from DB. Returns (opportunities, status_dict)."""
     result = await session.execute(select(ScannerSnapshot).where(ScannerSnapshot.id == SNAPSHOT_ID))
     row = result.scalar_one_or_none()
     if row is None:
         return [], _default_status()
 
-    opportunities: list[ArbitrageOpportunity] = []
+    opportunities: list[Opportunity] = []
     market_history = row.market_history_json if isinstance(row.market_history_json, dict) else {}
     for d in row.opportunities_json or []:
         try:
-            opp = ArbitrageOpportunity.model_validate(d)
+            opp = Opportunity.model_validate(d)
             for market in opp.markets:
                 mid = market.get("id", "")
                 if mid and mid in market_history:
@@ -419,17 +419,17 @@ async def read_scanner_snapshot(
 
 async def read_traders_snapshot(
     session: AsyncSession,
-) -> tuple[list[ArbitrageOpportunity], dict[str, Any]]:
+) -> tuple[list[Opportunity], dict[str, Any]]:
     """Read latest trader opportunities and status from dedicated snapshot row."""
     result = await session.execute(select(ScannerSnapshot).where(ScannerSnapshot.id == TRADERS_SNAPSHOT_ID))
     row = result.scalar_one_or_none()
     if row is None:
         return [], _default_status()
 
-    opportunities: list[ArbitrageOpportunity] = []
+    opportunities: list[Opportunity] = []
     for d in row.opportunities_json or []:
         try:
-            opp = ArbitrageOpportunity.model_validate(d)
+            opp = Opportunity.model_validate(d)
             if isinstance(opp.strategy_context, dict):
                 opp.strategy_context["source_key"] = "traders"
             else:
@@ -479,12 +479,12 @@ def _stable_id_from_opportunity_id(opportunity_id: Optional[str]) -> Optional[st
     return text
 
 
-def _is_traders_opportunity(opp: ArbitrageOpportunity) -> bool:
+def _is_traders_opportunity(opp: Opportunity) -> bool:
     context = opp.strategy_context if isinstance(opp.strategy_context, dict) else {}
     return str(context.get("source_key") or "").strip().lower() == "traders"
 
 
-def _market_ids_from_opportunity(opp: ArbitrageOpportunity) -> list[str]:
+def _market_ids_from_opportunity(opp: Opportunity) -> list[str]:
     ids: list[str] = []
     seen: set[str] = set()
 
@@ -562,7 +562,7 @@ async def get_opportunities_from_db(
     session: AsyncSession,
     filter: Optional[OpportunityFilter] = None,
     source: str = "markets",
-) -> list[ArbitrageOpportunity]:
+) -> list[Opportunity]:
     """Get current opportunities from DB with optional filter (API use)."""
     source_key = str(source or "markets").strip().lower()
     if source_key == "traders":
@@ -712,8 +712,8 @@ async def clear_opportunities_in_snapshot(session: AsyncSession) -> int:
 
 
 def _remove_expired_opportunities(
-    opportunities: list[ArbitrageOpportunity],
-) -> list[ArbitrageOpportunity]:
+    opportunities: list[Opportunity],
+) -> list[Opportunity]:
     """Drop opportunities whose resolution date has passed."""
     from datetime import timezone
 
@@ -730,15 +730,15 @@ def _remove_expired_opportunities(
 
 
 def _remove_old_opportunities(
-    opportunities: list[ArbitrageOpportunity],
+    opportunities: list[Opportunity],
     max_age_minutes: int,
-) -> list[ArbitrageOpportunity]:
+) -> list[Opportunity]:
     """Drop opportunities older than max_age_minutes."""
     from datetime import timedelta, timezone
 
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
 
-    def ok(o: ArbitrageOpportunity) -> bool:
+    def ok(o: Opportunity) -> bool:
         d = o.detected_at
         if d.tzinfo is None:
             d = d.replace(tzinfo=timezone.utc)

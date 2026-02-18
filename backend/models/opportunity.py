@@ -91,7 +91,7 @@ class ExecutionPlan(BaseModel):
         self.plan_id = f"plan_{digest}"
 
 
-class ArbitrageOpportunity(BaseModel):
+class Opportunity(BaseModel):
     """Represents a detected arbitrage opportunity"""
 
     id: str = Field(default_factory=lambda: "")

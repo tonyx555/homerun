@@ -29,6 +29,8 @@ import { Switch } from './ui/switch'
 import { cn } from '../lib/utils'
 import CodeEditor from './CodeEditor'
 import DataSourceApiDocsFlyout from './DataSourceApiDocsFlyout'
+import RestApiSourceForm from './RestApiSourceForm'
+import RssSourceForm from './RssSourceForm'
 import StrategyConfigForm from './StrategyConfigForm'
 import { getWorldSourceStatus } from '../services/worldIntelligenceApi'
 import {
@@ -169,7 +171,8 @@ const SOURCE_LABELS: Record<string, string> = {
 
 const SOURCE_KIND_LABELS: Record<string, string> = {
   python: 'Python',
-  rss: 'RSS',
+  rss: 'RSS Feed',
+  rest_api: 'REST API',
   gdelt: 'GDELT',
   events: 'Events',
   stories: 'Stories',
@@ -213,6 +216,7 @@ export default function DataSourcesManager() {
   const [showSettings, setShowSettings] = useState(false)
   const [showConfig, setShowConfig] = useState(false)
   const [showRawJson, setShowRawJson] = useState(false)
+  const [showAdvancedCode, setShowAdvancedCode] = useState(false)
 
   const [searchQuery, setSearchQuery] = useState('')
   const [sourceFilter, setSourceFilter] = useState<string>('all')
@@ -360,6 +364,7 @@ export default function DataSourcesManager() {
     setEditorSchemaJson(JSON.stringify(source.config_schema || {}, null, 2))
     setEditorError(null)
     setValidation(null)
+    setShowAdvancedCode(false)
   }, [catalog, selectedSourceId])
 
   const refreshCatalog = () => {
@@ -513,6 +518,7 @@ export default function DataSourcesManager() {
     setRunLimit(Number.isFinite(nextLimit) ? Math.max(1, Math.min(5000, Math.round(nextLimit))) : 500)
     setEditorError(null)
     setValidation(null)
+    setShowAdvancedCode(false)
   }
 
   const hasSelection = Boolean(selectedSource || draftToken)
@@ -527,6 +533,9 @@ export default function DataSourcesManager() {
       return []
     }
   }, [editorSchemaJson])
+
+  const hasSimpleForm = editorSourceKind === 'rss' || editorSourceKind === 'rest_api'
+  const saveDisabled = busy || !editorName.trim() || !editorSlug.trim() || (!hasSimpleForm && !editorCode.trim())
 
   const latestRun = runsQuery.data?.runs?.[0] || null
   const sourceHealthStatus = worldSourceStatusQuery.data?.sources || {}
@@ -787,7 +796,7 @@ export default function DataSourcesManager() {
                   size="sm"
                   className="h-7 gap-1 px-2 text-[11px] bg-cyan-600 hover:bg-cyan-500 text-white"
                   onClick={() => saveMutation.mutate()}
-                  disabled={busy || !editorCode.trim() || !editorName.trim() || !editorSlug.trim()}
+                  disabled={saveDisabled}
                 >
                   {saveMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
                   Save
@@ -963,26 +972,78 @@ export default function DataSourcesManager() {
               </div>
 
               <div className="flex-1 min-h-0 flex flex-col">
-                <div className="px-4 py-2 flex items-center justify-between shrink-0">
-                  <div className="flex items-center gap-2">
-                    <Code2 className="w-3.5 h-3.5 text-cyan-400" />
-                    <span className="text-xs font-medium">Source Code</span>
-                    <span className="text-[10px] text-muted-foreground font-mono">Python</span>
-                  </div>
-                  {inferredClassName && (
-                    <span className="text-[10px] font-mono text-muted-foreground">class {inferredClassName}</span>
-                  )}
-                </div>
-                <div className="flex-1 min-h-0 px-3 pb-2">
-                  <CodeEditor
-                    value={editorCode}
-                    onChange={setEditorCode}
-                    language="python"
-                    className="h-full"
-                    minHeight="100%"
-                    placeholder="Write your data source source code here..."
-                  />
-                </div>
+                {hasSimpleForm && !showAdvancedCode ? (
+                  <>
+                    <div className="px-4 py-2 flex items-center justify-between shrink-0">
+                      <div className="flex items-center gap-2">
+                        <Settings2 className="w-3.5 h-3.5 text-cyan-400" />
+                        <span className="text-xs font-medium">
+                          {editorSourceKind === 'rss' ? 'RSS Feed Configuration' : 'REST API Configuration'}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setShowAdvancedCode(true)}
+                        className="text-[10px] text-muted-foreground hover:text-foreground transition-colors font-mono flex items-center gap-1"
+                      >
+                        <Code2 className="w-3 h-3" />
+                        Advanced
+                      </button>
+                    </div>
+                    <div className="flex-1 min-h-0 overflow-auto px-4 pb-3">
+                      {editorSourceKind === 'rss' ? (
+                        <RssSourceForm
+                          config={(() => {
+                            try { return JSON.parse(editorConfigJson || '{}') } catch { return {} }
+                          })()}
+                          onChange={(config) => setEditorConfigJson(JSON.stringify(config, null, 2))}
+                        />
+                      ) : (
+                        <RestApiSourceForm
+                          config={(() => {
+                            try { return JSON.parse(editorConfigJson || '{}') } catch { return {} }
+                          })()}
+                          onChange={(config) => setEditorConfigJson(JSON.stringify(config, null, 2))}
+                        />
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="px-4 py-2 flex items-center justify-between shrink-0">
+                      <div className="flex items-center gap-2">
+                        <Code2 className="w-3.5 h-3.5 text-cyan-400" />
+                        <span className="text-xs font-medium">Source Code</span>
+                        <span className="text-[10px] text-muted-foreground font-mono">Python</span>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        {inferredClassName && (
+                          <span className="text-[10px] font-mono text-muted-foreground">class {inferredClassName}</span>
+                        )}
+                        {hasSimpleForm && (
+                          <button
+                            type="button"
+                            onClick={() => setShowAdvancedCode(false)}
+                            className="text-[10px] text-muted-foreground hover:text-foreground transition-colors font-mono flex items-center gap-1"
+                          >
+                            <Settings2 className="w-3 h-3" />
+                            Simple
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex-1 min-h-0 px-3 pb-2">
+                      <CodeEditor
+                        value={editorCode}
+                        onChange={setEditorCode}
+                        language="python"
+                        className="h-full"
+                        minHeight="100%"
+                        placeholder="Write your data source source code here..."
+                      />
+                    </div>
+                  </>
+                )}
               </div>
 
               <div className="shrink-0 border-t border-border/50">

@@ -22,7 +22,7 @@ from models.database import (
     TraderGroup,
     TraderGroupMember,
 )
-from models.opportunity import ArbitrageOpportunity
+from models.opportunity import Opportunity
 from services.market_tradability import get_market_tradability_map
 from services.opportunity_strategy_catalog import ensure_system_opportunity_strategies_seeded
 from services.smart_wallet_pool import _looks_like_crypto_market, smart_wallet_pool
@@ -355,7 +355,7 @@ async def get_strategy_trader_opportunities(
     *,
     limit: int = 50,
     include_filtered: bool = False,
-) -> list[ArbitrageOpportunity]:
+) -> list[Opportunity]:
     safe_limit = max(1, int(limit))
     filtered_rows = await get_strategy_filtered_trader_opportunities(
         limit=max(250, safe_limit * 6),
@@ -368,7 +368,7 @@ async def build_strategy_trader_opportunities_from_rows(
     rows: list[dict[str, Any]],
     *,
     limit: int = 50,
-) -> list[ArbitrageOpportunity]:
+) -> list[Opportunity]:
     safe_limit = max(1, int(limit))
     filtered_rows = [dict(row) for row in rows if isinstance(row, dict)]
     if not filtered_rows:
@@ -392,14 +392,14 @@ async def build_strategy_trader_opportunities_from_rows(
         logger.error("Traders strategy returned non-list opportunities", slug=_STRATEGY_SLUG)
         return []
 
-    opportunities: list[ArbitrageOpportunity] = []
+    opportunities: list[Opportunity] = []
     for item in built:
-        if isinstance(item, ArbitrageOpportunity):
+        if isinstance(item, Opportunity):
             opportunities.append(item)
             continue
         if isinstance(item, dict):
             try:
-                opportunities.append(ArbitrageOpportunity.model_validate(item))
+                opportunities.append(Opportunity.model_validate(item))
             except Exception:
                 continue
 

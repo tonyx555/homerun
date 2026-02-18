@@ -1,7 +1,7 @@
 from .market import Market, Event, Token
 from .opportunity import (
     AIAnalysis,
-    ArbitrageOpportunity,
+    Opportunity,
     ExecutionConstraints,
     ExecutionLeg,
     ExecutionPlan,
@@ -14,7 +14,7 @@ __all__ = [
     "Event",
     "Token",
     "AIAnalysis",
-    "ArbitrageOpportunity",
+    "Opportunity",
     "ExecutionPlan",
     "ExecutionLeg",
     "ExecutionConstraints",

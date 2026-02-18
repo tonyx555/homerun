@@ -23,7 +23,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from models import Market, Event, ArbitrageOpportunity, MispricingType
+from models import Market, Event, Opportunity, MispricingType
 from config import settings
 from .base import BaseStrategy, ExitDecision, ScoringWeights, SizingConfig
 from utils.logger import get_logger
@@ -329,7 +329,7 @@ class BayesianCascadeStrategy(BaseStrategy):
         events: list[Event],
         markets: list[Market],
         prices: dict[str, dict],
-    ) -> list[ArbitrageOpportunity]:
+    ) -> list[Opportunity]:
         if not settings.BAYESIAN_CASCADE_ENABLED:
             return []
 
@@ -540,12 +540,12 @@ class BayesianCascadeStrategy(BaseStrategy):
         movers: list[MarketNode],
         events: list[Event],
         markets: list[Market],
-    ) -> list[ArbitrageOpportunity]:
+    ) -> list[Opportunity]:
         """
         For each mover, propagate expected price changes through the graph.
         If a target market has NOT adjusted as expected, flag it.
         """
-        opportunities: list[ArbitrageOpportunity] = []
+        opportunities: list[Opportunity] = []
         min_edge_pct = settings.BAYESIAN_MIN_EDGE_PERCENT / 100.0
         max_depth = settings.BAYESIAN_PROPAGATION_DEPTH
 
@@ -580,7 +580,7 @@ class BayesianCascadeStrategy(BaseStrategy):
         min_edge_pct: float,
         market_to_event: dict[str, Event],
         flagged_pairs: set[tuple[str, str]],
-        opportunities: list[ArbitrageOpportunity],
+        opportunities: list[Opportunity],
     ) -> None:
         """
         BFS propagation from a mover node through the dependency graph.
@@ -668,7 +668,7 @@ class BayesianCascadeStrategy(BaseStrategy):
         actual_delta: float,
         mispricing: float,
         market_to_event: dict[str, Event],
-    ) -> Optional[ArbitrageOpportunity]:
+    ) -> Optional[Opportunity]:
         """
         Create an arbitrage opportunity from a cascade mispricing.
 

@@ -11,7 +11,7 @@ Pipeline:
   1. Wallet tracker monitors known profitable wallets
   2. Confluence engine detects multi-wallet convergence
   3. Signal bus emits trader flow signals
-  4. This strategy filters signals and converts to ArbitrageOpportunity
+  4. This strategy filters signals and converts to Opportunity
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from models import ArbitrageOpportunity, Event, Market, Token
+from models import Opportunity, Event, Market, Token
 from models.opportunity import MispricingType
 from services.strategies.base import BaseStrategy, DecisionCheck, ScoringWeights, SizingConfig, ExitDecision
 from services.data_events import DataEvent
@@ -394,12 +394,12 @@ class TradersConfluenceStrategy(BaseStrategy):
         rows: list[dict],
         *,
         limit: Optional[int] = None,
-    ) -> list[ArbitrageOpportunity]:
+    ) -> list[Opportunity]:
         if not rows:
             return []
 
         cfg = self._effective_config()
-        opportunities: list[ArbitrageOpportunity] = []
+        opportunities: list[Opportunity] = []
         for raw in rows:
             if not isinstance(raw, dict):
                 continue
@@ -533,7 +533,7 @@ class TradersConfluenceStrategy(BaseStrategy):
         events: list[Event],
         markets: list[Market],
         prices: dict[str, dict],
-    ) -> list[ArbitrageOpportunity]:
+    ) -> list[Opportunity]:
         """Sync detect - returns empty.
 
         TradersConfluenceStrategy is fed by the tracked trader pipeline,
@@ -547,8 +547,8 @@ class TradersConfluenceStrategy(BaseStrategy):
         signals: list[dict],
         markets: list[Market],
         events: list[Event],
-    ) -> list[ArbitrageOpportunity]:
-        """Convert trader confluence signals into ArbitrageOpportunity objects.
+    ) -> list[Opportunity]:
+        """Convert trader confluence signals into Opportunity objects.
 
         Each signal dict should contain:
           - market_id: str
@@ -572,7 +572,7 @@ class TradersConfluenceStrategy(BaseStrategy):
     # on_event()  (event-driven detection from tracked_traders_worker)
     # ------------------------------------------------------------------
 
-    async def on_event(self, event: DataEvent) -> list[ArbitrageOpportunity]:
+    async def on_event(self, event: DataEvent) -> list[Opportunity]:
         if event.event_type != "trader_activity":
             return []
         signals = event.payload.get("signals") or []

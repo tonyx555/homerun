@@ -9,11 +9,11 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from api import routes_ai
-from models.opportunity import ArbitrageOpportunity
+from models.opportunity import Opportunity
 
 
-def _weather_opp(opportunity_id: str) -> ArbitrageOpportunity:
-    opp = ArbitrageOpportunity(
+def _weather_opp(opportunity_id: str) -> Opportunity:
+    opp = Opportunity(
         strategy="weather_edge",
         title="Weather Edge Test",
         description="test",

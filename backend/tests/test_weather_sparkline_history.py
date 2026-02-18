@@ -8,7 +8,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from models.opportunity import ArbitrageOpportunity
+from models.opportunity import Opportunity
 from services.weather.workflow_orchestrator import WeatherWorkflowOrchestrator
 
 
@@ -16,8 +16,8 @@ def _build_opportunity(
     *,
     market_id: str = "0xmarket",
     report_only: bool = False,
-) -> ArbitrageOpportunity:
-    return ArbitrageOpportunity(
+) -> Opportunity:
+    return Opportunity(
         strategy="weather_edge",
         title="Weather Edge",
         description="REPORT ONLY | Test" if report_only else "Test",

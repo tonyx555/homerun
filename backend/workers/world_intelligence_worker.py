@@ -9,14 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import sys
 from datetime import datetime, timedelta, timezone
-
-_BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _BACKEND not in sys.path:
-    sys.path.insert(0, _BACKEND)
-if os.getcwd() != _BACKEND:
-    os.chdir(_BACKEND)
 
 from config import settings
 from models.database import (
@@ -26,16 +19,16 @@ from models.database import (
     CountryInstabilityRecord,
     TensionPairRecord,
     ConflictEventRecord,
-    init_database,
 )
 from services.worker_state import write_worker_snapshot, read_worker_control
 from services.worker_state import read_worker_snapshot
 from services.worker_state import clear_worker_run_request
 
-logging.basicConfig(
-    level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO")),
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+if not logging.root.handlers:
+    logging.basicConfig(
+        level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO")),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
 logger = logging.getLogger("world_intelligence_worker")
 
 _IDLE_SLEEP_SECONDS = 5
@@ -789,24 +782,12 @@ async def _run_loop() -> None:
             await asyncio.sleep(min(_IDLE_SLEEP_SECONDS, settings.WORLD_INTELLIGENCE_INTERVAL_SECONDS))
 
 
-async def main() -> None:
-    await init_database()
-    logger.info("Database initialized")
-    try:
-        from config import apply_world_intelligence_settings
+async def start_loop() -> None:
+    """Run the world intelligence worker loop (called from API process lifespan).
 
-        await apply_world_intelligence_settings()
-        logger.info("World intelligence settings loaded from database")
-    except Exception as exc:
-        logger.warning(
-            "Failed to load world intelligence settings from DB (using defaults): %s",
-            exc,
-        )
+    apply_world_intelligence_settings() is already done in main.py lifespan.
+    """
     try:
         await _run_loop()
     except asyncio.CancelledError:
         logger.info("World Intelligence worker shutting down")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

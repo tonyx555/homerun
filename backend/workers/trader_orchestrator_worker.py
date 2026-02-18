@@ -19,7 +19,6 @@ from models.database import (
     TrackedWallet,
     Trader,
     TraderGroupMember,
-    init_database,
 )
 from services.trader_orchestrator.live_market_context import (
     RuntimeTradeSignalView,
@@ -1028,7 +1027,10 @@ async def _run_trader_once(
                             processed_signals += 1
                             continue
 
-                    decision_obj = strategy.evaluate(
+                    loop = asyncio.get_running_loop()
+                    decision_obj = await loop.run_in_executor(
+                        None,
+                        strategy.evaluate,
                         runtime_signal,
                         {
                             "params": strategy_params,
@@ -1664,11 +1666,8 @@ async def run_worker_loop() -> None:
         await _release_orchestrator_cycle_lock_owner()
 
 
-async def main() -> None:
-    """Initialize DB schema before entering orchestrator loop."""
-    await init_database()
-    logger.info("Database initialized")
-
+async def start_loop() -> None:
+    """Run the trader orchestrator worker loop (called from API process lifespan)."""
     notifier = None
     try:
         from services.notifier import notifier as notifier_service
@@ -1689,7 +1688,3 @@ async def main() -> None:
                 await notifier.shutdown()
             except Exception as exc:
                 logger.debug("Notifier shutdown skipped: %s", exc)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

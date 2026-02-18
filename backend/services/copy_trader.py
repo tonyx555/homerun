@@ -19,7 +19,7 @@ from models.database import (
     PositionSide,
     AsyncSessionLocal,
 )
-from models.opportunity import ArbitrageOpportunity
+from models.opportunity import Opportunity
 from services.polymarket import polymarket_client
 from services.pause_state import global_pause_state
 from services.depth_analyzer import depth_analyzer
@@ -739,7 +739,7 @@ class CopyTradingService:
 
         return True, "ok"
 
-    async def _check_arb_match(self, trade: dict) -> Optional[ArbitrageOpportunity]:
+    async def _check_arb_match(self, trade: dict) -> Optional[Opportunity]:
         """Check if a trade matches a detected arbitrage opportunity (arb_only mode)."""
         from models.database import AsyncSessionLocal
         from services import shared_state

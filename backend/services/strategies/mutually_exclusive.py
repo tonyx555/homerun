@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from models import Market, Event, ArbitrageOpportunity
+from models import Market, Event, Opportunity
 from .base import BaseStrategy, DecisionCheck, ExitDecision, ScoringWeights, SizingConfig
 from utils.converters import to_float
 
@@ -97,7 +97,7 @@ class MutuallyExclusiveStrategy(BaseStrategy):
         ),
     ]
 
-    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[ArbitrageOpportunity]:
+    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:
         opportunities = []
 
         # Group markets by potential mutual exclusivity
@@ -117,7 +117,7 @@ class MutuallyExclusiveStrategy(BaseStrategy):
 
         return opportunities
 
-    def _find_exclusive_pairs_in_event(self, event: Event, prices: dict[str, dict]) -> list[ArbitrageOpportunity]:
+    def _find_exclusive_pairs_in_event(self, event: Event, prices: dict[str, dict]) -> list[Opportunity]:
         """Find mutually exclusive pairs within an event"""
         opportunities = []
         active_markets = [m for m in event.markets if m.active and not m.closed]
@@ -139,7 +139,7 @@ class MutuallyExclusiveStrategy(BaseStrategy):
 
     def _find_exclusive_pairs_across_markets(
         self, markets: list[Market], prices: dict[str, dict]
-    ) -> list[ArbitrageOpportunity]:
+    ) -> list[Opportunity]:
         """Find mutually exclusive pairs across all markets"""
         opportunities = []
 
@@ -225,7 +225,7 @@ class MutuallyExclusiveStrategy(BaseStrategy):
         market_b: Market,
         prices: dict[str, dict],
         event: Event = None,
-    ) -> ArbitrageOpportunity | None:
+    ) -> Opportunity | None:
         """Check if a pair offers arbitrage opportunity"""
 
         # Get YES prices

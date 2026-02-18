@@ -9,19 +9,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import sys
 from datetime import timedelta
 from typing import Any
 from sqlalchemy import select
 
-_BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _BACKEND not in sys.path:
-    sys.path.insert(0, _BACKEND)
-if os.getcwd() != _BACKEND:
-    os.chdir(_BACKEND)
-
 from utils.utcnow import utcnow
-from models.database import AsyncSessionLocal, AppSettings, init_database
+from models.database import AsyncSessionLocal, AppSettings
+from services.data_events import DataEvent, EventType
+from services.event_dispatcher import event_dispatcher
 from services.insider_detector import insider_detector
 from services.opportunity_strategy_catalog import ensure_all_strategies_seeded
 from services.strategy_signal_bridge import bridge_opportunities_to_signals
@@ -41,10 +36,11 @@ from services.worker_state import (
     write_worker_snapshot,
 )
 
-logging.basicConfig(
-    level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO")),
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+if not logging.root.handlers:
+    logging.basicConfig(
+        level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO")),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
 logger = logging.getLogger("tracked_traders_worker")
 
 
@@ -490,6 +486,30 @@ async def _run_loop() -> None:
             )
             emitted = 0
 
+            # Dispatch trader_activity DataEvent so subscribed strategies
+            # (e.g. TradersConfluenceStrategy) can react via on_event().
+            if deduped_opportunities:
+                try:
+                    trader_event = DataEvent(
+                        event_type=EventType.TRADER_ACTIVITY,
+                        source="tracked_traders_worker",
+                        timestamp=utcnow(),
+                        payload={
+                            "confluence_count": len(deduped_opportunities),
+                            "strategies_used": strategies_used,
+                            "opportunities": deduped_opportunities,
+                        },
+                    )
+                    event_opps = await event_dispatcher.dispatch(trader_event)
+                    if event_opps:
+                        for opp in event_opps:
+                            stable_id = str(getattr(opp, "stable_id", "") or getattr(opp, "id", "")).strip()
+                            if stable_id and stable_id not in deduped_by_stable_id:
+                                deduped_by_stable_id[stable_id] = opp
+                        deduped_opportunities = list(deduped_by_stable_id.values())
+                except Exception as exc:
+                    logger.warning("trader_activity DataEvent dispatch failed: %s", exc)
+
             async with AsyncSessionLocal() as session:
                 await shared_state.write_traders_snapshot(
                     session,
@@ -576,15 +596,12 @@ async def _run_loop() -> None:
         await asyncio.sleep(interval)
 
 
-async def main() -> None:
-    await init_database()
-    logger.info("Database initialized")
-    await market_cache_service.load_from_db()
+async def start_loop() -> None:
+    """Run the tracked-traders worker loop (called from API process lifespan).
+
+    market_cache_service.load_from_db() is already done in main.py lifespan.
+    """
     try:
         await _run_loop()
     except asyncio.CancelledError:
         logger.info("Tracked-traders worker shutting down")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

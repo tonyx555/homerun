@@ -33,7 +33,7 @@ from services.ai import get_llm_manager
 from services.ai.scratchpad import ScratchpadService
 
 if TYPE_CHECKING:
-    from models.opportunity import ArbitrageOpportunity
+    from models.opportunity import Opportunity
 
 from utils.logger import get_logger
 
@@ -392,7 +392,7 @@ class ResolutionAnalyzer:
 
     async def analyze_opportunity_markets(
         self,
-        opportunity: "ArbitrageOpportunity",
+        opportunity: "Opportunity",
         model: str | None = None,
     ) -> dict:
         """Analyze all markets in an arbitrage opportunity.

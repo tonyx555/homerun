@@ -13,7 +13,7 @@ Pipeline:
   1. News feed service fetches articles from RSS/GDELT
   2. Semantic matcher embeds articles + markets, finds matches
   3. Edge detector estimates probability via LLM, computes edge
-  4. This strategy converts edges into ArbitrageOpportunity objects
+  4. This strategy converts edges into Opportunity objects
 
 Because this is async (LLM calls), it runs differently from the sync
 strategies. The scanner calls detect_async() instead of detect().
@@ -27,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
 from config import settings
-from models import ArbitrageOpportunity, Event, Market
+from models import Opportunity, Event, Market
 from models.opportunity import MispricingType
 from services.news.edge_detector import NewsEdge
 from services.news.feed_service import news_feed_service
@@ -61,7 +61,7 @@ class NewsEdgeStrategy(BaseStrategy):
     allow_deduplication = False
     subscriptions = ["news_update"]
 
-    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[ArbitrageOpportunity]:
+    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:
         """Sync detect -- not used for this strategy.
 
         NewsEdgeStrategy requires async I/O (news fetching, LLM calls).
@@ -100,7 +100,7 @@ class NewsEdgeStrategy(BaseStrategy):
             platform="polymarket",
         )
 
-    async def on_event(self, event: DataEvent) -> list[ArbitrageOpportunity]:
+    async def on_event(self, event: DataEvent) -> list[Opportunity]:
         """Convert news intents dispatched by the news worker into opportunities."""
         if event.event_type != "news_update":
             return []
@@ -108,7 +108,7 @@ class NewsEdgeStrategy(BaseStrategy):
         if not intents:
             return []
 
-        opportunities: list[ArbitrageOpportunity] = []
+        opportunities: list[Opportunity] = []
         for intent in intents:
             market_id = str(intent.get("market_id") or "")
             if not market_id:
@@ -173,7 +173,7 @@ class NewsEdgeStrategy(BaseStrategy):
         events: list[Event],
         markets: list[Market],
         prices: dict[str, dict],
-    ) -> list[ArbitrageOpportunity]:
+    ) -> list[Opportunity]:
         """Async detection: fetch news, match, estimate, generate opportunities."""
         if not settings.NEWS_EDGE_ENABLED:
             return []
@@ -227,7 +227,7 @@ class NewsEdgeStrategy(BaseStrategy):
 
             edges = await edge_detector.detect_edges(matches)
 
-            # Step 6: Convert edges to ArbitrageOpportunity objects
+            # Step 6: Convert edges to Opportunity objects
             opportunities = []
             for edge in edges:
                 opp = self._edge_to_opportunity(edge, markets, events, prices)
@@ -301,8 +301,8 @@ class NewsEdgeStrategy(BaseStrategy):
         markets: list[Market],
         events: list[Event],
         prices: dict[str, dict],
-    ) -> Optional[ArbitrageOpportunity]:
-        """Convert a NewsEdge into an ArbitrageOpportunity."""
+    ) -> Optional[Opportunity]:
+        """Convert a NewsEdge into an Opportunity."""
         mi = edge.match.market
 
         # Find the actual Market object

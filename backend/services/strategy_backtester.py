@@ -983,7 +983,9 @@ class ExitBacktestResult:
     num_positions: int = 0
     exit_decisions: list[dict[str, Any]] = field(default_factory=list)
     would_close: int = 0
+    would_reduce: int = 0
     would_hold: int = 0
+    errors: int = 0
     load_time_ms: float = 0
     data_fetch_time_ms: float = 0
     exit_time_ms: float = 0
@@ -1048,14 +1050,19 @@ async def run_exit_backtest(
         from sqlalchemy import select
 
         async with AsyncSessionLocal() as session:
-            query = (
-                select(TraderPosition)
-                .where(TraderPosition.status == "open")
-                .order_by(TraderPosition.opened_at.desc())
-                .limit(max_positions)
-            )
+            query = select(TraderPosition).where(TraderPosition.status == "open")
+            order_columns = []
+            for column_name in ("first_order_at", "opened_at", "created_at"):
+                column = getattr(TraderPosition, column_name, None)
+                if column is not None:
+                    order_columns.append(column.desc())
+            if order_columns:
+                query = query.order_by(*order_columns)
+            query = query.limit(max(1, int(max_positions)))
             positions = list((await session.execute(query)).scalars().all())
         result.num_positions = len(positions)
+        if result.num_positions == 0:
+            result.validation_warnings.append("No open positions available for exit backtest.")
     except Exception as e:
         result.runtime_error = f"Failed to fetch positions: {e}"
         result.runtime_traceback = traceback.format_exc()
@@ -1067,12 +1074,65 @@ async def run_exit_backtest(
     # 4. Run should_exit() on each position
     exit_start = time.monotonic()
     try:
+        now_utc = datetime.now(timezone.utc)
         for pos in positions:
             try:
-                payload = pos.payload_json if isinstance(pos.payload_json, dict) else {}
-                entry_price = float(payload.get("entry_price", 0) or 0)
-                current_price = float(payload.get("last_price", entry_price) or entry_price)
+                payload_raw = getattr(pos, "payload_json", None)
+                payload = payload_raw if isinstance(payload_raw, dict) else {}
+                entry_price = 0.0
+                for candidate in (
+                    payload.get("entry_price"),
+                    getattr(pos, "avg_entry_price", None),
+                    payload.get("avg_entry_price"),
+                    payload.get("effective_price"),
+                    0.0,
+                ):
+                    try:
+                        entry_price = float(candidate or 0.0)
+                    except Exception:
+                        continue
+                    if entry_price > 0:
+                        break
+                current_price = entry_price
+                for candidate in (
+                    payload.get("last_price"),
+                    payload.get("current_price"),
+                    payload.get("mark_price"),
+                    payload.get("mid_price"),
+                    entry_price,
+                ):
+                    try:
+                        current_price = float(candidate if candidate is not None else entry_price)
+                        break
+                    except Exception:
+                        continue
+                highest_price = current_price
+                for candidate in (payload.get("highest_price"), current_price):
+                    try:
+                        highest_price = float(candidate if candidate is not None else current_price)
+                        break
+                    except Exception:
+                        continue
+                lowest_price = current_price
+                for candidate in (payload.get("lowest_price"), current_price):
+                    try:
+                        lowest_price = float(candidate if candidate is not None else current_price)
+                        break
+                    except Exception:
+                        continue
+                opened_at = getattr(pos, "first_order_at", None) or getattr(pos, "created_at", None)
+                opened_at_iso: Optional[str] = None
+                age_minutes = 0.0
+                if isinstance(opened_at, datetime):
+                    opened_at_utc = (
+                        opened_at if opened_at.tzinfo is not None else opened_at.replace(tzinfo=timezone.utc)
+                    )
+                    opened_at_iso = opened_at_utc.isoformat()
+                    age_minutes = max(0.0, (now_utc - opened_at_utc).total_seconds() / 60.0)
                 pnl_pct = ((current_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+                notional_usd = float(getattr(pos, "total_notional_usd", 0.0) or 0.0)
+                strategy_context_raw = payload.get("strategy_context")
+                strategy_context = strategy_context_raw if isinstance(strategy_context_raw, dict) else {}
 
                 class _PositionView:
                     pass
@@ -1080,42 +1140,79 @@ async def run_exit_backtest(
                 pos_view = _PositionView()
                 pos_view.entry_price = entry_price
                 pos_view.current_price = current_price
-                pos_view.highest_price = float(payload.get("highest_price", current_price) or current_price)
-                pos_view.lowest_price = float(payload.get("lowest_price", current_price) or current_price)
-                pos_view.age_minutes = 0
+                pos_view.highest_price = highest_price
+                pos_view.lowest_price = lowest_price
+                pos_view.age_minutes = age_minutes
                 pos_view.pnl_percent = pnl_pct
-                pos_view.strategy_context = payload.get("strategy_context", {})
+                pos_view.strategy_context = strategy_context
                 pos_view.config = config or {}
                 pos_view.outcome_idx = payload.get("outcome_idx", 0)
+                pos_view.market_id = getattr(pos, "market_id", "")
+                pos_view.market_question = getattr(pos, "market_question", "")
+                pos_view.direction = getattr(pos, "direction", "")
+                pos_view.mode = getattr(pos, "mode", "paper")
+                pos_view.total_notional_usd = notional_usd
+                pos_view.opened_at = opened_at
 
                 market_state = {
                     "current_price": current_price,
                     "market_tradable": True,
                     "is_resolved": False,
                     "winning_outcome": None,
+                    "market_id": getattr(pos, "market_id", None),
                 }
 
                 exit_decision = strategy.should_exit(pos_view, market_state)
-                action = getattr(exit_decision, "action", "hold") if exit_decision else "hold"
-                reason = getattr(exit_decision, "reason", "") if exit_decision else ""
+                action_raw = getattr(exit_decision, "action", "hold") if exit_decision else "hold"
+                action = str(action_raw or "hold").strip().lower()
+                if action not in {"close", "hold", "reduce"}:
+                    action = "hold"
+                reason = str(getattr(exit_decision, "reason", "") if exit_decision else "")
+                close_price = getattr(exit_decision, "close_price", None) if exit_decision else None
+                reduce_fraction = getattr(exit_decision, "reduce_fraction", None) if exit_decision else None
+                close_price_value = None
+                if close_price is not None:
+                    try:
+                        close_price_value = float(close_price)
+                    except Exception:
+                        close_price_value = None
+                reduce_fraction_value = None
+                if reduce_fraction is not None:
+                    try:
+                        reduce_fraction_value = max(0.0, min(1.0, float(reduce_fraction)))
+                    except Exception:
+                        reduce_fraction_value = None
 
                 result.exit_decisions.append(
                     {
                         "position_id": pos.id,
                         "market_id": getattr(pos, "market_id", None),
+                        "market_question": getattr(pos, "market_question", None),
+                        "direction": getattr(pos, "direction", None),
+                        "mode": getattr(pos, "mode", None),
+                        "notional_usd": round(notional_usd, 2),
                         "entry_price": entry_price,
                         "current_price": current_price,
+                        "highest_price": highest_price,
+                        "lowest_price": lowest_price,
                         "pnl_pct": round(pnl_pct, 2),
+                        "age_minutes": round(age_minutes, 2),
+                        "opened_at": opened_at_iso,
                         "action": action,
                         "reason": reason,
+                        "close_price": close_price_value,
+                        "reduce_fraction": reduce_fraction_value,
                     }
                 )
 
                 if action == "close":
                     result.would_close += 1
+                elif action == "reduce":
+                    result.would_reduce += 1
                 else:
                     result.would_hold += 1
             except Exception as exc:
+                result.errors += 1
                 result.exit_decisions.append(
                     {
                         "position_id": pos.id,

@@ -1869,7 +1869,7 @@ class ScannerSnapshot(Base):
     id = Column(String, primary_key=True, default="latest")
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     last_scan_at = Column(DateTime, nullable=True)
-    opportunities_json = Column(JSON, default=list)  # list of ArbitrageOpportunity dicts
+    opportunities_json = Column(JSON, default=list)  # list of Opportunity dicts
     # Status fields (denormalized for API)
     running = Column(Boolean, default=True)
     enabled = Column(Boolean, default=True)

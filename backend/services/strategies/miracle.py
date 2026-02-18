@@ -32,7 +32,7 @@ import re
 from datetime import datetime
 from typing import Any, Optional
 
-from models import Market, Event, ArbitrageOpportunity
+from models import Market, Event, Opportunity
 from config import settings
 from .base import BaseStrategy, DecisionCheck, ExitDecision, ScoringWeights, SizingConfig, utcnow, make_aware
 from utils.converters import to_float
@@ -247,7 +247,7 @@ class MiracleStrategy(BaseStrategy):
 
         return score, category, reasons
 
-    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[ArbitrageOpportunity]:
+    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:
         """Detect miracle betting opportunities"""
         opportunities = []
 
@@ -342,7 +342,7 @@ class MiracleStrategy(BaseStrategy):
 
         return opportunities
 
-    def find_stale_markets(self, markets: list[Market], resolved_events: list[str]) -> list[ArbitrageOpportunity]:
+    def find_stale_markets(self, markets: list[Market], resolved_events: list[str]) -> list[Opportunity]:
         """
         Find markets that are now logically impossible due to resolved events.
 

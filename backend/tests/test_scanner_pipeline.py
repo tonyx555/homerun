@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from models.market import Market
 from models.opportunity import (
-    ArbitrageOpportunity,
+    Opportunity,
     MispricingType,
     OpportunityFilter,
 )
@@ -220,7 +220,7 @@ class TestMispricingClassification:
     @pytest.mark.asyncio
     async def test_mispricing_type_set_for_basic_strategy(self, mock_polymarket_client):
         """Opportunities from basic strategy get WITHIN_MARKET classification."""
-        opp = ArbitrageOpportunity(
+        opp = Opportunity(
             strategy="basic",
             title="Test",
             description="D",
@@ -250,7 +250,7 @@ class TestMispricingClassification:
     @pytest.mark.asyncio
     async def test_mispricing_type_set_for_combinatorial(self, mock_polymarket_client):
         """Combinatorial strategy maps to CROSS_MARKET."""
-        opp = ArbitrageOpportunity(
+        opp = Opportunity(
             strategy="combinatorial",
             title="Test",
             description="D",
@@ -280,7 +280,7 @@ class TestMispricingClassification:
     @pytest.mark.asyncio
     async def test_mispricing_type_set_for_settlement_lag(self, mock_polymarket_client):
         """Settlement-lag strategy maps to SETTLEMENT_LAG."""
-        opp = ArbitrageOpportunity(
+        opp = Opportunity(
             strategy="settlement_lag",
             title="Test",
             description="D",
@@ -310,7 +310,7 @@ class TestMispricingClassification:
     @pytest.mark.asyncio
     async def test_mispricing_type_not_overwritten_if_already_set(self, mock_polymarket_client):
         """If a strategy already set mispricing_type, the scanner does not overwrite it."""
-        opp = ArbitrageOpportunity(
+        opp = Opportunity(
             strategy="basic",
             title="Test",
             description="D",
@@ -350,7 +350,7 @@ class TestSharedPriceHistoryAttach:
         scanner = _build_scanner(strategies=[])
         yes_token = "123456789012345678901"
         no_token = "123456789012345678902"
-        opp = ArbitrageOpportunity(
+        opp = Opportunity(
             strategy="weather_edge",
             title="Weather",
             description="D",
@@ -383,7 +383,7 @@ class TestSharedPriceHistoryAttach:
         scanner = _build_scanner(strategies=[])
         yes_token = "123456789012345678901"
         no_token = "123456789012345678902"
-        opp = ArbitrageOpportunity(
+        opp = Opportunity(
             strategy="weather_edge",
             title="Weather",
             description="D",

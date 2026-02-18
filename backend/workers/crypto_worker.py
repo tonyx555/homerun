@@ -9,20 +9,13 @@ import asyncio
 import logging
 import math
 import os
-import sys
 import time
 from collections import deque
 from datetime import datetime, timezone
 
-_BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _BACKEND not in sys.path:
-    sys.path.insert(0, _BACKEND)
-if os.getcwd() != _BACKEND:
-    os.chdir(_BACKEND)
-
 from utils.utcnow import utcnow
 from config import settings
-from models.database import AsyncSessionLocal, init_database
+from models.database import AsyncSessionLocal
 from services.chainlink_feed import get_chainlink_feed
 from services.crypto_service import get_crypto_service
 from services.data_events import DataEvent
@@ -39,10 +32,11 @@ from services.worker_state import (
     write_worker_snapshot,
 )
 
-logging.basicConfig(
-    level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO")),
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+if not logging.root.handlers:
+    logging.basicConfig(
+        level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO")),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
 logger = logging.getLogger("crypto_worker")
 
 # Keep short in-memory oracle history per asset for chart sparkline payloads.
@@ -593,9 +587,8 @@ async def _run_loop() -> None:
             await _sleep_with_demand_wake(worker_name, sleep_for)
 
 
-async def main() -> None:
-    await init_database()
-    logger.info("Database initialized")
+async def start_loop() -> None:
+    """Run the crypto worker loop (called from API process lifespan)."""
     try:
         await _run_loop()
     except asyncio.CancelledError:
@@ -614,7 +607,3 @@ async def main() -> None:
                     await feed_manager.stop()
         except Exception:
             pass
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

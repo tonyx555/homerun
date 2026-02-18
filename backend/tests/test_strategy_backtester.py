@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+import sqlalchemy
 
 from models.market import Event, Market, Token
 from services.strategies.base import BaseStrategy
@@ -176,3 +177,234 @@ async def test_run_strategy_backtest_replays_ohlc_when_live_snapshot_empty(monke
     assert result.opportunities[0]["id"] == "replay_hit"
     ctx = result.opportunities[0].get("strategy_context") or {}
     assert "backtest_replay_ts_ms" in ctx
+
+
+class ExitDecisionStrategy(BaseStrategy):
+    strategy_type = "unit_exit"
+    name = "Unit Exit"
+    description = "unit test"
+
+    def detect(self, events, markets, prices):
+        return []
+
+    def should_exit(self, position, market_state):
+        if position.pnl_percent >= 10:
+            return SimpleNamespace(action="close", reason="take profit", close_price=position.current_price)
+        if position.pnl_percent >= 2:
+            return SimpleNamespace(action="reduce", reason="trim", reduce_fraction=0.5)
+        return SimpleNamespace(action="hold", reason="let it run")
+
+
+class _FakeColumn:
+    def desc(self):
+        return self
+
+    def __eq__(self, other):
+        return ("eq", other)
+
+
+class _FakeTraderPositionModel:
+    status = _FakeColumn()
+    first_order_at = _FakeColumn()
+    created_at = _FakeColumn()
+
+
+class _FakeLegacyTraderPositionModel:
+    status = _FakeColumn()
+    opened_at = _FakeColumn()
+    created_at = _FakeColumn()
+
+
+class _FakeQuery:
+    def __init__(self) -> None:
+        self.order_by_args = ()
+
+    def where(self, *args):
+        return self
+
+    def order_by(self, *args):
+        self.order_by_args = args
+        return self
+
+    def limit(self, value):
+        return self
+
+
+class _FakeExecuteResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._rows
+
+
+class _FakeAsyncSession:
+    def __init__(self, rows):
+        self._rows = rows
+
+    async def execute(self, query):
+        return _FakeExecuteResult(self._rows)
+
+
+class _FakeSessionContext:
+    def __init__(self, rows):
+        self._rows = rows
+
+    async def __aenter__(self):
+        return _FakeAsyncSession(self._rows)
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+@pytest.mark.asyncio
+async def test_run_exit_backtest_uses_existing_position_columns_and_tracks_actions(monkeypatch):
+    strategy = ExitDecisionStrategy()
+    now = datetime.now(timezone.utc)
+
+    positions = [
+        SimpleNamespace(
+            id="p_close",
+            market_id="m1",
+            market_question="Market close",
+            direction="buy_yes",
+            mode="paper",
+            total_notional_usd=1000.0,
+            avg_entry_price=0.4,
+            first_order_at=now - timedelta(minutes=90),
+            created_at=now - timedelta(minutes=95),
+            payload_json={"entry_price": 0.4, "last_price": 0.45, "strategy_context": {"tag": "a"}},
+        ),
+        SimpleNamespace(
+            id="p_reduce",
+            market_id="m2",
+            market_question="Market reduce",
+            direction="buy_no",
+            mode="paper",
+            total_notional_usd=800.0,
+            avg_entry_price=0.5,
+            first_order_at=now - timedelta(minutes=45),
+            created_at=now - timedelta(minutes=50),
+            payload_json={"entry_price": 0.5, "last_price": 0.515, "strategy_context": {"tag": "b"}},
+        ),
+        SimpleNamespace(
+            id="p_hold",
+            market_id="m3",
+            market_question="Market hold",
+            direction="buy_yes",
+            mode="paper",
+            total_notional_usd=600.0,
+            avg_entry_price=0.6,
+            first_order_at=now - timedelta(minutes=20),
+            created_at=now - timedelta(minutes=25),
+            payload_json={"entry_price": 0.6, "last_price": 0.59, "strategy_context": {"tag": "c"}},
+        ),
+    ]
+
+    monkeypatch.setattr(
+        strategy_backtester,
+        "validate_strategy_source",
+        lambda source: {
+            "valid": True,
+            "errors": [],
+            "warnings": [],
+            "class_name": strategy.__class__.__name__,
+        },
+    )
+    monkeypatch.setattr(strategy_backtester, "StrategyLoader", lambda: _FakeLoader(strategy))
+
+    import models.database as database_models
+
+    monkeypatch.setattr(database_models, "AsyncSessionLocal", lambda: _FakeSessionContext(positions))
+    monkeypatch.setattr(database_models, "TraderPosition", _FakeTraderPositionModel)
+
+    captured_query: dict[str, object] = {}
+
+    def _fake_select(*args):
+        query = _FakeQuery()
+        captured_query["model"] = args[0]
+        captured_query["query"] = query
+        return query
+
+    monkeypatch.setattr(sqlalchemy, "select", _fake_select)
+
+    result = await strategy_backtester.run_exit_backtest(source_code="class Dummy: pass", slug="exit_test")
+
+    assert result.success is True
+    assert result.runtime_error is None
+    assert result.num_positions == 3
+    assert result.would_close == 1
+    assert result.would_reduce == 1
+    assert result.would_hold == 1
+    assert result.errors == 0
+    assert len(result.exit_decisions) == 3
+
+    decisions = {row["position_id"]: row for row in result.exit_decisions}
+    assert decisions["p_close"]["action"] == "close"
+    assert decisions["p_reduce"]["action"] == "reduce"
+    assert decisions["p_reduce"]["reduce_fraction"] == 0.5
+    assert decisions["p_hold"]["action"] == "hold"
+    assert decisions["p_close"]["age_minutes"] > 0
+    assert decisions["p_close"]["mode"] == "paper"
+    assert captured_query["model"] is _FakeTraderPositionModel
+    assert len(getattr(captured_query["query"], "order_by_args", ())) == 2
+
+
+@pytest.mark.asyncio
+async def test_run_exit_backtest_supports_opened_at_fallback_column(monkeypatch):
+    strategy = ExitDecisionStrategy()
+    now = datetime.now(timezone.utc)
+
+    positions = [
+        SimpleNamespace(
+            id="p_legacy",
+            market_id="m_legacy",
+            market_question="Legacy opened_at position",
+            direction="buy_yes",
+            mode="paper",
+            total_notional_usd=500.0,
+            avg_entry_price=0.45,
+            created_at=now - timedelta(minutes=70),
+            payload_json={"entry_price": 0.45, "last_price": 0.5, "strategy_context": {"tag": "legacy"}},
+        ),
+    ]
+
+    monkeypatch.setattr(
+        strategy_backtester,
+        "validate_strategy_source",
+        lambda source: {
+            "valid": True,
+            "errors": [],
+            "warnings": [],
+            "class_name": strategy.__class__.__name__,
+        },
+    )
+    monkeypatch.setattr(strategy_backtester, "StrategyLoader", lambda: _FakeLoader(strategy))
+
+    import models.database as database_models
+
+    monkeypatch.setattr(database_models, "AsyncSessionLocal", lambda: _FakeSessionContext(positions))
+    monkeypatch.setattr(database_models, "TraderPosition", _FakeLegacyTraderPositionModel)
+
+    captured_query: dict[str, object] = {}
+
+    def _fake_select(*args):
+        query = _FakeQuery()
+        captured_query["model"] = args[0]
+        captured_query["query"] = query
+        return query
+
+    monkeypatch.setattr(sqlalchemy, "select", _fake_select)
+
+    result = await strategy_backtester.run_exit_backtest(source_code="class Dummy: pass", slug="exit_legacy")
+
+    assert result.success is True
+    assert result.runtime_error is None
+    assert result.num_positions == 1
+    assert result.would_close == 1
+    assert len(result.exit_decisions) == 1
+    assert captured_query["model"] is _FakeLegacyTraderPositionModel
+    assert len(getattr(captured_query["query"], "order_by_args", ())) == 2

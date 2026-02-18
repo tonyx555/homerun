@@ -15,7 +15,7 @@ from models.database import (
     PositionSide,
     AsyncSessionLocal,
 )
-from models.opportunity import ArbitrageOpportunity
+from models.opportunity import Opportunity
 from utils.logger import get_logger
 
 logger = get_logger("simulation")
@@ -196,7 +196,7 @@ class SimulationService:
     async def execute_opportunity(
         self,
         account_id: str,
-        opportunity: ArbitrageOpportunity,
+        opportunity: Opportunity,
         position_size: Optional[float] = None,
         copied_from: Optional[str] = None,
         take_profit_price: Optional[float] = None,

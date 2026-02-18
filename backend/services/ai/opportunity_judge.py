@@ -32,7 +32,7 @@ from services.ai import get_llm_manager
 from services.ai.scratchpad import ScratchpadService
 
 if TYPE_CHECKING:
-    from models.opportunity import ArbitrageOpportunity
+    from models.opportunity import Opportunity
 
 from utils.logger import get_logger
 
@@ -311,7 +311,7 @@ class OpportunityJudge:
 
     async def judge_opportunity(
         self,
-        opportunity: "ArbitrageOpportunity",
+        opportunity: "Opportunity",
         resolution_analysis: dict | None = None,
         ml_prediction: dict | None = None,
         model: str | None = None,
@@ -501,7 +501,7 @@ class OpportunityJudge:
 
     async def judge_batch(
         self,
-        opportunities: list["ArbitrageOpportunity"],
+        opportunities: list["Opportunity"],
         model: str | None = None,
     ) -> list[dict]:
         """Judge multiple opportunities concurrently.
@@ -711,7 +711,7 @@ class OpportunityJudge:
 
     def _build_judgment_prompt(
         self,
-        opportunity: "ArbitrageOpportunity",
+        opportunity: "Opportunity",
         resolution_analysis: dict | None = None,
         ml_prediction: dict | None = None,
     ) -> str:
@@ -881,7 +881,7 @@ class OpportunityJudge:
 
     def _build_weather_judgment_prompt(
         self,
-        opportunity: "ArbitrageOpportunity",
+        opportunity: "Opportunity",
         resolution_analysis: dict | None = None,
         ml_prediction: dict | None = None,
     ) -> str:
@@ -981,7 +981,7 @@ class OpportunityJudge:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
 
-    def _temporal_anchor_lines(self, opportunity: "ArbitrageOpportunity") -> list[str]:
+    def _temporal_anchor_lines(self, opportunity: "Opportunity") -> list[str]:
         """Emit canonical timing anchors to reduce LLM date hallucinations."""
         now_utc = utcnow().astimezone(timezone.utc)
         detected_utc = self._to_utc(getattr(opportunity, "detected_at", None))
@@ -1003,7 +1003,7 @@ class OpportunityJudge:
         return lines
 
     @staticmethod
-    def _extract_weather_context(opportunity: "ArbitrageOpportunity") -> dict | None:
+    def _extract_weather_context(opportunity: "Opportunity") -> dict | None:
         for market in opportunity.markets or []:
             if not isinstance(market, dict):
                 continue
@@ -1012,24 +1012,24 @@ class OpportunityJudge:
                 return weather
         return None
 
-    def _is_weather_opportunity(self, opportunity: "ArbitrageOpportunity") -> bool:
+    def _is_weather_opportunity(self, opportunity: "Opportunity") -> bool:
         return (
             str(opportunity.strategy).lower() == "weather_edge"
             or self._extract_weather_context(opportunity) is not None
         )
 
     @staticmethod
-    def _is_directional_opportunity(opportunity: "ArbitrageOpportunity") -> bool:
+    def _is_directional_opportunity(opportunity: "Opportunity") -> bool:
         return not bool(getattr(opportunity, "is_guaranteed", False))
 
     @staticmethod
-    def _is_report_only_opportunity(opportunity: "ArbitrageOpportunity") -> bool:
+    def _is_report_only_opportunity(opportunity: "Opportunity") -> bool:
         if (opportunity.max_position_size or 0.0) <= 0.0:
             return True
         desc = (opportunity.description or "").strip().lower()
         return desc.startswith("report only")
 
-    def _report_only_judgment(self, opportunity: "ArbitrageOpportunity") -> dict:
+    def _report_only_judgment(self, opportunity: "Opportunity") -> dict:
         reason_bits = []
         for rf in opportunity.risk_factors or []:
             text = str(rf).strip()
@@ -1227,7 +1227,7 @@ class OpportunityJudge:
     async def _store_judgment(
         self,
         result: dict,
-        opportunity: "ArbitrageOpportunity",
+        opportunity: "Opportunity",
         ml_prediction: dict | None,
         session_id: str,
         model_used: str,

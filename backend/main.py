@@ -89,15 +89,16 @@ async def lifespan(app: FastAPI):
 
     cpu_count = os.cpu_count() or 4
     cpu_executor = ThreadPoolExecutor(
-        max_workers=max(cpu_count * 2, 8),
+        max_workers=max(cpu_count * 2 + 8, 16),
         thread_name_prefix="cpu-pool",
     )
     loop = asyncio.get_running_loop()
     loop.set_default_executor(cpu_executor)
     logger.info(
         "Thread pool executor configured",
-        max_workers=max(cpu_count * 2, 8),
+        max_workers=max(cpu_count * 2 + 8, 16),
     )
+    worker_tasks: list[asyncio.Task] = []
 
     try:
         # Initialize database
@@ -379,9 +380,6 @@ async def lifespan(app: FastAPI):
             else:
                 logger.warning("Trading service initialization failed - check credentials")
 
-        # Intelligence, crypto, tracked-trader, and trader-orchestrator runtimes are worker-owned.
-        logger.info("API runtime running in orchestration/read-only mode for worker-owned loops")
-
         # Start background cleanup if enabled (DB settings override env defaults).
         cleanup_enabled = bool(settings.AUTO_CLEANUP_ENABLED)
         cleanup_interval_hours = int(settings.CLEANUP_INTERVAL_HOURS)
@@ -455,6 +453,28 @@ async def lifespan(app: FastAPI):
 
         logger.info("All services started successfully")
 
+        # ── Start all workers in-process (P0 fix: EventDispatcher is in-process) ──
+        import importlib
+
+        _WORKER_MODULES = (
+            "workers.scanner_worker",
+            "workers.crypto_worker",
+            "workers.news_worker",
+            "workers.weather_worker",
+            "workers.tracked_traders_worker",
+            "workers.trader_orchestrator_worker",
+            "workers.world_intelligence_worker",
+            "workers.discovery_worker",
+        )
+        for mod_name in _WORKER_MODULES:
+            mod = importlib.import_module(mod_name)
+            task = asyncio.create_task(
+                mod.start_loop(),
+                name=mod_name.split(".")[-1],
+            )
+            worker_tasks.append(task)
+        logger.info("All %d worker loops started in-process", len(worker_tasks))
+
         yield
 
     except Exception as e:
@@ -484,6 +504,18 @@ async def lifespan(app: FastAPI):
             news_feed_service.stop()
         except Exception:
             pass
+
+        # Cancel in-process worker tasks first.
+        for task in worker_tasks:
+            task.cancel()
+        for task in worker_tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+        logger.info("All worker tasks cancelled")
 
         for task in tasks:
             task.cancel()

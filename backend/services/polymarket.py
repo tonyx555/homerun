@@ -90,11 +90,10 @@ class PolymarketClient:
 
             try:
                 response = await client.get(url, **kwargs)
-            except (
-                httpx.TimeoutException,
-                httpx.NetworkError,
-                httpx.ConnectError,
-            ) as exc:
+                # Read the body inside the retry loop so chunked/stream read
+                # failures are retried instead of escaping at response.json().
+                await response.aread()
+            except httpx.TransportError as exc:
                 if attempt < _MAX_RETRIES - 1:
                     delay = min(_BASE_DELAY * (2**attempt), _MAX_DELAY)
                     delay *= 0.5 + random.random()
@@ -1475,7 +1474,12 @@ class PolymarketClient:
                                 "rank": entry.get("rank", 0),
                             }
         except Exception as e:
-            print(f"Leaderboard lookup failed: {e}")
+            _logger.warning(
+                "Leaderboard lookup failed",
+                error=str(e),
+                error_type=type(e).__name__,
+                exc_info=e,
+            )
 
         # Try the data API profile endpoint
         try:
@@ -1531,7 +1535,13 @@ class PolymarketClient:
                         return {"username": username, "address": address}
 
         except Exception as e:
-            print(f"Error fetching profile for {address}: {e}")
+            _logger.warning(
+                "Error fetching profile",
+                address=address,
+                error=str(e),
+                error_type=type(e).__name__,
+                exc_info=e,
+            )
 
         return {"username": None, "address": address}
 
@@ -1937,7 +1947,13 @@ class PolymarketClient:
                 "unrealized_losses": position_losses,
             }
         except Exception as e:
-            print(f"Error calculating win rate for {address}: {e}")
+            _logger.warning(
+                "Error calculating win rate",
+                address=address,
+                error=str(e),
+                error_type=type(e).__name__,
+                exc_info=e,
+            )
             return {
                 "address": address,
                 "win_rate": 0.0,
@@ -2243,7 +2259,13 @@ class PolymarketClient:
                 "roi_percent": roi_percent,
             }
         except Exception as e:
-            print(f"Error calculating PnL for {address}: {e}")
+            _logger.warning(
+                "Error calculating PnL",
+                address=address,
+                error=str(e),
+                error_type=type(e).__name__,
+                exc_info=e,
+            )
             return {
                 "address": address,
                 "total_trades": 0,

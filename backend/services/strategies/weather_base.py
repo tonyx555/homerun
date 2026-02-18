@@ -21,7 +21,7 @@ import logging
 from typing import Any, Optional
 
 from config import settings
-from models import ArbitrageOpportunity, Event, Market
+from models import Opportunity, Event, Market
 from models.opportunity import MispricingType
 from services.strategies.base import BaseStrategy, DecisionCheck, ScoringWeights, SizingConfig, ExitDecision
 from utils.converters import to_float, to_confidence
@@ -79,7 +79,7 @@ class BaseWeatherStrategy(BaseStrategy):
         events: list[Event],
         markets: list[Market],
         prices: dict[str, dict],
-    ) -> list[ArbitrageOpportunity]:
+    ) -> list[Opportunity]:
         return []
 
     # ------------------------------------------------------------------
@@ -91,13 +91,13 @@ class BaseWeatherStrategy(BaseStrategy):
         intents: list[dict],
         markets: list[Market],
         events: list[Event],
-    ) -> list[ArbitrageOpportunity]:
-        """Convert weather trade intents into ArbitrageOpportunity objects."""
+    ) -> list[Opportunity]:
+        """Convert weather trade intents into Opportunity objects."""
         if not intents:
             return []
 
         cfg = self._config
-        opportunities: list[ArbitrageOpportunity] = []
+        opportunities: list[Opportunity] = []
         market_map = {m.id: m for m in markets}
         event_map: dict[str, Event] = {}
         for event in events:
@@ -131,7 +131,7 @@ class BaseWeatherStrategy(BaseStrategy):
         market_map: dict[str, Market],
         event_map: dict[str, Event],
         cfg: dict,
-    ) -> Optional[ArbitrageOpportunity]:
+    ) -> Optional[Opportunity]:
         """Standard evaluation scaffold.
 
         1. quality_gates
@@ -443,7 +443,7 @@ class BaseWeatherStrategy(BaseStrategy):
 
     @staticmethod
     def _build_market_dict(market: Market) -> dict:
-        """Build the standard market dict for an ArbitrageOpportunity."""
+        """Build the standard market dict for an Opportunity."""
         return {
             "id": market.id,
             "slug": market.slug,
@@ -472,8 +472,8 @@ class BaseWeatherStrategy(BaseStrategy):
         max_position: float,
         market: Market,
         positions: list[dict],
-    ) -> ArbitrageOpportunity:
-        """Construct the final ArbitrageOpportunity object."""
+    ) -> Opportunity:
+        """Construct the final Opportunity object."""
         opp = self.create_opportunity(
             title=title,
             description=description,

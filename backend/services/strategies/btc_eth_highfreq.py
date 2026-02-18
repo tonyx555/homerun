@@ -30,7 +30,7 @@ from typing import Any, Callable, Optional
 
 import math
 
-from models import Market, Event, ArbitrageOpportunity
+from models import Market, Event, Opportunity
 from config import settings as _cfg
 from .base import BaseStrategy, DecisionCheck, StrategyDecision, ExitDecision
 from services.data_events import DataEvent
@@ -840,7 +840,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         events: list[Event],
         markets: list[Market],
         prices: dict[str, dict],
-    ) -> list[ArbitrageOpportunity]:
+    ) -> list[Opportunity]:
         """Detect arbitrage opportunities across BTC/ETH high-freq markets.
 
         1. Filter markets to find BTC/ETH high-freq candidates.
@@ -851,7 +851,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         if not _cfg.BTC_ETH_HF_ENABLED:
             return []
 
-        opportunities: list[ArbitrageOpportunity] = []
+        opportunities: list[Opportunity] = []
 
         candidates = self._find_candidates(markets, prices)
         if not candidates:
@@ -1573,8 +1573,8 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         self,
         candidate: HighFreqCandidate,
         selected: SubStrategyScore,
-    ) -> Optional[ArbitrageOpportunity]:
-        """Turn a scored sub-strategy into an ArbitrageOpportunity via the base
+    ) -> Optional[Opportunity]:
+        """Turn a scored sub-strategy into an Opportunity via the base
         class ``create_opportunity`` (which applies all hard filters)."""
 
         market = candidate.market
@@ -1601,7 +1601,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         self,
         c: HighFreqCandidate,
         params: dict,
-    ) -> Optional[ArbitrageOpportunity]:
+    ) -> Optional[Opportunity]:
         """Generate opportunity for sub-strategy A: Pure Arbitrage."""
         market = c.market
         yes_price = params["yes_price"]
@@ -1633,7 +1633,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         self,
         c: HighFreqCandidate,
         params: dict,
-    ) -> Optional[ArbitrageOpportunity]:
+    ) -> Optional[Opportunity]:
         """Generate opportunity for sub-strategy B: Dump-Hedge.
 
         Modeled as a directional bet: buy only the dumped side at a price
@@ -1701,7 +1701,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         self,
         c: HighFreqCandidate,
         params: dict,
-    ) -> Optional[ArbitrageOpportunity]:
+    ) -> Optional[Opportunity]:
         """Generate opportunity for sub-strategy C: Pre-Placed Limits.
 
         Hard filters are relaxed because these are LIMIT orders on newly
@@ -1772,7 +1772,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         self,
         c: HighFreqCandidate,
         params: dict,
-    ) -> Optional[ArbitrageOpportunity]:
+    ) -> Optional[Opportunity]:
         """Generate opportunity for sub-strategy D: Directional Edge.
 
         Buys only the predicted winning side (directional bet, not arb).
@@ -1877,7 +1877,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
 
     @staticmethod
     def _attach_highfreq_metadata(
-        opp: ArbitrageOpportunity,
+        opp: Opportunity,
         candidate: HighFreqCandidate,
         sub_strategy: SubStrategy,
         params: dict,
@@ -2172,7 +2172,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
     # Event-driven detection (crypto_update from crypto worker)
     # ------------------------------------------------------------------
 
-    async def on_event(self, event: DataEvent) -> list[ArbitrageOpportunity]:
+    async def on_event(self, event: DataEvent) -> list[Opportunity]:
         if event.event_type != "crypto_update":
             return []
 
@@ -2220,14 +2220,14 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             platform="polymarket",
         )
 
-    def _detect_from_crypto_markets(self, markets: list[dict]) -> list[ArbitrageOpportunity]:
+    def _detect_from_crypto_markets(self, markets: list[dict]) -> list[Opportunity]:
         """Replicate the multi-strategy signal logic from the former emit_crypto_market_signals.
 
         For each crypto market dict, compute regime-weighted edge across
         directional / pure_arb / rebalance sub-strategies and return
-        ArbitrageOpportunity objects for markets with positive net edge.
+        Opportunity objects for markets with positive net edge.
         """
-        opportunities: list[ArbitrageOpportunity] = []
+        opportunities: list[Opportunity] = []
 
         for market in markets:
             market_id = str(market.get("condition_id") or market.get("id") or "")

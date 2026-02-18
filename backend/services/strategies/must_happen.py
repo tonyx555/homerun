@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from models import Market, Event, ArbitrageOpportunity
+from models import Market, Event, Opportunity
 from .base import BaseStrategy, DecisionCheck, ExitDecision, ScoringWeights, SizingConfig
 from utils.converters import to_float
 
@@ -101,7 +101,7 @@ class MustHappenStrategy(BaseStrategy):
         "finals winner",
     ]
 
-    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[ArbitrageOpportunity]:
+    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:
         opportunities = []
 
         for event in events:
@@ -224,7 +224,7 @@ class MustHappenStrategy(BaseStrategy):
         # If more than half the markets are date-based, reject the whole event
         return date_count > len(questions) * 0.5
 
-    def _detect_must_happen(self, event: Event, prices: dict[str, dict]) -> ArbitrageOpportunity | None:
+    def _detect_must_happen(self, event: Event, prices: dict[str, dict]) -> Opportunity | None:
         """Detect must-happen arbitrage opportunity"""
         active_markets = [m for m in event.markets if m.active and not m.closed]
 

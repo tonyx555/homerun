@@ -5,7 +5,7 @@ Evaluates weather workflow intent signals to detect actionable mispricings
 in temperature-based prediction markets. The weather workflow generates
 trade intents by comparing multi-source forecast consensus against current
 market prices. This strategy applies configurable thresholds before
-converting intents into ArbitrageOpportunity objects.
+converting intents into Opportunity objects.
 
 Unlike scanner strategies that detect structural mispricings, this strategy
 detects INFORMATIONAL mispricings based on meteorological forecast data.
@@ -24,7 +24,7 @@ import logging
 from typing import Any, Optional
 
 from config import settings
-from models import ArbitrageOpportunity, Event, Market
+from models import Opportunity, Event, Market
 from models.opportunity import MispricingType
 from services.strategies.base import BaseStrategy, DecisionCheck, ScoringWeights, SizingConfig, ExitDecision
 from services.data_events import DataEvent
@@ -91,7 +91,7 @@ class WeatherEdgeStrategy(BaseStrategy):
         events: list[Event],
         markets: list[Market],
         prices: dict[str, dict],
-    ) -> list[ArbitrageOpportunity]:
+    ) -> list[Opportunity]:
         return []
 
     # ------------------------------------------------------------------
@@ -103,13 +103,13 @@ class WeatherEdgeStrategy(BaseStrategy):
         intents: list[dict],
         markets: list[Market],
         events: list[Event],
-    ) -> list[ArbitrageOpportunity]:
-        """Convert weather trade intents into ArbitrageOpportunity objects."""
+    ) -> list[Opportunity]:
+        """Convert weather trade intents into Opportunity objects."""
         if not intents:
             return []
 
         cfg = self._config
-        opportunities: list[ArbitrageOpportunity] = []
+        opportunities: list[Opportunity] = []
         market_map = {m.id: m for m in markets}
         event_map: dict[str, Event] = {}
         for event in events:
@@ -143,7 +143,7 @@ class WeatherEdgeStrategy(BaseStrategy):
         market_map: dict[str, Market],
         event_map: dict[str, Event],
         cfg: dict,
-    ) -> Optional[ArbitrageOpportunity]:
+    ) -> Optional[Opportunity]:
         """Evaluate a single weather intent for opportunity detection.
 
         Pipeline:
@@ -317,7 +317,7 @@ class WeatherEdgeStrategy(BaseStrategy):
     # on_event()  (event-driven detection from weather worker)
     # ------------------------------------------------------------------
 
-    async def on_event(self, event: DataEvent) -> list[ArbitrageOpportunity]:
+    async def on_event(self, event: DataEvent) -> list[Opportunity]:
         if event.event_type != "weather_update":
             return []
         intents = event.payload.get("intents") or []

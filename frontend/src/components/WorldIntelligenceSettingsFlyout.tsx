@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertCircle,
@@ -17,7 +17,10 @@ import { Label } from './ui/label'
 import { Switch } from './ui/switch'
 import {
   getSettings,
+  getUnifiedDataSources,
+  type UnifiedDataSource,
   updateSettings,
+  updateUnifiedDataSource,
   type WorldIntelligenceSettings,
 } from '../services/api'
 
@@ -184,6 +187,14 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
+function sourceStatusClass(status: string): string {
+  const normalized = String(status || '').toLowerCase()
+  if (normalized === 'loaded') return 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+  if (normalized === 'error') return 'bg-red-500/15 text-red-400 border-red-500/30'
+  if (normalized === 'unloaded') return 'bg-zinc-500/15 text-zinc-400 border-zinc-500/30'
+  return 'bg-amber-500/15 text-amber-400 border-amber-500/30'
+}
+
 export default function WorldIntelligenceSettingsFlyout({
   isOpen,
   onClose,
@@ -200,6 +211,46 @@ export default function WorldIntelligenceSettingsFlyout({
     queryKey: ['settings'],
     queryFn: getSettings,
     enabled: isOpen,
+  })
+
+  const eventSourcesQuery = useQuery({
+    queryKey: ['unified-data-sources', 'events', 'world-intelligence-settings'],
+    queryFn: () => getUnifiedDataSources({ source_key: 'events' }),
+    enabled: isOpen,
+    staleTime: 10000,
+    refetchInterval: 15000,
+  })
+
+  const eventSources = useMemo(
+    () =>
+      [...(eventSourcesQuery.data || [])].sort((a, b) => {
+        if ((a.sort_order || 0) !== (b.sort_order || 0)) {
+          return (a.sort_order || 0) - (b.sort_order || 0)
+        }
+        return String(a.name || '').localeCompare(String(b.name || ''))
+      }),
+    [eventSourcesQuery.data]
+  )
+
+  const sourceToggleMutation = useMutation({
+    mutationFn: async ({ source, enabled }: { source: UnifiedDataSource; enabled: boolean }) =>
+      updateUnifiedDataSource(source.id, {
+        enabled,
+        unlock_system: Boolean(source.is_system),
+      }),
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['unified-data-sources'] })
+      queryClient.invalidateQueries({ queryKey: ['world-intelligence-sources'] })
+      setSaveMessage({
+        type: 'success',
+        text: `${variables.source.name} ${variables.enabled ? 'enabled' : 'disabled'}`,
+      })
+      setTimeout(() => setSaveMessage(null), 3000)
+    },
+    onError: (error: any) => {
+      setSaveMessage({ type: 'error', text: error?.message || 'Failed to update source state' })
+      setTimeout(() => setSaveMessage(null), 5000)
+    },
   })
 
   useEffect(() => {
@@ -221,7 +272,7 @@ export default function WorldIntelligenceSettingsFlyout({
       queryClient.invalidateQueries({ queryKey: ['world-intelligence-status'] })
       queryClient.invalidateQueries({ queryKey: ['world-intelligence-summary'] })
       queryClient.invalidateQueries({ queryKey: ['world-intelligence-sources'] })
-      setSaveMessage({ type: 'success', text: 'World intelligence settings saved' })
+      setSaveMessage({ type: 'success', text: 'Data settings saved' })
       setTimeout(() => setSaveMessage(null), 3000)
     },
     onError: (error: any) => {
@@ -251,7 +302,7 @@ export default function WorldIntelligenceSettingsFlyout({
         <div className="sticky top-0 z-10 flex items-center justify-between px-4 py-2.5 bg-background/95 backdrop-blur-sm border-b border-border/40">
           <div className="flex items-center gap-2">
             <Settings2 className="w-4 h-4 text-blue-500" />
-            <h3 className="text-sm font-semibold">World Intelligence Settings</h3>
+            <h3 className="text-sm font-semibold">Data Settings</h3>
           </div>
           <div className="flex items-center gap-2">
             <Button size="sm" onClick={handleSave} disabled={saveMutation.isPending} className="gap-1 text-[10px] h-auto px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white">
@@ -284,7 +335,7 @@ export default function WorldIntelligenceSettingsFlyout({
 
         <div className="p-3 space-y-3 pb-6">
           <Section title="Pipeline">
-            <ToggleRow label="Enable World Intelligence" checked={form.enabled} onCheckedChange={(v) => set('enabled', v)} />
+            <ToggleRow label="Enable Event Signals" checked={form.enabled} onCheckedChange={(v) => set('enabled', v)} />
             <ToggleRow label="Emit Trade Signals to Orchestrator" checked={form.emit_trade_signals} onCheckedChange={(v) => set('emit_trade_signals', v)} />
             <NumberField label="Collection Interval (seconds)" value={form.interval_seconds} min={30} onChange={(v) => set('interval_seconds', Math.max(30, Math.round(v)))} />
           </Section>
@@ -336,15 +387,44 @@ export default function WorldIntelligenceSettingsFlyout({
             />
           </Section>
 
-          <Section title="Source Toggles">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-              <ToggleRow label="Military" checked={form.military_enabled} onCheckedChange={(v) => set('military_enabled', v)} />
-              <ToggleRow label="USGS" checked={form.usgs_enabled} onCheckedChange={(v) => set('usgs_enabled', v)} />
-              <ToggleRow label="AIS Stream" checked={form.ais_enabled} onCheckedChange={(v) => set('ais_enabled', v)} />
-              <ToggleRow label="Airplanes.live" checked={form.airplanes_live_enabled} onCheckedChange={(v) => set('airplanes_live_enabled', v)} />
-              <ToggleRow label="Chokepoints" checked={form.chokepoints_enabled} onCheckedChange={(v) => set('chokepoints_enabled', v)} />
-              <ToggleRow label="GDELT News" checked={form.gdelt_news_enabled} onCheckedChange={(v) => set('gdelt_news_enabled', v)} />
-            </div>
+          <Section title="Event Sources (Data SDK)">
+            {eventSourcesQuery.isLoading ? (
+              <div className="text-xs text-muted-foreground py-2">Loading event sources...</div>
+            ) : eventSourcesQuery.isError ? (
+              <div className="text-xs text-red-400 py-2">Failed to load dynamic event sources.</div>
+            ) : eventSources.length === 0 ? (
+              <div className="text-xs text-muted-foreground py-2">No event data sources found.</div>
+            ) : (
+              <div className="space-y-1.5">
+                {eventSources.map((source) => {
+                  const isSavingSource =
+                    sourceToggleMutation.isPending
+                    && sourceToggleMutation.variables?.source.id === source.id
+                  return (
+                    <div key={source.id} className="flex items-center justify-between rounded-md border border-border/40 px-2 py-1.5">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-xs font-medium truncate">{source.name}</span>
+                          <span className={cn('rounded border px-1.5 py-0 text-[9px] uppercase tracking-wide', sourceStatusClass(source.status))}>
+                            {source.status}
+                          </span>
+                          {source.is_system && (
+                            <span className="rounded border border-border/40 px-1.5 py-0 text-[9px] text-muted-foreground">system</span>
+                          )}
+                        </div>
+                        <div className="text-[10px] text-muted-foreground font-mono">{source.slug}</div>
+                      </div>
+                      <Switch
+                        checked={Boolean(source.enabled)}
+                        disabled={isSavingSource}
+                        onCheckedChange={(enabled) => sourceToggleMutation.mutate({ source, enabled })}
+                        className="scale-75"
+                      />
+                    </div>
+                  )
+                })}
+              </div>
+            )}
           </Section>
 
           <Section title="Sync Sources">
@@ -432,7 +512,7 @@ export default function WorldIntelligenceSettingsFlyout({
             </div>
             <div className="flex items-center gap-1.5 mt-1">
               <Shield className="w-3 h-3 text-blue-400" />
-              If behavior does not update immediately, restart the world intelligence worker.
+              If behavior does not update immediately, restart the data worker.
             </div>
           </div>
         </div>

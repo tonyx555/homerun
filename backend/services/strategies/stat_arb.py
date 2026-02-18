@@ -23,7 +23,7 @@ import re
 import statistics
 from typing import Any, Optional
 
-from models import Market, Event, ArbitrageOpportunity
+from models import Market, Event, Opportunity
 from config import settings
 from .base import BaseStrategy, ExitDecision, ScoringWeights, SizingConfig, utcnow
 
@@ -439,7 +439,7 @@ class StatArbStrategy(BaseStrategy):
         events: list[Event],
         markets: list[Market],
         prices: dict[str, dict],
-    ) -> list[ArbitrageOpportunity]:
+    ) -> list[Opportunity]:
         """Detect statistical arbitrage opportunities.
 
         For each binary market, calculate all signals, compute composite
@@ -449,7 +449,7 @@ class StatArbStrategy(BaseStrategy):
         if not settings.STAT_ARB_ENABLED:
             return []
 
-        opportunities: list[ArbitrageOpportunity] = []
+        opportunities: list[Opportunity] = []
 
         # Pre-build market-id -> event mapping for fast lookup
         market_to_event: dict[str, Event] = {}

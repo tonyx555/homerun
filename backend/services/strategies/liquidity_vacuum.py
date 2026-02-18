@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 
-from models import Market, Event, ArbitrageOpportunity
+from models import Market, Event, Opportunity
 from config import settings
 from .base import BaseStrategy, ExitDecision, ScoringWeights, SizingConfig, utcnow, make_aware
 
@@ -94,11 +94,11 @@ class LiquidityVacuumStrategy(BaseStrategy):
         events: list[Event],
         markets: list[Market],
         prices: dict[str, dict],
-    ) -> list[ArbitrageOpportunity]:
+    ) -> list[Opportunity]:
         if not settings.LIQUIDITY_VACUUM_ENABLED:
             return []
 
-        opportunities: list[ArbitrageOpportunity] = []
+        opportunities: list[Opportunity] = []
 
         # Build event lookup for enriching opportunities
         event_by_market: dict[str, Event] = {}

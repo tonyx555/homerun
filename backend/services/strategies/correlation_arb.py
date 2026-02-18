@@ -19,7 +19,7 @@ import time
 from collections import deque
 from typing import Any, Optional
 
-from models import Market, Event, ArbitrageOpportunity
+from models import Market, Event, Opportunity
 from config import settings
 from .base import BaseStrategy, ExitDecision, ScoringWeights, SizingConfig
 from utils.logger import get_logger
@@ -225,7 +225,7 @@ class CorrelationArbStrategy(BaseStrategy):
         self._pair_cache: dict[tuple[str, str], float] = {}  # (id_a, id_b) -> correlation
         self._pair_cache_time: float = 0.0
 
-    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[ArbitrageOpportunity]:
+    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:
         if not settings.CORRELATION_ARB_ENABLED:
             return []
 
@@ -263,7 +263,7 @@ class CorrelationArbStrategy(BaseStrategy):
         # Find candidate pairs (same event or same category)
         candidate_pairs = self._find_candidate_pairs(active_ids)
 
-        opportunities: list[ArbitrageOpportunity] = []
+        opportunities: list[Opportunity] = []
 
         for id_a, id_b in candidate_pairs:
             hist_a = self._price_history.get(id_a)
@@ -444,7 +444,7 @@ class CorrelationArbStrategy(BaseStrategy):
         current_spread: float,
         mean_spread: float,
         prices: dict[str, dict],
-    ) -> Optional[ArbitrageOpportunity]:
+    ) -> Optional[Opportunity]:
         """
         Create a convergence trade opportunity.
 

@@ -25,7 +25,7 @@ import math
 from typing import Any, Optional
 
 from config import settings
-from models import ArbitrageOpportunity, Event, Market
+from models import Opportunity, Event, Market
 from models.opportunity import MispricingType
 from services.strategies.base import BaseStrategy, DecisionCheck, ScoringWeights, SizingConfig, ExitDecision
 from services.data_events import DataEvent
@@ -97,7 +97,7 @@ class WeatherDistributionStrategy(BaseStrategy):
         events: list[Event],
         markets: list[Market],
         prices: dict[str, dict],
-    ) -> list[ArbitrageOpportunity]:
+    ) -> list[Opportunity]:
         return []
 
     # ------------------------------------------------------------------
@@ -109,13 +109,13 @@ class WeatherDistributionStrategy(BaseStrategy):
         intents: list[dict],
         markets: list[Market],
         events: list[Event],
-    ) -> list[ArbitrageOpportunity]:
-        """Convert weather trade intents into ArbitrageOpportunity objects."""
+    ) -> list[Opportunity]:
+        """Convert weather trade intents into Opportunity objects."""
         if not intents:
             return []
 
         cfg = self._config
-        opportunities: list[ArbitrageOpportunity] = []
+        opportunities: list[Opportunity] = []
         market_map = {m.id: m for m in markets}
         event_map: dict[str, Event] = {}
         for event in events:
@@ -149,7 +149,7 @@ class WeatherDistributionStrategy(BaseStrategy):
         market_map: dict[str, Market],
         event_map: dict[str, Event],
         cfg: dict,
-    ) -> Optional[ArbitrageOpportunity]:
+    ) -> Optional[Opportunity]:
         """Evaluate a single weather trade intent using full distribution normalization.
 
         Builds model probabilities for ALL buckets (current + siblings),
@@ -406,7 +406,7 @@ class WeatherDistributionStrategy(BaseStrategy):
     # on_event()  (event-driven detection from weather worker)
     # ------------------------------------------------------------------
 
-    async def on_event(self, event: DataEvent) -> list[ArbitrageOpportunity]:
+    async def on_event(self, event: DataEvent) -> list[Opportunity]:
         if event.event_type != "weather_update":
             return []
         intents = event.payload.get("intents") or []

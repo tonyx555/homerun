@@ -23,7 +23,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Optional
 
-from models import Market, Event, ArbitrageOpportunity
+from models import Market, Event, Opportunity
 from config import settings
 from .base import BaseStrategy, DecisionCheck, ExitDecision, ScoringWeights, SizingConfig, utcnow, make_aware
 from utils.converters import to_float
@@ -225,7 +225,7 @@ class MarketMakingStrategy(BaseStrategy):
         events: list[Event],
         markets: list[Market],
         prices: dict[str, dict],
-    ) -> list[ArbitrageOpportunity]:
+    ) -> list[Opportunity]:
         """Detect market-making opportunities.
 
         Scans all binary markets for candidates with:
@@ -238,7 +238,7 @@ class MarketMakingStrategy(BaseStrategy):
         if not settings.MARKET_MAKING_ENABLED:
             return []
 
-        opportunities: list[ArbitrageOpportunity] = []
+        opportunities: list[Opportunity] = []
 
         # Build an event lookup for enrichment
         event_by_market: dict[str, Event] = {}

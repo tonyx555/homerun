@@ -219,7 +219,7 @@ async def get_unified_template():
             "both detect/detect_async and evaluate/should_exit."
         ),
         "available_imports": [
-            "models (Market, Event, ArbitrageOpportunity)",
+            "models (Market, Event, Opportunity)",
             "services.strategies.base (BaseStrategy)",
             "services.trader_orchestrator.strategies.base (BaseStrategy, StrategyDecision, DecisionCheck)",
             "services.strategies.* (built-in strategy modules)",
@@ -263,8 +263,8 @@ async def get_unified_docs():
                 "phases": [
                     {
                         "phase": "DETECT",
-                        "method": "detect(events, markets, prices) -> list[ArbitrageOpportunity]",
-                        "async_method": "detect_async(events, markets, prices) -> list[ArbitrageOpportunity]",
+                        "method": "detect(events, markets, prices) -> list[Opportunity]",
+                        "async_method": "detect_async(events, markets, prices) -> list[Opportunity]",
                         "caller": "Scanner service — runs every scan cycle (~30s)",
                         "purpose": "Find trading opportunities from live market data",
                         "default_behavior": "Returns empty list (no opportunities)",
@@ -333,10 +333,10 @@ async def get_unified_docs():
                         "positions, event=None, expected_payout=1.0, is_guaranteed=True, "
                         "vwap_total_cost=None, spread_bps=None, fill_probability=None, "
                         "min_liquidity_hard=None, min_position_size=None, min_absolute_profit=None) "
-                        "-> ArbitrageOpportunity"
+                        "-> Opportunity"
                     ),
                     "description": (
-                        "Always returns an ArbitrageOpportunity. Hard rejection filters run in "
+                        "Always returns an Opportunity. Hard rejection filters run in "
                         "QualityFilterPipeline after detection."
                     ),
                 },
@@ -373,11 +373,11 @@ async def get_unified_docs():
         "detect_phase": {
             "methods": {
                 "sync": {
-                    "signature": "detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[ArbitrageOpportunity]",
+                    "signature": "detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]",
                     "when_to_use": "CPU-bound strategies with no async I/O needed",
                 },
                 "async": {
-                    "signature": "async detect_async(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[ArbitrageOpportunity]",
+                    "signature": "async detect_async(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]",
                     "when_to_use": "Strategies that need await — LLM calls (services.ai), HTTP requests (httpx), DB queries",
                     "note": "If detect_async() exists, the scanner calls it instead of detect()",
                 },
@@ -405,7 +405,7 @@ async def get_unified_docs():
                 },
             },
             "return_value": {
-                "type": "list[ArbitrageOpportunity]",
+                "type": "list[Opportunity]",
                 "tip": (
                     "Use self.create_opportunity() to build these. It handles ROI calculation, "
                     "fee modeling, risk scoring, and hard rejection filters automatically."
@@ -584,7 +584,7 @@ async def get_unified_docs():
             ),
             "how_to_subscribe": (
                 "Set subscriptions = [EventType.MARKET_DATA_REFRESH] (or other EventType constants) "
-                "on your class. Implement on_event(self, event: DataEvent) -> list[ArbitrageOpportunity]. "
+                "on your class. Implement on_event(self, event: DataEvent) -> list[Opportunity]. "
                 "For scanner strategies, set realtime_processing_mode = 'incremental' | 'full_snapshot' | 'auto' "
                 "to control reactive batch routing."
             ),
@@ -658,7 +658,7 @@ async def get_unified_docs():
                 },
             },
             "on_event_method": {
-                "signature": "async on_event(self, event: DataEvent) -> list[ArbitrageOpportunity]",
+                "signature": "async on_event(self, event: DataEvent) -> list[Opportunity]",
                 "description": (
                     "Called by the event dispatcher when a subscribed event fires. "
                     "Return a list of detected opportunities (may be empty). "
@@ -679,7 +679,7 @@ async def get_unified_docs():
             "pipeline_class": {
                 "method": "evaluate(opp) -> QualityReport",
                 "description": (
-                    "Runs all quality filters on an ArbitrageOpportunity. "
+                    "Runs all quality filters on an Opportunity. "
                     "Returns a QualityReport with pass/fail and full filter breakdown."
                 ),
             },
@@ -802,7 +802,7 @@ async def get_unified_docs():
                 "Import validation happens at save time via AST analysis — no code is executed."
             ),
             "app_modules": {
-                "models": "Market, Event, ArbitrageOpportunity — core data types",
+                "models": "Market, Event, Opportunity — core data types",
                 "services.strategies.base": "BaseStrategy, StrategyDecision, ExitDecision, DecisionCheck",
                 "services.ai": "LLM integration — call AI models from your strategy",
                 "services.news": "News analysis services",
@@ -980,7 +980,7 @@ async def get_unified_docs():
                     '"""\n'
                     "Strategy: Simple Spread Finder\n"
                     '"""\n'
-                    "from models import Market, Event, ArbitrageOpportunity\n"
+                    "from models import Market, Event, Opportunity\n"
                     "from services.strategies.base import BaseStrategy\n\n"
                     "class SimpleSpreadFinder(BaseStrategy):\n"
                     '    name = "Simple Spread Finder"\n'
@@ -1021,7 +1021,7 @@ async def get_unified_docs():
                     "Detects directional momentum, gates on live price confirmation,\n"
                     "exits on momentum reversal or standard TP/SL.\n"
                     '"""\n'
-                    "from models import Market, Event, ArbitrageOpportunity\n"
+                    "from models import Market, Event, Opportunity\n"
                     "from services.strategies.base import BaseStrategy, StrategyDecision, ExitDecision, DecisionCheck\n\n"
                     "class MomentumEdge(BaseStrategy):\n"
                     '    name = "Momentum Edge"\n'
@@ -1109,7 +1109,7 @@ async def get_unified_docs():
                     "Uses LLM to analyze market questions and recent news.\n"
                     '"""\n'
                     "import httpx\n"
-                    "from models import Market, Event, ArbitrageOpportunity\n"
+                    "from models import Market, Event, Opportunity\n"
                     "from services.strategies.base import BaseStrategy\n"
                     "from services.ai import ai_service\n\n"
                     "class AINewsScanner(BaseStrategy):\n"

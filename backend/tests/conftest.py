@@ -15,7 +15,7 @@ import json
 
 from models.market import Market, Event, Token
 from models.opportunity import (
-    ArbitrageOpportunity,
+    Opportunity,
     MispricingType,
 )
 
@@ -112,8 +112,8 @@ def sample_token():
 
 @pytest.fixture
 def sample_opportunity():
-    """A fully-populated ArbitrageOpportunity."""
-    return ArbitrageOpportunity(
+    """A fully-populated Opportunity."""
+    return Opportunity(
         strategy="basic",
         title="Basic Arb: Will BTC exceed $100k...",
         description="Buy YES ($0.48) + NO ($0.48) = $0.96 for guaranteed $1 payout",
@@ -146,7 +146,7 @@ def sample_opportunity():
 @pytest.fixture
 def sample_opportunity_high_roi():
     """An opportunity with high ROI for sorting tests."""
-    return ArbitrageOpportunity(
+    return Opportunity(
         strategy="negrisk",
         title="NegRisk Arb: Election market",
         description="NegRisk opportunity",
@@ -178,7 +178,7 @@ def sample_opportunity_high_roi():
 @pytest.fixture
 def sample_opportunity_low_roi():
     """An opportunity with low ROI for sorting tests."""
-    return ArbitrageOpportunity(
+    return Opportunity(
         strategy="miracle",
         title="Miracle: Aliens land",
         description="Bet against impossible event",
@@ -210,7 +210,7 @@ def sample_opportunity_low_roi():
 @pytest.fixture
 def expired_opportunity():
     """An opportunity whose resolution_date is in the past."""
-    return ArbitrageOpportunity(
+    return Opportunity(
         strategy="basic",
         title="Expired opp",
         description="Already resolved",
@@ -229,7 +229,7 @@ def expired_opportunity():
 @pytest.fixture
 def old_opportunity():
     """An opportunity detected over 2 hours ago."""
-    return ArbitrageOpportunity(
+    return Opportunity(
         strategy="basic",
         title="Old opp",
         description="Old detection",

@@ -1,3 +1,18 @@
+"""Strategy DataEvent routing — dispatches typed events to strategy on_event() handlers.
+
+**Purpose**: Workers emit typed ``DataEvent`` objects (price changes, crypto
+updates, news, weather, trader activity, data source updates, etc.) and this
+dispatcher routes them to strategies that declared matching ``subscriptions``.
+
+**Not for WebSocket broadcast.** Frontend live updates go through
+``event_bus`` (``services.event_bus``). The two systems serve different purposes:
+
+- ``event_dispatcher`` → strategy DataEvent routing (trading logic)
+- ``event_bus`` → frontend WebSocket broadcast (UI live updates)
+
+All workers now run in-process (Phase 4 single-process collapse), so
+dispatched events reach all loaded strategies without IPC.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -63,7 +78,7 @@ class EventDispatcher:
     async def dispatch(self, event: DataEvent, include_strategies: Set[str] | None = None) -> list:
         """Dispatch an event to all subscribed handlers.
 
-        Returns a flat list of all results (ArbitrageOpportunity objects)
+        Returns a flat list of all results (Opportunity objects)
         from all handlers. Handlers that raise exceptions are logged
         and skipped -- they don't affect other handlers.
         """

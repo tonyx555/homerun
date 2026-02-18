@@ -207,15 +207,27 @@ async def run_data_source(
     skipped_count = 0
 
     try:
-        if runtime is None:
-            runtime = data_source_loader.load(
-                slug=source_slug,
-                source_code=str(source.source_code or ""),
-                config=dict(source.config or {}),
-                class_name=source.class_name,
-            )
+        # For declarative source kinds (rss, rest_api), use the built-in runner
+        # instead of loading a Python class.
+        source_kind = str(source.source_kind or "python").strip().lower()
 
-        instance = runtime.instance
+        if source_kind == "rss":
+            from services.data_source_runners.rss_runner import RssRunner
+            instance = RssRunner(dict(source.config or {}))
+        elif source_kind == "rest_api":
+            from services.data_source_runners.rest_api_runner import RestApiRunner
+            instance = RestApiRunner(dict(source.config or {}))
+        else:
+            # Python class-based source (original path)
+            if runtime is None:
+                runtime = data_source_loader.load(
+                    slug=source_slug,
+                    source_code=str(source.source_code or ""),
+                    config=dict(source.config or {}),
+                    class_name=source.class_name,
+                )
+            instance = runtime.instance
+
         if hasattr(instance, "fetch_async"):
             fetched = await _invoke_callable(instance.fetch_async)
         elif hasattr(instance, "fetch"):
@@ -316,9 +328,10 @@ async def run_data_source(
                 )
             upserted_count += 1
 
-        runtime.run_count += 1
-        runtime.last_run = datetime.now(timezone.utc)
-        runtime.last_error = None
+        if runtime is not None:
+            runtime.run_count += 1
+            runtime.last_run = datetime.now(timezone.utc)
+            runtime.last_error = None
 
         source.status = "loaded"
         source.error_message = None
@@ -349,6 +362,32 @@ async def run_data_source(
         await session.commit()
     else:
         await session.flush()
+
+    # Dispatch a DataEvent so subscribed strategies can react when a data
+    # source produces new records — bridging the DataSource SDK into the
+    # real-time event pipeline.
+    if run_row.status == "success" and upserted_count > 0:
+        try:
+            from services.data_events import DataEvent, EventType
+            from services.event_dispatcher import event_dispatcher
+
+            event = DataEvent(
+                event_type=EventType.DATA_SOURCE_UPDATE,
+                source=f"data_source:{source_slug}",
+                timestamp=datetime.now(timezone.utc),
+                payload={
+                    "source_slug": source_slug,
+                    "records_count": upserted_count,
+                    "run_id": run_row.id,
+                },
+            )
+            await event_dispatcher.dispatch(event)
+        except Exception as exc:
+            logger.warning(
+                "DataEvent dispatch after data source run failed (non-critical)",
+                source_slug=source_slug,
+                exc_info=exc,
+            )
 
     return {
         "run_id": run_row.id,

@@ -7,7 +7,7 @@ Bridges worker data to connected WebSocket clients in the API process.
 ``event_bus``; the broadcaster subscribes and immediately relays them to WS
 clients, applying signature-based deduplication for high-frequency events.
 
-**Fallback path (DB poll):** A slow 5-second DB-poll loop runs as a safety
+**Fallback path (DB poll):** A slow 30-second DB-poll loop runs as a safety
 net so data is never lost even if a worker forgets (or fails) to publish.
 """
 
@@ -227,13 +227,13 @@ class SnapshotBroadcaster:
             self._run_event_listener(),
             name="snapshot-broadcaster-events",
         )
-        # Fallback: slow DB poll at 5s for data consistency.
+        # Fallback: slow DB poll at 30s for data consistency.
         self._fallback_task = asyncio.create_task(
-            self._run_loop(interval_seconds=5.0),
+            self._run_loop(interval_seconds=30.0),
             name="snapshot-broadcaster-fallback",
         )
         logger.info(
-            "Snapshot broadcaster started (event-driven primary, DB-poll fallback at 5s)",
+            "Snapshot broadcaster started (event-driven primary, DB-poll fallback at 30s)",
             interval_seconds=interval_seconds,
         )
 
@@ -314,13 +314,14 @@ class SnapshotBroadcaster:
         await manager.broadcast({"type": event_type, "data": data})
 
     # ------------------------------------------------------------------
-    # Fallback DB-poll path (runs every 5 seconds)
+    # Fallback DB-poll path (runs every 30 seconds)
     # ------------------------------------------------------------------
 
     async def _run_loop(self, interval_seconds: float) -> None:
         """FALLBACK: Slow DB poll loop to ensure data consistency.
 
-        This is the original polling logic, reduced from 1s to 5s interval.
+        This is the original polling logic, reduced to 30s interval now that
+        workers run in-process and publish to the event bus directly.
         It catches any data that workers may not have published to the bus.
         """
         while self._running:

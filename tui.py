@@ -139,37 +139,11 @@ WORKER_TAG_TO_NAME: dict[str, str] = {
 }
 
 WORKER_BACKEND_HINTS: tuple[tuple[str, str], ...] = (
-    ("scanner_worker", "scanner"),
-    ("discovery_worker", "discovery"),
-    ("weather_worker", "weather"),
-    ("news_worker", "news"),
-    ("crypto_worker", "crypto"),
-    ("tracked_traders_worker", "tracked_traders"),
-    ("trader_orchestrator_worker", "trader_orchestrator"),
-    ("world_intelligence_worker", "world_intelligence"),
+    # Workers now run in-process inside the API lifespan (Phase 4).
 )
 
 WORKER_PROCESS_SPECS: tuple[tuple[str, str, str, str, str], ...] = (
-    ("scanner", "scanner_worker_proc", "workers.scanner_worker", "SCANNER", "scanner"),
-    ("discovery", "discovery_worker_proc", "workers.discovery_worker", "DISCOVERY", "discovery"),
-    ("weather", "weather_worker_proc", "workers.weather_worker", "WEATHER", "weather"),
-    ("news", "news_worker_proc", "workers.news_worker", "NEWS", "news"),
-    ("crypto", "crypto_worker_proc", "workers.crypto_worker", "CRYPTO", "crypto"),
-    ("tracked_traders", "tracked_worker_proc", "workers.tracked_traders_worker", "TRACKED", "tracked-traders"),
-    (
-        "trader_orchestrator",
-        "trader_orchestrator_worker_proc",
-        "workers.trader_orchestrator_worker",
-        "ORCHESTRATOR",
-        "trader-orchestrator",
-    ),
-    (
-        "world_intelligence",
-        "world_intel_worker_proc",
-        "workers.world_intelligence_worker",
-        "WORLDINTEL",
-        "world-intelligence",
-    ),
+    # Workers now run in-process inside the API lifespan (Phase 4).
 )
 WORKER_SPEC_BY_NAME: dict[str, dict[str, str]] = {
     worker_name: {

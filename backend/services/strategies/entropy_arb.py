@@ -33,7 +33,7 @@ from __future__ import annotations
 import math
 from typing import Any, Optional
 
-from models import Market, Event, ArbitrageOpportunity
+from models import Market, Event, Opportunity
 from config import settings
 from .base import BaseStrategy, ExitDecision, ScoringWeights, SizingConfig, make_aware, utcnow
 
@@ -373,11 +373,11 @@ class EntropyArbStrategy(BaseStrategy):
         events: list[Event],
         markets: list[Market],
         prices: dict[str, dict],
-    ) -> list[ArbitrageOpportunity]:
+    ) -> list[Opportunity]:
         if not settings.ENTROPY_ARB_ENABLED:
             return []
 
-        opportunities: list[ArbitrageOpportunity] = []
+        opportunities: list[Opportunity] = []
 
         for event in events:
             opp = self._detect_rebalancing(event, prices)
@@ -390,7 +390,7 @@ class EntropyArbStrategy(BaseStrategy):
         self,
         event: Event,
         prices: dict[str, dict],
-    ) -> Optional[ArbitrageOpportunity]:
+    ) -> Optional[Opportunity]:
         """Detect NegRisk rebalancing opportunity in a multiway event.
 
         Only creates an opportunity when sum(YES) < $1.00, meaning

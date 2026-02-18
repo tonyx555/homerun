@@ -9,12 +9,12 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from models.opportunity import ArbitrageOpportunity
+from models.opportunity import Opportunity
 from services.ai.opportunity_judge import OpportunityJudge
 
 
-def _build_weather_opportunity(*, max_position_size: float = 0.0) -> ArbitrageOpportunity:
-    return ArbitrageOpportunity(
+def _build_weather_opportunity(*, max_position_size: float = 0.0) -> Opportunity:
+    return Opportunity(
         strategy="weather_edge",
         title="Will the highest temperature in Miami be 75°F or below on February 14?",
         description=(

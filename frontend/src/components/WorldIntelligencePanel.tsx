@@ -1,4 +1,4 @@
-import { useState, useMemo, lazy, Suspense } from 'react'
+import { useState, useMemo, useEffect, lazy, Suspense } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   AlertTriangle,
@@ -86,8 +86,98 @@ const METADATA_CHIPS_CONFIG: Record<string, Array<{ key: string; label: string; 
   ],
 }
 
+type SignalsGroupBy = 'none' | 'type' | 'country' | 'severity' | 'source'
+type SignalsLayout = 'list' | 'cards'
+
+const SIGNAL_GROUP_OPTIONS: Array<{ value: SignalsGroupBy; label: string }> = [
+  { value: 'none', label: 'No grouping' },
+  { value: 'type', label: 'Signal type' },
+  { value: 'country', label: 'Country' },
+  { value: 'severity', label: 'Severity' },
+  { value: 'source', label: 'Source' },
+]
+
+function severityLevel(severity: number): 'critical' | 'high' | 'medium' | 'low' {
+  if (severity >= 0.8) return 'critical'
+  if (severity >= 0.6) return 'high'
+  if (severity >= 0.3) return 'medium'
+  return 'low'
+}
+
+function detectedAtValue(detectedAt: string | null | undefined): number {
+  if (!detectedAt) return Number.NEGATIVE_INFINITY
+  const parsed = Date.parse(detectedAt)
+  return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY
+}
+
+function buildSignalGroups(signals: WorldSignal[], groupBy: SignalsGroupBy): Array<{
+  key: string
+  label: string
+  order: number
+  signals: WorldSignal[]
+}> {
+  const groups = new Map<string, { key: string; label: string; order: number; signals: WorldSignal[] }>()
+
+  for (const signal of signals) {
+    let key = 'all'
+    let label = 'All signals'
+    let order = 0
+
+    if (groupBy === 'type') {
+      const typeConfig = SIGNAL_TYPE_CONFIG[signal.signal_type] || SIGNAL_TYPE_CONFIG.conflict
+      key = `type:${signal.signal_type}`
+      label = typeConfig.label
+    } else if (groupBy === 'country') {
+      const normalizedCountry = signal.country ? normalizeCountryCode(signal.country) || signal.country.toUpperCase() : 'UNKNOWN'
+      key = `country:${normalizedCountry}`
+      label = signal.country ? formatCountry(signal.country) : 'Unknown location'
+    } else if (groupBy === 'severity') {
+      const level = severityLevel(signal.severity)
+      key = `severity:${level}`
+      if (level === 'critical') {
+        label = 'Critical (80%+)'
+        order = 0
+      } else if (level === 'high') {
+        label = 'High (60-79%)'
+        order = 1
+      } else if (level === 'medium') {
+        label = 'Medium (30-59%)'
+        order = 2
+      } else {
+        label = 'Low (<30%)'
+        order = 3
+      }
+    } else if (groupBy === 'source') {
+      const source = signal.source || 'Unknown source'
+      key = `source:${source.toLowerCase()}`
+      label = source
+    }
+
+    const existing = groups.get(key)
+    if (existing) {
+      existing.signals.push(signal)
+    } else {
+      groups.set(key, { key, label, order, signals: [signal] })
+    }
+  }
+
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      signals: [...group.signals].sort((a, b) => {
+        if (b.severity !== a.severity) return b.severity - a.severity
+        return detectedAtValue(b.detected_at) - detectedAtValue(a.detected_at)
+      }),
+    }))
+    .sort((a, b) => {
+      if (groupBy === 'severity' && a.order !== b.order) return a.order - b.order
+      if (b.signals.length !== a.signals.length) return b.signals.length - a.signals.length
+      return a.label.localeCompare(b.label)
+    })
+}
+
 function SeverityBadge({ severity }: { severity: number }) {
-  const level = severity >= 0.8 ? 'critical' : severity >= 0.6 ? 'high' : severity >= 0.3 ? 'medium' : 'low'
+  const level = severityLevel(severity)
   const colors = {
     critical: 'bg-red-500/20 text-red-400 border-red-500/30',
     high: 'bg-orange-500/20 text-orange-400 border-orange-500/30',
@@ -121,7 +211,7 @@ function MarketRelevanceBadge({ score }: { score: number | null }) {
   )
 }
 
-function SignalRow({ signal }: { signal: WorldSignal }) {
+function SignalCard({ signal, layout }: { signal: WorldSignal; layout: SignalsLayout }) {
   const [expanded, setExpanded] = useState(false)
   const config = SIGNAL_TYPE_CONFIG[signal.signal_type] || SIGNAL_TYPE_CONFIG.conflict
   const Icon = config.icon
@@ -139,30 +229,40 @@ function SignalRow({ signal }: { signal: WorldSignal }) {
       }))
   }, [signal.signal_type, signal.metadata])
 
+  const contextParts = useMemo(() => {
+    const parts: string[] = []
+    if (signal.country) parts.push(formatCountry(signal.country))
+    if (signal.source) parts.push(signal.source)
+    if (signal.detected_at) parts.push(new Date(signal.detected_at).toLocaleString())
+    return parts
+  }, [signal.country, signal.source, signal.detected_at])
+
   return (
     <div
-      className="py-1.5 px-2 rounded bg-background/50 hover:bg-background/80 transition-colors cursor-pointer"
+      className={cn(
+        'rounded-lg transition-colors cursor-pointer',
+        layout === 'cards'
+          ? 'border border-border bg-card/70 hover:bg-card px-3 py-2.5 h-full'
+          : 'py-1.5 px-2 bg-background/50 hover:bg-background/80',
+      )}
       onClick={() => setExpanded((v) => !v)}
     >
       <div className="flex items-start gap-2">
         <Icon className={cn('w-4 h-4 mt-0.5 shrink-0', config.color)} />
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-medium truncate">{signal.title}</span>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-sm font-medium leading-5">{signal.title}</span>
+            <Badge variant="outline" className={cn('text-[9px] h-4 px-1.5 font-data', config.color, 'border-current/20')}>
+              {config.label}
+            </Badge>
             <SeverityBadge severity={signal.severity} />
             <MarketRelevanceBadge score={signal.market_relevance_score} />
           </div>
-          <div className="flex items-center gap-2 text-[10px] text-muted-foreground mt-0.5">
-            {signal.country && <span>{formatCountry(signal.country)}</span>}
-            <span>·</span>
-            <span>{signal.source}</span>
-            {signal.detected_at && (
-              <>
-                <span>·</span>
-                <span>{new Date(signal.detected_at).toLocaleTimeString()}</span>
-              </>
-            )}
-          </div>
+          {contextParts.length > 0 && (
+            <div className="text-[10px] text-muted-foreground mt-0.5">
+              {contextParts.join(' · ')}
+            </div>
+          )}
           {signal.related_market_ids && signal.related_market_ids.length > 0 && (
             <div className="flex items-center gap-1 mt-1">
               <MapPin className="w-3 h-3 text-primary" />
@@ -175,7 +275,7 @@ function SignalRow({ signal }: { signal: WorldSignal }) {
         </div>
       </div>
       {expanded && (
-        <div className="mt-2 ml-6 space-y-1.5">
+        <div className={cn('mt-2 space-y-1.5', layout === 'cards' ? 'pl-0' : 'ml-6')}>
           {signal.description && (
             <p className="text-xs text-muted-foreground">{signal.description}</p>
           )}
@@ -228,32 +328,63 @@ function SignalTypeSummaryBar({ signals }: { signals: WorldSignal[] }) {
 
 function SignalsView({ isConnected }: { isConnected: boolean }) {
   const [typeFilter, setTypeFilter] = useState<string>('')
-  const [limit, setLimit] = useState<number>(250)
+  const [pageSize, setPageSize] = useState<number>(100)
+  const [page, setPage] = useState<number>(1)
+  const [groupBy, setGroupBy] = useState<SignalsGroupBy>('type')
+  const [layout, setLayout] = useState<SignalsLayout>('cards')
+  const offset = (page - 1) * pageSize
   const { data, isLoading, isError } = useQuery({
-    queryKey: ['world-signals', { signal_type: typeFilter || undefined, limit }],
-    queryFn: () => getWorldSignals({ signal_type: typeFilter || undefined, limit }),
+    queryKey: ['world-signals', { signal_type: typeFilter || undefined, limit: pageSize, offset }],
+    queryFn: () => getWorldSignals({ signal_type: typeFilter || undefined, limit: pageSize, offset }),
     refetchInterval: isConnected ? false : 120000,
   })
+  const signals = data?.signals || []
+  const groupedSignals = useMemo(() => buildSignalGroups(signals, groupBy), [signals, groupBy])
+  const totalSignals = Math.max(Number(data?.total || 0), signals.length)
+  const totalPages = Math.max(1, Math.ceil(totalSignals / pageSize))
+  const currentPage = Math.min(page, totalPages)
+  const currentOffset = (currentPage - 1) * pageSize
+  const pageStart = signals.length === 0 ? 0 : currentOffset + 1
+  const pageEnd = signals.length === 0 ? 0 : currentOffset + signals.length
+
+  useEffect(() => {
+    if (page > totalPages) {
+      setPage(totalPages)
+    }
+  }, [page, totalPages])
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-center gap-2">
-        <Select value={typeFilter || 'all'} onValueChange={(value) => setTypeFilter(value === 'all' ? '' : value)}>
+    <div className="h-full min-h-0 flex flex-col">
+      <div className="shrink-0 space-y-3 border-b border-border/40 pb-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <Select
+            value={typeFilter || 'all'}
+            onValueChange={(value) => {
+              setTypeFilter(value === 'all' ? '' : value)
+              setPage(1)
+            }}
+          >
+            <SelectTrigger className="h-8 w-[180px] text-xs">
+              <SelectValue placeholder="Signal type" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All signal types</SelectItem>
+              {Object.entries(SIGNAL_TYPE_CONFIG).map(([type, config]) => (
+                <SelectItem key={type} value={type}>
+                  {config.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select
+            value={String(pageSize)}
+            onValueChange={(value) => {
+              setPageSize(Math.max(1, Number(value) || 100))
+              setPage(1)
+            }}
+          >
           <SelectTrigger className="h-8 w-[180px] text-xs">
-            <SelectValue placeholder="Signal type" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All signal types</SelectItem>
-            {Object.entries(SIGNAL_TYPE_CONFIG).map(([type, config]) => (
-              <SelectItem key={type} value={type}>
-                {config.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Select value={String(limit)} onValueChange={(value) => setLimit(Number(value) || 250)}>
-          <SelectTrigger className="h-8 w-[120px] text-xs">
-            <SelectValue placeholder="Rows" />
+            <SelectValue placeholder="Page size" />
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="25">25 rows</SelectItem>
@@ -262,30 +393,130 @@ function SignalsView({ isConnected }: { isConnected: boolean }) {
             <SelectItem value="250">250 rows</SelectItem>
             <SelectItem value="500">500 rows</SelectItem>
             <SelectItem value="1000">1000 rows</SelectItem>
-            <SelectItem value="2500">2500 rows</SelectItem>
-            <SelectItem value="5000">5000 rows</SelectItem>
           </SelectContent>
         </Select>
+          <Select value={groupBy} onValueChange={(value) => setGroupBy(value as SignalsGroupBy)}>
+            <SelectTrigger className="h-8 w-[170px] text-xs">
+              <SelectValue placeholder="Group by" />
+            </SelectTrigger>
+            <SelectContent>
+              {SIGNAL_GROUP_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <div className="inline-flex items-center rounded-md border border-border bg-background p-0.5 ml-auto">
+            <Button
+              variant={layout === 'list' ? 'secondary' : 'ghost'}
+              size="sm"
+              className="h-6 px-2 text-[11px]"
+              onClick={() => setLayout('list')}
+            >
+              List
+            </Button>
+            <Button
+              variant={layout === 'cards' ? 'secondary' : 'ghost'}
+              size="sm"
+              className="h-6 px-2 text-[11px]"
+              onClick={() => setLayout('cards')}
+            >
+              Cards
+            </Button>
+          </div>
+        </div>
+
+        {!isLoading && !isError && signals.length > 0 && (
+          <SignalTypeSummaryBar signals={signals} />
+        )}
+
+        <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+          <span className="font-data">
+            Showing {pageStart}-{pageEnd} of {totalSignals}
+          </span>
+          <div className="flex items-center gap-1">
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 px-2 text-[11px]"
+              onClick={() => setPage(1)}
+              disabled={currentPage <= 1 || isLoading}
+            >
+              First
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 px-2 text-[11px]"
+              onClick={() => setPage((prev) => Math.max(1, prev - 1))}
+              disabled={currentPage <= 1 || isLoading}
+            >
+              Prev
+            </Button>
+            <span className="px-2 text-[11px] font-mono">
+              {currentPage} / {totalPages}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 px-2 text-[11px]"
+              onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}
+              disabled={currentPage >= totalPages || isLoading}
+            >
+              Next
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 px-2 text-[11px]"
+              onClick={() => setPage(totalPages)}
+              disabled={currentPage >= totalPages || isLoading}
+            >
+              Last
+            </Button>
+          </div>
+        </div>
       </div>
 
-      {!isLoading && !isError && data?.signals && data.signals.length > 0 && (
-        <SignalTypeSummaryBar signals={data.signals} />
-      )}
-
-      {isLoading ? (
-        <div className="text-center text-muted-foreground py-8">Loading signals...</div>
-      ) : isError ? (
-        <div className="text-center text-red-400 py-8">Failed to load signals</div>
-      ) : (
-        <div className="space-y-2">
-          {(data?.signals || []).map((s) => (
-            <SignalRow key={s.signal_id} signal={s} />
-          ))}
-          {(!data?.signals || data.signals.length === 0) && (
-            <div className="text-center text-muted-foreground py-8">No signals matching filter</div>
-          )}
-        </div>
-      )}
+      <div className="flex-1 min-h-0 overflow-y-auto pt-3 pr-1">
+        {isLoading ? (
+          <div className="text-center text-muted-foreground py-8">Loading signals...</div>
+        ) : isError ? (
+          <div className="text-center text-red-400 py-8">Failed to load signals</div>
+        ) : (
+          <div className="space-y-3">
+            {groupedSignals.map((group) => (
+              <section key={group.key} className="space-y-2">
+                {groupBy !== 'none' && (
+                  <div className="flex items-center justify-between rounded-md border border-border/60 bg-muted/20 px-2.5 py-1.5">
+                    <span className="text-[11px] font-data tracking-wide text-muted-foreground">
+                      {group.label}
+                    </span>
+                    <Badge variant="outline" className="text-[9px] h-4 px-1.5 font-mono">
+                      {group.signals.length}
+                    </Badge>
+                  </div>
+                )}
+                <div
+                  className={cn(
+                    layout === 'cards'
+                      ? 'grid grid-cols-1 gap-2 xl:grid-cols-2 2xl:grid-cols-3'
+                      : 'space-y-2',
+                  )}
+                >
+                  {group.signals.map((signal) => (
+                    <SignalCard key={signal.signal_id} signal={signal} layout={layout} />
+                  ))}
+                </div>
+              </section>
+            ))}
+            {groupedSignals.length === 0 && (
+              <div className="text-center text-muted-foreground py-8">No signals matching filter</div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -503,7 +734,7 @@ export default function WorldIntelligencePanel({
             Settings
           </Button>
         </div>
-        <div className="flex-1 overflow-y-auto p-4">
+        <div className="flex-1 min-h-0 p-4">
           <ErrorBoundary fallback={<div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-500">This world intelligence view failed to render.</div>}>
             <SignalsView isConnected={isConnected} />
           </ErrorBoundary>
@@ -553,7 +784,7 @@ export default function WorldIntelligencePanel({
           </ErrorBoundary>
         </div>
       ) : (
-        <div className="flex-1 overflow-y-auto p-4">
+        <div className={cn('flex-1 p-4', subView === 'signals' ? 'min-h-0' : 'overflow-y-auto')}>
           <ErrorBoundary fallback={<div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-500">This world intelligence view failed to render.</div>}>
             {subView === 'signals' && <SignalsView isConnected={isConnected} />}
             {subView === 'countries' && <CountriesView isConnected={isConnected} />}

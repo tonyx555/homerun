@@ -34,7 +34,7 @@ Homerun detects mispricings in real time — guaranteed-spread arbitrage, cross-
                     │  on_event() → evaluate()   │
                     │  QualityFilterPipeline     │
                     └─────────────┬─────────────┘
-                                  │ ArbitrageOpportunity
+                                  │ Opportunity
                     ┌─────────────▼─────────────┐
                     │   Trader Orchestrator      │
                     │  Risk gates → Order Mgr    │
@@ -210,11 +210,11 @@ Hooks called at override points:
 
 ## Data Model
 
-The central object is `ArbitrageOpportunity`:
+The central object is `Opportunity`:
 
 ```python
 @dataclass
-class ArbitrageOpportunity:
+class Opportunity:
     id: str                      # UUID
     stable_id: str               # Fingerprint-based deduplication key
     strategy: str                # Which strategy produced this

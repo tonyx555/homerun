@@ -17,7 +17,7 @@ from models.database import (
     WeatherSnapshot,
     WeatherTradeIntent,
 )
-from models.opportunity import ArbitrageOpportunity
+from models.opportunity import Opportunity
 from services.event_bus import event_bus
 from services.market_tradability import get_market_tradability_map
 
@@ -115,7 +115,7 @@ def _parse_date_from_text(
     return None
 
 
-def _opportunity_target_date(opp: ArbitrageOpportunity) -> Optional[date]:
+def _opportunity_target_date(opp: Opportunity) -> Optional[date]:
     for market in opp.markets or []:
         if not isinstance(market, dict):
             continue
@@ -158,7 +158,7 @@ def _default_status() -> dict[str, Any]:
 
 async def write_weather_snapshot(
     session: AsyncSession,
-    opportunities: list[ArbitrageOpportunity],
+    opportunities: list[Opportunity],
     status: dict[str, Any],
     stats: Optional[dict[str, Any]] = None,
 ) -> None:
@@ -176,7 +176,7 @@ async def write_weather_snapshot(
         if hasattr(o, "model_dump"):
             payload.append(o.model_dump(mode="json"))
         else:
-            payload.append(ArbitrageOpportunity.model_validate(o).model_dump(mode="json"))
+            payload.append(Opportunity.model_validate(o).model_dump(mode="json"))
 
     result = await session.execute(select(WeatherSnapshot).where(WeatherSnapshot.id == WEATHER_SNAPSHOT_ID))
     row = result.scalar_one_or_none()
@@ -220,16 +220,16 @@ async def write_weather_snapshot(
 
 async def read_weather_snapshot(
     session: AsyncSession,
-) -> tuple[list[ArbitrageOpportunity], dict[str, Any]]:
+) -> tuple[list[Opportunity], dict[str, Any]]:
     result = await session.execute(select(WeatherSnapshot).where(WeatherSnapshot.id == WEATHER_SNAPSHOT_ID))
     row = result.scalar_one_or_none()
     if row is None:
         return [], _default_status()
 
-    opportunities: list[ArbitrageOpportunity] = []
+    opportunities: list[Opportunity] = []
     for d in row.opportunities_json or []:
         try:
-            opportunities.append(ArbitrageOpportunity.model_validate(d))
+            opportunities.append(Opportunity.model_validate(d))
         except Exception:
             continue
 
@@ -255,14 +255,14 @@ async def get_weather_opportunities_from_db(
     require_tradable_markets: bool = False,
     exclude_near_resolution: bool = False,
     include_report_only: bool = True,
-) -> list[ArbitrageOpportunity]:
+) -> list[Opportunity]:
     opportunities, _ = await read_weather_snapshot(session)
     for opp in opportunities:
         opp.title = _normalize_weather_edge_title(opp.title)
 
     if opportunities and exclude_near_resolution:
         now = datetime.now(timezone.utc)
-        filtered: list[ArbitrageOpportunity] = []
+        filtered: list[Opportunity] = []
         for opp in opportunities:
             if opp.resolution_date is None:
                 filtered.append(opp)
@@ -293,7 +293,7 @@ async def get_weather_opportunities_from_db(
         opportunities = filtered
 
     if max_entry_price is not None:
-        filtered: list[ArbitrageOpportunity] = []
+        filtered: list[Opportunity] = []
         for opp in opportunities:
             positions = opp.positions_to_take or []
             # Keep report-only rows (no executable leg) visible in weather UI.

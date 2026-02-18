@@ -339,7 +339,7 @@ def create_legs_from_opportunity(positions: list[dict], total_size_usd: float) -
     Helper to create ExecutionLegs from opportunity positions.
 
     Args:
-        positions: List of position dicts from ArbitrageOpportunity.positions_to_take
+        positions: List of position dicts from Opportunity.positions_to_take
         total_size_usd: Total USD to invest (split equally among legs)
 
     Returns:

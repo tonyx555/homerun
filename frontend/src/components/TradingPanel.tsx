@@ -255,11 +255,11 @@ const FALLBACK_TRADER_SOURCES: TraderSource[] = [
   },
   {
     key: 'traders',
-    label: 'Traders',
-    description: 'Tracked/pool/individual/group trader activity signals.',
+    label: 'Wallet Signals',
+    description: 'Tracked/pool/individual/group wallet activity signals.',
     domains: ['event_markets'],
     signal_types: ['confluence'],
-    strategy_options: [{ key: 'traders_flow', label: 'Traders Flow', description: '', default_params: {}, param_fields: [] }],
+    strategy_options: [{ key: 'traders_flow', label: 'Wallet Flow', description: '', default_params: {}, param_fields: [] }],
   },
   {
     key: 'weather',
@@ -285,7 +285,7 @@ const STRATEGY_LABELS: Record<string, string> = {
   opportunity_structural: 'Opportunity Structural',
   weather_consensus: 'Weather Consensus',
   weather_alerts: 'Weather Alerts',
-  traders_flow: 'Traders Flow',
+  traders_flow: 'Wallet Flow',
 }
 
 const DEFAULT_STRATEGY_KEY = 'crypto_15m'
@@ -1789,10 +1789,10 @@ export default function TradingPanel() {
       }
       const tradersEnabled = effectiveDraftSources.includes('traders')
       if (tradersEnabled && draftTradersScopeModes.includes('individual') && draftTradersIndividualWallets.length === 0) {
-        throw new Error('Select at least one individual wallet for traders scope.')
+        throw new Error('Select at least one individual wallet for wallet scope.')
       }
       if (tradersEnabled && draftTradersScopeModes.includes('group') && draftTradersGroupIds.length === 0) {
-        throw new Error('Select at least one group for traders scope.')
+        throw new Error('Select at least one group for wallet scope.')
       }
 
       return createTrader({
@@ -1813,7 +1813,7 @@ export default function TradingPanel() {
       refreshAll()
     },
     onError: (error: unknown) => {
-      setSaveError(errorMessage(error, 'Failed to create trader'))
+      setSaveError(errorMessage(error, 'Failed to create bot'))
     },
   })
 
@@ -1839,10 +1839,10 @@ export default function TradingPanel() {
       }
       const tradersEnabled = effectiveDraftSources.includes('traders')
       if (tradersEnabled && draftTradersScopeModes.includes('individual') && draftTradersIndividualWallets.length === 0) {
-        throw new Error('Select at least one individual wallet for traders scope.')
+        throw new Error('Select at least one individual wallet for wallet scope.')
       }
       if (tradersEnabled && draftTradersScopeModes.includes('group') && draftTradersGroupIds.length === 0) {
-        throw new Error('Select at least one group for traders scope.')
+        throw new Error('Select at least one group for wallet scope.')
       }
 
       return updateTrader(traderId, {
@@ -1862,7 +1862,7 @@ export default function TradingPanel() {
       refreshAll()
     },
     onError: (error: unknown) => {
-      setSaveError(errorMessage(error, 'Failed to save trader'))
+      setSaveError(errorMessage(error, 'Failed to save bot'))
     },
   })
 
@@ -1885,7 +1885,7 @@ export default function TradingPanel() {
       refreshAll()
     },
     onError: (error: unknown) => {
-      setSaveError(errorMessage(error, 'Failed to delete or disable trader'))
+      setSaveError(errorMessage(error, 'Failed to delete or disable bot'))
     },
   })
 
@@ -2434,17 +2434,17 @@ export default function TradingPanel() {
 
       {/* ── Main: Roster Rail + Work Area ── */}
       <div className="flex-1 min-h-0 grid gap-2 xl:grid-cols-[240px_minmax(0,1fr)]">
-        {/* Left rail — Trader Roster */}
+        {/* Left rail — Bot Roster */}
         <div className="hidden xl:flex flex-col min-h-0 rounded-lg border border-border/70 bg-card overflow-hidden">
           <div className="shrink-0 px-2.5 py-2 border-b border-border/50 flex items-center justify-between gap-1">
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Traders</span>
-            <Button size="sm" className="h-6 w-6 p-0" variant="outline" onClick={openCreateTraderFlyout} title="New trader">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Bots</span>
+            <Button size="sm" className="h-6 w-6 p-0" variant="outline" onClick={openCreateTraderFlyout} title="New bot">
               <Plus className="w-3.5 h-3.5" />
             </Button>
           </div>
           <ScrollArea className="flex-1 min-h-0">
             <div className="p-1.5 space-y-0.5">
-              {/* "All Traders" aggregate */}
+              {/* "All Bots" aggregate */}
               <button
                 type="button"
                 onClick={() => setSelectedTraderId(null)}
@@ -2455,7 +2455,7 @@ export default function TradingPanel() {
                     : 'text-muted-foreground hover:bg-muted/40'
                 )}
               >
-                All Traders
+                All Bots
               </button>
               {traders.map((trader) => {
                 const traderStatus = !trader.is_enabled ? 'disabled' : trader.is_paused ? 'paused' : 'running'
@@ -2495,7 +2495,7 @@ export default function TradingPanel() {
 
         {/* Right — Work Area */}
         <div className="flex flex-col min-h-0 gap-1.5">
-          {/* Trader header bar (when a specific trader is selected) */}
+          {/* Bot header bar (when a specific bot is selected) */}
           {selectedTrader && (
             <div className="shrink-0 rounded-lg border border-border/70 bg-card px-3 py-1.5 flex flex-wrap items-center gap-x-3 gap-y-1">
               <span className="text-sm font-semibold">{selectedTrader.name}</span>
@@ -2617,7 +2617,7 @@ export default function TradingPanel() {
                     <Table>
                       <TableHeader>
                         <TableRow>
-                          {!selectedTraderId && <TableHead className="text-[11px]">Trader</TableHead>}
+                          {!selectedTraderId && <TableHead className="text-[11px]">Bot</TableHead>}
                           <TableHead className="text-[11px]">Market</TableHead>
                           <TableHead className="text-[11px]">Dir</TableHead>
                           <TableHead className="text-[11px] text-right">Exposure</TableHead>
@@ -2666,7 +2666,7 @@ export default function TradingPanel() {
                       <Table>
                         <TableHeader>
                           <TableRow>
-                            {!selectedTraderId && <TableHead className="text-[11px]">Trader</TableHead>}
+                            {!selectedTraderId && <TableHead className="text-[11px]">Bot</TableHead>}
                             <TableHead className="text-[11px]">Market</TableHead>
                             <TableHead className="text-[11px]">Dir</TableHead>
                             <TableHead className="text-[11px]">Status</TableHead>
@@ -2973,12 +2973,12 @@ export default function TradingPanel() {
             <div className="border-b border-border px-4 py-3">
               <SheetHeader className="space-y-1 text-left">
                 <SheetTitle className="text-base">
-                  {traderFlyoutMode === 'create' ? 'Create Auto Trader' : 'Edit Auto Trader'}
+                  {traderFlyoutMode === 'create' ? 'Create Auto Bot' : 'Edit Auto Bot'}
                 </SheetTitle>
                 <SheetDescription>
                   {traderFlyoutMode === 'create'
-                    ? 'Configure a new trader profile with explicit strategy, source, risk, and lifecycle controls.'
-                    : 'Update runtime configuration and lifecycle state for this trader.'}
+                    ? 'Configure a new bot profile with explicit strategy, source, risk, and lifecycle controls.'
+                    : 'Update runtime configuration and lifecycle state for this bot.'}
                 </SheetDescription>
               </SheetHeader>
             </div>
@@ -2986,9 +2986,9 @@ export default function TradingPanel() {
             <ScrollArea className="flex-1 min-h-0 px-4 py-3">
               <div className="space-y-3 pb-2">
                 <FlyoutSection
-                  title="Trader Profile"
+                  title="Bot Profile"
                   icon={Sparkles}
-                  subtitle="Name this trader and configure source-specific execution strategies below."
+                  subtitle="Name this bot and configure source-specific execution strategies below."
                 >
                   <div>
                     <Label>Name</Label>
@@ -3005,7 +3005,7 @@ export default function TradingPanel() {
                   title="Signal Sources"
                   icon={Zap}
                   count={`${selectedSourceCount}/${sourceCards.length || sourceCatalog.length} enabled`}
-                  subtitle="Toggle signal sources this trader should consume."
+                  subtitle="Toggle signal sources this bot should consume."
                 >
                   <div className="flex flex-wrap items-center gap-1.5 mb-2">
                     <Button type="button" size="sm" variant="outline" className="h-6 px-2 text-[11px]" onClick={enableAllSourceCards}>
@@ -3157,11 +3157,11 @@ export default function TradingPanel() {
                     </div>
                   )}
 
-                  {/* Traders inline config — shown when traders source is enabled */}
+                  {/* Wallet-signal inline config — shown when traders source is enabled */}
                   {sourceCards.some((s) => isTraderSourceKey(s.key) && selectedSourceKeySet.has(normalizeSourceKey(s.key))) && (
                     <div className="rounded-lg border border-orange-500/30 bg-orange-500/5 p-2.5 space-y-3 mt-2">
                       <div className="border border-orange-500/30 bg-background/60 rounded-md p-2.5 space-y-2">
-                        <p className="text-[11px] font-semibold uppercase tracking-wide text-orange-400">Traders Scope</p>
+                        <p className="text-[11px] font-semibold uppercase tracking-wide text-orange-400">Wallet Scope</p>
                         <div className="flex flex-wrap gap-1.5">
                           {TRADERS_SCOPE_OPTIONS.map((option) => (
                             <Button
@@ -3230,10 +3230,10 @@ export default function TradingPanel() {
                       </div>
                       <div className="flex items-center gap-1.5">
                         <Filter className="w-3.5 h-3.5 text-orange-400" />
-                        <p className="text-[11px] font-semibold uppercase tracking-wide text-orange-400">Trader Signal Filters (Global)</p>
+                        <p className="text-[11px] font-semibold uppercase tracking-wide text-orange-400">Wallet Signal Filters (Global)</p>
                       </div>
                       <p className="text-[10px] text-muted-foreground/80">
-                        These filters are shared with trader-opportunity discovery settings.
+                        These filters are shared with wallet-opportunity discovery settings.
                       </p>
                       <div className="grid grid-cols-2 gap-2.5">
                         <div>
@@ -3244,8 +3244,8 @@ export default function TradingPanel() {
                             className="mt-0.5 h-7 w-full rounded-md border border-border bg-muted px-2 text-xs"
                           >
                             <option value="all">All sources</option>
-                            <option value="tracked">Tracked Traders</option>
-                            <option value="pool">Pool Traders</option>
+                            <option value="tracked">Tracked Wallets</option>
+                            <option value="pool">Pool Wallets</option>
                           </select>
                         </div>
                         <div>
@@ -3329,8 +3329,8 @@ export default function TradingPanel() {
                             className="mt-0.5 h-7 w-full rounded-md border border-border bg-muted px-2 text-xs"
                           >
                             <option value="disabled">Disabled (signals only)</option>
-                            <option value="pool">Pool Traders</option>
-                            <option value="tracked_group">Tracked Traders (all tracked)</option>
+                            <option value="pool">Pool Wallets</option>
+                            <option value="tracked_group">Tracked Wallets (all tracked)</option>
                             <option value="individual">Individual Wallet</option>
                           </select>
                         </div>
@@ -3461,7 +3461,7 @@ export default function TradingPanel() {
                 >
                   <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
                     <div>
-                      <Label>Trader Interval Seconds</Label>
+                      <Label>Bot Interval Seconds</Label>
                       <Input
                         type="number"
                         min={1}
@@ -3473,14 +3473,14 @@ export default function TradingPanel() {
                         className="mt-1"
                       />
                       <p className="mt-1 text-[10px] text-muted-foreground/70">
-                        Saves to this trader&apos;s <span className="font-mono">interval_seconds</span>.
+                        Saves to this bot&apos;s <span className="font-mono">interval_seconds</span>.
                       </p>
                     </div>
                     <div className="rounded-md border border-border/60 bg-muted/15 px-3 py-2">
                       <p className="text-[11px] font-medium">Global Orchestrator Loop</p>
                       <p className="mt-1 text-sm font-mono">{toNumber(overviewQuery.data?.control?.run_interval_seconds)}s</p>
                       <p className="mt-1 text-[10px] text-muted-foreground/70">
-                        Separate worker-level cadence. Traders run only when due on both schedules.
+                        Separate worker-level cadence. Bots run only when due on both schedules.
                       </p>
                     </div>
                   </div>
@@ -3497,7 +3497,7 @@ export default function TradingPanel() {
                   iconClassName="text-emerald-500"
                   count={`${draftEnabled ? 'enabled' : 'disabled'} / ${draftPaused ? 'paused' : 'active'}`}
                   defaultOpen={false}
-                  subtitle="Lifecycle controls applied when this trader is loaded by the orchestrator."
+                  subtitle="Lifecycle controls applied when this bot is loaded by the orchestrator."
                 >
                   <div className="grid gap-3 md:grid-cols-2">
                     <div className="rounded-md border border-border p-3">
@@ -3505,14 +3505,14 @@ export default function TradingPanel() {
                         <span className="text-sm">Enabled</span>
                         <Switch checked={draftEnabled} onCheckedChange={(checked) => setDraftEnabled(checked)} />
                       </div>
-                      <p className="mt-2 text-xs text-muted-foreground">Disabled traders are excluded from orchestrator cycles.</p>
+                      <p className="mt-2 text-xs text-muted-foreground">Disabled bots are excluded from orchestrator cycles.</p>
                     </div>
                     <div className="rounded-md border border-border p-3">
                       <div className="flex items-center justify-between">
                         <span className="text-sm">Paused</span>
                         <Switch checked={draftPaused} onCheckedChange={(checked) => setDraftPaused(checked)} />
                       </div>
-                      <p className="mt-2 text-xs text-muted-foreground">Paused traders stay loaded but do not execute decisions.</p>
+                      <p className="mt-2 text-xs text-muted-foreground">Paused bots stay loaded but do not execute decisions.</p>
                     </div>
                   </div>
                 </FlyoutSection>
@@ -3751,7 +3751,7 @@ export default function TradingPanel() {
 
                 {traderFlyoutMode === 'edit' && selectedTrader ? (
                   <FlyoutSection
-                    title="Delete / Disable Trader"
+                    title="Delete / Disable Bot"
                     icon={AlertTriangle}
                     iconClassName="text-red-500"
                     tone="danger"
@@ -3777,7 +3777,7 @@ export default function TradingPanel() {
                     {deleteAction === 'force_delete' ? (
                       <div>
                         <Label className="text-xs">
-                          Type trader name to confirm force delete: <span className="font-mono">{selectedTrader.name}</span>
+                          Type bot name to confirm force delete: <span className="font-mono">{selectedTrader.name}</span>
                         </Label>
                         <Input
                           value={deleteConfirmName}
@@ -3795,7 +3795,7 @@ export default function TradingPanel() {
                       }
                       onClick={() => deleteTraderMutation.mutate({ traderId: selectedTrader.id, action: deleteAction })}
                     >
-                      {deleteAction === 'disable' ? 'Disable Trader' : 'Delete Trader'}
+                      {deleteAction === 'disable' ? 'Disable Bot' : 'Delete Bot'}
                     </Button>
                   </FlyoutSection>
                 ) : null}
@@ -3828,7 +3828,7 @@ export default function TradingPanel() {
                   effectiveDraftSources.length === 0
                 }
               >
-                {traderFlyoutMode === 'create' ? 'Create Trader' : 'Save Trader'}
+                {traderFlyoutMode === 'create' ? 'Create Bot' : 'Save Bot'}
               </Button>
             </div>
           </div>

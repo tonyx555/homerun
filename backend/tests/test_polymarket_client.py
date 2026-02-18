@@ -3,6 +3,9 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import httpx
+import pytest
+
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
@@ -20,6 +23,74 @@ class _FakeResponse:
 
     def json(self):
         return self._payload
+
+
+class _FakeStreamingResponse:
+    def __init__(self, read_error=None):
+        self.status_code = 200
+        self.headers = {}
+        self._read_error = read_error
+        self.read_calls = 0
+
+    async def aread(self):
+        self.read_calls += 1
+        if self._read_error is not None:
+            raise self._read_error
+        return b"{}"
+
+
+class _FakeStreamingClient:
+    def __init__(self, failures_before_success):
+        self.failures_before_success = failures_before_success
+        self.calls = 0
+
+    async def get(self, _url, **_kwargs):
+        self.calls += 1
+        if self.calls <= self.failures_before_success:
+            return _FakeStreamingResponse(
+                read_error=httpx.RemoteProtocolError(
+                    "peer closed connection without sending complete message body"
+                )
+            )
+        return _FakeStreamingResponse()
+
+
+def test_rate_limited_get_retries_when_body_read_fails(monkeypatch):
+    client = PolymarketClient()
+
+    async def _fake_acquire(_endpoint):
+        return None
+
+    async def _fake_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr("services.polymarket.rate_limiter.acquire", _fake_acquire)
+    monkeypatch.setattr("services.polymarket.asyncio.sleep", _fake_sleep)
+
+    fake_client = _FakeStreamingClient(failures_before_success=2)
+    response = asyncio.run(client._rate_limited_get("https://example.com/test", client=fake_client))
+
+    assert response.status_code == 200
+    assert fake_client.calls == 3
+
+
+def test_rate_limited_get_raises_after_body_read_failures(monkeypatch):
+    client = PolymarketClient()
+
+    async def _fake_acquire(_endpoint):
+        return None
+
+    async def _fake_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr("services.polymarket.rate_limiter.acquire", _fake_acquire)
+    monkeypatch.setattr("services.polymarket.asyncio.sleep", _fake_sleep)
+
+    fake_client = _FakeStreamingClient(failures_before_success=10)
+    with pytest.raises(httpx.RemoteProtocolError):
+        asyncio.run(client._rate_limited_get("https://example.com/test", client=fake_client))
+
+    assert fake_client.calls == 4
 
 
 def test_extract_market_info_from_trades_prefers_matching_condition():

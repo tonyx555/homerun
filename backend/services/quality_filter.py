@@ -123,7 +123,7 @@ class QualityFilterPipeline:
         enters the signal pipeline.
 
         Args:
-            opp: ArbitrageOpportunity with fields: roi_percent, is_guaranteed,
+            opp: Opportunity with fields: roi_percent, is_guaranteed,
                  markets (list of dicts with 'liquidity'), positions_to_take,
                  resolution_date, min_liquidity, max_position_size,
                  net_profit, total_cost, stable_id, id

@@ -19,7 +19,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from models import Market, Event, ArbitrageOpportunity
+from models import Market, Event, Opportunity
 from config import settings
 from .base import BaseStrategy, ExitDecision, ScoringWeights, SizingConfig, utcnow, make_aware
 from utils.logger import get_logger
@@ -172,13 +172,13 @@ class TemporalDecayStrategy(BaseStrategy):
         # market_id -> (deadline_dt, first_seen_price) for decay calculation
         self._market_baselines: dict[str, tuple[datetime, float]] = {}
 
-    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[ArbitrageOpportunity]:
+    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:
         if not settings.TEMPORAL_DECAY_ENABLED:
             return []
 
         now = utcnow()
         scan_time = time.time()
-        opportunities: list[ArbitrageOpportunity] = []
+        opportunities: list[Opportunity] = []
 
         for market in markets:
             if market.closed or not market.active:
@@ -308,7 +308,7 @@ class TemporalDecayStrategy(BaseStrategy):
         no_price: float,
         now: datetime,
         scan_time: float,
-    ) -> Optional[ArbitrageOpportunity]:
+    ) -> Optional[Opportunity]:
         """Create directional opportunity when price rapidly reprices toward certainty."""
         if not getattr(settings, "TEMPORAL_SHOCK_ENABLED", True):
             return None
@@ -711,7 +711,7 @@ class TemporalDecayStrategy(BaseStrategy):
         days_remaining: float,
         deadline: datetime,
         prices: dict[str, dict],
-    ) -> Optional[ArbitrageOpportunity]:
+    ) -> Optional[Opportunity]:
         """Create an opportunity from a temporal decay deviation."""
         no_price = market.no_price
         if market.clob_token_ids and len(market.clob_token_ids) > 1:

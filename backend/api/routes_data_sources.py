@@ -54,7 +54,7 @@ class DataSourceCreateRequest(BaseModel):
     source_kind: str = Field(default="python", min_length=2, max_length=32)
     name: Optional[str] = Field(None, min_length=1, max_length=200)
     description: Optional[str] = Field(None, max_length=500)
-    source_code: str = Field(..., min_length=10)
+    source_code: Optional[str] = Field(default="", min_length=0)
     config: dict = Field(default_factory=dict)
     config_schema: dict = Field(default_factory=dict)
     enabled: bool = True
@@ -82,8 +82,19 @@ class DataSourceRunRequest(BaseModel):
     max_records: int = Field(default=500, ge=1, le=5000)
 
 
+_DECLARATIVE_KINDS = {"rss", "rest_api"}
+
+
 def _source_to_dict(row: DataSource) -> dict:
-    validation = validate_data_source_source(str(row.source_code or ""), class_name=row.class_name)
+    source_kind = str(row.source_kind or "python").strip().lower()
+    is_declarative = source_kind in _DECLARATIVE_KINDS
+
+    if is_declarative:
+        capabilities = {"has_fetch": True, "has_fetch_async": False, "has_transform": False}
+    else:
+        validation = validate_data_source_source(str(row.source_code or ""), class_name=row.class_name)
+        capabilities = validation.get("capabilities") or {}
+
     runtime = data_source_loader.get_runtime(str(row.slug or "").strip().lower())
     runtime_payload = None
     if runtime is not None:
@@ -119,7 +130,7 @@ def _source_to_dict(row: DataSource) -> dict:
         "sort_order": int(row.sort_order or 0),
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
-        "capabilities": validation.get("capabilities") or {},
+        "capabilities": capabilities,
         "runtime": runtime_payload,
     }
 
@@ -593,17 +604,32 @@ async def create_data_source(req: DataSourceCreateRequest):
     slug = _validate_slug(req.slug)
     source_key = str(req.source_key or "custom").strip().lower()
     source_kind = str(req.source_kind or "python").strip().lower()
+    is_declarative = source_kind in _DECLARATIVE_KINDS
 
-    validation = validate_data_source_source(req.source_code)
-    if not validation["valid"]:
-        raise HTTPException(
-            status_code=400,
-            detail={"message": "Data source validation failed", "errors": validation["errors"]},
-        )
+    class_name = None
+    source_name = None
+    source_description = None
 
-    source_name = (req.name or validation.get("source_name") or slug.replace("_", " ").title()).strip()
-    source_description = req.description if req.description is not None else validation.get("source_description")
-    class_name = validation.get("class_name")
+    if is_declarative:
+        # Declarative sources do not need source_code or AST validation.
+        source_name = (req.name or slug.replace("_", " ").title()).strip()
+        source_description = req.description
+    else:
+        source_code = req.source_code or ""
+        if len(source_code) < 10:
+            raise HTTPException(
+                status_code=400,
+                detail="Python data sources require source_code with at least 10 characters.",
+            )
+        validation = validate_data_source_source(source_code)
+        if not validation["valid"]:
+            raise HTTPException(
+                status_code=400,
+                detail={"message": "Data source validation failed", "errors": validation["errors"]},
+            )
+        source_name = (req.name or validation.get("source_name") or slug.replace("_", " ").title()).strip()
+        source_description = req.description if req.description is not None else validation.get("source_description")
+        class_name = validation.get("class_name")
 
     source_id = uuid.uuid4().hex
     status = "unloaded"
@@ -615,12 +641,17 @@ async def create_data_source(req: DataSourceCreateRequest):
             raise HTTPException(status_code=409, detail=f"A data source with slug '{slug}' already exists.")
 
         if req.enabled:
-            try:
-                data_source_loader.load(slug, req.source_code, req.config or None, class_name=class_name)
+            if is_declarative:
+                # Declarative runners are always "loaded" — the runner validates
+                # config at execution time.
                 status = "loaded"
-            except DataSourceValidationError as exc:
-                status = "error"
-                error_message = str(exc)
+            else:
+                try:
+                    data_source_loader.load(slug, req.source_code or "", req.config or None, class_name=class_name)
+                    status = "loaded"
+                except DataSourceValidationError as exc:
+                    status = "error"
+                    error_message = str(exc)
 
         row = DataSource(
             id=source_id,
@@ -629,7 +660,7 @@ async def create_data_source(req: DataSourceCreateRequest):
             source_kind=source_kind,
             name=source_name,
             description=source_description,
-            source_code=req.source_code,
+            source_code=req.source_code or "",
             class_name=class_name,
             is_system=False,
             enabled=req.enabled,
@@ -677,19 +708,28 @@ async def update_data_source(source_id: str, req: DataSourceUpdateRequest):
                 row.slug = next_slug
                 slug_changed = True
 
+        # Determine current effective source_kind (may be changing in this request)
+        effective_kind = str(
+            req.source_kind if req.source_kind is not None else (row.source_kind or "python")
+        ).strip().lower()
+        is_declarative = effective_kind in _DECLARATIVE_KINDS
+
         if req.source_code is not None and req.source_code != row.source_code:
-            validation = validate_data_source_source(req.source_code)
-            if not validation["valid"]:
-                raise HTTPException(
-                    status_code=400,
-                    detail={"message": "Validation failed", "errors": validation["errors"]},
-                )
-            row.source_code = req.source_code
-            row.class_name = validation.get("class_name")
-            if req.name is None and validation.get("source_name"):
-                row.name = validation.get("source_name")
-            if req.description is None and validation.get("source_description"):
-                row.description = validation.get("source_description")
+            if is_declarative:
+                row.source_code = req.source_code
+            else:
+                validation = validate_data_source_source(req.source_code)
+                if not validation["valid"]:
+                    raise HTTPException(
+                        status_code=400,
+                        detail={"message": "Validation failed", "errors": validation["errors"]},
+                    )
+                row.source_code = req.source_code
+                row.class_name = validation.get("class_name")
+                if req.name is None and validation.get("source_name"):
+                    row.name = validation.get("source_name")
+                if req.description is None and validation.get("source_description"):
+                    row.description = validation.get("source_description")
             row.version = int(row.version or 1) + 1
             code_changed = True
 
@@ -717,18 +757,23 @@ async def update_data_source(source_id: str, req: DataSourceUpdateRequest):
             if slug_changed:
                 data_source_loader.unload(original_slug)
             if row.enabled:
-                try:
-                    data_source_loader.load(
-                        row.slug,
-                        row.source_code,
-                        row.config or None,
-                        class_name=row.class_name,
-                    )
+                if is_declarative:
+                    # Declarative runners validate config at execution time.
                     row.status = "loaded"
                     row.error_message = None
-                except DataSourceValidationError as exc:
-                    row.status = "error"
-                    row.error_message = str(exc)
+                else:
+                    try:
+                        data_source_loader.load(
+                            row.slug,
+                            row.source_code,
+                            row.config or None,
+                            class_name=row.class_name,
+                        )
+                        row.status = "loaded"
+                        row.error_message = None
+                    except DataSourceValidationError as exc:
+                        row.status = "error"
+                        row.error_message = str(exc)
             else:
                 data_source_loader.unload(row.slug)
                 row.status = "unloaded"
@@ -766,12 +811,27 @@ async def reload_data_source(source_id: str, session: AsyncSession = Depends(get
         raise HTTPException(status_code=404, detail="Data source not found")
 
     slug = str(row.slug or "").strip().lower()
+    source_kind = str(row.source_kind or "python").strip().lower()
+    is_declarative = source_kind in _DECLARATIVE_KINDS
+
     if not bool(row.enabled):
-        data_source_loader.unload(slug)
+        if not is_declarative:
+            data_source_loader.unload(slug)
         row.status = "unloaded"
         row.error_message = None
         await session.commit()
         return {"status": "unloaded", "message": "Source is disabled", "runtime": None}
+
+    if is_declarative:
+        # Declarative runners have no Python code to compile; just mark loaded.
+        row.status = "loaded"
+        row.error_message = None
+        await session.commit()
+        return {
+            "status": "loaded",
+            "message": f"Reloaded {slug} (declarative {source_kind})",
+            "runtime": None,
+        }
 
     try:
         runtime = data_source_loader.load(

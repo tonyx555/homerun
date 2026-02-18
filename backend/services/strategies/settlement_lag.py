@@ -25,7 +25,7 @@ Detection approach:
 from __future__ import annotations
 
 from typing import Any, Optional
-from models import Market, Event, ArbitrageOpportunity, MispricingType
+from models import Market, Event, Opportunity, MispricingType
 from config import settings
 from .base import BaseStrategy, DecisionCheck, ExitDecision, ScoringWeights, SizingConfig, utcnow, make_aware
 from utils.converters import to_float
@@ -99,7 +99,7 @@ class SettlementLagStrategy(BaseStrategy):
 
     OVERDUE_RESOLUTION_DAYS = 0  # Market past resolution date
 
-    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[ArbitrageOpportunity]:
+    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:
         opportunities = []
 
         for market in markets:
@@ -142,7 +142,7 @@ class SettlementLagStrategy(BaseStrategy):
         market: Market,
         yes_price: float,
         no_price: float,
-    ) -> Optional[ArbitrageOpportunity]:
+    ) -> Optional[Opportunity]:
         """Check a binary market for settlement lag opportunities.
 
         Settlement lag requires the market to be AT or NEAR its resolution date.
@@ -257,7 +257,7 @@ class SettlementLagStrategy(BaseStrategy):
                 opp.risk_factors.append("WARNING: Opportunity may already be captured by faster bots")
         return opp
 
-    def _check_negrisk_settlement(self, event: Event, prices: dict[str, dict]) -> list[ArbitrageOpportunity]:
+    def _check_negrisk_settlement(self, event: Event, prices: dict[str, dict]) -> list[Opportunity]:
         """Check NegRisk events for settlement lag in multi-outcome markets.
 
         NegRisk events are especially vulnerable to settlement lag because

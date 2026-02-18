@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from models import Market, Event, ArbitrageOpportunity
+from models import Market, Event, Opportunity
 from .base import BaseStrategy, DecisionCheck, ExitDecision, ScoringWeights, SizingConfig
 from utils.converters import to_float
 
@@ -55,7 +55,7 @@ class BasicArbStrategy(BaseStrategy):
         "max_size_usd": 150.0,
     }
 
-    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[ArbitrageOpportunity]:
+    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:
         opportunities = []
 
         for market in markets:

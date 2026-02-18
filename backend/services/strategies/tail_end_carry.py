@@ -11,7 +11,7 @@ from datetime import timezone
 from typing import Any, Optional
 
 from config import settings
-from models import ArbitrageOpportunity, Event, Market
+from models import Opportunity, Event, Market
 from models.opportunity import MispricingType
 from services.strategies.base import (
     BaseStrategy,
@@ -116,7 +116,7 @@ class TailEndCarryStrategy(BaseStrategy):
         events: list[Event],
         markets: list[Market],
         prices: dict[str, dict],
-    ) -> list[ArbitrageOpportunity]:
+    ) -> list[Opportunity]:
         cfg = dict(self.default_config)
         cfg.update(getattr(self, "config", {}) or {})
 
@@ -136,7 +136,7 @@ class TailEndCarryStrategy(BaseStrategy):
                 event_by_market[event_market.id] = event
 
         now = utcnow().astimezone(timezone.utc)
-        candidates: list[tuple[float, ArbitrageOpportunity]] = []
+        candidates: list[tuple[float, Opportunity]] = []
 
         for market in markets:
             if market.closed or not market.active:
@@ -228,7 +228,7 @@ class TailEndCarryStrategy(BaseStrategy):
             return []
 
         candidates.sort(key=lambda item: item[0], reverse=True)
-        out: list[ArbitrageOpportunity] = []
+        out: list[Opportunity] = []
         seen: set[tuple[str, str]] = set()
         for _, opp in candidates:
             market_id = str((opp.markets or [{}])[0].get("id") or "")

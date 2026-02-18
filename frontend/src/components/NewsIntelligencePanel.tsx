@@ -1040,6 +1040,7 @@ function SourceBreakdownBar({ sources }: { sources: Record<string, number> }) {
 interface NewsIntelligencePanelProps {
   initialSearchQuery?: string
   mode?: NewsPanelMode
+  onOpenDataSettings?: () => void
 }
 
 function initialSubView(mode: NewsPanelMode, initialSearchQuery?: string): SubView {
@@ -1048,7 +1049,7 @@ function initialSubView(mode: NewsPanelMode, initialSearchQuery?: string): SubVi
   return initialSearchQuery ? 'feed' : 'workflow'
 }
 
-export default function NewsIntelligencePanel({ initialSearchQuery, mode = 'all' }: NewsIntelligencePanelProps = {}) {
+export default function NewsIntelligencePanel({ initialSearchQuery, mode = 'all', onOpenDataSettings }: NewsIntelligencePanelProps = {}) {
   const queryClient = useQueryClient()
   const [subView, setSubView] = useState<SubView>(initialSubView(mode, initialSearchQuery))
   const [searchFilter, setSearchFilter] = useState(initialSearchQuery || '')
@@ -1369,6 +1370,17 @@ export default function NewsIntelligencePanel({ initialSearchQuery, mode = 'all'
                   <Settings className="w-3.5 h-3.5" />
                   Settings
                 </Button>
+                {onOpenDataSettings && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="text-xs h-8 gap-1.5"
+                    onClick={onOpenDataSettings}
+                  >
+                    <Settings className="w-3.5 h-3.5" />
+                    Data Settings
+                  </Button>
+                )}
                 <Button
                   variant="outline"
                   size="sm"
@@ -1395,6 +1407,17 @@ export default function NewsIntelligencePanel({ initialSearchQuery, mode = 'all'
                   <RefreshCw className={cn("w-3.5 h-3.5", refreshMutation.isPending && "animate-spin")} />
                   Refresh
                 </Button>
+                {onOpenDataSettings && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="text-xs h-8 gap-1.5"
+                    onClick={onOpenDataSettings}
+                  >
+                    <Settings className="w-3.5 h-3.5" />
+                    Data Settings
+                  </Button>
+                )}
                 <Button
                   variant="ghost"
                   size="sm"

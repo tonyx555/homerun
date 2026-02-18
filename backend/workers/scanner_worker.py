@@ -8,16 +8,8 @@ Or from backend: python -m workers.scanner_worker
 import asyncio
 import logging
 import os
-import sys
 from datetime import datetime, timezone
 from typing import Optional
-
-# Ensure backend is on path when run as python -m workers.scanner_worker from project root
-_BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _BACKEND not in sys.path:
-    sys.path.insert(0, _BACKEND)
-if os.getcwd() != _BACKEND:
-    os.chdir(_BACKEND)
 
 # Native numerical libs (OpenMP/BLAS/FAISS) can segfault under high thread
 # contention in long-running workers on macOS; pin conservative defaults.
@@ -32,9 +24,9 @@ os.environ.setdefault("EMBEDDING_DEVICE", "cpu")
 
 from utils.utcnow import utcnow
 from config import settings, apply_search_filters
-from models.database import AsyncSessionLocal, init_database
+from models.database import AsyncSessionLocal
 from services.scanner import scanner
-from services.signal_bus import emit_scanner_signals
+from services.strategy_signal_bridge import bridge_opportunities_to_signals
 from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.shared_state import (
     clear_scan_request,
@@ -46,10 +38,11 @@ from services.shared_state import (
 )
 from services.worker_state import write_worker_snapshot
 
-logging.basicConfig(
-    level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO")),
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+if not logging.root.handlers:
+    logging.basicConfig(
+        level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO")),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
 logger = logging.getLogger("scanner_worker")
 
 
@@ -476,7 +469,12 @@ async def _run_scan_loop() -> None:
 
                 market_history = scanner.get_market_history_for_opportunities(opps)
                 await write_scanner_snapshot(session, opps, status, market_history=market_history)
-                emitted = await emit_scanner_signals(session, opps, quality_reports=scanner.quality_reports)
+                emitted = await bridge_opportunities_to_signals(
+                    session,
+                    opps,
+                    source="scanner",
+                    quality_reports=scanner.quality_reports,
+                )
                 await clear_scan_request(session)
                 await write_worker_snapshot(
                     session,
@@ -521,14 +519,12 @@ async def _run_scan_loop() -> None:
             await asyncio.sleep(sleep_seconds)
 
 
-async def main() -> None:
-    """Init DB and run scan loop."""
-    await init_database()
+async def start_loop() -> None:
+    """Run the scanner worker loop (called from API process lifespan)."""
     try:
         await apply_search_filters()
     except Exception as exc:
         logger.warning("Initial scanner runtime settings refresh failed: %s", exc)
-    logger.info("Database initialized")
     try:
         await _run_scan_loop()
     except asyncio.CancelledError:
@@ -541,7 +537,3 @@ async def main() -> None:
             await get_feed_manager().stop()
         except Exception:
             pass
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

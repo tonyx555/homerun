@@ -1,30 +1,34 @@
-import { useState } from 'react'
+import { useMemo, useState, type ComponentType } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import {
-  FlaskConical,
-  Play,
-  Clock,
   AlertTriangle,
+  BarChart3,
   CheckCircle2,
-  XCircle,
-  Loader2,
   ChevronDown,
   ChevronRight,
-  TrendingUp,
-  DollarSign,
-  BarChart3,
+  Clock,
+  Database,
+  FlaskConical,
+  Gauge,
+  Loader2,
+  Play,
+  ShieldCheck,
   Target,
+  TrendingUp,
+  XCircle,
 } from 'lucide-react'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { ScrollArea } from './ui/scroll-area'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from './ui/sheet'
 import { cn } from '../lib/utils'
+import { normalizeUtcTimestampsInPlace } from '../lib/timestamps'
 import axios from 'axios'
 
 const api = axios.create({ baseURL: '/api', timeout: 120000 })
 
-// ==================== TYPES ====================
+type BacktestMode = 'detect' | 'evaluate' | 'exit'
+type Tone = 'good' | 'warn' | 'bad' | 'neutral'
 
 interface QualityFilter {
   filter_name: string
@@ -41,224 +45,610 @@ interface QualityReportData {
   filters: QualityFilter[]
 }
 
+interface DecisionCheck {
+  check_key?: string
+  check_label?: string
+  passed?: boolean
+  score?: number | null
+}
+
 interface BacktestResult {
   success: boolean
   strategy_slug: string
   strategy_name: string
   class_name: string
-  num_events: number
-  num_markets: number
-  num_prices: number
-  data_source: string
-  replay_mode: string
-  replay_steps: number
-  replay_markets: number
-  replay_window_hours: number
-  replay_timeframe: string
-  opportunities: Array<Record<string, any>>
-  num_opportunities: number
-  quality_reports: QualityReportData[]
   load_time_ms: number
   data_fetch_time_ms: number
-  detect_time_ms: number
   total_time_ms: number
   validation_errors: string[]
   validation_warnings: string[]
   runtime_error: string | null
   runtime_traceback: string | null
+
+  num_events?: number
+  num_markets?: number
+  num_prices?: number
+  data_source?: string
+  replay_mode?: string
+  replay_steps?: number
+  replay_markets?: number
+  replay_window_hours?: number
+  replay_timeframe?: string
+  opportunities?: Array<Record<string, any>>
+  num_opportunities?: number
+  quality_reports?: QualityReportData[]
+  detect_time_ms?: number
+
+  num_signals?: number
+  decisions?: Array<Record<string, any>>
+  selected?: number
+  skipped?: number
+  blocked?: number
+  evaluate_time_ms?: number
+
+  num_positions?: number
+  exit_decisions?: Array<Record<string, any>>
+  would_close?: number
+  would_reduce?: number
+  would_hold?: number
+  errors?: number
+  exit_time_ms?: number
 }
 
-// ==================== HELPERS ====================
+interface OutcomeRow {
+  id: string
+  primary: string
+  secondary?: string
+  action: string
+  tone: Tone
+  headlineMetric: string
+  subMetrics: string[]
+  reason?: string
+  detail: Record<string, any>
+}
+
+interface SummaryCard {
+  label: string
+  value: string
+  subtitle: string
+  tone: Tone
+  icon: ComponentType<{ className?: string }>
+}
+
+function toNumber(value: unknown): number {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : 0
+}
 
 function fmt(n: number, decimals = 0): string {
-  return n.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals })
+  return toNumber(n).toLocaleString(undefined, {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  })
+}
+
+function fmtMoney(n: number): string {
+  return `$${fmt(n, 2)}`
+}
+
+function fmtSignedPct(n: number): string {
+  const value = toNumber(n)
+  return `${value > 0 ? '+' : ''}${fmt(value, 2)}%`
+}
+
+function fmtPrice(n: number): string {
+  return `$${fmt(n, 3)}`
+}
+
+function fmtMinutes(n: number): string {
+  const value = toNumber(n)
+  if (value < 60) {
+    return `${fmt(value, 0)}m`
+  }
+  return `${fmt(value / 60, 1)}h`
 }
 
 function fmtMs(ms: number): string {
-  if (ms < 1000) return `${Math.round(ms)}ms`
-  return `${(ms / 1000).toFixed(1)}s`
+  const value = toNumber(ms)
+  if (value < 1000) {
+    return `${Math.round(value)}ms`
+  }
+  return `${(value / 1000).toFixed(1)}s`
 }
 
-// ==================== OPPORTUNITY CARD ====================
+function percent(part: number, total: number): number {
+  if (total <= 0) {
+    return 0
+  }
+  return (part / total) * 100
+}
 
-function QualityReportSection({ report }: { report: QualityReportData }) {
-  const [filtersOpen, setFiltersOpen] = useState(false)
-  const failedCount = report.filters.filter(f => !f.passed).length
-  const passedCount = report.filters.filter(f => f.passed).length
+function mean(values: number[]): number {
+  if (values.length === 0) {
+    return 0
+  }
+  return values.reduce((sum, value) => sum + value, 0) / values.length
+}
 
+function actionTone(action: string): Tone {
+  const value = action.toLowerCase()
+  if (value === 'selected' || value === 'close' || value === 'quality-pass' || value === 'pass') {
+    return 'good'
+  }
+  if (value === 'blocked' || value === 'error' || value === 'quality-fail' || value === 'fail') {
+    return 'bad'
+  }
+  if (value === 'reduce') {
+    return 'warn'
+  }
+  return 'neutral'
+}
+
+function toneClasses(tone: Tone): string {
+  if (tone === 'good') {
+    return 'border-emerald-500/30 bg-emerald-500/5 text-emerald-300'
+  }
+  if (tone === 'warn') {
+    return 'border-amber-500/30 bg-amber-500/5 text-amber-300'
+  }
+  if (tone === 'bad') {
+    return 'border-red-500/30 bg-red-500/5 text-red-300'
+  }
+  return 'border-border/40 bg-card/30 text-foreground'
+}
+
+function phaseLabel(mode: BacktestMode): string {
+  if (mode === 'detect') {
+    return 'Detection'
+  }
+  if (mode === 'evaluate') {
+    return 'Evaluation'
+  }
+  return 'Exit Logic'
+}
+
+function phaseDurationMs(mode: BacktestMode, result: BacktestResult): number {
+  if (mode === 'detect') {
+    return toNumber(result.detect_time_ms)
+  }
+  if (mode === 'evaluate') {
+    return toNumber(result.evaluate_time_ms)
+  }
+  return toNumber(result.exit_time_ms)
+}
+
+function runSampleSize(mode: BacktestMode, result: BacktestResult): number {
+  if (mode === 'detect') {
+    return toNumber(result.num_opportunities)
+  }
+  if (mode === 'evaluate') {
+    return toNumber(result.num_signals)
+  }
+  return toNumber(result.num_positions)
+}
+
+function completenessScore(mode: BacktestMode, result: BacktestResult): number {
+  if (mode === 'detect') {
+    const opportunities = result.opportunities || []
+    if (opportunities.length === 0) {
+      return 0
+    }
+    let present = 0
+    let total = 0
+    opportunities.forEach((opp) => {
+      total += 3
+      if (Number.isFinite(Number(opp.roi_percent ?? opp.roi))) {
+        present += 1
+      }
+      if (Number.isFinite(Number(opp.total_cost))) {
+        present += 1
+      }
+      if (Number.isFinite(Number(opp.risk_score))) {
+        present += 1
+      }
+    })
+    return Math.round(percent(present, total))
+  }
+
+  if (mode === 'evaluate') {
+    const decisions = result.decisions || []
+    if (decisions.length === 0) {
+      return 0
+    }
+    let present = 0
+    let total = 0
+    decisions.forEach((decision) => {
+      total += 3
+      if (String(decision.decision || '').trim()) {
+        present += 1
+      }
+      if (String(decision.reason || decision.strategy_reason || '').trim()) {
+        present += 1
+      }
+      if (Array.isArray(decision.checks)) {
+        present += 1
+      }
+    })
+    return Math.round(percent(present, total))
+  }
+
+  const exitDecisions = result.exit_decisions || []
+  if (exitDecisions.length === 0) {
+    return 0
+  }
+  let present = 0
+  let total = 0
+  exitDecisions.forEach((decision) => {
+    total += 4
+    if (String(decision.action || '').trim()) {
+      present += 1
+    }
+    if (Number.isFinite(Number(decision.entry_price))) {
+      present += 1
+    }
+    if (Number.isFinite(Number(decision.current_price))) {
+      present += 1
+    }
+    if (Number.isFinite(Number(decision.pnl_pct))) {
+      present += 1
+    }
+  })
+  return Math.round(percent(present, total))
+}
+
+function buildOutcomeRows(mode: BacktestMode, result: BacktestResult | null): OutcomeRow[] {
+  if (!result) {
+    return []
+  }
+
+  if (mode === 'detect') {
+    const opportunities = result.opportunities || []
+    const qualityReports = result.quality_reports || []
+    const qualityById = new Map<string, QualityReportData>()
+    qualityReports.forEach((report) => {
+      const key = String(report.opportunity_id || '').trim()
+      if (key) {
+        qualityById.set(key, report)
+      }
+    })
+
+    return opportunities.map((opp, index) => {
+      const oppId = String(opp.id || opp.stable_id || `opp-${index}`)
+      const quality = qualityById.get(oppId) || qualityReports[index]
+      const roi = toNumber(opp.roi_percent ?? opp.roi)
+      const cost = toNumber(opp.total_cost)
+      const risk = toNumber(opp.risk_score)
+      const markets = Array.isArray(opp.markets) ? opp.markets.length : 0
+      const legs = Array.isArray(opp.positions_to_take) ? opp.positions_to_take.length : 0
+      const qualityAction = quality ? (quality.passed ? 'quality-pass' : 'quality-fail') : 'candidate'
+
+      return {
+        id: oppId,
+        primary: String(opp.title || `Opportunity ${index + 1}`),
+        secondary: String(opp.strategy || result.strategy_name || '').trim() || undefined,
+        action: qualityAction,
+        tone: actionTone(qualityAction),
+        headlineMetric: `${fmtSignedPct(roi)} ROI`,
+        subMetrics: [
+          `Cost ${fmtMoney(cost)}`,
+          `Risk ${fmt(risk, 2)}`,
+          `Markets ${fmt(markets)}`,
+          `Legs ${fmt(legs)}`,
+        ],
+        reason:
+          quality && !quality.passed
+            ? (quality.rejection_reasons || []).join(' | ')
+            : String(opp.description || ''),
+        detail: {
+          opportunity: opp,
+          quality_report: quality || null,
+        },
+      }
+    })
+  }
+
+  if (mode === 'evaluate') {
+    const decisions = result.decisions || []
+    return decisions.map((decision, index) => {
+      const checks = Array.isArray(decision.checks) ? (decision.checks as DecisionCheck[]) : []
+      const passedChecks = checks.filter((check) => Boolean(check.passed)).length
+      const action = String(decision.decision || 'skipped').toLowerCase()
+      return {
+        id: String(decision.signal_id || `signal-${index}`),
+        primary: String(decision.source || decision.strategy_type || `Signal ${index + 1}`),
+        secondary: String(decision.signal_id || '').trim() || undefined,
+        action,
+        tone: actionTone(action),
+        headlineMetric: `Size ${fmtMoney(toNumber(decision.size_usd))}`,
+        subMetrics: [
+          `Checks ${passedChecks}/${checks.length}`,
+          `Strategy ${String(decision.strategy_decision || 'n/a')}`,
+        ],
+        reason: String(decision.reason || decision.strategy_reason || ''),
+        detail: {
+          decision,
+        },
+      }
+    })
+  }
+
+  const exitDecisions = result.exit_decisions || []
+  return exitDecisions.map((decision, index) => {
+    const action = String(decision.action || 'hold').toLowerCase()
+    const reduceFraction = toNumber(decision.reduce_fraction)
+    const subMetrics = [
+      `Entry ${fmtPrice(toNumber(decision.entry_price))}`,
+      `Now ${fmtPrice(toNumber(decision.current_price))}`,
+      `Age ${fmtMinutes(toNumber(decision.age_minutes))}`,
+      `Notional ${fmtMoney(toNumber(decision.notional_usd))}`,
+    ]
+    if (action === 'reduce' && reduceFraction > 0) {
+      subMetrics.push(`Reduce ${fmt(reduceFraction * 100, 0)}%`)
+    }
+
+    return {
+      id: String(decision.position_id || `position-${index}`),
+      primary: String(decision.market_question || decision.market_id || `Position ${index + 1}`),
+      secondary: String(decision.position_id || '').trim() || undefined,
+      action,
+      tone: actionTone(action),
+      headlineMetric: `${fmtSignedPct(toNumber(decision.pnl_pct))} PnL`,
+      subMetrics,
+      reason: String(decision.reason || ''),
+      detail: {
+        decision,
+      },
+    }
+  })
+}
+
+function buildSummaryCards(mode: BacktestMode, result: BacktestResult, dataCompleteness: number): SummaryCard[] {
+  if (mode === 'detect') {
+    const opportunities = result.opportunities || []
+    const qualityReports = result.quality_reports || []
+    const passCount = qualityReports.filter((report) => report.passed).length
+    const roiValues = opportunities.map((opp) => toNumber(opp.roi_percent ?? opp.roi))
+    const riskValues = opportunities.map((opp) => toNumber(opp.risk_score))
+
+    return [
+      {
+        label: 'Opportunities',
+        value: fmt(toNumber(result.num_opportunities)),
+        subtitle: 'Detected opportunities',
+        tone: toNumber(result.num_opportunities) > 0 ? 'good' : 'neutral',
+        icon: Target,
+      },
+      {
+        label: 'Quality Pass',
+        value: qualityReports.length > 0 ? `${fmt(percent(passCount, qualityReports.length), 1)}%` : 'n/a',
+        subtitle: `${fmt(passCount)}/${fmt(qualityReports.length)} passed`,
+        tone: qualityReports.length > 0 && passCount > 0 ? 'good' : 'warn',
+        icon: ShieldCheck,
+      },
+      {
+        label: 'Average ROI',
+        value: `${fmt(mean(roiValues), 2)}%`,
+        subtitle: 'Across detected opportunities',
+        tone: mean(roiValues) > 0 ? 'good' : 'neutral',
+        icon: TrendingUp,
+      },
+      {
+        label: 'Average Risk',
+        value: fmt(mean(riskValues), 2),
+        subtitle: 'Normalized risk score',
+        tone: mean(riskValues) > 0.7 ? 'bad' : mean(riskValues) > 0.45 ? 'warn' : 'good',
+        icon: Gauge,
+      },
+      {
+        label: 'Replay Coverage',
+        value: `${fmt(toNumber(result.replay_steps))} steps`,
+        subtitle: `${fmt(toNumber(result.replay_markets))} markets`,
+        tone: toNumber(result.replay_steps) > 0 ? 'good' : 'neutral',
+        icon: BarChart3,
+      },
+      {
+        label: 'Completeness',
+        value: `${fmt(dataCompleteness)}%`,
+        subtitle: 'Core fields populated',
+        tone: dataCompleteness >= 90 ? 'good' : dataCompleteness >= 70 ? 'warn' : 'bad',
+        icon: Database,
+      },
+    ]
+  }
+
+  if (mode === 'evaluate') {
+    const decisions = result.decisions || []
+    const checks = decisions.flatMap((decision) =>
+      Array.isArray(decision.checks) ? (decision.checks as DecisionCheck[]) : []
+    )
+    const passedChecks = checks.filter((check) => Boolean(check.passed)).length
+    const sizeValues = decisions
+      .map((decision) => toNumber(decision.size_usd))
+      .filter((value) => value > 0)
+    const decisionErrors = decisions.filter(
+      (decision) => String(decision.decision || '').toLowerCase() === 'error'
+    ).length
+
+    return [
+      {
+        label: 'Signals Tested',
+        value: fmt(toNumber(result.num_signals)),
+        subtitle: 'Recent emissions evaluated',
+        tone: toNumber(result.num_signals) > 0 ? 'good' : 'neutral',
+        icon: Target,
+      },
+      {
+        label: 'Selected Rate',
+        value: `${fmt(percent(toNumber(result.selected), toNumber(result.num_signals)), 1)}%`,
+        subtitle: `${fmt(toNumber(result.selected))} selected`,
+        tone: toNumber(result.selected) > 0 ? 'good' : 'neutral',
+        icon: CheckCircle2,
+      },
+      {
+        label: 'Blocked Rate',
+        value: `${fmt(percent(toNumber(result.blocked), toNumber(result.num_signals)), 1)}%`,
+        subtitle: `${fmt(toNumber(result.blocked))} blocked`,
+        tone: toNumber(result.blocked) > 0 ? 'warn' : 'good',
+        icon: AlertTriangle,
+      },
+      {
+        label: 'Avg Size',
+        value: sizeValues.length > 0 ? fmtMoney(mean(sizeValues)) : 'n/a',
+        subtitle: 'Suggested position size',
+        tone: sizeValues.length > 0 ? 'good' : 'neutral',
+        icon: Gauge,
+      },
+      {
+        label: 'Check Pass Rate',
+        value: checks.length > 0 ? `${fmt(percent(passedChecks, checks.length), 1)}%` : 'n/a',
+        subtitle: `${fmt(passedChecks)}/${fmt(checks.length)} checks passed`,
+        tone: checks.length > 0 && passedChecks > 0 ? 'good' : 'warn',
+        icon: ShieldCheck,
+      },
+      {
+        label: 'Completeness',
+        value: `${fmt(dataCompleteness)}%`,
+        subtitle: `${fmt(decisionErrors)} decision errors`,
+        tone: dataCompleteness >= 90 ? 'good' : dataCompleteness >= 70 ? 'warn' : 'bad',
+        icon: Database,
+      },
+    ]
+  }
+
+  const exits = result.exit_decisions || []
+  const pnlValues = exits
+    .filter((decision) => String(decision.action || '').toLowerCase() !== 'error')
+    .map((decision) => toNumber(decision.pnl_pct))
+  const totalNotional = exits.reduce((sum, decision) => sum + toNumber(decision.notional_usd), 0)
+  const actionable = toNumber(result.would_close) + toNumber(result.would_reduce)
+
+  return [
+    {
+      label: 'Positions Tested',
+      value: fmt(toNumber(result.num_positions)),
+      subtitle: 'Open inventory sampled',
+      tone: toNumber(result.num_positions) > 0 ? 'good' : 'neutral',
+      icon: Target,
+    },
+    {
+      label: 'Exit Rate',
+      value: `${fmt(percent(actionable, toNumber(result.num_positions)), 1)}%`,
+      subtitle: `${fmt(actionable)} actionable exits`,
+      tone: actionable > 0 ? 'good' : 'neutral',
+      icon: TrendingUp,
+    },
+    {
+      label: 'Close / Reduce',
+      value: `${fmt(toNumber(result.would_close))}/${fmt(toNumber(result.would_reduce))}`,
+      subtitle: 'Action split',
+      tone: toNumber(result.would_close) > 0 || toNumber(result.would_reduce) > 0 ? 'good' : 'neutral',
+      icon: CheckCircle2,
+    },
+    {
+      label: 'Hold',
+      value: fmt(toNumber(result.would_hold)),
+      subtitle: 'Held positions',
+      tone: toNumber(result.would_hold) > 0 ? 'warn' : 'good',
+      icon: Gauge,
+    },
+    {
+      label: 'Average PnL',
+      value: `${fmt(mean(pnlValues), 2)}%`,
+      subtitle: 'Across non-error exits',
+      tone: mean(pnlValues) > 0 ? 'good' : 'neutral',
+      icon: BarChart3,
+    },
+    {
+      label: 'Completeness',
+      value: `${fmt(dataCompleteness)}%`,
+      subtitle: `${fmtMoney(totalNotional)} notional`,
+      tone: dataCompleteness >= 90 ? 'good' : dataCompleteness >= 70 ? 'warn' : 'bad',
+      icon: Database,
+    },
+  ]
+}
+
+function SummaryMetricCard({ card }: { card: SummaryCard }) {
   return (
-    <div className="border border-border/20 rounded-md overflow-hidden mt-1.5">
-      <button
-        className="w-full flex items-center gap-2 px-2 py-1.5 text-left hover:bg-card/30 transition-colors"
-        onClick={() => setFiltersOpen(!filtersOpen)}
-      >
-        {filtersOpen ? (
-          <ChevronDown className="w-2.5 h-2.5 text-muted-foreground shrink-0" />
-        ) : (
-          <ChevronRight className="w-2.5 h-2.5 text-muted-foreground shrink-0" />
-        )}
-        <span className="text-[9px] uppercase tracking-wider text-muted-foreground">Quality Filters</span>
-        <div className="ml-auto flex items-center gap-1.5">
-          {passedCount > 0 && (
-            <span className="text-[9px] text-emerald-400 font-mono">{passedCount} pass</span>
-          )}
-          {failedCount > 0 && (
-            <span className="text-[9px] text-red-400 font-mono">{failedCount} fail</span>
-          )}
-          <Badge
-            variant="outline"
-            className={cn(
-              'text-[8px] h-3.5',
-              report.passed ? 'border-emerald-500/30 text-emerald-400' : 'border-red-500/30 text-red-400'
-            )}
-          >
-            {report.passed ? 'PASS' : 'FAIL'}
-          </Badge>
-        </div>
-      </button>
-      {filtersOpen && (
-        <div className="px-2 pb-2 space-y-0.5 border-t border-border/10">
-          {report.filters.map((f, i) => (
-            <div key={i} className="flex items-start gap-1.5 py-0.5">
-              {f.passed ? (
-                <CheckCircle2 className="w-2.5 h-2.5 text-emerald-400 mt-0.5 shrink-0" />
-              ) : (
-                <XCircle className="w-2.5 h-2.5 text-red-400 mt-0.5 shrink-0" />
-              )}
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[9px] font-mono text-muted-foreground">{f.filter_name}</span>
-                </div>
-                <p className="text-[9px] text-muted-foreground/80 leading-tight">{f.reason}</p>
-                {f.threshold != null && f.actual_value != null && (
-                  <div className="flex gap-2 text-[8px] font-mono mt-0.5">
-                    <span className="text-amber-400/70">threshold: {String(typeof f.threshold === 'number' ? f.threshold.toFixed(2) : f.threshold)}</span>
-                    <span className={f.passed ? 'text-emerald-400/70' : 'text-red-400/70'}>actual: {String(typeof f.actual_value === 'number' ? f.actual_value.toFixed(2) : f.actual_value)}</span>
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+    <div className={cn('rounded-md border px-2.5 py-2', toneClasses(card.tone))}>
+      <div className="flex items-center gap-1.5 mb-1">
+        <card.icon className="w-3 h-3 opacity-70" />
+        <span className="text-[9px] uppercase tracking-wider opacity-75">{card.label}</span>
+      </div>
+      <div className="text-sm font-mono font-semibold">{card.value}</div>
+      <p className="text-[9px] opacity-70 mt-0.5">{card.subtitle}</p>
     </div>
   )
 }
 
-function OpportunityCard({ opp, index, qualityReport }: { opp: Record<string, any>; index: number; qualityReport?: QualityReportData }) {
-  const [expanded, setExpanded] = useState(false)
-  const roi = opp.roi_percent ?? opp.roi ?? 0
-  const cost = opp.total_cost ?? 0
-  const risk = opp.risk_score ?? 0
-  const title = opp.title || `Opportunity #${index + 1}`
-  const numMarkets = opp.markets?.length ?? 0
-  const positions = opp.positions_to_take ?? []
-
+function OutcomeCard({
+  row,
+  expanded,
+  onToggle,
+}: {
+  row: OutcomeRow
+  expanded: boolean
+  onToggle: () => void
+}) {
   return (
     <div className="border border-border/40 rounded-lg overflow-hidden">
       <button
-        className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-card/50 transition-colors"
-        onClick={() => setExpanded(!expanded)}
+        className="w-full text-left px-3 py-2 hover:bg-card/40 transition-colors"
+        onClick={onToggle}
       >
-        {expanded ? (
-          <ChevronDown className="w-3 h-3 text-muted-foreground shrink-0" />
-        ) : (
-          <ChevronRight className="w-3 h-3 text-muted-foreground shrink-0" />
-        )}
-        <span className="text-[11px] font-medium truncate flex-1">{title}</span>
-        {qualityReport && (
-          <Badge
-            variant="outline"
-            className={cn(
-              'text-[8px] h-3.5 shrink-0 mr-1',
-              qualityReport.passed ? 'border-emerald-500/20 text-emerald-400/70' : 'border-red-500/20 text-red-400/70'
+        <div className="flex items-start gap-2">
+          {expanded ? (
+            <ChevronDown className="w-3 h-3 text-muted-foreground shrink-0 mt-0.5" />
+          ) : (
+            <ChevronRight className="w-3 h-3 text-muted-foreground shrink-0 mt-0.5" />
+          )}
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-medium truncate">{row.primary}</span>
+              <Badge
+                variant="outline"
+                className={cn(
+                  'text-[8px] h-3.5 uppercase',
+                  row.tone === 'good'
+                    ? 'border-emerald-500/30 text-emerald-400'
+                    : row.tone === 'warn'
+                      ? 'border-amber-500/30 text-amber-400'
+                      : row.tone === 'bad'
+                        ? 'border-red-500/30 text-red-400'
+                        : 'border-border/40 text-muted-foreground'
+                )}
+              >
+                {row.action}
+              </Badge>
+              <span className="ml-auto text-[10px] font-mono font-medium">{row.headlineMetric}</span>
+            </div>
+            {row.secondary && (
+              <p className="text-[10px] text-muted-foreground mt-0.5 truncate">{row.secondary}</p>
             )}
-          >
-            {qualityReport.passed ? 'QF' : 'QF FAIL'}
-          </Badge>
-        )}
-        <Badge
-          variant="outline"
-          className={cn(
-            'text-[9px] h-4 shrink-0',
-            roi > 0 ? 'border-emerald-500/30 text-emerald-400' : 'border-red-500/30 text-red-400'
-          )}
-        >
-          {roi > 0 ? '+' : ''}{fmt(roi, 2)}% ROI
-        </Badge>
-      </button>
-      {expanded && (
-        <div className="px-3 pb-3 space-y-2 border-t border-border/20">
-          <div className="grid grid-cols-3 gap-2 pt-2">
-            <div className="text-center">
-              <div className="text-[9px] uppercase tracking-wider text-muted-foreground">Cost</div>
-              <div className="text-xs font-mono font-medium">${fmt(cost, 2)}</div>
-            </div>
-            <div className="text-center">
-              <div className="text-[9px] uppercase tracking-wider text-muted-foreground">Risk</div>
-              <div className={cn('text-xs font-mono font-medium', risk > 0.7 ? 'text-red-400' : risk > 0.4 ? 'text-amber-400' : 'text-emerald-400')}>
-                {fmt(risk, 2)}
-              </div>
-            </div>
-            <div className="text-center">
-              <div className="text-[9px] uppercase tracking-wider text-muted-foreground">Markets</div>
-              <div className="text-xs font-mono font-medium">{numMarkets}</div>
-            </div>
-          </div>
-          {opp.description && (
-            <p className="text-[10px] text-muted-foreground leading-relaxed">{opp.description}</p>
-          )}
-          {positions.length > 0 && (
-            <div className="space-y-1">
-              <div className="text-[9px] uppercase tracking-wider text-muted-foreground">Positions</div>
-              {positions.map((pos: any, i: number) => (
-                <div key={i} className="flex items-center gap-2 text-[10px]">
-                  <Badge variant="outline" className={cn('text-[8px] h-3.5', pos.outcome === 'Yes' ? 'text-emerald-400 border-emerald-500/30' : 'text-red-400 border-red-500/30')}>
-                    {pos.action} {pos.outcome}
-                  </Badge>
-                  <span className="text-muted-foreground truncate">{pos.market}</span>
-                  <span className="font-mono ml-auto shrink-0">${fmt(pos.price ?? 0, 2)}</span>
-                </div>
+            <div className="mt-1 flex flex-wrap gap-1.5">
+              {row.subMetrics.map((metric, index) => (
+                <span
+                  key={`${row.id}-${index}`}
+                  className="text-[9px] px-1.5 py-0.5 rounded bg-muted/40 text-muted-foreground font-mono"
+                >
+                  {metric}
+                </span>
               ))}
             </div>
-          )}
-          {qualityReport && (
-            <QualityReportSection report={qualityReport} />
-          )}
+            {row.reason && <p className="text-[10px] text-muted-foreground mt-1.5 leading-relaxed">{row.reason}</p>}
+          </div>
+        </div>
+      </button>
+      {expanded && (
+        <div className="px-3 pb-3 border-t border-border/20">
+          <pre className="text-[10px] font-mono bg-black/20 rounded p-2 mt-2 overflow-x-auto whitespace-pre">
+            {JSON.stringify(row.detail, null, 2)}
+          </pre>
         </div>
       )}
     </div>
   )
 }
-
-// ==================== STAT CARD ====================
-
-function Stat({ label, value, icon: Icon, tone = 'neutral' }: {
-  label: string
-  value: string
-  icon: React.ComponentType<{ className?: string }>
-  tone?: 'good' | 'warn' | 'bad' | 'neutral'
-}) {
-  const toneClass =
-    tone === 'good' ? 'border-emerald-500/30 bg-emerald-500/5 text-emerald-300' :
-    tone === 'warn' ? 'border-amber-500/30 bg-amber-500/5 text-amber-300' :
-    tone === 'bad' ? 'border-red-500/30 bg-red-500/5 text-red-300' :
-    'border-border/40 bg-card/30 text-foreground'
-
-  return (
-    <div className={cn('rounded-md border px-2.5 py-2', toneClass)}>
-      <div className="flex items-center gap-1.5 mb-1">
-        <Icon className="w-3 h-3 opacity-60" />
-        <span className="text-[9px] uppercase tracking-wider opacity-70">{label}</span>
-      </div>
-      <div className="text-sm font-mono font-semibold">{value}</div>
-    </div>
-  )
-}
-
-// ==================== MAIN FLYOUT ====================
-
-type BacktestMode = 'detect' | 'evaluate' | 'exit'
 
 const MODE_ENDPOINTS: Record<BacktestMode, string> = {
   detect: '/validation/code-backtest',
@@ -267,9 +657,21 @@ const MODE_ENDPOINTS: Record<BacktestMode, string> = {
 }
 
 const MODE_LABELS: Record<BacktestMode, { label: string; desc: string; running: string }> = {
-  detect: { label: 'Detect', desc: 'Find opportunities in current market data', running: 'Running detection...' },
-  evaluate: { label: 'Evaluate', desc: 'Test signal gating against recent trade signals', running: 'Evaluating signals...' },
-  exit: { label: 'Exit', desc: 'Test exit logic against current open positions', running: 'Testing exit logic...' },
+  detect: {
+    label: 'Detect',
+    desc: 'Find opportunities in current and replayed market states',
+    running: 'Running detection...',
+  },
+  evaluate: {
+    label: 'Evaluate',
+    desc: 'Score recent signals through strategy and platform gates',
+    running: 'Evaluating signals...',
+  },
+  exit: {
+    label: 'Exit',
+    desc: 'Run should_exit() against live open position inventory',
+    running: 'Testing exit logic...',
+  },
 }
 
 const DETECT_REPLAY_OPTIONS = {
@@ -278,6 +680,107 @@ const DETECT_REPLAY_OPTIONS = {
   replay_timeframe: '30m',
   replay_max_markets: 80,
   replay_max_steps: 72,
+}
+
+const BACKTEST_MODES: BacktestMode[] = ['detect', 'evaluate', 'exit']
+
+interface IntegratedBacktestScore {
+  overall: number
+  readiness: number
+  passedPhases: number
+  phaseScores: Record<BacktestMode, number>
+  phaseCompleteness: Record<BacktestMode, number>
+  phaseSamples: Record<BacktestMode, number>
+  phasePassed: Record<BacktestMode, boolean>
+}
+
+function scoreTone(score: number): Tone {
+  if (score >= 85) {
+    return 'good'
+  }
+  if (score >= 65) {
+    return 'warn'
+  }
+  return 'bad'
+}
+
+function createRequestFailureResult(mode: BacktestMode, slug: string, error: unknown): BacktestResult {
+  const detail =
+    axios.isAxiosError(error)
+      ? String(error.response?.data?.detail || error.message || 'Request failed')
+      : String(error)
+  return {
+    success: false,
+    strategy_slug: slug,
+    strategy_name: slug,
+    class_name: '',
+    load_time_ms: 0,
+    data_fetch_time_ms: 0,
+    total_time_ms: 0,
+    validation_errors: [],
+    validation_warnings: [],
+    runtime_error: `${phaseLabel(mode)} request failed: ${detail}`,
+    runtime_traceback: null,
+  }
+}
+
+function buildIntegratedScore(results: Partial<Record<BacktestMode, BacktestResult>>): IntegratedBacktestScore {
+  const phaseScores: Record<BacktestMode, number> = {
+    detect: 0,
+    evaluate: 0,
+    exit: 0,
+  }
+  const phaseCompleteness: Record<BacktestMode, number> = {
+    detect: 0,
+    evaluate: 0,
+    exit: 0,
+  }
+  const phaseSamples: Record<BacktestMode, number> = {
+    detect: 0,
+    evaluate: 0,
+    exit: 0,
+  }
+  const phasePassed: Record<BacktestMode, boolean> = {
+    detect: false,
+    evaluate: false,
+    exit: false,
+  }
+
+  BACKTEST_MODES.forEach((mode) => {
+    const result = results[mode]
+    if (!result) {
+      return
+    }
+
+    const completeness = completenessScore(mode, result)
+    const samples = runSampleSize(mode, result)
+    const runHealthy =
+      result.success &&
+      !result.runtime_error &&
+      Array.isArray(result.validation_errors) &&
+      result.validation_errors.length === 0
+    const phaseScore = Math.round(completeness * 0.6 + (samples > 0 ? 100 : 0) * 0.2 + (runHealthy ? 100 : 0) * 0.2)
+
+    phaseCompleteness[mode] = completeness
+    phaseSamples[mode] = samples
+    phaseScores[mode] = phaseScore
+    phasePassed[mode] = runHealthy && samples > 0 && completeness >= 70
+  })
+
+  const passedPhases = BACKTEST_MODES.filter((mode) => phasePassed[mode]).length
+  const readiness = Math.round(percent(passedPhases, BACKTEST_MODES.length))
+  const averagePhaseScore = mean(BACKTEST_MODES.map((mode) => phaseScores[mode]))
+  const overall = Math.round(averagePhaseScore * (readiness / 100))
+
+  return {
+    overall,
+    readiness,
+    passedPhases,
+    phaseScores,
+    phaseCompleteness,
+    phaseSamples,
+    phasePassed,
+  }
 }
 
 export default function StrategyBacktestFlyout({
@@ -295,61 +798,133 @@ export default function StrategyBacktestFlyout({
   config?: Record<string, any>
   variant: 'opportunity' | 'trader'
 }) {
-  const [result, setResult] = useState<BacktestResult | null>(null)
-  const [mode, setMode] = useState<BacktestMode>('detect')
+  const [phaseResults, setPhaseResults] = useState<Partial<Record<BacktestMode, BacktestResult>>>({})
+  const [expandedRowId, setExpandedRowId] = useState<string | null>(null)
+  const [runningPhase, setRunningPhase] = useState<BacktestMode | null>(null)
 
   const backtestMutation = useMutation({
     mutationFn: async () => {
-      const endpoint = MODE_ENDPOINTS[mode]
-      const payload = {
-        source_code: sourceCode,
-        slug,
-        config: config || {},
-        ...(mode === 'detect' ? DETECT_REPLAY_OPTIONS : { use_ohlc_replay: false }),
+      const suite: Record<BacktestMode, BacktestResult> = {
+        detect: createRequestFailureResult('detect', slug, 'Not run'),
+        evaluate: createRequestFailureResult('evaluate', slug, 'Not run'),
+        exit: createRequestFailureResult('exit', slug, 'Not run'),
       }
-      const { data } = await api.post(endpoint, payload)
-      return data as BacktestResult
+
+      for (const candidate of BACKTEST_MODES) {
+        setRunningPhase(candidate)
+        const payload = {
+          source_code: sourceCode,
+          slug,
+          config: config || {},
+          ...(candidate === 'detect' ? DETECT_REPLAY_OPTIONS : { use_ohlc_replay: false }),
+        }
+        try {
+          const { data } = await api.post(MODE_ENDPOINTS[candidate], payload)
+          normalizeUtcTimestampsInPlace(data)
+          suite[candidate] = data as BacktestResult
+        } catch (error) {
+          suite[candidate] = createRequestFailureResult(candidate, slug, error)
+        }
+      }
+
+      return suite
     },
-    onSuccess: (data) => setResult(data),
-    onError: () => setResult(null),
+    onMutate: () => {
+      setExpandedRowId(null)
+      setPhaseResults({})
+      setRunningPhase('detect')
+    },
+    onSuccess: (data) => {
+      setExpandedRowId(null)
+      setPhaseResults(data)
+      setRunningPhase(null)
+    },
+    onError: () => {
+      setExpandedRowId(null)
+      setPhaseResults({})
+      setRunningPhase(null)
+    },
   })
 
-  const hasWarnings = result && result.validation_warnings.length > 0
+  const integratedScore = useMemo(() => buildIntegratedScore(phaseResults), [phaseResults])
+  const overallTone = scoreTone(integratedScore.overall)
+  const hasSuiteResults = useMemo(
+    () => BACKTEST_MODES.some((candidate) => Boolean(phaseResults[candidate])),
+    [phaseResults]
+  )
+  const totalRuntimeMs = useMemo(
+    () => BACKTEST_MODES.reduce((sum, candidate) => sum + toNumber(phaseResults[candidate]?.total_time_ms), 0),
+    [phaseResults]
+  )
+
+  const phaseViews = useMemo(
+    () =>
+      BACKTEST_MODES.map((candidate) => {
+        const phaseResult = phaseResults[candidate] || null
+        const rows = buildOutcomeRows(candidate, phaseResult)
+        const actionCounts = (() => {
+          const counts = new Map<string, number>()
+          rows.forEach((row) => {
+            counts.set(row.action, (counts.get(row.action) || 0) + 1)
+          })
+          return Array.from(counts.entries()).sort((a, b) => b[1] - a[1])
+        })()
+        const dataCompleteness = phaseResult ? completenessScore(candidate, phaseResult) : 0
+        const summaryCards = phaseResult ? buildSummaryCards(candidate, phaseResult, dataCompleteness) : []
+        const phaseMs = phaseResult ? phaseDurationMs(candidate, phaseResult) : 0
+        const sampleSize = phaseResult ? runSampleSize(candidate, phaseResult) : 0
+        const hasWarnings = Boolean(phaseResult && phaseResult.validation_warnings.length > 0)
+        return {
+          mode: candidate,
+          result: phaseResult,
+          rows,
+          actionCounts,
+          dataCompleteness,
+          summaryCards,
+          phaseMs,
+          sampleSize,
+          hasWarnings,
+        }
+      }),
+    [phaseResults]
+  )
+
+  const runningLabel = runningPhase ? MODE_LABELS[runningPhase].running : 'Running full suite...'
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent side="right" className="w-full sm:max-w-xl p-0">
+      <SheetContent side="right" className="w-[98vw] sm:max-w-4xl xl:max-w-6xl p-0">
         <div className="h-full min-h-0 flex flex-col">
-          {/* Header */}
           <div className="border-b border-border px-4 py-3 space-y-3">
             <SheetHeader className="space-y-1 text-left">
               <SheetTitle className="text-base flex items-center gap-2">
                 <FlaskConical className="w-4 h-4" />
                 Strategy Backtest
                 <Badge variant="outline" className="text-[9px] h-4 font-normal">
-                  {mode === 'detect' ? 'Live+Replay' : 'Live'}
+                  Integrated
                 </Badge>
               </SheetTitle>
               <SheetDescription>
-                {MODE_LABELS[mode].desc}
+                Runs detect, evaluate, and exit as one required suite, shown as stacked sections below.
               </SheetDescription>
             </SheetHeader>
 
-            {/* Mode selector */}
-            <div className="flex gap-1 rounded-md bg-muted/50 p-0.5">
-              {(['detect', 'evaluate', 'exit'] as BacktestMode[]).map((m) => (
-                <button
-                  key={m}
+            <div className="grid grid-cols-3 gap-1 rounded-md bg-muted/50 p-1">
+              {BACKTEST_MODES.map((candidate) => (
+                <div
+                  key={candidate}
                   className={cn(
-                    'flex-1 text-[10px] font-medium py-1 px-2 rounded transition-colors',
-                    mode === m
-                      ? 'bg-background text-foreground shadow-sm'
-                      : 'text-muted-foreground hover:text-foreground'
+                    'rounded px-2 py-1 text-[10px]',
+                    hasSuiteResults
+                      ? integratedScore.phasePassed[candidate]
+                        ? 'border border-emerald-500/30 bg-emerald-500/5 text-emerald-300'
+                        : 'border border-red-500/30 bg-red-500/5 text-red-300'
+                      : 'border border-border/30 bg-background text-muted-foreground'
                   )}
-                  onClick={() => { setMode(m); setResult(null) }}
                 >
-                  {MODE_LABELS[m].label}
-                </button>
+                  <p className="uppercase tracking-wide opacity-80">{MODE_LABELS[candidate].label}</p>
+                  <p className="font-mono">{hasSuiteResults ? `${fmt(integratedScore.phaseScores[candidate])}/100` : 'Pending'}</p>
+                </div>
               ))}
             </div>
 
@@ -362,20 +937,18 @@ export default function StrategyBacktestFlyout({
               {backtestMutation.isPending ? (
                 <>
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  {MODE_LABELS[mode].running}
+                  {runningLabel}
                 </>
               ) : (
                 <>
                   <Play className="w-3.5 h-3.5" />
-                  Run {MODE_LABELS[mode].label} Backtest
+                  Run Full Backtest Suite
                 </>
               )}
             </Button>
           </div>
 
-          {/* Content */}
           <ScrollArea className="flex-1 min-h-0 px-4 py-3">
-            {/* Error from mutation itself */}
             {backtestMutation.isError && (
               <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-3 mb-3">
                 <div className="flex items-center gap-2 text-red-400 text-xs font-medium mb-1">
@@ -388,254 +961,306 @@ export default function StrategyBacktestFlyout({
               </div>
             )}
 
-            {/* No result yet */}
-            {!result && !backtestMutation.isPending && !backtestMutation.isError && (
+            {!hasSuiteResults && !backtestMutation.isPending && !backtestMutation.isError && (
               <div className="text-center py-12 space-y-2">
                 <FlaskConical className="w-8 h-8 mx-auto text-muted-foreground/30" />
                 <p className="text-xs text-muted-foreground">
-                  Click "Run Backtest" to test your strategy against {variant === 'opportunity' ? 'live market data with OHLC replay' : 'current signals'}.
+                  Run a full backtest suite to benchmark this strategy across{' '}
+                  {variant === 'opportunity'
+                    ? 'live+replay detection, evaluation, and exits'
+                    : 'signal gating and open-position exits'}
+                  .
                 </p>
                 <p className="text-[10px] text-muted-foreground/60">
-                  Your code will be compiled, loaded, and run against the current market snapshot.
+                  The score only passes when all three phases succeed with usable output.
                 </p>
               </div>
             )}
 
-            {/* Loading */}
             {backtestMutation.isPending && (
               <div className="text-center py-12 space-y-3">
                 <Loader2 className="w-8 h-8 mx-auto text-primary animate-spin" />
-                <p className="text-xs text-muted-foreground">
-                  Compiling strategy and running detection...
-                </p>
+                <p className="text-xs text-muted-foreground">{runningLabel}</p>
                 <p className="text-[10px] text-muted-foreground/60">
-                  This may take up to 60 seconds for I/O-heavy strategies.
+                  Running Detect, Evaluate, and Exit in sequence.
                 </p>
               </div>
             )}
 
-            {/* Results */}
-            {result && !backtestMutation.isPending && (
+            {hasSuiteResults && !backtestMutation.isPending && (
               <div className="space-y-3">
-                {/* Status banner */}
-                {result.success ? (
-                  <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3">
-                    <div className="flex items-center gap-2 text-emerald-400 text-xs font-medium">
-                      <CheckCircle2 className="w-3.5 h-3.5" />
-                      Detection completed successfully
-                      <span className="ml-auto text-[10px] text-emerald-400/60 font-mono">
-                        {fmtMs(result.total_time_ms)}
-                      </span>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-3">
-                    <div className="flex items-center gap-2 text-red-400 text-xs font-medium">
-                      <XCircle className="w-3.5 h-3.5" />
-                      Backtest failed
-                    </div>
-                  </div>
-                )}
-
-                {/* Summary stats — adaptive to mode */}
-                <div className="grid grid-cols-2 gap-2">
-                  {mode === 'detect' && (
-                    <>
-                      <Stat label="Opportunities" value={fmt(result.num_opportunities || 0)} icon={Target} tone={(result.num_opportunities || 0) > 0 ? 'good' : 'neutral'} />
-                      <Stat label="Markets Scanned" value={fmt(result.num_markets || 0)} icon={BarChart3} />
-                      <Stat label="Events" value={fmt(result.num_events || 0)} icon={TrendingUp} />
-                      <Stat label="Data Source" value={result.data_source || 'N/A'} icon={DollarSign} />
-                    </>
+                <div
+                  className={cn(
+                    'rounded-lg border p-3',
+                    overallTone === 'good'
+                      ? 'border-emerald-500/30 bg-emerald-500/5'
+                      : overallTone === 'warn'
+                        ? 'border-amber-500/30 bg-amber-500/5'
+                        : 'border-red-500/30 bg-red-500/5'
                   )}
-                  {mode === 'evaluate' && (
-                    <>
-                      <Stat label="Signals Tested" value={fmt((result as any).num_signals || 0)} icon={Target} />
-                      <Stat label="Selected" value={fmt((result as any).selected || 0)} icon={CheckCircle2} tone={(result as any).selected > 0 ? 'good' : 'neutral'} />
-                      <Stat label="Skipped" value={fmt((result as any).skipped || 0)} icon={XCircle} />
-                      <Stat label="Blocked" value={fmt((result as any).blocked || 0)} icon={AlertTriangle} />
-                    </>
-                  )}
-                  {mode === 'exit' && (
-                    <>
-                      <Stat label="Positions Tested" value={fmt((result as any).num_positions || 0)} icon={Target} />
-                      <Stat label="Would Close" value={fmt((result as any).would_close || 0)} icon={XCircle} tone={(result as any).would_close > 0 ? 'good' : 'neutral'} />
-                      <Stat label="Would Hold" value={fmt((result as any).would_hold || 0)} icon={CheckCircle2} />
-                      <Stat label="" value="" icon={DollarSign} />
-                    </>
-                  )}
-                </div>
-
-                {/* Timing breakdown */}
-                <div className="rounded-lg border border-border/30 p-3 space-y-1.5">
-                  <div className="flex items-center gap-2 text-xs font-medium mb-2">
-                    <Clock className="w-3.5 h-3.5 text-muted-foreground" />
-                    Timing Breakdown
-                  </div>
-                  {[
-                    { label: 'Code Load', ms: result.load_time_ms },
-                    { label: 'Data Fetch', ms: result.data_fetch_time_ms },
-                    { label: 'Detection', ms: result.detect_time_ms },
-                  ].map(({ label, ms }) => (
-                    <div key={label} className="flex items-center justify-between text-[11px]">
-                      <span className="text-muted-foreground">{label}</span>
-                      <span className="font-mono text-foreground">{fmtMs(ms)}</span>
-                    </div>
-                  ))}
-                  <div className="flex items-center justify-between text-[11px] border-t border-border/20 pt-1.5 mt-1.5">
-                    <span className="font-medium">Total</span>
-                    <span className="font-mono font-medium">{fmtMs(result.total_time_ms)}</span>
-                  </div>
-                </div>
-
-                {/* Validation errors */}
-                {result.validation_errors.length > 0 && (
-                  <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-3 space-y-2">
-                    <div className="flex items-center gap-2 text-red-400 text-xs font-medium">
-                      <XCircle className="w-3.5 h-3.5" />
-                      Validation Errors
-                    </div>
-                    {result.validation_errors.map((err, i) => (
-                      <p key={i} className="text-[11px] text-red-300/80 font-mono">{err}</p>
-                    ))}
-                  </div>
-                )}
-
-                {/* Validation warnings */}
-                {hasWarnings && (
-                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 space-y-2">
-                    <div className="flex items-center gap-2 text-amber-400 text-xs font-medium">
-                      <AlertTriangle className="w-3.5 h-3.5" />
-                      Warnings
-                    </div>
-                    {result.validation_warnings.map((warn, i) => (
-                      <p key={i} className="text-[11px] text-amber-300/80">{warn}</p>
-                    ))}
-                  </div>
-                )}
-
-                {/* Runtime error */}
-                {result.runtime_error && (
-                  <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-3 space-y-2">
-                    <div className="flex items-center gap-2 text-red-400 text-xs font-medium">
-                      <XCircle className="w-3.5 h-3.5" />
-                      Runtime Error
-                    </div>
-                    <p className="text-[11px] text-red-300/80 font-mono">{result.runtime_error}</p>
-                    {result.runtime_traceback && (
-                      <pre className="text-[10px] text-red-300/60 font-mono bg-black/20 rounded p-2 overflow-x-auto whitespace-pre max-h-48 overflow-y-auto">
-                        {result.runtime_traceback}
-                      </pre>
+                >
+                  <div
+                    className={cn(
+                      'flex items-center gap-2 text-xs font-medium',
+                      overallTone === 'good'
+                        ? 'text-emerald-400'
+                        : overallTone === 'warn'
+                          ? 'text-amber-400'
+                          : 'text-red-400'
                     )}
+                  >
+                    {integratedScore.passedPhases === BACKTEST_MODES.length ? (
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                    ) : integratedScore.passedPhases > 0 ? (
+                      <AlertTriangle className="w-3.5 h-3.5" />
+                    ) : (
+                      <XCircle className="w-3.5 h-3.5" />
+                    )}
+                    Integrated score
+                    <span className="ml-auto text-base font-mono font-semibold opacity-90">
+                      {fmt(integratedScore.overall)}/100
+                    </span>
                   </div>
-                )}
-
-                {/* DETECT: Opportunities list */}
-                {mode === 'detect' && (result.opportunities || []).length > 0 && (
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2 text-xs font-medium">
-                      <Target className="w-3.5 h-3.5 text-emerald-400" />
-                      Detected Opportunities ({result.num_opportunities})
+                  <div className="mt-2 grid grid-cols-2 md:grid-cols-3 gap-2 text-[10px]">
+                    <div className="rounded border border-border/30 bg-black/10 px-2 py-1.5">
+                      <span className="text-muted-foreground">Readiness</span>
+                      <p className="font-mono font-medium">{fmt(integratedScore.readiness)}%</p>
                     </div>
-                    <div className="space-y-1.5">
-                      {(result.opportunities || []).map((opp, i) => {
-                        const qr = (result.quality_reports || [])[i] || undefined
-                        return <OpportunityCard key={opp.id || i} opp={opp} index={i} qualityReport={qr} />
-                      })}
+                    <div className="rounded border border-border/30 bg-black/10 px-2 py-1.5">
+                      <span className="text-muted-foreground">Phase Passes</span>
+                      <p className="font-mono font-medium">
+                        {fmt(integratedScore.passedPhases)}/{fmt(BACKTEST_MODES.length)}
+                      </p>
+                    </div>
+                    <div className="rounded border border-border/30 bg-black/10 px-2 py-1.5">
+                      <span className="text-muted-foreground">Suite Runtime</span>
+                      <p className="font-mono font-medium">{fmtMs(totalRuntimeMs)}</p>
                     </div>
                   </div>
-                )}
+                  <div className="mt-2 grid grid-cols-1 md:grid-cols-3 gap-2 text-[10px]">
+                    {BACKTEST_MODES.map((candidate) => (
+                      <div
+                        key={candidate}
+                        className={cn(
+                          'rounded border px-2 py-1.5',
+                          integratedScore.phasePassed[candidate]
+                            ? 'border-emerald-500/30 bg-emerald-500/5'
+                            : 'border-red-500/30 bg-red-500/5'
+                        )}
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <span className="uppercase tracking-wide opacity-75">{MODE_LABELS[candidate].label}</span>
+                          <span className="ml-auto font-mono">{fmt(integratedScore.phaseScores[candidate])}/100</span>
+                        </div>
+                        <div className="mt-1 flex items-center justify-between font-mono">
+                          <span>Samples {fmt(integratedScore.phaseSamples[candidate])}</span>
+                          <span>Data {fmt(integratedScore.phaseCompleteness[candidate])}%</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-2 h-1.5 rounded bg-muted/40 overflow-hidden">
+                    <div
+                      className={cn(
+                        'h-full',
+                        integratedScore.overall >= 85
+                          ? 'bg-emerald-500/80'
+                          : integratedScore.overall >= 65
+                            ? 'bg-amber-500/80'
+                            : 'bg-red-500/80'
+                      )}
+                      style={{ width: `${Math.min(100, Math.max(0, integratedScore.overall))}%` }}
+                    />
+                  </div>
+                  <p className="mt-1 text-[10px] text-muted-foreground">
+                    Pass rule per phase: successful run, non-zero sample, and at least 70% completeness.
+                  </p>
+                </div>
 
-                {/* EVALUATE: Decisions list */}
-                {mode === 'evaluate' && ((result as any).decisions || []).length > 0 && (
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2 text-xs font-medium">
-                      <Target className="w-3.5 h-3.5 text-blue-400" />
-                      Evaluate Decisions ({(result as any).decisions?.length || 0})
+                {phaseViews.map((view) => (
+                  <div
+                    key={view.mode}
+                    className={cn(
+                      'rounded-lg border p-3 space-y-3',
+                      view.result && view.result.success
+                        ? 'border-border/40 bg-card/30'
+                        : 'border-red-500/20 bg-red-500/5'
+                    )}
+                  >
+                    <div className="flex items-center gap-2">
+                      <Badge variant="outline" className="text-[9px] h-4 font-medium uppercase tracking-wide">
+                        {phaseLabel(view.mode)}
+                      </Badge>
+                      <span className="text-[10px] text-muted-foreground">{MODE_LABELS[view.mode].desc}</span>
                     </div>
-                    <div className="space-y-1.5">
-                      {((result as any).decisions || []).map((d: any, i: number) => (
-                        <div key={i} className="border border-border/40 rounded-lg p-2 space-y-1">
-                          <div className="flex items-center justify-between">
-                            <span className="text-[11px] text-muted-foreground font-mono truncate">{d.source || d.strategy_type || `Signal #${i+1}`}</span>
-                            <Badge variant="outline" className={cn('text-[9px] h-4', d.decision === 'selected' ? 'border-emerald-500/30 text-emerald-400' : d.decision === 'blocked' ? 'border-red-500/30 text-red-400' : 'border-amber-500/30 text-amber-400')}>
-                              {d.decision}
-                            </Badge>
+
+                    {view.result && (
+                      <>
+                        <div
+                          className={cn(
+                            'rounded-lg border p-3',
+                            view.result.success
+                              ? 'border-emerald-500/30 bg-emerald-500/5'
+                              : 'border-red-500/30 bg-red-500/5'
+                          )}
+                        >
+                          <div
+                            className={cn(
+                              'flex items-center gap-2 text-xs font-medium',
+                              view.result.success ? 'text-emerald-400' : 'text-red-400'
+                            )}
+                          >
+                            {view.result.success ? (
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                            ) : (
+                              <XCircle className="w-3.5 h-3.5" />
+                            )}
+                            {view.result.success ? `${phaseLabel(view.mode)} completed` : `${phaseLabel(view.mode)} failed`}
+                            <span className="ml-auto text-[10px] font-mono opacity-70">{fmtMs(view.result.total_time_ms)}</span>
                           </div>
-                          {d.reason && <p className="text-[10px] text-muted-foreground">{d.reason}</p>}
-                          {d.size_usd && <p className="text-[10px] font-mono text-emerald-400">${d.size_usd.toFixed(2)}</p>}
-                          {(d.checks || []).length > 0 && (
-                            <div className="space-y-0.5 mt-1">
-                              {d.checks.map((c: any, j: number) => (
-                                <div key={j} className="flex items-center gap-1 text-[9px]">
-                                  {c.passed ? <CheckCircle2 className="w-2.5 h-2.5 text-emerald-400" /> : <XCircle className="w-2.5 h-2.5 text-red-400" />}
-                                  <span className="text-muted-foreground">{c.check_label || c.check_key}</span>
-                                  {c.score != null && <span className="font-mono ml-auto">{c.score.toFixed(2)}</span>}
-                                </div>
+                          <div className="mt-2 grid grid-cols-2 gap-2 text-[10px]">
+                            <div className="rounded border border-border/30 bg-black/10 px-2 py-1.5">
+                              <span className="text-muted-foreground">Sample Size</span>
+                              <p className="font-mono font-medium">{fmt(view.sampleSize)}</p>
+                            </div>
+                            <div className="rounded border border-border/30 bg-black/10 px-2 py-1.5">
+                              <span className="text-muted-foreground">Data Completeness</span>
+                              <p className="font-mono font-medium">{fmt(view.dataCompleteness)}%</p>
+                            </div>
+                          </div>
+                          <div className="mt-2 h-1.5 rounded bg-muted/40 overflow-hidden">
+                            <div
+                              className={cn(
+                                'h-full',
+                                view.dataCompleteness >= 90
+                                  ? 'bg-emerald-500/80'
+                                  : view.dataCompleteness >= 70
+                                    ? 'bg-amber-500/80'
+                                    : 'bg-red-500/80'
+                              )}
+                              style={{ width: `${Math.min(100, Math.max(0, view.dataCompleteness))}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-2">
+                          {view.summaryCards.map((card) => (
+                            <SummaryMetricCard key={`${view.mode}-${card.label}`} card={card} />
+                          ))}
+                        </div>
+
+                        <div className="rounded-lg border border-border/30 p-3 space-y-1.5">
+                          <div className="flex items-center gap-2 text-xs font-medium mb-1.5">
+                            <Clock className="w-3.5 h-3.5 text-muted-foreground" />
+                            Timing Breakdown
+                          </div>
+                          <div className="flex items-center justify-between text-[11px]">
+                            <span className="text-muted-foreground">Code Load</span>
+                            <span className="font-mono">{fmtMs(view.result.load_time_ms)}</span>
+                          </div>
+                          <div className="flex items-center justify-between text-[11px]">
+                            <span className="text-muted-foreground">Data Fetch</span>
+                            <span className="font-mono">{fmtMs(view.result.data_fetch_time_ms)}</span>
+                          </div>
+                          <div className="flex items-center justify-between text-[11px]">
+                            <span className="text-muted-foreground">{phaseLabel(view.mode)}</span>
+                            <span className="font-mono">{fmtMs(view.phaseMs)}</span>
+                          </div>
+                          <div className="flex items-center justify-between text-[11px] border-t border-border/20 pt-1.5 mt-1.5">
+                            <span className="font-medium">Total</span>
+                            <span className="font-mono font-medium">{fmtMs(view.result.total_time_ms)}</span>
+                          </div>
+                        </div>
+
+                        <div className="rounded-lg border border-border/30 p-3 space-y-2">
+                          <div className="flex items-center gap-2 text-xs font-medium">
+                            <Database className="w-3.5 h-3.5 text-blue-400" />
+                            Outcome Stream
+                            <span className="ml-auto text-[10px] text-muted-foreground font-mono">{fmt(view.rows.length)} rows</span>
+                          </div>
+
+                          {view.actionCounts.length > 0 && (
+                            <div className="flex flex-wrap gap-1.5">
+                              {view.actionCounts.map(([action, count]) => (
+                                <Badge key={`${view.mode}-${action}`} variant="outline" className="text-[9px] h-4 font-mono">
+                                  {action}: {fmt(count)}
+                                </Badge>
                               ))}
                             </div>
                           )}
+
+                          {view.rows.length === 0 ? (
+                            <div className="text-center py-6 space-y-2">
+                              <Target className="w-6 h-6 mx-auto text-muted-foreground/30" />
+                              <p className="text-xs text-muted-foreground">No outcomes produced for this run.</p>
+                            </div>
+                          ) : (
+                            <div className="space-y-1.5">
+                              {view.rows.map((row) => {
+                                const rowKey = `${view.mode}:${row.id}`
+                                return (
+                                  <OutcomeCard
+                                    key={rowKey}
+                                    row={row}
+                                    expanded={expandedRowId === rowKey}
+                                    onToggle={() => setExpandedRowId(expandedRowId === rowKey ? null : rowKey)}
+                                  />
+                                )
+                              })}
+                            </div>
+                          )}
                         </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
 
-                {/* EXIT: Exit decisions list */}
-                {mode === 'exit' && ((result as any).exit_decisions || []).length > 0 && (
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2 text-xs font-medium">
-                      <Target className="w-3.5 h-3.5 text-orange-400" />
-                      Exit Decisions ({(result as any).exit_decisions?.length || 0})
-                    </div>
-                    <div className="space-y-1.5">
-                      {((result as any).exit_decisions || []).map((d: any, i: number) => (
-                        <div key={i} className="border border-border/40 rounded-lg p-2 space-y-1">
-                          <div className="flex items-center justify-between">
-                            <span className="text-[11px] text-muted-foreground font-mono truncate">{d.market_id || `Position #${i+1}`}</span>
-                            <Badge variant="outline" className={cn('text-[9px] h-4', d.action === 'close' ? 'border-red-500/30 text-red-400' : 'border-emerald-500/30 text-emerald-400')}>
-                              {d.action}
-                            </Badge>
+                        {(view.result.validation_errors.length > 0 || view.hasWarnings || view.result.runtime_error) && (
+                          <div className="rounded-lg border border-border/30 p-3 space-y-2">
+                            <div className="flex items-center gap-2 text-xs font-medium">
+                              <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                              Diagnostics
+                            </div>
+
+                            {view.result.validation_errors.length > 0 && (
+                              <div className="rounded border border-red-500/30 bg-red-500/5 p-2 space-y-1">
+                                <p className="text-[10px] uppercase tracking-wider text-red-400 font-medium">
+                                  Validation Errors
+                                </p>
+                                {view.result.validation_errors.map((error, index) => (
+                                  <p key={index} className="text-[11px] text-red-300/80 font-mono">
+                                    {error}
+                                  </p>
+                                ))}
+                              </div>
+                            )}
+
+                            {view.hasWarnings && (
+                              <div className="rounded border border-amber-500/30 bg-amber-500/5 p-2 space-y-1">
+                                <p className="text-[10px] uppercase tracking-wider text-amber-400 font-medium">Warnings</p>
+                                {view.result.validation_warnings.map((warning, index) => (
+                                  <p key={index} className="text-[11px] text-amber-200/80">
+                                    {warning}
+                                  </p>
+                                ))}
+                              </div>
+                            )}
+
+                            {view.result.runtime_error && (
+                              <div className="rounded border border-red-500/30 bg-red-500/5 p-2 space-y-1">
+                                <p className="text-[10px] uppercase tracking-wider text-red-400 font-medium">
+                                  Runtime Error
+                                </p>
+                                <p className="text-[11px] text-red-300/80 font-mono">{view.result.runtime_error}</p>
+                                {view.result.runtime_traceback && (
+                                  <pre className="text-[10px] text-red-300/60 font-mono bg-black/20 rounded p-2 overflow-x-auto whitespace-pre max-h-48 overflow-y-auto">
+                                    {view.result.runtime_traceback}
+                                  </pre>
+                                )}
+                              </div>
+                            )}
                           </div>
-                          {d.reason && <p className="text-[10px] text-muted-foreground">{d.reason}</p>}
-                          <div className="flex gap-3 text-[10px] font-mono">
-                            <span>Entry: ${d.entry_price?.toFixed(3)}</span>
-                            <span>Now: ${d.current_price?.toFixed(3)}</span>
-                            <span className={d.pnl_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}>{d.pnl_pct >= 0 ? '+' : ''}{d.pnl_pct}%</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
+                        )}
+                      </>
+                    )}
                   </div>
-                )}
-
-                {/* No results for detect mode */}
-                {mode === 'detect' && result.success && (result.num_opportunities || 0) === 0 && (
-                  <div className="text-center py-6 space-y-2">
-                    <Target className="w-6 h-6 mx-auto text-muted-foreground/30" />
-                    <p className="text-xs text-muted-foreground">
-                      No opportunities detected in the current market snapshot.
-                    </p>
-                    <p className="text-[10px] text-muted-foreground/60">
-                      This is normal — your strategy may have strict filters or current markets may not match its criteria.
-                    </p>
-                  </div>
-                )}
-
-                {/* No results for evaluate mode */}
-                {mode === 'evaluate' && result.success && ((result as any).decisions || []).length === 0 && (
-                  <div className="text-center py-6 space-y-2">
-                    <Target className="w-6 h-6 mx-auto text-muted-foreground/30" />
-                    <p className="text-xs text-muted-foreground">No recent signals to evaluate.</p>
-                  </div>
-                )}
-
-                {/* No results for exit mode */}
-                {mode === 'exit' && result.success && ((result as any).exit_decisions || []).length === 0 && (
-                  <div className="text-center py-6 space-y-2">
-                    <Target className="w-6 h-6 mx-auto text-muted-foreground/30" />
-                    <p className="text-xs text-muted-foreground">No open positions to test exit logic against.</p>
-                  </div>
-                )}
+                ))}
               </div>
             )}
           </ScrollArea>

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from models import Market, Event, ArbitrageOpportunity
+from models import Market, Event, Opportunity
 from .base import BaseStrategy, DecisionCheck, ExitDecision, ScoringWeights, SizingConfig
 from utils.converters import to_float
 
@@ -78,7 +78,7 @@ class ContradictionStrategy(BaseStrategy):
         ("rise", "fall"),
     ]
 
-    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[ArbitrageOpportunity]:
+    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:
         opportunities = []
 
         # Index markets by key topics for efficient matching
@@ -246,7 +246,7 @@ class ContradictionStrategy(BaseStrategy):
 
     def _check_contradiction(
         self, market_a: Market, market_b: Market, prices: dict[str, dict]
-    ) -> ArbitrageOpportunity | None:
+    ) -> Opportunity | None:
         """
         Check contradiction arbitrage.
 

@@ -21,7 +21,7 @@ from datetime import datetime, timezone, timedelta
 from utils.utcnow import utcnow
 
 from models.market import Market, Event, Token
-from models.opportunity import ArbitrageOpportunity
+from models.opportunity import Opportunity
 from services.strategies.basic import BasicArbStrategy
 from services.strategies.negrisk import NegRiskStrategy
 
@@ -749,7 +749,7 @@ class TestBaseStrategyCreateOpportunity:
         assert result is None
 
     def test_returns_opportunity_when_roi_above_threshold(self):
-        """create_opportunity should return ArbitrageOpportunity when profitable."""
+        """create_opportunity should return Opportunity when profitable."""
         market = make_market(yes_price=0.40, no_price=0.40, liquidity=10000.0)
         result = self.strategy.create_opportunity(
             title="Test Opp",
@@ -759,7 +759,7 @@ class TestBaseStrategyCreateOpportunity:
             positions=[{"action": "BUY", "outcome": "YES", "price": 0.40}],
         )
         assert result is not None
-        assert isinstance(result, ArbitrageOpportunity)
+        assert isinstance(result, Opportunity)
         assert result.total_cost == pytest.approx(0.80)
         assert result.expected_payout == pytest.approx(1.0)
         assert result.gross_profit == pytest.approx(0.20)

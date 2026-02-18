@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { AnimatePresence, motion } from 'framer-motion'
 import {
   AlertTriangle,
   BookOpen,
@@ -75,6 +77,60 @@ function normalizeSlug(value: string): string {
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9_]/g, '_')
+}
+
+function toStrategyClassNameFromSlug(value: string): string {
+  const normalizedSlug = normalizeSlug(value)
+  const tokens = normalizedSlug
+    .split('_')
+    .map((token) => token.trim())
+    .filter(Boolean)
+  const baseRaw = tokens
+    .map((token) => `${token.charAt(0).toUpperCase()}${token.slice(1)}`)
+    .join('')
+    .replace(/[^A-Za-z0-9_]/g, '')
+  const rooted = baseRaw ? (baseRaw.match(/^[A-Za-z_]/) ? baseRaw : `S${baseRaw}`) : 'Custom'
+  if (rooted.toLowerCase().endsWith('strategy')) return rooted
+  return `${rooted}Strategy`
+}
+
+function pythonStringLiteral(value: string): string {
+  return `"${String(value || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')}"`
+}
+
+function renderTemplateSource(
+  template: string,
+  {
+    className,
+    strategyName,
+    strategyDescription,
+    sourceKey,
+  }: {
+    className: string
+    strategyName: string
+    strategyDescription: string
+    sourceKey: string
+  }
+): string {
+  let out = String(template || '')
+  out = out.split('__CLASS_NAME__').join(className)
+  out = out.split('__STRATEGY_NAME__').join(strategyName)
+  out = out.split('__STRATEGY_DESCRIPTION__').join(strategyDescription)
+  out = out.split('__SOURCE_KEY__').join(sourceKey)
+
+  out = out.replace(
+    /class\s+[A-Za-z_][A-Za-z0-9_]*\s*\(BaseStrategy\)\s*:/,
+    `class ${className}(BaseStrategy):`
+  )
+  out = out.replace(/^\s*name\s*=\s*".*"$/m, `    name = ${pythonStringLiteral(strategyName)}`)
+  out = out.replace(/^\s*description\s*=\s*".*"$/m, `    description = ${pythonStringLiteral(strategyDescription)}`)
+  out = out.replace(/^\s*source_key\s*=\s*".*"$/m, `    source_key = ${pythonStringLiteral(sourceKey)}`)
+  out = out.replace(/^\s*worker_affinity\s*=\s*".*"$/m, `    worker_affinity = ${pythonStringLiteral(sourceKey)}`)
+  return out
 }
 
 function inferClassName(sourceCode: string): string | null {
@@ -173,34 +229,104 @@ function CapabilityBadges({ capabilities }: { capabilities?: Capabilities }) {
   )
 }
 
-// ==================== Fallback Template ====================
+// ==================== Templates ====================
 
-const FALLBACK_TEMPLATE = [
-  'from models import Market, Event, ArbitrageOpportunity',
-  'from services.strategies.base import BaseStrategy',
+interface NewStrategyTemplate {
+  key: string
+  label: string
+  description: string
+  template: string
+}
+
+const FULL_TEMPLATE_FALLBACK = [
+  'from models import Market, Event, Opportunity',
+  'from services.strategies.base import BaseStrategy, StrategyDecision, ExitDecision, DecisionCheck',
   '',
   '',
-  'class CustomStrategy(BaseStrategy):',
-  '    name = "Custom Strategy"',
-  '    description = "Describe what this strategy does"',
+  'class MyCustomStrategy(BaseStrategy):',
+  '    name = "My Custom Strategy"',
+  '    description = "Describe what this strategy detects and how it trades"',
+  '    source_key = "scanner"',
+  '    worker_affinity = "scanner"',
   '',
-  '    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[ArbitrageOpportunity]:',
-  '        """Scan market data and return tradeable opportunities."""',
-  '        opportunities = []',
-  '        # TODO: add detection logic',
+  '    default_config = {',
+  '        "min_edge_percent": 2.0,',
+  '        "base_size_usd": 25.0,',
+  '        "max_size_usd": 200.0,',
+  '        "take_profit_pct": 15.0,',
+  '        "stop_loss_pct": 8.0,',
+  '    }',
+  '',
+  '    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:',
+  '        opportunities: list[Opportunity] = []',
   '        return opportunities',
   '',
   '    def evaluate(self, signal, context):',
-  '        """Decide whether to trade a detected opportunity."""',
-  '        # TODO: add evaluation logic',
-  '        return None',
+  '        params = context.get("params") or {}',
+  '        checks = [DecisionCheck(name="default", passed=True, value=params.get("min_edge_percent"), threshold=0.0)]',
+  '        return StrategyDecision(decision="selected", reason="Template default gate", checks=checks)',
   '',
-  '    def should_exit(self, position, context):',
-  '        """Decide whether to exit an open position."""',
-  '        # TODO: add exit logic',
-  '        return False',
+  '    def should_exit(self, position, market_state):',
+  '        return ExitDecision(action="hold", reason="Template default hold")',
   '',
 ].join('\n')
+
+const DETECT_TEMPLATE = [
+  'from models import Market, Event, Opportunity',
+  'from services.strategies.base import BaseStrategy',
+  '',
+  '',
+  'class __CLASS_NAME__(BaseStrategy):',
+  '    name = "__STRATEGY_NAME__"',
+  '    description = "__STRATEGY_DESCRIPTION__"',
+  '    source_key = "__SOURCE_KEY__"',
+  '    worker_affinity = "__SOURCE_KEY__"',
+  '',
+  '    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:',
+  '        opportunities: list[Opportunity] = []',
+  '        return opportunities',
+  '',
+].join('\n')
+
+const EVALUATE_TEMPLATE = [
+  'from services.strategies.base import BaseStrategy, StrategyDecision',
+  '',
+  '',
+  'class __CLASS_NAME__(BaseStrategy):',
+  '    name = "__STRATEGY_NAME__"',
+  '    description = "__STRATEGY_DESCRIPTION__"',
+  '    source_key = "__SOURCE_KEY__"',
+  '    worker_affinity = "__SOURCE_KEY__"',
+  '',
+  '    def evaluate(self, signal, context):',
+  '        return StrategyDecision(decision="skipped", reason="No custom gating logic configured")',
+  '',
+].join('\n')
+
+const UNIFIED_MINIMAL_TEMPLATE = [
+  'from models import Market, Event, Opportunity',
+  'from services.strategies.base import BaseStrategy, StrategyDecision, ExitDecision',
+  '',
+  '',
+  'class __CLASS_NAME__(BaseStrategy):',
+  '    name = "__STRATEGY_NAME__"',
+  '    description = "__STRATEGY_DESCRIPTION__"',
+  '    source_key = "__SOURCE_KEY__"',
+  '    worker_affinity = "__SOURCE_KEY__"',
+  '',
+  '    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:',
+  '        opportunities: list[Opportunity] = []',
+  '        return opportunities',
+  '',
+  '    def evaluate(self, signal, context):',
+  '        return StrategyDecision(decision="selected", reason="Default minimal template decision")',
+  '',
+  '    def should_exit(self, position, market_state):',
+  '        return ExitDecision(action="hold", reason="Default minimal template hold")',
+  '',
+].join('\n')
+
+const DEFAULT_NEW_TEMPLATE_KEY = 'full_unified'
 
 // ==================== Main Component ====================
 
@@ -213,6 +339,7 @@ export default function UnifiedStrategiesManager() {
   const [showRawJson, setShowRawJson] = useState(false)
   const [showApiDocs, setShowApiDocs] = useState(false)
   const [showBacktest, setShowBacktest] = useState(false)
+  const [showCreateModal, setShowCreateModal] = useState(false)
 
   // Filters
   const [searchQuery, setSearchQuery] = useState('')
@@ -221,6 +348,13 @@ export default function UnifiedStrategiesManager() {
   // Selection
   const [selectedStrategyId, setSelectedStrategyId] = useState<string | null>(null)
   const [draftToken, setDraftToken] = useState<string | null>(null)
+  const [newStrategyName, setNewStrategyName] = useState('Custom Strategy')
+  const [newStrategySlug, setNewStrategySlug] = useState(() => `custom_${Date.now().toString().slice(-6)}`)
+  const [newStrategyDescription, setNewStrategyDescription] = useState('')
+  const [newStrategySourceKey, setNewStrategySourceKey] = useState('scanner')
+  const [newStrategyTemplateKey, setNewStrategyTemplateKey] = useState(DEFAULT_NEW_TEMPLATE_KEY)
+  const [newStrategySlugDirty, setNewStrategySlugDirty] = useState(false)
+  const [newStrategyError, setNewStrategyError] = useState<string | null>(null)
 
   // Editor state
   const [editorSlug, setEditorSlug] = useState('')
@@ -271,6 +405,74 @@ export default function UnifiedStrategiesManager() {
     const merged = uniqueStrings(fromCatalog)
     return merged.length > 0 ? merged : ['scanner']
   }, [catalog])
+
+  const createSourceKeys = useMemo(
+    () => uniqueStrings([...Object.keys(SOURCE_LABELS), ...sourceKeys]),
+    [sourceKeys]
+  )
+
+  const newStrategyClassName = useMemo(() => {
+    const base = toStrategyClassNameFromSlug(newStrategySlug)
+    const existing = new Set(
+      catalog
+        .map((strategy) => String(strategy.class_name || '').trim().toLowerCase())
+        .filter(Boolean)
+    )
+    if (!existing.has(base.toLowerCase())) return base
+    let index = 2
+    let candidate = `${base}${index}`
+    while (existing.has(candidate.toLowerCase())) {
+      index += 1
+      candidate = `${base}${index}`
+    }
+    return candidate
+  }, [newStrategySlug, catalog])
+
+  const newStrategyTemplates = useMemo<NewStrategyTemplate[]>(
+    () => [
+      {
+        key: DEFAULT_NEW_TEMPLATE_KEY,
+        label: 'Full Unified',
+        description: 'Detect + evaluate + exit scaffold with complete defaults.',
+        template: templateQuery.data?.template || FULL_TEMPLATE_FALLBACK,
+      },
+      {
+        key: 'scanner_detect',
+        label: 'Detect Only',
+        description: 'Scanner-first template with detect() only.',
+        template: DETECT_TEMPLATE,
+      },
+      {
+        key: 'execution_gate',
+        label: 'Evaluate Only',
+        description: 'Execution-gating template with evaluate() only.',
+        template: EVALUATE_TEMPLATE,
+      },
+      {
+        key: 'unified_minimal',
+        label: 'Unified Minimal',
+        description: 'Lean detect + evaluate + should_exit base.',
+        template: UNIFIED_MINIMAL_TEMPLATE,
+      },
+    ],
+    [templateQuery.data?.template]
+  )
+
+  const selectedNewTemplate = useMemo(() => {
+    return newStrategyTemplates.find((template) => template.key === newStrategyTemplateKey) || newStrategyTemplates[0] || null
+  }, [newStrategyTemplateKey, newStrategyTemplates])
+
+  const newStrategyPreviewCode = useMemo(() => {
+    if (!selectedNewTemplate) return ''
+    const title = String(newStrategyName || '').trim() || 'Custom Strategy'
+    const description = String(newStrategyDescription || '').trim() || `${title} strategy`
+    return renderTemplateSource(selectedNewTemplate.template, {
+      className: newStrategyClassName,
+      strategyName: title,
+      strategyDescription: description,
+      sourceKey: String(newStrategySourceKey || 'scanner').trim().toLowerCase() || 'scanner',
+    })
+  }, [selectedNewTemplate, newStrategyName, newStrategyDescription, newStrategySourceKey, newStrategyClassName])
 
   const grouped = useMemo(() => {
     let rows = [...catalog]
@@ -378,6 +580,29 @@ export default function UnifiedStrategiesManager() {
     setEditorError(null)
     setValidation(null)
   }, [selectedStrategyId, catalog])
+
+  useEffect(() => {
+    if (newStrategyTemplates.some((item) => item.key === newStrategyTemplateKey)) return
+    if (newStrategyTemplates.length > 0) {
+      setNewStrategyTemplateKey(newStrategyTemplates[0].key)
+    }
+  }, [newStrategyTemplates, newStrategyTemplateKey])
+
+  useEffect(() => {
+    if (!showCreateModal || typeof document === 'undefined') return
+    const previousOverflow = document.body.style.overflow
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setShowCreateModal(false)
+      }
+    }
+    document.body.style.overflow = 'hidden'
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [showCreateModal])
 
   // ── Refresh helper ──
 
@@ -520,20 +745,61 @@ export default function UnifiedStrategiesManager() {
 
   // ── New draft ──
 
-  const startNewDraft = () => {
+  const openCreateModal = () => {
+    const nonce = Date.now().toString().slice(-6)
+    setNewStrategyName('Custom Strategy')
+    setNewStrategySlug(`custom_${nonce}`)
+    setNewStrategyDescription('')
+    setNewStrategySourceKey('scanner')
+    setNewStrategyTemplateKey(DEFAULT_NEW_TEMPLATE_KEY)
+    setNewStrategySlugDirty(false)
+    setNewStrategyError(null)
+    setShowCreateModal(true)
+  }
+
+  const createDraftFromModal = () => {
+    const normalizedSlug = normalizeSlug(newStrategySlug)
+    const normalizedSourceKey = String(newStrategySourceKey || 'scanner').trim().toLowerCase() || 'scanner'
+    const trimmedName = String(newStrategyName || '').trim()
+    const trimmedDescription = String(newStrategyDescription || '').trim()
+    const selectedTemplate = selectedNewTemplate || newStrategyTemplates[0]
+
+    if (!trimmedName) {
+      setNewStrategyError('Strategy name is required.')
+      return
+    }
+    if (!normalizedSlug) {
+      setNewStrategyError('Strategy key is required.')
+      return
+    }
+    if (!selectedTemplate) {
+      setNewStrategyError('Select a template before creating the draft.')
+      return
+    }
+
+    const renderedSource = renderTemplateSource(selectedTemplate.template, {
+      className: newStrategyClassName,
+      strategyName: trimmedName,
+      strategyDescription: trimmedDescription || `${trimmedName} strategy`,
+      sourceKey: normalizedSourceKey,
+    })
+
     setSelectedStrategyId(null)
     setDraftToken(`draft_${Date.now()}`)
-    setEditorSlug(`custom_${Date.now().toString().slice(-6)}`)
-    setEditorSourceKey('scanner')
-    setEditorName('Custom Strategy')
-    setEditorDescription('')
+    setEditorSlug(normalizedSlug)
+    setEditorSourceKey(normalizedSourceKey)
+    setEditorName(trimmedName)
+    setEditorDescription(trimmedDescription)
     setEditorEnabled(true)
-    setEditorCode(templateQuery.data?.template || FALLBACK_TEMPLATE)
+    setEditorCode(renderedSource)
     setEditorConfigJson('{}')
     setEditorSchemaJson('{"param_fields": []}')
     setEditorAliasesCsv('')
     setEditorError(null)
     setValidation(null)
+    setShowSettings(true)
+    setShowCreateModal(false)
+    setNewStrategyError(null)
   }
 
   // ── Derived display state ──
@@ -574,7 +840,7 @@ export default function UnifiedStrategiesManager() {
               type="button"
               size="sm"
               className="h-7 gap-1.5 px-2.5 text-[11px] flex-1"
-              onClick={startNewDraft}
+              onClick={openCreateModal}
               disabled={busy}
             >
               <Plus className="w-3 h-3" />
@@ -1133,6 +1399,199 @@ export default function UnifiedStrategiesManager() {
           </>
         )}
       </div>
+
+      {typeof document !== 'undefined' && createPortal(
+        <AnimatePresence>
+          {showCreateModal && (
+            <motion.div
+              key="create-strategy-modal"
+              className="fixed inset-0 z-[140] flex items-center justify-center p-3 sm:p-6"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+            >
+              <motion.div
+                className="absolute inset-0 bg-black/35 dark:bg-black/75 backdrop-blur-[2px] dark:backdrop-blur-[3px]"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.2 }}
+                onClick={() => setShowCreateModal(false)}
+                aria-hidden
+              />
+              <motion.div
+                role="dialog"
+                aria-modal="true"
+                aria-label="Create strategy draft"
+                className="relative z-10 w-full max-w-5xl rounded-2xl border border-border/70 bg-gradient-to-br from-background via-background to-violet-50/70 dark:border-violet-500/30 dark:from-card dark:via-card dark:to-violet-950/20 shadow-[0_40px_120px_rgba(0,0,0,0.35)] dark:shadow-[0_40px_120px_rgba(0,0,0,0.55)]"
+                initial={{ scale: 0.94, opacity: 0, y: 20 }}
+                animate={{ scale: 1, opacity: 1, y: 0 }}
+                exit={{ scale: 0.98, opacity: 0, y: 12 }}
+                transition={{ type: 'spring', stiffness: 250, damping: 28, mass: 0.95 }}
+              >
+                <div className="border-b border-border/60 px-5 py-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold">Create Strategy</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        Configure strategy metadata and choose a scaffold. Code editing starts after draft creation.
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 w-7 p-0"
+                      onClick={() => setShowCreateModal(false)}
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="grid gap-4 p-4 lg:grid-cols-[1.2fr_0.8fr]">
+                  <div className="space-y-4">
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div>
+                        <Label className="text-[11px] text-muted-foreground">Name</Label>
+                        <Input
+                          value={newStrategyName}
+                          onChange={(event) => {
+                            const value = event.target.value
+                            setNewStrategyName(value)
+                            setNewStrategyError(null)
+                            if (!newStrategySlugDirty) {
+                              const autoSlug = normalizeSlug(value)
+                              setNewStrategySlug(autoSlug || `custom_${Date.now().toString().slice(-6)}`)
+                            }
+                          }}
+                          className="mt-1 h-9 text-xs"
+                          placeholder="My Strategy"
+                        />
+                      </div>
+                      <div>
+                        <Label className="text-[11px] text-muted-foreground">Strategy Key</Label>
+                        <Input
+                          value={newStrategySlug}
+                          onChange={(event) => {
+                            setNewStrategySlugDirty(true)
+                            setNewStrategySlug(normalizeSlug(event.target.value))
+                            setNewStrategyError(null)
+                          }}
+                          className="mt-1 h-9 text-xs font-mono"
+                          placeholder="my_strategy"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div>
+                        <Label className="text-[11px] text-muted-foreground">Source</Label>
+                        <Select
+                          value={newStrategySourceKey}
+                          onValueChange={(value) => {
+                            setNewStrategySourceKey(value)
+                            setNewStrategyError(null)
+                          }}
+                        >
+                          <SelectTrigger className="mt-1 h-9 text-xs">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {createSourceKeys.map((sourceKey) => (
+                              <SelectItem key={sourceKey} value={sourceKey}>
+                                {SOURCE_LABELS[sourceKey] || sourceKey}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div>
+                        <Label className="text-[11px] text-muted-foreground">Class Name (auto from key)</Label>
+                        <Input value={newStrategyClassName} className="mt-1 h-9 text-xs font-mono" disabled />
+                      </div>
+                    </div>
+
+                    <div>
+                      <Label className="text-[11px] text-muted-foreground">Description</Label>
+                      <textarea
+                        value={newStrategyDescription}
+                        onChange={(event) => {
+                          setNewStrategyDescription(event.target.value)
+                          setNewStrategyError(null)
+                        }}
+                        className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-xs leading-5 text-foreground outline-none ring-offset-background placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                        rows={3}
+                        placeholder="Describe what this strategy does."
+                      />
+                    </div>
+
+                    <div>
+                      <Label className="text-[11px] text-muted-foreground">Template</Label>
+                      <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                        {newStrategyTemplates.map((template) => {
+                          const active = template.key === (selectedNewTemplate?.key || '')
+                          return (
+                            <button
+                              key={template.key}
+                              type="button"
+                              onClick={() => {
+                                setNewStrategyTemplateKey(template.key)
+                                setNewStrategyError(null)
+                              }}
+                              className={cn(
+                                'rounded-lg border px-3 py-2 text-left transition-all',
+                                active
+                                  ? 'border-violet-500/70 bg-violet-500/10 shadow-[0_0_0_1px_rgba(139,92,246,0.22)]'
+                                  : 'border-border/70 bg-card/50 hover:border-border'
+                              )}
+                            >
+                              <p className="text-xs font-semibold">{template.label}</p>
+                              <p className="mt-1 text-[10px] text-muted-foreground leading-relaxed">{template.description}</p>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="min-h-0 rounded-xl border border-border/60 bg-muted/30 dark:bg-black/30">
+                    <div className="flex items-center justify-between border-b border-border/60 px-3 py-2">
+                      <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Template Preview</span>
+                      <span className="text-[10px] font-mono text-muted-foreground">Read-only</span>
+                    </div>
+                    <div className="max-h-[420px] overflow-auto px-3 py-2">
+                      <pre className="whitespace-pre-wrap text-[11px] leading-5 text-muted-foreground font-mono">{newStrategyPreviewCode}</pre>
+                    </div>
+                  </div>
+                </div>
+
+                {newStrategyError && (
+                  <div className="mx-4 mb-2 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+                    {newStrategyError}
+                  </div>
+                )}
+
+                <div className="flex items-center justify-end gap-2 border-t border-border/60 px-4 py-3">
+                  <Button type="button" variant="outline" size="sm" onClick={() => setShowCreateModal(false)}>
+                    Cancel
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="bg-violet-600 hover:bg-violet-500 text-white"
+                    onClick={createDraftFromModal}
+                    disabled={busy || !newStrategyName.trim() || !normalizeSlug(newStrategySlug)}
+                  >
+                    Continue to Editor
+                  </Button>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>,
+        document.body
+      )}
 
       {/* ── Flyouts ── */}
       <StrategyApiDocsFlyout open={showApiDocs} onOpenChange={setShowApiDocs} variant={flyoutVariant} />

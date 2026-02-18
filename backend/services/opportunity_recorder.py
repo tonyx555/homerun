@@ -16,7 +16,7 @@ from typing import Optional
 from sqlalchemy import select, func, and_, case
 
 from models.database import AsyncSessionLocal, OpportunityHistory
-from models.opportunity import ArbitrageOpportunity
+from models.opportunity import Opportunity
 from services.polymarket import polymarket_client
 from utils.logger import get_logger
 
@@ -69,7 +69,7 @@ class OpportunityRecorder:
     # Scanner callback  (records every detected opportunity)
     # ------------------------------------------------------------------
 
-    async def _on_opportunities(self, opportunities: list[ArbitrageOpportunity]):
+    async def _on_opportunities(self, opportunities: list[Opportunity]):
         """Callback invoked by the scanner after each scan cycle."""
         if not opportunities:
             return
@@ -646,7 +646,7 @@ class OpportunityRecorder:
             logger.error("Failed to load known IDs", exc_info=True)
 
     @staticmethod
-    def _serialise_positions(opp: ArbitrageOpportunity) -> dict:
+    def _serialise_positions(opp: Opportunity) -> dict:
         """Convert opportunity data to a JSON-serialisable dict for storage."""
         return {
             "markets": [

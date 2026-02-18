@@ -48,7 +48,7 @@ Implement detect() to find opportunities, evaluate() to gate execution,
 and should_exit() to manage open positions.
 """
 
-from models import Market, Event, ArbitrageOpportunity
+from models import Market, Event, Opportunity
 from services.strategies.base import BaseStrategy, StrategyDecision, ExitDecision, DecisionCheck
 
 

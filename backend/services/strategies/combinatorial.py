@@ -29,7 +29,7 @@ import time
 from collections import OrderedDict, defaultdict
 from typing import Any, Optional
 from config import settings
-from models import Market, Event, ArbitrageOpportunity
+from models import Market, Event, Opportunity
 from .base import BaseStrategy, DecisionCheck, ExitDecision, ScoringWeights, SizingConfig
 from utils.converters import to_float
 from utils.logger import get_logger
@@ -862,7 +862,7 @@ class CombinatorialStrategy(BaseStrategy):
         self._accuracy_tracker = DependencyAccuracyTracker(persistence_path=persistence_path)
         self._validator = DependencyValidator(self._accuracy_tracker)
 
-    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[ArbitrageOpportunity]:
+    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:
         """
         Detect combinatorial arbitrage opportunities.
 
@@ -910,7 +910,7 @@ class CombinatorialStrategy(BaseStrategy):
 
     def _check_pair(
         self, market_a: Market, market_b: Market, prices: dict[str, dict]
-    ) -> Optional[ArbitrageOpportunity]:
+    ) -> Optional[Opportunity]:
         """
         Check a market pair for combinatorial arbitrage.
 
@@ -1302,7 +1302,7 @@ class CombinatorialStrategy(BaseStrategy):
         dependencies: list[Dependency],
         confidence: float = 0.0,
         confidence_tier: str = "UNKNOWN",
-    ) -> ArbitrageOpportunity:
+    ) -> Opportunity:
         """Create opportunity from IP solver result, including validation metadata."""
         # Build positions to take
         positions = []
@@ -1366,7 +1366,7 @@ class CombinatorialStrategy(BaseStrategy):
 
     async def detect_async(
         self, events: list[Event], markets: list[Market], prices: dict[str, dict]
-    ) -> list[ArbitrageOpportunity]:
+    ) -> list[Opportunity]:
         """
         Async version with LLM dependency detection.
 

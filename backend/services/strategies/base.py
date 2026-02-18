@@ -7,7 +7,7 @@ from typing import Any, Optional, TypedDict
 from datetime import datetime, timezone
 
 from models import (
-    ArbitrageOpportunity,
+    Opportunity,
     Event,
     ExecutionConstraints,
     ExecutionLeg,
@@ -192,9 +192,72 @@ def _has_custom_detect_sync(strategy: "BaseStrategy") -> bool:
 
 
 class BaseStrategy(ABC):
-    """Base class for arbitrage detection strategies.
+    """Base class for all trading strategies.
 
     Strategies set ``strategy_type`` to their unique slug string.
+
+    Full Signal Lifecycle
+    =====================
+
+    Every opportunity flows through this pipeline. Understanding it is
+    essential for strategy authors — each gate can alter or block your signal.
+
+    1. **Detection** — ``detect()`` / ``detect_async()`` / ``on_event()``
+       Your strategy examines market data and returns ``list[Opportunity]``.
+       Called by the scanner (MARKET_DATA_REFRESH) or workers (CRYPTO_UPDATE,
+       WEATHER_UPDATE, TRADER_ACTIVITY, NEWS_UPDATE, DATA_SOURCE_UPDATE, etc.).
+
+    2. **Quality Filter** — ``QualityFilterPipeline.evaluate_opportunity()``
+       10 structural checks (min ROI, directional cap, plausible ROI, max legs,
+       per-leg liquidity, hard liquidity floor, min position size, min absolute
+       profit, resolution timeframe, annualized ROI). Override thresholds via
+       ``quality_filter_overrides`` class attribute. Rejected opportunities are
+       still written to the DB with ``quality_passed=False``.
+
+    3. **Cross-Strategy Deduplication** — same market + similar ROI from
+       multiple strategies collapses to the best signal. Opt out via
+       ``allow_deduplication = False``.
+
+    4. **TradeSignal Upsert** — ``strategy_signal_bridge.bridge_opportunities_to_signals()``
+       Opportunity is written to the ``trade_signals`` table as a pending signal.
+       Dedupe key = (stable_id, strategy_type, market_id).
+
+    5. **Signal Expiry** — stale signals past ``expires_at`` are skipped.
+
+    6. **Orchestrator Pickup** — ``trader_orchestrator_worker`` polls pending
+       signals and calls ``strategy.evaluate(signal, context)``.
+
+    7. **Evaluate** — ``evaluate(signal, context) -> StrategyDecision``
+       Your strategy decides whether to trade the signal RIGHT NOW.
+       If ``scoring_weights`` is set, uses the composable pipeline
+       (``custom_checks`` + ``compute_score`` + ``compute_size``).
+       Returns ``StrategyDecision`` with decision = selected|skipped|blocked.
+
+    8. **Risk Manager Gates** (applied by orchestrator, not strategy):
+       - Daily loss limit (``BlockReason.RISK_DAILY_LOSS``)
+       - Gross exposure cap (``BlockReason.RISK_GROSS_EXPOSURE``)
+       - Consecutive loss guard (``BlockReason.RISK_CONSECUTIVE_LOSS``)
+       - Trade notional cap (``BlockReason.RISK_TRADE_NOTIONAL``)
+       - Open positions limit (``BlockReason.RISK_OPEN_POSITIONS``)
+       - Per-market exposure cap (``BlockReason.RISK_MARKET_EXPOSURE``)
+       Your ``on_blocked(signal, reason, context)`` fires if blocked.
+
+    9. **Trading Window** — UTC time-of-day gate. ``BlockReason.TRADING_WINDOW``.
+
+    10. **Stacking Guard** — prevents opening a second position on the same
+        market. ``BlockReason.STACKING_GUARD``.
+
+    11. **Size Capping** — position size clamped to ``max_trade_notional_usd``.
+        Your ``on_size_capped(original, capped, reason)`` fires if capped.
+
+    12. **Order Execution** — the order manager places the trade.
+
+    13. **Position Lifecycle** — ``should_exit(position, market_state)``
+        called every cycle for open positions. Default applies TP/SL/trailing/
+        max-hold from config.
+
+    Strategy Types
+    ==============
 
     Implement **at least one** of:
 
@@ -206,6 +269,24 @@ class BaseStrategy(ABC):
 
     Scanner strategies subscribe to ``EventType.MARKET_DATA_REFRESH`` and only
     need to implement ``detect()`` — the default ``on_event()`` handles routing.
+
+    BlockReason Reference
+    =====================
+
+    All ``BlockReason`` codes that can be passed to ``on_blocked()``:
+
+    - ``QUALITY_FILTER`` — failed QualityFilterPipeline (ROI, liquidity, etc.)
+    - ``RISK_DAILY_LOSS`` — daily realized loss exceeds configured limit
+    - ``RISK_GROSS_EXPOSURE`` — total open notional exceeds exposure cap
+    - ``RISK_CONSECUTIVE_LOSS`` — too many consecutive losing trades
+    - ``RISK_TRADE_NOTIONAL`` — single trade notional exceeds per-trade cap
+    - ``RISK_OPEN_POSITIONS`` — max open positions reached
+    - ``RISK_MARKET_EXPOSURE`` — per-market exposure cap reached
+    - ``TRADING_WINDOW`` — outside configured UTC trading hours
+    - ``STACKING_GUARD`` — already have a position on this market
+    - ``SIGNAL_EXPIRED`` — signal past its expires_at timestamp
+    - ``SCANNER_POOL_CAPACITY`` — scanner opportunity pool is full
+    - ``DEDUPLICATION`` — duplicate signal collapsed with a better one
     """
 
     strategy_type: str  # strategy slug identifier (set to slug by loader)
@@ -278,6 +359,49 @@ class BaseStrategy(ABC):
     #   quality_filter_overrides = QualityFilterOverrides(max_roi_cap=200.0)
     quality_filter_overrides: Any = None  # Optional[QualityFilterOverrides]
 
+    # ── Declarative platform gate hints ─────────────────────────
+    # These fields let strategies declare their requirements to the platform
+    # so the orchestrator, risk manager, and scheduler can make informed
+    # decisions without hardcoding strategy-specific logic.
+
+    # Risk budget — declares this strategy's risk appetite so the risk
+    # manager can allocate exposure proportionally across strategies.
+    # max_exposure_usd: max gross notional this strategy should have open.
+    # max_positions: max concurrent positions from this strategy.
+    # max_daily_loss_usd: strategy-specific daily loss circuit breaker.
+    # All values are soft hints — the global risk manager caps override them.
+    risk_budget: dict = {}
+    # Example:
+    #   risk_budget = {
+    #       "max_exposure_usd": 500.0,
+    #       "max_positions": 3,
+    #       "max_daily_loss_usd": 50.0,
+    #   }
+
+    # Market filters — declarative market selection criteria applied before
+    # detect() is called. Reduces noise and lets the scanner skip irrelevant
+    # markets early. All fields optional; None means no filter.
+    market_filters: dict = {}
+    # Example:
+    #   market_filters = {
+    #       "categories": ["politics", "crypto"],     # only these categories
+    #       "min_liquidity_usd": 5000.0,              # skip illiquid markets
+    #       "max_resolution_days": 90,                # skip far-future markets
+    #       "min_resolution_days": 1,                 # skip about-to-resolve markets
+    #       "platforms": ["polymarket"],               # platform filter
+    #   }
+
+    # Scheduling — how often this strategy should run and what triggers it.
+    # Strategies that set scheduling preferences allow the orchestrator to
+    # batch and prioritize strategy execution.
+    scheduling: dict = {}
+    # Example:
+    #   scheduling = {
+    #       "run_interval_seconds": 300,   # run every 5 minutes
+    #       "run_on_event_only": True,     # only run when a subscribed event fires
+    #       "priority": "high",            # high | normal | low
+    #   }
+
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Validate strategy metadata at class definition time.
 
@@ -328,7 +452,7 @@ class BaseStrategy(ABC):
         # Strategy state — persisted across detect() cycles
         self._state: dict = {}
 
-    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[ArbitrageOpportunity]:
+    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:
         """Detect arbitrage opportunities (sync).
 
         Backward-compatible name. Prefer overriding detect_sync() for new strategies.
@@ -368,7 +492,7 @@ class BaseStrategy(ABC):
         events: list[Event],
         markets: list[Market],
         prices: dict[str, dict],
-    ) -> list[ArbitrageOpportunity]:
+    ) -> list[Opportunity]:
         """Detect arbitrage opportunities (async, preferred for I/O-bound work).
 
         The scanner calls this method when it exists.  The default
@@ -381,7 +505,7 @@ class BaseStrategy(ABC):
         """
         return self.detect(events, markets, prices)
 
-    async def on_event(self, event: DataEvent) -> list[ArbitrageOpportunity]:
+    async def on_event(self, event: DataEvent) -> list[Opportunity]:
         """React to a subscribed DataEvent.
 
         Called by the EventDispatcher when an event matching one of your
@@ -403,7 +527,7 @@ class BaseStrategy(ABC):
                    type-specific fields (markets, prices, old_price, etc.)
 
         Returns:
-            list of ArbitrageOpportunity objects (empty list if no opportunities).
+            list of Opportunity objects (empty list if no opportunities).
         """
         if event.event_type == EventType.MARKET_DATA_REFRESH:
             # Priority:
@@ -959,8 +1083,8 @@ class BaseStrategy(ABC):
         custom_roi_percent: Optional[float] = None,
         # Pass a pre-computed risk score [0, 1] to bypass calculate_risk_score().
         custom_risk_score: Optional[float] = None,
-    ) -> Optional[ArbitrageOpportunity]:
-        """Create an ArbitrageOpportunity with fee/risk enrichment.
+    ) -> Optional[Opportunity]:
+        """Create an Opportunity with fee/risk enrichment.
 
         Args:
             skip_fee_model: When True, uses a zero fee_breakdown. Use for
@@ -1094,7 +1218,7 @@ class BaseStrategy(ABC):
 
         roi_type = "guaranteed_spread" if is_guaranteed else "directional_payout"
 
-        return ArbitrageOpportunity(
+        return Opportunity(
             strategy=self.strategy_type,
             title=title,
             description=description,

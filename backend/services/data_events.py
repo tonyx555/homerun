@@ -44,6 +44,20 @@ class EventType:
     NEWS_EVENT: str = "news_event"
     """Breaking news signal from the news worker (alias for compatibility)."""
 
+    DATA_SOURCE_UPDATE: str = "data_source_update"
+    """A DB-defined data source completed a fetch cycle with new records.
+
+    Strategies can subscribe to this event type to react when any data source
+    produces new records, bridging the DataSource SDK into the real-time event
+    pipeline.
+
+    payload = {
+        "source_slug": str,        # data source slug that produced the records
+        "records_count": int,      # number of records upserted in this cycle
+        "run_id": str,             # DataSourceRun row ID for audit trail
+    }
+    """
+
     WORLD_INTEL_UPDATE: str = "world_intel_update"
     """Geopolitical and world event signals from the world intelligence worker.
 
@@ -88,6 +102,7 @@ class EventType:
             "news_update",
             "news_event",
             "world_intel_update",
+            "data_source_update",
         }
     )
 
@@ -106,6 +121,7 @@ class DataEvent:
         EventType.NEWS_UPDATE           - News intent signal from news worker
         EventType.NEWS_EVENT            - Breaking news signal from news worker
         EventType.WORLD_INTEL_UPDATE    - Geopolitical signals from world intel worker
+        EventType.DATA_SOURCE_UPDATE    - DB data source completed a fetch cycle
     """
 
     event_type: str
@@ -126,17 +142,47 @@ class DataEvent:
 
 
 class BlockReason:
-    """Standard reason codes passed to strategy.on_blocked(). All platform gates use these."""
+    """Standard reason codes passed to ``strategy.on_blocked()``.
+
+    Every platform gate uses one of these constants so strategy authors can
+    programmatically identify why a signal was blocked and react accordingly.
+
+    See ``BaseStrategy`` docstring for the full signal lifecycle and where
+    each gate sits in the pipeline.
+    """
 
     QUALITY_FILTER = "quality_filter"
+    """Opportunity failed QualityFilterPipeline (ROI, liquidity, legs, etc.)."""
+
     RISK_DAILY_LOSS = "risk_daily_loss"
+    """Daily realized loss exceeds the configured limit."""
+
     RISK_GROSS_EXPOSURE = "risk_gross_exposure"
+    """Total open notional across all strategies exceeds the exposure cap."""
+
     RISK_CONSECUTIVE_LOSS = "risk_consecutive_loss"
+    """Too many consecutive losing trades — circuit breaker tripped."""
+
     RISK_TRADE_NOTIONAL = "risk_trade_notional"
+    """Single trade notional exceeds the per-trade cap."""
+
     RISK_OPEN_POSITIONS = "risk_open_positions"
+    """Maximum number of open positions reached."""
+
     RISK_MARKET_EXPOSURE = "risk_market_exposure"
+    """Per-market exposure cap reached (already have exposure on this market)."""
+
     TRADING_WINDOW = "trading_window"
+    """Outside the configured UTC trading hours."""
+
     STACKING_GUARD = "stacking_guard"
+    """Already have an open position on this market."""
+
     SIGNAL_EXPIRED = "signal_expired"
+    """Signal is past its ``expires_at`` timestamp."""
+
     SCANNER_POOL_CAPACITY = "scanner_pool_capacity"
+    """Scanner opportunity pool is at capacity."""
+
     DEDUPLICATION = "deduplication"
+    """Duplicate signal collapsed with a higher-priority one."""

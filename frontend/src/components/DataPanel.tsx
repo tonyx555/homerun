@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Database, Globe2, Newspaper, Radio } from 'lucide-react'
 
@@ -7,6 +7,7 @@ import { getNewsFeedStatus, getUnifiedDataSources } from '../services/api'
 import { getWorldIntelligenceSummary } from '../services/worldIntelligenceApi'
 import NewsIntelligencePanel from './NewsIntelligencePanel'
 import WorldIntelligencePanel from './WorldIntelligencePanel'
+import WorldIntelligenceSettingsFlyout from './WorldIntelligenceSettingsFlyout'
 import DataSourcesManager from './DataSourcesManager'
 import ErrorBoundary from './ErrorBoundary'
 import { Button } from './ui/button'
@@ -22,6 +23,7 @@ interface DataPanelProps {
 }
 
 export default function DataPanel({ isConnected, view, onViewChange }: DataPanelProps) {
+  const [dataSettingsOpen, setDataSettingsOpen] = useState(false)
   const { data: worldSummary } = useQuery({
     queryKey: ['world-intelligence-summary'],
     queryFn: getWorldIntelligenceSummary,
@@ -148,7 +150,7 @@ export default function DataPanel({ isConnected, view, onViewChange }: DataPanel
 
       {view === 'stories' && (
         <div className="flex-1 overflow-y-auto px-6 py-4">
-          <NewsIntelligencePanel mode="feed" />
+          <NewsIntelligencePanel mode="feed" onOpenDataSettings={() => setDataSettingsOpen(true)} />
         </div>
       )}
 
@@ -157,6 +159,11 @@ export default function DataPanel({ isConnected, view, onViewChange }: DataPanel
           <DataSourcesManager />
         </div>
       )}
+
+      <WorldIntelligenceSettingsFlyout
+        isOpen={dataSettingsOpen}
+        onClose={() => setDataSettingsOpen(false)}
+      />
     </div>
   )
 }

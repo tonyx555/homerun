@@ -1,9 +1,8 @@
-"""Bridge: convert ArbitrageOpportunity objects from strategy on_event() into TradeSignal DB rows.
+"""Bridge: convert Opportunity objects into TradeSignal DB rows.
 
-Workers dispatch DataEvents to subscribed strategies via the event_dispatcher.
-Strategies return lists of ArbitrageOpportunity objects.  This module converts
-those opportunities into normalized TradeSignal rows using the same upsert
-pattern as the existing signal_bus emit_* functions.
+Workers and the scanner emit Opportunity objects.  This module converts
+those opportunities into normalized TradeSignal rows using a single upsert
+pattern shared by all signal sources.
 """
 
 from __future__ import annotations
@@ -13,7 +12,7 @@ from typing import Optional, Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.opportunity import ArbitrageOpportunity
+from models.opportunity import Opportunity
 from services.signal_bus import (
     build_signal_contract_from_opportunity,
     make_dedupe_key,
@@ -25,24 +24,30 @@ from utils.utcnow import utcnow
 
 async def bridge_opportunities_to_signals(
     session: AsyncSession,
-    opportunities: list[ArbitrageOpportunity],
+    opportunities: list[Opportunity],
     source: str,
     *,
     default_ttl_minutes: int = 120,
     quality_filter_pipeline: Optional[Any] = None,
+    quality_reports: Optional[dict] = None,
 ) -> int:
-    """Convert strategy-produced ArbitrageOpportunity objects into TradeSignal rows.
+    """Convert Opportunity objects into TradeSignal rows.
 
-    Mirrors the pattern used by ``emit_scanner_signals`` in signal_bus.py:
-    each opportunity is upserted by (source, dedupe_key) so repeated
+    Each opportunity is upserted by (source, dedupe_key) so repeated
     detections update rather than duplicate.
 
-    If ``quality_filter_pipeline`` is provided it is a ``QualityFilterPipeline``
-    instance.  Each opportunity is evaluated once before upserting and the
-    result is stored on the signal row via ``quality_passed`` /
-    ``quality_rejection_reasons``.  Opportunities that fail are still written
-    to the DB (with ``quality_passed=False``) so the orchestrator can skip them
-    using the stored result rather than re-evaluating.
+    Quality information can be supplied in two ways:
+
+    *   ``quality_filter_pipeline`` — a ``QualityFilterPipeline`` instance.
+        Each opportunity is evaluated inline before upserting.
+    *   ``quality_reports`` — a dict mapping ``opp.stable_id`` (or ``opp.id``)
+        to a pre-computed ``QualityReport``.  Used when the caller already ran
+        the quality filter (e.g. the scanner) and wants to propagate results
+        without re-evaluating.
+
+    Opportunities that fail quality are still written to the DB (with
+    ``quality_passed=False``) so the orchestrator can skip them using the
+    stored result rather than re-evaluating.
 
     Returns the number of signals upserted.
     """
@@ -69,6 +74,15 @@ async def bridge_opportunities_to_signals(
             report = quality_filter_pipeline.evaluate(opp)
             opp_quality_passed = bool(report.passed)
             opp_rejection_reasons = list(report.rejection_reasons) if not report.passed else None
+        elif quality_reports is not None:
+            opp_key = opp.stable_id or opp.id
+            report = quality_reports.get(opp_key)
+            if report is not None:
+                opp_quality_passed = bool(report.passed)
+                opp_rejection_reasons = list(report.rejection_reasons) if not report.passed else None
+            else:
+                opp_quality_passed = True
+                opp_rejection_reasons = None
 
         await upsert_trade_signal(
             session,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from models import Market, Event, ArbitrageOpportunity
+from models import Market, Event, Opportunity
 from config import settings
 from .base import BaseStrategy, DecisionCheck, ExitDecision, ScoringWeights, SizingConfig, make_aware
 from utils.converters import to_float
@@ -60,7 +60,7 @@ class NegRiskStrategy(BaseStrategy):
         "max_size_usd": 180.0,
     }
 
-    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[ArbitrageOpportunity]:
+    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:
         opportunities = []
 
         for event in events:
@@ -93,7 +93,7 @@ class NegRiskStrategy(BaseStrategy):
 
         return opportunities
 
-    def _detect_negrisk_event(self, event: Event, prices: dict[str, dict]) -> ArbitrageOpportunity | None:
+    def _detect_negrisk_event(self, event: Event, prices: dict[str, dict]) -> Opportunity | None:
         """Detect arbitrage in official NegRisk events.
 
         IMPORTANT: The NegRisk flag guarantees mutual exclusivity among LISTED
@@ -194,7 +194,7 @@ class NegRiskStrategy(BaseStrategy):
 
     def _detect_negrisk_short(
         self, event: Event, active_markets: list[Market], prices: dict[str, dict]
-    ) -> ArbitrageOpportunity | None:
+    ) -> Opportunity | None:
         """Detect short-side NegRisk arbitrage.
 
         When total YES > $1.00, buying NO on all outcomes can be profitable.
@@ -517,7 +517,7 @@ class NegRiskStrategy(BaseStrategy):
         # If >=50% of questions match threshold patterns, this is a threshold market
         return len(questions) > 0 and threshold_count >= len(questions) * 0.5
 
-    def _detect_multi_outcome(self, event: Event, prices: dict[str, dict]) -> ArbitrageOpportunity | None:
+    def _detect_multi_outcome(self, event: Event, prices: dict[str, dict]) -> Opportunity | None:
         """
         Detect multi-outcome arbitrage: exhaustive outcomes where one must win
         Buy YES on all outcomes when total < $1
@@ -632,7 +632,7 @@ class NegRiskStrategy(BaseStrategy):
 
     def _detect_multi_outcome_short(
         self, event: Event, exclusive_markets: list[Market], prices: dict[str, dict]
-    ) -> ArbitrageOpportunity | None:
+    ) -> Opportunity | None:
         """Detect short-side multi-outcome arbitrage.
 
         When total YES > $1.00, buying NO on all outcomes can be profitable.
