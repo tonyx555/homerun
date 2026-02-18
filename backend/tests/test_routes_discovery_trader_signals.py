@@ -22,123 +22,59 @@ class _RowsResult:
 
 
 @pytest.mark.asyncio
-async def test_tracked_trader_opportunities_include_source_and_validation_metadata(
-    monkeypatch,
-):
-    opportunities = [
-        {
-            "id": "sig-good",
-            "market_id": "0xmarket",
-            "market_question": "Will BTC be above $120k?",
-            "wallets": ["0xpool", "0xtracked"],
-            "signal_type": "multi_wallet_buy",
-            "outcome": "YES",
-            "yes_price": 0.62,
-            "no_price": 0.38,
-        },
-        {
-            "id": "sig-bad",
-            "market_id": "",
-            "market_question": "",
-            "wallets": ["0xunknown"],
-            "signal_type": "",
-            "outcome": None,
-            "yes_price": 1.2,
-            "no_price": -0.1,
-        },
-    ]
-
-    session = SimpleNamespace(
-        execute=AsyncMock(
-            side_effect=[
-                _RowsResult([("0xpool", True), ("0xtracked", False)]),
-                _RowsResult([("0xtracked",)]),
-                _RowsResult([("0xtracked", "group-1")]),
-            ]
-        )
-    )
-
+async def test_load_tracked_trader_opportunities_delegates_to_strategy_pipeline(monkeypatch):
+    rows = [{"id": "sig-1"}, {"id": "sig-2"}]
+    loader = AsyncMock(return_value=rows)
     monkeypatch.setattr(
         routes_discovery,
         "get_strategy_filtered_trader_opportunities",
-        AsyncMock(return_value=opportunities),
+        loader,
     )
-    monkeypatch.setattr(
-        routes_discovery,
-        "_load_scanner_market_history",
-        AsyncMock(return_value={}),
-    )
-    monkeypatch.setattr(
-        routes_discovery,
-        "_attach_signal_market_metadata",
-        AsyncMock(side_effect=lambda rows: rows),
-    )
-    monkeypatch.setattr(
-        routes_discovery,
-        "_attach_activity_history_fallback",
-        AsyncMock(return_value=None),
-    )
-
-    payload = await routes_discovery.get_tracked_trader_opportunities(
+    result = await routes_discovery._load_tracked_trader_opportunities(
         limit=50,
-        min_tier="WATCH",
-        session=session,
+        include_filtered=False,
     )
-
-    assert payload["total"] == 2
-    by_id = {row["id"]: row for row in payload["opportunities"]}
-
-    good = by_id["sig-good"]
-    assert good["source_flags"]["from_pool"] is True
-    assert good["source_flags"]["from_tracked_traders"] is True
-    assert good["source_flags"]["qualified"] is True
-    assert good["is_valid"] is True
-    assert good["is_tradeable"] is True
-    assert good["source_breakdown"]["pool_wallets"] == 1
-    assert good["source_breakdown"]["tracked_wallets"] == 1
-
-    bad = by_id["sig-bad"]
-    assert bad["source_flags"]["qualified"] is False
-    assert bad["is_valid"] is False
-    assert bad["is_tradeable"] is False
-    assert "missing_market_id" in bad["validation_reasons"]
-    assert "missing_direction" in bad["validation_reasons"]
-    assert "price_out_of_bounds" in bad["validation_reasons"]
-    assert "unqualified_wallet_source" in bad["validation_reasons"]
+    loader.assert_awaited_once_with(limit=50, include_filtered=False)
+    assert result == rows
 
 
 @pytest.mark.asyncio
-async def test_tracked_trader_opportunities_include_filtered_passthrough(monkeypatch):
-    opportunities = [
+async def test_load_tracked_trader_opportunities_include_filtered_passthrough(monkeypatch):
+    rows = [{"id": "sig-filtered", "is_tradeable": False}]
+    loader = AsyncMock(return_value=rows)
+    monkeypatch.setattr(
+        routes_discovery,
+        "get_strategy_filtered_trader_opportunities",
+        loader,
+    )
+    result = await routes_discovery._load_tracked_trader_opportunities(
+        limit=25,
+        include_filtered=True,
+    )
+    loader.assert_awaited_once_with(limit=25, include_filtered=True)
+    assert result == rows
+
+
+@pytest.mark.asyncio
+async def test_get_traders_overview_uses_strategy_filtered_rows(monkeypatch):
+    confluence_rows = [
         {
-            "id": "sig-filtered",
-            "market_id": "0xfiltered",
-            "market_question": "Will this be visible in filtered mode?",
-            "wallets": ["0xpool"],
+            "id": "sig-traders",
+            "market_id": "0xmarket",
+            "market_question": "Will this be returned?",
+            "wallets": ["0xabc"],
             "signal_type": "multi_wallet_buy",
             "outcome": "YES",
-            "yes_price": 0.48,
-            "no_price": 0.52,
-            "is_active": False,
-            "is_tradeable": False,
+            "yes_price": 0.6,
+            "no_price": 0.4,
+            "detected_at": datetime.utcnow().isoformat(),
         }
     ]
-
-    session = SimpleNamespace(
-        execute=AsyncMock(
-            side_effect=[
-                _RowsResult([]),
-                _RowsResult([]),
-                _RowsResult([]),
-            ]
-        )
-    )
-
-    get_opps_mock = AsyncMock(return_value=opportunities)
+    monkeypatch.setattr(routes_discovery.wallet_tracker, "get_all_wallets", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         routes_discovery,
-        "get_strategy_filtered_trader_opportunities",
-        get_opps_mock,
+        "_load_tracked_trader_opportunities",
+        AsyncMock(return_value=confluence_rows),
     )
     monkeypatch.setattr(
         routes_discovery,
@@ -155,129 +91,32 @@ async def test_tracked_trader_opportunities_include_filtered_passthrough(monkeyp
         "_attach_activity_history_fallback",
         AsyncMock(return_value=None),
     )
+    monkeypatch.setattr(
+        routes_discovery,
+        "_attach_live_mid_prices_to_signal_rows",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        routes_discovery,
+        "_annotate_trader_signal_rows",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        routes_discovery,
+        "_fetch_group_payload",
+        AsyncMock(return_value=[]),
+    )
 
-    payload = await routes_discovery.get_tracked_trader_opportunities(
-        limit=25,
-        min_tier="WATCH",
-        include_filtered=True,
+    session = SimpleNamespace(execute=AsyncMock(return_value=_RowsResult([])))
+    payload = await routes_discovery.get_traders_overview(
+        tracked_limit=25,
+        confluence_limit=10,
+        hours=24,
         session=session,
     )
-
-    get_opps_mock.assert_awaited_once_with(
-        limit=25,
-        min_tier="WATCH",
-        include_filtered=True,
-    )
-    assert payload["total"] == 1
-    assert payload["opportunities"][0]["id"] == "sig-filtered"
-
-
-@pytest.mark.asyncio
-async def test_tracked_trader_opportunities_source_filter_scopes_confluence(monkeypatch):
-    opportunities = [
-        {
-            "id": "sig-tracked",
-            "market_id": "0xtracked",
-            "market_question": "Tracked signal",
-            "wallets": ["0xtracked"],
-            "signal_type": "multi_wallet_buy",
-            "outcome": "YES",
-            "yes_price": 0.51,
-            "no_price": 0.49,
-        },
-        {
-            "id": "sig-pool",
-            "market_id": "0xpool",
-            "market_question": "Pool signal",
-            "wallets": ["0xpool"],
-            "signal_type": "multi_wallet_buy",
-            "outcome": "YES",
-            "yes_price": 0.53,
-            "no_price": 0.47,
-        },
-        {
-            "id": "sig-unqualified",
-            "market_id": "0xother",
-            "market_question": "Unqualified signal",
-            "wallets": ["0xother"],
-            "signal_type": "multi_wallet_buy",
-            "outcome": "YES",
-            "yes_price": 0.55,
-            "no_price": 0.45,
-        },
-    ]
-
-    def make_session():
-        return SimpleNamespace(
-            execute=AsyncMock(
-                side_effect=[
-                    _RowsResult([("0xtracked", False), ("0xpool", True), ("0xother", False)]),
-                    _RowsResult([("0xtracked",)]),
-                    _RowsResult([]),
-                ]
-            )
-        )
-
-    monkeypatch.setattr(
-        routes_discovery,
-        "get_strategy_filtered_trader_opportunities",
-        AsyncMock(return_value=opportunities),
-    )
-    monkeypatch.setattr(
-        routes_discovery,
-        "_load_scanner_market_history",
-        AsyncMock(return_value={}),
-    )
-    monkeypatch.setattr(
-        routes_discovery,
-        "_attach_signal_market_metadata",
-        AsyncMock(side_effect=lambda rows: rows),
-    )
-    monkeypatch.setattr(
-        routes_discovery,
-        "_attach_activity_history_fallback",
-        AsyncMock(return_value=None),
-    )
-
-    payload_all = await routes_discovery.get_tracked_trader_opportunities(
-        limit=50,
-        min_tier="WATCH",
-        source_filter="all",
-        include_filtered=False,
-        session=make_session(),
-    )
-    ids_all = {row["id"] for row in payload_all["opportunities"]}
-    assert ids_all == {"sig-tracked", "sig-pool"}
-
-    payload_tracked = await routes_discovery.get_tracked_trader_opportunities(
-        limit=50,
-        min_tier="WATCH",
-        source_filter="tracked",
-        include_filtered=False,
-        session=make_session(),
-    )
-    assert {row["id"] for row in payload_tracked["opportunities"]} == {"sig-tracked"}
-
-    payload_pool = await routes_discovery.get_tracked_trader_opportunities(
-        limit=50,
-        min_tier="WATCH",
-        source_filter="pool",
-        include_filtered=False,
-        session=make_session(),
-    )
-    assert {row["id"] for row in payload_pool["opportunities"]} == {"sig-pool"}
-
-    payload_legacy_confluence = await routes_discovery.get_tracked_trader_opportunities(
-        limit=50,
-        min_tier="WATCH",
-        source_filter="confluence",
-        include_filtered=False,
-        session=make_session(),
-    )
-    assert {row["id"] for row in payload_legacy_confluence["opportunities"]} == {
-        "sig-tracked",
-        "sig-pool",
-    }
+    assert payload["confluence"]["total_signals"] == 1
+    assert payload["confluence"]["signals"][0]["id"] == "sig-traders"
+    assert "min_tier" not in payload["confluence"]
 
 
 @pytest.mark.asyncio

@@ -495,8 +495,6 @@ export default function RecentTradesPanel({
     onOpenCopilot?.('trader_signal', contextId, label)
   }
 
-  const rawTrackedCount = signalView.scannedTrackedCount
-  const rawPoolCount = signalView.scannedPoolCount
   const rawSignalCount = signalView.scannedSignals.length
   const displayedTrackedCount = signalView.visibleTrackedCount
   const displayedPoolCount = signalView.visiblePoolCount

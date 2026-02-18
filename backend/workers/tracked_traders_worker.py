@@ -24,6 +24,7 @@ from utils.utcnow import utcnow
 from models.database import AsyncSessionLocal, AppSettings, init_database
 from services.insider_detector import insider_detector
 from services.opportunity_strategy_catalog import ensure_all_strategies_seeded
+from services.strategy_signal_bridge import bridge_opportunities_to_signals
 from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.market_cache import market_cache_service
 from services.smart_wallet_pool import smart_wallet_pool
@@ -487,7 +488,7 @@ async def _run_loop() -> None:
                     if str(getattr(opp, "strategy", "") or "").strip()
                 }
             )
-            emitted = len(deduped_opportunities)
+            emitted = 0
 
             async with AsyncSessionLocal() as session:
                 await shared_state.write_traders_snapshot(
@@ -501,6 +502,11 @@ async def _run_loop() -> None:
                         "current_activity": "Tracked traders strategy cycle complete.",
                         "strategies": strategies_used,
                     },
+                )
+                emitted = await bridge_opportunities_to_signals(
+                    session,
+                    deduped_opportunities,
+                    source="traders",
                 )
                 if requested:
                     await clear_worker_run_request(session, worker_name)
