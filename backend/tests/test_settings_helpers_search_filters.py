@@ -21,7 +21,7 @@ def _make_request(search_filters_section):
         maintenance=None,
         discovery=None,
         trading_proxy=None,
-        world_intelligence=None,
+        events=None,
         search_filters=search_filters_section,
     )
 

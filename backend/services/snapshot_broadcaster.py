@@ -3,8 +3,9 @@ Snapshot broadcaster.
 
 Bridges worker data to connected WebSocket clients in the API process.
 
-**Primary path (event-driven):** Workers publish events on the in-process
-``event_bus``; the broadcaster subscribes and immediately relays them to WS
+**Primary path (event-driven):** Workers publish events on ``event_bus``;
+the bus fans out across processes via Redis stream and the broadcaster
+subscribes and immediately relays them to WS
 clients, applying signature-based deduplication for high-frequency events.
 
 **Fallback path (DB poll):** A slow 30-second DB-poll loop runs as a safety
@@ -27,14 +28,14 @@ from models.database import (
     TraderDecision,
     TraderEvent,
     TraderOrder,
-    WorldIntelligenceSignal,
-    WorldIntelligenceSnapshot,
+    EventsSignal,
+    EventsSnapshot,
 )
 from services import shared_state
 from services.event_bus import event_bus
 from services.news import shared_state as news_shared_state
 from services.trader_orchestrator_state import read_orchestrator_snapshot
-from services.worker_state import list_worker_snapshots
+from services.worker_state import list_worker_snapshots, read_worker_snapshot
 from services.weather import shared_state as weather_shared_state
 from utils.logger import get_logger
 from utils.market_urls import serialize_opportunity_with_links
@@ -321,8 +322,9 @@ class SnapshotBroadcaster:
         """FALLBACK: Slow DB poll loop to ensure data consistency.
 
         This is the original polling logic, reduced to 30s interval now that
-        workers run in-process and publish to the event bus directly.
-        It catches any data that workers may not have published to the bus.
+        workers publish to event_bus and Redis stream fan-out delivers
+        those events to this process. It catches any data that workers may
+        not have published to the bus.
         """
         while self._running:
             try:
@@ -334,7 +336,7 @@ class SnapshotBroadcaster:
                     weather_status = await weather_shared_state.get_weather_status_from_db(session)
                     weather_status["opportunities_count"] = len(weather_opps)
                     news_status = await news_shared_state.get_news_status_from_db(session)
-                    worker_statuses = await list_worker_snapshots(session)
+                    worker_statuses = await list_worker_snapshots(session, include_stats=False)
                     orchestrator_status = await read_orchestrator_snapshot(session)
                     signal_rows = (
                         (await session.execute(select(TradeSignalSnapshot).order_by(TradeSignalSnapshot.source.asc())))
@@ -344,7 +346,7 @@ class SnapshotBroadcaster:
                     world_snapshot = (
                         (
                             await session.execute(
-                                select(WorldIntelligenceSnapshot).where(WorldIntelligenceSnapshot.id == "latest")
+                                select(EventsSnapshot).where(EventsSnapshot.id == "latest")
                             )
                         )
                         .scalars()
@@ -353,10 +355,10 @@ class SnapshotBroadcaster:
                     world_rows = (
                         (
                             await session.execute(
-                                select(WorldIntelligenceSignal)
+                                select(EventsSignal)
                                 .order_by(
-                                    WorldIntelligenceSignal.detected_at.desc(),
-                                    WorldIntelligenceSignal.severity.desc(),
+                                    EventsSignal.detected_at.desc(),
+                                    EventsSignal.severity.desc(),
                                 )
                                 .limit(100)
                             )
@@ -536,20 +538,15 @@ class SnapshotBroadcaster:
                     self._last_worker_status_sig = worker_sig
                     await manager.broadcast({"type": "worker_status_update", "data": {"workers": worker_statuses}})
 
-                crypto_row = next(
-                    (row for row in worker_statuses if row.get("worker_name") == "crypto"),
-                    None,
-                )
-                crypto_stats = (
-                    (crypto_row or {}).get("stats") if isinstance((crypto_row or {}).get("stats"), dict) else {}
-                )
+                crypto_row = await read_worker_snapshot(session, "crypto")
+                crypto_stats = (crypto_row.get("stats") if isinstance(crypto_row.get("stats"), dict) else {})
                 crypto_markets = crypto_stats.get("markets")
                 if not isinstance(crypto_markets, list):
                     crypto_markets = []
 
                 crypto_sig = (
-                    (crypto_row or {}).get("updated_at"),
-                    (crypto_row or {}).get("last_run_at"),
+                    crypto_row.get("updated_at"),
+                    crypto_row.get("last_run_at"),
                     len(crypto_markets),
                     ((crypto_markets[0] or {}).get("id") if crypto_markets else None),
                     ((crypto_markets[0] or {}).get("oracle_updated_at_ms") if crypto_markets else None),
@@ -618,7 +615,7 @@ class SnapshotBroadcaster:
                     self._last_world_status_sig = world_status_sig
                     await manager.broadcast(
                         {
-                            "type": "world_intelligence_status",
+                            "type": "events_status",
                             "data": {
                                 "status": world_status,
                                 "stats": world_stats,
@@ -655,7 +652,7 @@ class SnapshotBroadcaster:
                     self._last_world_update_sig = world_update_sig
                     await manager.broadcast(
                         {
-                            "type": "world_intelligence_update",
+                            "type": "events_update",
                             "data": {
                                 "count": len(world_signals),
                                 "signals": world_signals[:50],

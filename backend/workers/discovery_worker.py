@@ -21,12 +21,9 @@ from services.discovery_shared_state import (
 from services.pause_state import global_pause_state
 from services.wallet_discovery import wallet_discovery
 from services.worker_state import write_worker_snapshot
+from utils.logger import setup_logging
 
-if not logging.root.handlers:
-    logging.basicConfig(
-        level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO")),
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"), json_format=False)
 logger = logging.getLogger("discovery_worker")
 PRIORITY_BACKLOG_INTERVAL_MINUTES = 10
 

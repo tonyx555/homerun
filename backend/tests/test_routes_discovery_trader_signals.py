@@ -27,7 +27,7 @@ async def test_load_tracked_trader_opportunities_delegates_to_strategy_pipeline(
     loader = AsyncMock(return_value=rows)
     monkeypatch.setattr(
         routes_discovery,
-        "get_strategy_filtered_trader_opportunities",
+        "get_strategy_filtered_trader_signals",
         loader,
     )
     result = await routes_discovery._load_tracked_trader_opportunities(
@@ -44,7 +44,7 @@ async def test_load_tracked_trader_opportunities_include_filtered_passthrough(mo
     loader = AsyncMock(return_value=rows)
     monkeypatch.setattr(
         routes_discovery,
-        "get_strategy_filtered_trader_opportunities",
+        "get_strategy_filtered_trader_signals",
         loader,
     )
     result = await routes_discovery._load_tracked_trader_opportunities(

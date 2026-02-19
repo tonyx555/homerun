@@ -68,10 +68,6 @@ class ExecutionSessionEngine:
             signal_payload = payload if isinstance(payload, dict) else {}
             fallback_market_id = str(getattr(signal, "market_id", "") or "")
             fallback_market_question = str(getattr(signal, "market_question", "") or "")
-            fallback_direction = str(getattr(signal, "direction", "") or "").strip().lower()
-            fallback_outcome = (
-                "yes" if fallback_direction == "buy_yes" else "no" if fallback_direction == "buy_no" else None
-            )
             legs = [
                 {
                     "leg_id": "leg_1",
@@ -82,7 +78,7 @@ class ExecutionSessionEngine:
                     ).strip()
                     or None,
                     "side": "buy",
-                    "outcome": fallback_outcome,
+                    "outcome": None,
                     "limit_price": safe_float(getattr(signal, "entry_price", None), None),
                     "price_policy": "maker_limit",
                     "time_in_force": "GTC",

@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { AnimatePresence, motion } from 'framer-motion'
 import {
   AlertTriangle,
   BookOpen,
@@ -23,7 +25,6 @@ import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { Label } from './ui/label'
-import { ScrollArea } from './ui/scroll-area'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
 import { Switch } from './ui/switch'
 import { cn } from '../lib/utils'
@@ -32,10 +33,11 @@ import DataSourceApiDocsFlyout from './DataSourceApiDocsFlyout'
 import RestApiSourceForm from './RestApiSourceForm'
 import RssSourceForm from './RssSourceForm'
 import StrategyConfigForm from './StrategyConfigForm'
-import { getWorldSourceStatus } from '../services/worldIntelligenceApi'
+import { getWorldSourceStatus } from '../services/eventsApi'
 import {
   createUnifiedDataSource,
   deleteUnifiedDataSource,
+  getUnifiedDataSource,
   getUnifiedDataSourceRecords,
   getUnifiedDataSourceRuns,
   getUnifiedDataSourceTemplate,
@@ -43,6 +45,7 @@ import {
   reloadUnifiedDataSource,
   runUnifiedDataSource,
   UnifiedDataSource,
+  UnifiedDataSourceTemplatePreset,
   updateUnifiedDataSource,
   validateUnifiedDataSource,
 } from '../services/api'
@@ -98,6 +101,25 @@ function errorMessage(error: unknown, fallback: string): string {
   }
   if (typeof err?.message === 'string' && err.message.trim()) return err.message
   return fallback
+}
+
+function normalizeRetentionPolicy(input: unknown): { max_records?: number; max_age_days?: number } {
+  const value = input && typeof input === 'object' ? input as Record<string, unknown> : {}
+  const next: { max_records?: number; max_age_days?: number } = {}
+
+  const maxRecords = Number(value.max_records)
+  if (Number.isFinite(maxRecords)) {
+    const parsed = Math.max(1, Math.min(250000, Math.round(maxRecords)))
+    next.max_records = parsed
+  }
+
+  const maxAgeDays = Number(value.max_age_days)
+  if (Number.isFinite(maxAgeDays)) {
+    const parsed = Math.max(1, Math.min(3650, Math.round(maxAgeDays)))
+    next.max_age_days = parsed
+  }
+
+  return next
 }
 
 function classifySourceTone(details: any): 'ok' | 'degraded' | 'error' {
@@ -173,10 +195,23 @@ const SOURCE_KIND_LABELS: Record<string, string> = {
   python: 'Python',
   rss: 'RSS Feed',
   rest_api: 'REST API',
-  gdelt: 'GDELT',
-  events: 'Events',
-  stories: 'Stories',
-  bridge: 'Bridge',
+}
+
+interface NewDataSourceTemplate {
+  id: string
+  slug_prefix: string
+  name: string
+  description: string
+  source_key: string
+  source_kind: string
+  source_code: string
+  retention?: {
+    max_records?: number
+    max_age_days?: number
+  }
+  config: Record<string, unknown>
+  config_schema: Record<string, unknown>
+  is_system_seed?: boolean
 }
 
 const EVENT_SOURCE_HEALTH_KEY_BY_SLUG: Record<string, string> = {
@@ -186,11 +221,6 @@ const EVENT_SOURCE_HEALTH_KEY_BY_SLUG: Record<string, string> = {
   events_infrastructure: 'infrastructure',
   events_gdelt_news: 'gdelt_news',
   events_usgs: 'usgs',
-  events_rss_news: 'rss_news',
-  events_chokepoints: 'chokepoints',
-  events_convergence: 'convergence',
-  events_instability: 'instability',
-  events_anomaly: 'anomaly',
 }
 
 const FALLBACK_TEMPLATE = [
@@ -209,10 +239,16 @@ const FALLBACK_TEMPLATE = [
   '        return []',
 ].join('\n')
 
+const DEFAULT_NEW_SOURCE_PRESET_ID = 'python_custom'
+const DEFAULT_REST_API_PRESET_ID = 'rest_api_custom'
+const CREATE_SOURCE_KIND_ORDER = ['python', 'rss', 'rest_api']
+
 export default function DataSourcesManager() {
   const queryClient = useQueryClient()
+  const loadedEditorSourceKeyRef = useRef<string | null>(null)
 
   const [showApiDocs, setShowApiDocs] = useState(false)
+  const [showCreateModal, setShowCreateModal] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showConfig, setShowConfig] = useState(false)
   const [showRawJson, setShowRawJson] = useState(false)
@@ -220,7 +256,15 @@ export default function DataSourcesManager() {
 
   const [searchQuery, setSearchQuery] = useState('')
   const [sourceFilter, setSourceFilter] = useState<string>('all')
-  const [newPresetId, setNewPresetId] = useState<string>('')
+
+  const [newSourceName, setNewSourceName] = useState('Custom Data Source')
+  const [newSourceSlug, setNewSourceSlug] = useState(() => `custom_source_${Date.now().toString().slice(-6)}`)
+  const [newSourceDescription, setNewSourceDescription] = useState('')
+  const [newSourceSourceKey, setNewSourceSourceKey] = useState('custom')
+  const [newSourceTemplateKind, setNewSourceTemplateKind] = useState('python')
+  const [newSourceTemplateKey, setNewSourceTemplateKey] = useState(DEFAULT_NEW_SOURCE_PRESET_ID)
+  const [newSourceSlugDirty, setNewSourceSlugDirty] = useState(false)
+  const [newSourceError, setNewSourceError] = useState<string | null>(null)
 
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null)
   const [draftToken, setDraftToken] = useState<string | null>(null)
@@ -232,6 +276,7 @@ export default function DataSourcesManager() {
   const [editorSourceKind, setEditorSourceKind] = useState('python')
   const [editorEnabled, setEditorEnabled] = useState(true)
   const [editorCode, setEditorCode] = useState('')
+  const [editorRetention, setEditorRetention] = useState<{ max_records?: number; max_age_days?: number }>({})
   const [editorConfigJson, setEditorConfigJson] = useState('{}')
   const [editorSchemaJson, setEditorSchemaJson] = useState('{}')
   const [editorError, setEditorError] = useState<string | null>(null)
@@ -245,7 +290,7 @@ export default function DataSourcesManager() {
 
   const sourcesQuery = useQuery({
     queryKey: ['unified-data-sources'],
-    queryFn: () => getUnifiedDataSources(),
+    queryFn: () => getUnifiedDataSources({ include_code: false }),
     staleTime: 15000,
     refetchInterval: 15000,
   })
@@ -257,22 +302,131 @@ export default function DataSourcesManager() {
   })
 
   const worldSourceStatusQuery = useQuery({
-    queryKey: ['world-intelligence-sources'],
+    queryKey: ['events-sources'],
     queryFn: getWorldSourceStatus,
     staleTime: 10000,
     refetchInterval: 15000,
   })
 
-  const catalog = sourcesQuery.data || []
-  const templatePresets = useMemo(() => templateQuery.data?.presets || [], [templateQuery.data?.presets])
+  const catalog = useMemo(() => {
+    const payload = sourcesQuery.data as UnifiedDataSource[] | { items?: UnifiedDataSource[] } | undefined
+    if (Array.isArray(payload)) return payload
+    if (payload && Array.isArray(payload.items)) return payload.items
+    return []
+  }, [sourcesQuery.data])
+  const templatePresets = useMemo<NewDataSourceTemplate[]>(() => {
+    const presets = (templateQuery.data?.presets || []).map((preset) => {
+      const mapped = preset as UnifiedDataSourceTemplatePreset
+      return {
+        id: String(mapped.id || '').trim(),
+        slug_prefix: String(mapped.slug_prefix || mapped.id || '').trim(),
+        name: String(mapped.name || '').trim() || 'Custom Data Source',
+        description: String(mapped.description || '').trim() || 'Custom data source template',
+        source_key: String(mapped.source_key || 'custom').trim().toLowerCase(),
+        source_kind: String(mapped.source_kind || 'python').trim().toLowerCase(),
+        source_code: String(mapped.source_code || templateQuery.data?.template || FALLBACK_TEMPLATE),
+        retention: normalizeRetentionPolicy(mapped.retention || {}),
+        config: mapped.config || {},
+        config_schema: mapped.config_schema || { param_fields: [] },
+        is_system_seed: Boolean(mapped.is_system_seed),
+      }
+    })
 
-  const selectedPreset = useMemo(
-    () => templatePresets.find((preset) => preset.id === newPresetId) || templatePresets[0] || null,
-    [templatePresets, newPresetId]
+    if (presets.length > 0) {
+      const hasPythonTemplate = presets.some((preset) => preset.source_kind === 'python')
+      if (!hasPythonTemplate) {
+        presets.push({
+          id: DEFAULT_NEW_SOURCE_PRESET_ID,
+          slug_prefix: 'custom_source',
+          name: 'Custom Python Source',
+          description: 'Full custom Python source with BaseDataSource',
+          source_key: 'custom',
+          source_kind: 'python',
+          source_code: templateQuery.data?.template || FALLBACK_TEMPLATE,
+          retention: {},
+          config: {},
+          config_schema: { param_fields: [] },
+          is_system_seed: false,
+        })
+      }
+    } else {
+      presets.push({
+        id: DEFAULT_NEW_SOURCE_PRESET_ID,
+        slug_prefix: 'custom_source',
+        name: 'Custom Python Source',
+        description: 'Full custom Python source with BaseDataSource',
+        source_key: 'custom',
+        source_kind: 'python',
+        source_code: templateQuery.data?.template || FALLBACK_TEMPLATE,
+        retention: {},
+        config: {},
+        config_schema: { param_fields: [] },
+        is_system_seed: false,
+      })
+    }
+
+    const hasRestApiTemplate = presets.some((preset) => preset.source_kind === 'rest_api')
+    if (!hasRestApiTemplate) {
+      presets.push({
+        id: DEFAULT_REST_API_PRESET_ID,
+        slug_prefix: 'custom_rest_api',
+        name: 'Custom REST API Source',
+        description: 'Simple REST API connector source',
+        source_key: 'custom',
+        source_kind: 'rest_api',
+        source_code: templateQuery.data?.template || FALLBACK_TEMPLATE,
+        retention: {},
+        config: {},
+        config_schema: { param_fields: [] },
+        is_system_seed: false,
+      })
+    }
+
+    return presets
+  }, [templateQuery.data?.presets, templateQuery.data?.template])
+
+  const templateKinds = useMemo(() => {
+    const seen = new Set<string>()
+    const present = new Set(
+      templatePresets.map((preset) => String(preset.source_kind || '').trim().toLowerCase())
+    )
+    const ordered = [...CREATE_SOURCE_KIND_ORDER]
+    for (const kind of present) {
+      if (!ordered.includes(kind)) ordered.push(kind)
+    }
+    const unique: string[] = []
+    for (const kind of ordered) {
+      const normalized = String(kind || '').trim().toLowerCase()
+      if (!normalized || seen.has(normalized)) continue
+      seen.add(normalized)
+      unique.push(normalized)
+    }
+    return unique
+  }, [templatePresets])
+
+  const templatesForCreateKind = useMemo(() => {
+    const normalizedKind = String(newSourceTemplateKind || '').trim().toLowerCase()
+    const byKind = templatePresets.filter((preset) => String(preset.source_kind || '').trim().toLowerCase() === normalizedKind)
+    if (byKind.length > 0) return byKind
+    return templatePresets
+  }, [templatePresets, newSourceTemplateKind])
+
+  const selectedCreateTemplate = useMemo(() => {
+    return (
+      templatePresets.find((preset) => preset.id === newSourceTemplateKey)
+      || templatesForCreateKind[0]
+      || templatePresets[0]
+      || null
+    )
+  }, [newSourceTemplateKey, templatesForCreateKind, templatePresets])
+
+  const newSourceTemplatePreviewCode = useMemo(
+    () => selectedCreateTemplate?.source_code || templateQuery.data?.template || FALLBACK_TEMPLATE,
+    [selectedCreateTemplate?.source_code, templateQuery.data?.template]
   )
 
   const sourceKeys = useMemo(() => {
-    const known = ['custom', 'stories', 'events', 'weather', 'crypto', 'traders']
+    const known = ['custom', 'stories', 'events']
     const dynamic = [...new Set(catalog.map((s) => String(s.source_key || '').toLowerCase()).filter(Boolean))]
     return [...new Set([...known, ...dynamic])]
   }, [catalog])
@@ -310,6 +464,20 @@ export default function DataSourcesManager() {
     [catalog, selectedSourceId]
   )
 
+  const selectedSourceQuery = useQuery({
+    queryKey: ['unified-data-source', selectedSourceId],
+    queryFn: () => getUnifiedDataSource(String(selectedSourceId)),
+    enabled: !!selectedSourceId,
+    staleTime: 10000,
+  })
+
+  const selectedSourceResolved = useMemo(() => {
+    if (selectedSourceQuery.data && selectedSourceQuery.data.id === selectedSourceId) {
+      return selectedSourceQuery.data
+    }
+    return selectedSource
+  }, [selectedSourceId, selectedSourceQuery.data, selectedSource])
+
   const runsQuery = useQuery({
     queryKey: ['unified-data-source-runs', selectedSourceId],
     queryFn: () => getUnifiedDataSourceRuns(String(selectedSourceId), { limit: 10 }),
@@ -335,22 +503,31 @@ export default function DataSourcesManager() {
   }, [catalog, selectedSourceId, draftToken])
 
   useEffect(() => {
-    const defaultPresetId = String(templateQuery.data?.default_preset || '').trim()
-    const hasCurrent = templatePresets.some((preset) => preset.id === newPresetId)
-    if (!hasCurrent) {
-      const fallbackId = templatePresets.some((preset) => preset.id === defaultPresetId)
-        ? defaultPresetId
-        : templatePresets[0]?.id || ''
-      if (newPresetId !== fallbackId) {
-        setNewPresetId(fallbackId)
-      }
+    if (templatePresets.length === 0) return
+    const defaultKind = String(templateQuery.data?.default_preset || '').trim()
+    const defaultTemplate = templatePresets.find((preset) => preset.id === defaultKind)
+      || templatePresets.find((preset) => String(preset.source_kind || '').trim().toLowerCase() === String(newSourceTemplateKind || '').trim().toLowerCase())
+      || templatePresets[0]
+    const normalizedKind = String(defaultTemplate.source_kind || 'python').trim().toLowerCase() || 'python'
+    const kindTemplates = templatePresets.filter((preset) => String(preset.source_kind || '').trim().toLowerCase() === normalizedKind)
+    if (!kindTemplates.some((preset) => preset.id === newSourceTemplateKey)) {
+      setNewSourceTemplateKind(normalizedKind)
+      setNewSourceTemplateKey(kindTemplates[0]?.id || templatePresets[0]?.id || '')
     }
-  }, [templateQuery.data?.default_preset, templatePresets, newPresetId])
+  }, [templateQuery.data?.default_preset, templatePresets, newSourceTemplateKind, newSourceTemplateKey])
 
   useEffect(() => {
-    if (!selectedSourceId) return
-    const source = catalog.find((item) => item.id === selectedSourceId)
+    if (!selectedSourceId) {
+      loadedEditorSourceKeyRef.current = null
+      return
+    }
+    const source = selectedSourceResolved
     if (!source) return
+    const sourceVersion = Number(source.version || 0)
+    const hasDetailPayload = Boolean(selectedSourceQuery.data && selectedSourceQuery.data.id === source.id)
+    const nextLoadedKey = `${source.id}:${sourceVersion}:${hasDetailPayload ? 'detail' : 'summary'}`
+    if (loadedEditorSourceKeyRef.current === nextLoadedKey) return
+    loadedEditorSourceKeyRef.current = nextLoadedKey
 
     setDraftToken(null)
     setEditorSlug(source.slug || '')
@@ -360,15 +537,17 @@ export default function DataSourcesManager() {
     setEditorSourceKind(source.source_kind || 'python')
     setEditorEnabled(Boolean(source.enabled))
     setEditorCode(source.source_code || '')
+    setEditorRetention(normalizeRetentionPolicy(source.retention || {}))
     setEditorConfigJson(JSON.stringify(source.config || {}, null, 2))
     setEditorSchemaJson(JSON.stringify(source.config_schema || {}, null, 2))
     setEditorError(null)
     setValidation(null)
     setShowAdvancedCode(false)
-  }, [catalog, selectedSourceId])
+  }, [selectedSourceId, selectedSourceResolved, selectedSourceQuery.data])
 
   const refreshCatalog = () => {
     queryClient.invalidateQueries({ queryKey: ['unified-data-sources'] })
+    queryClient.invalidateQueries({ queryKey: ['unified-data-source'] })
     queryClient.invalidateQueries({ queryKey: ['unified-data-source-runs'] })
     queryClient.invalidateQueries({ queryKey: ['unified-data-source-records-preview'] })
   }
@@ -391,6 +570,7 @@ export default function DataSourcesManager() {
         name: String(editorName || '').trim(),
         description: editorDescription.trim() || undefined,
         source_code: editorCode,
+        retention: normalizeRetentionPolicy(editorRetention),
         config: parsedConfig.value,
         config_schema: parsedSchema.value,
         enabled: editorEnabled,
@@ -412,6 +592,7 @@ export default function DataSourcesManager() {
       setEditorError(null)
       setDraftToken(null)
       setSelectedSourceId(source.id)
+      queryClient.setQueryData(['unified-data-source', source.id], source)
       refreshCatalog()
     },
     onError: (error: unknown) => {
@@ -491,37 +672,77 @@ export default function DataSourcesManager() {
     || runMutation.isPending
     || deleteMutation.isPending
 
-  const startNewDraft = (presetId?: string) => {
-    const preset = templatePresets.find((item) => item.id === (presetId || newPresetId)) || selectedPreset
-    if (!preset) {
-      setEditorError('Template presets are unavailable from backend. Reload sources and retry.')
+  const openCreateModal = () => {
+    const defaultPresetId = String(templateQuery.data?.default_preset || '').trim()
+    const fallback = templatePresets.find((item) => item.id === defaultPresetId) || selectedCreateTemplate || templatePresets[0]
+    const nonce = Date.now().toString().slice(-6)
+    const slugPrefix = normalizeSlug(fallback?.slug_prefix || fallback?.id || 'source')
+    const normalizedKind = String(fallback?.source_kind || 'python').trim().toLowerCase() || 'python'
+    const normalizedSourceKey = String(fallback?.source_key || 'custom').trim().toLowerCase() || 'custom'
+
+    setShowCreateModal(true)
+    setNewSourceName(fallback?.name || 'Custom Data Source')
+    setNewSourceDescription(fallback?.description || '')
+    setNewSourceSourceKey(normalizedSourceKey)
+    setNewSourceTemplateKind(normalizedKind)
+    setNewSourceTemplateKey(fallback?.id || DEFAULT_NEW_SOURCE_PRESET_ID)
+    setNewSourceSlug(`${slugPrefix}_${nonce}`)
+    setNewSourceSlugDirty(false)
+    setNewSourceError(null)
+  }
+
+  const createDraftFromModal = () => {
+    const trimmedName = String(newSourceName || '').trim()
+    const normalizedSlug = normalizeSlug(newSourceSlug)
+    const normalizedSourceKind = String(newSourceTemplateKind || '').trim().toLowerCase()
+    const normalizedSourceKey = String(newSourceSourceKey || '').trim().toLowerCase() || 'custom'
+    const selectedTemplate = selectedCreateTemplate
+
+    if (!trimmedName) {
+      setNewSourceError('Source name is required.')
       return
     }
-    const suffix = Date.now().toString().slice(-6)
-    const slugPrefix = normalizeSlug(String(preset.slug_prefix || preset.id || 'source'))
-    const nextSlug = normalizeSlug(`${slugPrefix}_${suffix}`)
-    const nextConfig = preset.config || {}
-    const nextSchema = preset.config_schema || { param_fields: [] }
-    const nextLimit = Number((nextConfig as Record<string, unknown>).limit)
+    if (!normalizedSlug) {
+      setNewSourceError('Source slug is required.')
+      return
+    }
+    if (!selectedTemplate) {
+      setNewSourceError('Select a template before creating the draft.')
+      return
+    }
+
+    const templateConfig = selectedTemplate.config || {}
+    const templateSchema = selectedTemplate.config_schema || { param_fields: [] }
+    const nextLimit = Number((templateConfig as Record<string, unknown>).limit)
 
     setSelectedSourceId(null)
+    loadedEditorSourceKeyRef.current = null
     setDraftToken(`draft_${Date.now()}`)
-    setEditorSlug(nextSlug)
-    setEditorSourceKey(String(preset.source_key || 'custom').trim().toLowerCase())
-    setEditorSourceKind(String(preset.source_kind || 'python').trim().toLowerCase())
-    setEditorName(preset.name || 'Custom Data Source')
-    setEditorDescription(preset.description || '')
+    setEditorSlug(normalizedSlug)
+    setEditorSourceKind(String(selectedTemplate.source_kind || normalizedSourceKind || 'python').trim().toLowerCase() || 'python')
+    setEditorSourceKey(normalizedSourceKey)
+    setEditorName(trimmedName)
+    setEditorDescription(String(newSourceDescription || '').trim())
     setEditorEnabled(true)
-    setEditorCode(preset.source_code || templateQuery.data?.template || FALLBACK_TEMPLATE)
-    setEditorConfigJson(JSON.stringify(nextConfig, null, 2))
-    setEditorSchemaJson(JSON.stringify(nextSchema, null, 2))
+    setEditorCode(selectedTemplate.source_code || templateQuery.data?.template || FALLBACK_TEMPLATE)
+    setEditorRetention(normalizeRetentionPolicy(selectedTemplate.retention || {}))
+    setEditorConfigJson(JSON.stringify(templateConfig, null, 2))
+    setEditorSchemaJson(JSON.stringify(templateSchema, null, 2))
     setRunLimit(Number.isFinite(nextLimit) ? Math.max(1, Math.min(5000, Math.round(nextLimit))) : 500)
     setEditorError(null)
     setValidation(null)
     setShowAdvancedCode(false)
+    setShowSettings(true)
+    setShowCreateModal(false)
+    setNewSourceError(null)
   }
 
   const hasSelection = Boolean(selectedSource || draftToken)
+  const sourceCodeEditorKey = useMemo(() => {
+    const scope = draftToken || selectedSourceId || 'new'
+    const version = selectedSource?.version || 0
+    return `${scope}:${version}:${editorSourceKind}`
+  }, [draftToken, selectedSourceId, selectedSource?.version, editorSourceKind])
   const displayStatus = selectedSource?.status || 'draft'
   const statusColor = STATUS_COLORS[displayStatus] || STATUS_COLORS.draft
 
@@ -545,47 +766,27 @@ export default function DataSourcesManager() {
     <div className="h-full min-h-0 flex gap-3">
       <div className="w-[300px] shrink-0 min-h-0 flex flex-col rounded-lg border border-border/70 bg-card/50">
         <div className="shrink-0 p-3 space-y-3 border-b border-border/50">
-          <div className="space-y-2">
-            <div className="flex items-center gap-2">
-              {selectedPreset ? (
-                <Select value={selectedPreset.id} onValueChange={setNewPresetId}>
-                  <SelectTrigger className="h-7 text-[11px] flex-1">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {templatePresets.map((preset) => (
-                      <SelectItem key={preset.id} value={preset.id}>
-                        {preset.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              ) : (
-                <div className="h-7 flex-1 rounded-md border border-red-500/30 bg-red-500/10 px-2 text-[10px] text-red-300 flex items-center">
-                  No backend presets available
-                </div>
-              )}
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                className="h-7 px-2 text-[11px]"
-                onClick={() => refreshCatalog()}
-                disabled={busy}
-                title="Refresh sources"
-              >
-                <RefreshCw className={cn('w-3 h-3', sourcesQuery.isFetching && 'animate-spin')} />
-              </Button>
-            </div>
+          <div className="flex items-center justify-between gap-2">
             <Button
               type="button"
               size="sm"
-              className="h-7 gap-1.5 px-2.5 text-[11px] w-full"
-              onClick={() => startNewDraft(selectedPreset?.id)}
-              disabled={busy || !selectedPreset}
+              className="h-7 gap-1.5 px-2.5 text-[11px] flex-1"
+              onClick={openCreateModal}
+              disabled={busy}
             >
               <Plus className="w-3 h-3" />
-              {selectedPreset ? `New ${selectedPreset.name}` : 'New Source'}
+              New Source
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-7 px-2 text-[11px]"
+              onClick={() => refreshCatalog()}
+              disabled={busy}
+              title="Refresh sources"
+            >
+              <RefreshCw className={cn('w-3 h-3', sourcesQuery.isFetching && 'animate-spin')} />
             </Button>
           </div>
 
@@ -593,7 +794,7 @@ export default function DataSourcesManager() {
             <SelectTrigger className="h-7 text-[11px]">
               <SelectValue />
             </SelectTrigger>
-            <SelectContent>
+            <SelectContent className="z-[180]">
               <SelectItem value="all">All Sources ({catalog.length})</SelectItem>
               {sourceKeys.map((key) => (
                 <SelectItem key={key} value={key}>
@@ -623,9 +824,13 @@ export default function DataSourcesManager() {
           </div>
         </div>
 
-        <ScrollArea className="flex-1 min-h-0">
-          <div className="p-1.5 space-y-1">
-            {flatFiltered.length === 0 ? (
+        <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
+          <div className="p-1.5 pr-2 space-y-1">
+            {sourcesQuery.isError ? (
+              <p className="px-3 py-6 text-xs text-red-300 text-center">
+                {errorMessage(sourcesQuery.error, 'Failed to load data sources.')}
+              </p>
+            ) : flatFiltered.length === 0 ? (
               <p className="px-3 py-6 text-xs text-muted-foreground text-center">No data sources found.</p>
             ) : (
               Object.entries(grouped).map(([groupKey, sources]) => (
@@ -659,8 +864,8 @@ export default function DataSourcesManager() {
                           active ? 'bg-cyan-500/10 ring-1 ring-cyan-500/30' : 'hover:bg-muted/50'
                         )}
                       >
-                        <div className="flex items-center justify-between gap-2">
-                          <p className="text-xs font-medium truncate" title={source.name}>
+                        <div className="flex items-center justify-between gap-2 min-w-0">
+                          <p className="min-w-0 flex-1 text-xs font-medium truncate" title={source.name}>
                             {source.name}
                           </p>
                           <Badge variant="outline" className={cn('text-[9px] px-1.5 py-0 h-4 border shrink-0', badgeColor)}>
@@ -674,11 +879,11 @@ export default function DataSourcesManager() {
                           {SOURCE_KIND_LABELS[source.source_kind] || source.source_kind}
                         </p>
                         {healthDetails && healthTone && (
-                          <div className="mt-1 flex items-center justify-between rounded bg-background/50 px-1.5 py-1">
-                            <span className="text-[10px] font-mono text-muted-foreground">
+                          <div className="mt-1 flex items-center justify-between rounded bg-background/50 px-1.5 py-1 gap-2 min-w-0">
+                            <span className="min-w-0 flex-1 truncate text-[10px] font-mono text-muted-foreground">
                               {healthSourceName}
                             </span>
-                            <span className={cn('text-[10px] font-mono', sourceToneClasses(healthTone))}>
+                            <span className={cn('text-[10px] font-mono shrink-0', sourceToneClasses(healthTone))}>
                               {sourceToneLabel(healthTone, healthCount)}
                             </span>
                           </div>
@@ -690,7 +895,7 @@ export default function DataSourcesManager() {
               ))
             )}
           </div>
-        </ScrollArea>
+        </div>
 
         <div className="shrink-0 px-3 py-2 border-t border-border/50 text-[10px] text-muted-foreground space-y-1">
           {sourceHealthError && (
@@ -927,7 +1132,7 @@ export default function DataSourcesManager() {
                           <SelectTrigger className="mt-1 h-8 text-xs">
                             <SelectValue />
                           </SelectTrigger>
-                          <SelectContent>
+                          <SelectContent className="z-[180]">
                             {sourceKeys.map((key) => (
                               <SelectItem key={key} value={key}>
                                 {SOURCE_LABELS[key] || key}
@@ -942,7 +1147,7 @@ export default function DataSourcesManager() {
                           <SelectTrigger className="mt-1 h-8 text-xs">
                             <SelectValue />
                           </SelectTrigger>
-                          <SelectContent>
+                          <SelectContent className="z-[180]">
                             {Object.entries(SOURCE_KIND_LABELS).map(([kind, label]) => (
                               <SelectItem key={kind} value={kind}>{label}</SelectItem>
                             ))}
@@ -966,6 +1171,64 @@ export default function DataSourcesManager() {
                         className="mt-1 h-8 text-xs"
                         placeholder="Describe what this source ingests and transforms..."
                       />
+                    </div>
+                    <div className="grid gap-3 grid-cols-2 xl:grid-cols-4">
+                      <div>
+                        <Label className="text-[11px] text-muted-foreground">Retention Max Records</Label>
+                        <Input
+                          type="number"
+                          min={1}
+                          max={250000}
+                          value={editorRetention.max_records != null ? String(editorRetention.max_records) : ''}
+                          onChange={(event) => {
+                            const value = event.target.value
+                            setEditorRetention((prev) => {
+                              const next = { ...prev }
+                              if (!value.trim()) {
+                                delete next.max_records
+                                return next
+                              }
+                              const parsed = Number(value)
+                              if (!Number.isFinite(parsed)) {
+                                delete next.max_records
+                                return next
+                              }
+                              next.max_records = Math.max(1, Math.min(250000, Math.round(parsed)))
+                              return next
+                            })
+                          }}
+                          className="mt-1 h-8 text-xs font-mono"
+                          placeholder="Disabled"
+                        />
+                      </div>
+                      <div>
+                        <Label className="text-[11px] text-muted-foreground">Retention Max Age (days)</Label>
+                        <Input
+                          type="number"
+                          min={1}
+                          max={3650}
+                          value={editorRetention.max_age_days != null ? String(editorRetention.max_age_days) : ''}
+                          onChange={(event) => {
+                            const value = event.target.value
+                            setEditorRetention((prev) => {
+                              const next = { ...prev }
+                              if (!value.trim()) {
+                                delete next.max_age_days
+                                return next
+                              }
+                              const parsed = Number(value)
+                              if (!Number.isFinite(parsed)) {
+                                delete next.max_age_days
+                                return next
+                              }
+                              next.max_age_days = Math.max(1, Math.min(3650, Math.round(parsed)))
+                              return next
+                            })
+                          }}
+                          className="mt-1 h-8 text-xs font-mono"
+                          placeholder="Disabled"
+                        />
+                      </div>
                     </div>
                   </div>
                 )}
@@ -1034,6 +1297,7 @@ export default function DataSourcesManager() {
                     </div>
                     <div className="flex-1 min-h-0 px-3 pb-2">
                       <CodeEditor
+                        key={sourceCodeEditorKey}
                         value={editorCode}
                         onChange={setEditorCode}
                         language="python"
@@ -1134,6 +1398,214 @@ export default function DataSourcesManager() {
           </>
         )}
       </div>
+
+      {typeof document !== 'undefined' && createPortal(
+        <AnimatePresence>
+          {showCreateModal && (
+            <motion.div
+              key="create-data-source-modal"
+              className="fixed inset-0 z-[140] flex items-start sm:items-center justify-center overflow-y-auto p-3 sm:p-6"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+            >
+              <motion.div
+                className="absolute inset-0 bg-black/35 dark:bg-black/75 backdrop-blur-[2px] dark:backdrop-blur-[3px]"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.2 }}
+                onClick={() => setShowCreateModal(false)}
+                aria-hidden
+              />
+              <motion.div
+                role="dialog"
+                aria-modal="true"
+                aria-label="Create data source draft"
+                className="relative z-10 flex max-h-[calc(100vh-1.5rem)] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-border/70 bg-gradient-to-br from-background via-background to-cyan-50/70 dark:border-cyan-500/30 dark:from-card dark:via-card dark:to-cyan-950/20 shadow-[0_40px_120px_rgba(0,0,0,0.35)] dark:shadow-[0_40px_120px_rgba(0,0,0,0.55)] sm:max-h-[calc(100vh-3rem)]"
+                initial={{ scale: 0.94, opacity: 0, y: 20 }}
+                animate={{ scale: 1, opacity: 1, y: 0 }}
+                exit={{ scale: 0.98, opacity: 0, y: 12 }}
+                transition={{ type: 'spring', stiffness: 250, damping: 28, mass: 0.95 }}
+              >
+                <div className="border-b border-border/60 px-5 py-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold">Create Data Source</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        Pick a source type and template, then continue to configure it in the editor.
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 w-7 p-0"
+                      onClick={() => setShowCreateModal(false)}
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="grid min-h-0 flex-1 gap-4 overflow-y-auto p-4 lg:grid-cols-[1.2fr_0.8fr]">
+                  <div className="space-y-4">
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div>
+                        <Label className="text-[11px] text-muted-foreground">Name</Label>
+                        <Input
+                          value={newSourceName}
+                          onChange={(event) => {
+                            const value = event.target.value
+                            setNewSourceName(value)
+                            setNewSourceError(null)
+                            if (!newSourceSlugDirty) {
+                              const autoSlug = normalizeSlug(value)
+                              setNewSourceSlug(autoSlug || `custom_${Date.now().toString().slice(-6)}`)
+                            }
+                          }}
+                          className="mt-1 h-9 text-xs"
+                          placeholder="My Data Source"
+                        />
+                      </div>
+                      <div>
+                        <Label className="text-[11px] text-muted-foreground">Source Slug</Label>
+                        <Input
+                          value={newSourceSlug}
+                          onChange={(event) => {
+                            setNewSourceSlugDirty(true)
+                            setNewSourceSlug(normalizeSlug(event.target.value))
+                            setNewSourceError(null)
+                          }}
+                          className="mt-1 h-9 text-xs font-mono"
+                          placeholder="my_data_source"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div>
+                        <Label className="text-[11px] text-muted-foreground">Source</Label>
+                        <Select value={newSourceSourceKey} onValueChange={setNewSourceSourceKey}>
+                          <SelectTrigger className="mt-1 h-9 text-xs">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent className="z-[180]">
+                            {sourceKeys.map((sourceKey) => (
+                              <SelectItem key={sourceKey} value={sourceKey}>
+                                {SOURCE_LABELS[sourceKey] || sourceKey}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div>
+                        <Label className="text-[11px] text-muted-foreground">Source Kind</Label>
+                        <Select
+                          value={String(newSourceTemplateKind || 'python')}
+                          onValueChange={(value) => {
+                            setNewSourceTemplateKind(value)
+                            setNewSourceError(null)
+                          }}
+                        >
+                          <SelectTrigger className="mt-1 h-9 text-xs">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent className="z-[180]">
+                            {templateKinds.map((kind) => (
+                              <SelectItem key={kind} value={kind}>
+                                {SOURCE_KIND_LABELS[kind] || kind}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
+
+                    <div>
+                      <Label className="text-[11px] text-muted-foreground">Description</Label>
+                      <textarea
+                        value={newSourceDescription}
+                        onChange={(event) => {
+                          setNewSourceDescription(event.target.value)
+                          setNewSourceError(null)
+                        }}
+                        className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-xs leading-5 text-foreground outline-none ring-offset-background placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                        rows={3}
+                        placeholder="Describe what this data source fetches."
+                      />
+                    </div>
+
+                    <div>
+                      <Label className="text-[11px] text-muted-foreground">
+                        Template ({templatesForCreateKind.length} available for type {SOURCE_KIND_LABELS[newSourceTemplateKind] || newSourceTemplateKind})
+                      </Label>
+                      <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                        {templatesForCreateKind.map((preset) => {
+                          const active = preset.id === (selectedCreateTemplate?.id || '')
+                          return (
+                            <button
+                              type="button"
+                              key={preset.id}
+                              onClick={() => {
+                                setNewSourceTemplateKey(preset.id)
+                                setNewSourceTemplateKind(String(preset.source_kind || 'python').trim().toLowerCase())
+                                setNewSourceSourceKey(String(preset.source_key || newSourceSourceKey).trim().toLowerCase() || 'custom')
+                                setNewSourceError(null)
+                              }}
+                              className={cn(
+                                'rounded-lg border px-3 py-2 text-left transition-all',
+                                active
+                                  ? 'border-cyan-500/70 bg-cyan-500/10 shadow-[0_0_0_1px_rgba(6,182,212,0.22)]'
+                                  : 'border-border/70 bg-card/50 hover:border-border'
+                              )}
+                            >
+                              <p className="text-xs font-semibold">{preset.name}</p>
+                              <p className="text-[10px] text-muted-foreground leading-relaxed mt-1">{preset.description}</p>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="min-h-0 rounded-xl border border-border/60 bg-muted/30 dark:bg-black/30">
+                    <div className="flex items-center justify-between border-b border-border/60 px-3 py-2">
+                      <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Template Preview</span>
+                      <span className="text-[10px] font-mono text-muted-foreground">Read-only</span>
+                    </div>
+                    <div className="max-h-[460px] overflow-auto px-3 py-2">
+                      <pre className="whitespace-pre-wrap text-[11px] leading-5 text-muted-foreground font-mono">{newSourceTemplatePreviewCode}</pre>
+                    </div>
+                  </div>
+                </div>
+
+                {newSourceError && (
+                  <div className="mx-4 mb-2 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+                    {newSourceError}
+                  </div>
+                )}
+
+                <div className="flex items-center justify-end gap-2 border-t border-border/60 px-4 py-3">
+                  <Button type="button" variant="outline" size="sm" onClick={() => setShowCreateModal(false)}>
+                    Cancel
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="bg-cyan-600 hover:bg-cyan-500 text-white"
+                    onClick={createDraftFromModal}
+                    disabled={busy || !newSourceName.trim() || !normalizeSlug(newSourceSlug)}
+                  >
+                    Continue to Editor
+                  </Button>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>,
+        document.body
+      )}
 
       <DataSourceApiDocsFlyout open={showApiDocs} onOpenChange={setShowApiDocs} />
     </div>

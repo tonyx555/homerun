@@ -1,0 +1,776 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]:
+      - img [ref=e7]
+      - generic [ref=e9]: HOMERUN
+    - button "Select Account" [ref=e11] [cursor=pointer]:
+      - img [ref=e12]
+      - generic [ref=e14]: Select Account
+      - img [ref=e15]
+    - generic [ref=e17]:
+      - generic [ref=e18]:
+        - img [ref=e19]
+        - generic [ref=e23]: Balance
+        - generic [ref=e24]: $0.00
+      - generic [ref=e25]:
+        - img [ref=e26]
+        - generic [ref=e29]: PnL
+        - generic [ref=e30]: $0.00
+      - generic [ref=e31]:
+        - img [ref=e32]
+        - generic [ref=e34]: ROI
+        - generic [ref=e35]: 0.0%
+      - generic [ref=e36]:
+        - img [ref=e37]
+        - generic [ref=e39]: Positions
+        - generic [ref=e40]: "0"
+    - generic [ref=e43]:
+      - img [ref=e44]
+      - textbox "Search markets, wallets, traders..." [ref=e47]
+      - generic [ref=e48]: /
+    - generic [ref=e49]:
+      - button "Worker health status" [ref=e50]
+      - button [ref=e52] [cursor=pointer]:
+        - img [ref=e53]
+      - button "Pause" [ref=e59] [cursor=pointer]:
+        - img [ref=e60]
+        - text: Pause
+  - generic [ref=e63]:
+    - img [ref=e67]
+    - generic [ref=e73]:
+      - generic [ref=e74]:
+        - img [ref=e75]
+        - generic [ref=e77]: SYSTEM
+        - generic [ref=e78]: LIVE
+        - generic [ref=e79]: "|"
+      - generic [ref=e80]:
+        - img [ref=e81]
+        - generic [ref=e84]: SCAN
+        - generic [ref=e85]: 3h ago
+        - generic [ref=e86]: "|"
+      - generic [ref=e87]:
+        - img [ref=e88]
+        - generic [ref=e90]: WORKERS
+        - generic [ref=e91]: 1/8
+        - generic [ref=e92]: 7 ERR
+        - generic [ref=e93]: "|"
+      - generic [ref=e94]:
+        - img [ref=e95]
+        - generic [ref=e97]: MARKETS
+        - generic [ref=e98]: "497"
+        - generic [ref=e99]: "|"
+      - generic [ref=e100]:
+        - img [ref=e101]
+        - generic [ref=e105]: TRADERS
+        - generic [ref=e106]: "0"
+        - generic [ref=e107]: "|"
+      - generic [ref=e108]:
+        - img [ref=e109]
+        - generic [ref=e111]: NEWS
+        - generic [ref=e112]: "0"
+        - generic [ref=e113]: "|"
+      - generic [ref=e114]:
+        - img [ref=e115]
+        - generic [ref=e117]: WEATHER
+        - generic [ref=e118]: "0"
+        - generic [ref=e119]: "|"
+      - generic [ref=e120]:
+        - img [ref=e121]
+        - generic [ref=e123]: CRYPTO
+        - generic [ref=e124]: "12"
+        - generic [ref=e125]: "|"
+      - generic [ref=e126]:
+        - img [ref=e127]
+        - generic [ref=e129]: SIGNALS
+        - generic [ref=e130]: P:4.2K S:0 X:0
+        - generic [ref=e131]: F:0
+        - generic [ref=e132]: "|"
+      - generic [ref=e133]:
+        - img [ref=e134]
+        - generic [ref=e136]: STRATEGIES
+        - generic [ref=e137]: "25"
+        - generic [ref=e138]: "|"
+      - generic [ref=e139]:
+        - img [ref=e140]
+        - generic [ref=e143]: ORCH
+        - generic [ref=e144]: PAPER PAUSED
+        - generic [ref=e145]: "|"
+      - generic [ref=e146]:
+        - img [ref=e147]
+        - generic [ref=e151]: FUNNEL
+        - generic [ref=e152]: 0→0
+        - generic [ref=e153]: 0.0%
+        - generic [ref=e154]: "|"
+      - generic [ref=e155]:
+        - img [ref=e156]
+        - generic [ref=e159]: DAY PNL
+        - generic [ref=e160]: $0.00
+        - generic [ref=e161]: "|"
+      - generic [ref=e162]:
+        - img [ref=e163]
+        - generic [ref=e165]: EXPOSURE
+        - generic [ref=e166]: $0.00
+        - generic [ref=e167]: "|"
+      - generic [ref=e168]:
+        - img [ref=e169]
+        - generic [ref=e171]: OPEN ORD
+        - generic [ref=e172]: "0"
+        - generic [ref=e173]: "|"
+      - generic [ref=e174]:
+        - img [ref=e175]
+        - generic [ref=e177]: EVENTS 1M
+        - generic [ref=e178]: "129"
+        - generic [ref=e179]: "|"
+      - generic [ref=e180]:
+        - img [ref=e181]
+        - generic [ref=e183]: FLOW 1M
+        - generic [ref=e184]: D:0 O:0 S:0
+        - generic [ref=e185]: "|"
+      - generic [ref=e186]:
+        - img [ref=e187]
+        - generic [ref=e190]: SCANS 1M
+        - generic [ref=e191]: "0"
+        - generic [ref=e192]: "|"
+      - generic [ref=e193]:
+        - img [ref=e194]
+        - generic [ref=e196]: ALERTS 1M
+        - generic [ref=e197]: "0"
+        - generic [ref=e198]: "|"
+      - generic [ref=e199]:
+        - img [ref=e200]
+        - generic [ref=e202]: LAST EVT
+        - generic [ref=e203]: Worker heartbeat
+        - generic [ref=e2191]: just now
+        - generic [ref=e204]: "|"
+      - generic [ref=e205]:
+        - img [ref=e206]
+        - generic [ref=e208]: SYSTEM
+        - generic [ref=e209]: LIVE
+        - generic [ref=e210]: "|"
+      - generic [ref=e211]:
+        - img [ref=e212]
+        - generic [ref=e215]: SCAN
+        - generic [ref=e216]: 3h ago
+        - generic [ref=e217]: "|"
+      - generic [ref=e218]:
+        - img [ref=e219]
+        - generic [ref=e221]: WORKERS
+        - generic [ref=e222]: 1/8
+        - generic [ref=e223]: 7 ERR
+        - generic [ref=e224]: "|"
+      - generic [ref=e225]:
+        - img [ref=e226]
+        - generic [ref=e228]: MARKETS
+        - generic [ref=e229]: "497"
+        - generic [ref=e230]: "|"
+      - generic [ref=e231]:
+        - img [ref=e232]
+        - generic [ref=e236]: TRADERS
+        - generic [ref=e237]: "0"
+        - generic [ref=e238]: "|"
+      - generic [ref=e239]:
+        - img [ref=e240]
+        - generic [ref=e242]: NEWS
+        - generic [ref=e243]: "0"
+        - generic [ref=e244]: "|"
+      - generic [ref=e245]:
+        - img [ref=e246]
+        - generic [ref=e248]: WEATHER
+        - generic [ref=e249]: "0"
+        - generic [ref=e250]: "|"
+      - generic [ref=e251]:
+        - img [ref=e252]
+        - generic [ref=e254]: CRYPTO
+        - generic [ref=e255]: "12"
+        - generic [ref=e256]: "|"
+      - generic [ref=e257]:
+        - img [ref=e258]
+        - generic [ref=e260]: SIGNALS
+        - generic [ref=e261]: P:4.2K S:0 X:0
+        - generic [ref=e262]: F:0
+        - generic [ref=e263]: "|"
+      - generic [ref=e264]:
+        - img [ref=e265]
+        - generic [ref=e267]: STRATEGIES
+        - generic [ref=e268]: "25"
+        - generic [ref=e269]: "|"
+      - generic [ref=e270]:
+        - img [ref=e271]
+        - generic [ref=e274]: ORCH
+        - generic [ref=e275]: PAPER PAUSED
+        - generic [ref=e276]: "|"
+      - generic [ref=e277]:
+        - img [ref=e278]
+        - generic [ref=e282]: FUNNEL
+        - generic [ref=e283]: 0→0
+        - generic [ref=e284]: 0.0%
+        - generic [ref=e285]: "|"
+      - generic [ref=e286]:
+        - img [ref=e287]
+        - generic [ref=e290]: DAY PNL
+        - generic [ref=e291]: $0.00
+        - generic [ref=e292]: "|"
+      - generic [ref=e293]:
+        - img [ref=e294]
+        - generic [ref=e296]: EXPOSURE
+        - generic [ref=e297]: $0.00
+        - generic [ref=e298]: "|"
+      - generic [ref=e299]:
+        - img [ref=e300]
+        - generic [ref=e302]: OPEN ORD
+        - generic [ref=e303]: "0"
+        - generic [ref=e304]: "|"
+      - generic [ref=e305]:
+        - img [ref=e306]
+        - generic [ref=e308]: EVENTS 1M
+        - generic [ref=e309]: "129"
+        - generic [ref=e310]: "|"
+      - generic [ref=e311]:
+        - img [ref=e312]
+        - generic [ref=e314]: FLOW 1M
+        - generic [ref=e315]: D:0 O:0 S:0
+        - generic [ref=e316]: "|"
+      - generic [ref=e317]:
+        - img [ref=e318]
+        - generic [ref=e321]: SCANS 1M
+        - generic [ref=e322]: "0"
+        - generic [ref=e323]: "|"
+      - generic [ref=e324]:
+        - img [ref=e325]
+        - generic [ref=e327]: ALERTS 1M
+        - generic [ref=e328]: "0"
+        - generic [ref=e329]: "|"
+      - generic [ref=e330]:
+        - img [ref=e331]
+        - generic [ref=e333]: LAST EVT
+        - generic [ref=e334]: Worker heartbeat
+        - generic [ref=e2192]: just now
+        - generic [ref=e335]: "|"
+  - generic [ref=e336]:
+    - navigation [ref=e337]:
+      - button "Opportunities" [ref=e338] [cursor=pointer]:
+        - img [ref=e340]
+        - generic [ref=e342]: Opportunities
+      - button "Bots" [ref=e343] [cursor=pointer]:
+        - img [ref=e344]
+        - generic [ref=e347]: Bots
+      - button "Positions" [ref=e348] [cursor=pointer]:
+        - img [ref=e349]
+        - generic [ref=e352]: Positions
+      - button "Performance" [ref=e353] [cursor=pointer]:
+        - img [ref=e354]
+        - generic [ref=e356]: Performance
+      - button "Accounts" [ref=e357] [cursor=pointer]:
+        - img [ref=e358]
+        - generic [ref=e362]: Accounts
+      - button "Strategies" [ref=e363] [cursor=pointer]:
+        - img [ref=e364]
+        - generic [ref=e368]: Strategies
+      - button "Traders" [ref=e369] [cursor=pointer]:
+        - img [ref=e370]
+        - generic [ref=e375]: Traders
+      - button "Data" [ref=e376] [cursor=pointer]:
+        - img [ref=e377]
+        - generic [ref=e381]: Data
+      - button "AI" [ref=e382] [cursor=pointer]:
+        - img [ref=e383]
+        - generic [ref=e386]: AI
+      - button "Settings" [ref=e387] [cursor=pointer]:
+        - img [ref=e388]
+        - generic [ref=e391]: Settings
+    - main [ref=e392]:
+      - generic [ref=e2194]:
+        - generic [ref=e2195]:
+          - button "Map 10939" [ref=e2196] [cursor=pointer]:
+            - img [ref=e2197]
+            - text: Map
+            - generic [ref=e2202]: "10939"
+          - button "Events 10939" [ref=e2203] [cursor=pointer]:
+            - img [ref=e2204]
+            - text: Events
+            - generic [ref=e2210]: "10939"
+          - button "Stories 26210" [ref=e2211] [cursor=pointer]:
+            - img [ref=e2212]
+            - text: Stories
+            - generic [ref=e2215]: "26210"
+          - button "Sources 44" [active] [ref=e2216] [cursor=pointer]:
+            - img [ref=e2217]
+            - text: Sources
+            - generic [ref=e2221]: "44"
+        - generic [ref=e4010]:
+          - generic [ref=e4011]:
+            - generic [ref=e4012]:
+              - generic [ref=e4013]:
+                - button "New Source" [ref=e4014] [cursor=pointer]:
+                  - img [ref=e4015]
+                  - text: New Source
+                - button "Refresh sources" [ref=e4016] [cursor=pointer]:
+                  - img [ref=e4017]
+              - combobox [ref=e4022] [cursor=pointer]:
+                - generic: All Sources (44)
+                - img [ref=e4023]
+              - generic [ref=e4025]:
+                - img
+                - textbox "Search data sources..." [ref=e4026]
+            - generic [ref=e4028]:
+              - generic [ref=e4029]:
+                - paragraph [ref=e4032]: Events (12)
+                - 'button "Events: All loaded events_all Python" [ref=e4034] [cursor=pointer]':
+                  - generic [ref=e4035]:
+                    - paragraph [ref=e4036]: "Events: All"
+                    - generic [ref=e4037]: loaded
+                  - paragraph [ref=e4038]: events_all
+                  - paragraph [ref=e4039]: Python
+                - 'button "Events: ACLED loaded events_acled Python acled ok (0)" [ref=e4040] [cursor=pointer]':
+                  - generic [ref=e4041]:
+                    - paragraph [ref=e4042]: "Events: ACLED"
+                    - generic [ref=e4043]: loaded
+                  - paragraph [ref=e4044]: events_acled
+                  - paragraph [ref=e4045]: Python
+                  - generic [ref=e4046]:
+                    - generic [ref=e4047]: acled
+                    - generic [ref=e4048]: ok (0)
+                - 'button "Events: GDELT Tensions loaded events_gdelt_tensions Python gdelt_tensions error" [ref=e4049] [cursor=pointer]':
+                  - generic [ref=e4050]:
+                    - paragraph [ref=e4051]: "Events: GDELT Tensions"
+                    - generic [ref=e4052]: loaded
+                  - paragraph [ref=e4053]: events_gdelt_tensions
+                  - paragraph [ref=e4054]: Python
+                  - generic [ref=e4055]:
+                    - generic [ref=e4056]: gdelt_tensions
+                    - generic [ref=e4057]: error
+                - 'button "Events: Military loaded events_military Python military ok (0)" [ref=e4058] [cursor=pointer]':
+                  - generic [ref=e4059]:
+                    - paragraph [ref=e4060]: "Events: Military"
+                    - generic [ref=e4061]: loaded
+                  - paragraph [ref=e4062]: events_military
+                  - paragraph [ref=e4063]: Python
+                  - generic [ref=e4064]:
+                    - generic [ref=e4065]: military
+                    - generic [ref=e4066]: ok (0)
+                - 'button "Events: Infrastructure loaded events_infrastructure Python infrastructure ok (0)" [ref=e4067] [cursor=pointer]':
+                  - generic [ref=e4068]:
+                    - paragraph [ref=e4069]: "Events: Infrastructure"
+                    - generic [ref=e4070]: loaded
+                  - paragraph [ref=e4071]: events_infrastructure
+                  - paragraph [ref=e4072]: Python
+                  - generic [ref=e4073]:
+                    - generic [ref=e4074]: infrastructure
+                    - generic [ref=e4075]: ok (0)
+                - 'button "Events: GDELT News loaded events_gdelt_news Python gdelt_news error" [ref=e4076] [cursor=pointer]':
+                  - generic [ref=e4077]:
+                    - paragraph [ref=e4078]: "Events: GDELT News"
+                    - generic [ref=e4079]: loaded
+                  - paragraph [ref=e4080]: events_gdelt_news
+                  - paragraph [ref=e4081]: Python
+                  - generic [ref=e4082]:
+                    - generic [ref=e4083]: gdelt_news
+                    - generic [ref=e4084]: error
+                - 'button "Events: USGS loaded events_usgs Python usgs error" [ref=e4085] [cursor=pointer]':
+                  - generic [ref=e4086]:
+                    - paragraph [ref=e4087]: "Events: USGS"
+                    - generic [ref=e4088]: loaded
+                  - paragraph [ref=e4089]: events_usgs
+                  - paragraph [ref=e4090]: Python
+                  - generic [ref=e4091]:
+                    - generic [ref=e4092]: usgs
+                    - generic [ref=e4093]: error
+                - 'button "Events: RSS News loaded events_rss_news Python rss_news ok (1500)" [ref=e4094] [cursor=pointer]':
+                  - generic [ref=e4095]:
+                    - paragraph [ref=e4096]: "Events: RSS News"
+                    - generic [ref=e4097]: loaded
+                  - paragraph [ref=e4098]: events_rss_news
+                  - paragraph [ref=e4099]: Python
+                  - generic [ref=e4100]:
+                    - generic [ref=e4101]: rss_news
+                    - generic [ref=e4102]: ok (1500)
+                - 'button "Events: Chokepoints loaded events_chokepoints Python chokepoints ok (5)" [ref=e4103] [cursor=pointer]':
+                  - generic [ref=e4104]:
+                    - paragraph [ref=e4105]: "Events: Chokepoints"
+                    - generic [ref=e4106]: loaded
+                  - paragraph [ref=e4107]: events_chokepoints
+                  - paragraph [ref=e4108]: Python
+                  - generic [ref=e4109]:
+                    - generic [ref=e4110]: chokepoints
+                    - generic [ref=e4111]: ok (5)
+                - 'button "Events: Convergence loaded events_convergence Python convergence ok (0)" [ref=e4112] [cursor=pointer]':
+                  - generic [ref=e4113]:
+                    - paragraph [ref=e4114]: "Events: Convergence"
+                    - generic [ref=e4115]: loaded
+                  - paragraph [ref=e4116]: events_convergence
+                  - paragraph [ref=e4117]: Python
+                  - generic [ref=e4118]:
+                    - generic [ref=e4119]: convergence
+                    - generic [ref=e4120]: ok (0)
+                - 'button "Events: Instability loaded events_instability Python instability ok (0)" [ref=e4121] [cursor=pointer]':
+                  - generic [ref=e4122]:
+                    - paragraph [ref=e4123]: "Events: Instability"
+                    - generic [ref=e4124]: loaded
+                  - paragraph [ref=e4125]: events_instability
+                  - paragraph [ref=e4126]: Python
+                  - generic [ref=e4127]:
+                    - generic [ref=e4128]: instability
+                    - generic [ref=e4129]: ok (0)
+                - 'button "Events: Anomaly loaded events_anomaly Python anomaly ok (0)" [ref=e4130] [cursor=pointer]':
+                  - generic [ref=e4131]:
+                    - paragraph [ref=e4132]: "Events: Anomaly"
+                    - generic [ref=e4133]: loaded
+                  - paragraph [ref=e4134]: events_anomaly
+                  - paragraph [ref=e4135]: Python
+                  - generic [ref=e4136]:
+                    - generic [ref=e4137]: anomaly
+                    - generic [ref=e4138]: ok (0)
+              - generic [ref=e4139]:
+                - paragraph [ref=e4142]: Stories (32)
+                - 'button "Stories: Google - Breaking News loaded stories_google_breaking_news_f4718f RSS Feed" [ref=e4144] [cursor=pointer]':
+                  - generic [ref=e4145]:
+                    - paragraph [ref=e4146]: "Stories: Google - Breaking News"
+                    - generic [ref=e4147]: loaded
+                  - paragraph [ref=e4148]: stories_google_breaking_news_f4718f
+                  - paragraph [ref=e4149]: RSS Feed
+                - 'button "Stories: Google - Politics loaded stories_google_politics_1a1d14 RSS Feed" [ref=e4150] [cursor=pointer]':
+                  - generic [ref=e4151]:
+                    - paragraph [ref=e4152]: "Stories: Google - Politics"
+                    - generic [ref=e4153]: loaded
+                  - paragraph [ref=e4154]: stories_google_politics_1a1d14
+                  - paragraph [ref=e4155]: RSS Feed
+                - 'button "Stories: Google - Business loaded stories_google_business_11d404 RSS Feed" [ref=e4156] [cursor=pointer]':
+                  - generic [ref=e4157]:
+                    - paragraph [ref=e4158]: "Stories: Google - Business"
+                    - generic [ref=e4159]: loaded
+                  - paragraph [ref=e4160]: stories_google_business_11d404
+                  - paragraph [ref=e4161]: RSS Feed
+                - 'button "Stories: Google - Markets loaded stories_google_markets_6c6948 RSS Feed" [ref=e4162] [cursor=pointer]':
+                  - generic [ref=e4163]:
+                    - paragraph [ref=e4164]: "Stories: Google - Markets"
+                    - generic [ref=e4165]: loaded
+                  - paragraph [ref=e4166]: stories_google_markets_6c6948
+                  - paragraph [ref=e4167]: RSS Feed
+                - 'button "Stories: Google - Economy loaded stories_google_economy_6fda2b RSS Feed" [ref=e4168] [cursor=pointer]':
+                  - generic [ref=e4169]:
+                    - paragraph [ref=e4170]: "Stories: Google - Economy"
+                    - generic [ref=e4171]: loaded
+                  - paragraph [ref=e4172]: stories_google_economy_6fda2b
+                  - paragraph [ref=e4173]: RSS Feed
+                - 'button "Stories: Google - Inflation loaded stories_google_inflation_6d731a RSS Feed" [ref=e4174] [cursor=pointer]':
+                  - generic [ref=e4175]:
+                    - paragraph [ref=e4176]: "Stories: Google - Inflation"
+                    - generic [ref=e4177]: loaded
+                  - paragraph [ref=e4178]: stories_google_inflation_6d731a
+                  - paragraph [ref=e4179]: RSS Feed
+                - 'button "Stories: Google - Federal Reserve loaded stories_google_federal_reserve_857c94 RSS Feed" [ref=e4180] [cursor=pointer]':
+                  - generic [ref=e4181]:
+                    - paragraph [ref=e4182]: "Stories: Google - Federal Reserve"
+                    - generic [ref=e4183]: loaded
+                  - paragraph [ref=e4184]: stories_google_federal_reserve_857c94
+                  - paragraph [ref=e4185]: RSS Feed
+                - 'button "Stories: Google - Supreme Court loaded stories_google_supreme_court_222c72 RSS Feed" [ref=e4186] [cursor=pointer]':
+                  - generic [ref=e4187]:
+                    - paragraph [ref=e4188]: "Stories: Google - Supreme Court"
+                    - generic [ref=e4189]: loaded
+                  - paragraph [ref=e4190]: stories_google_supreme_court_222c72
+                  - paragraph [ref=e4191]: RSS Feed
+                - 'button "Stories: Google - Technology loaded stories_google_technology_e91fad RSS Feed" [ref=e4192] [cursor=pointer]':
+                  - generic [ref=e4193]:
+                    - paragraph [ref=e4194]: "Stories: Google - Technology"
+                    - generic [ref=e4195]: loaded
+                  - paragraph [ref=e4196]: stories_google_technology_e91fad
+                  - paragraph [ref=e4197]: RSS Feed
+                - 'button "Stories: Google - Artificial Intelligence loaded stories_google_artificial_intelli_803b3e RSS Feed" [ref=e4198] [cursor=pointer]':
+                  - generic [ref=e4199]:
+                    - paragraph [ref=e4200]: "Stories: Google - Artificial Intelligence"
+                    - generic [ref=e4201]: loaded
+                  - paragraph [ref=e4202]: stories_google_artificial_intelli_803b3e
+                  - paragraph [ref=e4203]: RSS Feed
+                - 'button "Stories: Google - Science loaded stories_google_science_790fad RSS Feed" [ref=e4204] [cursor=pointer]':
+                  - generic [ref=e4205]:
+                    - paragraph [ref=e4206]: "Stories: Google - Science"
+                    - generic [ref=e4207]: loaded
+                  - paragraph [ref=e4208]: stories_google_science_790fad
+                  - paragraph [ref=e4209]: RSS Feed
+                - 'button "Stories: Google - Sports loaded stories_google_sports_1cb542 RSS Feed" [ref=e4210] [cursor=pointer]':
+                  - generic [ref=e4211]:
+                    - paragraph [ref=e4212]: "Stories: Google - Sports"
+                    - generic [ref=e4213]: loaded
+                  - paragraph [ref=e4214]: stories_google_sports_1cb542
+                  - paragraph [ref=e4215]: RSS Feed
+                - 'button "Stories: Google - World loaded stories_google_world_486ea4 RSS Feed" [ref=e4216] [cursor=pointer]':
+                  - generic [ref=e4217]:
+                    - paragraph [ref=e4218]: "Stories: Google - World"
+                    - generic [ref=e4219]: loaded
+                  - paragraph [ref=e4220]: stories_google_world_486ea4
+                  - paragraph [ref=e4221]: RSS Feed
+                - 'button "Stories: Google - Ukraine loaded stories_google_ukraine_5c86f5 RSS Feed" [ref=e4222] [cursor=pointer]':
+                  - generic [ref=e4223]:
+                    - paragraph [ref=e4224]: "Stories: Google - Ukraine"
+                    - generic [ref=e4225]: loaded
+                  - paragraph [ref=e4226]: stories_google_ukraine_5c86f5
+                  - paragraph [ref=e4227]: RSS Feed
+                - 'button "Stories: Google - China Us Relations loaded stories_google_china_us_relations_43f71c RSS Feed" [ref=e4228] [cursor=pointer]':
+                  - generic [ref=e4229]:
+                    - paragraph [ref=e4230]: "Stories: Google - China Us Relations"
+                    - generic [ref=e4231]: loaded
+                  - paragraph [ref=e4232]: stories_google_china_us_relations_43f71c
+                  - paragraph [ref=e4233]: RSS Feed
+                - 'button "Stories: Google - Middle East loaded stories_google_middle_east_121d4a RSS Feed" [ref=e4234] [cursor=pointer]':
+                  - generic [ref=e4235]:
+                    - paragraph [ref=e4236]: "Stories: Google - Middle East"
+                    - generic [ref=e4237]: loaded
+                  - paragraph [ref=e4238]: stories_google_middle_east_121d4a
+                  - paragraph [ref=e4239]: RSS Feed
+                - 'button "Stories: Google - Energy Prices loaded stories_google_energy_prices_882f5f RSS Feed" [ref=e4240] [cursor=pointer]':
+                  - generic [ref=e4241]:
+                    - paragraph [ref=e4242]: "Stories: Google - Energy Prices"
+                    - generic [ref=e4243]: loaded
+                  - paragraph [ref=e4244]: stories_google_energy_prices_882f5f
+                  - paragraph [ref=e4245]: RSS Feed
+                - 'button "Stories: Google - Cryptocurrency loaded stories_google_cryptocurrency_a81246 RSS Feed" [ref=e4246] [cursor=pointer]':
+                  - generic [ref=e4247]:
+                    - paragraph [ref=e4248]: "Stories: Google - Cryptocurrency"
+                    - generic [ref=e4249]: loaded
+                  - paragraph [ref=e4250]: stories_google_cryptocurrency_a81246
+                  - paragraph [ref=e4251]: RSS Feed
+                - 'button "Stories: Google - Bitcoin Etf loaded stories_google_bitcoin_etf_f5b554 RSS Feed" [ref=e4252] [cursor=pointer]':
+                  - generic [ref=e4253]:
+                    - paragraph [ref=e4254]: "Stories: Google - Bitcoin Etf"
+                    - generic [ref=e4255]: loaded
+                  - paragraph [ref=e4256]: stories_google_bitcoin_etf_f5b554
+                  - paragraph [ref=e4257]: RSS Feed
+                - 'button "Stories: GDELT - Prediction Market loaded stories_gdelt_prediction_market_e2a6d8 REST API" [ref=e4258] [cursor=pointer]':
+                  - generic [ref=e4259]:
+                    - paragraph [ref=e4260]: "Stories: GDELT - Prediction Market"
+                    - generic [ref=e4261]: loaded
+                  - paragraph [ref=e4262]: stories_gdelt_prediction_market_e2a6d8
+                  - paragraph [ref=e4263]: REST API
+                - 'button "Stories: GDELT - Polymarket loaded stories_gdelt_polymarket_b0c5fb REST API" [ref=e4264] [cursor=pointer]':
+                  - generic [ref=e4265]:
+                    - paragraph [ref=e4266]: "Stories: GDELT - Polymarket"
+                    - generic [ref=e4267]: loaded
+                  - paragraph [ref=e4268]: stories_gdelt_polymarket_b0c5fb
+                  - paragraph [ref=e4269]: REST API
+                - 'button "Stories: GDELT - Kalshi loaded stories_gdelt_kalshi_b064bb REST API" [ref=e4270] [cursor=pointer]':
+                  - generic [ref=e4271]:
+                    - paragraph [ref=e4272]: "Stories: GDELT - Kalshi"
+                    - generic [ref=e4273]: loaded
+                  - paragraph [ref=e4274]: stories_gdelt_kalshi_b064bb
+                  - paragraph [ref=e4275]: REST API
+                - 'button "Stories: GDELT - Election Odds loaded stories_gdelt_election_odds_90c8d2 REST API" [ref=e4276] [cursor=pointer]':
+                  - generic [ref=e4277]:
+                    - paragraph [ref=e4278]: "Stories: GDELT - Election Odds"
+                    - generic [ref=e4279]: loaded
+                  - paragraph [ref=e4280]: stories_gdelt_election_odds_90c8d2
+                  - paragraph [ref=e4281]: REST API
+                - 'button "Stories: GDELT - Federal Reserve Policy loaded stories_gdelt_federal_reserve_po_5caba5 REST API" [ref=e4282] [cursor=pointer]':
+                  - generic [ref=e4283]:
+                    - paragraph [ref=e4284]: "Stories: GDELT - Federal Reserve Policy"
+                    - generic [ref=e4285]: loaded
+                  - paragraph [ref=e4286]: stories_gdelt_federal_reserve_po_5caba5
+                  - paragraph [ref=e4287]: REST API
+                - 'button "Stories: GDELT - Inflation Report loaded stories_gdelt_inflation_report_c114a4 REST API" [ref=e4288] [cursor=pointer]':
+                  - generic [ref=e4289]:
+                    - paragraph [ref=e4290]: "Stories: GDELT - Inflation Report"
+                    - generic [ref=e4291]: loaded
+                  - paragraph [ref=e4292]: stories_gdelt_inflation_report_c114a4
+                  - paragraph [ref=e4293]: REST API
+                - 'button "Stories: GDELT - Jobs Report loaded stories_gdelt_jobs_report_5f09c4 REST API" [ref=e4294] [cursor=pointer]':
+                  - generic [ref=e4295]:
+                    - paragraph [ref=e4296]: "Stories: GDELT - Jobs Report"
+                    - generic [ref=e4297]: loaded
+                  - paragraph [ref=e4298]: stories_gdelt_jobs_report_5f09c4
+                  - paragraph [ref=e4299]: REST API
+                - 'button "Stories: GDELT - Supreme Court Decision loaded stories_gdelt_supreme_court_deci_d253a3 REST API" [ref=e4300] [cursor=pointer]':
+                  - generic [ref=e4301]:
+                    - paragraph [ref=e4302]: "Stories: GDELT - Supreme Court Decision"
+                    - generic [ref=e4303]: loaded
+                  - paragraph [ref=e4304]: stories_gdelt_supreme_court_deci_d253a3
+                  - paragraph [ref=e4305]: REST API
+                - 'button "Stories: GDELT - Ceasefire Agreement loaded stories_gdelt_ceasefire_agreemen_685aa1 REST API" [ref=e4306] [cursor=pointer]':
+                  - generic [ref=e4307]:
+                    - paragraph [ref=e4308]: "Stories: GDELT - Ceasefire Agreement"
+                    - generic [ref=e4309]: loaded
+                  - paragraph [ref=e4310]: stories_gdelt_ceasefire_agreemen_685aa1
+                  - paragraph [ref=e4311]: REST API
+                - 'button "Stories: GDELT - Military Escalation loaded stories_gdelt_military_escalatio_2e3b53 REST API" [ref=e4312] [cursor=pointer]':
+                  - generic [ref=e4313]:
+                    - paragraph [ref=e4314]: "Stories: GDELT - Military Escalation"
+                    - generic [ref=e4315]: loaded
+                  - paragraph [ref=e4316]: stories_gdelt_military_escalatio_2e3b53
+                  - paragraph [ref=e4317]: REST API
+                - 'button "Stories: GDELT - Trade Sanctions loaded stories_gdelt_trade_sanctions_6202ae REST API" [ref=e4318] [cursor=pointer]':
+                  - generic [ref=e4319]:
+                    - paragraph [ref=e4320]: "Stories: GDELT - Trade Sanctions"
+                    - generic [ref=e4321]: loaded
+                  - paragraph [ref=e4322]: stories_gdelt_trade_sanctions_6202ae
+                  - paragraph [ref=e4323]: REST API
+                - 'button "Stories: GDELT - Cryptocurrency Regulation loaded stories_gdelt_cryptocurrency_reg_79056e REST API" [ref=e4324] [cursor=pointer]':
+                  - generic [ref=e4325]:
+                    - paragraph [ref=e4326]: "Stories: GDELT - Cryptocurrency Regulation"
+                    - generic [ref=e4327]: loaded
+                  - paragraph [ref=e4328]: stories_gdelt_cryptocurrency_reg_79056e
+                  - paragraph [ref=e4329]: REST API
+                - 'button "Stories: GDELT - Bitcoin Etf loaded stories_gdelt_bitcoin_etf_f5b554 REST API" [ref=e4330] [cursor=pointer]':
+                  - generic [ref=e4331]:
+                    - paragraph [ref=e4332]: "Stories: GDELT - Bitcoin Etf"
+                    - generic [ref=e4333]: loaded
+                  - paragraph [ref=e4334]: stories_gdelt_bitcoin_etf_f5b554
+                  - paragraph [ref=e4335]: REST API
+            - generic [ref=e4336]:
+              - generic [ref=e4337]
+              - generic [ref=e4338]:
+                - generic [ref=e4339]: 44 sources
+                - generic [ref=e4340]: 44 enabled
+          - generic [ref=e4341]:
+            - generic [ref=e4342]:
+              - generic [ref=e4343]:
+                - generic [ref=e4344]:
+                  - img [ref=e4345]
+                  - generic: "Events: All"
+                - generic [ref=e4349]: loaded
+                - generic [ref=e4350]: System
+                - generic [ref=e4351]: v4
+              - generic [ref=e4352]:
+                - generic [ref=e4353]:
+                  - generic [ref=e4354]: Enabled
+                  - switch [checked] [ref=e4355] [cursor=pointer]
+                - generic [ref=e4356]:
+                  - generic [ref=e4357]: Run
+                  - spinbutton [ref=e4358]: "500"
+                - button "API Docs" [ref=e4359] [cursor=pointer]:
+                  - img [ref=e4360]
+                  - text: API Docs
+                - button "Validate" [ref=e4363] [cursor=pointer]:
+                  - img [ref=e4364]
+                  - text: Validate
+                - button "Reload" [ref=e4366] [cursor=pointer]:
+                  - img [ref=e4367]
+                  - text: Reload
+                - button "Run" [ref=e4372] [cursor=pointer]:
+                  - img [ref=e4373]
+                  - text: Run
+                - button "Save" [ref=e4375] [cursor=pointer]:
+                  - img [ref=e4376]
+                  - text: Save
+                - button "Delete source" [ref=e4380] [cursor=pointer]:
+                  - img [ref=e4381]
+            - generic [ref=e4384]:
+              - generic [ref=e4385]: "Last run: never"
+              - generic [ref=e4386]: "Records: 0"
+            - generic [ref=e4387]:
+              - button "Source Settings events_all" [ref=e4389] [cursor=pointer]:
+                - img [ref=e4390]
+                - img [ref=e4392]
+                - generic [ref=e4395]: Source Settings
+                - generic [ref=e4396]: events_all
+              - generic [ref=e4397]:
+                - generic [ref=e4398]:
+                  - generic [ref=e4399]:
+                    - img [ref=e4400]
+                    - generic [ref=e4404]: Source Code
+                    - generic [ref=e4405]: Python
+                  - generic [ref=e4407]: class EventsProviderSource
+                - generic [ref=e4411]:
+                  - generic [ref=e4412]:
+                    - generic [ref=e4413]:
+                      - generic [ref=e4414]: "1"
+                      - generic [ref=e4415]: "2"
+                      - generic [ref=e4416]: "3"
+                      - generic [ref=e4417]: "4"
+                      - generic [ref=e4418]: "5"
+                      - generic [ref=e4419]: "6"
+                      - generic [ref=e4420]: "7"
+                      - generic [ref=e4421]: "8"
+                      - generic [ref=e4422]: "9"
+                      - generic [ref=e4423]: "10"
+                      - generic [ref=e4424]: "11"
+                      - generic [ref=e4425]: "12"
+                      - generic [ref=e4426]: "13"
+                      - generic [ref=e4427]: "14"
+                      - generic [ref=e4428]: "15"
+                      - generic [ref=e4429]: "16"
+                      - generic [ref=e4430]: "17"
+                      - generic [ref=e4431]: "18"
+                      - generic [ref=e4432]: "19"
+                      - generic [ref=e4433]: "20"
+                      - generic [ref=e4434]: "21"
+                      - generic [ref=e4435]: "22"
+                      - generic [ref=e4436]: "23"
+                      - generic [ref=e4437]: "24"
+                      - generic [ref=e4438]: "25"
+                      - generic [ref=e4439]: "26"
+                      - generic [ref=e4440]: "27"
+                      - generic [ref=e4441]: "28"
+                      - generic [ref=e4442]: "29"
+                      - generic [ref=e4443]: "30"
+                      - generic [ref=e4444]: "31"
+                      - generic [ref=e4445]: "32"
+                      - generic [ref=e4446]: "33"
+                      - generic [ref=e4447]: "34"
+                      - generic [ref=e4448]: "35"
+                      - generic [ref=e4449]: "36"
+                      - generic [ref=e4450]: "37"
+                      - generic [ref=e4451]: "38"
+                      - generic [ref=e4452]: "39"
+                      - generic [ref=e4453]: "40"
+                      - generic [ref=e4454]: "41"
+                      - generic [ref=e4455]: "42"
+                      - generic [ref=e4456]: "43"
+                    - generic [ref=e4457]:
+                      - generic [ref=e4458] [cursor=pointer]: ⌄
+                      - generic [ref=e4459] [cursor=pointer]: ⌄
+                      - generic [ref=e4460] [cursor=pointer]: ⌄
+                      - generic [ref=e4461] [cursor=pointer]: ⌄
+                      - generic [ref=e4462] [cursor=pointer]: ⌄
+                      - generic [ref=e4463] [cursor=pointer]: ⌄
+                      - generic [ref=e4464] [cursor=pointer]: ⌄
+                      - generic [ref=e4465] [cursor=pointer]: ⌄
+                      - generic [ref=e4466] [cursor=pointer]: ⌄
+                      - generic [ref=e4467] [cursor=pointer]: ⌄
+                      - generic [ref=e4468] [cursor=pointer]: ⌄
+                      - generic [ref=e4469] [cursor=pointer]: ⌄
+                      - generic [ref=e4470] [cursor=pointer]: ⌄
+                      - generic [ref=e4471] [cursor=pointer]: ⌄
+                  - textbox [ref=e4472]:
+                    - generic [ref=e4473]: "# System data source seed"
+                    - generic [ref=e4474]: from __future__ import annotations
+                    - generic [ref=e4476]: import hashlib
+                    - generic [ref=e4477]: from datetime import datetime, timedelta, timezone
+                    - generic [ref=e4479]: from sqlalchemy import desc, select
+                    - generic [ref=e4481]: from models.database import AsyncSessionLocal, EventsSignal, NewsArticleCache
+                    - generic [ref=e4482]: from services.data_source_sdk import BaseDataSource
+                    - generic [ref=e4485]: "def _now_utc() -> datetime:"
+                    - generic [ref=e4486]: return datetime.now(timezone.utc)
+                    - generic [ref=e4489]: "def _parse_datetime(value):"
+                    - generic [ref=e4490]: "if value is None:"
+                    - generic [ref=e4491]: return None
+                    - generic [ref=e4492]: "if isinstance(value, datetime):"
+                    - generic [ref=e4493]: "if value.tzinfo is not None:"
+                    - generic [ref=e4494]: return value.astimezone(timezone.utc)
+                    - generic [ref=e4495]: return value.replace(tzinfo=timezone.utc)
+                    - generic [ref=e4496]: text = str(value or "").strip()
+                    - generic [ref=e4497]: "if not text:"
+                    - generic [ref=e4498]: return None
+                    - generic [ref=e4499]: "if text.endswith(\"Z\"):"
+                    - generic [ref=e4500]: text = text[:-1] + "+00:00"
+                    - generic [ref=e4501]: "try:"
+                    - generic [ref=e4502]: parsed = datetime.fromisoformat(text)
+                    - generic [ref=e4503]: "except Exception:"
+                    - generic [ref=e4504]: return None
+                    - generic [ref=e4505]: "if parsed.tzinfo is not None:"
+                    - generic [ref=e4506]: return parsed.astimezone(timezone.utc)
+                    - generic [ref=e4507]: return parsed.replace(tzinfo=timezone.utc)
+                    - generic [ref=e4510]: "def _as_float(value, default=0.0):"
+                    - generic [ref=e4511]: "try:"
+                    - generic [ref=e4512]: out = float(value)
+                    - generic [ref=e4513]: "except Exception:"
+                    - generic [ref=e4514]: return float(default)
+                    - generic [ref=e4515]: "if out != out:"
+              - button "Runtime Config 7 fields" [ref=e4518] [cursor=pointer]:
+                - img [ref=e4519]
+                - img [ref=e4521]
+                - generic [ref=e4524]: Runtime Config
+                - generic [ref=e4525]: 7 fields
+  - button "K" [ref=e2185] [cursor=pointer]:
+    - img [ref=e2186]
+    - generic [ref=e2188]:
+      - img [ref=e2189]
+      - text: K

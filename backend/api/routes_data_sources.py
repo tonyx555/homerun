@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
+import asyncio
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -19,7 +20,12 @@ from models.database import (
     DataSourceTombstone,
     get_db_session,
 )
-from services.data_source_catalog import ensure_all_data_sources_seeded, list_prebuilt_data_source_presets
+from services.data_source_catalog import (
+    build_data_source_source_code,
+    default_data_source_retention_policy,
+    ensure_all_data_sources_seeded,
+    list_prebuilt_data_source_presets,
+)
 from services.data_source_loader import (
     DATA_SOURCE_TEMPLATE,
     DataSourceValidationError,
@@ -33,6 +39,15 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/data-sources", tags=["Data Sources"])
 
 _SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{1,48}[a-z0-9]$")
+_SOURCE_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
+_SEED_GUARD_LOCK = asyncio.Lock()
+_DATA_SOURCES_SEEDED = False
+_ALLOWED_SOURCE_KINDS = {"python", "rss", "rest_api"}
+_TEMPLATED_SOURCE_KINDS = {"rss", "rest_api"}
+_RETENTION_BOUNDS: dict[str, tuple[int, int]] = {
+    "max_records": (1, 250_000),
+    "max_age_days": (1, 3650),
+}
 
 
 def _validate_slug(slug: str) -> str:
@@ -48,6 +63,112 @@ def _validate_slug(slug: str) -> str:
     return value
 
 
+def _normalize_source_key(value: str, default: str = "custom") -> str:
+    out = str(value or "").strip().lower() or default
+    if not _SOURCE_KEY_RE.match(out):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid source_key '{out}'. Must start with a letter, use lowercase letters/numbers/underscores, "
+                "and be 2-64 characters."
+            ),
+        )
+    return out
+
+
+def _normalize_source_kind(value: str, default: str = "python") -> str:
+    out = str(value or "").strip().lower() or default
+    if out not in _ALLOWED_SOURCE_KINDS:
+        allowed = ", ".join(sorted(_ALLOWED_SOURCE_KINDS))
+        raise HTTPException(status_code=400, detail=f"Unsupported source_kind '{out}'. Allowed values: {allowed}.")
+    return out
+
+
+def _normalize_retention_policy(retention: object, *, strict: bool = True) -> dict[str, int]:
+    if retention is None:
+        return {}
+    if not isinstance(retention, dict):
+        if strict:
+            raise HTTPException(status_code=400, detail="retention must be an object.")
+        return {}
+
+    normalized: dict[str, int] = {}
+    for key, bounds in _RETENTION_BOUNDS.items():
+        raw_value = retention.get(key)
+        if raw_value in (None, ""):
+            continue
+        low, high = bounds
+        try:
+            parsed = int(float(raw_value))
+        except (TypeError, ValueError):
+            if strict:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"retention.{key} must be an integer between {low} and {high}.",
+                ) from None
+            continue
+        if parsed < low or parsed > high:
+            if strict:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"retention.{key} must be between {low} and {high}.",
+                )
+            continue
+        normalized[key] = parsed
+    return normalized
+
+
+def _resolve_retention_policy(
+    retention: object,
+    *,
+    slug: str | None,
+    source_key: str | None,
+    source_kind: str | None,
+    strict: bool = True,
+) -> dict[str, int]:
+    defaults = default_data_source_retention_policy(
+        slug=slug,
+        source_key=source_key,
+        source_kind=source_kind,
+    )
+    normalized = _normalize_retention_policy(retention, strict=strict)
+    if not normalized:
+        return defaults
+    out = dict(defaults)
+    out.update(normalized)
+    return out
+
+
+def _resolve_source_code_for_kind(
+    *,
+    source_kind: str,
+    slug: str,
+    name: str,
+    description: str | None,
+    source_code: str | None,
+    config: dict,
+) -> str:
+    raw_code = str(source_code or "")
+    if raw_code.strip():
+        return raw_code
+
+    normalized_kind = _normalize_source_kind(source_kind, "python")
+    if normalized_kind in _TEMPLATED_SOURCE_KINDS:
+        return build_data_source_source_code(
+            source_kind=normalized_kind,
+            slug=slug,
+            name=name,
+            description=description or "",
+            config=dict(config or {}),
+            include_seed_marker=False,
+        )
+
+    raise HTTPException(
+        status_code=400,
+        detail="Python data sources require source_code with at least 10 characters.",
+    )
+
+
 class DataSourceCreateRequest(BaseModel):
     slug: str = Field(..., min_length=3, max_length=128)
     source_key: str = Field(default="custom", min_length=2, max_length=64)
@@ -55,6 +176,7 @@ class DataSourceCreateRequest(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=200)
     description: Optional[str] = Field(None, max_length=500)
     source_code: Optional[str] = Field(default="", min_length=0)
+    retention: dict = Field(default_factory=dict)
     config: dict = Field(default_factory=dict)
     config_schema: dict = Field(default_factory=dict)
     enabled: bool = True
@@ -67,6 +189,7 @@ class DataSourceUpdateRequest(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=200)
     description: Optional[str] = None
     source_code: Optional[str] = Field(None, min_length=10)
+    retention: Optional[dict] = None
     config: Optional[dict] = None
     config_schema: Optional[dict] = None
     enabled: Optional[bool] = None
@@ -82,18 +205,40 @@ class DataSourceRunRequest(BaseModel):
     max_records: int = Field(default=500, ge=1, le=5000)
 
 
-_DECLARATIVE_KINDS = {"rss", "rest_api"}
+async def _ensure_data_sources_seeded_once(session: AsyncSession) -> None:
+    global _DATA_SOURCES_SEEDED
+
+    if _DATA_SOURCES_SEEDED:
+        return
+
+    async with _SEED_GUARD_LOCK:
+        if _DATA_SOURCES_SEEDED:
+            return
+        try:
+            await ensure_all_data_sources_seeded(session)
+            _DATA_SOURCES_SEEDED = True
+        except Exception as exc:
+            logger.warning(
+                "Skipped data source seeding during request",
+                source="data-sources-route",
+                error=exc,
+            )
+            # Continue with whatever is currently in DB; this avoids hard-failing the data-tab
+            # when the seed step is temporarily blocked.
+            _DATA_SOURCES_SEEDED = False
 
 
-def _source_to_dict(row: DataSource) -> dict:
-    source_kind = str(row.source_kind or "python").strip().lower()
-    is_declarative = source_kind in _DECLARATIVE_KINDS
-
-    if is_declarative:
-        capabilities = {"has_fetch": True, "has_fetch_async": False, "has_transform": False}
-    else:
+def _source_to_dict(row: DataSource, *, include_code: bool = True) -> dict:
+    capabilities = {"has_fetch": False, "has_fetch_async": False, "has_transform": False}
+    try:
         validation = validate_data_source_source(str(row.source_code or ""), class_name=row.class_name)
-        capabilities = validation.get("capabilities") or {}
+        capabilities = validation.get("capabilities") or capabilities
+    except Exception as exc:
+        logger.warning(
+            "Failed to validate source capabilities during source serialization",
+            source_slug=str(row.slug or "").strip().lower(),
+            error=exc,
+        )
 
     runtime = data_source_loader.get_runtime(str(row.slug or "").strip().lower())
     runtime_payload = None
@@ -118,13 +263,20 @@ def _source_to_dict(row: DataSource) -> dict:
         "source_kind": row.source_kind,
         "name": row.name,
         "description": row.description,
-        "source_code": row.source_code,
+        "source_code": row.source_code if include_code else "",
         "class_name": row.class_name,
         "is_system": bool(row.is_system),
         "enabled": bool(row.enabled),
         "status": row.status,
         "error_message": row.error_message,
         "version": int(row.version or 1),
+        "retention": _resolve_retention_policy(
+            row.retention,
+            slug=row.slug,
+            source_key=row.source_key,
+            source_kind=row.source_kind,
+            strict=False,
+        ),
         "config": dict(row.config or {}),
         "config_schema": dict(row.config_schema or {}),
         "sort_order": int(row.sort_order or 0),
@@ -158,17 +310,18 @@ async def get_data_source_template():
         "presets": presets,
         "instructions": (
             "Create a class extending BaseDataSource and implement fetch() or fetch_async(). "
-            "Return normalized dict records and optionally transform each record."
+            "Return normalized dict records and optionally transform each record. "
+            "Use BaseDataSource helpers for HTTP, RSS, datetime parsing, and filtering."
         ),
         "available_imports": [
             "services.data_source_sdk (BaseDataSource, DataSourceSDK)",
             "services.strategy_sdk (StrategySDK)",
-            "services.news.*",
-            "services.world_intelligence.*",
             "models.*",
             "config (settings)",
             "math, statistics, collections, datetime, re, json, random, asyncio, pathlib",
             "httpx",
+            "requests, aiohttp, urllib",
+            "feedparser",
             "numpy, scipy, pandas (if installed)",
         ],
     }
@@ -190,9 +343,10 @@ async def get_data_source_docs():
                 "run": "One execution of a source (fetch -> transform -> upsert), stored in data_source_runs.",
                 "record": "A normalized output row from a source, stored in data_source_records.",
                 "source_key": (
-                    "Domain bucket for UI and strategy routing (events, stories, weather, crypto, traders, custom)."
+                    "Domain bucket for grouping/routing (events, stories, custom, or another lowercase underscore key)."
                 ),
-                "source_kind": "Implementation kind (python, rss, gdelt, events, stories, bridge).",
+                "source_kind": "Implementation kind (python, rss, rest_api).",
+                "retention": "Optional datasource-level retention policy (max_records, max_age_days).",
             },
             "three_stage_lifecycle": {
                 "description": (
@@ -278,6 +432,16 @@ async def get_data_source_docs():
                     "description": "Normalize one fetched item. Default returns item unchanged.",
                 },
             },
+            "helpers": {
+                "_http_get_json": "async _http_get_json(url, params=None, headers=None, timeout=30.0, default=None)",
+                "_http_get_text": "async _http_get_text(url, params=None, headers=None, timeout=30.0, default='')",
+                "_fetch_rss": "async _fetch_rss(url, timeout=30.0) -> (feed_title, entries)",
+                "_parse_datetime": "_parse_datetime(value) -> datetime | None",
+                "_extract_json_path": "_extract_json_path(data, path) -> list[dict]",
+                "_as_int/_as_float/_clamp": "Numeric parsing + clamp helpers for config and payload values",
+                "_hours/_limit/_min_severity": "Standardized config-driven bounds for ingestion loops",
+                "_keep": "_keep(source, category, severity) -> bool using source_names/signal_types/min_severity filters",
+            },
             "method_selection": {
                 "note": "Implement at least one of fetch() or fetch_async().",
                 "runner_behavior": ("Runner prefers fetch_async() when available; otherwise it executes fetch()."),
@@ -293,7 +457,7 @@ async def get_data_source_docs():
                 "title": "str | optional headline/title shown in previews",
                 "summary": "str | optional short text summary",
                 "category": "str | optional lowercase category (conflict, macro, weather, crypto, etc.)",
-                "source": "str | optional upstream provider name",
+                "source": "str | optional upstream source name",
                 "url": "str | optional canonical source URL",
                 "observed_at": "datetime | ISO8601 string | optional event timestamp",
                 "payload": "dict | optional raw or lightly-normalized payload",
@@ -327,6 +491,16 @@ async def get_data_source_docs():
                 "data_sources": "Source registry metadata and Python source code.",
                 "data_source_runs": "Execution history for every run.",
                 "data_source_records": "Latest normalized records for strategy/UI consumption.",
+            },
+            "retention_enforcement": {
+                "description": (
+                    "If a source defines retention.max_records and/or retention.max_age_days, "
+                    "runner applies pruning after each successful upsert cycle."
+                ),
+                "fields": {
+                    "max_records": "Keep only the newest N records for this source.",
+                    "max_age_days": "Delete records older than N days by observed_at (fallback: ingested_at).",
+                },
             },
         },
         "sdk_reference": {
@@ -382,9 +556,9 @@ async def get_data_source_docs():
                     "description": "Execute ingestion immediately and return run summary.",
                 },
             },
-            "strategy_sdk_bridge": {
+            "strategy_sdk_access": {
                 "description": (
-                    "Strategy code can call StrategySDK wrappers instead of importing DataSourceSDK directly."
+                    "Strategy code has first-class DataSourceSDK access via StrategySDK wrappers."
                 ),
                 "methods": {
                     "StrategySDK.get_data_records": "Wrapper around DataSourceSDK.get_records()",
@@ -393,6 +567,11 @@ async def get_data_source_docs():
                     "StrategySDK.list_data_sources": "Wrapper around DataSourceSDK.list_sources()",
                     "StrategySDK.get_data_source": "Wrapper around DataSourceSDK.get_source()",
                     "StrategySDK.get_data_source_runs": "Wrapper around DataSourceSDK.get_recent_runs()",
+                    "StrategySDK.create_data_source": "Wrapper around DataSourceSDK.create_source()",
+                    "StrategySDK.update_data_source": "Wrapper around DataSourceSDK.update_source()",
+                    "StrategySDK.delete_data_source": "Wrapper around DataSourceSDK.delete_source()",
+                    "StrategySDK.reload_data_source": "Wrapper around DataSourceSDK.reload_source()",
+                    "StrategySDK.validate_data_source": "Wrapper around DataSourceSDK.validate_source()",
                 },
             },
         },
@@ -400,8 +579,6 @@ async def get_data_source_docs():
             "app_modules": {
                 "services.data_source_sdk": "BaseDataSource and DataSourceSDK",
                 "services.strategy_sdk": "Read/use data sources from strategy runtime",
-                "services.news.*": "News ingestion helpers",
-                "services.world_intelligence.*": "World intelligence helpers",
                 "models.*": "Core ORM/Pydantic models",
                 "config": "Application settings",
             },
@@ -422,6 +599,7 @@ async def get_data_source_docs():
             ],
             "third_party": {
                 "httpx": "Async-friendly HTTP client for upstream APIs",
+                "feedparser": "RSS/Atom parsing helper for feed-based sources",
                 "numpy": "Numerical transformations",
                 "scipy": "Scientific/statistical transforms",
                 "pandas": "Tabular parsing/cleanup (when installed)",
@@ -517,7 +695,7 @@ async def get_data_source_docs():
                     "            'title': item.get('title'),\n"
                     "            'summary': item.get('summary'),\n"
                     "            'category': 'events',\n"
-                    "            'source': item.get('provider') or 'api',\n"
+                    "            'source': item.get('source') or item.get('domain') or 'api',\n"
                     "            'url': item.get('url'),\n"
                     "            'observed_at': item.get('timestamp'),\n"
                     "            'payload': item,\n"
@@ -568,9 +746,10 @@ async def validate_data_source(req: DataSourceValidateRequest):
 async def list_data_sources(
     source_key: Optional[str] = Query(default=None),
     enabled: Optional[bool] = Query(default=None),
+    include_code: bool = Query(default=False),
 ):
     async with AsyncSessionLocal() as session:
-        await ensure_all_data_sources_seeded(session)
+        await _ensure_data_sources_seeded_once(session)
 
         query = select(DataSource).order_by(
             DataSource.is_system.desc(),
@@ -583,53 +762,69 @@ async def list_data_sources(
             query = query.where(DataSource.enabled == bool(enabled))
 
         rows = (await session.execute(query)).scalars().all()
-        items = [_source_to_dict(row) for row in rows]
+        items = []
+        for row in rows:
+            try:
+                items.append(_source_to_dict(row, include_code=include_code))
+            except Exception as exc:
+                slug = str(row.slug or "").strip().lower()
+                logger.warning("Skipping data source due serialization failure", source_slug=slug, error=exc)
 
     return {"items": items, "total": len(items)}
 
 
 @router.get("/{source_id}")
 async def get_data_source(source_id: str, session: AsyncSession = Depends(get_db_session)):
-    await ensure_all_data_sources_seeded(session)
+    await _ensure_data_sources_seeded_once(session)
 
     row = await session.get(DataSource, source_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Data source not found")
 
-    return _source_to_dict(row)
+    return _source_to_dict(row, include_code=True)
 
 
 @router.post("")
 async def create_data_source(req: DataSourceCreateRequest):
     slug = _validate_slug(req.slug)
-    source_key = str(req.source_key or "custom").strip().lower()
-    source_kind = str(req.source_kind or "python").strip().lower()
-    is_declarative = source_kind in _DECLARATIVE_KINDS
+    source_key = _normalize_source_key(req.source_key, "custom")
+    source_kind = _normalize_source_kind(req.source_kind, "python")
+    source_name = (req.name or slug.replace("_", " ").title()).strip()
+    if not source_name:
+        raise HTTPException(status_code=400, detail="name is required")
 
-    class_name = None
-    source_name = None
-    source_description = None
+    source_code = str(req.source_code or "")
+    if not source_code.strip() and source_kind in {"rss", "rest_api"}:
+        source_code = build_data_source_source_code(
+            source_kind=source_kind,
+            slug=slug,
+            name=source_name,
+            description=req.description or "",
+            config=dict(req.config or {}),
+            include_seed_marker=False,
+        )
+    if not source_code.strip() and source_kind == "python":
+        raise HTTPException(
+            status_code=400,
+            detail="Python data sources require source_code with at least 10 characters.",
+        )
 
-    if is_declarative:
-        # Declarative sources do not need source_code or AST validation.
-        source_name = (req.name or slug.replace("_", " ").title()).strip()
-        source_description = req.description
-    else:
-        source_code = req.source_code or ""
-        if len(source_code) < 10:
-            raise HTTPException(
-                status_code=400,
-                detail="Python data sources require source_code with at least 10 characters.",
-            )
-        validation = validate_data_source_source(source_code)
-        if not validation["valid"]:
-            raise HTTPException(
-                status_code=400,
-                detail={"message": "Data source validation failed", "errors": validation["errors"]},
-            )
-        source_name = (req.name or validation.get("source_name") or slug.replace("_", " ").title()).strip()
-        source_description = req.description if req.description is not None else validation.get("source_description")
-        class_name = validation.get("class_name")
+    validation = validate_data_source_source(source_code)
+    if not validation["valid"]:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "Data source validation failed", "errors": validation["errors"]},
+        )
+    source_name = (req.name or validation.get("source_name") or source_name).strip()
+    source_description = req.description if req.description is not None else validation.get("source_description")
+    class_name = validation.get("class_name")
+    retention_policy = _resolve_retention_policy(
+        req.retention,
+        slug=slug,
+        source_key=source_key,
+        source_kind=source_kind,
+        strict=True,
+    )
 
     source_id = uuid.uuid4().hex
     status = "unloaded"
@@ -641,17 +836,12 @@ async def create_data_source(req: DataSourceCreateRequest):
             raise HTTPException(status_code=409, detail=f"A data source with slug '{slug}' already exists.")
 
         if req.enabled:
-            if is_declarative:
-                # Declarative runners are always "loaded" — the runner validates
-                # config at execution time.
+            try:
+                data_source_loader.load(slug, source_code, req.config or None, class_name=class_name)
                 status = "loaded"
-            else:
-                try:
-                    data_source_loader.load(slug, req.source_code or "", req.config or None, class_name=class_name)
-                    status = "loaded"
-                except DataSourceValidationError as exc:
-                    status = "error"
-                    error_message = str(exc)
+            except DataSourceValidationError as exc:
+                status = "error"
+                error_message = str(exc)
 
         row = DataSource(
             id=source_id,
@@ -660,12 +850,13 @@ async def create_data_source(req: DataSourceCreateRequest):
             source_kind=source_kind,
             name=source_name,
             description=source_description,
-            source_code=req.source_code or "",
+            source_code=source_code,
             class_name=class_name,
             is_system=False,
             enabled=req.enabled,
             status=status,
             error_message=error_message,
+            retention=retention_policy,
             config=req.config or {},
             config_schema=req.config_schema or {},
             version=1,
@@ -690,13 +881,14 @@ async def update_data_source(source_id: str, req: DataSourceUpdateRequest):
                 detail="System data sources are read-only. Set unlock_system=true for admin override.",
             )
 
-        original_slug = row.slug
-        code_changed = False
+        original_slug = str(row.slug or "").strip().lower()
         slug_changed = False
+        runtime_reload_required = False
+        source_kind_changed = False
 
         if req.slug is not None:
             next_slug = _validate_slug(req.slug)
-            if next_slug != row.slug:
+            if next_slug != str(row.slug or "").strip().lower():
                 existing_slug = await session.execute(
                     select(DataSource.id).where(
                         DataSource.slug == next_slug,
@@ -708,74 +900,98 @@ async def update_data_source(source_id: str, req: DataSourceUpdateRequest):
                 row.slug = next_slug
                 slug_changed = True
 
-        # Determine current effective source_kind (may be changing in this request)
-        effective_kind = str(
-            req.source_kind if req.source_kind is not None else (row.source_kind or "python")
-        ).strip().lower()
-        is_declarative = effective_kind in _DECLARATIVE_KINDS
-
-        if req.source_code is not None and req.source_code != row.source_code:
-            if is_declarative:
-                row.source_code = req.source_code
-            else:
-                validation = validate_data_source_source(req.source_code)
-                if not validation["valid"]:
-                    raise HTTPException(
-                        status_code=400,
-                        detail={"message": "Validation failed", "errors": validation["errors"]},
-                    )
-                row.source_code = req.source_code
-                row.class_name = validation.get("class_name")
-                if req.name is None and validation.get("source_name"):
-                    row.name = validation.get("source_name")
-                if req.description is None and validation.get("source_description"):
-                    row.description = validation.get("source_description")
-            row.version = int(row.version or 1) + 1
-            code_changed = True
-
-        if req.config is not None:
-            row.config = req.config
-            code_changed = True
-        if req.config_schema is not None:
-            row.config_schema = req.config_schema
-
         if req.source_key is not None:
-            row.source_key = str(req.source_key or "custom").strip().lower()
+            row.source_key = _normalize_source_key(req.source_key, "custom")
         if req.source_kind is not None:
-            row.source_kind = str(req.source_kind or "python").strip().lower()
+            normalized_kind = _normalize_source_kind(req.source_kind, "python")
+            current_kind = _normalize_source_kind(str(row.source_kind or ""), "python")
+            source_kind_changed = normalized_kind != current_kind
+            row.source_kind = normalized_kind
         if req.name is not None:
             row.name = req.name
         if req.description is not None:
             row.description = req.description
+        if req.config is not None:
+            row.config = dict(req.config)
+            runtime_reload_required = True
+        if req.config_schema is not None:
+            row.config_schema = dict(req.config_schema)
+
+        effective_kind = _normalize_source_kind(str(row.source_kind or ""), "python")
+        if str(row.source_kind or "").strip().lower() != effective_kind:
+            row.source_kind = effective_kind
+        row.retention = _resolve_retention_policy(
+            req.retention if req.retention is not None else row.retention,
+            slug=str(row.slug or "").strip().lower(),
+            source_key=str(row.source_key or "").strip().lower(),
+            source_kind=effective_kind,
+            strict=req.retention is not None,
+        )
+
+        source_code_input = req.source_code
+        if source_code_input is None:
+            if source_kind_changed and effective_kind in _TEMPLATED_SOURCE_KINDS:
+                source_code_input = ""
+            else:
+                source_code_input = str(row.source_code or "")
+        source_name = str(row.name or "").strip() or str(row.slug or "").replace("_", " ").title()
+        resolved_source_code = _resolve_source_code_for_kind(
+            source_kind=effective_kind,
+            slug=str(row.slug or "").strip().lower(),
+            name=source_name,
+            description=row.description,
+            source_code=source_code_input,
+            config=dict(row.config or {}),
+        )
+
+        should_validate = (
+            req.source_code is not None
+            or source_kind_changed
+            or (effective_kind in _TEMPLATED_SOURCE_KINDS and not str(row.source_code or "").strip())
+        )
+        if should_validate:
+            validation = validate_data_source_source(resolved_source_code)
+            if not validation["valid"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"message": "Validation failed", "errors": validation["errors"]},
+                )
+            if str(row.source_code or "") != resolved_source_code:
+                row.source_code = resolved_source_code
+                row.version = int(row.version or 1) + 1
+                runtime_reload_required = True
+            row.class_name = validation.get("class_name")
+            if req.name is None and validation.get("source_name"):
+                row.name = validation.get("source_name")
+            if req.description is None and validation.get("source_description"):
+                row.description = validation.get("source_description")
+            if source_kind_changed:
+                runtime_reload_required = True
 
         enabled_changed = False
         if req.enabled is not None and req.enabled != row.enabled:
             row.enabled = req.enabled
             enabled_changed = True
 
-        if enabled_changed or code_changed or slug_changed:
+        if enabled_changed or runtime_reload_required or slug_changed:
             if slug_changed:
                 data_source_loader.unload(original_slug)
             if row.enabled:
-                if is_declarative:
-                    # Declarative runners validate config at execution time.
+                try:
+                    runtime = data_source_loader.load(
+                        str(row.slug or "").strip().lower(),
+                        str(row.source_code or ""),
+                        dict(row.config or {}),
+                        class_name=row.class_name,
+                    )
+                    row.class_name = runtime.class_name
                     row.status = "loaded"
                     row.error_message = None
-                else:
-                    try:
-                        data_source_loader.load(
-                            row.slug,
-                            row.source_code,
-                            row.config or None,
-                            class_name=row.class_name,
-                        )
-                        row.status = "loaded"
-                        row.error_message = None
-                    except DataSourceValidationError as exc:
-                        row.status = "error"
-                        row.error_message = str(exc)
+                except DataSourceValidationError as exc:
+                    row.status = "error"
+                    row.error_message = str(exc)
             else:
-                data_source_loader.unload(row.slug)
+                data_source_loader.unload(str(row.slug or "").strip().lower())
                 row.status = "unloaded"
                 row.error_message = None
 
@@ -811,27 +1027,13 @@ async def reload_data_source(source_id: str, session: AsyncSession = Depends(get
         raise HTTPException(status_code=404, detail="Data source not found")
 
     slug = str(row.slug or "").strip().lower()
-    source_kind = str(row.source_kind or "python").strip().lower()
-    is_declarative = source_kind in _DECLARATIVE_KINDS
 
     if not bool(row.enabled):
-        if not is_declarative:
-            data_source_loader.unload(slug)
+        data_source_loader.unload(slug)
         row.status = "unloaded"
         row.error_message = None
         await session.commit()
         return {"status": "unloaded", "message": "Source is disabled", "runtime": None}
-
-    if is_declarative:
-        # Declarative runners have no Python code to compile; just mark loaded.
-        row.status = "loaded"
-        row.error_message = None
-        await session.commit()
-        return {
-            "status": "loaded",
-            "message": f"Reloaded {slug} (declarative {source_kind})",
-            "runtime": None,
-        }
 
     try:
         runtime = data_source_loader.load(

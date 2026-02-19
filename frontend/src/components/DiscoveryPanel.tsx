@@ -845,6 +845,7 @@ export default function DiscoveryPanel({ onAnalyzeWallet, view = 'discovery' }: 
       pool_min_size: next.pool_min_size,
       pool_max_size: next.pool_max_size,
       pool_active_window_hours: next.pool_active_window_hours,
+      pool_inactive_rising_retention_hours: next.pool_inactive_rising_retention_hours,
       pool_selection_score_floor: next.pool_selection_score_floor,
       pool_max_hourly_replacement_rate: next.pool_max_hourly_replacement_rate,
       pool_replacement_score_cutoff: next.pool_replacement_score_cutoff,
@@ -1581,6 +1582,8 @@ export default function DiscoveryPanel({ onAnalyzeWallet, view = 'discovery' }: 
             pool_min_size: discoverySettings.pool_min_size ?? 400,
             pool_max_size: discoverySettings.pool_max_size ?? 600,
             pool_active_window_hours: discoverySettings.pool_active_window_hours ?? 72,
+            pool_inactive_rising_retention_hours:
+              discoverySettings.pool_inactive_rising_retention_hours ?? 336,
             pool_selection_score_floor: discoverySettings.pool_selection_score_floor ?? 0.55,
             pool_max_hourly_replacement_rate: discoverySettings.pool_max_hourly_replacement_rate ?? 0.15,
             pool_replacement_score_cutoff: discoverySettings.pool_replacement_score_cutoff ?? 0.05,

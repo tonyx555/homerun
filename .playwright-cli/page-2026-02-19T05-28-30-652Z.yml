@@ -1,0 +1,1657 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]:
+      - img [ref=e7]
+      - generic [ref=e9]: HOMERUN
+    - button "Select Account" [ref=e11] [cursor=pointer]:
+      - img [ref=e12]
+      - generic [ref=e14]: Select Account
+      - img [ref=e15]
+    - generic [ref=e17]:
+      - generic [ref=e18]:
+        - img [ref=e19]
+        - generic [ref=e23]: Balance
+        - generic [ref=e24]: $0.00
+      - generic [ref=e25]:
+        - img [ref=e26]
+        - generic [ref=e29]: PnL
+        - generic [ref=e30]: $0.00
+      - generic [ref=e31]:
+        - img [ref=e32]
+        - generic [ref=e34]: ROI
+        - generic [ref=e35]: 0.0%
+      - generic [ref=e36]:
+        - img [ref=e37]
+        - generic [ref=e39]: Positions
+        - generic [ref=e40]: "0"
+    - generic [ref=e43]:
+      - img [ref=e44]
+      - textbox "Search markets, wallets, traders..." [ref=e47]
+      - generic [ref=e48]: /
+    - generic [ref=e49]:
+      - button "Worker health status" [ref=e50]
+      - button [ref=e52] [cursor=pointer]:
+        - img [ref=e53]
+      - button "Pause" [ref=e59] [cursor=pointer]:
+        - img [ref=e60]
+        - text: Pause
+  - generic [ref=e63]:
+    - img [ref=e67]
+    - generic [ref=e73]:
+      - generic [ref=e74]:
+        - img [ref=e75]
+        - generic [ref=e77]: SYSTEM
+        - generic [ref=e78]: LIVE
+        - generic [ref=e79]: "|"
+      - generic [ref=e453]:
+        - img [ref=e454]
+        - generic [ref=e457]: SCAN
+        - generic [ref=e458]: 5h ago
+        - generic [ref=e459]: "|"
+      - generic [ref=e460]:
+        - img [ref=e461]
+        - generic [ref=e463]: WORKERS
+        - generic [ref=e464]: 1/8
+        - generic [ref=e465]: 7 ERR
+        - generic [ref=e466]: "|"
+      - generic [ref=e467]:
+        - img [ref=e468]
+        - generic [ref=e470]: MARKETS
+        - generic [ref=e471]: "497"
+        - generic [ref=e472]: "|"
+      - generic [ref=e473]:
+        - img [ref=e474]
+        - generic [ref=e478]: TRADERS
+        - generic [ref=e479]: "3"
+        - generic [ref=e480]: "|"
+      - generic [ref=e481]:
+        - img [ref=e482]
+        - generic [ref=e484]: NEWS
+        - generic [ref=e485]: "0"
+        - generic [ref=e486]: "|"
+      - generic [ref=e487]:
+        - img [ref=e488]
+        - generic [ref=e490]: WEATHER
+        - generic [ref=e491]: "0"
+        - generic [ref=e492]: "|"
+      - generic [ref=e493]:
+        - img [ref=e494]
+        - generic [ref=e496]: CRYPTO
+        - generic [ref=e497]: "12"
+        - generic [ref=e498]: "|"
+      - generic [ref=e499]:
+        - img [ref=e500]
+        - generic [ref=e502]: SIGNALS
+        - generic [ref=e503]: P:4.3K S:0 X:0
+        - generic [ref=e504]: F:0
+        - generic [ref=e505]: "|"
+      - generic [ref=e506]:
+        - img [ref=e507]
+        - generic [ref=e509]: STRATEGIES
+        - generic [ref=e510]: "25"
+        - generic [ref=e511]: "|"
+      - generic [ref=e512]:
+        - img [ref=e513]
+        - generic [ref=e516]: ORCH
+        - generic [ref=e517]: PAPER PAUSED
+        - generic [ref=e518]: "|"
+      - generic [ref=e519]:
+        - img [ref=e520]
+        - generic [ref=e524]: FUNNEL
+        - generic [ref=e525]: 0→0
+        - generic [ref=e526]: 0.0%
+        - generic [ref=e527]: "|"
+      - generic [ref=e528]:
+        - img [ref=e529]
+        - generic [ref=e532]: DAY PNL
+        - generic [ref=e533]: $0.00
+        - generic [ref=e534]: "|"
+      - generic [ref=e535]:
+        - img [ref=e536]
+        - generic [ref=e538]: EXPOSURE
+        - generic [ref=e539]: $0.00
+        - generic [ref=e540]: "|"
+      - generic [ref=e541]:
+        - img [ref=e542]
+        - generic [ref=e544]: OPEN ORD
+        - generic [ref=e545]: "0"
+        - generic [ref=e546]: "|"
+      - generic [ref=e547]:
+        - img [ref=e548]
+        - generic [ref=e550]: EVENTS 1M
+        - generic [ref=e551]: "95"
+        - generic [ref=e552]: "|"
+      - generic [ref=e553]:
+        - img [ref=e554]
+        - generic [ref=e556]: FLOW 1M
+        - generic [ref=e557]: D:0 O:0 S:0
+        - generic [ref=e558]: "|"
+      - generic [ref=e559]:
+        - img [ref=e560]
+        - generic [ref=e563]: SCANS 1M
+        - generic [ref=e564]: "0"
+        - generic [ref=e565]: "|"
+      - generic [ref=e566]:
+        - img [ref=e567]
+        - generic [ref=e569]: ALERTS 1M
+        - generic [ref=e570]: "0"
+        - generic [ref=e571]: "|"
+      - generic [ref=e572]:
+        - img [ref=e573]
+        - generic [ref=e575]: LAST EVT
+        - generic [ref=e576]: Crypto update
+        - generic [ref=e577]: just now
+        - generic [ref=e578]: "|"
+      - generic [ref=e579]:
+        - img [ref=e580]
+        - generic [ref=e582]: SYSTEM
+        - generic [ref=e583]: LIVE
+        - generic [ref=e584]: "|"
+      - generic [ref=e585]:
+        - img [ref=e586]
+        - generic [ref=e589]: SCAN
+        - generic [ref=e590]: 5h ago
+        - generic [ref=e591]: "|"
+      - generic [ref=e592]:
+        - img [ref=e593]
+        - generic [ref=e595]: WORKERS
+        - generic [ref=e596]: 1/8
+        - generic [ref=e597]: 7 ERR
+        - generic [ref=e598]: "|"
+      - generic [ref=e599]:
+        - img [ref=e600]
+        - generic [ref=e602]: MARKETS
+        - generic [ref=e603]: "497"
+        - generic [ref=e604]: "|"
+      - generic [ref=e605]:
+        - img [ref=e606]
+        - generic [ref=e610]: TRADERS
+        - generic [ref=e611]: "3"
+        - generic [ref=e612]: "|"
+      - generic [ref=e613]:
+        - img [ref=e614]
+        - generic [ref=e616]: NEWS
+        - generic [ref=e617]: "0"
+        - generic [ref=e618]: "|"
+      - generic [ref=e619]:
+        - img [ref=e620]
+        - generic [ref=e622]: WEATHER
+        - generic [ref=e623]: "0"
+        - generic [ref=e624]: "|"
+      - generic [ref=e625]:
+        - img [ref=e626]
+        - generic [ref=e628]: CRYPTO
+        - generic [ref=e629]: "12"
+        - generic [ref=e630]: "|"
+      - generic [ref=e631]:
+        - img [ref=e632]
+        - generic [ref=e634]: SIGNALS
+        - generic [ref=e635]: P:4.3K S:0 X:0
+        - generic [ref=e636]: F:0
+        - generic [ref=e637]: "|"
+      - generic [ref=e638]:
+        - img [ref=e639]
+        - generic [ref=e641]: STRATEGIES
+        - generic [ref=e642]: "25"
+        - generic [ref=e643]: "|"
+      - generic [ref=e644]:
+        - img [ref=e645]
+        - generic [ref=e648]: ORCH
+        - generic [ref=e649]: PAPER PAUSED
+        - generic [ref=e650]: "|"
+      - generic [ref=e651]:
+        - img [ref=e652]
+        - generic [ref=e656]: FUNNEL
+        - generic [ref=e657]: 0→0
+        - generic [ref=e658]: 0.0%
+        - generic [ref=e659]: "|"
+      - generic [ref=e660]:
+        - img [ref=e661]
+        - generic [ref=e664]: DAY PNL
+        - generic [ref=e665]: $0.00
+        - generic [ref=e666]: "|"
+      - generic [ref=e667]:
+        - img [ref=e668]
+        - generic [ref=e670]: EXPOSURE
+        - generic [ref=e671]: $0.00
+        - generic [ref=e672]: "|"
+      - generic [ref=e673]:
+        - img [ref=e674]
+        - generic [ref=e676]: OPEN ORD
+        - generic [ref=e677]: "0"
+        - generic [ref=e678]: "|"
+      - generic [ref=e679]:
+        - img [ref=e680]
+        - generic [ref=e682]: EVENTS 1M
+        - generic [ref=e683]: "95"
+        - generic [ref=e684]: "|"
+      - generic [ref=e685]:
+        - img [ref=e686]
+        - generic [ref=e688]: FLOW 1M
+        - generic [ref=e689]: D:0 O:0 S:0
+        - generic [ref=e690]: "|"
+      - generic [ref=e691]:
+        - img [ref=e692]
+        - generic [ref=e695]: SCANS 1M
+        - generic [ref=e696]: "0"
+        - generic [ref=e697]: "|"
+      - generic [ref=e698]:
+        - img [ref=e699]
+        - generic [ref=e701]: ALERTS 1M
+        - generic [ref=e702]: "0"
+        - generic [ref=e703]: "|"
+      - generic [ref=e704]:
+        - img [ref=e705]
+        - generic [ref=e707]: LAST EVT
+        - generic [ref=e708]: Crypto update
+        - generic [ref=e709]: just now
+        - generic [ref=e710]: "|"
+  - generic [ref=e322]:
+    - navigation [ref=e323]:
+      - button "Opportunities" [ref=e324] [cursor=pointer]:
+        - img [ref=e326]
+        - generic [ref=e328]: Opportunities
+      - button "Bots" [ref=e329] [cursor=pointer]:
+        - img [ref=e330]
+        - generic [ref=e333]: Bots
+      - button "Positions" [ref=e334] [cursor=pointer]:
+        - img [ref=e335]
+        - generic [ref=e338]: Positions
+      - button "Performance" [ref=e339] [cursor=pointer]:
+        - img [ref=e340]
+        - generic [ref=e342]: Performance
+      - button "Accounts" [ref=e343] [cursor=pointer]:
+        - img [ref=e344]
+        - generic [ref=e348]: Accounts
+      - button "Strategies" [ref=e349] [cursor=pointer]:
+        - img [ref=e350]
+        - generic [ref=e354]: Strategies
+      - button "Traders" [ref=e355] [cursor=pointer]:
+        - img [ref=e356]
+        - generic [ref=e361]: Traders
+      - button "Data" [ref=e362] [cursor=pointer]:
+        - img [ref=e363]
+        - generic [ref=e367]: Data
+      - button "AI" [ref=e368] [cursor=pointer]:
+        - img [ref=e369]
+        - generic [ref=e372]: AI
+      - button "Settings" [ref=e373] [cursor=pointer]:
+        - img [ref=e374]
+        - generic [ref=e377]: Settings
+    - main [ref=e378]:
+      - generic [ref=e380]:
+        - generic [ref=e381]:
+          - button "Markets 497" [ref=e2462] [cursor=pointer]:
+            - img [ref=e383]
+            - text: Markets
+            - generic [ref=e386]: "497"
+          - button "Traders 3" [ref=e2463] [cursor=pointer]:
+            - img [ref=e2464]
+            - text: Traders
+            - generic [ref=e2467]: "3"
+          - button "News 0" [ref=e2468] [cursor=pointer]:
+            - img [ref=e2469]
+            - text: News
+            - generic [ref=e2473]: "0"
+          - button "Weather 0" [ref=e2474] [cursor=pointer]:
+            - img [ref=e2475]
+            - text: Weather
+            - generic [ref=e2478]: "0"
+          - button "Crypto 12" [ref=e2479] [cursor=pointer]:
+            - img [ref=e2480]
+            - text: Crypto
+            - generic [ref=e2484]: "12"
+          - generic [ref=e387]:
+            - button [ref=e388] [cursor=pointer]:
+              - img [ref=e389]
+            - button [ref=e394] [cursor=pointer]:
+              - img [ref=e395]
+            - button [ref=e396] [cursor=pointer]:
+              - img [ref=e397]
+          - generic [ref=e399]:
+            - button "Settings" [ref=e400] [cursor=pointer]:
+              - img [ref=e401]
+              - text: Settings
+            - generic [ref=e404]:
+              - button "Analyze Visible" [ref=e712] [cursor=pointer]:
+                - img [ref=e713]
+                - text: Analyze Visible
+              - button [ref=e405] [cursor=pointer]:
+                - img [ref=e406]
+        - generic [ref=e716]:
+          - img [ref=e717]
+          - generic [ref=e722]: Fetching Polymarket events and markets...
+        - generic [ref=e409]:
+          - generic [ref=e410]:
+            - img [ref=e411]
+            - textbox "Search markets..." [ref=e414]
+          - combobox [ref=e415] [cursor=pointer]:
+            - generic: All Detectors
+            - img [ref=e416]
+          - button "Show Empty" [ref=e418] [cursor=pointer]
+          - combobox [ref=e419] [cursor=pointer]:
+            - generic: All Categories
+            - img [ref=e420]
+          - spinbutton [ref=e422]: "0"
+          - generic [ref=e423]:
+            - generic [ref=e424]:
+              - generic [ref=e425]: Risk
+              - generic [ref=e426]: "1.0"
+            - slider [ref=e427] [cursor=pointer]: "1"
+          - combobox [ref=e428] [cursor=pointer]:
+            - generic: AI Score
+            - img [ref=e429]
+          - 'button "Sort direction: descending" [ref=e431] [cursor=pointer]':
+            - img [ref=e432]
+          - button "Refresh" [ref=e434] [cursor=pointer]:
+            - img [ref=e435]
+            - text: Refresh
+        - generic [ref=e723]:
+          - generic [ref=e726]:
+            - generic [ref=e727]:
+              - generic [ref=e728]:
+                - generic [ref=e729]: Liquidity Vacuum
+                - 'generic "StrategySDK: liquidity_vacuum" [ref=e730]': SDK liquidity_vacuum
+                - generic [ref=e731]: Politics
+              - generic [ref=e732]:
+                - generic [ref=e733]:
+                  - img [ref=e734]
+                  - generic [ref=e737]: +59.89%
+                - paragraph [ref=e738]: $0.1138 net
+            - 'heading "Vacuum: BUY YES Will Gregor Heise be the Republican Nominee for TX" [level=3] [ref=e739]'
+            - generic [ref=e740]:
+              - generic [ref=e743]:
+                - generic [ref=e744]: Yes 0.18
+                - generic [ref=e745]: No 0.82
+              - generic [ref=e746]:
+                - generic [ref=e747]:
+                  - paragraph [ref=e748]: Cost
+                  - generic [ref=e750]: $0.1900
+                - generic [ref=e751]:
+                  - paragraph [ref=e752]: Liq
+                  - generic [ref=e754]: $1.3K
+                - generic [ref=e755]:
+                  - paragraph [ref=e756]: Risk
+                  - generic [ref=e758]: 40%
+                - generic [ref=e761]:
+                  - paragraph [ref=e762]: Max Pos
+                  - generic [ref=e764]: $129
+            - generic [ref=e765]:
+              - generic [ref=e766]:
+                - img [ref=e767]
+                - text: No AI analysis
+              - button "Analyze" [ref=e770] [cursor=pointer]
+            - generic [ref=e771]:
+              - generic [ref=e773]:
+                - generic [ref=e774]: BUY YES
+                - generic [ref=e775]: "@0.19"
+              - generic [ref=e776]:
+                - generic [ref=e777]:
+                  - img [ref=e778]
+                  - text: "1"
+                - generic [ref=e782]:
+                  - img [ref=e783]
+                  - text: 5h
+            - generic [ref=e786]:
+              - link "PM" [ref=e787] [cursor=pointer]:
+                - /url: https://polymarket.com/event/tx-30-republican-primary-winner/will-gregor-heise-be-the-republican-nominee-for-tx-30
+                - img [ref=e788]
+                - text: PM
+              - button "AI" [ref=e792] [cursor=pointer]:
+                - img [ref=e793]
+                - text: AI
+              - button "News" [ref=e795] [cursor=pointer]:
+                - img [ref=e796]
+                - text: News
+              - generic [ref=e799]:
+                - button "Expand" [ref=e800] [cursor=pointer]:
+                  - img [ref=e801]
+                  - text: Expand
+                - button "More" [ref=e806] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e807]
+          - generic [ref=e811]:
+            - generic [ref=e812]:
+              - generic [ref=e813]:
+                - generic [ref=e814]: Liquidity Vacuum
+                - 'generic "StrategySDK: liquidity_vacuum" [ref=e815]': SDK liquidity_vacuum
+                - generic [ref=e816]: Sports
+              - generic [ref=e817]:
+                - generic [ref=e818]:
+                  - img [ref=e819]
+                  - generic [ref=e822]: +52.44%
+                - paragraph [ref=e823]: $0.0944 net
+            - 'heading "Vacuum: BUY YES Spread: Philadelphia Union (-2.5)" [level=3] [ref=e824]'
+            - generic [ref=e825]:
+              - generic [ref=e828]:
+                - generic [ref=e829]: Yes 0.23
+                - generic [ref=e830]: No 0.77
+              - generic [ref=e831]:
+                - generic [ref=e832]:
+                  - paragraph [ref=e833]: Cost
+                  - generic [ref=e835]: $0.1800
+                - generic [ref=e836]:
+                  - paragraph [ref=e837]: Liq
+                  - generic [ref=e839]: $391
+                - generic [ref=e840]:
+                  - paragraph [ref=e841]: Risk
+                  - generic [ref=e843]: 50%
+                - generic [ref=e846]:
+                  - paragraph [ref=e847]: Max Pos
+                  - generic [ref=e849]: $39.15
+            - generic [ref=e850]:
+              - generic [ref=e851]:
+                - img [ref=e852]
+                - text: No AI analysis
+              - button "Analyze" [ref=e855] [cursor=pointer]
+            - generic [ref=e856]:
+              - generic [ref=e858]:
+                - generic [ref=e859]: BUY YES
+                - generic [ref=e860]: "@0.18"
+              - generic [ref=e861]:
+                - generic [ref=e862]:
+                  - img [ref=e863]
+                  - text: "1"
+                - generic [ref=e867]:
+                  - img [ref=e868]
+                  - text: 5h
+            - generic [ref=e871]:
+              - link "PM" [ref=e872] [cursor=pointer]:
+                - /url: https://polymarket.com/event/mls-dcu-phi-2026-02-21-more-markets/mls-dcu-phi-2026-02-21-spread-away-2pt5
+                - img [ref=e873]
+                - text: PM
+              - button "AI" [ref=e877] [cursor=pointer]:
+                - img [ref=e878]
+                - text: AI
+              - button "News" [ref=e880] [cursor=pointer]:
+                - img [ref=e881]
+                - text: News
+              - generic [ref=e884]:
+                - button "Expand" [ref=e885] [cursor=pointer]:
+                  - img [ref=e886]
+                  - text: Expand
+                - button "More" [ref=e891] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e892]
+          - generic [ref=e896]:
+            - generic [ref=e897]:
+              - generic [ref=e898]:
+                - generic [ref=e899]: Liquidity Vacuum
+                - 'generic "StrategySDK: liquidity_vacuum" [ref=e900]': SDK liquidity_vacuum
+                - generic [ref=e901]: AI
+              - generic [ref=e902]:
+                - generic [ref=e903]:
+                  - img [ref=e904]
+                  - generic [ref=e907]: +47.00%
+                - paragraph [ref=e908]: $0.0470 net
+            - 'heading "Vacuum: BUY YES Will Anthropic have the best AI model for math on" [level=3] [ref=e909]'
+            - generic [ref=e910]:
+              - generic [ref=e913]:
+                - generic [ref=e914]: Yes 0.10
+                - generic [ref=e915]: No 0.90
+              - generic [ref=e916]:
+                - generic [ref=e917]:
+                  - paragraph [ref=e918]: Cost
+                  - generic [ref=e920]: $0.1000
+                - generic [ref=e921]:
+                  - paragraph [ref=e922]: Liq
+                  - generic [ref=e924]: $2.8K
+                - generic [ref=e925]:
+                  - paragraph [ref=e926]: Risk
+                  - generic [ref=e928]: 40%
+                - generic [ref=e931]:
+                  - paragraph [ref=e932]: Max Pos
+                  - generic [ref=e934]: $284
+            - generic [ref=e935]:
+              - generic [ref=e936]:
+                - img [ref=e937]
+                - text: No AI analysis
+              - button "Analyze" [ref=e940] [cursor=pointer]
+            - generic [ref=e941]:
+              - generic [ref=e943]:
+                - generic [ref=e944]: BUY YES
+                - generic [ref=e945]: "@0.10"
+              - generic [ref=e946]:
+                - generic [ref=e947]:
+                  - img [ref=e948]
+                  - text: "1"
+                - generic [ref=e952]:
+                  - img [ref=e953]
+                  - text: 5h
+            - generic [ref=e956]:
+              - link "PM" [ref=e957] [cursor=pointer]:
+                - /url: https://polymarket.com/event/which-company-will-have-the-best-ai-model-for-math-on-march-31/will-anthropic-have-the-best-ai-model-for-math-on-march-31
+                - img [ref=e958]
+                - text: PM
+              - button "AI" [ref=e962] [cursor=pointer]:
+                - img [ref=e963]
+                - text: AI
+              - button "News" [ref=e965] [cursor=pointer]:
+                - img [ref=e966]
+                - text: News
+              - generic [ref=e969]:
+                - button "Expand" [ref=e970] [cursor=pointer]:
+                  - img [ref=e971]
+                  - text: Expand
+                - button "More" [ref=e976] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e977]
+          - generic [ref=e981]:
+            - generic [ref=e982]:
+              - generic [ref=e983]:
+                - generic [ref=e984]: Liquidity Vacuum
+                - 'generic "StrategySDK: liquidity_vacuum" [ref=e985]': SDK liquidity_vacuum
+                - generic [ref=e986]: AI
+              - generic [ref=e987]:
+                - generic [ref=e988]:
+                  - img [ref=e989]
+                  - generic [ref=e992]: +42.10%
+                - paragraph [ref=e993]: $0.0842 net
+            - 'heading "Vacuum: BUY YES Will Google have the best AI model for math on Mar" [level=3] [ref=e994]'
+            - generic [ref=e995]:
+              - generic [ref=e998]:
+                - generic [ref=e999]: Yes 0.20
+                - generic [ref=e1000]: No 0.80
+              - generic [ref=e1001]:
+                - generic [ref=e1002]:
+                  - paragraph [ref=e1003]: Cost
+                  - generic [ref=e1005]: $0.2000
+                - generic [ref=e1006]:
+                  - paragraph [ref=e1007]: Liq
+                  - generic [ref=e1009]: $2.8K
+                - generic [ref=e1010]:
+                  - paragraph [ref=e1011]: Risk
+                  - generic [ref=e1013]: 35%
+                - generic [ref=e1016]:
+                  - paragraph [ref=e1017]: Max Pos
+                  - generic [ref=e1019]: $284
+            - generic [ref=e1020]:
+              - generic [ref=e1021]:
+                - img [ref=e1022]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1025] [cursor=pointer]
+            - generic [ref=e1026]:
+              - generic [ref=e1028]:
+                - generic [ref=e1029]: BUY YES
+                - generic [ref=e1030]: "@0.20"
+              - generic [ref=e1031]:
+                - generic [ref=e1032]:
+                  - img [ref=e1033]
+                  - text: "1"
+                - generic [ref=e1037]:
+                  - img [ref=e1038]
+                  - text: 5h
+            - generic [ref=e1041]:
+              - link "PM" [ref=e1042] [cursor=pointer]:
+                - /url: https://polymarket.com/event/which-company-will-have-the-best-ai-model-for-math-on-march-31/will-google-have-the-best-ai-model-for-math-on-march-31
+                - img [ref=e1043]
+                - text: PM
+              - button "AI" [ref=e1047] [cursor=pointer]:
+                - img [ref=e1048]
+                - text: AI
+              - button "News" [ref=e1050] [cursor=pointer]:
+                - img [ref=e1051]
+                - text: News
+              - generic [ref=e1054]:
+                - button "Expand" [ref=e1055] [cursor=pointer]:
+                  - img [ref=e1056]
+                  - text: Expand
+                - button "More" [ref=e1061] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1062]
+          - generic [ref=e1066]:
+            - generic [ref=e1067]:
+              - generic [ref=e1068]:
+                - generic [ref=e1069]: Liquidity Vacuum
+                - 'generic "StrategySDK: liquidity_vacuum" [ref=e1070]': SDK liquidity_vacuum
+                - generic [ref=e1071]: Israel
+              - generic [ref=e1072]:
+                - generic [ref=e1073]:
+                  - img [ref=e1074]
+                  - generic [ref=e1077]: +41.90%
+                - paragraph [ref=e1078]: $0.0402 net
+            - 'heading "Vacuum: BUY YES Will Cuba recognize Israel by June 30" [level=3] [ref=e1079]'
+            - generic [ref=e1080]:
+              - generic [ref=e1083]:
+                - generic [ref=e1084]: Yes 0.08
+                - generic [ref=e1085]: No 0.92
+              - generic [ref=e1086]:
+                - generic [ref=e1087]:
+                  - paragraph [ref=e1088]: Cost
+                  - generic [ref=e1090]: $0.0960
+                - generic [ref=e1091]:
+                  - paragraph [ref=e1092]: Liq
+                  - generic [ref=e1094]: $561
+                - generic [ref=e1095]:
+                  - paragraph [ref=e1096]: Risk
+                  - generic [ref=e1098]: 50%
+                - generic [ref=e1101]:
+                  - paragraph [ref=e1102]: Max Pos
+                  - generic [ref=e1104]: $56.14
+            - generic [ref=e1105]:
+              - generic [ref=e1106]:
+                - img [ref=e1107]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1110] [cursor=pointer]
+            - generic [ref=e1111]:
+              - generic [ref=e1113]:
+                - generic [ref=e1114]: BUY YES
+                - generic [ref=e1115]: "@0.10"
+              - generic [ref=e1116]:
+                - generic [ref=e1117]:
+                  - img [ref=e1118]
+                  - text: "1"
+                - generic [ref=e1122]:
+                  - img [ref=e1123]
+                  - text: 5h
+            - generic [ref=e1126]:
+              - link "PM" [ref=e1127] [cursor=pointer]:
+                - /url: https://polymarket.com/event/which-countries-will-recognize-israel-by-june-30/will-cuba-recognize-israel-by-june-30
+                - img [ref=e1128]
+                - text: PM
+              - button "AI" [ref=e1132] [cursor=pointer]:
+                - img [ref=e1133]
+                - text: AI
+              - button "News" [ref=e1135] [cursor=pointer]:
+                - img [ref=e1136]
+                - text: News
+              - generic [ref=e1139]:
+                - button "Expand" [ref=e1140] [cursor=pointer]:
+                  - img [ref=e1141]
+                  - text: Expand
+                - button "More" [ref=e1146] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1147]
+          - generic [ref=e1151]:
+            - generic [ref=e1152]:
+              - generic [ref=e1153]:
+                - generic [ref=e1154]: Liquidity Vacuum
+                - 'generic "StrategySDK: liquidity_vacuum" [ref=e1155]': SDK liquidity_vacuum
+                - generic [ref=e1156]: Culture
+              - generic [ref=e1157]:
+                - generic [ref=e1158]:
+                  - img [ref=e1159]
+                  - generic [ref=e1162]: +41.56%
+                - paragraph [ref=e1163]: $0.0374 net
+            - 'heading "Vacuum: BUY YES Will Levante win Sanremo 2026?" [level=3] [ref=e1164]'
+            - generic [ref=e1165]:
+              - generic [ref=e1168]:
+                - generic [ref=e1169]: Yes 0.06
+                - generic [ref=e1170]: No 0.94
+              - generic [ref=e1171]:
+                - generic [ref=e1172]:
+                  - paragraph [ref=e1173]: Cost
+                  - generic [ref=e1175]: $0.0900
+                - generic [ref=e1176]:
+                  - paragraph [ref=e1177]: Liq
+                  - generic [ref=e1179]: $1.5K
+                - generic [ref=e1180]:
+                  - paragraph [ref=e1181]: Risk
+                  - generic [ref=e1183]: 50%
+                - generic [ref=e1186]:
+                  - paragraph [ref=e1187]: Max Pos
+                  - generic [ref=e1189]: $152
+            - generic [ref=e1190]:
+              - generic [ref=e1191]:
+                - img [ref=e1192]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1195] [cursor=pointer]
+            - generic [ref=e1196]:
+              - generic [ref=e1198]:
+                - generic [ref=e1199]: BUY YES
+                - generic [ref=e1200]: "@0.09"
+              - generic [ref=e1201]:
+                - generic [ref=e1202]:
+                  - img [ref=e1203]
+                  - text: "1"
+                - generic [ref=e1207]:
+                  - img [ref=e1208]
+                  - text: 5h
+            - generic [ref=e1211]:
+              - link "PM" [ref=e1212] [cursor=pointer]:
+                - /url: https://polymarket.com/event/sanremo-2026-winner/will-levante-win-sanremo-2026
+                - img [ref=e1213]
+                - text: PM
+              - button "AI" [ref=e1217] [cursor=pointer]:
+                - img [ref=e1218]
+                - text: AI
+              - button "News" [ref=e1220] [cursor=pointer]:
+                - img [ref=e1221]
+                - text: News
+              - generic [ref=e1224]:
+                - button "Expand" [ref=e1225] [cursor=pointer]:
+                  - img [ref=e1226]
+                  - text: Expand
+                - button "More" [ref=e1231] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1232]
+          - generic [ref=e1236]:
+            - generic [ref=e1237]:
+              - generic [ref=e1238]:
+                - generic [ref=e1239]: Liquidity Vacuum
+                - 'generic "StrategySDK: liquidity_vacuum" [ref=e1240]': SDK liquidity_vacuum
+                - generic [ref=e1241]: Sports
+              - generic [ref=e1242]:
+                - generic [ref=e1243]:
+                  - img [ref=e1244]
+                  - generic [ref=e1247]: +36.56%
+                - paragraph [ref=e1248]: $0.1115 net
+            - 'heading "Vacuum: BUY YES Will Queens Park Rangers FC win on 2026-02-24?" [level=3] [ref=e1249]'
+            - generic [ref=e1250]:
+              - generic [ref=e1253]:
+                - generic [ref=e1254]: Yes 0.32
+                - generic [ref=e1255]: No 0.69
+              - generic [ref=e1256]:
+                - generic [ref=e1257]:
+                  - paragraph [ref=e1258]: Cost
+                  - generic [ref=e1260]: $0.3050
+                - generic [ref=e1261]:
+                  - paragraph [ref=e1262]: Liq
+                  - generic [ref=e1264]: $1.1K
+                - generic [ref=e1265]:
+                  - paragraph [ref=e1266]: Risk
+                  - generic [ref=e1268]: 45%
+                - generic [ref=e1271]:
+                  - paragraph [ref=e1272]: Max Pos
+                  - generic [ref=e1274]: $108
+            - generic [ref=e1275]:
+              - generic [ref=e1276]:
+                - img [ref=e1277]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1280] [cursor=pointer]
+            - generic [ref=e1281]:
+              - generic [ref=e1283]:
+                - generic [ref=e1284]: BUY YES
+                - generic [ref=e1285]: "@0.30"
+              - generic [ref=e1286]:
+                - generic [ref=e1287]:
+                  - img [ref=e1288]
+                  - text: "1"
+                - generic [ref=e1292]:
+                  - img [ref=e1293]
+                  - text: 5h
+            - generic [ref=e1296]:
+              - link "PM" [ref=e1297] [cursor=pointer]:
+                - /url: https://polymarket.com/event/elc-sot-qpr-2026-02-24/elc-sot-qpr-2026-02-24-qpr
+                - img [ref=e1298]
+                - text: PM
+              - button "AI" [ref=e1302] [cursor=pointer]:
+                - img [ref=e1303]
+                - text: AI
+              - button "News" [ref=e1305] [cursor=pointer]:
+                - img [ref=e1306]
+                - text: News
+              - generic [ref=e1309]:
+                - button "Expand" [ref=e1310] [cursor=pointer]:
+                  - img [ref=e1311]
+                  - text: Expand
+                - button "More" [ref=e1316] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1317]
+          - generic [ref=e1321]:
+            - generic [ref=e1322]:
+              - generic [ref=e1323]:
+                - generic [ref=e1324]: Liquidity Vacuum
+                - 'generic "StrategySDK: liquidity_vacuum" [ref=e1325]': SDK liquidity_vacuum
+                - generic [ref=e1326]: Culture
+              - generic [ref=e1327]:
+                - generic [ref=e1328]:
+                  - img [ref=e1329]
+                  - generic [ref=e1332]: +35.69%
+                - paragraph [ref=e1333]: $0.0464 net
+            - 'heading "Vacuum: BUY YES Will King George III die in Bridgerton: Season 4?" [level=3] [ref=e1334]'
+            - generic [ref=e1335]:
+              - generic [ref=e1338]:
+                - generic [ref=e1339]: Yes 0.14
+                - generic [ref=e1340]: No 0.86
+              - generic [ref=e1341]:
+                - generic [ref=e1342]:
+                  - paragraph [ref=e1343]: Cost
+                  - generic [ref=e1345]: $0.1300
+                - generic [ref=e1346]:
+                  - paragraph [ref=e1347]: Liq
+                  - generic [ref=e1349]: $1.2K
+                - generic [ref=e1350]:
+                  - paragraph [ref=e1351]: Risk
+                  - generic [ref=e1353]: 50%
+                - generic [ref=e1356]:
+                  - paragraph [ref=e1357]: Max Pos
+                  - generic [ref=e1359]: $120
+            - generic [ref=e1360]:
+              - generic [ref=e1361]:
+                - img [ref=e1362]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1365] [cursor=pointer]
+            - generic [ref=e1366]:
+              - generic [ref=e1368]:
+                - generic [ref=e1369]: BUY YES
+                - generic [ref=e1370]: "@0.13"
+              - generic [ref=e1371]:
+                - generic [ref=e1372]:
+                  - img [ref=e1373]
+                  - text: "1"
+                - generic [ref=e1377]:
+                  - img [ref=e1378]
+                  - text: 5h
+            - generic [ref=e1381]:
+              - link "PM" [ref=e1382] [cursor=pointer]:
+                - /url: https://polymarket.com/event/who-will-die-in-bridgerton-season-4/will-king-george-iii-die-in-bridgerton-season-4
+                - img [ref=e1383]
+                - text: PM
+              - button "AI" [ref=e1387] [cursor=pointer]:
+                - img [ref=e1388]
+                - text: AI
+              - button "News" [ref=e1390] [cursor=pointer]:
+                - img [ref=e1391]
+                - text: News
+              - generic [ref=e1394]:
+                - button "Expand" [ref=e1395] [cursor=pointer]:
+                  - img [ref=e1396]
+                  - text: Expand
+                - button "More" [ref=e1401] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1402]
+          - generic [ref=e1406]:
+            - generic [ref=e1407]:
+              - generic [ref=e1408]:
+                - generic [ref=e1409]: Liquidity Vacuum
+                - 'generic "StrategySDK: liquidity_vacuum" [ref=e1410]': SDK liquidity_vacuum
+                - generic [ref=e1411]: Geopolitics
+              - generic [ref=e1412]:
+                - generic [ref=e1413]:
+                  - img [ref=e1414]
+                  - generic [ref=e1417]: +35.33%
+                - paragraph [ref=e1418]: $0.0742 net
+            - 'heading "Vacuum: BUY YES Iran strike on US military by February 28?" [level=3] [ref=e1419]'
+            - generic [ref=e1420]:
+              - generic [ref=e1423]:
+                - generic [ref=e1424]: Yes 0.22
+                - generic [ref=e1425]: No 0.78
+              - generic [ref=e1426]:
+                - generic [ref=e1427]:
+                  - paragraph [ref=e1428]: Cost
+                  - generic [ref=e1430]: $0.2100
+                - generic [ref=e1431]:
+                  - paragraph [ref=e1432]: Liq
+                  - generic [ref=e1434]: $5.8K
+                - generic [ref=e1435]:
+                  - paragraph [ref=e1436]: Risk
+                  - generic [ref=e1438]: 35%
+                - generic [ref=e1441]:
+                  - paragraph [ref=e1442]: Max Pos
+                  - generic [ref=e1444]: $581
+            - generic [ref=e1445]:
+              - generic [ref=e1446]:
+                - img [ref=e1447]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1450] [cursor=pointer]
+            - generic [ref=e1451]:
+              - generic [ref=e1453]:
+                - generic [ref=e1454]: BUY YES
+                - generic [ref=e1455]: "@0.21"
+              - generic [ref=e1456]:
+                - generic [ref=e1457]:
+                  - img [ref=e1458]
+                  - text: "1"
+                - generic [ref=e1462]:
+                  - img [ref=e1463]
+                  - text: 5h
+            - generic [ref=e1466]:
+              - link "PM" [ref=e1467] [cursor=pointer]:
+                - /url: https://polymarket.com/market/iran-strike-on-us-military-by-february-28
+                - img [ref=e1468]
+                - text: PM
+              - button "AI" [ref=e1472] [cursor=pointer]:
+                - img [ref=e1473]
+                - text: AI
+              - button "News" [ref=e1475] [cursor=pointer]:
+                - img [ref=e1476]
+                - text: News
+              - generic [ref=e1479]:
+                - button "Expand" [ref=e1480] [cursor=pointer]:
+                  - img [ref=e1481]
+                  - text: Expand
+                - button "More" [ref=e1486] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1487]
+          - generic [ref=e1491]:
+            - generic [ref=e1492]:
+              - generic [ref=e1493]:
+                - generic [ref=e1494]: Liquidity Vacuum
+                - 'generic "StrategySDK: liquidity_vacuum" [ref=e1495]': SDK liquidity_vacuum
+                - generic [ref=e1496]: Sports
+              - generic [ref=e1497]:
+                - generic [ref=e1498]:
+                  - img [ref=e1499]
+                  - generic [ref=e1502]: +34.18%
+                - paragraph [ref=e1503]: $0.1111 net
+            - 'heading "Vacuum: BUY YES Will Preston North End FC win on 2026-02-24?" [level=3] [ref=e1504]'
+            - generic [ref=e1505]:
+              - generic [ref=e1508]:
+                - generic [ref=e1509]: Yes 0.32
+                - generic [ref=e1510]: No 0.68
+              - generic [ref=e1511]:
+                - generic [ref=e1512]:
+                  - paragraph [ref=e1513]: Cost
+                  - generic [ref=e1515]: $0.3250
+                - generic [ref=e1516]:
+                  - paragraph [ref=e1517]: Liq
+                  - generic [ref=e1519]: $893
+                - generic [ref=e1520]:
+                  - paragraph [ref=e1521]: Risk
+                  - generic [ref=e1523]: 45%
+                - generic [ref=e1526]:
+                  - paragraph [ref=e1527]: Max Pos
+                  - generic [ref=e1529]: $89.30
+            - generic [ref=e1530]:
+              - generic [ref=e1531]:
+                - img [ref=e1532]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1535] [cursor=pointer]
+            - generic [ref=e1536]:
+              - generic [ref=e1538]:
+                - generic [ref=e1539]: BUY YES
+                - generic [ref=e1540]: "@0.33"
+              - generic [ref=e1541]:
+                - generic [ref=e1542]:
+                  - img [ref=e1543]
+                  - text: "1"
+                - generic [ref=e1547]:
+                  - img [ref=e1548]
+                  - text: 5h
+            - generic [ref=e1551]:
+              - link "PM" [ref=e1552] [cursor=pointer]:
+                - /url: https://polymarket.com/event/elc-swa-pne-2026-02-24/elc-swa-pne-2026-02-24-pne
+                - img [ref=e1553]
+                - text: PM
+              - button "AI" [ref=e1557] [cursor=pointer]:
+                - img [ref=e1558]
+                - text: AI
+              - button "News" [ref=e1560] [cursor=pointer]:
+                - img [ref=e1561]
+                - text: News
+              - generic [ref=e1564]:
+                - button "Expand" [ref=e1565] [cursor=pointer]:
+                  - img [ref=e1566]
+                  - text: Expand
+                - button "More" [ref=e1571] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1572]
+          - generic [ref=e1576]:
+            - generic [ref=e1577]:
+              - generic [ref=e1578]:
+                - generic [ref=e1579]: Liquidity Vacuum
+                - 'generic "StrategySDK: liquidity_vacuum" [ref=e1580]': SDK liquidity_vacuum
+                - generic [ref=e1581]: Sports
+              - generic [ref=e1582]:
+                - generic [ref=e1583]:
+                  - img [ref=e1584]
+                  - generic [ref=e1587]: +33.64%
+                - paragraph [ref=e1588]: $0.0740 net
+            - 'heading "Vacuum: BUY YES Spread: Vancouver Whitecaps FC (-2.5)" [level=3] [ref=e1589]'
+            - generic [ref=e1590]:
+              - generic [ref=e1593]:
+                - generic [ref=e1594]: Yes 0.17
+                - generic [ref=e1595]: No 0.82
+              - generic [ref=e1596]:
+                - generic [ref=e1597]:
+                  - paragraph [ref=e1598]: Cost
+                  - generic [ref=e1600]: $0.2200
+                - generic [ref=e1601]:
+                  - paragraph [ref=e1602]: Liq
+                  - generic [ref=e1604]: $825
+                - generic [ref=e1605]:
+                  - paragraph [ref=e1606]: Risk
+                  - generic [ref=e1608]: 50%
+                - generic [ref=e1611]:
+                  - paragraph [ref=e1612]: Max Pos
+                  - generic [ref=e1614]: $82.48
+            - generic [ref=e1615]:
+              - generic [ref=e1616]:
+                - img [ref=e1617]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1620] [cursor=pointer]
+            - generic [ref=e1621]:
+              - generic [ref=e1623]:
+                - generic [ref=e1624]: BUY YES
+                - generic [ref=e1625]: "@0.22"
+              - generic [ref=e1626]:
+                - generic [ref=e1627]:
+                  - img [ref=e1628]
+                  - text: "1"
+                - generic [ref=e1632]:
+                  - img [ref=e1633]
+                  - text: 5h
+            - generic [ref=e1636]:
+              - link "PM" [ref=e1637] [cursor=pointer]:
+                - /url: https://polymarket.com/event/mls-vwh-rsl-2026-02-21-more-markets/mls-vwh-rsl-2026-02-21-spread-home-2pt5
+                - img [ref=e1638]
+                - text: PM
+              - button "AI" [ref=e1642] [cursor=pointer]:
+                - img [ref=e1643]
+                - text: AI
+              - button "News" [ref=e1645] [cursor=pointer]:
+                - img [ref=e1646]
+                - text: News
+              - generic [ref=e1649]:
+                - button "Expand" [ref=e1650] [cursor=pointer]:
+                  - img [ref=e1651]
+                  - text: Expand
+                - button "More" [ref=e1656] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1657]
+          - generic [ref=e1661]:
+            - generic [ref=e1662]:
+              - generic [ref=e1663]:
+                - generic [ref=e1664]: Liquidity Vacuum
+                - 'generic "StrategySDK: liquidity_vacuum" [ref=e1665]': SDK liquidity_vacuum
+                - generic [ref=e1666]: Culture
+              - generic [ref=e1667]:
+                - generic [ref=e1668]:
+                  - img [ref=e1669]
+                  - generic [ref=e1672]: +33.64%
+                - paragraph [ref=e1673]: $0.0370 net
+            - 'heading "Vacuum: BUY YES Will \"Apocalypse In The Tropics\" win Best Document" [level=3] [ref=e1674]'
+            - generic [ref=e1675]:
+              - generic [ref=e1678]:
+                - generic [ref=e1679]: Yes 0.09
+                - generic [ref=e1680]: No 0.91
+              - generic [ref=e1681]:
+                - generic [ref=e1682]:
+                  - paragraph [ref=e1683]: Cost
+                  - generic [ref=e1685]: $0.1100
+                - generic [ref=e1686]:
+                  - paragraph [ref=e1687]: Liq
+                  - generic [ref=e1689]: $1.7K
+                - generic [ref=e1690]:
+                  - paragraph [ref=e1691]: Risk
+                  - generic [ref=e1693]: 55%
+                - generic [ref=e1696]:
+                  - paragraph [ref=e1697]: Max Pos
+                  - generic [ref=e1699]: $172
+            - generic [ref=e1700]:
+              - generic [ref=e1701]:
+                - img [ref=e1702]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1705] [cursor=pointer]
+            - generic [ref=e1706]:
+              - generic [ref=e1708]:
+                - generic [ref=e1709]: BUY YES
+                - generic [ref=e1710]: "@0.11"
+              - generic [ref=e1711]:
+                - generic [ref=e1712]:
+                  - img [ref=e1713]
+                  - text: "1"
+                - generic [ref=e1717]:
+                  - img [ref=e1718]
+                  - text: 5h
+            - generic [ref=e1721]:
+              - link "PM" [ref=e1722] [cursor=pointer]:
+                - /url: https://polymarket.com/event/bafta-film-awards-best-documentary-winner/will-apocalypse-in-the-tropics-win-best-documentary-at-the-2026-bafta-awards
+                - img [ref=e1723]
+                - text: PM
+              - button "AI" [ref=e1727] [cursor=pointer]:
+                - img [ref=e1728]
+                - text: AI
+              - button "News" [ref=e1730] [cursor=pointer]:
+                - img [ref=e1731]
+                - text: News
+              - generic [ref=e1734]:
+                - button "Expand" [ref=e1735] [cursor=pointer]:
+                  - img [ref=e1736]
+                  - text: Expand
+                - button "More" [ref=e1741] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1742]
+          - generic [ref=e1746]:
+            - generic [ref=e1747]:
+              - generic [ref=e1748]:
+                - generic [ref=e1749]: Liquidity Vacuum
+                - 'generic "StrategySDK: liquidity_vacuum" [ref=e1750]': SDK liquidity_vacuum
+                - generic [ref=e1751]: Sports
+              - generic [ref=e1752]:
+                - generic [ref=e1753]:
+                  - img [ref=e1754]
+                  - generic [ref=e1757]: +33.10%
+                - paragraph [ref=e1758]: $0.1109 net
+            - 'heading "Vacuum: BUY YES Will CA Newell''s Old Boys win on 2026-02-25?" [level=3] [ref=e1759]'
+            - generic [ref=e1760]:
+              - generic [ref=e1763]:
+                - generic [ref=e1764]: Yes 0.28
+                - generic [ref=e1765]: No 0.72
+              - generic [ref=e1766]:
+                - generic [ref=e1767]:
+                  - paragraph [ref=e1768]: Cost
+                  - generic [ref=e1770]: $0.3350
+                - generic [ref=e1771]:
+                  - paragraph [ref=e1772]: Liq
+                  - generic [ref=e1774]: $917
+                - generic [ref=e1775]:
+                  - paragraph [ref=e1776]: Risk
+                  - generic [ref=e1778]: 45%
+                - generic [ref=e1781]:
+                  - paragraph [ref=e1782]: Max Pos
+                  - generic [ref=e1784]: $91.65
+            - generic [ref=e1785]:
+              - generic [ref=e1786]:
+                - img [ref=e1787]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1790] [cursor=pointer]
+            - generic [ref=e1791]:
+              - generic [ref=e1793]:
+                - generic [ref=e1794]: BUY YES
+                - generic [ref=e1795]: "@0.33"
+              - generic [ref=e1796]:
+                - generic [ref=e1797]:
+                  - img [ref=e1798]
+                  - text: "1"
+                - generic [ref=e1802]:
+                  - img [ref=e1803]
+                  - text: 5h
+            - generic [ref=e1806]:
+              - link "PM" [ref=e1807] [cursor=pointer]:
+                - /url: https://polymarket.com/event/arg-new-est-2026-02-25/arg-new-est-2026-02-25-new
+                - img [ref=e1808]
+                - text: PM
+              - button "AI" [ref=e1812] [cursor=pointer]:
+                - img [ref=e1813]
+                - text: AI
+              - button "News" [ref=e1815] [cursor=pointer]:
+                - img [ref=e1816]
+                - text: News
+              - generic [ref=e1819]:
+                - button "Expand" [ref=e1820] [cursor=pointer]:
+                  - img [ref=e1821]
+                  - text: Expand
+                - button "More" [ref=e1826] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1827]
+          - generic [ref=e1831]:
+            - generic [ref=e1832]:
+              - generic [ref=e1833]:
+                - generic [ref=e1834]: Liquidity Vacuum
+                - 'generic "StrategySDK: liquidity_vacuum" [ref=e1835]': SDK liquidity_vacuum
+                - generic [ref=e1836]: ICE
+              - generic [ref=e1837]:
+                - generic [ref=e1838]:
+                  - img [ref=e1839]
+                  - generic [ref=e1842]: +32.24%
+                - paragraph [ref=e1843]: $0.0369 net
+            - 'heading "Vacuum: BUY YES Will Alea Nadeem be the Republican nominee for OH-" [level=3] [ref=e1844]'
+            - generic [ref=e1845]:
+              - generic [ref=e1848]:
+                - generic [ref=e1849]: Yes 0.14
+                - generic [ref=e1850]: No 0.86
+              - generic [ref=e1851]:
+                - generic [ref=e1852]:
+                  - paragraph [ref=e1853]: Cost
+                  - generic [ref=e1855]: $0.1145
+                - generic [ref=e1856]:
+                  - paragraph [ref=e1857]: Liq
+                  - generic [ref=e1859]: $504
+                - generic [ref=e1860]:
+                  - paragraph [ref=e1861]: Risk
+                  - generic [ref=e1863]: 50%
+                - generic [ref=e1866]:
+                  - paragraph [ref=e1867]: Max Pos
+                  - generic [ref=e1869]: $50.39
+            - generic [ref=e1870]:
+              - generic [ref=e1871]:
+                - img [ref=e1872]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1875] [cursor=pointer]
+            - generic [ref=e1876]:
+              - generic [ref=e1878]:
+                - generic [ref=e1879]: BUY YES
+                - generic [ref=e1880]: "@0.11"
+              - generic [ref=e1881]:
+                - generic [ref=e1882]:
+                  - img [ref=e1883]
+                  - text: "1"
+                - generic [ref=e1887]:
+                  - img [ref=e1888]
+                  - text: 5h
+            - generic [ref=e1891]:
+              - link "PM" [ref=e1892] [cursor=pointer]:
+                - /url: https://polymarket.com/event/oh-09-republican-primary-winner/will-alea-nadeem-be-the-republican-nominee-for-oh-09
+                - img [ref=e1893]
+                - text: PM
+              - button "AI" [ref=e1897] [cursor=pointer]:
+                - img [ref=e1898]
+                - text: AI
+              - button "News" [ref=e1900] [cursor=pointer]:
+                - img [ref=e1901]
+                - text: News
+              - generic [ref=e1904]:
+                - button "Expand" [ref=e1905] [cursor=pointer]:
+                  - img [ref=e1906]
+                  - text: Expand
+                - button "More" [ref=e1911] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1912]
+          - generic [ref=e1916]:
+            - generic [ref=e1917]:
+              - generic [ref=e1918]:
+                - generic [ref=e1919]: Liquidity Vacuum
+                - 'generic "StrategySDK: liquidity_vacuum" [ref=e1920]': SDK liquidity_vacuum
+                - generic [ref=e1921]: TSLA
+              - generic [ref=e1922]:
+                - generic [ref=e1923]:
+                  - img [ref=e1924]
+                  - generic [ref=e1927]: +31.60%
+                - paragraph [ref=e1928]: $0.0553 net
+            - 'heading "Vacuum: BUY YES Will Tesla (TSLA) close above $440 end of February" [level=3] [ref=e1929]'
+            - generic [ref=e1930]:
+              - generic [ref=e1933]:
+                - generic [ref=e1934]: Yes 0.16
+                - generic [ref=e1935]: No 0.84
+              - generic [ref=e1936]:
+                - generic [ref=e1937]:
+                  - paragraph [ref=e1938]: Cost
+                  - generic [ref=e1940]: $0.1750
+                - generic [ref=e1941]:
+                  - paragraph [ref=e1942]: Liq
+                  - generic [ref=e1944]: $2.0K
+                - generic [ref=e1945]:
+                  - paragraph [ref=e1946]: Risk
+                  - generic [ref=e1948]: 45%
+                - generic [ref=e1951]:
+                  - paragraph [ref=e1952]: Max Pos
+                  - generic [ref=e1954]: $196
+            - generic [ref=e1955]:
+              - generic [ref=e1956]:
+                - img [ref=e1957]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1960] [cursor=pointer]
+            - generic [ref=e1961]:
+              - generic [ref=e1963]:
+                - generic [ref=e1964]: BUY YES
+                - generic [ref=e1965]: "@0.17"
+              - generic [ref=e1966]:
+                - generic [ref=e1967]:
+                  - img [ref=e1968]
+                  - text: "1"
+                - generic [ref=e1972]:
+                  - img [ref=e1973]
+                  - text: 5h
+            - generic [ref=e1976]:
+              - link "PM" [ref=e1977] [cursor=pointer]:
+                - /url: https://polymarket.com/event/tsla-above-in-february-2026/tsla-above-440-on-february-27-2026
+                - img [ref=e1978]
+                - text: PM
+              - button "AI" [ref=e1982] [cursor=pointer]:
+                - img [ref=e1983]
+                - text: AI
+              - button "News" [ref=e1985] [cursor=pointer]:
+                - img [ref=e1986]
+                - text: News
+              - generic [ref=e1989]:
+                - button "Expand" [ref=e1990] [cursor=pointer]:
+                  - img [ref=e1991]
+                  - text: Expand
+                - button "More" [ref=e1996] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1997]
+          - generic [ref=e2001]:
+            - generic [ref=e2002]:
+              - generic [ref=e2003]:
+                - generic [ref=e2004]: NegRisk
+                - 'generic "StrategySDK: negrisk" [ref=e2005]': SDK negrisk
+                - generic [ref=e2006]: Midterms
+              - generic [ref=e2007]:
+                - generic [ref=e2008]:
+                  - img [ref=e2009]
+                  - generic [ref=e2012]: +29.97%
+                - paragraph [ref=e2013]: $0.2260 net
+            - 'heading "NegRisk: Nebraska Senate Election Winner ..." [level=3] [ref=e2014]'
+            - generic [ref=e2015]:
+              - generic [ref=e2018]:
+                - generic [ref=e2019]: Democrat 0.03
+                - generic [ref=e2020]: Republi… 0.72
+              - generic [ref=e2021]:
+                - generic [ref=e2022]:
+                  - paragraph [ref=e2023]: Cost
+                  - generic [ref=e2025]: $0.7540
+                - generic [ref=e2026]:
+                  - paragraph [ref=e2027]: Liq
+                  - generic [ref=e2029]: $20.5K
+                - generic [ref=e2030]:
+                  - paragraph [ref=e2031]: Risk
+                  - generic [ref=e2033]: 30%
+                - generic [ref=e2036]:
+                  - paragraph [ref=e2037]: Max Pos
+                  - generic [ref=e2039]: $2.1K
+            - generic [ref=e2040]:
+              - generic [ref=e2041]:
+                - img [ref=e2042]
+                - text: No AI analysis
+              - button "Analyze" [ref=e2045] [cursor=pointer]
+            - generic [ref=e2046]:
+              - generic [ref=e2047]:
+                - generic [ref=e2048]:
+                  - generic [ref=e2049]: BUY YES
+                  - generic [ref=e2050]: Will the De…
+                  - generic [ref=e2051]: "@0.03"
+                - generic [ref=e2052]:
+                  - generic [ref=e2053]: ·
+                  - generic [ref=e2054]: BUY YES
+                  - generic [ref=e2055]: Will the Re…
+                  - generic [ref=e2056]: "@0.72"
+              - generic [ref=e2057]:
+                - generic [ref=e2058]:
+                  - img [ref=e2059]
+                  - text: "2"
+                - generic [ref=e2063]:
+                  - img [ref=e2064]
+                  - text: 6h
+            - generic [ref=e2067]:
+              - link "PM" [ref=e2068] [cursor=pointer]:
+                - /url: https://polymarket.com/event/nebraska-senate-election-winner/will-the-democrats-win-the-nebraska-senate-race-in-2026
+                - img [ref=e2069]
+                - text: PM
+              - button "AI" [ref=e2073] [cursor=pointer]:
+                - img [ref=e2074]
+                - text: AI
+              - button "News" [ref=e2076] [cursor=pointer]:
+                - img [ref=e2077]
+                - text: News
+              - generic [ref=e2080]:
+                - button "Expand" [ref=e2081] [cursor=pointer]:
+                  - img [ref=e2082]
+                  - text: Expand
+                - button "More" [ref=e2087] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e2088]
+          - generic [ref=e2092]:
+            - generic [ref=e2093]:
+              - generic [ref=e2094]:
+                - generic [ref=e2095]: NegRisk
+                - 'generic "StrategySDK: negrisk" [ref=e2096]': SDK negrisk
+                - generic [ref=e2097]: Politics
+              - generic [ref=e2098]:
+                - generic [ref=e2099]:
+                  - img [ref=e2100]
+                  - generic [ref=e2103]: +29.97%
+                - paragraph [ref=e2104]: $0.2260 net
+            - 'heading "Multi-Outcome: How high will Trump''s approval rating go..." [level=3] [ref=e2105]'
+            - generic [ref=e2106]:
+              - generic [ref=e2109]:
+                - generic [ref=e2110]: ↑ 44% 0.22
+                - generic [ref=e2111]: ↑ 48% 0.05
+                - generic [ref=e2112]: ↑ 46% 0.11
+                - generic [ref=e2113]: ↑ 50% 0.07
+                - generic [ref=e2114]: ↑ 47% 0.09
+                - generic [ref=e2115]: ↑ 45% 0.10
+                - generic [ref=e2116]: "+1"
+              - generic [ref=e2117]:
+                - generic [ref=e2118]:
+                  - paragraph [ref=e2119]: Cost
+                  - generic [ref=e2121]: $0.7540
+                - generic [ref=e2122]:
+                  - paragraph [ref=e2123]: Liq
+                  - generic [ref=e2125]: $2.9K
+                - generic [ref=e2126]:
+                  - paragraph [ref=e2127]: Risk
+                  - generic [ref=e2129]: 65%
+                - generic [ref=e2132]:
+                  - paragraph [ref=e2133]: Max Pos
+                  - generic [ref=e2135]: $287
+            - generic [ref=e2136]:
+              - generic [ref=e2137]:
+                - img [ref=e2138]
+                - text: No AI analysis
+              - button "Analyze" [ref=e2141] [cursor=pointer]
+            - generic [ref=e2142]:
+              - generic [ref=e2143]:
+                - generic [ref=e2144]:
+                  - generic [ref=e2145]: BUY YES
+                  - generic [ref=e2146]: Will Trump'…
+                  - generic [ref=e2147]: "@0.26"
+                - generic [ref=e2148]:
+                  - generic [ref=e2149]: ·
+                  - generic [ref=e2150]: BUY YES
+                  - generic [ref=e2151]: Will Trump'…
+                  - generic [ref=e2152]: "@0.05"
+                - generic [ref=e2153]: "+5"
+              - generic [ref=e2154]:
+                - generic [ref=e2155]:
+                  - img [ref=e2156]
+                  - text: "7"
+                - generic [ref=e2160]:
+                  - img [ref=e2161]
+                  - text: 5h
+            - generic [ref=e2164]:
+              - link "PM" [ref=e2165] [cursor=pointer]:
+                - /url: https://polymarket.com/event/how-high-will-trumps-approval-rating-go-in-2026/will-trumps-approval-rating-hit-44-in-2026
+                - img [ref=e2166]
+                - text: PM
+              - button "AI" [ref=e2170] [cursor=pointer]:
+                - img [ref=e2171]
+                - text: AI
+              - button "News" [ref=e2173] [cursor=pointer]:
+                - img [ref=e2174]
+                - text: News
+              - generic [ref=e2177]:
+                - button "Expand" [ref=e2178] [cursor=pointer]:
+                  - img [ref=e2179]
+                  - text: Expand
+                - button "More" [ref=e2184] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e2185]
+          - generic [ref=e2189]:
+            - generic [ref=e2190]:
+              - generic [ref=e2191]:
+                - generic [ref=e2192]: Liquidity Vacuum
+                - 'generic "StrategySDK: liquidity_vacuum" [ref=e2193]': SDK liquidity_vacuum
+                - generic [ref=e2194]: Culture
+              - generic [ref=e2195]:
+                - generic [ref=e2196]:
+                  - img [ref=e2197]
+                  - generic [ref=e2200]: +28.63%
+                - paragraph [ref=e2201]: $0.0458 net
+            - 'heading "Vacuum: BUY YES Will Jensen Huang attend the 2026 State of the Uni" [level=3] [ref=e2202]'
+            - generic [ref=e2203]:
+              - generic [ref=e2206]:
+                - generic [ref=e2207]: Yes 0.11
+                - generic [ref=e2208]: No 0.89
+              - generic [ref=e2209]:
+                - generic [ref=e2210]:
+                  - paragraph [ref=e2211]: Cost
+                  - generic [ref=e2213]: $0.1600
+                - generic [ref=e2214]:
+                  - paragraph [ref=e2215]: Liq
+                  - generic [ref=e2217]: $3.4K
+                - generic [ref=e2218]:
+                  - paragraph [ref=e2219]: Risk
+                  - generic [ref=e2221]: 45%
+                - generic [ref=e2224]:
+                  - paragraph [ref=e2225]: Max Pos
+                  - generic [ref=e2227]: $337
+            - generic [ref=e2228]:
+              - generic [ref=e2229]:
+                - img [ref=e2230]
+                - text: No AI analysis
+              - button "Analyze" [ref=e2233] [cursor=pointer]
+            - generic [ref=e2234]:
+              - generic [ref=e2236]:
+                - generic [ref=e2237]: BUY YES
+                - generic [ref=e2238]: "@0.16"
+              - generic [ref=e2239]:
+                - generic [ref=e2240]:
+                  - img [ref=e2241]
+                  - text: "1"
+                - generic [ref=e2245]:
+                  - img [ref=e2246]
+                  - text: 5h
+            - generic [ref=e2249]:
+              - link "PM" [ref=e2250] [cursor=pointer]:
+                - /url: https://polymarket.com/event/who-will-attend-the-state-of-the-union-address/will-jensen-huang-attend-the-2026-state-of-the-union-address
+                - img [ref=e2251]
+                - text: PM
+              - button "AI" [ref=e2255] [cursor=pointer]:
+                - img [ref=e2256]
+                - text: AI
+              - button "News" [ref=e2258] [cursor=pointer]:
+                - img [ref=e2259]
+                - text: News
+              - generic [ref=e2262]:
+                - button "Expand" [ref=e2263] [cursor=pointer]:
+                  - img [ref=e2264]
+                  - text: Expand
+                - button "More" [ref=e2269] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e2270]
+          - generic [ref=e2274]:
+            - generic [ref=e2275]:
+              - generic [ref=e2276]:
+                - generic [ref=e2277]: Liquidity Vacuum
+                - 'generic "StrategySDK: liquidity_vacuum" [ref=e2278]': SDK liquidity_vacuum
+                - generic [ref=e2279]: Sports
+              - generic [ref=e2280]:
+                - generic [ref=e2281]:
+                  - img [ref=e2282]
+                  - generic [ref=e2285]: +28.62%
+                - paragraph [ref=e2286]: $0.0916 net
+            - 'heading "Vacuum: BUY YES Will CA Tigre win on 2026-02-21?" [level=3] [ref=e2287]'
+            - generic [ref=e2288]:
+              - generic [ref=e2291]:
+                - generic [ref=e2292]: Yes 0.34
+                - generic [ref=e2293]: No 0.66
+              - generic [ref=e2294]:
+                - generic [ref=e2295]:
+                  - paragraph [ref=e2296]: Cost
+                  - generic [ref=e2298]: $0.3200
+                - generic [ref=e2299]:
+                  - paragraph [ref=e2300]: Liq
+                  - generic [ref=e2302]: $889
+                - generic [ref=e2303]:
+                  - paragraph [ref=e2304]: Risk
+                  - generic [ref=e2306]: 45%
+                - generic [ref=e2309]:
+                  - paragraph [ref=e2310]: Max Pos
+                  - generic [ref=e2312]: $88.95
+            - generic [ref=e2313]:
+              - generic [ref=e2314]:
+                - img [ref=e2315]
+                - text: No AI analysis
+              - button "Analyze" [ref=e2318] [cursor=pointer]
+            - generic [ref=e2319]:
+              - generic [ref=e2321]:
+                - generic [ref=e2322]: BUY YES
+                - generic [ref=e2323]: "@0.32"
+              - generic [ref=e2324]:
+                - generic [ref=e2325]:
+                  - img [ref=e2326]
+                  - text: "1"
+                - generic [ref=e2330]:
+                  - img [ref=e2331]
+                  - text: 5h
+            - generic [ref=e2334]:
+              - link "PM" [ref=e2335] [cursor=pointer]:
+                - /url: https://polymarket.com/event/arg-cac-tig-2026-02-21/arg-cac-tig-2026-02-21-tig
+                - img [ref=e2336]
+                - text: PM
+              - button "AI" [ref=e2340] [cursor=pointer]:
+                - img [ref=e2341]
+                - text: AI
+              - button "News" [ref=e2343] [cursor=pointer]:
+                - img [ref=e2344]
+                - text: News
+              - generic [ref=e2347]:
+                - button "Expand" [ref=e2348] [cursor=pointer]:
+                  - img [ref=e2349]
+                  - text: Expand
+                - button "More" [ref=e2354] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e2355]
+          - generic [ref=e2359]:
+            - generic [ref=e2360]:
+              - generic [ref=e2361]:
+                - generic [ref=e2362]: NegRisk
+                - 'generic "StrategySDK: negrisk" [ref=e2363]': SDK negrisk
+                - generic [ref=e2364]: Macro Indicators
+              - generic [ref=e2365]:
+                - generic [ref=e2366]:
+                  - img [ref=e2367]
+                  - generic [ref=e2370]: +28.03%
+                - paragraph [ref=e2371]: $1.29 net
+            - 'heading "Multi-Outcome Short: Eurozone GDP growth in Q1 2026..." [level=3] [ref=e2372]'
+            - generic [ref=e2373]:
+              - generic [ref=e2376]:
+                - generic [ref=e2377]: 0.5-0.8% 0.46
+                - generic [ref=e2378]: 2.1-2.4% 0.46
+                - generic [ref=e2379]: 0.9-1.2% 0.46
+                - generic [ref=e2380]: 2.5%+ 0.00
+                - generic [ref=e2381]: <0.5% 0.20
+                - generic [ref=e2382]: 1.7-2.0% 0.46
+                - generic [ref=e2383]: "+1"
+              - generic [ref=e2384]:
+                - generic [ref=e2385]:
+                  - paragraph [ref=e2386]: Cost
+                  - generic [ref=e2388]: $4.59
+                - generic [ref=e2389]:
+                  - paragraph [ref=e2390]: Liq
+                  - generic [ref=e2392]: $305
+                - generic [ref=e2393]:
+                  - paragraph [ref=e2394]: Risk
+                  - generic [ref=e2396]: 50%
+                - generic [ref=e2399]:
+                  - paragraph [ref=e2400]: Max Pos
+                  - generic [ref=e2402]: $30.47
+            - generic [ref=e2403]:
+              - generic [ref=e2404]:
+                - img [ref=e2405]
+                - text: No AI analysis
+              - button "Analyze" [ref=e2408] [cursor=pointer]
+            - generic [ref=e2409]:
+              - generic [ref=e2410]:
+                - generic [ref=e2411]:
+                  - generic [ref=e2412]: BUY NO
+                  - generic [ref=e2413]: Will Eurozo…
+                  - generic [ref=e2414]: "@0.55"
+                - generic [ref=e2415]:
+                  - generic [ref=e2416]: ·
+                  - generic [ref=e2417]: BUY NO
+                  - generic [ref=e2418]: Will Eurozo…
+                  - generic [ref=e2419]: "@0.56"
+                - generic [ref=e2420]: "+5"
+              - generic [ref=e2421]:
+                - generic [ref=e2422]:
+                  - img [ref=e2423]
+                  - text: "7"
+                - generic [ref=e2427]:
+                  - img [ref=e2428]
+                  - text: 8h
+            - generic [ref=e2431]:
+              - link "PM" [ref=e2432] [cursor=pointer]:
+                - /url: https://polymarket.com/event/eurozone-gdp-growth-in-q1-2026/will-eurozone-gdp-growth-in-q1-2026-be-between-0pt5-and-0pt8
+                - img [ref=e2433]
+                - text: PM
+              - button "AI" [ref=e2437] [cursor=pointer]:
+                - img [ref=e2438]
+                - text: AI
+              - button "News" [ref=e2440] [cursor=pointer]:
+                - img [ref=e2441]
+                - text: News
+              - generic [ref=e2444]:
+                - button "Expand" [ref=e2445] [cursor=pointer]:
+                  - img [ref=e2446]
+                  - text: Expand
+                - button "More" [ref=e2451] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e2452]
+        - generic [ref=e2455]:
+          - generic [ref=e2456]: 1 - 20 of 497
+          - generic [ref=e2457]:
+            - button "Prev" [disabled]:
+              - img
+              - text: Prev
+            - generic [ref=e2458]: 1/25
+            - button "Next" [ref=e2459] [cursor=pointer]:
+              - text: Next
+              - img [ref=e2460]
+  - button "K" [ref=e447] [cursor=pointer]:
+    - img [ref=e448]
+    - generic [ref=e450]:
+      - img [ref=e451]
+      - text: K

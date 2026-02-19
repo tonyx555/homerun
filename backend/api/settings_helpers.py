@@ -104,6 +104,7 @@ DISCOVERY_SETTINGS_DEFAULTS: dict[str, Any] = {
     "pool_min_size": 400,
     "pool_max_size": 600,
     "pool_active_window_hours": 72,
+    "pool_inactive_rising_retention_hours": 336,
     "pool_selection_score_floor": 0.55,
     "pool_max_hourly_replacement_rate": 0.15,
     "pool_replacement_score_cutoff": 0.05,
@@ -126,7 +127,7 @@ DISCOVERY_SETTINGS_DEFAULTS: dict[str, Any] = {
     "pool_recompute_interval_seconds": 60,
 }
 
-WORLD_INTELLIGENCE_DEFAULTS: dict[str, Any] = {
+EVENTS_DEFAULTS: dict[str, Any] = {
     "enabled": True,
     "interval_seconds": 300,
     "emit_trade_signals": False,
@@ -200,8 +201,6 @@ def _normalize_trader_opps_source_filter(value: Any) -> str:
     normalized = str(value or "all").strip().lower()
     if normalized in {"tracked", "pool", "all"}:
         return normalized
-    if normalized == "insider":
-        return "pool"
     return "all"
 
 
@@ -470,6 +469,10 @@ def discovery_payload(settings: AppSettings) -> dict[str, Any]:
             settings.discovery_pool_active_window_hours,
             DISCOVERY_SETTINGS_DEFAULTS["pool_active_window_hours"],
         ),
+        "pool_inactive_rising_retention_hours": _with_default(
+            settings.discovery_pool_inactive_rising_retention_hours,
+            DISCOVERY_SETTINGS_DEFAULTS["pool_inactive_rising_retention_hours"],
+        ),
         "pool_selection_score_floor": _with_default(
             settings.discovery_pool_selection_score_floor,
             DISCOVERY_SETTINGS_DEFAULTS["pool_selection_score_floor"],
@@ -560,30 +563,30 @@ def search_filters_payload(settings: AppSettings) -> dict[str, Any]:
     }
 
 
-def world_intelligence_payload(settings: AppSettings) -> dict[str, Any]:
-    raw = getattr(settings, "world_intel_settings_json", None)
+def events_payload(settings: AppSettings) -> dict[str, Any]:
+    raw = getattr(settings, "events_settings_json", None)
     stored = raw if isinstance(raw, dict) else {}
 
     if "gdelt_news_enabled" not in stored:
         stored = {
             **stored,
-            "gdelt_news_enabled": getattr(settings, "world_intel_gdelt_news_enabled", None),
-            "gdelt_news_timespan_hours": getattr(settings, "world_intel_gdelt_news_timespan_hours", None),
-            "gdelt_news_max_records": getattr(settings, "world_intel_gdelt_news_max_records", None),
+            "gdelt_news_enabled": getattr(settings, "events_gdelt_news_enabled", None),
+            "gdelt_news_timespan_hours": getattr(settings, "events_gdelt_news_timespan_hours", None),
+            "gdelt_news_max_records": getattr(settings, "events_gdelt_news_max_records", None),
         }
 
     payload = {
         field_name: _coerce_typed(stored.get(field_name), default)
-        for field_name, default in WORLD_INTELLIGENCE_DEFAULTS.items()
+        for field_name, default in EVENTS_DEFAULTS.items()
     }
     payload.update(
         {
-            "acled_api_key": mask_stored_secret(settings.world_intel_acled_api_key),
-            "acled_email": getattr(settings, "world_intel_acled_email", None),
-            "opensky_username": getattr(settings, "world_intel_opensky_username", None),
-            "opensky_password": mask_stored_secret(settings.world_intel_opensky_password),
-            "aisstream_api_key": mask_stored_secret(settings.world_intel_aisstream_api_key),
-            "cloudflare_radar_token": mask_stored_secret(settings.world_intel_cloudflare_radar_token),
+            "acled_api_key": mask_stored_secret(settings.events_acled_api_key),
+            "acled_email": getattr(settings, "events_acled_email", None),
+            "opensky_username": getattr(settings, "events_opensky_username", None),
+            "opensky_password": mask_stored_secret(settings.events_opensky_password),
+            "aisstream_api_key": mask_stored_secret(settings.events_aisstream_api_key),
+            "cloudflare_radar_token": mask_stored_secret(settings.events_cloudflare_radar_token),
         }
     )
     return payload
@@ -601,7 +604,7 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
     discovery = getattr(request, "discovery", None)
     search_filters = getattr(request, "search_filters", None)
     trading_proxy = getattr(request, "trading_proxy", None)
-    world_intelligence = getattr(request, "world_intelligence", None)
+    events = getattr(request, "events", None)
 
     if polymarket:
         pm = polymarket
@@ -758,6 +761,7 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
         settings.discovery_pool_min_size = discovery.pool_min_size
         settings.discovery_pool_max_size = discovery.pool_max_size
         settings.discovery_pool_active_window_hours = discovery.pool_active_window_hours
+        settings.discovery_pool_inactive_rising_retention_hours = discovery.pool_inactive_rising_retention_hours
         settings.discovery_pool_selection_score_floor = discovery.pool_selection_score_floor
         settings.discovery_pool_max_hourly_replacement_rate = discovery.pool_max_hourly_replacement_rate
         settings.discovery_pool_replacement_score_cutoff = discovery.pool_replacement_score_cutoff
@@ -799,62 +803,62 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
         settings.trading_proxy_timeout = proxy.timeout
         settings.trading_proxy_require_vpn = proxy.require_vpn
 
-    if world_intelligence is not None:
-        current_raw = getattr(settings, "world_intel_settings_json", None)
+    if events is not None:
+        current_raw = getattr(settings, "events_settings_json", None)
         current_config = current_raw if isinstance(current_raw, dict) else {}
         next_config = dict(current_config)
 
-        for field_name, default in WORLD_INTELLIGENCE_DEFAULTS.items():
-            if hasattr(world_intelligence, field_name):
-                incoming = getattr(world_intelligence, field_name)
+        for field_name, default in EVENTS_DEFAULTS.items():
+            if hasattr(events, field_name):
+                incoming = getattr(events, field_name)
                 if incoming is not None:
                     next_config[field_name] = _coerce_typed(incoming, default)
 
-        settings.world_intel_settings_json = next_config
+        settings.events_settings_json = next_config
 
         # Keep existing GDELT DB-backed config columns aligned.
-        settings.world_intel_gdelt_news_enabled = bool(
+        settings.events_gdelt_news_enabled = bool(
             _coerce_typed(
                 next_config.get("gdelt_news_enabled"),
-                WORLD_INTELLIGENCE_DEFAULTS["gdelt_news_enabled"],
+                EVENTS_DEFAULTS["gdelt_news_enabled"],
             )
         )
-        settings.world_intel_gdelt_news_timespan_hours = int(
+        settings.events_gdelt_news_timespan_hours = int(
             _coerce_typed(
                 next_config.get("gdelt_news_timespan_hours"),
-                WORLD_INTELLIGENCE_DEFAULTS["gdelt_news_timespan_hours"],
+                EVENTS_DEFAULTS["gdelt_news_timespan_hours"],
             )
         )
-        settings.world_intel_gdelt_news_max_records = int(
+        settings.events_gdelt_news_max_records = int(
             _coerce_typed(
                 next_config.get("gdelt_news_max_records"),
-                WORLD_INTELLIGENCE_DEFAULTS["gdelt_news_max_records"],
+                EVENTS_DEFAULTS["gdelt_news_max_records"],
             )
         )
 
-        if getattr(world_intelligence, "acled_api_key", None) is not None:
-            set_encrypted_secret(settings, "world_intel_acled_api_key", world_intelligence.acled_api_key)
-        if getattr(world_intelligence, "acled_email", None) is not None:
-            settings.world_intel_acled_email = str(world_intelligence.acled_email or "").strip() or None
-        if getattr(world_intelligence, "opensky_username", None) is not None:
-            settings.world_intel_opensky_username = str(world_intelligence.opensky_username or "").strip() or None
-        if getattr(world_intelligence, "opensky_password", None) is not None:
+        if getattr(events, "acled_api_key", None) is not None:
+            set_encrypted_secret(settings, "events_acled_api_key", events.acled_api_key)
+        if getattr(events, "acled_email", None) is not None:
+            settings.events_acled_email = str(events.acled_email or "").strip() or None
+        if getattr(events, "opensky_username", None) is not None:
+            settings.events_opensky_username = str(events.opensky_username or "").strip() or None
+        if getattr(events, "opensky_password", None) is not None:
             set_encrypted_secret(
                 settings,
-                "world_intel_opensky_password",
-                world_intelligence.opensky_password,
+                "events_opensky_password",
+                events.opensky_password,
             )
-        if getattr(world_intelligence, "aisstream_api_key", None) is not None:
+        if getattr(events, "aisstream_api_key", None) is not None:
             set_encrypted_secret(
                 settings,
-                "world_intel_aisstream_api_key",
-                world_intelligence.aisstream_api_key,
+                "events_aisstream_api_key",
+                events.aisstream_api_key,
             )
-        if getattr(world_intelligence, "cloudflare_radar_token", None) is not None:
+        if getattr(events, "cloudflare_radar_token", None) is not None:
             set_encrypted_secret(
                 settings,
-                "world_intel_cloudflare_radar_token",
-                world_intelligence.cloudflare_radar_token,
+                "events_cloudflare_radar_token",
+                events.cloudflare_radar_token,
             )
 
     settings.updated_at = utcnow()
@@ -862,5 +866,5 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
         "needs_llm_reinit": bool(llm),
         "needs_proxy_reinit": bool(trading_proxy),
         "needs_filter_reload": bool(search_filters) or bool(scanner),
-        "needs_world_intel_reload": world_intelligence is not None,
+        "needs_events_reload": events is not None,
     }

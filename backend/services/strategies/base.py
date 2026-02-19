@@ -312,6 +312,10 @@ class BaseStrategy(ABC):
     # Opportunity TTL — how long detected opportunities stay valid (minutes)
     # None means use the global SCANNER_STALE_OPPORTUNITY_MINUTES default.
     opportunity_ttl_minutes: Optional[int] = None
+    # Retention window alias for config-driven durations like "15m" / "2d".
+    retention_window: Optional[str] = None
+    # Per-strategy opportunity cap alias for config-driven retention.
+    retention_max_opportunities: Optional[int] = None
 
     # Deduplication control — if True, this strategy's opportunities can be
     # deduplicated against other strategies finding the same markets.
@@ -1194,6 +1198,7 @@ class BaseStrategy(ABC):
                 "group_item_title": getattr(m, "group_item_title", ""),
                 "event_slug": getattr(m, "event_slug", ""),
                 "event_ticker": getattr(m, "event_slug", ""),
+                "clob_token_ids": list(getattr(m, "clob_token_ids", []) or []),
                 "yes_price": m.yes_price,
                 "no_price": m.no_price,
                 "outcome_labels": outcome_labels,

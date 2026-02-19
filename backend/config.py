@@ -16,8 +16,8 @@ def _detect_project_root(backend_dir: Path) -> Path:
 
 
 _PROJECT_ROOT = _detect_project_root(_BACKEND_DIR)
-_DEFAULT_DB_PATH = (_PROJECT_ROOT / "data" / "arbitrage.db").resolve()
-_LEGACY_DB_PATH = (_BACKEND_DIR / "arbitrage.db").resolve()
+_DEFAULT_DB_PATH = (_PROJECT_ROOT / "data" / "homerun.db").resolve()
+_LEGACY_DB_PATH = (_BACKEND_DIR / "homerun.db").resolve()
 _SQLITE_ASYNC_PREFIX = "sqlite+aiosqlite:///"
 _SQLITE_SYNC_PREFIX = "sqlite:///"
 _LOGGER = logging.getLogger(__name__)
@@ -152,6 +152,19 @@ class Settings(BaseSettings):
 
     # Database - canonical path under project-root data directory
     DATABASE_URL: str = f"sqlite+aiosqlite:///{_DEFAULT_DB_PATH}"
+
+    # Redis (worker/event IPC)
+    REDIS_HOST: str = "127.0.0.1"
+    REDIS_PORT: int = 6379
+    REDIS_DB: int = 0
+    REDIS_PASSWORD: Optional[str] = None
+    REDIS_CONNECT_TIMEOUT_SECONDS: float = 1.0
+    REDIS_SOCKET_TIMEOUT_SECONDS: float = 1.0
+    REDIS_STREAM_BLOCK_MS: int = 1000
+    REDIS_STREAM_READ_COUNT: int = 200
+    EVENT_BUS_STREAM_KEY: str = "homerun:event_bus"
+    DATA_EVENT_STREAM_KEY: str = "homerun:data_events"
+    REDIS_EVENT_STREAM_MAXLEN: int = 50000
 
     # Production Settings
     LOG_LEVEL: str = "INFO"
@@ -393,85 +406,85 @@ class Settings(BaseSettings):
     WEATHER_WORKFLOW_DEFAULT_SIZE_USD: float = 10.0
     WEATHER_WORKFLOW_MAX_SIZE_USD: float = 50.0
 
-    # World Intelligence Settings
-    WORLD_INTELLIGENCE_ENABLED: bool = True
-    WORLD_INTELLIGENCE_INTERVAL_SECONDS: int = 300  # 5 minutes
-    WORLD_INTEL_EMIT_TRADE_SIGNALS: bool = False  # keep decoupled from trader orchestrator by default
+    # Events Settings
+    EVENTS_ENABLED: bool = True
+    EVENTS_INTERVAL_SECONDS: int = 300  # 5 minutes
+    EVENTS_EMIT_TRADE_SIGNALS: bool = False  # keep decoupled from trader orchestrator by default
     ACLED_API_KEY: Optional[str] = None  # ACLED API key (free registration)
     ACLED_EMAIL: Optional[str] = None  # Email for ACLED API auth
     OPENSKY_USERNAME: Optional[str] = None  # OpenSky Network credentials (optional)
     OPENSKY_PASSWORD: Optional[str] = None
     AISSTREAM_API_KEY: Optional[str] = None  # AIS stream API key (optional)
     CLOUDFLARE_RADAR_TOKEN: Optional[str] = None  # Cloudflare Radar API token
-    WORLD_INTEL_AIS_ENABLED: bool = True
-    WORLD_INTEL_AIS_WS_URL: str = "wss://stream.aisstream.io/v0/stream"
-    WORLD_INTEL_AIS_SAMPLE_SECONDS: int = 10
-    WORLD_INTEL_AIS_MAX_MESSAGES: int = 250
-    WORLD_INTEL_AIRPLANES_LIVE_ENABLED: bool = True
-    WORLD_INTEL_AIRPLANES_LIVE_URL: str = "https://api.airplanes.live/v2/mil"
-    WORLD_INTEL_AIRPLANES_LIVE_TIMEOUT_SECONDS: float = 20.0
-    WORLD_INTEL_AIRPLANES_LIVE_MAX_RECORDS: int = 1500
-    WORLD_INTEL_MILITARY_DEDUPE_RADIUS_KM: float = 45.0
-    WORLD_INTEL_COUNTRY_REFERENCE_SYNC_ENABLED: bool = True
-    WORLD_INTEL_COUNTRY_REFERENCE_SYNC_HOURS: int = 24
-    WORLD_INTEL_COUNTRY_REFERENCE_REQUEST_TIMEOUT_SECONDS: float = 20.0
-    WORLD_INTEL_UCDP_SYNC_ENABLED: bool = True
-    WORLD_INTEL_UCDP_SYNC_HOURS: int = 24
-    WORLD_INTEL_UCDP_LOOKBACK_YEARS: int = 8
-    WORLD_INTEL_UCDP_MAX_PAGES: int = 100
-    WORLD_INTEL_UCDP_REQUEST_TIMEOUT_SECONDS: float = 25.0
-    WORLD_INTEL_MID_SYNC_ENABLED: bool = True
-    WORLD_INTEL_MID_SYNC_HOURS: int = 168
-    WORLD_INTEL_MID_REQUEST_TIMEOUT_SECONDS: float = 20.0
-    WORLD_INTEL_TRADE_DEPENDENCY_SYNC_ENABLED: bool = True
-    WORLD_INTEL_TRADE_DEPENDENCY_SYNC_HOURS: int = 24
-    WORLD_INTEL_TRADE_DEPENDENCY_REQUEST_TIMEOUT_SECONDS: float = 20.0
-    WORLD_INTEL_TRADE_DEPENDENCY_WB_PER_PAGE: int = 5000
-    WORLD_INTEL_TRADE_DEPENDENCY_WB_MAX_PAGES: int = 50
-    WORLD_INTEL_TRADE_DEPENDENCY_BASE_DIVISOR: float = 120.0
-    WORLD_INTEL_TRADE_DEPENDENCY_MIN_FACTOR: float = 0.5
-    WORLD_INTEL_TRADE_DEPENDENCY_MAX_FACTOR: float = 1.5
-    WORLD_INTEL_CHOKEPOINTS_ENABLED: bool = True
-    WORLD_INTEL_CHOKEPOINTS_REFRESH_SECONDS: int = 1800
-    WORLD_INTEL_CHOKEPOINTS_REQUEST_TIMEOUT_SECONDS: float = 20.0
-    WORLD_INTEL_CHOKEPOINTS_MAX_DAILY_ROWS: int = 500
-    WORLD_INTEL_CHOKEPOINTS_DB_SYNC_ENABLED: bool = True
-    WORLD_INTEL_CHOKEPOINTS_DB_SYNC_HOURS: int = 6
-    WORLD_INTEL_CHOKEPOINTS_PORTWATCH_POINTS_URL: str = (
+    EVENTS_AIS_ENABLED: bool = True
+    EVENTS_AIS_WS_URL: str = "wss://stream.aisstream.io/v0/stream"
+    EVENTS_AIS_SAMPLE_SECONDS: int = 10
+    EVENTS_AIS_MAX_MESSAGES: int = 250
+    EVENTS_AIRPLANES_LIVE_ENABLED: bool = True
+    EVENTS_AIRPLANES_LIVE_URL: str = "https://api.airplanes.live/v2/mil"
+    EVENTS_AIRPLANES_LIVE_TIMEOUT_SECONDS: float = 20.0
+    EVENTS_AIRPLANES_LIVE_MAX_RECORDS: int = 1500
+    EVENTS_MILITARY_DEDUPE_RADIUS_KM: float = 45.0
+    EVENTS_COUNTRY_REFERENCE_SYNC_ENABLED: bool = True
+    EVENTS_COUNTRY_REFERENCE_SYNC_HOURS: int = 24
+    EVENTS_COUNTRY_REFERENCE_REQUEST_TIMEOUT_SECONDS: float = 20.0
+    EVENTS_UCDP_SYNC_ENABLED: bool = True
+    EVENTS_UCDP_SYNC_HOURS: int = 24
+    EVENTS_UCDP_LOOKBACK_YEARS: int = 8
+    EVENTS_UCDP_MAX_PAGES: int = 100
+    EVENTS_UCDP_REQUEST_TIMEOUT_SECONDS: float = 25.0
+    EVENTS_MID_SYNC_ENABLED: bool = True
+    EVENTS_MID_SYNC_HOURS: int = 168
+    EVENTS_MID_REQUEST_TIMEOUT_SECONDS: float = 20.0
+    EVENTS_TRADE_DEPENDENCY_SYNC_ENABLED: bool = True
+    EVENTS_TRADE_DEPENDENCY_SYNC_HOURS: int = 24
+    EVENTS_TRADE_DEPENDENCY_REQUEST_TIMEOUT_SECONDS: float = 20.0
+    EVENTS_TRADE_DEPENDENCY_WB_PER_PAGE: int = 5000
+    EVENTS_TRADE_DEPENDENCY_WB_MAX_PAGES: int = 50
+    EVENTS_TRADE_DEPENDENCY_BASE_DIVISOR: float = 120.0
+    EVENTS_TRADE_DEPENDENCY_MIN_FACTOR: float = 0.5
+    EVENTS_TRADE_DEPENDENCY_MAX_FACTOR: float = 1.5
+    EVENTS_CHOKEPOINTS_ENABLED: bool = True
+    EVENTS_CHOKEPOINTS_REFRESH_SECONDS: int = 1800
+    EVENTS_CHOKEPOINTS_REQUEST_TIMEOUT_SECONDS: float = 20.0
+    EVENTS_CHOKEPOINTS_MAX_DAILY_ROWS: int = 500
+    EVENTS_CHOKEPOINTS_DB_SYNC_ENABLED: bool = True
+    EVENTS_CHOKEPOINTS_DB_SYNC_HOURS: int = 6
+    EVENTS_CHOKEPOINTS_PORTWATCH_POINTS_URL: str = (
         "https://services9.arcgis.com/weJ1QsnbMYJlCHdG/arcgis/rest/services/"
         "PortWatch_chokepoints_database/FeatureServer/0/query"
     )
-    WORLD_INTEL_CHOKEPOINTS_PORTWATCH_DAILY_URL: str = (
+    EVENTS_CHOKEPOINTS_PORTWATCH_DAILY_URL: str = (
         "https://services9.arcgis.com/weJ1QsnbMYJlCHdG/arcgis/rest/services/"
         "Daily_Chokepoints_Data/FeatureServer/0/query"
     )
-    WORLD_INTEL_CONVERGENCE_MIN_TYPES: int = 2  # Min signal types for convergence
-    WORLD_INTEL_ANOMALY_THRESHOLD: float = 1.8  # Z-score threshold for anomalies
-    WORLD_INTEL_ANOMALY_MIN_BASELINE_POINTS: int = 3
-    WORLD_INTEL_INSTABILITY_SIGNAL_MIN: float = 15.0
-    WORLD_INTEL_INSTABILITY_CRITICAL: float = 60.0  # CII threshold for critical alerts
-    WORLD_INTEL_TENSION_CRITICAL: float = 70.0  # Tension score threshold for alerts
-    WORLD_INTEL_TENSION_PAIRS: list[str] = []
-    WORLD_INTEL_GDELT_QUERY_DELAY_SECONDS: float = 5.0
-    WORLD_INTEL_GDELT_MAX_CONCURRENCY: int = 1
-    WORLD_INTEL_GDELT_NEWS_ENABLED: bool = True
-    WORLD_INTEL_GDELT_NEWS_TIMESPAN_HOURS: int = 6
-    WORLD_INTEL_GDELT_NEWS_MAX_RECORDS: int = 40
-    WORLD_INTEL_GDELT_NEWS_REQUEST_TIMEOUT_SECONDS: float = 20.0
-    WORLD_INTEL_GDELT_NEWS_CACHE_SECONDS: int = 300
-    WORLD_INTEL_GDELT_NEWS_QUERY_DELAY_SECONDS: float = 5.0
-    WORLD_INTEL_GDELT_NEWS_SYNC_ENABLED: bool = True
-    WORLD_INTEL_GDELT_NEWS_SYNC_HOURS: int = 1
-    WORLD_INTEL_ACLED_RATE_LIMIT_PER_MIN: int = 5
-    WORLD_INTEL_ACLED_AUTH_RATE_LIMIT_PER_MIN: int = 12
-    WORLD_INTEL_ACLED_CB_MAX_FAILURES: int = 8
-    WORLD_INTEL_ACLED_CB_COOLDOWN_SECONDS: float = 180.0
-    WORLD_INTEL_OPENSKY_CB_MAX_FAILURES: int = 6
-    WORLD_INTEL_OPENSKY_CB_COOLDOWN_SECONDS: float = 120.0
-    WORLD_INTEL_USGS_MIN_MAGNITUDE: float = 4.5
-    WORLD_INTEL_GOV_RSS_ENABLED: bool = True  # Legacy flag (deprecated; NEWS_GOV_RSS_ENABLED is authoritative)
-    WORLD_INTEL_USGS_ENABLED: bool = True  # Enable earthquake monitoring
-    WORLD_INTEL_MILITARY_ENABLED: bool = True  # Enable military flight tracking
+    EVENTS_CONVERGENCE_MIN_TYPES: int = 2  # Min signal types for convergence
+    EVENTS_ANOMALY_THRESHOLD: float = 1.8  # Z-score threshold for anomalies
+    EVENTS_ANOMALY_MIN_BASELINE_POINTS: int = 3
+    EVENTS_INSTABILITY_SIGNAL_MIN: float = 15.0
+    EVENTS_INSTABILITY_CRITICAL: float = 60.0  # CII threshold for critical alerts
+    EVENTS_TENSION_CRITICAL: float = 70.0  # Tension score threshold for alerts
+    EVENTS_TENSION_PAIRS: list[str] = []
+    EVENTS_GDELT_QUERY_DELAY_SECONDS: float = 5.0
+    EVENTS_GDELT_MAX_CONCURRENCY: int = 1
+    EVENTS_GDELT_NEWS_ENABLED: bool = True
+    EVENTS_GDELT_NEWS_TIMESPAN_HOURS: int = 6
+    EVENTS_GDELT_NEWS_MAX_RECORDS: int = 40
+    EVENTS_GDELT_NEWS_REQUEST_TIMEOUT_SECONDS: float = 20.0
+    EVENTS_GDELT_NEWS_CACHE_SECONDS: int = 300
+    EVENTS_GDELT_NEWS_QUERY_DELAY_SECONDS: float = 5.0
+    EVENTS_GDELT_NEWS_SYNC_ENABLED: bool = True
+    EVENTS_GDELT_NEWS_SYNC_HOURS: int = 1
+    EVENTS_ACLED_RATE_LIMIT_PER_MIN: int = 5
+    EVENTS_ACLED_AUTH_RATE_LIMIT_PER_MIN: int = 12
+    EVENTS_ACLED_CB_MAX_FAILURES: int = 8
+    EVENTS_ACLED_CB_COOLDOWN_SECONDS: float = 180.0
+    EVENTS_OPENSKY_CB_MAX_FAILURES: int = 6
+    EVENTS_OPENSKY_CB_COOLDOWN_SECONDS: float = 120.0
+    EVENTS_USGS_MIN_MAGNITUDE: float = 4.5
+    EVENTS_GOV_RSS_ENABLED: bool = True  # Legacy flag (deprecated; NEWS_GOV_RSS_ENABLED is authoritative)
+    EVENTS_USGS_ENABLED: bool = True  # Enable earthquake monitoring
+    EVENTS_MILITARY_ENABLED: bool = True  # Enable military flight tracking
 
     # Database Maintenance
     AUTO_CLEANUP_ENABLED: bool = False  # Enable automatic cleanup
@@ -535,82 +548,82 @@ class Settings(BaseSettings):
 settings = Settings()
 
 
-_WORLD_INTELLIGENCE_DB_FIELD_MAP: dict[str, tuple[str, object]] = {
-    "enabled": ("WORLD_INTELLIGENCE_ENABLED", True),
-    "interval_seconds": ("WORLD_INTELLIGENCE_INTERVAL_SECONDS", 300),
-    "emit_trade_signals": ("WORLD_INTEL_EMIT_TRADE_SIGNALS", False),
-    "ais_enabled": ("WORLD_INTEL_AIS_ENABLED", True),
-    "ais_sample_seconds": ("WORLD_INTEL_AIS_SAMPLE_SECONDS", 10),
-    "ais_max_messages": ("WORLD_INTEL_AIS_MAX_MESSAGES", 250),
-    "airplanes_live_enabled": ("WORLD_INTEL_AIRPLANES_LIVE_ENABLED", True),
+_EVENTS_DB_FIELD_MAP: dict[str, tuple[str, object]] = {
+    "enabled": ("EVENTS_ENABLED", True),
+    "interval_seconds": ("EVENTS_INTERVAL_SECONDS", 300),
+    "emit_trade_signals": ("EVENTS_EMIT_TRADE_SIGNALS", False),
+    "ais_enabled": ("EVENTS_AIS_ENABLED", True),
+    "ais_sample_seconds": ("EVENTS_AIS_SAMPLE_SECONDS", 10),
+    "ais_max_messages": ("EVENTS_AIS_MAX_MESSAGES", 250),
+    "airplanes_live_enabled": ("EVENTS_AIRPLANES_LIVE_ENABLED", True),
     "airplanes_live_timeout_seconds": (
-        "WORLD_INTEL_AIRPLANES_LIVE_TIMEOUT_SECONDS",
+        "EVENTS_AIRPLANES_LIVE_TIMEOUT_SECONDS",
         20.0,
     ),
-    "airplanes_live_max_records": ("WORLD_INTEL_AIRPLANES_LIVE_MAX_RECORDS", 1500),
-    "military_dedupe_radius_km": ("WORLD_INTEL_MILITARY_DEDUPE_RADIUS_KM", 45.0),
-    "country_reference_sync_enabled": ("WORLD_INTEL_COUNTRY_REFERENCE_SYNC_ENABLED", True),
-    "country_reference_sync_hours": ("WORLD_INTEL_COUNTRY_REFERENCE_SYNC_HOURS", 24),
+    "airplanes_live_max_records": ("EVENTS_AIRPLANES_LIVE_MAX_RECORDS", 1500),
+    "military_dedupe_radius_km": ("EVENTS_MILITARY_DEDUPE_RADIUS_KM", 45.0),
+    "country_reference_sync_enabled": ("EVENTS_COUNTRY_REFERENCE_SYNC_ENABLED", True),
+    "country_reference_sync_hours": ("EVENTS_COUNTRY_REFERENCE_SYNC_HOURS", 24),
     "country_reference_request_timeout_seconds": (
-        "WORLD_INTEL_COUNTRY_REFERENCE_REQUEST_TIMEOUT_SECONDS",
+        "EVENTS_COUNTRY_REFERENCE_REQUEST_TIMEOUT_SECONDS",
         20.0,
     ),
-    "ucdp_sync_enabled": ("WORLD_INTEL_UCDP_SYNC_ENABLED", True),
-    "ucdp_sync_hours": ("WORLD_INTEL_UCDP_SYNC_HOURS", 24),
-    "ucdp_lookback_years": ("WORLD_INTEL_UCDP_LOOKBACK_YEARS", 8),
-    "ucdp_max_pages": ("WORLD_INTEL_UCDP_MAX_PAGES", 100),
-    "ucdp_request_timeout_seconds": ("WORLD_INTEL_UCDP_REQUEST_TIMEOUT_SECONDS", 25.0),
-    "mid_sync_enabled": ("WORLD_INTEL_MID_SYNC_ENABLED", True),
-    "mid_sync_hours": ("WORLD_INTEL_MID_SYNC_HOURS", 168),
-    "mid_request_timeout_seconds": ("WORLD_INTEL_MID_REQUEST_TIMEOUT_SECONDS", 20.0),
-    "trade_dependency_sync_enabled": ("WORLD_INTEL_TRADE_DEPENDENCY_SYNC_ENABLED", True),
-    "trade_dependency_sync_hours": ("WORLD_INTEL_TRADE_DEPENDENCY_SYNC_HOURS", 24),
+    "ucdp_sync_enabled": ("EVENTS_UCDP_SYNC_ENABLED", True),
+    "ucdp_sync_hours": ("EVENTS_UCDP_SYNC_HOURS", 24),
+    "ucdp_lookback_years": ("EVENTS_UCDP_LOOKBACK_YEARS", 8),
+    "ucdp_max_pages": ("EVENTS_UCDP_MAX_PAGES", 100),
+    "ucdp_request_timeout_seconds": ("EVENTS_UCDP_REQUEST_TIMEOUT_SECONDS", 25.0),
+    "mid_sync_enabled": ("EVENTS_MID_SYNC_ENABLED", True),
+    "mid_sync_hours": ("EVENTS_MID_SYNC_HOURS", 168),
+    "mid_request_timeout_seconds": ("EVENTS_MID_REQUEST_TIMEOUT_SECONDS", 20.0),
+    "trade_dependency_sync_enabled": ("EVENTS_TRADE_DEPENDENCY_SYNC_ENABLED", True),
+    "trade_dependency_sync_hours": ("EVENTS_TRADE_DEPENDENCY_SYNC_HOURS", 24),
     "trade_dependency_request_timeout_seconds": (
-        "WORLD_INTEL_TRADE_DEPENDENCY_REQUEST_TIMEOUT_SECONDS",
+        "EVENTS_TRADE_DEPENDENCY_REQUEST_TIMEOUT_SECONDS",
         20.0,
     ),
-    "trade_dependency_wb_per_page": ("WORLD_INTEL_TRADE_DEPENDENCY_WB_PER_PAGE", 5000),
-    "trade_dependency_wb_max_pages": ("WORLD_INTEL_TRADE_DEPENDENCY_WB_MAX_PAGES", 50),
-    "trade_dependency_base_divisor": ("WORLD_INTEL_TRADE_DEPENDENCY_BASE_DIVISOR", 120.0),
-    "trade_dependency_min_factor": ("WORLD_INTEL_TRADE_DEPENDENCY_MIN_FACTOR", 0.5),
-    "trade_dependency_max_factor": ("WORLD_INTEL_TRADE_DEPENDENCY_MAX_FACTOR", 1.5),
-    "chokepoints_enabled": ("WORLD_INTEL_CHOKEPOINTS_ENABLED", True),
-    "chokepoints_refresh_seconds": ("WORLD_INTEL_CHOKEPOINTS_REFRESH_SECONDS", 1800),
+    "trade_dependency_wb_per_page": ("EVENTS_TRADE_DEPENDENCY_WB_PER_PAGE", 5000),
+    "trade_dependency_wb_max_pages": ("EVENTS_TRADE_DEPENDENCY_WB_MAX_PAGES", 50),
+    "trade_dependency_base_divisor": ("EVENTS_TRADE_DEPENDENCY_BASE_DIVISOR", 120.0),
+    "trade_dependency_min_factor": ("EVENTS_TRADE_DEPENDENCY_MIN_FACTOR", 0.5),
+    "trade_dependency_max_factor": ("EVENTS_TRADE_DEPENDENCY_MAX_FACTOR", 1.5),
+    "chokepoints_enabled": ("EVENTS_CHOKEPOINTS_ENABLED", True),
+    "chokepoints_refresh_seconds": ("EVENTS_CHOKEPOINTS_REFRESH_SECONDS", 1800),
     "chokepoints_request_timeout_seconds": (
-        "WORLD_INTEL_CHOKEPOINTS_REQUEST_TIMEOUT_SECONDS",
+        "EVENTS_CHOKEPOINTS_REQUEST_TIMEOUT_SECONDS",
         20.0,
     ),
-    "chokepoints_max_daily_rows": ("WORLD_INTEL_CHOKEPOINTS_MAX_DAILY_ROWS", 500),
-    "chokepoints_db_sync_enabled": ("WORLD_INTEL_CHOKEPOINTS_DB_SYNC_ENABLED", True),
-    "chokepoints_db_sync_hours": ("WORLD_INTEL_CHOKEPOINTS_DB_SYNC_HOURS", 6),
-    "convergence_min_types": ("WORLD_INTEL_CONVERGENCE_MIN_TYPES", 2),
-    "anomaly_threshold": ("WORLD_INTEL_ANOMALY_THRESHOLD", 1.8),
-    "anomaly_min_baseline_points": ("WORLD_INTEL_ANOMALY_MIN_BASELINE_POINTS", 3),
-    "instability_signal_min": ("WORLD_INTEL_INSTABILITY_SIGNAL_MIN", 15.0),
-    "instability_critical": ("WORLD_INTEL_INSTABILITY_CRITICAL", 60.0),
-    "tension_critical": ("WORLD_INTEL_TENSION_CRITICAL", 70.0),
-    "gdelt_query_delay_seconds": ("WORLD_INTEL_GDELT_QUERY_DELAY_SECONDS", 5.0),
-    "gdelt_max_concurrency": ("WORLD_INTEL_GDELT_MAX_CONCURRENCY", 1),
-    "gdelt_news_enabled": ("WORLD_INTEL_GDELT_NEWS_ENABLED", True),
-    "gdelt_news_timespan_hours": ("WORLD_INTEL_GDELT_NEWS_TIMESPAN_HOURS", 6),
-    "gdelt_news_max_records": ("WORLD_INTEL_GDELT_NEWS_MAX_RECORDS", 40),
+    "chokepoints_max_daily_rows": ("EVENTS_CHOKEPOINTS_MAX_DAILY_ROWS", 500),
+    "chokepoints_db_sync_enabled": ("EVENTS_CHOKEPOINTS_DB_SYNC_ENABLED", True),
+    "chokepoints_db_sync_hours": ("EVENTS_CHOKEPOINTS_DB_SYNC_HOURS", 6),
+    "convergence_min_types": ("EVENTS_CONVERGENCE_MIN_TYPES", 2),
+    "anomaly_threshold": ("EVENTS_ANOMALY_THRESHOLD", 1.8),
+    "anomaly_min_baseline_points": ("EVENTS_ANOMALY_MIN_BASELINE_POINTS", 3),
+    "instability_signal_min": ("EVENTS_INSTABILITY_SIGNAL_MIN", 15.0),
+    "instability_critical": ("EVENTS_INSTABILITY_CRITICAL", 60.0),
+    "tension_critical": ("EVENTS_TENSION_CRITICAL", 70.0),
+    "gdelt_query_delay_seconds": ("EVENTS_GDELT_QUERY_DELAY_SECONDS", 5.0),
+    "gdelt_max_concurrency": ("EVENTS_GDELT_MAX_CONCURRENCY", 1),
+    "gdelt_news_enabled": ("EVENTS_GDELT_NEWS_ENABLED", True),
+    "gdelt_news_timespan_hours": ("EVENTS_GDELT_NEWS_TIMESPAN_HOURS", 6),
+    "gdelt_news_max_records": ("EVENTS_GDELT_NEWS_MAX_RECORDS", 40),
     "gdelt_news_request_timeout_seconds": (
-        "WORLD_INTEL_GDELT_NEWS_REQUEST_TIMEOUT_SECONDS",
+        "EVENTS_GDELT_NEWS_REQUEST_TIMEOUT_SECONDS",
         20.0,
     ),
-    "gdelt_news_cache_seconds": ("WORLD_INTEL_GDELT_NEWS_CACHE_SECONDS", 300),
-    "gdelt_news_query_delay_seconds": ("WORLD_INTEL_GDELT_NEWS_QUERY_DELAY_SECONDS", 5.0),
-    "gdelt_news_sync_enabled": ("WORLD_INTEL_GDELT_NEWS_SYNC_ENABLED", True),
-    "gdelt_news_sync_hours": ("WORLD_INTEL_GDELT_NEWS_SYNC_HOURS", 1),
-    "acled_rate_limit_per_min": ("WORLD_INTEL_ACLED_RATE_LIMIT_PER_MIN", 5),
-    "acled_auth_rate_limit_per_min": ("WORLD_INTEL_ACLED_AUTH_RATE_LIMIT_PER_MIN", 12),
-    "acled_cb_max_failures": ("WORLD_INTEL_ACLED_CB_MAX_FAILURES", 8),
-    "acled_cb_cooldown_seconds": ("WORLD_INTEL_ACLED_CB_COOLDOWN_SECONDS", 180.0),
-    "opensky_cb_max_failures": ("WORLD_INTEL_OPENSKY_CB_MAX_FAILURES", 6),
-    "opensky_cb_cooldown_seconds": ("WORLD_INTEL_OPENSKY_CB_COOLDOWN_SECONDS", 120.0),
-    "usgs_min_magnitude": ("WORLD_INTEL_USGS_MIN_MAGNITUDE", 4.5),
-    "usgs_enabled": ("WORLD_INTEL_USGS_ENABLED", True),
-    "military_enabled": ("WORLD_INTEL_MILITARY_ENABLED", True),
+    "gdelt_news_cache_seconds": ("EVENTS_GDELT_NEWS_CACHE_SECONDS", 300),
+    "gdelt_news_query_delay_seconds": ("EVENTS_GDELT_NEWS_QUERY_DELAY_SECONDS", 5.0),
+    "gdelt_news_sync_enabled": ("EVENTS_GDELT_NEWS_SYNC_ENABLED", True),
+    "gdelt_news_sync_hours": ("EVENTS_GDELT_NEWS_SYNC_HOURS", 1),
+    "acled_rate_limit_per_min": ("EVENTS_ACLED_RATE_LIMIT_PER_MIN", 5),
+    "acled_auth_rate_limit_per_min": ("EVENTS_ACLED_AUTH_RATE_LIMIT_PER_MIN", 12),
+    "acled_cb_max_failures": ("EVENTS_ACLED_CB_MAX_FAILURES", 8),
+    "acled_cb_cooldown_seconds": ("EVENTS_ACLED_CB_COOLDOWN_SECONDS", 180.0),
+    "opensky_cb_max_failures": ("EVENTS_OPENSKY_CB_MAX_FAILURES", 6),
+    "opensky_cb_cooldown_seconds": ("EVENTS_OPENSKY_CB_COOLDOWN_SECONDS", 120.0),
+    "usgs_min_magnitude": ("EVENTS_USGS_MIN_MAGNITUDE", 4.5),
+    "usgs_enabled": ("EVENTS_USGS_ENABLED", True),
+    "military_enabled": ("EVENTS_MILITARY_ENABLED", True),
 }
 
 
@@ -644,8 +657,8 @@ def _coerce_setting(value: object, default: object) -> object:
     return value
 
 
-async def apply_world_intelligence_settings():
-    """Load world intelligence settings from DB into the runtime config singleton."""
+async def apply_events_settings():
+    """Load events settings from DB into the runtime config singleton."""
     from models.database import AsyncSessionLocal, AppSettings
     from sqlalchemy import select
     from utils.secrets import decrypt_secret
@@ -656,50 +669,50 @@ async def apply_world_intelligence_settings():
         if not db:
             return
 
-    raw_cfg = getattr(db, "world_intel_settings_json", None)
+    raw_cfg = getattr(db, "events_settings_json", None)
     config_payload = raw_cfg if isinstance(raw_cfg, dict) else {}
 
     # Preserve older persisted GDELT-specific columns as fallback.
     if "gdelt_news_enabled" not in config_payload:
-        config_payload["gdelt_news_enabled"] = getattr(db, "world_intel_gdelt_news_enabled", None)
+        config_payload["gdelt_news_enabled"] = getattr(db, "events_gdelt_news_enabled", None)
     if "gdelt_news_timespan_hours" not in config_payload:
-        config_payload["gdelt_news_timespan_hours"] = getattr(db, "world_intel_gdelt_news_timespan_hours", None)
+        config_payload["gdelt_news_timespan_hours"] = getattr(db, "events_gdelt_news_timespan_hours", None)
     if "gdelt_news_max_records" not in config_payload:
-        config_payload["gdelt_news_max_records"] = getattr(db, "world_intel_gdelt_news_max_records", None)
+        config_payload["gdelt_news_max_records"] = getattr(db, "events_gdelt_news_max_records", None)
 
-    for db_field, (config_attr, default) in _WORLD_INTELLIGENCE_DB_FIELD_MAP.items():
+    for db_field, (config_attr, default) in _EVENTS_DB_FIELD_MAP.items():
         resolved = _coerce_setting(config_payload.get(db_field), default)
         object.__setattr__(settings, config_attr, resolved)
 
     object.__setattr__(
         settings,
         "ACLED_API_KEY",
-        decrypt_secret(getattr(db, "world_intel_acled_api_key", None)),
+        decrypt_secret(getattr(db, "events_acled_api_key", None)),
     )
     object.__setattr__(
         settings,
         "ACLED_EMAIL",
-        str(getattr(db, "world_intel_acled_email", "") or "").strip() or None,
+        str(getattr(db, "events_acled_email", "") or "").strip() or None,
     )
     object.__setattr__(
         settings,
         "OPENSKY_USERNAME",
-        str(getattr(db, "world_intel_opensky_username", "") or "").strip() or None,
+        str(getattr(db, "events_opensky_username", "") or "").strip() or None,
     )
     object.__setattr__(
         settings,
         "OPENSKY_PASSWORD",
-        decrypt_secret(getattr(db, "world_intel_opensky_password", None)),
+        decrypt_secret(getattr(db, "events_opensky_password", None)),
     )
     object.__setattr__(
         settings,
         "AISSTREAM_API_KEY",
-        decrypt_secret(getattr(db, "world_intel_aisstream_api_key", None)),
+        decrypt_secret(getattr(db, "events_aisstream_api_key", None)),
     )
     object.__setattr__(
         settings,
         "CLOUDFLARE_RADAR_TOKEN",
-        decrypt_secret(getattr(db, "world_intel_cloudflare_radar_token", None)),
+        decrypt_secret(getattr(db, "events_cloudflare_radar_token", None)),
     )
 
 

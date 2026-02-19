@@ -103,9 +103,14 @@ def _assign_to_job(proc: subprocess.Popen) -> None:
 # ---------------------------------------------------------------------------
 BACKEND_PORT = 8000
 FRONTEND_PORT = 3000
+REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
+try:
+    REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
+except ValueError:
+    REDIS_PORT = 6379
 # Use 127.0.0.1 instead of localhost; on Windows, localhost can resolve to
 # ::1 (IPv6) first while uvicorn only binds 0.0.0.0 (IPv4), causing timeouts.
-HEALTH_URL = f"http://127.0.0.1:{BACKEND_PORT}/health/detailed"
+HEALTH_URL = f"http://127.0.0.1:{BACKEND_PORT}/health/tui"
 PROJECT_ROOT = Path(__file__).parent.resolve()
 BACKEND_DIR = PROJECT_ROOT / "backend"
 
@@ -124,7 +129,7 @@ WORKER_STATUS_ORDER: list[tuple[str, str]] = [
     ("crypto", "CRYPTO"),
     ("tracked_traders", "TRACKED"),
     ("trader_orchestrator", "ORCHESTRATOR"),
-    ("world_intelligence", "WORLD INTEL"),
+    ("events", "EVENTS"),
 ]
 
 WORKER_TAG_TO_NAME: dict[str, str] = {
@@ -135,7 +140,7 @@ WORKER_TAG_TO_NAME: dict[str, str] = {
     "CRYPTO": "crypto",
     "TRACKED": "tracked_traders",
     "ORCHESTRATOR": "trader_orchestrator",
-    "WORLDINTEL": "world_intelligence",
+    "EVENTS": "events",
 }
 
 WORKER_BACKEND_HINTS: tuple[tuple[str, str], ...] = (
@@ -148,7 +153,7 @@ WORKER_BACKEND_HINTS: tuple[tuple[str, str], ...] = (
     ("crypto_worker", "crypto"),
     ("tracked_traders", "tracked_traders"),
     ("orchestrator", "trader_orchestrator"),
-    ("world_intel", "world_intelligence"),
+    ("events_worker", "events"),
 )
 
 SOURCE_FILTER_BY_BUTTON: dict[str, str] = {
@@ -234,7 +239,7 @@ Screen {
 #hero-row {
     layout: horizontal;
     margin: 1 1 0 1;
-    height: 11;
+    height: 13;
 }
 
 #brand-panel {
@@ -618,6 +623,46 @@ def kill_port(port: int) -> None:
                 pass
 
 
+def kill_legacy_worker_processes() -> None:
+    """Stop detached legacy worker processes from pre in-process runs."""
+    if sys.platform == "win32":
+        return
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return
+
+    for line in result.stdout.splitlines():
+        entry = line.strip()
+        if not entry:
+            continue
+        parts = entry.split(None, 1)
+        if len(parts) != 2:
+            continue
+        pid_text, command = parts
+        if " -m workers." not in command:
+            continue
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        if pid == os.getpid():
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        except OSError:
+            continue
+
+    time.sleep(0.25)
+
+
 class WorkerPanel(Static):
     """Compact worker telemetry panel with mini logs."""
 
@@ -796,6 +841,8 @@ class HomerunApp(App):
             with Vertical(id="platform-panel"):
                 yield Static("Platform", id="platform-title")
                 yield Static("[red]\u25cf[/] BACKEND   OFFLINE", id="svc-backend", classes="platform-item")
+                yield Static("[red]\u25cf[/] DATABASE  OFFLINE", id="svc-database", classes="platform-item")
+                yield Static("[red]\u25cf[/] REDIS    OFFLINE", id="svc-redis", classes="platform-item")
                 yield Static("[red]\u25cf[/] FRONTEND  OFFLINE", id="svc-frontend", classes="platform-item")
                 yield Static("[red]\u25cf[/] WS FEEDS  OFFLINE", id="svc-wsfeeds", classes="platform-item")
                 yield Static(f"Dashboard  http://localhost:{FRONTEND_PORT}", classes="platform-url")
@@ -1535,6 +1582,9 @@ class HomerunApp(App):
         self._log_activity("[bold cyan]Starting services...[/]")
         self.call_from_thread(self._reset_worker_telemetry)
 
+        # Clean up detached worker processes from older launch modes.
+        kill_legacy_worker_processes()
+
         # Kill stale processes
         kill_port(BACKEND_PORT)
         kill_port(FRONTEND_PORT)
@@ -1711,13 +1761,21 @@ class HomerunApp(App):
 
         # --- Platform status ---
         ws = services.get("ws_feeds", {})
+        database_healthy = self._resolve_database_health(data, services)
+        redis_healthy = self._resolve_redis_health(services)
 
         self._update_platform_item("svc-backend", "BACKEND", True)
+        self._update_platform_item("svc-database", "DATABASE", database_healthy)
+        self._update_platform_item("svc-redis", "REDIS", redis_healthy)
         if not self._frontend_alive():
             self._request_frontend_start("backend health ready")
         frontend_alive = self._frontend_alive()
         self._update_platform_item("svc-frontend", "FRONTEND", frontend_alive)
-        ws_healthy = ws.get("healthy", False) if isinstance(ws, dict) else False
+        ws_started = bool(ws.get("started", False)) if isinstance(ws, dict) else False
+        ws_available = (
+            bool(ws.get("websockets_available", True)) if isinstance(ws, dict) else False
+        )
+        ws_healthy = bool(ws.get("healthy", False)) or (ws_started and ws_available)
         self._update_platform_item("svc-wsfeeds", "WS FEEDS", ws_healthy)
 
         # --- Worker command center ---
@@ -1730,6 +1788,8 @@ class HomerunApp(App):
         """Mark backend as offline; check worker/frontend processes directly."""
         self.backend_healthy = False
         self._update_platform_item("svc-backend", "BACKEND", False)
+        self._update_platform_item("svc-database", "DATABASE", False)
+        self._update_platform_item("svc-redis", "REDIS", self._ping_redis())
         # Frontend and WS feeds depend on backend, mark offline
         frontend_alive = self.frontend_proc is not None and self.frontend_proc.poll() is None
         self._update_platform_item("svc-frontend", "FRONTEND", frontend_alive)
@@ -1746,6 +1806,42 @@ class HomerunApp(App):
             self.query_one(f"#{widget_id}", Static).update(f"{dot} {label:<8} {state}")
         except Exception:
             pass
+
+    def _resolve_database_health(self, data: dict, services: dict) -> bool:
+        checks = data.get("checks")
+        if isinstance(checks, dict) and "database" in checks:
+            return bool(checks.get("database"))
+        db_status = services.get("database")
+        if isinstance(db_status, bool):
+            return db_status
+        if isinstance(db_status, dict):
+            for key in ("healthy", "connected", "ok", "running"):
+                if key in db_status:
+                    return bool(db_status.get(key))
+        return True
+
+    def _resolve_redis_health(self, services: dict) -> bool:
+        redis_status = services.get("redis")
+        if isinstance(redis_status, bool):
+            return redis_status
+        if isinstance(redis_status, dict):
+            for key in ("healthy", "connected", "ok", "running"):
+                if key in redis_status:
+                    return bool(redis_status.get(key))
+        return self._ping_redis()
+
+    def _ping_redis(self) -> bool:
+        import socket
+
+        payload = b"*1\r\n$4\r\nPING\r\n"
+        try:
+            with socket.create_connection((REDIS_HOST, REDIS_PORT), timeout=0.3) as sock:
+                sock.sendall(payload)
+                sock.settimeout(0.3)
+                data = sock.recv(64)
+                return b"+PONG" in data
+        except Exception:
+            return False
 
     def _normalize_workers_payload(self, workers: object, services: dict) -> dict[str, dict]:
         by_name: dict[str, dict] = {}
@@ -1783,7 +1879,7 @@ class HomerunApp(App):
         elif worker_name == "trader_orchestrator":
             running = bool(services.get("trader_orchestrator", {}).get("running", False))
         else:
-            # crypto, weather, tracked_traders, world_intelligence — no dedicated
+            # crypto, weather, tracked_traders, events — no dedicated
             # services key; they report via worker_snapshots which the main
             # workers dict already covers.  If we got here, health didn't include
             # a snapshot yet (worker hasn't completed its first cycle).
@@ -1872,6 +1968,26 @@ class HomerunApp(App):
         if not snapshot:
             return "No telemetry yet"
         parts: list[str] = []
+        stats = snapshot.get("stats")
+
+        if isinstance(stats, dict):
+            memory_mb: Optional[float] = None
+            memory_raw = stats.get("memory_mb")
+            if isinstance(memory_raw, (int, float)) and float(memory_raw) > 0:
+                memory_mb = float(memory_raw)
+            else:
+                rss_bytes = stats.get("rss_bytes")
+                if isinstance(rss_bytes, (int, float)) and float(rss_bytes) > 0:
+                    memory_mb = float(rss_bytes) / (1024 * 1024)
+
+            if memory_mb is not None:
+                parts.append(f"mem {memory_mb:.1f} MB")
+
+            pid = stats.get("pid")
+            if isinstance(pid, int) and pid > 0:
+                parts.append(f"pid {pid}")
+            elif isinstance(pid, str) and pid.isdigit():
+                parts.append(f"pid {pid}")
 
         interval_seconds = snapshot.get("interval_seconds")
         if isinstance(interval_seconds, (int, float)) and interval_seconds > 0:

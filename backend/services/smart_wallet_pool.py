@@ -43,6 +43,7 @@ TARGET_POOL_SIZE = 500
 MIN_POOL_SIZE = 400
 MAX_POOL_SIZE = 600
 ACTIVE_WINDOW_HOURS = 72
+INACTIVE_RISING_RETENTION_HOURS = 336
 SELECTION_SCORE_QUALITY_TARGET_FLOOR = 0.55
 
 # Scheduling targets
@@ -125,6 +126,7 @@ POOL_RUNTIME_DEFAULTS: dict[str, Any] = {
     "min_pool_size": 400,
     "max_pool_size": 600,
     "active_window_hours": 72,
+    "inactive_rising_retention_hours": 336,
     "selection_score_quality_target_floor": 0.55,
     "max_hourly_replacement_rate": 0.15,
     "replacement_score_cutoff": 0.05,
@@ -247,6 +249,12 @@ class SmartWalletPoolService:
         target_pool_size = max(min_pool_size, min(target_pool_size, max_pool_size))
 
         active_window_hours = self._coerce_int(merged.get("active_window_hours"), 72, 1, 720)
+        inactive_rising_retention_hours = self._coerce_int(
+            merged.get("inactive_rising_retention_hours"),
+            336,
+            0,
+            8760,
+        )
         selection_floor = self._coerce_float(merged.get("selection_score_quality_target_floor"), 0.55, 0.0, 1.0)
         max_hourly_replacement_rate = self._coerce_float(merged.get("max_hourly_replacement_rate"), 0.15, 0.0, 1.0)
         replacement_score_cutoff = self._coerce_float(merged.get("replacement_score_cutoff"), 0.05, 0.0, 1.0)
@@ -287,6 +295,7 @@ class SmartWalletPoolService:
         global MIN_POOL_SIZE
         global MAX_POOL_SIZE
         global ACTIVE_WINDOW_HOURS
+        global INACTIVE_RISING_RETENTION_HOURS
         global SELECTION_SCORE_QUALITY_TARGET_FLOOR
         global MAX_HOURLY_REPLACEMENT_RATE
         global REPLACEMENT_SCORE_CUTOFF
@@ -312,6 +321,7 @@ class SmartWalletPoolService:
         MIN_POOL_SIZE = min_pool_size
         MAX_POOL_SIZE = max_pool_size
         ACTIVE_WINDOW_HOURS = active_window_hours
+        INACTIVE_RISING_RETENTION_HOURS = inactive_rising_retention_hours
         SELECTION_SCORE_QUALITY_TARGET_FLOOR = selection_floor
         MAX_HOURLY_REPLACEMENT_RATE = max_hourly_replacement_rate
         REPLACEMENT_SCORE_CUTOFF = replacement_score_cutoff
@@ -345,6 +355,7 @@ class SmartWalletPoolService:
             "min_pool_size": MIN_POOL_SIZE,
             "max_pool_size": MAX_POOL_SIZE,
             "active_window_hours": ACTIVE_WINDOW_HOURS,
+            "inactive_rising_retention_hours": INACTIVE_RISING_RETENTION_HOURS,
             "selection_score_quality_target_floor": SELECTION_SCORE_QUALITY_TARGET_FLOOR,
             "max_hourly_replacement_rate": MAX_HOURLY_REPLACEMENT_RATE,
             "replacement_score_cutoff": REPLACEMENT_SCORE_CUTOFF,
@@ -708,36 +719,30 @@ class SmartWalletPoolService:
         safe_limit = max(1, int(limit))
 
         async with AsyncSessionLocal() as session:
-            if include_filtered:
-                filtered_cutoff = utcnow() - timedelta(hours=24)
-                result = await session.execute(
-                    select(MarketConfluenceSignal)
-                    .where(
-                        func.coalesce(
-                            MarketConfluenceSignal.last_seen_at,
-                            MarketConfluenceSignal.detected_at,
-                        )
-                        >= filtered_cutoff
-                    )
-                    .order_by(
-                        MarketConfluenceSignal.conviction_score.desc(),
-                        MarketConfluenceSignal.last_seen_at.desc(),
-                    )
-                    .limit(max(safe_limit * 6, safe_limit + 50))
+            result = await session.execute(
+                select(MarketConfluenceSignal)
+                .order_by(
+                    MarketConfluenceSignal.is_active.desc(),
+                    MarketConfluenceSignal.last_seen_at.desc(),
+                    MarketConfluenceSignal.conviction_score.desc(),
                 )
-            else:
-                result = await session.execute(
-                    select(MarketConfluenceSignal)
-                    .where(MarketConfluenceSignal.is_active == True)  # noqa: E712
-                    .order_by(
-                        MarketConfluenceSignal.conviction_score.desc(),
-                        MarketConfluenceSignal.last_seen_at.desc(),
-                    )
-                    .limit(max(safe_limit * 6, safe_limit + 50))
-                )
+                .limit(max(safe_limit * 6, safe_limit + 50))
+            )
             raw = list(result.scalars().all())
+            deduped: list[MarketConfluenceSignal] = []
+            seen_keys: set[str] = set()
+            for signal in raw:
+                market_id = str(signal.market_id or "").strip().lower()
+                outcome = str(signal.outcome or "").strip().upper()
+                if not market_id:
+                    continue
+                dedupe_key = f"{market_id}|{outcome}"
+                if dedupe_key in seen_keys:
+                    continue
+                seen_keys.add(dedupe_key)
+                deduped.append(signal)
 
-            signals = list(raw)
+            signals = list(deduped)
             if signals:
                 await self._refresh_signal_market_metadata(session=session, signals=signals)
 
@@ -827,6 +832,7 @@ class SmartWalletPoolService:
                 row["side"] = StrategySDK.infer_trader_side(row)
 
             self._stats["firehose_rows_raw"] = len(raw)
+            self._stats["firehose_rows_deduped"] = len(signals)
             self._stats["firehose_rows_normalized"] = len(output)
             self._stats["firehose_rows_unknown_tier"] = int(unknown_tier_rows)
 
@@ -1420,7 +1426,9 @@ class SmartWalletPoolService:
     async def _refresh_metrics_and_apply_pool(self, now: datetime) -> float:
         cutoff_1h = now - timedelta(hours=1)
         cutoff_24h = now - timedelta(hours=24)
-        cutoff_72h = now - timedelta(hours=ACTIVE_WINDOW_HOURS)
+        cutoff_active = now - timedelta(hours=ACTIVE_WINDOW_HOURS)
+        cutoff_72h = cutoff_active
+        cutoff_rising_retention = now - timedelta(hours=INACTIVE_RISING_RETENTION_HOURS)
         quality_only_mode = self._recompute_mode == POOL_RECOMPUTE_MODE_QUALITY_ONLY
 
         async with AsyncSessionLocal() as session:
@@ -1455,6 +1463,11 @@ class SmartWalletPoolService:
 
             wallets_result = await session.execute(select(DiscoveredWallet))
             wallets = list(wallets_result.scalars().all())
+            current_pool_set = {
+                wallet.address
+                for wallet in wallets
+                if wallet.in_top_pool and not self._is_pool_blocked(wallet)
+            }
 
             selection_scores: dict[str, float] = {}
             insider_scores: dict[str, float] = {}
@@ -1509,13 +1522,20 @@ class SmartWalletPoolService:
                 selection_scores[wallet.address] = selection_score
                 insider_scores[wallet.address] = insider
                 source_confidence_scores[wallet.address] = source_confidence
-                is_recent = bool(last_trade_at is not None and last_trade_at >= cutoff_72h)
+                is_recent = bool(last_trade_at is not None and last_trade_at >= cutoff_active)
+                is_retained_rising = (
+                    wallet.address in current_pool_set
+                    and INACTIVE_RISING_RETENTION_HOURS > 0
+                    and last_trade_at is not None
+                    and last_trade_at >= cutoff_rising_retention
+                )
                 active_recently[wallet.address] = is_recent
 
                 blockers = self._eligibility_blockers(wallet)
                 core_eligible, rising_eligible = self._tier_eligibility(
                     wallet,
                     is_active_recent=is_recent,
+                    is_retained_rising=is_retained_rising,
                 )
                 if core_eligible:
                     tier_hint[wallet.address] = "core"
@@ -1608,7 +1628,7 @@ class SmartWalletPoolService:
                     effective_target_size,
                 )
 
-            current_pool = [w.address for w in wallets if w.in_top_pool and not self._is_pool_blocked(w)]
+            current_pool = list(current_pool_set)
             final_pool, churn_rate = self._apply_churn_guard(
                 desired=desired,
                 current=current_pool,
@@ -1848,6 +1868,7 @@ class SmartWalletPoolService:
         wallet: DiscoveredWallet,
         *,
         is_active_recent: bool,
+        is_retained_rising: bool = False,
     ) -> tuple[bool, bool]:
         win_rate = float(wallet.win_rate or 0.0)
         total_trades = int(wallet.total_trades or 0)
@@ -1864,7 +1885,7 @@ class SmartWalletPoolService:
             win_rate >= CORE_MIN_WIN_RATE and sharpe_ok and profit_factor_ok
         )
         rising_eligible = (
-            is_active_recent
+            (is_active_recent or is_retained_rising)
             and win_rate >= RISING_MIN_WIN_RATE
             and total_pnl > 0
             and total_trades >= MIN_ELIGIBLE_TRADES

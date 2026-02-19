@@ -150,7 +150,7 @@ export default function ValidationEnginePanel() {
   const [saveBest, setSaveBest] = useState(true)
   const [bestSetName, setBestSetName] = useState('')
   const [simForm, setSimForm] = useState({
-    strategy_key: 'crypto_15m',
+    strategy_key: 'btc_eth_highfreq',
     source_key: 'crypto',
     market_provider: 'polymarket',
     market_ref: '',
@@ -446,7 +446,7 @@ export default function ValidationEnginePanel() {
   const simulatorEvents = useMemo(() => simulatorEventsData?.events || [], [simulatorEventsData?.events])
 
   const executionFailureRate = toNumber(overview?.trader_orchestrator_execution_30d?.failure_rate)
-  const resolverTradableRate = toNumber(overview?.world_intel_resolver_7d?.tradable_rate)
+  const resolverTradableRate = toNumber(overview?.events_resolver_7d?.tradable_rate)
   const executionSample = toNumber(overview?.trader_orchestrator_execution_30d?.sample_size)
 
   const executionBySource = useMemo(() => {
@@ -471,7 +471,7 @@ export default function ValidationEnginePanel() {
   }, [overview?.trader_orchestrator_execution_30d?.by_source])
 
   const resolverByType = useMemo(() => {
-    const rows = overview?.world_intel_resolver_7d?.by_signal_type || []
+    const rows = overview?.events_resolver_7d?.by_signal_type || []
     return rows
       .map((entry) => {
         const record = entry as Record<string, unknown>
@@ -484,7 +484,7 @@ export default function ValidationEnginePanel() {
       })
       .sort((left, right) => right.candidates - left.candidates)
       .slice(0, 8)
-  }, [overview?.world_intel_resolver_7d?.by_signal_type])
+  }, [overview?.events_resolver_7d?.by_signal_type])
 
   const activeSetLabel = useMemo(() => {
     const activeSet = overview?.active_parameter_set

@@ -24,7 +24,7 @@ from api.settings_helpers import (
     search_filters_payload,
     trading_payload,
     trading_proxy_payload,
-    world_intelligence_payload,
+    events_payload,
 )
 
 logger = get_logger(__name__)
@@ -272,6 +272,12 @@ class DiscoverySettings(BaseModel):
         le=720,
         description="Recency window (hours) used by activity-aware gating",
     )
+    pool_inactive_rising_retention_hours: int = Field(
+        default=336,
+        ge=0,
+        le=8760,
+        description="How long to retain rising-tier traders after inactivity (hours)",
+    )
     pool_selection_score_floor: float = Field(
         default=0.55,
         ge=0.0,
@@ -459,8 +465,8 @@ class TradingProxySettings(BaseModel):
     require_vpn: bool = Field(default=True, description="Block trades if VPN proxy is unreachable")
 
 
-class WorldIntelligenceSettings(BaseModel):
-    """World intelligence source and threshold configuration."""
+class EventsSettings(BaseModel):
+    """Events source and threshold configuration."""
 
     enabled: Optional[bool] = None
     interval_seconds: Optional[int] = None
@@ -791,7 +797,7 @@ class AllSettings(BaseModel):
     maintenance: MaintenanceSettings
     discovery: DiscoverySettings
     trading_proxy: TradingProxySettings
-    world_intelligence: WorldIntelligenceSettings
+    events: EventsSettings
     search_filters: SearchFilterSettings
     updated_at: Optional[str] = None
 
@@ -808,7 +814,7 @@ class UpdateSettingsRequest(BaseModel):
     maintenance: Optional[MaintenanceSettings] = None
     discovery: Optional[DiscoverySettings] = None
     trading_proxy: Optional[TradingProxySettings] = None
-    world_intelligence: Optional[WorldIntelligenceSettings] = None
+    events: Optional[EventsSettings] = None
     search_filters: Optional[SearchFilterSettings] = None
 
 
@@ -850,7 +856,7 @@ async def get_settings():
             maintenance=MaintenanceSettings(**maintenance_payload(settings)),
             discovery=DiscoverySettings(**discovery_payload(settings)),
             trading_proxy=TradingProxySettings(**trading_proxy_payload(settings)),
-            world_intelligence=WorldIntelligenceSettings(**world_intelligence_payload(settings)),
+            events=EventsSettings(**events_payload(settings)),
             search_filters=SearchFilterSettings(**search_filters_payload(settings)),
             updated_at=settings.updated_at.isoformat() if settings.updated_at else None,
         )
@@ -882,7 +888,7 @@ async def update_settings(request: UpdateSettingsRequest):
             needs_llm_reinit = update_flags["needs_llm_reinit"]
             needs_proxy_reinit = update_flags["needs_proxy_reinit"]
             needs_filter_reload = update_flags["needs_filter_reload"]
-            needs_world_intel_reload = update_flags["needs_world_intel_reload"]
+            needs_events_reload = update_flags["needs_events_reload"]
 
         # Re-initialize LLM manager OUTSIDE the DB session so the new
         # session inside initialize() can see the just-committed data
@@ -927,15 +933,15 @@ async def update_settings(request: UpdateSettingsRequest):
                     f"Failed to reload search filters: {reinit_err}",
                 )
 
-        if needs_world_intel_reload:
+        if needs_events_reload:
             try:
-                from config import apply_world_intelligence_settings
+                from config import apply_events_settings
 
-                await apply_world_intelligence_settings()
-                logger.info("World intelligence config reloaded after settings update")
+                await apply_events_settings()
+                logger.info("Events config reloaded after settings update")
             except Exception as reinit_err:
                 logger.error(
-                    f"Failed to reload world intelligence settings: {reinit_err}",
+                    f"Failed to reload events settings: {reinit_err}",
                 )
 
         logger.info("Settings updated successfully")
@@ -1159,6 +1165,64 @@ async def test_trading_proxy():
                 "message": "Proxy reachable but IP matches direct connection — VPN may not be active",
                 **status,
             }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@router.post("/test/llm")
+async def test_llm_connection(provider: Optional[str] = None):
+    """Test connectivity to an LLM backend by refreshing models for a provider."""
+    try:
+        provider_name = (provider or "").strip().lower()
+
+        manager_provider = provider_name or None
+        if provider_name in {"", "none"}:
+            manager_provider = None
+        elif provider_name not in {"openai", "anthropic", "google", "xai", "deepseek", "ollama", "lmstudio"}:
+            return {
+                "status": "error",
+                "message": f"Unsupported LLM provider '{provider_name}'.",
+            }
+
+        from services.ai import get_llm_manager
+
+        manager = get_llm_manager()
+        await manager.initialize()
+        if manager_provider is None:
+            settings = await get_or_create_settings()
+            provider_name = (settings.llm_provider or "none").strip().lower()
+            if provider_name in {"", "none"}:
+                if (settings.ollama_base_url or "").strip():
+                    provider_name = "ollama"
+                elif (settings.lmstudio_base_url or "").strip():
+                    provider_name = "lmstudio"
+
+            if provider_name in {"", "none"}:
+                return {
+                    "status": "warning",
+                    "message": "No LLM provider configured. Set a provider and save settings first.",
+                }
+            models = await manager.fetch_and_cache_models(provider_name=provider_name)
+            models_for_provider = models.get(provider_name, [])
+        else:
+            models = await manager.fetch_and_cache_models(provider_name=manager_provider)
+            models_for_provider = models.get(provider_name, [])
+
+        if not models_for_provider:
+            target = provider_name or "the configured provider"
+            return {
+                "status": "error",
+                "message": f"No models returned from {target}. Check API URL and credentials.",
+            }
+
+        return {
+            "status": "success",
+            "message": f"{provider_name or 'Configured provider'} connectivity OK ({len(models_for_provider)} models).",
+            "provider": provider_name or "configured",
+            "model_count": len(models_for_provider),
+        }
+    except RuntimeError as exc:
+        return {"status": "error", "message": str(exc)}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 

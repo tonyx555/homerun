@@ -4,10 +4,10 @@ import { Database, Globe2, Newspaper, Radio } from 'lucide-react'
 
 import { cn } from '../lib/utils'
 import { getNewsFeedStatus, getUnifiedDataSources } from '../services/api'
-import { getWorldIntelligenceSummary } from '../services/worldIntelligenceApi'
+import { getEventsSummary } from '../services/eventsApi'
 import NewsIntelligencePanel from './NewsIntelligencePanel'
-import WorldIntelligencePanel from './WorldIntelligencePanel'
-import WorldIntelligenceSettingsFlyout from './WorldIntelligenceSettingsFlyout'
+import EventsPanel from './EventsPanel'
+import EventsSettingsFlyout from './EventsSettingsFlyout'
 import DataSourcesManager from './DataSourcesManager'
 import ErrorBoundary from './ErrorBoundary'
 import { Button } from './ui/button'
@@ -25,8 +25,8 @@ interface DataPanelProps {
 export default function DataPanel({ isConnected, view, onViewChange }: DataPanelProps) {
   const [dataSettingsOpen, setDataSettingsOpen] = useState(false)
   const { data: worldSummary } = useQuery({
-    queryKey: ['world-intelligence-summary'],
-    queryFn: getWorldIntelligenceSummary,
+    queryKey: ['events-summary'],
+    queryFn: getEventsSummary,
     refetchInterval: isConnected ? false : 120000,
   })
 
@@ -144,7 +144,7 @@ export default function DataPanel({ isConnected, view, onViewChange }: DataPanel
 
       {view === 'events' && (
         <div className="flex-1 min-h-0 overflow-hidden px-6 py-4">
-          <WorldIntelligencePanel isConnected={isConnected} eventsOnly />
+          <EventsPanel isConnected={isConnected} eventsOnly />
         </div>
       )}
 
@@ -156,11 +156,13 @@ export default function DataPanel({ isConnected, view, onViewChange }: DataPanel
 
       {view === 'sources' && (
         <div className="flex-1 min-h-0 overflow-hidden px-6 py-4">
-          <DataSourcesManager />
+          <ErrorBoundary fallback={<div className="m-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-500">Sources view crashed.</div>}>
+            <DataSourcesManager />
+          </ErrorBoundary>
         </div>
       )}
 
-      <WorldIntelligenceSettingsFlyout
+      <EventsSettingsFlyout
         isOpen={dataSettingsOpen}
         onClose={() => setDataSettingsOpen(false)}
       />

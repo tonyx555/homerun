@@ -173,7 +173,7 @@ async def judge_opportunity(
 
 
 class JudgeBulkRequest(BaseModel):
-    opportunity_ids: list[str] = []  # empty = all unjudged
+    opportunity_ids: list[str] = Field(default_factory=list)  # empty = all unjudged
     force: bool = False  # if True, re-analyze even if already judged
 
 
@@ -182,30 +182,57 @@ async def judge_opportunities_bulk(
     request: JudgeBulkRequest,
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Judge multiple opportunities sequentially. Returns results as they complete."""
+    """Judge multiple opportunities concurrently."""
     from services.ai.opportunity_judge import opportunity_judge
     from models.opportunity import AIAnalysis
     from datetime import datetime
 
-    opps = await shared_state.get_opportunities_from_db(session, None)
+    scanner_opportunities = await shared_state.get_opportunities_from_db(
+        session,
+        None,
+        source="all",
+    )
+    weather_opportunities = await weather_shared_state.get_weather_opportunities_from_db(
+        session,
+        include_report_only=True,
+    )
+    scanner_by_id = {opp.id: opp for opp in scanner_opportunities}
+    weather_by_id = {opp.id: opp for opp in weather_opportunities}
 
+    combined_by_id: dict[str, Any] = {}
+    combined_by_id.update(scanner_by_id)
+    for opportunity_id, opp in weather_by_id.items():
+        if opportunity_id not in combined_by_id:
+            combined_by_id[opportunity_id] = opp
+
+    targets: list[Any]
     if request.opportunity_ids:
-        id_set = set(request.opportunity_ids)
-        targets = [o for o in opps if o.id in id_set]
+        seen_ids: set[str] = set()
+        requested_ids: list[str] = []
+        for opportunity_id in request.opportunity_ids:
+            if opportunity_id in seen_ids or opportunity_id not in combined_by_id:
+                continue
+            seen_ids.add(opportunity_id)
+            requested_ids.append(opportunity_id)
+        targets = [combined_by_id[opportunity_id] for opportunity_id in requested_ids]
     elif request.force:
-        # Re-analyze all opportunities regardless of existing analysis
-        targets = list(opps)
+        targets = list(combined_by_id.values())
     else:
-        # Judge all that don't already have a non-pending analysis
-        targets = [o for o in opps if not o.ai_analysis or o.ai_analysis.recommendation == "pending"]
+        targets = [
+            opp
+            for opp in combined_by_id.values()
+            if not opp.ai_analysis or opp.ai_analysis.recommendation == "pending"
+        ]
 
-    results = []
+    if not targets:
+        return {"judged": 0, "errors": [], "total_requested": 0}
+
+    results = await opportunity_judge.judge_batch(targets)
     errors = []
+    judged = 0
 
-    for opp in targets:
+    for opp, result in zip(targets, results):
         try:
-            result = await opportunity_judge.judge_opportunity(opp)
-            # Update in-memory opportunity
             opp.ai_analysis = AIAnalysis(
                 overall_score=result.get("overall_score", 0.0),
                 profit_viability=result.get("profit_viability", 0.0),
@@ -217,20 +244,32 @@ async def judge_opportunities_bulk(
                 risk_factors=result.get("risk_factors", []),
                 judged_at=datetime.fromisoformat(result["judged_at"]) if result.get("judged_at") else utcnow(),
             )
+            judged += 1
             try:
-                await shared_state.update_opportunity_ai_analysis_in_snapshot(
-                    session=session,
-                    opportunity_id=opp.id,
-                    stable_id=opp.stable_id,
-                    ai_analysis=opp.ai_analysis.model_dump(mode="json"),
+                if opp.id in scanner_by_id:
+                    await shared_state.update_opportunity_ai_analysis_in_snapshot(
+                        session=session,
+                        opportunity_id=opp.id,
+                        stable_id=opp.stable_id,
+                        ai_analysis=opp.ai_analysis.model_dump(mode="json"),
+                    )
+                if opp.id in weather_by_id:
+                    await weather_shared_state.update_weather_opportunity_ai_analysis_in_snapshot(
+                        session=session,
+                        opportunity_id=opp.id,
+                        stable_id=opp.stable_id,
+                        ai_analysis=opp.ai_analysis.model_dump(mode="json"),
+                    )
+            except Exception as snapshot_error:
+                logger.warning(
+                    "Failed to persist inline ai_analysis for %s: %s",
+                    opp.id,
+                    snapshot_error,
                 )
-            except Exception:
-                pass
-            results.append(result)
         except Exception as e:
             errors.append({"opportunity_id": opp.id, "error": str(e)})
 
-    return {"judged": len(results), "errors": errors, "total_requested": len(targets)}
+    return {"judged": judged, "errors": errors, "total_requested": len(targets)}
 
 
 @router.get("/ai/judge/history")

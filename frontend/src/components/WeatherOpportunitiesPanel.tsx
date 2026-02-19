@@ -25,16 +25,19 @@ import {
   startWeatherWorkflow,
   pauseWeatherWorkflow,
   getWeatherWorkflowOpportunityDates,
+  getWeatherWorkflowOpportunityIds,
   getWeatherWorkflowOpportunities,
   type WeatherOpportunityDateBucket,
   type Opportunity,
 } from '../services/api'
+import { useWebSocket } from '../hooks/useWebSocket'
 import WeatherWorkflowSettingsFlyout from './WeatherWorkflowSettingsFlyout'
 
 type DirectionFilter = 'all' | 'buy_yes' | 'buy_no'
 type TargetDateFilter = 'all' | string
 const ITEMS_PER_PAGE = 20
 const DATE_PAGE_SIZE = 8
+const ANALYZE_ALL_LIMIT = 5000
 
 function timeAgo(value: string | null | undefined): string {
   if (!value) return 'Never'
@@ -87,11 +90,16 @@ function formatDateButtonLabel(value: string): string {
 export default function WeatherOpportunitiesPanel({
   onExecute,
   viewMode = 'card',
+  showSettingsButton = true,
+  onAnalyzeTargetsChange,
 }: {
   onExecute: (opportunity: Opportunity) => void
   viewMode?: 'card' | 'list' | 'terminal'
+  showSettingsButton?: boolean
+  onAnalyzeTargetsChange?: (targets: { visibleIds: string[]; allIds: string[] }) => void
 }) {
   const queryClient = useQueryClient()
+  const { isConnected } = useWebSocket('/ws')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [direction, setDirection] = useState<DirectionFilter>('all')
   const [city, setCity] = useState('')
@@ -114,10 +122,16 @@ export default function WeatherOpportunitiesPanel({
     setDatePage(0)
   }, [direction, city, minEdge, maxEntry, showFiltered])
 
+  useEffect(() => {
+    const handleOpenSettings = () => setSettingsOpen(true)
+    window.addEventListener('open-weather-workflow-settings', handleOpenSettings as EventListener)
+    return () => window.removeEventListener('open-weather-workflow-settings', handleOpenSettings as EventListener)
+  }, [])
+
   const { data: status } = useQuery({
     queryKey: ['weather-workflow-status'],
     queryFn: getWeatherWorkflowStatus,
-    refetchInterval: 30000,
+    refetchInterval: isConnected ? false : 30000,
   })
 
   const { data: oppData, isLoading: oppsLoading } = useQuery({
@@ -134,22 +148,7 @@ export default function WeatherOpportunitiesPanel({
         offset: currentPage * ITEMS_PER_PAGE,
       })
     },
-    refetchInterval: 30000,
-  })
-
-  const { data: dateSourceOppData } = useQuery({
-    queryKey: ['weather-workflow-opportunity-date-source', direction, city, minEdge, maxEntry, showFiltered],
-    queryFn: () =>
-      getWeatherWorkflowOpportunities({
-        direction: direction === 'all' ? undefined : direction,
-        location: city.trim() || undefined,
-        min_edge: minEdge > 0 ? minEdge : undefined,
-        max_entry: maxEntryFilter,
-        include_report_only: showFiltered,
-        limit: 500,
-        offset: 0,
-      }),
-    refetchInterval: 30000,
+    refetchInterval: isConnected ? false : 30000,
   })
 
   const { data: dateData, isLoading: dateBucketsLoading } = useQuery({
@@ -162,7 +161,7 @@ export default function WeatherOpportunitiesPanel({
         max_entry: maxEntryFilter,
         include_report_only: showFiltered,
       }),
-    refetchInterval: 30000,
+    refetchInterval: isConnected ? false : 30000,
   })
 
   const refreshMutation = useMutation({
@@ -171,10 +170,14 @@ export default function WeatherOpportunitiesPanel({
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['weather-workflow-status'] }),
         queryClient.invalidateQueries({ queryKey: ['weather-workflow-opportunities'] }),
+        queryClient.invalidateQueries({ queryKey: ['weather-workflow-opportunity-dates'] }),
+        queryClient.invalidateQueries({ queryKey: ['weather-workflow-opportunity-ids-analyze-all'] }),
       ])
       await Promise.all([
         queryClient.refetchQueries({ queryKey: ['weather-workflow-status'] }),
         queryClient.refetchQueries({ queryKey: ['weather-workflow-opportunities'] }),
+        queryClient.refetchQueries({ queryKey: ['weather-workflow-opportunity-dates'] }),
+        queryClient.refetchQueries({ queryKey: ['weather-workflow-opportunity-ids-analyze-all'] }),
       ])
     },
   })
@@ -195,6 +198,43 @@ export default function WeatherOpportunitiesPanel({
 
   const opportunities = oppData?.opportunities ?? []
   const totalOpportunities = oppData?.total ?? opportunities.length
+  const analyzeAllLimit = Math.max(
+    ITEMS_PER_PAGE,
+    Math.min(Math.max(totalOpportunities, ITEMS_PER_PAGE), ANALYZE_ALL_LIMIT),
+  )
+  const { data: allAnalyzeOppData } = useQuery({
+    queryKey: [
+      'weather-workflow-opportunity-ids-analyze-all',
+      direction,
+      city,
+      minEdge,
+      maxEntry,
+      targetDate,
+      showFiltered,
+      analyzeAllLimit,
+    ],
+    queryFn: () =>
+      getWeatherWorkflowOpportunityIds({
+        direction: direction === 'all' ? undefined : direction,
+        location: city.trim() || undefined,
+        target_date: targetDate === 'all' ? undefined : targetDate,
+        min_edge: minEdge > 0 ? minEdge : undefined,
+        max_entry: maxEntryFilter,
+        include_report_only: showFiltered,
+        limit: analyzeAllLimit,
+        offset: 0,
+      }),
+    enabled: totalOpportunities > 0,
+    refetchInterval: isConnected ? false : 30000,
+  })
+  const visibleAnalyzeIds = useMemo(
+    () => Array.from(new Set(opportunities.map((opportunity) => opportunity.id))),
+    [opportunities],
+  )
+  const allAnalyzeIds = useMemo(
+    () => Array.from(new Set(allAnalyzeOppData?.ids ?? visibleAnalyzeIds)),
+    [allAnalyzeOppData?.ids, visibleAnalyzeIds],
+  )
   const totalPages = Math.ceil(totalOpportunities / ITEMS_PER_PAGE)
   const pageDateBuckets = useMemo((): WeatherOpportunityDateBucket[] => {
     const counts = new Map<string, number>()
@@ -207,23 +247,11 @@ export default function WeatherOpportunitiesPanel({
       .sort((a, b) => a[0].localeCompare(b[0]))
       .map(([date, count]) => ({ date, count }))
   }, [opportunities])
-  const derivedDateBuckets = useMemo((): WeatherOpportunityDateBucket[] => {
-    const counts = new Map<string, number>()
-    const sourceOpportunities = dateSourceOppData?.opportunities ?? []
-    for (const opportunity of sourceOpportunities) {
-      const key = opportunityDateKey(opportunity)
-      if (!key) continue
-      counts.set(key, (counts.get(key) ?? 0) + 1)
-    }
-    return Array.from(counts.entries())
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .map(([date, count]) => ({ date, count }))
-  }, [dateSourceOppData?.opportunities])
   const serverDateBuckets: WeatherOpportunityDateBucket[] = dateData?.dates ?? []
   const availableDateBuckets: WeatherOpportunityDateBucket[] = (
     serverDateBuckets.length > 0
       ? serverDateBuckets
-      : (derivedDateBuckets.length > 0 ? derivedDateBuckets : pageDateBuckets)
+      : pageDateBuckets
   )
   const totalDatePages = Math.max(1, Math.ceil(availableDateBuckets.length / DATE_PAGE_SIZE))
   const visibleDateBuckets = useMemo(() => {
@@ -268,6 +296,16 @@ export default function WeatherOpportunitiesPanel({
       setCurrentPage(maxPage)
     }
   }, [currentPage, totalPages, oppData])
+
+  useEffect(() => {
+    onAnalyzeTargetsChange?.({ visibleIds: visibleAnalyzeIds, allIds: allAnalyzeIds })
+  }, [onAnalyzeTargetsChange, visibleAnalyzeIds, allAnalyzeIds])
+
+  useEffect(() => {
+    return () => {
+      onAnalyzeTargetsChange?.({ visibleIds: [], allIds: [] })
+    }
+  }, [onAnalyzeTargetsChange])
 
   const workflowStateLabel = status?.paused
     ? 'Paused'
@@ -369,15 +407,17 @@ export default function WeatherOpportunitiesPanel({
               {status?.paused ? <Play className="w-3.5 h-3.5" /> : <Pause className="w-3.5 h-3.5" />}
               {status?.paused ? 'Resume' : 'Pause'}
             </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-8 text-xs gap-1.5"
-              onClick={() => setSettingsOpen(true)}
-            >
-              <Settings className="w-3.5 h-3.5" />
-              Settings
-            </Button>
+            {showSettingsButton && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 text-xs gap-1.5"
+                onClick={() => setSettingsOpen(true)}
+              >
+                <Settings className="w-3.5 h-3.5" />
+                Settings
+              </Button>
+            )}
             <Button
               variant="outline"
               size="sm"

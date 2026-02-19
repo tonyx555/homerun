@@ -4,17 +4,23 @@ from __future__ import annotations
 
 import inspect
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import DataSource, DataSourceRecord, DataSourceRun
+from services.data_source_catalog import default_data_source_retention_policy
 from services.data_source_loader import DataSourceValidationError, data_source_loader
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+_RETENTION_BOUNDS: dict[str, tuple[int, int]] = {
+    "max_records": (1, 250_000),
+    "max_age_days": (1, 3650),
+}
 
 
 def _utcnow_naive() -> datetime:
@@ -98,11 +104,133 @@ def _parse_datetime(value: Any) -> datetime | None:
     return parsed
 
 
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            return value.astimezone(timezone.utc).isoformat()
+        return value.replace(tzinfo=timezone.utc).isoformat()
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, nested in value.items():
+            out[str(key)] = _json_safe(nested)
+        return out
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    return str(value)
+
+
 def _normalize_country_iso3(value: Any) -> str | None:
     text = str(value or "").strip().upper()
     if len(text) == 3 and text.isalpha():
         return text
     return None
+
+
+def _normalize_retention_policy(retention: Any) -> dict[str, int]:
+    if not isinstance(retention, dict):
+        return {}
+
+    normalized: dict[str, int] = {}
+    for key, bounds in _RETENTION_BOUNDS.items():
+        raw_value = retention.get(key)
+        if raw_value in (None, ""):
+            continue
+        low, high = bounds
+        try:
+            parsed = int(float(raw_value))
+        except (TypeError, ValueError):
+            continue
+        if parsed < low or parsed > high:
+            continue
+        normalized[key] = parsed
+    return normalized
+
+
+def _resolve_retention_policy(
+    retention: Any,
+    *,
+    slug: str | None,
+    source_key: str | None,
+    source_kind: str | None,
+) -> dict[str, int]:
+    defaults = default_data_source_retention_policy(
+        slug=slug,
+        source_key=source_key,
+        source_kind=source_kind,
+    )
+    normalized = _normalize_retention_policy(retention)
+    if not normalized:
+        return defaults
+    out = dict(defaults)
+    out.update(normalized)
+    return out
+
+
+async def _apply_retention_policy(
+    session: AsyncSession,
+    source: DataSource,
+    *,
+    retention_policy: dict[str, int],
+) -> dict[str, int]:
+    source_id = str(source.id or "").strip()
+    if not source_id or not retention_policy:
+        return {"max_age_deleted": 0, "max_records_deleted": 0}
+
+    max_age_deleted = 0
+    max_records_deleted = 0
+
+    max_age_days = retention_policy.get("max_age_days")
+    if max_age_days is not None:
+        cutoff = _utcnow_naive() - timedelta(days=int(max_age_days))
+        stale_ids = (
+            (
+                await session.execute(
+                    select(DataSourceRecord.id)
+                    .where(DataSourceRecord.data_source_id == source_id)
+                    .where(func.coalesce(DataSourceRecord.observed_at, DataSourceRecord.ingested_at) < cutoff)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if stale_ids:
+            delete_result = await session.execute(
+                delete(DataSourceRecord).where(DataSourceRecord.id.in_(list(stale_ids)))
+            )
+            deleted = int(delete_result.rowcount or 0)
+            max_age_deleted = deleted if deleted > 0 else len(stale_ids)
+
+    max_records = retention_policy.get("max_records")
+    if max_records is not None:
+        overflow_ids = (
+            (
+                await session.execute(
+                    select(DataSourceRecord.id)
+                    .where(DataSourceRecord.data_source_id == source_id)
+                    .order_by(
+                        desc(DataSourceRecord.observed_at),
+                        desc(DataSourceRecord.ingested_at),
+                        desc(DataSourceRecord.id),
+                    )
+                    .offset(int(max_records))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if overflow_ids:
+            delete_result = await session.execute(
+                delete(DataSourceRecord).where(DataSourceRecord.id.in_(list(overflow_ids)))
+            )
+            deleted = int(delete_result.rowcount or 0)
+            max_records_deleted = deleted if deleted > 0 else len(overflow_ids)
+
+    return {
+        "max_age_deleted": int(max_age_deleted),
+        "max_records_deleted": int(max_records_deleted),
+    }
 
 
 async def _invoke_callable(func: Any, *args: Any, **kwargs: Any) -> Any:
@@ -113,39 +241,46 @@ async def _invoke_callable(func: Any, *args: Any, **kwargs: Any) -> Any:
 
 
 def _normalize_record(raw: dict[str, Any], transformed: dict[str, Any]) -> dict[str, Any]:
-    payload = dict(raw)
-    final = dict(transformed)
+    payload_raw = dict(raw)
+    final_raw = dict(transformed)
 
-    external_id = _as_text(final.get("external_id")) or _as_text(payload.get("external_id"))
-    title = _as_text(final.get("title")) or _as_text(payload.get("title"))
-    summary = _as_text(final.get("summary")) or _as_text(payload.get("summary"))
-    category_raw = _as_text(final.get("category")) or _as_text(payload.get("category"))
+    external_id = _as_text(final_raw.get("external_id")) or _as_text(payload_raw.get("external_id"))
+    title = _as_text(final_raw.get("title")) or _as_text(payload_raw.get("title"))
+    summary = _as_text(final_raw.get("summary")) or _as_text(payload_raw.get("summary"))
+    category_raw = _as_text(final_raw.get("category")) or _as_text(payload_raw.get("category"))
     category = category_raw.lower() if category_raw else None
-    source = _as_text(final.get("source")) or _as_text(payload.get("source"))
-    url = _as_text(final.get("url")) or _as_text(payload.get("url"))
+    source = _as_text(final_raw.get("source")) or _as_text(payload_raw.get("source"))
+    url = _as_text(final_raw.get("url")) or _as_text(payload_raw.get("url"))
 
-    latitude = _as_float(final.get("latitude"))
+    latitude = _as_float(final_raw.get("latitude"))
     if latitude is None:
-        latitude = _as_float(payload.get("latitude"))
-    longitude = _as_float(final.get("longitude"))
+        latitude = _as_float(payload_raw.get("latitude"))
+    longitude = _as_float(final_raw.get("longitude"))
     if longitude is None:
-        longitude = _as_float(payload.get("longitude"))
+        longitude = _as_float(payload_raw.get("longitude"))
 
-    country_iso3 = _normalize_country_iso3(final.get("country_iso3"))
+    country_iso3 = _normalize_country_iso3(final_raw.get("country_iso3"))
     if country_iso3 is None:
-        country_iso3 = _normalize_country_iso3(payload.get("country_iso3"))
+        country_iso3 = _normalize_country_iso3(payload_raw.get("country_iso3"))
 
-    geotagged = _as_bool(final.get("geotagged"), default=False)
+    geotagged = _as_bool(final_raw.get("geotagged"), default=False)
     if not geotagged:
         geotagged = latitude is not None and longitude is not None
 
-    observed_at = _parse_datetime(final.get("observed_at"))
+    observed_at = _parse_datetime(final_raw.get("observed_at"))
     if observed_at is None:
-        observed_at = _parse_datetime(payload.get("observed_at"))
+        observed_at = _parse_datetime(payload_raw.get("observed_at"))
 
-    tags = _as_tags(final.get("tags"))
+    tags = _as_tags(final_raw.get("tags"))
     if not tags:
-        tags = _as_tags(payload.get("tags"))
+        tags = _as_tags(payload_raw.get("tags"))
+
+    payload = _json_safe(payload_raw)
+    if not isinstance(payload, dict):
+        payload = {}
+    final = _json_safe(final_raw)
+    if not isinstance(final, dict):
+        final = {}
 
     return {
         "external_id": external_id,
@@ -205,28 +340,24 @@ async def run_data_source(
     transformed_count = 0
     upserted_count = 0
     skipped_count = 0
+    retention_policy = _resolve_retention_policy(
+        source.retention,
+        slug=source_slug,
+        source_key=source.source_key,
+        source_kind=source.source_kind,
+    )
+    source.retention = dict(retention_policy)
+    retention_pruned = {"max_age_deleted": 0, "max_records_deleted": 0}
 
     try:
-        # For declarative source kinds (rss, rest_api), use the built-in runner
-        # instead of loading a Python class.
-        source_kind = str(source.source_kind or "python").strip().lower()
-
-        if source_kind == "rss":
-            from services.data_source_runners.rss_runner import RssRunner
-            instance = RssRunner(dict(source.config or {}))
-        elif source_kind == "rest_api":
-            from services.data_source_runners.rest_api_runner import RestApiRunner
-            instance = RestApiRunner(dict(source.config or {}))
-        else:
-            # Python class-based source (original path)
-            if runtime is None:
-                runtime = data_source_loader.load(
-                    slug=source_slug,
-                    source_code=str(source.source_code or ""),
-                    config=dict(source.config or {}),
-                    class_name=source.class_name,
-                )
-            instance = runtime.instance
+        if runtime is None:
+            runtime = data_source_loader.load(
+                slug=source_slug,
+                source_code=str(source.source_code or ""),
+                config=dict(source.config or {}),
+                class_name=source.class_name,
+            )
+        instance = runtime.instance
 
         if hasattr(instance, "fetch_async"):
             fetched = await _invoke_callable(instance.fetch_async)
@@ -328,6 +459,12 @@ async def run_data_source(
                 )
             upserted_count += 1
 
+        retention_pruned = await _apply_retention_policy(
+            session,
+            source,
+            retention_policy=retention_policy,
+        )
+
         if runtime is not None:
             runtime.run_count += 1
             runtime.last_run = datetime.now(timezone.utc)
@@ -354,6 +491,13 @@ async def run_data_source(
     run_row.skipped_count = skipped_count
     run_row.metadata_json = {
         "max_records": safe_max_records,
+        "retention": dict(retention_policy),
+        "retention_pruned": {
+            "max_age_deleted": int(retention_pruned.get("max_age_deleted") or 0),
+            "max_records_deleted": int(retention_pruned.get("max_records_deleted") or 0),
+            "total_deleted": int(retention_pruned.get("max_age_deleted") or 0)
+            + int(retention_pruned.get("max_records_deleted") or 0),
+        },
     }
     run_row.completed_at = completed_at
     run_row.duration_ms = int((completed_at - started_at).total_seconds() * 1000)
@@ -399,6 +543,8 @@ async def run_data_source(
         "skipped_count": skipped_count,
         "error_message": run_row.error_message,
         "duration_ms": run_row.duration_ms,
+        "retention_pruned_count": int(retention_pruned.get("max_age_deleted") or 0)
+        + int(retention_pruned.get("max_records_deleted") or 0),
     }
 
 

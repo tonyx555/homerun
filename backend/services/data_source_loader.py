@@ -28,7 +28,6 @@ Implement a class extending BaseDataSource. Return normalized records from
 fetch()/fetch_async() and optionally transform() each record.
 """
 
-import httpx
 from services.data_source_sdk import BaseDataSource
 
 
@@ -43,18 +42,15 @@ class MyCustomSource(BaseDataSource):
 
     async def fetch_async(self):
         endpoint = str(self.config.get("endpoint") or "").strip()
-        limit = int(self.config.get("limit") or 100)
         if not endpoint:
             return []
-
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            response = await client.get(endpoint)
-            response.raise_for_status()
-            payload = response.json()
+        limit = self._as_int(self.config.get("limit"), 100, 1, 2000)
+        payload = await self._http_get_json(endpoint, params={"limit": limit}, default=[])
 
         rows = payload if isinstance(payload, list) else payload.get("items", [])
         out = []
         for row in rows[:limit]:
+            observed = self._parse_datetime(row.get("timestamp"))
             out.append({
                 "external_id": str(row.get("id") or ""),
                 "title": str(row.get("title") or "").strip(),
@@ -62,7 +58,7 @@ class MyCustomSource(BaseDataSource):
                 "category": str(row.get("category") or "data").strip().lower(),
                 "source": "custom_api",
                 "url": row.get("url"),
-                "observed_at": row.get("timestamp"),
+                "observed_at": observed.isoformat() if observed else None,
                 "payload": row,
                 "geotagged": bool(row.get("lat") is not None and row.get("lon") is not None),
                 "latitude": row.get("lat"),
@@ -82,8 +78,6 @@ ALLOWED_IMPORT_PREFIXES = {
     "__future__",
     "services.data_source_sdk",
     "services.strategy_sdk",
-    "services.news",
-    "services.world_intelligence",
     "models",
     "utils",
     "config",
@@ -120,6 +114,10 @@ ALLOWED_IMPORT_PREFIXES = {
     "string",
     "concurrent",
     "httpx",
+    "requests",
+    "aiohttp",
+    "urllib",
+    "feedparser",
     "numpy",
     "scipy",
     "pandas",
@@ -137,9 +135,6 @@ BLOCKED_IMPORTS = {
     "ctypes",
     "socket",
     "http",
-    "urllib",
-    "requests",
-    "aiohttp",
     "pickle",
     "shelve",
     "marshal",
@@ -494,6 +489,10 @@ class DataSourceLoader:
 
             if db_state_changed:
                 await db.commit()
+        except Exception:
+            if own_session:
+                await db.rollback()
+            raise
         finally:
             if own_session:
                 await db.close()

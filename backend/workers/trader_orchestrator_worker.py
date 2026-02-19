@@ -33,7 +33,6 @@ from services.trader_orchestrator.decision_gates import (
     is_within_trading_window_utc,
 )
 from services.trader_orchestrator.sources.registry import (
-    list_source_aliases,
     normalize_source_key,
 )
 from services.opportunity_strategy_catalog import ensure_all_strategies_seeded
@@ -76,6 +75,14 @@ _PAPER_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
 _ORPHAN_CLEANUP_MAX_TRADERS_PER_CYCLE = 32
 _ORCHESTRATOR_CYCLE_LOCK_KEY = 0x54524F5243485354  # "TRORCHST"
 _orchestrator_lock_ctx: tuple[Any, Any] | None = None
+
+
+def _session_dialect_name(session: Any) -> str:
+    try:
+        bind = session.get_bind()
+        return str(getattr(getattr(bind, "dialect", None), "name", "") or "").lower()
+    except Exception:
+        return ""
 
 
 async def submit_order(
@@ -215,11 +222,7 @@ async def _try_acquire_orchestrator_cycle_lock(session: Any) -> bool:
     For non-PostgreSQL dialects (e.g. sqlite in local tests), fall back to
     allowing the cycle to proceed.
     """
-    try:
-        bind = session.get_bind()
-        dialect_name = str(getattr(getattr(bind, "dialect", None), "name", "") or "").lower()
-    except Exception:
-        dialect_name = ""
+    dialect_name = _session_dialect_name(session)
 
     if dialect_name != "postgresql":
         return True
@@ -237,11 +240,7 @@ async def _try_acquire_orchestrator_cycle_lock(session: Any) -> bool:
 
 async def _release_orchestrator_cycle_lock(session: Any) -> None:
     """Release the PostgreSQL advisory lock, if applicable."""
-    try:
-        bind = session.get_bind()
-        dialect_name = str(getattr(getattr(bind, "dialect", None), "name", "") or "").lower()
-    except Exception:
-        dialect_name = ""
+    dialect_name = _session_dialect_name(session)
 
     if dialect_name != "postgresql":
         return
@@ -264,14 +263,21 @@ async def _ensure_orchestrator_cycle_lock_owner() -> bool:
 
     session_ctx = AsyncSessionLocal()
     session = await session_ctx.__aenter__()
-    acquired = await _try_acquire_orchestrator_cycle_lock(session)
-    if acquired:
-        _orchestrator_lock_ctx = (session_ctx, session)
-        logger.info("Acquired orchestrator cross-process cycle lock")
-        return True
+    keep_lock_session = False
+    try:
+        acquired = await _try_acquire_orchestrator_cycle_lock(session)
+        if not acquired:
+            return False
 
-    await session_ctx.__aexit__(None, None, None)
-    return False
+        if _session_dialect_name(session) == "postgresql":
+            _orchestrator_lock_ctx = (session_ctx, session)
+            keep_lock_session = True
+            logger.info("Acquired orchestrator cross-process cycle lock")
+
+        return True
+    finally:
+        if not keep_lock_session:
+            await session_ctx.__aexit__(None, None, None)
 
 
 async def _release_orchestrator_cycle_lock_owner() -> None:
@@ -292,12 +298,7 @@ async def _release_orchestrator_cycle_lock_owner() -> None:
 def _query_sources_for_configs(source_configs: dict[str, dict[str, Any]]) -> list[str]:
     if not source_configs:
         return []
-    source_aliases = list_source_aliases()
-    sources: set[str] = set(source_configs.keys())
-    for alias, canonical in source_aliases.items():
-        if canonical in source_configs:
-            sources.add(alias)
-    return sorted(sources)
+    return sorted(source_configs.keys())
 
 
 def _signal_wallets(signal: Any) -> set[str]:

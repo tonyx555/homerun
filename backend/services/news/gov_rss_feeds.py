@@ -14,12 +14,7 @@ from xml.etree import ElementTree
 import httpx
 from sqlalchemy import select
 
-from models.database import AppSettings, AsyncSessionLocal
-from services.news.rss_config import (
-    default_gov_rss_feeds,
-    merge_gov_rss_feeds,
-    normalize_gov_rss_feeds,
-)
+from models.database import AsyncSessionLocal, DataSource
 
 logger = logging.getLogger(__name__)
 
@@ -59,44 +54,57 @@ class GovRSSFeedService:
         self._enabled: bool = True
 
     async def _load_configuration(self) -> tuple[bool, list[dict[str, Any]]]:
-        """Load enabled flag + feed rows from DB-backed app settings."""
-        default_enabled = True
-        default_feeds = default_gov_rss_feeds()
-
+        """Load government feed rows from DB-managed story data sources."""
         try:
             async with AsyncSessionLocal() as session:
-                result = await session.execute(select(AppSettings).where(AppSettings.id == "default"))
-                row = result.scalar_one_or_none()
-                if row is None:
-                    row = AppSettings(
-                        id="default",
-                        news_gov_rss_enabled=default_enabled,
-                        news_gov_rss_feeds_json=default_feeds,
-                    )
-                    session.add(row)
-                    await session.commit()
-                    await session.refresh(row)
-
-                raw_enabled = getattr(row, "news_gov_rss_enabled", None)
-                enabled = default_enabled if raw_enabled is None else bool(raw_enabled)
-                raw_rows = getattr(row, "news_gov_rss_feeds_json", None)
-                rows = normalize_gov_rss_feeds(raw_rows) if raw_rows else []
-                merged_rows = merge_gov_rss_feeds(rows)
-                if not merged_rows:
-                    merged_rows = default_feeds
-                if merged_rows != rows:
-                    rows = merged_rows
-                    row.news_gov_rss_feeds_json = rows
-                    await session.commit()
+                query = (
+                    select(DataSource)
+                    .where(DataSource.source_key == "stories")
+                    .where(DataSource.enabled == True)  # noqa: E712
+                    .order_by(DataSource.sort_order.asc(), DataSource.slug.asc())
+                )
+                rows = list((await session.execute(query)).scalars().all())
         except Exception as exc:
-            logger.debug("RSS config DB read failed, using defaults: %s", exc)
-            self._enabled = default_enabled
-            self._configured_feeds_count = len(default_feeds)
-            return self._enabled, default_feeds
+            logger.debug("Story source DB read failed for gov RSS service: %s", exc)
+            self._enabled = True
+            self._configured_feeds_count = 0
+            return self._enabled, []
 
-        self._enabled = enabled
-        self._configured_feeds_count = len(rows)
-        return enabled, rows
+        feed_rows: list[dict[str, Any]] = []
+        for source in rows:
+            config = dict(source.config or {})
+            feed_source = str(config.get("feed_source") or "").strip().lower()
+            if feed_source not in {"rss", "gov_rss", "government"}:
+                continue
+
+            url = str(config.get("url") or "").strip()
+            if not url:
+                continue
+
+            agency = str(config.get("category_override") or "government").strip().lower() or "government"
+            name = str(config.get("source_name") or source.name or source.slug or "Government RSS").strip()
+            priority = str(config.get("priority") or "medium").strip().lower()
+            if priority not in {"critical", "high", "medium", "low"}:
+                priority = "medium"
+
+            country_iso3 = str(config.get("country_iso3") or "USA").strip().upper()[:3]
+            if len(country_iso3) != 3:
+                country_iso3 = "USA"
+
+            feed_rows.append(
+                {
+                    "url": url,
+                    "name": name,
+                    "agency": agency,
+                    "priority": priority,
+                    "country_iso3": country_iso3,
+                    "enabled": True,
+                }
+            )
+
+        self._enabled = True
+        self._configured_feeds_count = len(feed_rows)
+        return True, feed_rows
 
     async def fetch_all(self, consumer: str = "default") -> list[GovArticle]:
         """Fetch from all enabled government RSS feeds. Returns NEW articles only."""

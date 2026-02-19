@@ -35,12 +35,9 @@ from services.worker_state import (
     read_worker_control,
     write_worker_snapshot,
 )
+from utils.logger import setup_logging
 
-if not logging.root.handlers:
-    logging.basicConfig(
-        level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO")),
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"), json_format=False)
 logger = logging.getLogger("tracked_traders_worker")
 
 
@@ -97,6 +94,7 @@ async def _pool_runtime_settings() -> dict[str, Any]:
         "min_pool_size": 400,
         "max_pool_size": 600,
         "active_window_hours": 72,
+        "inactive_rising_retention_hours": 336,
         "selection_score_quality_target_floor": 0.55,
         "max_hourly_replacement_rate": 0.15,
         "replacement_score_cutoff": 0.05,
@@ -132,6 +130,11 @@ async def _pool_runtime_settings() -> dict[str, Any]:
             config["max_pool_size"] = row.discovery_pool_max_size if row.discovery_pool_max_size is not None else 600
             config["active_window_hours"] = (
                 row.discovery_pool_active_window_hours if row.discovery_pool_active_window_hours is not None else 72
+            )
+            config["inactive_rising_retention_hours"] = (
+                row.discovery_pool_inactive_rising_retention_hours
+                if row.discovery_pool_inactive_rising_retention_hours is not None
+                else 336
             )
             config["selection_score_quality_target_floor"] = (
                 row.discovery_pool_selection_score_floor
@@ -412,31 +415,55 @@ async def _run_loop() -> None:
 
             if requested or now >= next_full_sweep:
                 activity_labels.append("full_sweep")
-                await smart_wallet_pool.run_full_sweep()
+                try:
+                    await asyncio.wait_for(smart_wallet_pool.run_full_sweep(), timeout=180)
+                except asyncio.TimeoutError:
+                    activity_labels.append("full_sweep_timeout")
+                    logger.warning("Tracked-traders full_sweep timed out after 180s")
                 next_full_sweep = now + full_sweep_interval
 
             if requested or now >= next_incremental:
                 activity_labels.append("incremental_refresh")
-                await smart_wallet_pool.run_incremental_refresh()
+                try:
+                    await asyncio.wait_for(smart_wallet_pool.run_incremental_refresh(), timeout=90)
+                except asyncio.TimeoutError:
+                    activity_labels.append("incremental_refresh_timeout")
+                    logger.warning("Tracked-traders incremental_refresh timed out after 90s")
                 next_incremental = now + incremental_refresh_interval
 
             if requested or now >= next_reconcile:
                 activity_labels.append("activity_reconcile")
-                await smart_wallet_pool.reconcile_activity()
+                try:
+                    await asyncio.wait_for(smart_wallet_pool.reconcile_activity(), timeout=45)
+                except asyncio.TimeoutError:
+                    activity_labels.append("activity_reconcile_timeout")
+                    logger.warning("Tracked-traders activity_reconcile timed out after 45s")
                 next_reconcile = now + activity_reconcile_interval
 
             if requested or now >= next_recompute:
                 activity_labels.append("pool_recompute")
-                await smart_wallet_pool.recompute_pool()
+                try:
+                    await asyncio.wait_for(smart_wallet_pool.recompute_pool(), timeout=90)
+                except asyncio.TimeoutError:
+                    activity_labels.append("pool_recompute_timeout")
+                    logger.warning("Tracked-traders pool_recompute timed out after 90s")
                 next_recompute = now + pool_recompute_interval
 
             if requested or now >= next_full_intelligence:
                 activity_labels.append("full_intelligence")
-                await wallet_intelligence.run_full_analysis()
+                try:
+                    await asyncio.wait_for(wallet_intelligence.run_full_analysis(), timeout=180)
+                except asyncio.TimeoutError:
+                    activity_labels.append("full_intelligence_timeout")
+                    logger.warning("Tracked-traders full_intelligence timed out after 180s")
                 next_full_intelligence = now + FULL_INTELLIGENCE_INTERVAL
             else:
                 activity_labels.append("confluence_scan")
-                await wallet_intelligence.confluence.scan_for_confluence()
+                try:
+                    await asyncio.wait_for(wallet_intelligence.confluence.scan_for_confluence(), timeout=45)
+                except asyncio.TimeoutError:
+                    activity_labels.append("confluence_scan_timeout")
+                    logger.warning("Tracked-traders confluence_scan timed out after 45s")
 
             if requested or now >= next_insider_rescore:
                 activity_labels.append("insider_rescore")
@@ -452,6 +479,7 @@ async def _run_loop() -> None:
             confluence_scan_limit = max(250, confluence_limit * 6)
             firehose_rows = await smart_wallet_pool.get_tracked_trader_firehose_signals(
                 limit=confluence_scan_limit,
+                include_filtered=True,
             )
             confluence_scanned = len(firehose_rows)
 
@@ -497,6 +525,7 @@ async def _run_loop() -> None:
                         payload={
                             "confluence_count": len(deduped_opportunities),
                             "strategies_used": strategies_used,
+                            "signals": filtered_rows,
                             "opportunities": deduped_opportunities,
                         },
                     )

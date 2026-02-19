@@ -62,15 +62,37 @@ def _normalize_strategy_config_for_source(source_key: str, config: Optional[dict
     normalized_source_key = str(source_key or "scanner").strip().lower()
     payload = dict(config or {})
     if normalized_source_key == "traders":
-        return StrategySDK.validate_trader_filter_config(payload)
-    return payload
+        payload = StrategySDK.validate_trader_filter_config(payload)
+    elif normalized_source_key == "news":
+        payload = StrategySDK.validate_news_filter_config(payload)
+    return StrategySDK.normalize_strategy_retention_config(payload)
+
+
+def _merge_config_schemas(base_schema: dict, extra_schema: dict) -> dict:
+    merged = dict(base_schema or {})
+    base_fields = list(merged.get("param_fields") or [])
+    existing_keys = {str(field.get("key") or "").strip() for field in base_fields if isinstance(field, dict)}
+    for field in list((extra_schema or {}).get("param_fields") or []):
+        if not isinstance(field, dict):
+            continue
+        key = str(field.get("key") or "").strip()
+        if not key or key in existing_keys:
+            continue
+        base_fields.append(dict(field))
+        existing_keys.add(key)
+    merged["param_fields"] = base_fields
+    return merged
 
 
 def _default_config_schema_for_source(source_key: str) -> dict:
     normalized_source_key = str(source_key or "scanner").strip().lower()
     if normalized_source_key == "traders":
-        return StrategySDK.trader_filter_config_schema()
-    return {}
+        base_schema = StrategySDK.trader_filter_config_schema()
+    elif normalized_source_key == "news":
+        base_schema = StrategySDK.news_filter_config_schema()
+    else:
+        base_schema = {}
+    return _merge_config_schemas(base_schema, StrategySDK.strategy_retention_config_schema())
 
 
 # ---------------------------------------------------------------------------
@@ -177,10 +199,16 @@ def _strategy_to_dict(row: Strategy) -> dict:
     """Convert a Strategy ORM row to the API response dict."""
     capabilities = _detect_capabilities(row.source_code or "")
     config_file_path = StrategySDK.get_strategy_config_path(row.slug)
+    source_key = row.source_key or "scanner"
+    normalized_config = _normalize_strategy_config_for_source(source_key, dict(row.config or {}))
+    normalized_schema = _merge_config_schemas(
+        dict(row.config_schema or {}),
+        StrategySDK.strategy_retention_config_schema(),
+    )
     return {
         "id": row.id,
         "slug": row.slug,
-        "source_key": row.source_key or "scanner",
+        "source_key": source_key,
         "name": row.name,
         "description": row.description,
         "source_code": row.source_code,
@@ -190,8 +218,8 @@ def _strategy_to_dict(row: Strategy) -> dict:
         "status": row.status,
         "error_message": row.error_message,
         "version": int(row.version or 1),
-        "config": dict(row.config or {}),
-        "config_schema": dict(row.config_schema or {}),
+        "config": normalized_config,
+        "config_schema": normalized_schema,
         "strategy_type": _infer_strategy_type(capabilities),
         "capabilities": capabilities,
         "aliases": [],
@@ -219,7 +247,7 @@ async def get_unified_template():
             "both detect/detect_async and evaluate/should_exit."
         ),
         "available_imports": [
-            "models (Market, Event, Opportunity)",
+            "models (Market, Event, Opportunity) — use Opportunity; ArbitrageOpportunity is removed",
             "services.strategies.base (BaseStrategy)",
             "services.trader_orchestrator.strategies.base (BaseStrategy, StrategyDecision, DecisionCheck)",
             "services.strategies.* (built-in strategy modules)",
@@ -231,6 +259,7 @@ async def get_unified_template():
             "services.ai (get_llm_manager, LLMMessage, LLMResponse)",
             "services.strategy_sdk (StrategySDK)",
             "services.data_source_sdk (DataSourceSDK: list/get/validate/create/update/delete/reload/run/read)",
+            "services.traders_sdk (TradersSDK: firehose/strategy/confluence/pool/tracked/groups/tags)",
             "config (settings)",
             "math, statistics, collections, datetime, re, json, random, threading, asyncio, calendar, pathlib, etc.",
             "httpx",
@@ -802,7 +831,7 @@ async def get_unified_docs():
                 "Import validation happens at save time via AST analysis — no code is executed."
             ),
             "app_modules": {
-                "models": "Market, Event, Opportunity — core data types",
+                "models": "Market, Event, Opportunity — core data types (ArbitrageOpportunity is removed)",
                 "services.strategies.base": "BaseStrategy, StrategyDecision, ExitDecision, DecisionCheck",
                 "services.ai": "LLM integration — call AI models from your strategy",
                 "services.news": "News analysis services",
@@ -970,6 +999,103 @@ async def get_unified_docs():
                 "Filter records by category/since/geotagged to keep evaluation deterministic.",
                 "Use run_source sparingly inside hot loops; it performs real ingestion work.",
                 "Use StrategySDK wrappers when failures should degrade gracefully.",
+            ],
+        },
+        # ── Section 7c: Trader Data SDK ────────────────────────────
+        "trader_data_sdk": {
+            "description": (
+                "Strategies can query trader intelligence datasets in a first-class way "
+                "via StrategySDK (firehose rows, strategy-filtered rows, confluence, "
+                "pooled/tracked traders, groups, and tags)."
+            ),
+            "imports": {
+                "wrapped": "from services.strategy_sdk import StrategySDK",
+                "direct": "from services.traders_sdk import TradersSDK",
+                "advanced_raw": (
+                    "from services.trader_data_access import get_trader_firehose_signals, "
+                    "get_strategy_filtered_trader_signals, get_trader_confluence_signals, "
+                    "get_pooled_traders, get_tracked_traders, get_trader_groups, "
+                    "get_trader_tags, get_traders_by_tag"
+                ),
+            },
+            "datasets": {
+                "firehose": "Raw tracked-trader firehose rows with canonical source_flags/source_breakdown.",
+                "strategy_filtered": "Rows after traders_confluence strategy gates (tradeable/actionable signals).",
+                "confluence": "Active confluence detector outputs by strength/tier.",
+                "pool": "Smart-pool membership rows (tier, scores, pool flags, tags).",
+                "tracked": "Tracked wallets with PnL stats and optional recent-activity enrichment.",
+                "groups": "Active trader groups with optional member payloads.",
+                "tags": "Tag definitions and wallet counts, plus wallets per tag.",
+            },
+            "strategy_sdk_methods": {
+                "StrategySDK.get_trader_firehose_signals": (
+                    "await StrategySDK.get_trader_firehose_signals(limit=250, "
+                    "include_filtered=False, include_source_context=True)"
+                ),
+                "StrategySDK.get_trader_strategy_signals": (
+                    "await StrategySDK.get_trader_strategy_signals(limit=50, include_filtered=False)"
+                ),
+                "StrategySDK.get_trader_confluence_signals": (
+                    "await StrategySDK.get_trader_confluence_signals(min_strength=0.0, min_tier='WATCH', limit=50)"
+                ),
+                "StrategySDK.get_pooled_traders": (
+                    "await StrategySDK.get_pooled_traders(limit=200, tier=None, "
+                    "include_blacklisted=True, tracked_only=False)"
+                ),
+                "StrategySDK.get_tracked_traders": (
+                    "await StrategySDK.get_tracked_traders(limit=200, include_recent_activity=False, activity_hours=24)"
+                ),
+                "StrategySDK.get_trader_groups": (
+                    "await StrategySDK.get_trader_groups(include_members=False, member_limit=25)"
+                ),
+                "StrategySDK.get_trader_tags": "await StrategySDK.get_trader_tags()",
+                "StrategySDK.get_traders_by_tag": "await StrategySDK.get_traders_by_tag(tag_name, limit=100)",
+            },
+            "traders_sdk_methods": {
+                "TradersSDK.get_firehose_signals": (
+                    "await TradersSDK.get_firehose_signals(limit=250, "
+                    "include_filtered=False, include_source_context=True)"
+                ),
+                "TradersSDK.get_strategy_filtered_signals": (
+                    "await TradersSDK.get_strategy_filtered_signals(limit=50, include_filtered=False)"
+                ),
+                "TradersSDK.get_confluence_signals": (
+                    "await TradersSDK.get_confluence_signals(min_strength=0.0, min_tier='WATCH', limit=50)"
+                ),
+                "TradersSDK.get_pooled_traders": (
+                    "await TradersSDK.get_pooled_traders(limit=200, tier=None, "
+                    "include_blacklisted=True, tracked_only=False)"
+                ),
+                "TradersSDK.get_tracked_traders": (
+                    "await TradersSDK.get_tracked_traders(limit=200, include_recent_activity=False, activity_hours=24)"
+                ),
+                "TradersSDK.get_groups": "await TradersSDK.get_groups(include_members=False, member_limit=25)",
+                "TradersSDK.get_tags": "await TradersSDK.get_tags()",
+                "TradersSDK.get_traders_by_tag": "await TradersSDK.get_traders_by_tag(tag_name, limit=100)",
+            },
+            "examples": {
+                "signal_screening": (
+                    "signals = await StrategySDK.get_trader_strategy_signals(limit=200)\n"
+                    "for signal in signals:\n"
+                    "    if float(signal.get('firehose_confidence') or 0.0) < 0.6:\n"
+                    "        continue\n"
+                    "    # build opportunities from high-confidence rows"
+                ),
+                "tag_driven_universe": (
+                    "whales = await StrategySDK.get_traders_by_tag('whale', limit=200)\n"
+                    "addresses = {str(w.get('address') or '').lower() for w in whales}\n"
+                    "firehose = await StrategySDK.get_trader_firehose_signals(limit=500)\n"
+                    "relevant = [\n"
+                    "    row for row in firehose\n"
+                    "    if any(str(w).lower() in addresses for w in (row.get('wallets') or []))\n"
+                    "]"
+                ),
+            },
+            "guidance": [
+                "Prefer StrategySDK wrappers in strategy source for runtime-safe failure handling.",
+                "Use strategy-filtered rows when you want parity with traders_confluence execution gates.",
+                "Use raw firehose rows when building custom gating logic and include source context.",
+                "Treat source_flags.qualified as the canonical pooled/tracked/group provenance gate.",
             ],
         },
         # ── Section 8: Complete Examples ──────────────────────────────
@@ -1225,7 +1351,7 @@ async def get_unified_docs():
         # ── Section 12: Quick Start ──────────────────────────────────
         "quick_start": [
             "1. GET /strategy-manager/template → copy the starter template",
-            "2. Edit the class: set name, description, default_config",
+            "2. Import from models using Opportunity (not ArbitrageOpportunity)",
             "3. Implement detect() to find opportunities from events/markets/prices",
             "4. POST /strategy-manager/validate with your source_code → check for errors",
             "5. POST /validation/code-backtest with your source_code → see what it finds",
@@ -1308,7 +1434,10 @@ async def create_strategy(req: UnifiedStrategyCreateRequest):
     slug = _validate_slug(req.slug)
     source_key = str(req.source_key or "scanner").strip().lower()
     normalized_config = _normalize_strategy_config_for_source(source_key, req.config)
-    normalized_schema = req.config_schema or _default_config_schema_for_source(source_key)
+    normalized_schema = _merge_config_schemas(
+        req.config_schema or _default_config_schema_for_source(source_key),
+        StrategySDK.strategy_retention_config_schema(),
+    )
 
     # Validate source code
     validation = validate_strategy_source(req.source_code)
@@ -1425,7 +1554,10 @@ async def update_strategy(strategy_id: str, req: UnifiedStrategyUpdateRequest):
             row.config = _normalize_strategy_config_for_source(next_source_key, req.config)
             code_changed = True
         if req.config_schema is not None:
-            row.config_schema = req.config_schema
+            row.config_schema = _merge_config_schemas(
+                req.config_schema,
+                StrategySDK.strategy_retention_config_schema(),
+            )
 
         if req.source_key is not None:
             row.source_key = next_source_key

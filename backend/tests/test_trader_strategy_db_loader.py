@@ -69,6 +69,107 @@ def test_validate_strategy_source_rejects_blocked_import():
     assert any("Blocked import" in err for err in validation["errors"])
 
 
+def test_validate_strategy_source_accepts_detect_async_only_strategy():
+    source_code = "\n".join(
+        [
+            "from services.strategies.base import BaseStrategy",
+            "",
+            "class AsyncOnlyStrategy(BaseStrategy):",
+            "    name = 'Async Only'",
+            "    description = 'Detects in async mode only'",
+            "    async def detect_async(self, events, markets, prices):",
+            "        return []",
+        ]
+    )
+    validation = validate_strategy_source(source_code, "AsyncOnlyStrategy")
+    assert validation["valid"] is True
+    assert validation["capabilities"]["has_detect_async"] is True
+    assert validation["capabilities"]["has_detect"] is False
+    assert validation["capabilities"]["has_evaluate"] is False
+
+
+def test_validate_strategy_source_accepts_on_event_only_strategy():
+    source_code = "\n".join(
+        [
+            "from services.strategies.base import BaseStrategy",
+            "from services.data_events import EventType",
+            "",
+            "class EventOnlyStrategy(BaseStrategy):",
+            "    name = 'Event Only'",
+            "    description = 'Reacts to event bus updates'",
+            "    subscriptions = [EventType.CRYPTO_UPDATE]",
+            "    async def on_event(self, event):",
+            "        return []",
+        ]
+    )
+    validation = validate_strategy_source(source_code, "EventOnlyStrategy")
+    assert validation["valid"] is True
+    assert validation["capabilities"]["has_on_event"] is True
+    assert validation["capabilities"]["has_detect"] is False
+    assert validation["capabilities"]["has_detect_async"] is False
+    assert validation["capabilities"]["has_evaluate"] is False
+
+
+def test_validate_strategy_source_rejects_should_exit_only_strategy():
+    source_code = "\n".join(
+        [
+            "from services.strategies.base import BaseStrategy, ExitDecision",
+            "",
+            "class ExitOnlyStrategy(BaseStrategy):",
+            "    name = 'Exit Only'",
+            "    description = 'Exit-only strategy'",
+            "    def should_exit(self, position, market_state):",
+            "        return ExitDecision(action='hold', reason='not used')",
+        ]
+    )
+    validation = validate_strategy_source(source_code, "ExitOnlyStrategy")
+    assert validation["valid"] is False
+    assert any("must implement at least one of" in err for err in validation["errors"])
+
+
+def test_loader_sets_slug_identity_and_merges_config_for_dynamic_strategy():
+    source_code = "\n".join(
+        [
+            "from services.strategies.base import BaseStrategy",
+            "",
+            "class ConfigAwareStrategy(BaseStrategy):",
+            "    name = 'Config Aware'",
+            "    description = 'Tests runtime contract for dynamic strategies'",
+            "    default_config = {'threshold': 0.15, 'window': 3}",
+            "    def detect(self, events, markets, prices):",
+            "        return [",
+            "            {",
+            "                'strategy_type': self.strategy_type,",
+            "                'key': self.key,",
+            "                'threshold': self.config.get('threshold'),",
+            "                'window': self.config.get('window'),",
+            "                'market_count': len(markets),",
+            "            }",
+            "        ]",
+        ]
+    )
+    loader = StrategyDBLoader()
+    loaded = loader.load("config_aware_strategy", source_code, {"threshold": 0.4})
+    strategy = loaded.instance
+
+    assert strategy.strategy_type == "config_aware_strategy"
+    assert strategy.key == "config_aware_strategy"
+    assert strategy.config["threshold"] == 0.4
+    assert strategy.config["window"] == 3
+    assert strategy.default_config["threshold"] == 0.15
+
+    opportunities = strategy.detect(events=[], markets=[object(), object()], prices={})
+    assert len(opportunities) == 1
+    assert opportunities[0]["strategy_type"] == "config_aware_strategy"
+    assert opportunities[0]["key"] == "config_aware_strategy"
+    assert opportunities[0]["threshold"] == 0.4
+    assert opportunities[0]["window"] == 3
+    assert opportunities[0]["market_count"] == 2
+
+    loader.unload("config_aware_strategy")
+    assert loader.get_strategy("config_aware_strategy") is None
+
+
 @pytest.mark.asyncio
 async def test_loader_isolates_error_rows_and_loads_valid_rows(tmp_path):
     engine, session_factory = await _build_session_factory(tmp_path)
@@ -185,6 +286,54 @@ async def test_ensure_system_seed_rewrites_legacy_wrapper_rows(tmp_path):
             row = (await session.execute(select(Strategy).where(Strategy.slug == "basic"))).scalars().one()
             assert "System opportunity strategy wrapper loaded from DB" not in (row.source_code or "")
             assert "from services.strategies" in (row.source_code or "")
+            assert int(row.version or 0) == 2
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ensure_system_seed_rewrites_arbitrage_opportunity_imports(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    try:
+        async with session_factory() as session:
+            legacy_source = "\n".join(
+                [
+                    "from models import Market, Event, ArbitrageOpportunity",
+                    "from services.strategies.base import BaseStrategy",
+                    "",
+                    "class ContradictionStrategy(BaseStrategy):",
+                    "    name = 'Contradiction'",
+                    "    description = 'Legacy import test'",
+                    "    def detect(self, events, markets, prices):",
+                    "        return []",
+                ]
+            )
+            session.add(
+                Strategy(
+                    id="legacy-contradiction",
+                    slug="contradiction",
+                    source_key="scanner",
+                    name="Contradiction",
+                    description="Legacy import row",
+                    class_name="ContradictionStrategy",
+                    source_code=legacy_source,
+                    config={},
+                    config_schema={},
+                    aliases=[],
+                    is_system=True,
+                    enabled=True,
+                    status="loaded",
+                    version=1,
+                )
+            )
+            await session.commit()
+
+            changed = await ensure_system_opportunity_strategies_seeded(session)
+            assert changed >= 1
+
+            row = (await session.execute(select(Strategy).where(Strategy.slug == "contradiction"))).scalars().one()
+            assert "ArbitrageOpportunity" not in (row.source_code or "")
+            assert "from models import Market, Event, Opportunity" in (row.source_code or "")
             assert int(row.version or 0) == 2
     finally:
         await engine.dispose()

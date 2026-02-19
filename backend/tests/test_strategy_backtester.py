@@ -46,6 +46,18 @@ class DetectSyncOnlyStrategy(BaseStrategy):
         return [FakeOpportunity(id="sync_hit", stable_id="sync_hit", roi_percent=3.2)]
 
 
+class DetectAsyncOnlyStrategy(BaseStrategy):
+    strategy_type = "unit_async"
+    name = "Unit Async"
+    description = "unit test"
+
+    def detect(self, events, markets, prices):
+        raise AssertionError("detect() should not be called when detect_async() is overridden")
+
+    async def detect_async(self, events, markets, prices):
+        return [FakeOpportunity(id="async_hit", stable_id="async_hit", roi_percent=4.6)]
+
+
 class ReplaySensitiveStrategy(BaseStrategy):
     strategy_type = "unit_replay"
     name = "Unit Replay"
@@ -141,6 +153,27 @@ async def test_run_strategy_backtest_uses_detect_sync_override(monkeypatch):
     assert result.runtime_error is None
     assert result.num_opportunities == 1
     assert result.opportunities[0]["id"] == "sync_hit"
+
+
+@pytest.mark.asyncio
+async def test_run_strategy_backtest_uses_detect_async_override(monkeypatch):
+    market = _make_market()
+    event = _make_event(market)
+    strategy = DetectAsyncOnlyStrategy()
+
+    _patch_common(monkeypatch, strategy, market, event)
+    monkeypatch.setattr(strategy_backtester.scanner, "_market_price_history", {}, raising=False)
+
+    result = await strategy_backtester.run_strategy_backtest(
+        source_code="class Dummy: pass",
+        slug="async_test",
+        use_ohlc_replay=False,
+    )
+
+    assert result.success is True
+    assert result.runtime_error is None
+    assert result.num_opportunities == 1
+    assert result.opportunities[0]["id"] == "async_hit"
 
 
 @pytest.mark.asyncio

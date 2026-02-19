@@ -62,14 +62,15 @@ class TradersConfluenceStrategy(BaseStrategy):
         "min_edge_percent": 3.0,
         "min_confidence": 0.45,
         "min_confluence_strength": 0.50,
-        "min_tier": "high",
+        "min_tier": "low",
         "min_wallet_count": 2,
         "max_entry_price": 0.85,
         "risk_base_score": 0.40,
+        "firehose_require_active_signal": True,
         "firehose_require_tradable_market": True,
-        "firehose_exclude_crypto_markets": True,
+        "firehose_exclude_crypto_markets": False,
         "firehose_require_qualified_source": True,
-        "firehose_max_age_minutes": 180,
+        "firehose_max_age_minutes": 720,
         "firehose_source_scope": "all",
         "firehose_side_filter": "all",
     }
@@ -231,6 +232,12 @@ class TradersConfluenceStrategy(BaseStrategy):
         checks["matches_source_scope"] = source_scope_ok
         if not source_scope_ok:
             reasons.append("source_scope_mismatch")
+
+        signal_active = bool(signal.get("is_active", True))
+        require_active = self._to_bool(config.get("firehose_require_active_signal"), True)
+        checks["signal_is_active"] = signal_active or (not require_active)
+        if require_active and not signal_active:
+            reasons.append("signal_inactive")
 
         upstream_tradable = bool(signal.get("firehose_market_tradable", signal.get("is_tradeable", True)))
         require_tradable = self._to_bool(config.get("firehose_require_tradable_market"), True)
@@ -546,6 +553,21 @@ class TradersConfluenceStrategy(BaseStrategy):
         opportunities by detect_from_signals().
         """
         return []
+
+    async def detect_async(
+        self,
+        events: list[Event],
+        markets: list[Market],
+        prices: dict[str, dict],
+    ) -> list[Opportunity]:
+        """Async detect for DB/runtime backtests and direct strategy invocation."""
+        signals = await StrategySDK.get_trader_strategy_signals(
+            limit=250,
+            include_filtered=False,
+        )
+        if not signals:
+            return []
+        return self.build_opportunities_from_firehose(signals, limit=None)
 
     def detect_from_signals(
         self,

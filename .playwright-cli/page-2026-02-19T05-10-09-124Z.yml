@@ -1,0 +1,918 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]:
+      - img [ref=e7]
+      - generic [ref=e9]: HOMERUN
+    - button "Select Account" [ref=e11] [cursor=pointer]:
+      - img [ref=e12]
+      - generic [ref=e14]: Select Account
+      - img [ref=e15]
+    - generic [ref=e17]:
+      - generic [ref=e18]:
+        - img [ref=e19]
+        - generic [ref=e23]: Balance
+        - generic [ref=e24]: $0.00
+      - generic [ref=e25]:
+        - img [ref=e26]
+        - generic [ref=e29]: PnL
+        - generic [ref=e30]: $0.00
+      - generic [ref=e31]:
+        - img [ref=e32]
+        - generic [ref=e34]: ROI
+        - generic [ref=e35]: 0.0%
+      - generic [ref=e36]:
+        - img [ref=e37]
+        - generic [ref=e39]: Positions
+        - generic [ref=e40]: "0"
+    - generic [ref=e43]:
+      - img [ref=e44]
+      - textbox "Search markets, wallets, traders..." [ref=e47]
+      - generic [ref=e48]: /
+    - generic [ref=e49]:
+      - button "Worker health status" [ref=e50]
+      - button [ref=e52] [cursor=pointer]:
+        - img [ref=e53]
+      - button "Pause" [ref=e59] [cursor=pointer]:
+        - img [ref=e60]
+        - text: Pause
+  - generic [ref=e63]:
+    - img [ref=e67]
+    - generic [ref=e73]:
+      - generic [ref=e74]:
+        - img [ref=e75]
+        - generic [ref=e77]: SYSTEM
+        - generic [ref=e78]: LIVE
+        - generic [ref=e79]: "|"
+      - generic [ref=e80]:
+        - img [ref=e81]
+        - generic [ref=e84]: SCAN
+        - generic [ref=e85]: 5h ago
+        - generic [ref=e86]: "|"
+      - generic [ref=e87]:
+        - img [ref=e88]
+        - generic [ref=e90]: WORKERS
+        - generic [ref=e91]: 1/8
+        - generic [ref=e92]: 7 ERR
+        - generic [ref=e93]: "|"
+      - generic [ref=e94]:
+        - img [ref=e95]
+        - generic [ref=e97]: MARKETS
+        - generic [ref=e98]: "497"
+        - generic [ref=e99]: "|"
+      - generic [ref=e100]:
+        - img [ref=e101]
+        - generic [ref=e105]: TRADERS
+        - generic [ref=e106]: "7"
+        - generic [ref=e107]: "|"
+      - generic [ref=e108]:
+        - img [ref=e109]
+        - generic [ref=e111]: NEWS
+        - generic [ref=e112]: "0"
+        - generic [ref=e113]: "|"
+      - generic [ref=e114]:
+        - img [ref=e115]
+        - generic [ref=e117]: WEATHER
+        - generic [ref=e118]: "0"
+        - generic [ref=e119]: "|"
+      - generic [ref=e120]:
+        - img [ref=e121]
+        - generic [ref=e123]: CRYPTO
+        - generic [ref=e124]: "12"
+        - generic [ref=e125]: "|"
+      - generic [ref=e126]:
+        - img [ref=e127]
+        - generic [ref=e129]: SIGNALS
+        - generic [ref=e130]: P:4.2K S:0 X:0
+        - generic [ref=e131]: F:0
+        - generic [ref=e132]: "|"
+      - generic [ref=e133]:
+        - img [ref=e134]
+        - generic [ref=e136]: STRATEGIES
+        - generic [ref=e137]: "25"
+        - generic [ref=e138]: "|"
+      - generic [ref=e139]:
+        - img [ref=e140]
+        - generic [ref=e143]: ORCH
+        - generic [ref=e144]: PAPER PAUSED
+        - generic [ref=e145]: "|"
+      - generic [ref=e146]:
+        - img [ref=e147]
+        - generic [ref=e151]: FUNNEL
+        - generic [ref=e152]: 0→0
+        - generic [ref=e153]: 0.0%
+        - generic [ref=e154]: "|"
+      - generic [ref=e155]:
+        - img [ref=e156]
+        - generic [ref=e159]: DAY PNL
+        - generic [ref=e160]: $0.00
+        - generic [ref=e161]: "|"
+      - generic [ref=e162]:
+        - img [ref=e163]
+        - generic [ref=e165]: EXPOSURE
+        - generic [ref=e166]: $0.00
+        - generic [ref=e167]: "|"
+      - generic [ref=e168]:
+        - img [ref=e169]
+        - generic [ref=e171]: OPEN ORD
+        - generic [ref=e172]: "0"
+        - generic [ref=e173]: "|"
+      - generic [ref=e174]:
+        - img [ref=e175]
+        - generic [ref=e177]: EVENTS 1M
+        - generic [ref=e178]: "169"
+        - generic [ref=e179]: "|"
+      - generic [ref=e180]:
+        - img [ref=e181]
+        - generic [ref=e183]: FLOW 1M
+        - generic [ref=e184]: D:0 O:0 S:0
+        - generic [ref=e185]: "|"
+      - generic [ref=e186]:
+        - img [ref=e187]
+        - generic [ref=e190]: SCANS 1M
+        - generic [ref=e191]: "0"
+        - generic [ref=e192]: "|"
+      - generic [ref=e193]:
+        - img [ref=e194]
+        - generic [ref=e196]: ALERTS 1M
+        - generic [ref=e197]: "0"
+        - generic [ref=e198]: "|"
+      - generic [ref=e199]:
+        - img [ref=e200]
+        - generic [ref=e202]: LAST EVT
+        - generic [ref=e203]: Worker heartbeat
+        - generic [ref=e204]: just now
+        - generic [ref=e205]: "|"
+      - generic [ref=e206]:
+        - img [ref=e207]
+        - generic [ref=e209]: SYSTEM
+        - generic [ref=e210]: LIVE
+        - generic [ref=e211]: "|"
+      - generic [ref=e212]:
+        - img [ref=e213]
+        - generic [ref=e216]: SCAN
+        - generic [ref=e217]: 5h ago
+        - generic [ref=e218]: "|"
+      - generic [ref=e219]:
+        - img [ref=e220]
+        - generic [ref=e222]: WORKERS
+        - generic [ref=e223]: 1/8
+        - generic [ref=e224]: 7 ERR
+        - generic [ref=e225]: "|"
+      - generic [ref=e226]:
+        - img [ref=e227]
+        - generic [ref=e229]: MARKETS
+        - generic [ref=e230]: "497"
+        - generic [ref=e231]: "|"
+      - generic [ref=e232]:
+        - img [ref=e233]
+        - generic [ref=e237]: TRADERS
+        - generic [ref=e238]: "7"
+        - generic [ref=e239]: "|"
+      - generic [ref=e240]:
+        - img [ref=e241]
+        - generic [ref=e243]: NEWS
+        - generic [ref=e244]: "0"
+        - generic [ref=e245]: "|"
+      - generic [ref=e246]:
+        - img [ref=e247]
+        - generic [ref=e249]: WEATHER
+        - generic [ref=e250]: "0"
+        - generic [ref=e251]: "|"
+      - generic [ref=e252]:
+        - img [ref=e253]
+        - generic [ref=e255]: CRYPTO
+        - generic [ref=e256]: "12"
+        - generic [ref=e257]: "|"
+      - generic [ref=e258]:
+        - img [ref=e259]
+        - generic [ref=e261]: SIGNALS
+        - generic [ref=e262]: P:4.2K S:0 X:0
+        - generic [ref=e263]: F:0
+        - generic [ref=e264]: "|"
+      - generic [ref=e265]:
+        - img [ref=e266]
+        - generic [ref=e268]: STRATEGIES
+        - generic [ref=e269]: "25"
+        - generic [ref=e270]: "|"
+      - generic [ref=e271]:
+        - img [ref=e272]
+        - generic [ref=e275]: ORCH
+        - generic [ref=e276]: PAPER PAUSED
+        - generic [ref=e277]: "|"
+      - generic [ref=e278]:
+        - img [ref=e279]
+        - generic [ref=e283]: FUNNEL
+        - generic [ref=e284]: 0→0
+        - generic [ref=e285]: 0.0%
+        - generic [ref=e286]: "|"
+      - generic [ref=e287]:
+        - img [ref=e288]
+        - generic [ref=e291]: DAY PNL
+        - generic [ref=e292]: $0.00
+        - generic [ref=e293]: "|"
+      - generic [ref=e294]:
+        - img [ref=e295]
+        - generic [ref=e297]: EXPOSURE
+        - generic [ref=e298]: $0.00
+        - generic [ref=e299]: "|"
+      - generic [ref=e300]:
+        - img [ref=e301]
+        - generic [ref=e303]: OPEN ORD
+        - generic [ref=e304]: "0"
+        - generic [ref=e305]: "|"
+      - generic [ref=e306]:
+        - img [ref=e307]
+        - generic [ref=e309]: EVENTS 1M
+        - generic [ref=e310]: "169"
+        - generic [ref=e311]: "|"
+      - generic [ref=e312]:
+        - img [ref=e313]
+        - generic [ref=e315]: FLOW 1M
+        - generic [ref=e316]: D:0 O:0 S:0
+        - generic [ref=e317]: "|"
+      - generic [ref=e318]:
+        - img [ref=e319]
+        - generic [ref=e322]: SCANS 1M
+        - generic [ref=e323]: "0"
+        - generic [ref=e324]: "|"
+      - generic [ref=e325]:
+        - img [ref=e326]
+        - generic [ref=e328]: ALERTS 1M
+        - generic [ref=e329]: "0"
+        - generic [ref=e330]: "|"
+      - generic [ref=e331]:
+        - img [ref=e332]
+        - generic [ref=e334]: LAST EVT
+        - generic [ref=e335]: Worker heartbeat
+        - generic [ref=e336]: just now
+        - generic [ref=e337]: "|"
+  - generic [ref=e338]:
+    - navigation [ref=e339]:
+      - button "Opportunities" [ref=e340] [cursor=pointer]:
+        - img [ref=e342]
+        - generic [ref=e344]: Opportunities
+      - button "Bots" [ref=e345] [cursor=pointer]:
+        - img [ref=e346]
+        - generic [ref=e349]: Bots
+      - button "Positions" [ref=e350] [cursor=pointer]:
+        - img [ref=e351]
+        - generic [ref=e354]: Positions
+      - button "Performance" [ref=e355] [cursor=pointer]:
+        - img [ref=e356]
+        - generic [ref=e358]: Performance
+      - button "Accounts" [ref=e359] [cursor=pointer]:
+        - img [ref=e360]
+        - generic [ref=e364]: Accounts
+      - button "Strategies" [ref=e365] [cursor=pointer]:
+        - img [ref=e366]
+        - generic [ref=e370]: Strategies
+      - button "Traders" [ref=e371] [cursor=pointer]:
+        - img [ref=e372]
+        - generic [ref=e377]: Traders
+      - button "Data" [ref=e378] [cursor=pointer]:
+        - img [ref=e379]
+        - generic [ref=e383]: Data
+      - button "AI" [ref=e384] [cursor=pointer]:
+        - img [ref=e385]
+        - generic [ref=e388]: AI
+      - button "Settings" [ref=e389] [cursor=pointer]:
+        - img [ref=e390]
+        - generic [ref=e393]: Settings
+    - main [ref=e394]:
+      - generic [ref=e396]:
+        - generic [ref=e397]:
+          - button "Markets 497" [ref=e2216] [cursor=pointer]:
+            - img [ref=e399]
+            - text: Markets
+            - generic [ref=e402]: "497"
+          - button "Traders 7" [active] [ref=e2217] [cursor=pointer]:
+            - img [ref=e2218]
+            - text: Traders
+            - generic [ref=e2221]: "7"
+          - button "News 0" [ref=e2222] [cursor=pointer]:
+            - img [ref=e2223]
+            - text: News
+            - generic [ref=e2227]: "0"
+          - button "Weather 0" [ref=e2228] [cursor=pointer]:
+            - img [ref=e2229]
+            - text: Weather
+            - generic [ref=e2232]: "0"
+          - button "Crypto 12" [ref=e2233] [cursor=pointer]:
+            - img [ref=e2234]
+            - text: Crypto
+            - generic [ref=e2238]: "12"
+          - generic [ref=e403]:
+            - button [ref=e404] [cursor=pointer]:
+              - img [ref=e405]
+            - button [ref=e410] [cursor=pointer]:
+              - img [ref=e411]
+            - button [ref=e412] [cursor=pointer]:
+              - img [ref=e413]
+          - generic [ref=e415]:
+            - button "Settings" [ref=e416] [cursor=pointer]:
+              - img [ref=e417]
+              - text: Settings
+            - generic [ref=e420]:
+              - button "Analyze Visible" [ref=e421] [cursor=pointer]:
+                - img [ref=e422]
+                - text: Analyze Visible
+              - button [ref=e425] [cursor=pointer]:
+                - img [ref=e426]
+        - generic [ref=e2239]:
+          - generic [ref=e2240]:
+            - img [ref=e2241]
+            - generic [ref=e2243]: Confluence limit 50
+            - generic [ref=e2244]: Executable 7
+            - generic [ref=e2245]: High/Extreme 0/0
+            - generic [ref=e2246]: Avg 69.4
+            - generic [ref=e2247]: Markets/Wallets 7/9
+            - generic [ref=e2248]:
+              - button "Show Filtered" [ref=e2249] [cursor=pointer]
+              - button "Refresh" [ref=e2250] [cursor=pointer]:
+                - img [ref=e2251]
+                - text: Refresh
+          - generic [ref=e2256]:
+            - generic [ref=e2259] [cursor=pointer]:
+              - generic [ref=e2260]:
+                - generic [ref=e2261]: CONFLUENCE
+                - generic [ref=e2262]: WATCH
+                - generic [ref=e2263]: "YES"
+                - generic [ref=e2264]:
+                  - img [ref=e2265]
+                  - text: TRADEABLE
+                - 'generic "StrategySDK: traders_confluence" [ref=e2268]': SDK traders_confluence
+                - generic [ref=e2269]:
+                  - img [ref=e2270]
+                  - text: 1m
+              - heading "Bitcoin Up or Down - February 18, 11:45PM-12:00AM ET" [level=3] [ref=e2273]
+              - generic [ref=e2274]:
+                - generic [ref=e2275]: Pool 2
+                - generic [ref=e2276]: Tracked 1
+              - generic [ref=e2277]:
+                - generic [ref=e2278]:
+                  - paragraph [ref=e2279]: "Yes"
+                  - paragraph [ref=e2280]: 58¢
+                - generic [ref=e2281]:
+                  - paragraph [ref=e2282]: "No"
+                  - paragraph [ref=e2283]: 42¢
+              - generic [ref=e2284]:
+                - generic [ref=e2285]:
+                  - paragraph [ref=e2286]: Confidence
+                  - paragraph [ref=e2287]: "69"
+                - generic [ref=e2288]:
+                  - paragraph [ref=e2289]: Wallets
+                  - paragraph [ref=e2290]:
+                    - img [ref=e2291]
+                    - text: "5"
+                - generic [ref=e2296]:
+                  - paragraph [ref=e2297]: Entry
+                  - paragraph [ref=e2298]: 58¢
+                - generic [ref=e2299]:
+                  - paragraph [ref=e2300]: Source Fit
+                  - paragraph [ref=e2301]: 2/3
+              - generic [ref=e2302]:
+                - generic [ref=e2303]:
+                  - paragraph [ref=e2304]: Net Notional
+                  - paragraph [ref=e2305]: $46.5K
+                - generic [ref=e2306]:
+                  - paragraph [ref=e2307]: Window
+                  - paragraph [ref=e2308]: 15m
+                - generic [ref=e2309]:
+                  - paragraph [ref=e2310]: Qualified
+                  - paragraph [ref=e2311]: "YES"
+                - generic [ref=e2312]:
+                  - paragraph [ref=e2313]: Wallet Base
+                  - paragraph [ref=e2314]: "5"
+              - generic [ref=e2316]:
+                - generic [ref=e2317]: Conviction
+                - generic [ref=e2318]: 69/100
+              - generic [ref=e2321]:
+                - button "0x1979ae6B7E6534dE9c4539D0c205E582cA637C9D-1769439463256 68" [ref=e2322]:
+                  - img [ref=e2323]
+                  - generic [ref=e2327]: 0x1979ae6B7E6534dE9c4539D0c205E582cA637C9D-1769439463256
+                  - generic [ref=e2328]: "68"
+                - button "0x1d0034134e 67" [ref=e2329]:
+                  - img [ref=e2330]
+                  - generic [ref=e2334]: "0x1d0034134e"
+                  - generic [ref=e2335]: "67"
+                - button "Winner55555 75" [ref=e2336]:
+                  - img [ref=e2337]
+                  - generic [ref=e2341]: Winner55555
+                  - generic [ref=e2342]: "75"
+                - button "BoneReader 73" [ref=e2343]:
+                  - img [ref=e2344]
+                  - generic [ref=e2348]: BoneReader
+                  - generic [ref=e2349]: "73"
+              - generic [ref=e2350]:
+                - link "Market" [ref=e2351]:
+                  - /url: https://polymarket.com/event/btc-updown-15m-1771476300
+                  - img [ref=e2352]
+                  - text: Market
+                - button "Copilot" [ref=e2356]:
+                  - img [ref=e2357]
+                  - text: Copilot
+                - button "Expand" [ref=e2359]:
+                  - img [ref=e2360]
+                  - text: Expand
+                - img [ref=e2366]
+            - generic [ref=e2370] [cursor=pointer]:
+              - generic [ref=e2371]:
+                - generic [ref=e2372]: CONFLUENCE
+                - generic [ref=e2373]: WATCH
+                - generic [ref=e2374]: "YES"
+                - generic [ref=e2375]:
+                  - img [ref=e2376]
+                  - text: TRADEABLE
+                - 'generic "StrategySDK: traders_confluence" [ref=e2379]': SDK traders_confluence
+                - generic [ref=e2380]:
+                  - img [ref=e2381]
+                  - text: 1m
+              - heading "Bitcoin Up or Down - February 18, 11:45PM-11:50PM ET" [level=3] [ref=e2384]
+              - generic [ref=e2386]: Pool 1
+              - generic [ref=e2387]:
+                - generic [ref=e2388]:
+                  - paragraph [ref=e2389]: "Yes"
+                  - paragraph [ref=e2390]: 52¢
+                - generic [ref=e2391]:
+                  - paragraph [ref=e2392]: "No"
+                  - paragraph [ref=e2393]: 48¢
+              - generic [ref=e2394]:
+                - generic [ref=e2395]:
+                  - paragraph [ref=e2396]: Confidence
+                  - paragraph [ref=e2397]: "74"
+                - generic [ref=e2398]:
+                  - paragraph [ref=e2399]: Wallets
+                  - paragraph [ref=e2400]:
+                    - img [ref=e2401]
+                    - text: "8"
+                - generic [ref=e2406]:
+                  - paragraph [ref=e2407]: Entry
+                  - paragraph [ref=e2408]: 52¢
+                - generic [ref=e2409]:
+                  - paragraph [ref=e2410]: Source Fit
+                  - paragraph [ref=e2411]: 1/3
+              - generic [ref=e2412]:
+                - generic [ref=e2413]:
+                  - paragraph [ref=e2414]: Net Notional
+                  - paragraph [ref=e2415]: $69.8K
+                - generic [ref=e2416]:
+                  - paragraph [ref=e2417]: Window
+                  - paragraph [ref=e2418]: 60m
+                - generic [ref=e2419]:
+                  - paragraph [ref=e2420]: Qualified
+                  - paragraph [ref=e2421]: "YES"
+                - generic [ref=e2422]:
+                  - paragraph [ref=e2423]: Wallet Base
+                  - paragraph [ref=e2424]: "8"
+              - generic [ref=e2426]:
+                - generic [ref=e2427]: Conviction
+                - generic [ref=e2428]: 74/100
+              - generic [ref=e2431]:
+                - button "0x1979ae6B7E6534dE9c4539D0c205E582cA637C9D-1769439463256 68" [ref=e2432]:
+                  - img [ref=e2433]
+                  - generic [ref=e2437]: 0x1979ae6B7E6534dE9c4539D0c205E582cA637C9D-1769439463256
+                  - generic [ref=e2438]: "68"
+                - button "0x1d0034134e 67" [ref=e2439]:
+                  - img [ref=e2440]
+                  - generic [ref=e2444]: "0x1d0034134e"
+                  - generic [ref=e2445]: "67"
+                - button "vidarx 68" [ref=e2446]:
+                  - img [ref=e2447]
+                  - generic [ref=e2451]: vidarx
+                  - generic [ref=e2452]: "68"
+                - button "dustedfloor 68" [ref=e2453]:
+                  - img [ref=e2454]
+                  - generic [ref=e2458]: dustedfloor
+                  - generic [ref=e2459]: "68"
+              - generic [ref=e2460]:
+                - link "Market" [ref=e2461]:
+                  - /url: https://polymarket.com/event/btc-updown-5m-1771476300
+                  - img [ref=e2462]
+                  - text: Market
+                - button "Copilot" [ref=e2466]:
+                  - img [ref=e2467]
+                  - text: Copilot
+                - button "Expand" [ref=e2469]:
+                  - img [ref=e2470]
+                  - text: Expand
+                - img [ref=e2476]
+            - generic [ref=e2480] [cursor=pointer]:
+              - generic [ref=e2481]:
+                - generic [ref=e2482]: CONFLUENCE
+                - generic [ref=e2483]: WATCH
+                - generic [ref=e2484]: "YES"
+                - generic [ref=e2485]:
+                  - img [ref=e2486]
+                  - text: TRADEABLE
+                - 'generic "StrategySDK: traders_confluence" [ref=e2489]': SDK traders_confluence
+                - generic [ref=e2490]:
+                  - img [ref=e2491]
+                  - text: 1m
+              - heading "Bitcoin Up or Down - February 18, 11:50PM-11:55PM ET" [level=3] [ref=e2494]
+              - generic [ref=e2496]: Pool 1
+              - generic [ref=e2497]:
+                - generic [ref=e2498]:
+                  - paragraph [ref=e2499]: "Yes"
+                  - paragraph [ref=e2500]: 29¢
+                - generic [ref=e2501]:
+                  - paragraph [ref=e2502]: "No"
+                  - paragraph [ref=e2503]: 71¢
+              - generic [ref=e2504]:
+                - generic [ref=e2505]:
+                  - paragraph [ref=e2506]: Confidence
+                  - paragraph [ref=e2507]: "73"
+                - generic [ref=e2508]:
+                  - paragraph [ref=e2509]: Wallets
+                  - paragraph [ref=e2510]:
+                    - img [ref=e2511]
+                    - text: "8"
+                - generic [ref=e2516]:
+                  - paragraph [ref=e2517]: Entry
+                  - paragraph [ref=e2518]: 29¢
+                - generic [ref=e2519]:
+                  - paragraph [ref=e2520]: Source Fit
+                  - paragraph [ref=e2521]: 1/3
+              - generic [ref=e2522]:
+                - generic [ref=e2523]:
+                  - paragraph [ref=e2524]: Net Notional
+                  - paragraph [ref=e2525]: $24.7K
+                - generic [ref=e2526]:
+                  - paragraph [ref=e2527]: Window
+                  - paragraph [ref=e2528]: 15m
+                - generic [ref=e2529]:
+                  - paragraph [ref=e2530]: Qualified
+                  - paragraph [ref=e2531]: "YES"
+                - generic [ref=e2532]:
+                  - paragraph [ref=e2533]: Wallet Base
+                  - paragraph [ref=e2534]: "8"
+              - generic [ref=e2536]:
+                - generic [ref=e2537]: Conviction
+                - generic [ref=e2538]: 73/100
+              - generic [ref=e2541]:
+                - button "0x1979ae6B7E6534dE9c4539D0c205E582cA637C9D-1769439463256 68" [ref=e2542]:
+                  - img [ref=e2543]
+                  - generic [ref=e2547]: 0x1979ae6B7E6534dE9c4539D0c205E582cA637C9D-1769439463256
+                  - generic [ref=e2548]: "68"
+                - button "0x1d0034134e 67" [ref=e2549]:
+                  - img [ref=e2550]
+                  - generic [ref=e2554]: "0x1d0034134e"
+                  - generic [ref=e2555]: "67"
+                - button "vidarx 68" [ref=e2556]:
+                  - img [ref=e2557]
+                  - generic [ref=e2561]: vidarx
+                  - generic [ref=e2562]: "68"
+                - button "dustedfloor 68" [ref=e2563]:
+                  - img [ref=e2564]
+                  - generic [ref=e2568]: dustedfloor
+                  - generic [ref=e2569]: "68"
+              - generic [ref=e2570]:
+                - link "Market" [ref=e2571]:
+                  - /url: https://polymarket.com/event/btc-updown-5m-1771476600
+                  - img [ref=e2572]
+                  - text: Market
+                - button "Copilot" [ref=e2576]:
+                  - img [ref=e2577]
+                  - text: Copilot
+                - button "Expand" [ref=e2579]:
+                  - img [ref=e2580]
+                  - text: Expand
+                - img [ref=e2586]
+            - generic [ref=e2590] [cursor=pointer]:
+              - generic [ref=e2591]:
+                - generic [ref=e2592]: CONFLUENCE
+                - generic [ref=e2593]: WATCH
+                - generic [ref=e2594]: "YES"
+                - generic [ref=e2595]:
+                  - img [ref=e2596]
+                  - text: TRADEABLE
+                - 'generic "StrategySDK: traders_confluence" [ref=e2599]': SDK traders_confluence
+                - generic [ref=e2600]:
+                  - img [ref=e2601]
+                  - text: 1m
+              - heading "Bitcoin Up or Down - February 18, 11:40PM-11:45PM ET" [level=3] [ref=e2604]
+              - generic [ref=e2606]: Pool 1
+              - generic [ref=e2607]:
+                - generic [ref=e2608]:
+                  - paragraph [ref=e2609]: "Yes"
+                  - paragraph [ref=e2610]: 53¢
+                - generic [ref=e2611]:
+                  - paragraph [ref=e2612]: "No"
+                  - paragraph [ref=e2613]: 47¢
+              - generic [ref=e2614]:
+                - generic [ref=e2615]:
+                  - paragraph [ref=e2616]: Confidence
+                  - paragraph [ref=e2617]: "71"
+                - generic [ref=e2618]:
+                  - paragraph [ref=e2619]: Wallets
+                  - paragraph [ref=e2620]:
+                    - img [ref=e2621]
+                    - text: "7"
+                - generic [ref=e2626]:
+                  - paragraph [ref=e2627]: Entry
+                  - paragraph [ref=e2628]: 53¢
+                - generic [ref=e2629]:
+                  - paragraph [ref=e2630]: Source Fit
+                  - paragraph [ref=e2631]: 1/3
+              - generic [ref=e2632]:
+                - generic [ref=e2633]:
+                  - paragraph [ref=e2634]: Net Notional
+                  - paragraph [ref=e2635]: $18.8K
+                - generic [ref=e2636]:
+                  - paragraph [ref=e2637]: Window
+                  - paragraph [ref=e2638]: 60m
+                - generic [ref=e2639]:
+                  - paragraph [ref=e2640]: Qualified
+                  - paragraph [ref=e2641]: "YES"
+                - generic [ref=e2642]:
+                  - paragraph [ref=e2643]: Wallet Base
+                  - paragraph [ref=e2644]: "7"
+              - generic [ref=e2646]:
+                - generic [ref=e2647]: Conviction
+                - generic [ref=e2648]: 71/100
+              - generic [ref=e2651]:
+                - button "0x1979ae6B7E6534dE9c4539D0c205E582cA637C9D-1769439463256 68" [ref=e2652]:
+                  - img [ref=e2653]
+                  - generic [ref=e2657]: 0x1979ae6B7E6534dE9c4539D0c205E582cA637C9D-1769439463256
+                  - generic [ref=e2658]: "68"
+                - button "vidarx 68" [ref=e2659]:
+                  - img [ref=e2660]
+                  - generic [ref=e2664]: vidarx
+                  - generic [ref=e2665]: "68"
+                - button "dustedfloor 68" [ref=e2666]:
+                  - img [ref=e2667]
+                  - generic [ref=e2671]: dustedfloor
+                  - generic [ref=e2672]: "68"
+                - button "0x8dxd 54" [ref=e2673]:
+                  - img [ref=e2674]
+                  - generic [ref=e2678]: 0x8dxd
+                  - generic [ref=e2679]: "54"
+              - generic [ref=e2680]:
+                - link "Market" [ref=e2681]:
+                  - /url: https://polymarket.com/event/btc-updown-5m-1771476000
+                  - img [ref=e2682]
+                  - text: Market
+                - button "Copilot" [ref=e2686]:
+                  - img [ref=e2687]
+                  - text: Copilot
+                - button "Expand" [ref=e2689]:
+                  - img [ref=e2690]
+                  - text: Expand
+                - img [ref=e2696]
+            - generic [ref=e2700] [cursor=pointer]:
+              - generic [ref=e2701]:
+                - generic [ref=e2702]: CONFLUENCE
+                - generic [ref=e2703]: WATCH
+                - generic [ref=e2704]: "YES"
+                - generic [ref=e2705]:
+                  - img [ref=e2706]
+                  - text: TRADEABLE
+                - 'generic "StrategySDK: traders_confluence" [ref=e2709]': SDK traders_confluence
+                - generic [ref=e2710]:
+                  - img [ref=e2711]
+                  - text: 1m
+              - heading "Bitcoin Up or Down - February 18, 11:55PM-12:00AM ET" [level=3] [ref=e2714]
+              - generic [ref=e2716]: Pool 1
+              - generic [ref=e2717]:
+                - generic [ref=e2718]:
+                  - paragraph [ref=e2719]: "Yes"
+                  - paragraph [ref=e2720]: 57¢
+                - generic [ref=e2721]:
+                  - paragraph [ref=e2722]: "No"
+                  - paragraph [ref=e2723]: 43¢
+              - generic [ref=e2724]:
+                - generic [ref=e2725]:
+                  - paragraph [ref=e2726]: Confidence
+                  - paragraph [ref=e2727]: "71"
+                - generic [ref=e2728]:
+                  - paragraph [ref=e2729]: Wallets
+                  - paragraph [ref=e2730]:
+                    - img [ref=e2731]
+                    - text: "6"
+                - generic [ref=e2736]:
+                  - paragraph [ref=e2737]: Entry
+                  - paragraph [ref=e2738]: 57¢
+                - generic [ref=e2739]:
+                  - paragraph [ref=e2740]: Source Fit
+                  - paragraph [ref=e2741]: 1/3
+              - generic [ref=e2742]:
+                - generic [ref=e2743]:
+                  - paragraph [ref=e2744]: Net Notional
+                  - paragraph [ref=e2745]: $44.4K
+                - generic [ref=e2746]:
+                  - paragraph [ref=e2747]: Window
+                  - paragraph [ref=e2748]: 15m
+                - generic [ref=e2749]:
+                  - paragraph [ref=e2750]: Qualified
+                  - paragraph [ref=e2751]: "YES"
+                - generic [ref=e2752]:
+                  - paragraph [ref=e2753]: Wallet Base
+                  - paragraph [ref=e2754]: "6"
+              - generic [ref=e2756]:
+                - generic [ref=e2757]: Conviction
+                - generic [ref=e2758]: 71/100
+              - generic [ref=e2761]:
+                - button "0x1979ae6B7E6534dE9c4539D0c205E582cA637C9D-1769439463256 68" [ref=e2762]:
+                  - img [ref=e2763]
+                  - generic [ref=e2767]: 0x1979ae6B7E6534dE9c4539D0c205E582cA637C9D-1769439463256
+                  - generic [ref=e2768]: "68"
+                - button "0x1d0034134e 67" [ref=e2769]:
+                  - img [ref=e2770]
+                  - generic [ref=e2774]: "0x1d0034134e"
+                  - generic [ref=e2775]: "67"
+                - button "vidarx 68" [ref=e2776]:
+                  - img [ref=e2777]
+                  - generic [ref=e2781]: vidarx
+                  - generic [ref=e2782]: "68"
+                - button "dustedfloor 68" [ref=e2783]:
+                  - img [ref=e2784]
+                  - generic [ref=e2788]: dustedfloor
+                  - generic [ref=e2789]: "68"
+              - generic [ref=e2790]:
+                - link "Market" [ref=e2791]:
+                  - /url: https://polymarket.com/event/btc-updown-5m-1771476900
+                  - img [ref=e2792]
+                  - text: Market
+                - button "Copilot" [ref=e2796]:
+                  - img [ref=e2797]
+                  - text: Copilot
+                - button "Expand" [ref=e2799]:
+                  - img [ref=e2800]
+                  - text: Expand
+                - img [ref=e2806]
+            - generic [ref=e2810] [cursor=pointer]:
+              - generic [ref=e2811]:
+                - generic [ref=e2812]: CONFLUENCE
+                - generic [ref=e2813]: WATCH
+                - generic [ref=e2814]: "YES"
+                - generic [ref=e2815]:
+                  - img [ref=e2816]
+                  - text: TRADEABLE
+                - 'generic "StrategySDK: traders_confluence" [ref=e2819]': SDK traders_confluence
+                - generic [ref=e2820]:
+                  - img [ref=e2821]
+                  - text: 1m
+              - heading "Bitcoin Up or Down - February 18, 11:30PM-11:45PM ET" [level=3] [ref=e2824]
+              - generic [ref=e2826]: Pool 1
+              - generic [ref=e2827]:
+                - generic [ref=e2828]:
+                  - paragraph [ref=e2829]: "Yes"
+                  - paragraph [ref=e2830]: 48¢
+                - generic [ref=e2831]:
+                  - paragraph [ref=e2832]: "No"
+                  - paragraph [ref=e2833]: 52¢
+              - generic [ref=e2834]:
+                - generic [ref=e2835]:
+                  - paragraph [ref=e2836]: Confidence
+                  - paragraph [ref=e2837]: "66"
+                - generic [ref=e2838]:
+                  - paragraph [ref=e2839]: Wallets
+                  - paragraph [ref=e2840]:
+                    - img [ref=e2841]
+                    - text: "5"
+                - generic [ref=e2846]:
+                  - paragraph [ref=e2847]: Entry
+                  - paragraph [ref=e2848]: 48¢
+                - generic [ref=e2849]:
+                  - paragraph [ref=e2850]: Source Fit
+                  - paragraph [ref=e2851]: 1/3
+              - generic [ref=e2852]:
+                - generic [ref=e2853]:
+                  - paragraph [ref=e2854]: Net Notional
+                  - paragraph [ref=e2855]: $44.4K
+                - generic [ref=e2856]:
+                  - paragraph [ref=e2857]: Window
+                  - paragraph [ref=e2858]: 60m
+                - generic [ref=e2859]:
+                  - paragraph [ref=e2860]: Qualified
+                  - paragraph [ref=e2861]: "YES"
+                - generic [ref=e2862]:
+                  - paragraph [ref=e2863]: Wallet Base
+                  - paragraph [ref=e2864]: "5"
+              - generic [ref=e2866]:
+                - generic [ref=e2867]: Conviction
+                - generic [ref=e2868]: 66/100
+              - generic [ref=e2871]:
+                - button "0x1d0034134e 67" [ref=e2872]:
+                  - img [ref=e2873]
+                  - generic [ref=e2877]: "0x1d0034134e"
+                  - generic [ref=e2878]: "67"
+                - button "0x8dxd 54" [ref=e2879]:
+                  - img [ref=e2880]
+                  - generic [ref=e2884]: 0x8dxd
+                  - generic [ref=e2885]: "54"
+                - button "k9Q2mX4L8A7ZP3R 51" [ref=e2886]:
+                  - img [ref=e2887]
+                  - generic [ref=e2891]: k9Q2mX4L8A7ZP3R
+                  - generic [ref=e2892]: "51"
+                - button "BoneReader 73" [ref=e2893]:
+                  - img [ref=e2894]
+                  - generic [ref=e2898]: BoneReader
+                  - generic [ref=e2899]: "73"
+              - generic [ref=e2900]:
+                - link "Market" [ref=e2901]:
+                  - /url: https://polymarket.com/event/btc-updown-15m-1771475400
+                  - img [ref=e2902]
+                  - text: Market
+                - button "Copilot" [ref=e2906]:
+                  - img [ref=e2907]
+                  - text: Copilot
+                - button "Expand" [ref=e2909]:
+                  - img [ref=e2910]
+                  - text: Expand
+                - img [ref=e2916]
+            - generic [ref=e2920] [cursor=pointer]:
+              - generic [ref=e2921]:
+                - generic [ref=e2922]: CONFLUENCE
+                - generic [ref=e2923]: WATCH
+                - generic [ref=e2924]: "YES"
+                - generic [ref=e2925]:
+                  - img [ref=e2926]
+                  - text: TRADEABLE
+                - 'generic "StrategySDK: traders_confluence" [ref=e2929]': SDK traders_confluence
+                - generic [ref=e2930]:
+                  - img [ref=e2931]
+                  - text: 1m
+              - heading "Ethereum Up or Down - February 18, 11:30PM-11:45PM ET" [level=3] [ref=e2934]
+              - generic [ref=e2936]: Pool 1
+              - generic [ref=e2937]:
+                - generic [ref=e2938]:
+                  - paragraph [ref=e2939]: "Yes"
+                  - paragraph [ref=e2940]: 74¢
+                - generic [ref=e2941]:
+                  - paragraph [ref=e2942]: "No"
+                  - paragraph [ref=e2943]: 26¢
+              - generic [ref=e2944]:
+                - generic [ref=e2945]:
+                  - paragraph [ref=e2946]: Confidence
+                  - paragraph [ref=e2947]: "62"
+                - generic [ref=e2948]:
+                  - paragraph [ref=e2949]: Wallets
+                  - paragraph [ref=e2950]:
+                    - img [ref=e2951]
+                    - text: "5"
+                - generic [ref=e2956]:
+                  - paragraph [ref=e2957]: Entry
+                  - paragraph [ref=e2958]: 74¢
+                - generic [ref=e2959]:
+                  - paragraph [ref=e2960]: Source Fit
+                  - paragraph [ref=e2961]: 1/3
+              - generic [ref=e2962]:
+                - generic [ref=e2963]:
+                  - paragraph [ref=e2964]: Net Notional
+                  - paragraph [ref=e2965]: $30.4K
+                - generic [ref=e2966]:
+                  - paragraph [ref=e2967]: Window
+                  - paragraph [ref=e2968]: 60m
+                - generic [ref=e2969]:
+                  - paragraph [ref=e2970]: Qualified
+                  - paragraph [ref=e2971]: "YES"
+                - generic [ref=e2972]:
+                  - paragraph [ref=e2973]: Wallet Base
+                  - paragraph [ref=e2974]: "5"
+              - generic [ref=e2976]:
+                - generic [ref=e2977]: Conviction
+                - generic [ref=e2978]: 62/100
+              - generic [ref=e2981]:
+                - button "0x1d0034134e 67" [ref=e2982]:
+                  - img [ref=e2983]
+                  - generic [ref=e2987]: "0x1d0034134e"
+                  - generic [ref=e2988]: "67"
+                - button "0x8dxd 54" [ref=e2989]:
+                  - img [ref=e2990]
+                  - generic [ref=e2994]: 0x8dxd
+                  - generic [ref=e2995]: "54"
+                - button "k9Q2mX4L8A7ZP3R 51" [ref=e2996]:
+                  - img [ref=e2997]
+                  - generic [ref=e3001]: k9Q2mX4L8A7ZP3R
+                  - generic [ref=e3002]: "51"
+                - button "BoneReader 73" [ref=e3003]:
+                  - img [ref=e3004]
+                  - generic [ref=e3008]: BoneReader
+                  - generic [ref=e3009]: "73"
+              - generic [ref=e3010]:
+                - link "Market" [ref=e3011]:
+                  - /url: https://polymarket.com/event/eth-updown-15m-1771475400
+                  - img [ref=e3012]
+                  - text: Market
+                - button "Copilot" [ref=e3016]:
+                  - img [ref=e3017]
+                  - text: Copilot
+                - button "Expand" [ref=e3019]:
+                  - img [ref=e3020]
+                  - text: Expand
+                - img [ref=e3026]
+          - generic [ref=e3029]:
+            - generic [ref=e3030]: 1 - 7 of 7
+            - generic [ref=e3031]:
+              - button "Prev" [disabled]:
+                - img
+                - text: Prev
+              - generic [ref=e3032]: 1/1
+              - button "Next" [disabled]:
+                - text: Next
+                - img
+  - button "K" [ref=e2207] [cursor=pointer]:
+    - img [ref=e2208]
+    - generic [ref=e2210]:
+      - img [ref=e2211]
+      - text: K

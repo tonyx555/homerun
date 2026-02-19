@@ -15,6 +15,7 @@ Pipeline:
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, Optional
 
@@ -90,8 +91,10 @@ class VPINToxicityStrategy(BaseStrategy):
             self._accumulate_trade(event)
             return []
         elif event.event_type == EventType.MARKET_DATA_REFRESH:
-            # Delegate to detect() for opportunity generation
-            return self.detect(
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None,
+                self.detect,
                 event.events or [], event.markets or [], event.prices or {}
             )
         return []

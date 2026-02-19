@@ -21,7 +21,7 @@ export default function RssSourceForm({ config, onChange }: RssSourceFormProps) 
     onChange({ ...config, [key]: value })
   }
 
-  const feedUrl = String(config.feed_url || '')
+  const feedUrl = String(config.url || '')
   const pollInterval = String(config.poll_interval_minutes || '15')
   const categoryFilter = String(config.category_filter || '')
 
@@ -34,7 +34,7 @@ export default function RssSourceForm({ config, onChange }: RssSourceFormProps) 
         <Input
           type="url"
           value={feedUrl}
-          onChange={(e) => update('feed_url', e.target.value)}
+          onChange={(e) => update('url', e.target.value)}
           className="mt-1 h-8 text-xs font-mono"
           placeholder="https://example.com/feed.xml"
           required

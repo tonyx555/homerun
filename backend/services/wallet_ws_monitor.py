@@ -10,6 +10,7 @@ Inspired by terauss/Polymarket-Copy-Trading-Bot architecture.
 
 import asyncio
 import json
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -257,6 +258,10 @@ class WalletWebSocketMonitor:
         self._poll_fallback_task: Optional[asyncio.Task] = None
         self._ws_task: Optional[asyncio.Task] = None
         self._mempool_mode = False  # Enable for pre-confirmation (<1s) latency
+        self._rpc_failure_streak: int = 0
+        self._rpc_backoff_until: float = 0.0
+        self._rpc_backoff_base_seconds: float = 2.0
+        self._rpc_backoff_max_seconds: float = 30.0
         self._stats = {
             "blocks_processed": 0,
             "events_detected": 0,
@@ -443,6 +448,7 @@ class WalletWebSocketMonitor:
                     self._ws_url,
                     ping_interval=20,
                     ping_timeout=30,
+                    open_timeout=10,
                     close_timeout=10,
                 ) as ws:
                     self._ws_connection = ws
@@ -558,6 +564,9 @@ class WalletWebSocketMonitor:
 
         # Avoid processing the same block twice
         if self._last_processed_block is not None and block_number <= self._last_processed_block:
+            return
+
+        if self._rpc_backoff_until > time.monotonic():
             return
 
         block_hex = hex(block_number)
@@ -686,6 +695,8 @@ class WalletWebSocketMonitor:
                         response_type=type(result).__name__,
                     )
                     return None
+                self._rpc_failure_streak = 0
+                self._rpc_backoff_until = 0.0
                 return result
             except Exception as e:
                 last_error = e
@@ -699,11 +710,19 @@ class WalletWebSocketMonitor:
                 )
 
         if last_error is not None:
+            self._rpc_failure_streak += 1
+            cooldown_seconds = min(
+                self._rpc_backoff_base_seconds * (2 ** max(0, self._rpc_failure_streak - 1)),
+                self._rpc_backoff_max_seconds,
+            )
+            self._rpc_backoff_until = time.monotonic() + cooldown_seconds
             logger.error(
                 "Wallet monitor RPC failed across all endpoints",
                 method=method,
                 block=block_hex or None,
                 endpoints=self._rpc_urls,
+                failure_streak=self._rpc_failure_streak,
+                cooldown_seconds=round(cooldown_seconds, 2),
                 error_type=type(last_error).__name__,
                 error=_exception_text(last_error),
             )

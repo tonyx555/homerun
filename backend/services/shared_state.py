@@ -5,12 +5,16 @@ Scanner worker writes snapshot; API and other workers read from DB.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
+from config import settings
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy import select, or_
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import (
@@ -30,6 +34,9 @@ logger = logging.getLogger(__name__)
 SNAPSHOT_ID = "latest"
 TRADERS_SNAPSHOT_ID = "traders_latest"
 CONTROL_ID = "default"
+SQLITE_LOCK_RETRY_ATTEMPTS = 6
+SQLITE_LOCK_BASE_DELAY_SECONDS = 0.15
+SQLITE_LOCK_MAX_DELAY_SECONDS = 1.5
 
 # In-memory targeted condition IDs for the next scan request.
 # Set by the evaluate endpoint, consumed and cleared by the scanner worker.
@@ -63,6 +70,31 @@ def _format_iso_utc_z(dt: Optional[datetime]) -> Optional[str]:
     else:
         dt = dt.astimezone(timezone.utc)
     return dt.replace(tzinfo=None).isoformat() + "Z"
+
+
+def _is_sqlite_lock_error(exc: Exception) -> bool:
+    message = str(getattr(exc, "orig", exc)).lower()
+    return "database is locked" in message or "database table is locked" in message
+
+
+def _sqlite_lock_retry_delay(attempt: int) -> float:
+    return min(SQLITE_LOCK_BASE_DELAY_SECONDS * (2**attempt), SQLITE_LOCK_MAX_DELAY_SECONDS)
+
+
+async def _commit_with_retry(session: AsyncSession) -> None:
+    for attempt in range(SQLITE_LOCK_RETRY_ATTEMPTS):
+        try:
+            if "sqlite" in settings.DATABASE_URL.lower():
+                await session.execute(text("PRAGMA busy_timeout=1500"))
+            await session.commit()
+            return
+        except OperationalError as exc:
+            await session.rollback()
+            is_locked = _is_sqlite_lock_error(exc)
+            is_last = attempt >= SQLITE_LOCK_RETRY_ATTEMPTS - 1
+            if not is_locked or is_last:
+                raise
+            await asyncio.sleep(_sqlite_lock_retry_delay(attempt))
 
 
 def _normalize_weather_edge_title(title: str) -> str:
@@ -122,7 +154,7 @@ async def write_scanner_snapshot(
     if market_history is not None:
         row.market_history_json = market_history
     await _persist_incremental_state(session, payload, status, last_scan)
-    await session.commit()
+    await _commit_with_retry(session)
 
     # Publish events so the broadcaster can relay immediately.
     try:
@@ -197,7 +229,7 @@ async def write_traders_snapshot(
     row.strategies_json = status.get("strategies", [])
     row.tiered_scanning_json = status.get("tiered_scanning")
     row.ws_feeds_json = status.get("ws_feeds")
-    await session.commit()
+    await _commit_with_retry(session)
 
     logger.info(
         "Wrote traders snapshot: opportunities=%s skipped=%s running=%s enabled=%s",
@@ -426,10 +458,34 @@ async def read_traders_snapshot(
     if row is None:
         return [], _default_status()
 
+    market_history_row = (
+        await session.execute(select(ScannerSnapshot).where(ScannerSnapshot.id == SNAPSHOT_ID))
+    ).scalar_one_or_none()
+    market_history = (
+        market_history_row.market_history_json
+        if market_history_row is not None and isinstance(market_history_row.market_history_json, dict)
+        else {}
+    )
+
     opportunities: list[Opportunity] = []
     for d in row.opportunities_json or []:
         try:
             opp = Opportunity.model_validate(d)
+            if isinstance(market_history, dict):
+                for market in opp.markets:
+                    if not isinstance(market, dict):
+                        continue
+                    candidates = {
+                        str(market.get("id", "") or "").strip(),
+                        str(market.get("condition_id", "") or "").strip(),
+                    }
+                    for candidate in candidates:
+                        if not candidate:
+                            continue
+                        history = market_history.get(candidate)
+                        if isinstance(history, list):
+                            market["price_history"] = history
+                            break
             if isinstance(opp.strategy_context, dict):
                 opp.strategy_context["source_key"] = "traders"
             else:

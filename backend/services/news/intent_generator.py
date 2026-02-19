@@ -32,6 +32,8 @@ class IntentGenerator:
         findings: list[WorkflowFinding],
         min_edge: float = 10.0,
         min_confidence: float = 0.6,
+        min_supporting_articles: int = 2,
+        min_supporting_sources: int = 2,
         market_metadata_by_id: Optional[dict[str, dict[str, Any]]] = None,
     ) -> list[dict]:
         """Generate trade intent records from actionable findings.
@@ -48,6 +50,8 @@ class IntentGenerator:
         intents: list[dict] = []
         now = datetime.now(timezone.utc)
         market_metadata_by_id = market_metadata_by_id or {}
+        required_articles = max(1, int(min_supporting_articles))
+        required_sources = max(1, int(min_supporting_sources))
 
         for finding in findings:
             if not finding.actionable:
@@ -59,14 +63,14 @@ class IntentGenerator:
 
             supporting_articles = self._extract_supporting_articles(finding)
             supporting_source_count = self._count_distinct_sources(supporting_articles)
-            if len(supporting_articles) < 2:
+            if len(supporting_articles) < required_articles:
                 logger.debug(
                     "Skipping intent for market %s: insufficient supporting articles (%d)",
                     finding.market_id,
                     len(supporting_articles),
                 )
                 continue
-            if supporting_source_count < 2:
+            if supporting_source_count < required_sources:
                 logger.debug(
                     "Skipping intent for market %s: insufficient source diversity (%d)",
                     finding.market_id,

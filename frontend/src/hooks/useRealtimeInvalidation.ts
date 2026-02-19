@@ -81,6 +81,12 @@ export function useRealtimeInvalidation(
       (viewingOpportunities && opportunitiesView === 'news')
       || (viewingData && dataView === 'feed')
     const viewingWeather = viewingOpportunities && opportunitiesView === 'weather'
+    const viewingScannerFamily = viewingOpportunities
+      && opportunitiesView !== 'search'
+      && opportunitiesView !== 'crypto'
+      && opportunitiesView !== 'news'
+      && opportunitiesView !== 'weather'
+      && opportunitiesView !== 'traders'
     const viewingWorld = viewingData && dataView === 'map'
     const viewingTrading = activeTab === 'trading'
 
@@ -92,25 +98,23 @@ export function useRealtimeInvalidation(
     }
 
     if (messageType === 'opportunities_update' || messageType === 'init') {
-      // Direct cache update for the primary opportunities query
-      if (lastMessage.data?.opportunities) {
-        queryClient.setQueryData(['opportunities'], (old: any) => ({
-          ...old,
-          ...lastMessage.data,
-        }))
-      }
-      // Still invalidate derived/secondary queries
       queueInvalidations([
-        ['opportunity-counts'],
+        ['opportunities'],
+        ['opportunity-strategy-counts'],
+        ['opportunity-category-counts'],
+        ['opportunity-subfilters'],
         ['scanner-status'],
-      ])
+      ], { immediate: viewingScannerFamily })
     }
     if (messageType === 'opportunity_events') {
       queueInvalidations(
         [
           ...(viewingArbitrage ? ([['opportunities']] as QueryKey[]) : []),
-          ['opportunity-counts'],
+          ['opportunity-strategy-counts'],
+          ['opportunity-category-counts'],
+          ['opportunity-subfilters'],
         ],
+        { immediate: viewingScannerFamily },
       )
     }
     if (messageType === 'wallet_trade') {
@@ -195,42 +199,40 @@ export function useRealtimeInvalidation(
       ])
     }
     if (messageType === 'weather_update' && lastMessage.data) {
-      // Direct cache update for weather opportunities and status
-      if (lastMessage.data.opportunities) {
-        queryClient.setQueryData(['weather-workflow-opportunities'], (old: any) => ({
-          ...old,
-          ...lastMessage.data,
-        }))
-      }
       if (lastMessage.data.status) {
         queryClient.setQueryData(['weather-workflow-status'], lastMessage.data.status)
       }
-      // Still invalidate derived queries
       queueInvalidations([
-        ...(viewingWeather
-          ? ([
-              ['weather-workflow-intents'],
-              ['weather-workflow-performance'],
-            ] as QueryKey[])
-          : []),
-      ])
-    }
-    if (messageType === 'weather_status' && lastMessage.data) {
-      // Direct cache update for weather status
-      queryClient.setQueryData(['weather-workflow-status'], lastMessage.data)
-      queueInvalidations([
+        ['weather-workflow-opportunities', 'count'],
         ...(viewingWeather
           ? ([
               ['weather-workflow-opportunities'],
+              ['weather-workflow-opportunity-ids-analyze-all'],
+              ['weather-workflow-opportunity-dates'],
               ['weather-workflow-intents'],
               ['weather-workflow-performance'],
             ] as QueryKey[])
           : []),
-      ])
+      ], { immediate: viewingWeather })
     }
-    if (messageType === 'world_intelligence_status' && lastMessage.data) {
-      // Direct cache update for world intelligence status
-      queryClient.setQueryData(['world-intelligence-status'], lastMessage.data)
+    if (messageType === 'weather_status' && lastMessage.data) {
+      queryClient.setQueryData(['weather-workflow-status'], lastMessage.data)
+      queueInvalidations([
+        ['weather-workflow-opportunities', 'count'],
+        ...(viewingWeather
+          ? ([
+              ['weather-workflow-opportunities'],
+              ['weather-workflow-opportunity-ids-analyze-all'],
+              ['weather-workflow-opportunity-dates'],
+              ['weather-workflow-intents'],
+              ['weather-workflow-performance'],
+            ] as QueryKey[])
+          : []),
+      ], { immediate: viewingWeather })
+    }
+    if (messageType === 'events_status' && lastMessage.data) {
+      // Direct cache update for events status
+      queryClient.setQueryData(['events-status'], lastMessage.data)
       queueInvalidations([
         ...(viewingWorld
           ? ([
@@ -240,16 +242,16 @@ export function useRealtimeInvalidation(
               ['world-convergences'],
               ['world-anomalies'],
               ['world-regions'],
-              ['world-intelligence-summary'],
-              ['world-intelligence-sources'],
+              ['events-summary'],
+              ['events-sources'],
             ] as QueryKey[])
           : []),
       ])
     }
-    if (messageType === 'world_intelligence_update' && lastMessage.data) {
-      // Direct cache update for world intelligence status and signals
+    if (messageType === 'events_update' && lastMessage.data) {
+      // Direct cache update for events status and signals
       if (lastMessage.data.status) {
-        queryClient.setQueryData(['world-intelligence-status'], lastMessage.data.status)
+        queryClient.setQueryData(['events-status'], lastMessage.data.status)
       }
       if (lastMessage.data.signals) {
         queryClient.setQueryData(['world-signals'], (old: any) => ({
@@ -266,8 +268,8 @@ export function useRealtimeInvalidation(
               ['world-convergences'],
               ['world-anomalies'],
               ['world-regions'],
-              ['world-intelligence-summary'],
-              ['world-intelligence-sources'],
+              ['events-summary'],
+              ['events-sources'],
             ] as QueryKey[])
           : []),
       ])

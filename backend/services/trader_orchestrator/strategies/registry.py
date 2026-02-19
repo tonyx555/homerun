@@ -8,7 +8,6 @@ strategy instance by slug.
 from __future__ import annotations
 
 from services.strategies.base import BaseStrategy
-from services.strategies.btc_eth_highfreq import BtcEthHighFreqStrategy
 from services.strategy_loader import strategy_loader
 
 
@@ -19,9 +18,6 @@ def list_strategy_keys() -> list[str]:
 def get_strategy(strategy_key: str) -> BaseStrategy:
     """Return the BaseStrategy instance for *strategy_key*, or a default."""
     key = str(strategy_key or "").strip().lower()
-    if key in {"strategy.default", "default"}:
-        return BtcEthHighFreqStrategy()
-
     instance = strategy_loader.get_instance(key)
     if instance is not None:
         return instance

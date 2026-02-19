@@ -1,6 +1,10 @@
 # Homerun - Windows Setup Script
 # Run: .\scripts\setup.ps1
 
+param(
+    [switch]$RedisOnly
+)
+
 $ErrorActionPreference = "Stop"
 
 # Navigate to project root (parent of scripts\)
@@ -10,6 +14,67 @@ Write-Host "=========================================" -ForegroundColor Green
 Write-Host "  Homerun Setup (Windows)" -ForegroundColor Green
 Write-Host "=========================================" -ForegroundColor Green
 Write-Host ""
+
+function Test-RedisRuntimeAvailable {
+    if (Get-Command docker -ErrorAction SilentlyContinue) { return $true }
+    if (Get-Command redis-server -ErrorAction SilentlyContinue) { return $true }
+    try {
+        $svc = Get-Service -Name "Memurai" -ErrorAction SilentlyContinue
+        if ($svc) { return $true }
+    } catch {
+    }
+    return $false
+}
+
+function Ensure-RedisRuntime {
+    if (Test-RedisRuntimeAvailable) {
+        Write-Host "Redis runtime prerequisite found (docker, redis-server, or Memurai)." -ForegroundColor Green
+        return $true
+    }
+
+    Write-Host "Redis runtime prerequisite missing. Attempting to install..." -ForegroundColor Cyan
+
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if ($winget) {
+        $wingetIds = @(
+            "tporadowski.redis",
+            "Memurai.MemuraiDeveloper"
+        )
+        foreach ($id in $wingetIds) {
+            try {
+                winget install --id $id --exact --silent --accept-source-agreements --accept-package-agreements *> $null
+                if (Test-RedisRuntimeAvailable) {
+                    Write-Host "Redis runtime installed via winget ($id)." -ForegroundColor Green
+                    return $true
+                }
+            } catch {
+            }
+        }
+    }
+
+    $choco = Get-Command choco -ErrorAction SilentlyContinue
+    if ($choco) {
+        try {
+            choco install redis-64 -y *> $null
+            if (Test-RedisRuntimeAvailable) {
+                Write-Host "Redis runtime installed via Chocolatey." -ForegroundColor Green
+                return $true
+            }
+        } catch {
+        }
+    }
+
+    Write-Host "Failed to auto-install Redis runtime prerequisites." -ForegroundColor Red
+    Write-Host "Install Docker Desktop, redis-server, or Memurai, then rerun setup." -ForegroundColor Yellow
+    return $false
+}
+
+if ($RedisOnly) {
+    if (-not (Ensure-RedisRuntime)) {
+        exit 1
+    }
+    exit 0
+}
 
 # Check Python
 try {
@@ -89,6 +154,12 @@ Pop-Location
 # Create data directory
 if (-not (Test-Path "data")) {
     New-Item -ItemType Directory -Path "data" | Out-Null
+}
+
+Write-Host ""
+Write-Host "Ensuring Redis runtime prerequisites..." -ForegroundColor Cyan
+if (-not (Ensure-RedisRuntime)) {
+    exit 1
 }
 
 # Write setup fingerprint so run.ps1 can detect drift and auto-rerun setup.

@@ -27,7 +27,7 @@ from models.database import (
     TradeSignal,
     TraderOrder,
     ValidationJob,
-    WorldIntelligenceSignal,
+    EventsSignal,
 )
 from services.param_optimizer import param_optimizer
 from services.simulation.execution_simulator import execution_simulator
@@ -438,7 +438,7 @@ class ValidationService:
         )
         return summary
 
-    async def compute_world_intel_resolver_metrics(
+    async def compute_events_resolver_metrics(
         self,
         days: int = 7,
         max_signals: int = 500,
@@ -448,9 +448,9 @@ class ValidationService:
             signals = (
                 (
                     await session.execute(
-                        select(WorldIntelligenceSignal)
-                        .where(WorldIntelligenceSignal.detected_at >= cutoff)
-                        .order_by(WorldIntelligenceSignal.detected_at.desc())
+                        select(EventsSignal)
+                        .where(EventsSignal.detected_at >= cutoff)
+                        .order_by(EventsSignal.detected_at.desc())
                         .limit(max(1, min(max_signals, 5000)))
                     )
                 )
@@ -468,13 +468,28 @@ class ValidationService:
                     "by_signal_type": {},
                 }
 
-            from services.world_intelligence.resolver import resolve_world_signal_opportunities
-
-            candidates = await resolve_world_signal_opportunities(
-                session,
-                signals,
-                max_markets_per_signal=5,
-            )
+            candidates: list[dict[str, Any]] = []
+            for signal in signals:
+                metadata = signal.metadata_json if isinstance(signal.metadata_json, dict) else {}
+                related_market_ids = [
+                    str(item).strip()
+                    for item in list(signal.related_market_ids or [])
+                    if str(item).strip()
+                ]
+                market_relevance_score = signal.market_relevance_score
+                if market_relevance_score is None:
+                    try:
+                        market_relevance_score = float(metadata.get("market_relevance_score"))
+                    except Exception:
+                        market_relevance_score = 0.0
+                relevance_value = float(market_relevance_score or 0.0)
+                tradable = bool(related_market_ids) and relevance_value >= 0.3
+                candidates.append(
+                    {
+                        "signal_type": str(signal.signal_type or "unknown"),
+                        "tradable": bool(tradable),
+                    }
+                )
 
         tradable = [row for row in candidates if bool(row.get("tradable"))]
         by_type: dict[str, dict[str, Any]] = {}

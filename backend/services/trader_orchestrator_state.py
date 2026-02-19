@@ -35,9 +35,7 @@ from services.simulation import simulation_service
 from services.trader_orchestrator.sources.registry import normalize_source_key
 from services.opportunity_strategy_catalog import (
     build_system_opportunity_strategy_rows,
-    default_strategy_by_source,
     list_system_strategy_keys,
-    source_to_strategy_keys,
 )
 from services.trader_orchestrator.templates import (
     DEFAULT_GLOBAL_RISK,
@@ -60,24 +58,10 @@ ACTIVE_POSITION_STATUS = "open"
 INACTIVE_POSITION_STATUS = "closed"
 ACTIVE_EXECUTION_SESSION_STATUSES = {"pending", "placing", "working", "partial", "hedging", "paused"}
 TERMINAL_EXECUTION_SESSION_STATUSES = {"completed", "failed", "cancelled", "expired"}
-_STRATEGY_KEY_ALIASES: dict[str, str] = {
-    "strategy.default": "btc_eth_highfreq",
-    "default": "btc_eth_highfreq",
-    "crypto_5m": "btc_eth_highfreq",
-    "crypto_15m": "btc_eth_highfreq",
-    "crypto_1h": "btc_eth_highfreq",
-    "crypto_4h": "btc_eth_highfreq",
-}
 _RESUME_POLICY_VALUES = {"resume_full", "manage_only", "flatten_then_start"}
 _TRADER_SCOPE_MODES = {"tracked", "pool", "individual", "group"}
-_SOURCE_STRATEGY_MATRIX_FALLBACK: dict[str, set[str]] = {
-    key: set(values) for key, values in source_to_strategy_keys().items()
-}
 _ORCHESTRATOR_SNAPSHOT_STALE_MULTIPLIER = 5.0
 _ORCHESTRATOR_SNAPSHOT_STALE_MIN_SECONDS = 15.0
-_SOURCE_DEFAULT_STRATEGY: dict[str, str] = default_strategy_by_source()
-# Legacy alias removed — use _SOURCE_DEFAULT_STRATEGY from the unified catalog.
-_LEGACY_OMNI_STRATEGY_BY_SOURCE: dict[str, str] = _SOURCE_DEFAULT_STRATEGY
 
 
 def _now() -> datetime:
@@ -151,13 +135,12 @@ def _normalize_resume_policy(value: Any) -> str:
 
 
 def _normalize_strategy_key(value: Any) -> str:
-    key = str(value or "").strip().lower()
-    return _STRATEGY_KEY_ALIASES.get(key, key)
+    return str(value or "").strip().lower()
 
 
 def _normalize_strategy_for_source(source_key: str, strategy_key: str) -> str:
-    """Normalize strategy key for a given source. Returns the key unchanged."""
-    return strategy_key
+    """Normalize strategy key for a given source."""
+    return _normalize_strategy_key(strategy_key)
 
 
 async def _fetch_enabled_strategy_catalog(
@@ -184,12 +167,6 @@ async def _fetch_enabled_strategy_catalog(
                 continue
             valid_keys.add(slug)
             by_source.setdefault(src, set()).add(slug)
-            # Include aliases so old strategy keys keep working
-            for alias in row.get("aliases") or []:
-                a = str(alias).strip().lower()
-                if a:
-                    valid_keys.add(a)
-                    by_source.setdefault(src, set()).add(a)
         return valid_keys, by_source
 
     valid_keys: set[str] = set()
@@ -339,60 +316,6 @@ async def _validate_source_configs(
             _validate_traders_scope(_normalize_traders_scope(source_config.get("traders_scope")))
 
 
-def _legacy_source_configs_from_fields(
-    strategy_key: Any,
-    sources_value: Any,
-    params_value: Any,
-) -> list[dict[str, Any]]:
-    old_strategy_key = _normalize_strategy_key(strategy_key)
-    raw_sources = sources_value if isinstance(sources_value, list) else []
-    normalized_sources: list[str] = []
-    seen_sources: set[str] = set()
-    for raw_source in raw_sources:
-        source_key = normalize_source_key(raw_source)
-        if source_key == "world_intelligence":
-            continue
-        if source_key not in _SOURCE_STRATEGY_MATRIX_FALLBACK:
-            continue
-        if source_key in seen_sources:
-            continue
-        seen_sources.add(source_key)
-        normalized_sources.append(source_key)
-
-    if not normalized_sources:
-        fallback_source = "crypto" if old_strategy_key.startswith("crypto_") else "scanner"
-        normalized_sources = [fallback_source]
-
-    legacy_params = params_value if isinstance(params_value, dict) else {}
-    source_configs: list[dict[str, Any]] = []
-    for source_key in normalized_sources:
-        if old_strategy_key == "omni_aggressive":
-            mapped_strategy = _LEGACY_OMNI_STRATEGY_BY_SOURCE.get(
-                source_key,
-                _SOURCE_DEFAULT_STRATEGY[source_key],
-            )
-        else:
-            mapped_strategy = (
-                old_strategy_key
-                if old_strategy_key in _SOURCE_STRATEGY_MATRIX_FALLBACK[source_key]
-                else _SOURCE_DEFAULT_STRATEGY[source_key]
-            )
-        source_config: dict[str, Any] = {
-            "source_key": source_key,
-            "strategy_key": mapped_strategy,
-            "strategy_params": _normalize_strategy_params(legacy_params),
-        }
-        if source_key == "traders":
-            source_config["traders_scope"] = {
-                "modes": ["tracked", "pool"],
-                "individual_wallets": [],
-                "group_ids": [],
-            }
-        source_configs.append(source_config)
-
-    return source_configs
-
-
 def _normalize_or_backfill_source_configs(
     source_configs_value: Any,
     *,
@@ -400,17 +323,10 @@ def _normalize_or_backfill_source_configs(
     fallback_sources: Any = None,
     fallback_params: Any = None,
 ) -> list[dict[str, Any]]:
-    normalized = _normalize_source_configs(source_configs_value)
-    if normalized:
-        return normalized
-    return _legacy_source_configs_from_fields(
-        fallback_strategy_key,
-        fallback_sources,
-        fallback_params,
-    )
+    return _normalize_source_configs(source_configs_value)
 
 
-def _derive_legacy_fields_from_source_configs(
+def _derive_fields_from_source_configs(
     source_configs: list[dict[str, Any]],
 ) -> tuple[str, list[str], dict[str, Any]]:
     if not source_configs:
@@ -787,7 +703,7 @@ def list_trader_templates() -> list[dict[str, Any]]:
             "id": template["id"],
             "name": template["name"],
             "description": template.get("description"),
-            "source_configs": list(template.get("source_configs") or []),
+            "source_configs": _normalize_source_configs(template.get("source_configs") or []),
             "interval_seconds": int(template.get("interval_seconds", 60) or 60),
             "risk_limits": template.get("risk_limits", {}),
         }
@@ -850,7 +766,7 @@ async def seed_default_traders(session: AsyncSession) -> None:
             fallback_sources=template.get("sources"),
             fallback_params=template.get("params"),
         )
-        strategy_key, sources, params = _derive_legacy_fields_from_source_configs(source_configs)
+        strategy_key, sources, params = _derive_fields_from_source_configs(source_configs)
         session.add(
             Trader(
                 id=_new_id(),
@@ -886,7 +802,7 @@ async def create_trader(session: AsyncSession, payload: dict[str, Any]) -> dict[
     if existing is not None:
         raise ValueError("Trader name already exists")
 
-    strategy_key, sources, params = _derive_legacy_fields_from_source_configs(normalized["source_configs"])
+    strategy_key, sources, params = _derive_fields_from_source_configs(normalized["source_configs"])
     row = Trader(
         id=_new_id(),
         name=normalized["name"],
@@ -944,7 +860,7 @@ async def update_trader(
         return None
 
     normalized = await _normalize_trader_payload(session, {**_serialize_trader(row), **payload})
-    strategy_key, sources, params = _derive_legacy_fields_from_source_configs(normalized["source_configs"])
+    strategy_key, sources, params = _derive_fields_from_source_configs(normalized["source_configs"])
     if "name" in payload:
         row.name = normalized["name"]
     if "description" in payload:

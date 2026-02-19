@@ -43,7 +43,7 @@ async def test_init_database_creates_schema_and_revision(tmp_path, monkeypatch):
 
         app_columns = await conn.execute(text("PRAGMA table_info(app_settings)"))
         app_column_names = {row[1] for row in app_columns.fetchall()}
-        assert "world_intel_settings_json" in app_column_names
+        assert "events_settings_json" in app_column_names
 
     await engine.dispose()
 

@@ -62,25 +62,6 @@ def test_scanner_opportunities_filtered_by_market_tradability(monkeypatch):
     assert [r.markets[0]["id"] for r in rows] == ["0xgood"]
 
 
-def test_weather_opportunities_filtered_by_market_tradability(monkeypatch):
-    good = _opp("0xweathergood")
-    bad = _opp("0xweatherbad")
-
-    async def _fake_read(_session):
-        return [good, bad], {}
-
-    async def _fake_map(market_ids, **_kwargs):
-        return {str(mid).lower(): str(mid).lower() != "0xweatherbad" for mid in market_ids}
-
-    monkeypatch.setattr(weather_shared_state, "read_weather_snapshot", _fake_read)
-    monkeypatch.setattr(weather_shared_state, "get_market_tradability_map", _fake_map)
-
-    rows = asyncio.run(
-        weather_shared_state.get_weather_opportunities_from_db(session=None, require_tradable_markets=True)
-    )
-    assert [r.markets[0]["id"] for r in rows] == ["0xweathergood"]
-
-
 def test_weather_opportunities_drop_near_resolution(monkeypatch):
     soon = _opp("0xsoon")
     soon.resolution_date = datetime.now(timezone.utc) + timedelta(minutes=10)
@@ -90,11 +71,7 @@ def test_weather_opportunities_drop_near_resolution(monkeypatch):
     async def _fake_read(_session):
         return [soon, later], {}
 
-    async def _fake_map(market_ids, **_kwargs):
-        return {str(mid).lower(): True for mid in market_ids}
-
     monkeypatch.setattr(weather_shared_state, "read_weather_snapshot", _fake_read)
-    monkeypatch.setattr(weather_shared_state, "get_market_tradability_map", _fake_map)
 
     rows = asyncio.run(
         weather_shared_state.get_weather_opportunities_from_db(session=None, exclude_near_resolution=True)
@@ -110,11 +87,7 @@ def test_weather_opportunities_default_keeps_reports(monkeypatch):
     async def _fake_read(_session):
         return [soon, untradable], {}
 
-    async def _fake_map(market_ids, **_kwargs):
-        return {str(mid).lower(): str(mid).lower() != "0xweatherbad" for mid in market_ids}
-
     monkeypatch.setattr(weather_shared_state, "read_weather_snapshot", _fake_read)
-    monkeypatch.setattr(weather_shared_state, "get_market_tradability_map", _fake_map)
 
     rows = asyncio.run(weather_shared_state.get_weather_opportunities_from_db(session=None))
     assert [r.markets[0]["id"] for r in rows] == ["0xsoon", "0xweatherbad"]
@@ -127,11 +100,7 @@ def test_weather_max_entry_keeps_report_only_cards(monkeypatch):
     async def _fake_read(_session):
         return [report_only, expensive], {}
 
-    async def _fake_map(_market_ids, **_kwargs):
-        return {}
-
     monkeypatch.setattr(weather_shared_state, "read_weather_snapshot", _fake_read)
-    monkeypatch.setattr(weather_shared_state, "get_market_tradability_map", _fake_map)
 
     rows = asyncio.run(weather_shared_state.get_weather_opportunities_from_db(session=None, max_entry_price=0.25))
     assert [r.markets[0]["id"] for r in rows] == ["0xreport"]
@@ -145,11 +114,7 @@ def test_weather_can_hide_report_only_rows(monkeypatch):
     async def _fake_read(_session):
         return [report_only, tradable], {}
 
-    async def _fake_map(_market_ids, **_kwargs):
-        return {}
-
     monkeypatch.setattr(weather_shared_state, "read_weather_snapshot", _fake_read)
-    monkeypatch.setattr(weather_shared_state, "get_market_tradability_map", _fake_map)
 
     rows = asyncio.run(
         weather_shared_state.get_weather_opportunities_from_db(
@@ -171,11 +136,7 @@ def test_weather_opportunities_filtered_by_target_date(monkeypatch):
     async def _fake_read(_session):
         return [feb13, feb14, fallback], {}
 
-    async def _fake_map(_market_ids, **_kwargs):
-        return {}
-
     monkeypatch.setattr(weather_shared_state, "read_weather_snapshot", _fake_read)
-    monkeypatch.setattr(weather_shared_state, "get_market_tradability_map", _fake_map)
 
     rows = asyncio.run(
         weather_shared_state.get_weather_opportunities_from_db(
@@ -197,11 +158,7 @@ def test_weather_target_date_counts_from_snapshot(monkeypatch):
     async def _fake_read(_session):
         return [feb13_a, feb13_b, feb14], {}
 
-    async def _fake_map(_market_ids, **_kwargs):
-        return {}
-
     monkeypatch.setattr(weather_shared_state, "read_weather_snapshot", _fake_read)
-    monkeypatch.setattr(weather_shared_state, "get_market_tradability_map", _fake_map)
 
     rows = asyncio.run(weather_shared_state.get_weather_target_date_counts_from_db(session=None))
     assert rows == [
@@ -219,11 +176,7 @@ def test_weather_target_date_counts_fallback_to_question_text(monkeypatch):
     async def _fake_read(_session):
         return [text_only], {}
 
-    async def _fake_map(_market_ids, **_kwargs):
-        return {}
-
     monkeypatch.setattr(weather_shared_state, "read_weather_snapshot", _fake_read)
-    monkeypatch.setattr(weather_shared_state, "get_market_tradability_map", _fake_map)
 
     rows = asyncio.run(weather_shared_state.get_weather_target_date_counts_from_db(session=None))
     assert rows and rows[0]["count"] == 1

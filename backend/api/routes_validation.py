@@ -106,7 +106,7 @@ async def get_validation_overview():
         strategy_health = await validation_service.get_strategy_health()
         guardrail_config = await validation_service.get_guardrail_config()
         trader_orchestrator_execution = await validation_service.compute_trader_orchestrator_execution_metrics(days=30)
-        world_intel_resolver = await validation_service.compute_world_intel_resolver_metrics(days=7)
+        events_resolver = await validation_service.compute_events_resolver_metrics(days=7)
 
         latest_optimization = optimization_results[0] if optimization_results else None
         return {
@@ -125,7 +125,7 @@ async def get_validation_overview():
             "strategy_health": strategy_health,
             "guardrail_config": guardrail_config,
             "trader_orchestrator_execution_30d": trader_orchestrator_execution,
-            "world_intel_resolver_7d": world_intel_resolver,
+            "events_resolver_7d": events_resolver,
             "jobs": jobs,
         }
     except Exception as e:

@@ -54,9 +54,11 @@ class SimulationService:
     @staticmethod
     def _direction_to_position_side(direction: str) -> tuple[PositionSide, str]:
         normalized = str(direction or "").strip().lower()
-        if normalized in {"buy_no", "no", "down", "short", "sell_yes"}:
+        if normalized == "buy_no":
             return PositionSide.NO, "NO"
-        return PositionSide.YES, "YES"
+        if normalized == "buy_yes":
+            return PositionSide.YES, "YES"
+        raise ValueError(f"Unsupported direction '{direction}'")
 
     @staticmethod
     def is_sqlite_lock_error(exc: Exception) -> bool:
@@ -408,6 +410,10 @@ class SimulationService:
                 "quantity": quantity,
                 "opened_at": now.isoformat() + "Z",
             }
+        except Exception:
+            if should_close:
+                await session.rollback()
+            raise
         finally:
             if should_close:
                 await session.close()
@@ -509,6 +515,10 @@ class SimulationService:
                 "reason": str(reason or ""),
                 "resolved_at": now.isoformat() + "Z",
             }
+        except Exception:
+            if should_close:
+                await session.rollback()
+            raise
         finally:
             if should_close:
                 await session.close()
@@ -584,7 +594,10 @@ class SimulationService:
             )
 
             return trade
-
+        except Exception:
+            if should_close:
+                await session.rollback()
+            raise
         finally:
             if should_close:
                 await session.close()

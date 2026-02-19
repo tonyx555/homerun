@@ -21,6 +21,7 @@ import {
   Sliders,
   LayoutGrid,
   Database,
+  Users,
 } from 'lucide-react'
 import { Badge } from './ui/badge'
 import { ScrollArea } from './ui/scroll-area'
@@ -137,6 +138,7 @@ function UnifiedDocs({ docs }: { docs: Record<string, any> }) {
   const configSchema = docs.config_schema as Record<string, any> | undefined
   const imports = docs.imports as Record<string, any> | undefined
   const dataSourceSdk = docs.data_source_sdk as Record<string, any> | undefined
+  const traderDataSdk = docs.trader_data_sdk as Record<string, any> | undefined
   const examples = docs.examples as Record<string, Record<string, string>> | undefined
   const backtesting = docs.backtesting as Record<string, any> | undefined
   const validation = docs.validation as Record<string, any> | undefined
@@ -621,7 +623,7 @@ class MyStrategy(BaseStrategy):
                 ['weather', 'cyan', 'Weather tab — strategies driven by weather data'],
                 ['crypto', 'orange', 'Crypto tab — crypto market strategies'],
                 ['traders', 'orange', 'Traders tab — copy-trading / tracked-trader strategies'],
-                ['world_intelligence', 'blue', 'World Intel tab — macro / geopolitical intelligence'],
+                ['events', 'blue', 'Events tab — macro / geopolitical event intelligence'],
               ] as const).map(([key, color, desc]) => (
                 <div key={key} className="flex gap-2 text-[11px] py-0.5">
                   <code className={`font-mono shrink-0 text-${color}-400`}>{key}</code>
@@ -758,6 +760,62 @@ class MyStrategy(BaseStrategy):
                 <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider mb-1">Guidance</div>
                 <ol className="space-y-0.5">
                   {(dataSourceSdk.guidance as string[]).map((item, i) => (
+                    <li key={i} className="text-[10px] text-muted-foreground flex items-start gap-1">
+                      <span className="text-amber-400 shrink-0">{i + 1}.</span>
+                      <span>{item}</span>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
+          </div>
+        </Section>
+      )}
+
+      {/* Trader Data SDK */}
+      {traderDataSdk && (
+        <Section title="Trader Data SDK" icon={Users} iconColor="text-orange-400">
+          <div className="space-y-3 pt-2">
+            <p className="text-[11px] text-muted-foreground">{traderDataSdk.description as string}</p>
+
+            {traderDataSdk.imports && (
+              <div>
+                <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider mb-1">Imports</div>
+                <FieldTable fields={traderDataSdk.imports as Record<string, string>} />
+              </div>
+            )}
+
+            {traderDataSdk.datasets && (
+              <div>
+                <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider mb-1">Datasets</div>
+                <FieldTable fields={traderDataSdk.datasets as Record<string, string>} />
+              </div>
+            )}
+
+            {traderDataSdk.strategy_sdk_methods && (
+              <div>
+                <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider mb-1">StrategySDK Methods</div>
+                <FieldTable fields={traderDataSdk.strategy_sdk_methods as Record<string, string>} />
+              </div>
+            )}
+
+            {traderDataSdk.examples && (
+              <div>
+                <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider mb-1">Examples</div>
+                {Object.entries(traderDataSdk.examples as Record<string, string>).map(([key, sourceCode]) => (
+                  <div key={key} className="mb-1.5">
+                    <div className="text-[10px] font-medium text-muted-foreground mb-1">{key.replace(/_/g, ' ')}</div>
+                    <CodeBlock code={sourceCode} />
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {Array.isArray(traderDataSdk.guidance) && traderDataSdk.guidance.length > 0 && (
+              <div>
+                <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider mb-1">Guidance</div>
+                <ol className="space-y-0.5">
+                  {(traderDataSdk.guidance as string[]).map((item, i) => (
                     <li key={i} className="text-[10px] text-muted-foreground flex items-start gap-1">
                       <span className="text-amber-400 shrink-0">{i + 1}.</span>
                       <span>{item}</span>

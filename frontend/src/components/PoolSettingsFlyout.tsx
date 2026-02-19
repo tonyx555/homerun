@@ -12,6 +12,7 @@ export type PoolSettingsForm = {
   pool_min_size: number
   pool_max_size: number
   pool_active_window_hours: number
+  pool_inactive_rising_retention_hours: number
   pool_selection_score_floor: number
   pool_max_hourly_replacement_rate: number
   pool_replacement_score_cutoff: number
@@ -195,6 +196,14 @@ export default function PoolSettingsFlyout({
                 onChange={(v) => setForm((prev) => ({ ...prev, pool_active_window_hours: v }))}
                 min={1}
                 max={720}
+                step={1}
+              />
+              <NumericField
+                label="Rising Retention (hours)"
+                value={form.pool_inactive_rising_retention_hours}
+                onChange={(v) => setForm((prev) => ({ ...prev, pool_inactive_rising_retention_hours: v }))}
+                min={0}
+                max={8760}
                 step={1}
               />
             </div>
@@ -392,4 +401,3 @@ export default function PoolSettingsFlyout({
     </>
   )
 }
-

@@ -571,24 +571,6 @@ async def _attach_live_mid_prices_to_findings(
         )
 
 
-class CustomRssFeedRequest(BaseModel):
-    id: Optional[str] = None
-    name: str = ""
-    url: str = ""
-    enabled: bool = True
-    category: Optional[str] = ""
-
-
-class GovRssFeedRequest(BaseModel):
-    id: Optional[str] = None
-    agency: str = "government"
-    name: str = ""
-    url: str = ""
-    priority: str = "medium"
-    country_iso3: str = "USA"
-    enabled: bool = True
-
-
 class WorkflowSettingsRequest(BaseModel):
     """Update workflow settings."""
 
@@ -618,12 +600,6 @@ class WorkflowSettingsRequest(BaseModel):
     cache_ttl_minutes: Optional[int] = Field(None, ge=1, le=1440)
     max_edge_evals_per_article: Optional[int] = Field(None, ge=1, le=20)
     model: Optional[str] = None
-    rss_feeds: Optional[list[CustomRssFeedRequest]] = None
-    rss_enabled: Optional[bool] = None
-    rss_sources: Optional[list[GovRssFeedRequest]] = None
-    # Backward-compatible request aliases.
-    gov_rss_enabled: Optional[bool] = None
-    gov_rss_feeds: Optional[list[GovRssFeedRequest]] = None
 
 
 async def _build_status_payload(session: AsyncSession) -> dict:
@@ -918,11 +894,6 @@ async def update_workflow_settings(
     """Update workflow settings."""
     try:
         updates = request.model_dump(exclude_unset=True)
-        # Normalize legacy payload keys to the rebranded RSS keys.
-        if "gov_rss_enabled" in updates and "rss_enabled" not in updates:
-            updates["rss_enabled"] = updates.get("gov_rss_enabled")
-        if "gov_rss_feeds" in updates and "rss_sources" not in updates:
-            updates["rss_sources"] = updates.get("gov_rss_feeds")
         settings_payload = await shared_state.update_news_settings(session, updates)
 
         if "scan_interval_seconds" in updates:

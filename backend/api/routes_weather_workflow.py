@@ -16,11 +16,6 @@ from models.database import (
     WeatherTradeIntent,
     get_db_session,
 )
-from services.live_price_snapshot import (
-    append_live_binary_price_point,
-    get_live_mid_prices,
-    normalize_binary_price_history,
-)
 from services.pause_state import global_pause_state
 from services.data_events import DataEvent
 from services.event_dispatcher import event_dispatcher
@@ -54,99 +49,6 @@ def _read_row_value(row: object, key: str):
     if isinstance(row, dict):
         return row.get(key)
     return getattr(row, key, None)
-
-
-def _extract_binary_market_tokens(market: dict) -> tuple[Optional[str], Optional[str]]:
-    token_ids = market.get("clob_token_ids") or market.get("token_ids") or market.get("market_token_ids")
-    if not isinstance(token_ids, list):
-        return None, None
-
-    cleaned = [str(token_id).strip().lower() for token_id in token_ids if str(token_id or "").strip()]
-    if len(cleaned) < 2:
-        return None, None
-    return cleaned[0], cleaned[1]
-
-
-def _normalize_weather_price_histories(opportunities: list[dict]) -> None:
-    for opp in opportunities:
-        markets = opp.get("markets")
-        if not isinstance(markets, list):
-            continue
-        for market in markets:
-            if not isinstance(market, dict):
-                continue
-            normalized = normalize_binary_price_history(market.get("price_history"))
-            if not normalized:
-                continue
-            market["price_history"] = normalized
-            last = normalized[-1]
-            yes_price = last.get("yes")
-            no_price = last.get("no")
-            if market.get("yes_price") is None and yes_price is not None:
-                market["yes_price"] = yes_price
-            if market.get("current_yes_price") is None and yes_price is not None:
-                market["current_yes_price"] = yes_price
-            if market.get("no_price") is None and no_price is not None:
-                market["no_price"] = no_price
-            if market.get("current_no_price") is None and no_price is not None:
-                market["current_no_price"] = no_price
-
-
-async def _attach_live_mid_prices_to_weather_payload(
-    opportunities: list[dict],
-) -> None:
-    if not opportunities:
-        return
-    _normalize_weather_price_histories(opportunities)
-
-    market_refs: list[tuple[dict, str, str]] = []
-    unique_tokens: list[str] = []
-    seen_tokens: set[str] = set()
-
-    for opp in opportunities:
-        markets = opp.get("markets")
-        if not isinstance(markets, list):
-            continue
-        for market in markets:
-            if not isinstance(market, dict):
-                continue
-            yes_token, no_token = _extract_binary_market_tokens(market)
-            if not yes_token or not no_token:
-                continue
-            market_refs.append((market, yes_token, no_token))
-            for token_id in (yes_token, no_token):
-                if token_id in seen_tokens:
-                    continue
-                seen_tokens.add(token_id)
-                unique_tokens.append(token_id)
-
-    if not market_refs:
-        return
-
-    live_prices = await get_live_mid_prices(unique_tokens)
-    if not live_prices:
-        return
-
-    for market, yes_token, no_token in market_refs:
-        yes_price = live_prices.get(yes_token)
-        no_price = live_prices.get(no_token)
-        if yes_price is None and no_price is not None and 0.0 <= no_price <= 1.0:
-            yes_price = float(1.0 - no_price)
-        if no_price is None and yes_price is not None and 0.0 <= yes_price <= 1.0:
-            no_price = float(1.0 - yes_price)
-        if yes_price is None or no_price is None:
-            continue
-
-        market["yes_price"] = yes_price
-        market["no_price"] = no_price
-        market["current_yes_price"] = yes_price
-        market["current_no_price"] = no_price
-        market["outcome_prices"] = [yes_price, no_price]
-        market["price_history"] = append_live_binary_price_point(
-            market.get("price_history"),
-            yes_price=yes_price,
-            no_price=no_price,
-        )
 
 
 class WeatherWorkflowSettingsRequest(BaseModel):
@@ -307,7 +209,6 @@ async def get_weather_opportunities(
         max_entry_price=max_entry,
         location_query=location,
         target_date=target_date,
-        require_tradable_markets=True,
         exclude_near_resolution=True,
         include_report_only=include_report_only,
     )
@@ -315,12 +216,50 @@ async def get_weather_opportunities(
     total = len(opps)
     opps = opps[offset : offset + limit]
     serialized = [serialize_opportunity_with_links(o) for o in opps]
-    await _attach_live_mid_prices_to_weather_payload(serialized)
     return {
         "total": total,
         "offset": offset,
         "limit": limit,
         "opportunities": serialized,
+    }
+
+
+@router.get("/weather-workflow/opportunity-ids")
+async def get_weather_opportunity_ids(
+    session: AsyncSession = Depends(get_db_session),
+    min_edge: Optional[float] = Query(None, ge=0),
+    direction: Optional[str] = Query(None),
+    max_entry: Optional[float] = Query(None, ge=0.01, le=0.99),
+    location: Optional[str] = Query(None),
+    target_date: Optional[date] = None,
+    include_report_only: bool = Query(False),
+    limit: int = Query(5000, ge=1, le=10000),
+    offset: int = Query(0, ge=0),
+):
+    min_edge = _resolve_query_default(min_edge)
+    direction = _resolve_query_default(direction)
+    max_entry = _resolve_query_default(max_entry)
+    location = _resolve_query_default(location)
+    include_report_only = _resolve_query_bool(include_report_only)
+
+    opps = await shared_state.get_weather_opportunities_from_db(
+        session,
+        min_edge_percent=min_edge,
+        direction=direction,
+        max_entry_price=max_entry,
+        location_query=location,
+        target_date=target_date,
+        exclude_near_resolution=True,
+        include_report_only=include_report_only,
+    )
+    total = len(opps)
+    rows = opps[offset : offset + limit]
+    ids = [str(o.id) for o in rows if str(getattr(o, "id", "") or "").strip()]
+    return {
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "ids": ids,
     }
 
 
@@ -345,7 +284,6 @@ async def get_weather_opportunity_dates(
         direction=direction,
         max_entry_price=max_entry,
         location_query=location,
-        require_tradable_markets=True,
         exclude_near_resolution=True,
         include_report_only=include_report_only,
     )

@@ -1,4 +1,4 @@
-"""Add world intelligence settings columns.
+"""Add events settings columns.
 
 Revision ID: 202602130002
 Revises: 202602130001
@@ -24,13 +24,13 @@ def upgrade() -> None:
     existing = column_names(table_name)
 
     additions: list[sa.Column] = [
-        sa.Column("world_intel_settings_json", sa.JSON(), nullable=True),
-        sa.Column("world_intel_acled_api_key", sa.String(), nullable=True),
-        sa.Column("world_intel_acled_email", sa.String(), nullable=True),
-        sa.Column("world_intel_opensky_username", sa.String(), nullable=True),
-        sa.Column("world_intel_opensky_password", sa.String(), nullable=True),
-        sa.Column("world_intel_aisstream_api_key", sa.String(), nullable=True),
-        sa.Column("world_intel_cloudflare_radar_token", sa.String(), nullable=True),
+        sa.Column("events_settings_json", sa.JSON(), nullable=True),
+        sa.Column("events_acled_api_key", sa.String(), nullable=True),
+        sa.Column("events_acled_email", sa.String(), nullable=True),
+        sa.Column("events_opensky_username", sa.String(), nullable=True),
+        sa.Column("events_opensky_password", sa.String(), nullable=True),
+        sa.Column("events_aisstream_api_key", sa.String(), nullable=True),
+        sa.Column("events_cloudflare_radar_token", sa.String(), nullable=True),
     ]
 
     for column in additions:

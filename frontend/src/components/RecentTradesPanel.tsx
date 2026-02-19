@@ -52,6 +52,8 @@ interface Props {
   mode?: 'full' | 'management' | 'opportunities'
   managementVariant?: 'default' | 'groups'
   viewMode?: 'card' | 'list' | 'terminal'
+  showSettingsButton?: boolean
+  onAnalyzeTargetsChange?: (targets: { visibleIds: string[]; allIds: string[] }) => void
   onSignalStatsChange?: (stats: {
     scannedCount: number
     executableCount: number
@@ -188,6 +190,8 @@ export default function RecentTradesPanel({
   mode = 'full',
   managementVariant = 'default',
   viewMode = 'card',
+  showSettingsButton = true,
+  onAnalyzeTargetsChange,
   onSignalStatsChange,
 }: Props) {
   const showManagement = mode !== 'opportunities'
@@ -220,7 +224,7 @@ export default function RecentTradesPanel({
   } | null>(null)
 
   const queryClient = useQueryClient()
-  const { lastMessage } = useWebSocket('/ws')
+  const { isConnected, lastMessage } = useWebSocket('/ws')
 
   const { data: discoverySettings } = useQuery({
     queryKey: ['settings-discovery'],
@@ -281,7 +285,7 @@ export default function RecentTradesPanel({
       })
       return result.opportunities
     },
-    refetchInterval: 30000,
+    refetchInterval: isConnected ? false : 30000,
     enabled: showOpportunities,
   })
 
@@ -425,6 +429,12 @@ export default function RecentTradesPanel({
     setCurrentPage(0)
   }, [showOpportunities, signalLimit, showFilteredSignals])
 
+  useEffect(() => {
+    const handleOpenSettings = () => setSettingsOpen(true)
+    window.addEventListener('open-trader-opportunities-settings', handleOpenSettings as EventListener)
+    return () => window.removeEventListener('open-trader-opportunities-settings', handleOpenSettings as EventListener)
+  }, [])
+
   const rawTrades = rawTradesData?.trades || []
   const opportunities = confluenceOpportunities
   const isLoading = opportunitiesLoading || (showManagement && rawTradesLoading)
@@ -545,6 +555,17 @@ export default function RecentTradesPanel({
     executableSignalCount,
     filteredOutSignals,
   ])
+
+  useEffect(() => {
+    if (!showOpportunities) {
+      onAnalyzeTargetsChange?.({ visibleIds: [], allIds: [] })
+      return
+    }
+    onAnalyzeTargetsChange?.({
+      visibleIds: Array.from(new Set(paginatedSignals.map((signal) => signal.id))),
+      allIds: Array.from(new Set(unifiedSignals.map((signal) => signal.id))),
+    })
+  }, [showOpportunities, onAnalyzeTargetsChange, paginatedSignals, unifiedSignals])
 
   const trackedWalletActivity = useMemo(() => {
     const map = new Map<
@@ -1049,18 +1070,20 @@ export default function RecentTradesPanel({
                   <RefreshCw className={cn('w-3.5 h-3.5', isRefetching && 'animate-spin')} />
                   Refresh
                 </button>
-                <button
-                  onClick={() => setSettingsOpen(true)}
-                  disabled={!discoverySettings}
-                  className={cn(
-                    'inline-flex h-8 items-center gap-1.5 rounded-md border border-border/60 bg-card px-2.5 text-xs text-muted-foreground',
-                    'hover:text-orange-300 hover:bg-orange-500/10 hover:border-orange-500/40 transition-colors',
-                    !discoverySettings && 'opacity-50 cursor-not-allowed',
-                  )}
-                >
-                  <Settings className="w-3.5 h-3.5" />
-                  Settings
-                </button>
+                {showSettingsButton && (
+                  <button
+                    onClick={() => setSettingsOpen(true)}
+                    disabled={!discoverySettings}
+                    className={cn(
+                      'inline-flex h-8 items-center gap-1.5 rounded-md border border-border/60 bg-card px-2.5 text-xs text-muted-foreground',
+                      'hover:text-orange-300 hover:bg-orange-500/10 hover:border-orange-500/40 transition-colors',
+                      !discoverySettings && 'opacity-50 cursor-not-allowed',
+                    )}
+                  >
+                    <Settings className="w-3.5 h-3.5" />
+                    Settings
+                  </button>
+                )}
               </div>
             </div>
           ) : (

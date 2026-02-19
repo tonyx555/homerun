@@ -19,7 +19,6 @@ from models.database import (
 )
 from models.opportunity import Opportunity
 from services.event_bus import event_bus
-from services.market_tradability import get_market_tradability_map
 
 WEATHER_SNAPSHOT_ID = "latest"
 WEATHER_CONTROL_ID = "default"
@@ -252,7 +251,6 @@ async def get_weather_opportunities_from_db(
     max_entry_price: Optional[float] = None,
     location_query: Optional[str] = None,
     target_date: Optional[date] = None,
-    require_tradable_markets: bool = False,
     exclude_near_resolution: bool = False,
     include_report_only: bool = True,
 ) -> list[Opportunity]:
@@ -324,31 +322,6 @@ async def get_weather_opportunities_from_db(
     if not include_report_only:
         opportunities = [o for o in opportunities if (o.max_position_size or 0.0) > 0.0 and bool(o.positions_to_take)]
 
-    if opportunities and require_tradable_markets:
-        market_ids: set[str] = set()
-        by_index: dict[int, list[str]] = {}
-        for idx, opp in enumerate(opportunities):
-            mids: list[str] = []
-            seen: set[str] = set()
-            for market in opp.markets or []:
-                if not isinstance(market, dict):
-                    continue
-                mid = str(market.get("id") or market.get("condition_id") or "").strip().lower()
-                if not mid or mid in seen:
-                    continue
-                seen.add(mid)
-                mids.append(mid)
-                market_ids.add(mid)
-            by_index[idx] = mids
-
-        if market_ids:
-            tradability = await get_market_tradability_map(market_ids)
-            opportunities = [
-                opp
-                for idx, opp in enumerate(opportunities)
-                if all(tradability.get(mid, True) for mid in by_index.get(idx, []))
-            ]
-
     return opportunities
 
 
@@ -358,7 +331,6 @@ async def get_weather_target_date_counts_from_db(
     direction: Optional[str] = None,
     max_entry_price: Optional[float] = None,
     location_query: Optional[str] = None,
-    require_tradable_markets: bool = False,
     exclude_near_resolution: bool = False,
     include_report_only: bool = True,
 ) -> list[dict[str, Any]]:
@@ -369,7 +341,6 @@ async def get_weather_target_date_counts_from_db(
         max_entry_price=max_entry_price,
         location_query=location_query,
         target_date=None,
-        require_tradable_markets=require_tradable_markets,
         exclude_near_resolution=exclude_near_resolution,
         include_report_only=include_report_only,
     )
@@ -469,25 +440,7 @@ async def list_weather_intents(
         query = query.where(WeatherTradeIntent.status == status_filter)
     query = query.limit(limit)
     result = await session.execute(query)
-    rows = list(result.scalars().all())
-
-    actionable = [r for r in rows if r.status in {"pending", "submitted"} and r.market_id]
-    if actionable:
-        tradability = await get_market_tradability_map([str(r.market_id) for r in actionable])
-        now = utcnow()
-        changed = 0
-        for row in actionable:
-            if tradability.get(str(row.market_id).strip().lower(), True):
-                continue
-            row.status = "expired"
-            row.consumed_at = now
-            changed += 1
-        if changed:
-            await session.commit()
-            if status_filter in {"pending", "submitted"}:
-                rows = [r for r in rows if r.status == status_filter]
-
-    return rows
+    return list(result.scalars().all())
 
 
 async def mark_weather_intent(

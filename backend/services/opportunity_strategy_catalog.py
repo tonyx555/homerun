@@ -193,6 +193,22 @@ _SCANNER_SCHEMA_WITH_LIQ_HOLD = {
 }
 
 
+def _with_retention_schema(schema: dict | None) -> dict:
+    merged = dict(schema or {})
+    param_fields = list(merged.get("param_fields") or [])
+    existing_keys = {str(field.get("key") or "").strip() for field in param_fields if isinstance(field, dict)}
+    for field in list(StrategySDK.strategy_retention_config_schema().get("param_fields", [])):
+        if not isinstance(field, dict):
+            continue
+        key = str(field.get("key") or "").strip()
+        if not key or key in existing_keys:
+            continue
+        param_fields.append(dict(field))
+        existing_keys.add(key)
+    merged["param_fields"] = param_fields
+    return merged
+
+
 SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
     # ── Scanner strategies ──────────────────────────────────────
     SystemOpportunityStrategySeed(
@@ -399,8 +415,7 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         sort_order=180,
         config_schema={
             "param_fields": [
-                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
-                {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
+                *StrategySDK.news_filter_config_schema().get("param_fields", []),
                 {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
                 {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
@@ -601,7 +616,7 @@ def build_system_opportunity_strategy_rows(*, now: datetime | None = None) -> li
                 "status": "unloaded",
                 "error_message": None,
                 "config": meta["default_config"],
-                "config_schema": seed.config_schema or {},
+                "config_schema": _with_retention_schema(seed.config_schema),
                 "aliases": [],
                 "version": 1,
                 "sort_order": seed.sort_order,
@@ -650,25 +665,32 @@ async def ensure_system_opportunity_strategies_seeded(session: AsyncSession) -> 
             inserted += 1
             continue
 
-        if bool(current.is_system) and _is_stale_system_source(slug, str(current.source_code or "")):
-            current.source_key = row["source_key"]
-            current.name = row["name"]
-            current.description = row["description"]
-            current.source_code = row["source_code"]
-            current.class_name = row["class_name"]
-            current.config_schema = row["config_schema"]
-            current.is_system = True
-            current.status = "unloaded"
-            current.error_message = None
-            current.version = int(current.version or 1) + 1
-            current.sort_order = row["sort_order"]
-            current.updated_at = row["updated_at"]
-            rewritten += 1
+        if bool(current.is_system):
+            source_changed = (
+                str(current.source_key or "") != str(row["source_key"])
+                or str(current.name or "") != str(row["name"])
+                or str(current.description or "") != str(row["description"])
+                or str(current.source_code or "") != str(row["source_code"])
+                or str(current.class_name or "") != str(row["class_name"])
+                or dict(current.config_schema or {}) != dict(row["config_schema"] or {})
+                or int(current.sort_order or 0) != int(row["sort_order"] or 0)
+            )
+            if source_changed:
+                current.source_key = row["source_key"]
+                current.name = row["name"]
+                current.description = row["description"]
+                current.source_code = row["source_code"]
+                current.class_name = row["class_name"]
+                current.config_schema = row["config_schema"]
+                current.is_system = True
+                current.status = "unloaded"
+                current.error_message = None
+                current.version = int(current.version or 1) + 1
+                current.sort_order = row["sort_order"]
+                current.updated_at = row["updated_at"]
+                rewritten += 1
             continue
 
-        # Seed-once: if the strategy already exists in the DB, DO NOT overwrite.
-        # User may have customized source_code, config, or description.
-        # A separate "reset to factory" API endpoint can restore the original.
         continue
 
     # Disable old execution-only duplicate slugs that are now aliases on

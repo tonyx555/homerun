@@ -9,6 +9,7 @@ alembic==1.13.2
 aiosqlite==0.19.0
 greenlet>=3.0.0
 cryptography>=42.0.0
+redis>=5.0.0
 
 # urllib3 is pulled in transitively by requests (via sentence-transformers /
 # huggingface-hub).  v2 requires OpenSSL 1.1.1+ which is available on

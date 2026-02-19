@@ -13,7 +13,16 @@ router = APIRouter(prefix="/trader-sources", tags=["Trader Sources"])
 
 
 @router.get("")
-async def get_trader_sources():
+async def get_trader_sources(session: AsyncSession = Depends(get_db_session)):
+    try:
+        schema = await build_trader_config_schema(session)
+        sources = schema.get("sources", [])
+        if isinstance(sources, list) and sources:
+            return {"sources": sources}
+    except Exception:
+        # Keep endpoint stable if schema generation fails unexpectedly.
+        pass
+
     return {
         "sources": [
             {

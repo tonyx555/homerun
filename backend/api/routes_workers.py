@@ -34,7 +34,7 @@ ALLOWED_WORKERS = {
     "tracked_traders",
     "trader_orchestrator",
     "discovery",
-    "world_intelligence",
+    "events",
 }
 WORKER_DISPLAY_ORDER = (
     "scanner",
@@ -44,28 +44,16 @@ WORKER_DISPLAY_ORDER = (
     "crypto",
     "tracked_traders",
     "trader_orchestrator",
-    "world_intelligence",
+    "events",
 )
-GENERIC_WORKERS = ("crypto", "tracked_traders", "world_intelligence")
+GENERIC_WORKERS = ("crypto", "tracked_traders", "events")
 
 
 def _normalize_worker_name(raw: str) -> str:
     name = (raw or "").strip().lower().replace("-", "_")
     if name.endswith("_worker"):
         name = name[:-7]
-    alias = {
-        "tracked_traders": "tracked_traders",
-        "trackedtraders": "tracked_traders",
-        "scanner": "scanner",
-        "news": "news",
-        "weather": "weather",
-        "crypto": "crypto",
-        "trader_orchestrator": "trader_orchestrator",
-        "discovery": "discovery",
-        "world_intelligence": "world_intelligence",
-        "worldintelligence": "world_intelligence",
-    }
-    return alias.get(name, name)
+    return name
 
 
 def _assert_supported_worker(name: str) -> None:

@@ -105,6 +105,56 @@ function extractCryptoMarketsFromInit(payload: any): CryptoMarket[] | null {
   return Array.isArray(markets) ? markets as CryptoMarket[] : null
 }
 
+function marketIdentity(market: Partial<CryptoMarket>): string {
+  const id = String(market.id || '').trim()
+  if (id) return `id:${id}`
+  const conditionId = String(market.condition_id || '').trim()
+  if (conditionId) return `condition:${conditionId}`
+  const slug = String(market.slug || '').trim()
+  if (slug) return `slug:${slug}`
+  const asset = String(market.asset || '').trim().toUpperCase()
+  const timeframe = normalizeTimeframe(market.timeframe)
+  const endTime = String(market.end_time || '').trim()
+  return `fallback:${asset}:${timeframe}:${endTime}`
+}
+
+function dedupeMarkets(markets: CryptoMarket[]): CryptoMarket[] {
+  if (markets.length <= 1) return markets
+  const byKey = new Map<string, CryptoMarket>()
+  for (const market of markets) {
+    byKey.set(marketIdentity(market), market)
+  }
+  return Array.from(byKey.values())
+}
+
+function mergeMarkets(base: CryptoMarket[], updates: CryptoMarket[], appendUnknown = true): CryptoMarket[] {
+  if (updates.length === 0) return base
+  if (base.length === 0) return dedupeMarkets(updates)
+
+  const merged = [...base]
+  const indexByKey = new Map<string, number>()
+  for (let i = 0; i < merged.length; i += 1) {
+    indexByKey.set(marketIdentity(merged[i]), i)
+  }
+
+  for (const market of updates) {
+    const key = marketIdentity(market)
+    const index = indexByKey.get(key)
+    if (index === undefined) {
+      if (!appendUnknown) continue
+      indexByKey.set(key, merged.length)
+      merged.push(market)
+      continue
+    }
+    merged[index] = {
+      ...merged[index],
+      ...market,
+    }
+  }
+
+  return merged
+}
+
 function marketTakerFeePct(market: CryptoMarket): number | null {
   if (!market.fees_enabled) return 0
 
@@ -122,6 +172,17 @@ function marketTakerFeePct(market: CryptoMarket): number | null {
   }
 
   return null
+}
+
+function resolveCryptoStrategySdk(market: CryptoMarket): string {
+  const explicit = String(
+    market.strategy_sdk
+    || market.strategy_key
+    || market.strategy
+    || '',
+  ).trim().toLowerCase()
+  if (explicit) return explicit
+  return 'btc_eth_highfreq'
 }
 
 // ─── Countdown Timer ─────────────────────────────────────
@@ -321,6 +382,7 @@ function CryptoMarketCard({
   const spread = combined !== null ? 1 - combined : null
   const takerFeePct = marketTakerFeePct(market)
   const isDarkTheme = themeMode === 'dark'
+  const strategySdk = resolveCryptoStrategySdk(market)
 
   const polyUrl = buildPolymarketMarketUrl({
     eventSlug: market.event_slug,
@@ -436,6 +498,13 @@ function CryptoMarketCard({
               <div className="mt-0.5 flex items-center gap-1.5 flex-wrap">
                 <Badge variant="outline" className="text-[9px] px-1.5 py-0 text-muted-foreground border-muted-foreground/20">
                   {market.timeframe.toUpperCase()}
+                </Badge>
+                <Badge
+                  variant="outline"
+                  className="max-w-[170px] truncate text-[9px] px-1.5 py-0 font-mono border-border/50 bg-muted/25 text-muted-foreground"
+                  title={`StrategySDK: ${strategySdk}`}
+                >
+                  SDK {strategySdk}
                 </Badge>
                 {market.is_live ? (
                   <Badge variant="outline" className="text-[9px] px-1.5 py-0 font-bold text-green-400 bg-green-500/15 border-green-500/25">
@@ -717,9 +786,15 @@ interface Props {
   onExecute?: (opportunity: any) => void
   onOpenCopilot?: (opportunity: any) => void
   onOpenCryptoSettings?: () => void
+  showSettingsButton?: boolean
 }
 
-export default function CryptoMarketsPanel({ onExecute, onOpenCopilot, onOpenCryptoSettings }: Props) {
+export default function CryptoMarketsPanel({
+  onExecute,
+  onOpenCopilot,
+  onOpenCryptoSettings,
+  showSettingsButton = true,
+}: Props) {
   const panelRef = useRef<HTMLDivElement>(null)
   const themeMode = useAtomValue(themeAtom)
   const [timeframeFilter, setTimeframeFilter] = useState<TimeframeFilter>('all')
@@ -731,14 +806,14 @@ export default function CryptoMarketsPanel({ onExecute, onOpenCopilot, onOpenCry
   void onExecute
   void onOpenCopilot
   const { isConnected, lastMessage } = useWebSocket('/ws')
-  const [wsMarkets, setWsMarkets] = useState<CryptoMarket[] | null>(null)
+  const [wsMarkets, setWsMarkets] = useState<CryptoMarket[]>([])
   const [wsMarketsUpdatedAtMs, setWsMarketsUpdatedAtMs] = useState<number | null>(null)
   const [nowMs, setNowMs] = useState(() => Date.now())
 
   // Listen for real-time WebSocket pushes
   useEffect(() => {
     if (lastMessage?.type === 'crypto_markets_update' && Array.isArray(lastMessage.data?.markets)) {
-      setWsMarkets(lastMessage.data.markets)
+      setWsMarkets((current) => mergeMarkets(current, dedupeMarkets(lastMessage.data.markets as CryptoMarket[])))
       setWsMarketsUpdatedAtMs(Date.now())
       return
     }
@@ -746,7 +821,7 @@ export default function CryptoMarketsPanel({ onExecute, onOpenCopilot, onOpenCry
     if (lastMessage?.type === 'init') {
       const seededMarkets = extractCryptoMarketsFromInit(lastMessage.data)
       if (seededMarkets) {
-        setWsMarkets(seededMarkets)
+        setWsMarkets((current) => mergeMarkets(current, dedupeMarkets(seededMarkets)))
         setWsMarketsUpdatedAtMs(Date.now())
       }
     }
@@ -755,7 +830,7 @@ export default function CryptoMarketsPanel({ onExecute, onOpenCopilot, onOpenCry
   // If websocket disconnects, immediately stop trusting any stale ws cache.
   useEffect(() => {
     if (!isConnected) {
-      setWsMarkets(null)
+      setWsMarkets([])
       setWsMarketsUpdatedAtMs(null)
     }
   }, [isConnected])
@@ -795,7 +870,7 @@ export default function CryptoMarketsPanel({ onExecute, onOpenCopilot, onOpenCry
   const isViewerActive = isDocumentVisible && isPanelInViewport
 
   const hasFreshWsMarkets =
-    !!wsMarkets &&
+    wsMarkets.length > 0 &&
     wsMarketsUpdatedAtMs !== null &&
     nowMs - wsMarketsUpdatedAtMs <= WS_MARKETS_STALE_MS
 
@@ -809,9 +884,17 @@ export default function CryptoMarketsPanel({ onExecute, onOpenCopilot, onOpenCry
     staleTime: 1000,
   })
 
-  const allMarkets = hasFreshWsMarkets
-    ? (wsMarkets || httpMarkets || [])
-    : (httpMarkets || wsMarkets || [])
+  useEffect(() => {
+    if (!httpMarkets || httpMarkets.length === 0) return
+    const snapshotKeys = new Set(dedupeMarkets(httpMarkets).map((market) => marketIdentity(market)))
+    setWsMarkets((current) => current.filter((market) => snapshotKeys.has(marketIdentity(market))))
+  }, [httpMarkets])
+
+  const allMarkets = useMemo(() => {
+    const snapshotMarkets = dedupeMarkets(httpMarkets || [])
+    if (snapshotMarkets.length === 0) return wsMarkets
+    return mergeMarkets(snapshotMarkets, wsMarkets, false)
+  }, [httpMarkets, wsMarkets])
 
   const timeframeCounts = useMemo(() => {
     const counts: Record<'5m' | '15m' | '1h' | '4h', number> = {
@@ -895,7 +978,6 @@ export default function CryptoMarketsPanel({ onExecute, onOpenCopilot, onOpenCry
               <ArrowUpDown className="w-4 h-4 text-orange-400" />
               <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
             </div>
-              <span className="text-sm font-semibold text-foreground">Crypto 5m/15m/1h/4h Markets</span>
             <Badge variant="outline" className="text-[9px] text-orange-400 border-orange-500/20 bg-orange-500/10">
               LIVE
             </Badge>
@@ -924,8 +1006,8 @@ export default function CryptoMarketsPanel({ onExecute, onOpenCopilot, onOpenCry
                 </button>
               ))}
             </div>
-                {onOpenCryptoSettings && (
-                  <Button size="sm" variant="outline" onClick={onOpenCryptoSettings} className="h-7 px-2.5 text-xs gap-1.5">
+            {showSettingsButton && onOpenCryptoSettings && (
+              <Button size="sm" variant="outline" onClick={onOpenCryptoSettings} className="h-7 px-2.5 text-xs gap-1.5">
                 <Settings className="w-3.5 h-3.5" />
                 Settings
               </Button>

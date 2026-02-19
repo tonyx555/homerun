@@ -63,7 +63,7 @@ class GlobalPauseState:
                 orchestrator_control = await read_orchestrator_control(session)
                 crypto_control = await read_worker_control(session, "crypto")
                 tracked_control = await read_worker_control(session, "tracked_traders")
-                world_intel_control = await read_worker_control(session, "world_intelligence")
+                events_control = await read_worker_control(session, "events")
 
             self._paused = all(
                 bool(control.get("is_paused", False))
@@ -75,7 +75,7 @@ class GlobalPauseState:
                     orchestrator_control,
                     crypto_control,
                     tracked_control,
-                    world_intel_control,
+                    events_control,
                 )
             )
         except Exception:

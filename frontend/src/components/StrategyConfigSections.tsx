@@ -36,6 +36,7 @@ export default function StrategyConfigSections({
   sourceKey: string
   enabled?: boolean
 }) {
+  const normalizedSourceKey = String(sourceKey || '').trim().toLowerCase()
   const queryClient = useQueryClient()
 
   const { data: allPlugins } = useQuery({
@@ -47,7 +48,7 @@ export default function StrategyConfigSections({
   // Filter to strategies matching this subtab's source_key that have config schemas
   const strategies = (allPlugins || []).filter(
     (p) =>
-      p.source_key === sourceKey &&
+      normalizeSourceKey(p.source_key) === normalizedSourceKey &&
       p.config_schema &&
       p.config_schema.param_fields &&
       p.config_schema.param_fields.length > 0
@@ -200,6 +201,7 @@ function StrategyConfigCard({
                     detail: {
                       subtab: 'opportunity',
                       sourceFilter: strategy.source_key,
+                      source: strategy.source_key,
                     },
                   })
                 )
@@ -227,4 +229,9 @@ function StrategyConfigCard({
       )}
     </Card>
   )
+}
+
+function normalizeSourceKey(sourceKey: string): string {
+  const key = String(sourceKey || '').trim().toLowerCase()
+  return key
 }

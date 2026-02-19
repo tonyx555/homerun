@@ -328,9 +328,25 @@ const UNIFIED_MINIMAL_TEMPLATE = [
 
 const DEFAULT_NEW_TEMPLATE_KEY = 'full_unified'
 
+function normalizeSourceFilter(value: unknown): string | null {
+  const raw = String(value || '').trim().toLowerCase()
+  if (!raw) return null
+  return raw
+}
+
+function normalizeStrategySourceFilter(value: unknown): string {
+  return normalizeSourceFilter(value) || 'scanner'
+}
+
 // ==================== Main Component ====================
 
-export default function UnifiedStrategiesManager() {
+export default function UnifiedStrategiesManager({
+  initialSourceFilter,
+  onSourceFilterApplied,
+}: {
+  initialSourceFilter?: string | null
+  onSourceFilterApplied?: () => void
+}) {
   const queryClient = useQueryClient()
 
   // UI toggles
@@ -401,10 +417,30 @@ export default function UnifiedStrategiesManager() {
   // ── Derived state ──
 
   const sourceKeys = useMemo(() => {
-    const fromCatalog = catalog.map((s) => String(s.source_key || '').toLowerCase())
+    const fromCatalog = catalog.map((s) => normalizeStrategySourceFilter(s.source_key))
     const merged = uniqueStrings(fromCatalog)
-    return merged.length > 0 ? merged : ['scanner']
+    return merged
   }, [catalog])
+
+  useEffect(() => {
+    const normalizedSource = normalizeSourceFilter(initialSourceFilter)
+    if (!normalizedSource) {
+      return
+    }
+    if (normalizedSource !== 'all' && sourceKeys.length === 0) {
+      return
+    }
+
+    const normalizedSourceKeys = new Set(sourceKeys)
+    const target =
+      normalizedSource === 'all' || normalizedSourceKeys.has(normalizedSource) ? normalizedSource : 'all'
+
+    setSourceFilter((current) => {
+      if (current === target) return current
+      return target
+    })
+    onSourceFilterApplied?.()
+  }, [initialSourceFilter, onSourceFilterApplied, sourceKeys])
 
   const createSourceKeys = useMemo(
     () => uniqueStrings([...Object.keys(SOURCE_LABELS), ...sourceKeys]),
@@ -470,14 +506,14 @@ export default function UnifiedStrategiesManager() {
       className: newStrategyClassName,
       strategyName: title,
       strategyDescription: description,
-      sourceKey: String(newStrategySourceKey || 'scanner').trim().toLowerCase() || 'scanner',
+      sourceKey: normalizeStrategySourceFilter(newStrategySourceKey),
     })
   }, [selectedNewTemplate, newStrategyName, newStrategyDescription, newStrategySourceKey, newStrategyClassName])
 
   const grouped = useMemo(() => {
     let rows = [...catalog]
     if (sourceFilter !== 'all') {
-      rows = rows.filter((s) => s.source_key === sourceFilter)
+      rows = rows.filter((s) => normalizeStrategySourceFilter(s.source_key) === sourceFilter)
     }
     if (searchQuery.trim()) {
       const q = searchQuery.trim().toLowerCase()
@@ -485,7 +521,7 @@ export default function UnifiedStrategiesManager() {
         (s) =>
           (s.name || '').toLowerCase().includes(q) ||
           (s.slug || '').toLowerCase().includes(q) ||
-          (s.source_key || '').toLowerCase().includes(q) ||
+          normalizeStrategySourceFilter(s.source_key).includes(q) ||
           (s.description || '').toLowerCase().includes(q) ||
           (s.class_name || '').toLowerCase().includes(q)
       )
@@ -493,7 +529,7 @@ export default function UnifiedStrategiesManager() {
     // Group by source_key
     const groups: Record<string, UnifiedStrategy[]> = {}
     for (const s of rows) {
-      const key = s.source_key || 'other'
+      const key = normalizeStrategySourceFilter(s.source_key)
       if (!groups[key]) groups[key] = []
       groups[key].push(s)
     }
@@ -571,7 +607,7 @@ export default function UnifiedStrategiesManager() {
     setEditorSlug(strategy.slug || '')
     setEditorName(strategy.name || '')
     setEditorDescription(strategy.description || '')
-    setEditorSourceKey(strategy.source_key || 'scanner')
+    setEditorSourceKey(normalizeStrategySourceFilter(strategy.source_key))
     setEditorEnabled(Boolean(strategy.enabled))
     setEditorCode(strategy.source_code || '')
     setEditorConfigJson(JSON.stringify(strategy.config || {}, null, 2))
@@ -628,7 +664,7 @@ export default function UnifiedStrategiesManager() {
 
       const payload = {
         slug: normalizeSlug(editorSlug),
-        source_key: String(editorSourceKey || '').trim().toLowerCase(),
+        source_key: normalizeStrategySourceFilter(editorSourceKey),
         name: String(editorName || '').trim(),
         description: editorDescription.trim() || undefined,
         source_code: editorCode,
@@ -698,7 +734,7 @@ export default function UnifiedStrategiesManager() {
       if (!selected) throw new Error('Select a strategy to clone')
       return createUnifiedStrategy({
         slug: `${selected.slug}_clone_${Date.now().toString().slice(-6)}`,
-        source_key: selected.source_key || 'scanner',
+        source_key: normalizeStrategySourceFilter(selected.source_key),
         name: `${selected.name} (Clone)`,
         description: selected.description || undefined,
         source_code: selected.source_code || '',
@@ -750,7 +786,7 @@ export default function UnifiedStrategiesManager() {
     setNewStrategyName('Custom Strategy')
     setNewStrategySlug(`custom_${nonce}`)
     setNewStrategyDescription('')
-    setNewStrategySourceKey('scanner')
+    setNewStrategySourceKey(normalizeStrategySourceFilter('scanner'))
     setNewStrategyTemplateKey(DEFAULT_NEW_TEMPLATE_KEY)
     setNewStrategySlugDirty(false)
     setNewStrategyError(null)
@@ -759,7 +795,7 @@ export default function UnifiedStrategiesManager() {
 
   const createDraftFromModal = () => {
     const normalizedSlug = normalizeSlug(newStrategySlug)
-    const normalizedSourceKey = String(newStrategySourceKey || 'scanner').trim().toLowerCase() || 'scanner'
+    const normalizedSourceKey = normalizeStrategySourceFilter(newStrategySourceKey)
     const trimmedName = String(newStrategyName || '').trim()
     const trimmedDescription = String(newStrategyDescription || '').trim()
     const selectedTemplate = selectedNewTemplate || newStrategyTemplates[0]
@@ -879,7 +915,7 @@ export default function UnifiedStrategiesManager() {
               <SelectItem value="all">All Sources ({catalog.length})</SelectItem>
               {sourceKeys.map((sk) => (
                 <SelectItem key={sk} value={sk}>
-                  {SOURCE_LABELS[sk] || sk} ({catalog.filter((s) => s.source_key === sk).length})
+                  {SOURCE_LABELS[sk] || sk} ({catalog.filter((s) => normalizeStrategySourceFilter(s.source_key) === sk).length})
                 </SelectItem>
               ))}
             </SelectContent>

@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback } from 'react'
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { AnimatePresence, motion } from 'framer-motion'
@@ -50,6 +50,7 @@ import {
   buildPolymarketMarketUrl,
   inferMarketPlatform,
 } from '../lib/marketUrls'
+import { useWebSocket } from '../hooks/useWebSocket'
 import NewsWorkflowSettingsFlyout from './NewsWorkflowSettingsFlyout'
 import { Button } from './ui/button'
 import { Badge } from './ui/badge'
@@ -435,6 +436,22 @@ function resolveFindingOutcomes(
   return { labels, prices }
 }
 
+function resolveFindingStrategySdk(finding: NewsWorkflowFinding): string {
+  const explicit = String(finding.strategy_sdk || '').trim().toLowerCase()
+  if (explicit) return explicit
+
+  const evidence = asRecord(finding.evidence)
+  const strategy = cleanMarketText(
+    evidence?.strategy_sdk
+    || evidence?.strategy_slug
+    || evidence?.strategy_key
+    || evidence?.strategy,
+  ).toLowerCase()
+  if (strategy) return strategy
+
+  return 'news_edge'
+}
+
 function findingCreatedAtMs(finding: NewsWorkflowFinding): number {
   return parseUtcDate(finding.created_at)?.getTime() ?? 0
 }
@@ -593,6 +610,8 @@ function FindingCard({
 }) {
   const [expandedArticles, setExpandedArticles] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
+  const sparklineRef = useRef<HTMLDivElement>(null)
+  const [sparklineWidth, setSparklineWidth] = useState(260)
   const evidence = finding.evidence as Record<string, unknown> | null
   const cluster = (evidence?.cluster && typeof evidence.cluster === 'object')
     ? (evidence.cluster as Record<string, unknown>)
@@ -648,6 +667,7 @@ function FindingCard({
     ? dedupedSupportingArticles
     : dedupedSupportingArticles.slice(0, 2)
   const isBuyYes = finding.direction === 'buy_yes'
+  const strategySdk = resolveFindingStrategySdk(finding)
   const directionLabel = isBuyYes ? yesOutcomeLabel : noOutcomeLabel
   const closeModal = () => setModalOpen(false)
 
@@ -670,6 +690,20 @@ function FindingCard({
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [isModalView, modalOpen])
+
+  useEffect(() => {
+    if (!hasSparkline) return
+    if (!sparklineRef.current) return
+
+    const measure = () => {
+      if (!sparklineRef.current) return
+      setSparklineWidth(Math.max(240, sparklineRef.current.offsetWidth))
+    }
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(sparklineRef.current)
+    return () => ro.disconnect()
+  }, [hasSparkline, finding.id])
 
   return (
     <>
@@ -698,6 +732,13 @@ function FindingCard({
                 {articleCount} articles
               </Badge>
             )}
+            <Badge
+              variant="outline"
+              className="max-w-[170px] truncate text-[9px] font-mono border-border/50 bg-muted/25 text-muted-foreground"
+              title={`StrategySDK: ${strategySdk}`}
+            >
+              SDK {strategySdk}
+            </Badge>
           </div>
           <div className="text-right shrink-0">
             <span className={cn("text-lg font-bold font-data", edgeColor(finding.edge_percent))}>
@@ -773,22 +814,22 @@ function FindingCard({
           </div>
         </div>
 
-        <div className="flex items-stretch gap-2.5 mb-3">
+        <div className="space-y-1.5 mb-3">
           {hasSparkline && (
-            <div className="shrink-0">
+            <div ref={sparklineRef} className="w-full">
               <Sparkline
                 data={sparkSeries[0]?.data || []}
                 series={sparklineSeries}
-                width={96}
-                height={40}
+                width={sparklineWidth}
+                height={44}
                 lineWidth={1.5}
                 showDots
               />
-              <div className="mt-0.5 flex flex-wrap gap-x-1.5 gap-y-0.5 px-0.5 text-[9px] font-data">
+              <div className="mt-0 flex flex-wrap gap-x-1.5 gap-y-0.5 px-0.5 text-[9px] font-data">
                 {sparkSeries.map((row, index) => (
                   <span
                     key={`${finding.id}-spark-${row.key}`}
-                    className={SPARKLINE_TEXT_CLASSES[index % SPARKLINE_TEXT_CLASSES.length]}
+                    className={cn('whitespace-nowrap', SPARKLINE_TEXT_CLASSES[index % SPARKLINE_TEXT_CLASSES.length])}
                   >
                     {compactOutcomeLabel(row.label, 9)} {row.latest != null ? row.latest.toFixed(2) : '—'}
                   </span>
@@ -796,7 +837,7 @@ function FindingCard({
               </div>
             </div>
           )}
-          <div className="grid grid-cols-2 gap-1.5 flex-1">
+          <div className="grid grid-cols-2 gap-1.5">
             <div className="bg-muted/30 rounded-lg p-1.5 text-center">
               <div className="text-[8px] text-muted-foreground uppercase tracking-wider">Current</div>
               <div className={cn("text-xs font-data font-semibold", edgeColor(finding.edge_percent))}>
@@ -1041,6 +1082,7 @@ interface NewsIntelligencePanelProps {
   initialSearchQuery?: string
   mode?: NewsPanelMode
   onOpenDataSettings?: () => void
+  showSettingsButton?: boolean
 }
 
 function initialSubView(mode: NewsPanelMode, initialSearchQuery?: string): SubView {
@@ -1049,8 +1091,14 @@ function initialSubView(mode: NewsPanelMode, initialSearchQuery?: string): SubVi
   return initialSearchQuery ? 'feed' : 'workflow'
 }
 
-export default function NewsIntelligencePanel({ initialSearchQuery, mode = 'all', onOpenDataSettings }: NewsIntelligencePanelProps = {}) {
+export default function NewsIntelligencePanel({
+  initialSearchQuery,
+  mode = 'all',
+  onOpenDataSettings,
+  showSettingsButton = true,
+}: NewsIntelligencePanelProps = {}) {
   const queryClient = useQueryClient()
+  const { isConnected } = useWebSocket('/ws')
   const [subView, setSubView] = useState<SubView>(initialSubView(mode, initialSearchQuery))
   const [searchFilter, setSearchFilter] = useState(initialSearchQuery || '')
   const [feedSourceFilter, setFeedSourceFilter] = useState<string | null>(null)
@@ -1069,10 +1117,16 @@ export default function NewsIntelligencePanel({ initialSearchQuery, mode = 'all'
     if (mode === 'feed') setSubView('feed')
   }, [mode])
 
+  useEffect(() => {
+    const handleOpenSettings = () => setWorkflowSettingsOpen(true)
+    window.addEventListener('open-news-workflow-settings', handleOpenSettings as EventListener)
+    return () => window.removeEventListener('open-news-workflow-settings', handleOpenSettings as EventListener)
+  }, [])
+
   const { data: workflowStatus } = useQuery({
     queryKey: ['news-workflow-status'],
     queryFn: getNewsWorkflowStatus,
-    refetchInterval: 30000,
+    refetchInterval: isConnected ? false : 30000,
   })
 
   const { data: workflowFindingsData, isLoading: findingsLoading } = useQuery({
@@ -1083,14 +1137,14 @@ export default function NewsIntelligencePanel({ initialSearchQuery, mode = 'all'
       max_age_hours: 24,
       limit: 150,
     }),
-    refetchInterval: 30000,
+    refetchInterval: isConnected ? false : 30000,
     enabled: mode !== 'feed' && subView === 'workflow',
   })
 
   const { data: workflowIntentsData } = useQuery({
     queryKey: ['news-workflow-intents'],
     queryFn: () => getNewsWorkflowIntents({ limit: 50 }),
-    refetchInterval: 15000,
+    refetchInterval: isConnected ? false : 15000,
     enabled: mode !== 'feed' && subView === 'workflow',
   })
 
@@ -1139,7 +1193,7 @@ export default function NewsIntelligencePanel({ initialSearchQuery, mode = 'all'
   const { data: feedStatus } = useQuery({
     queryKey: ['news-feed-status'],
     queryFn: getNewsFeedStatus,
-    refetchInterval: 60000,
+    refetchInterval: isConnected ? false : 60000,
   })
 
   const PAGE_SIZE = 100
@@ -1163,7 +1217,7 @@ export default function NewsIntelligencePanel({ initialSearchQuery, mode = 'all'
       return undefined
     },
     initialPageParam: 0,
-    refetchInterval: 120000,
+    refetchInterval: isConnected ? false : 120000,
   })
 
   const clearMutation = useMutation({
@@ -1361,15 +1415,17 @@ export default function NewsIntelligencePanel({ initialSearchQuery, mode = 'all'
                   <RefreshCw className={cn("w-3.5 h-3.5", refreshMutation.isPending && "animate-spin")} />
                   Refresh
                 </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="text-xs h-8 gap-1.5"
-                  onClick={() => setWorkflowSettingsOpen(true)}
-                >
-                  <Settings className="w-3.5 h-3.5" />
-                  Settings
-                </Button>
+                {showSettingsButton && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="text-xs h-8 gap-1.5"
+                    onClick={() => setWorkflowSettingsOpen(true)}
+                  >
+                    <Settings className="w-3.5 h-3.5" />
+                    Settings
+                  </Button>
+                )}
                 {onOpenDataSettings && (
                   <Button
                     variant="outline"

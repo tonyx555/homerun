@@ -15,11 +15,13 @@ from models.opportunity import AIAnalysis, MispricingType
 from models.database import AsyncSessionLocal, ScannerSettings, OpportunityJudgment
 from services.strategy_loader import strategy_loader
 from services.opportunity_strategy_catalog import ensure_system_opportunity_strategies_seeded
+from services.strategy_sdk import StrategySDK
 from services.providers import market_data_provider
 from services.pause_state import global_pause_state
 from utils.converters import to_iso
 from services.market_prioritizer import market_prioritizer, MarketTier
 from services.ws_feeds import get_feed_manager
+from services.redis_price_cache import redis_price_cache
 from services.quality_filter import quality_filter
 from services.data_events import DataEvent, EventType
 from services.event_dispatcher import event_dispatcher
@@ -163,44 +165,6 @@ class ArbitrageScanner:
                 await cb(activity)
             except Exception:
                 pass
-
-    def _merge_ws_prices(self, http_prices: dict, token_ids: list[str]) -> dict:
-        """Merge WebSocket real-time prices with HTTP-fetched prices.
-
-        WS prices take precedence when fresh (within stale TTL).
-        Falls back to HTTP prices for tokens not covered by WS.
-        """
-        if not settings.WS_FEED_ENABLED:
-            return http_prices
-
-        try:
-            feed_mgr = get_feed_manager()
-            if not feed_mgr._started:
-                return http_prices
-
-            merged = dict(http_prices)
-            ws_hits = 0
-
-            for token_id in token_ids:
-                if feed_mgr.is_fresh(token_id):
-                    mid = feed_mgr.cache.get_mid_price(token_id)
-                    if mid is not None:
-                        bba = feed_mgr.cache.get_best_bid_ask(token_id)
-                        if bba:
-                            bid, ask = bba
-                            merged[token_id] = {
-                                "mid": mid,
-                                "bid": bid,
-                                "ask": ask,
-                            }
-                            ws_hits += 1
-
-            if ws_hits > 0:
-                print(f"  WS price overlay: {ws_hits}/{len(token_ids)} tokens from real-time feed")
-            return merged
-        except Exception as e:
-            print(f"  WS price merge failed (using HTTP): {e}")
-            return http_prices
 
     @staticmethod
     def _price_value(raw: Optional[dict]) -> Optional[float]:
@@ -414,16 +378,30 @@ class ArbitrageScanner:
                 out.append(token)
         return out
 
-    def _snapshot_ws_prices(self, token_ids: list[str]) -> dict[str, dict]:
-        """Return fresh WS mid/bid/ask snapshots for token IDs."""
+    async def _snapshot_ws_prices(self, token_ids: list[str]) -> dict[str, dict]:
+        """Return fresh live snapshots for token IDs from Redis + in-memory fallback."""
         if not token_ids or not settings.WS_FEED_ENABLED:
             return {}
+        clean_token_ids = [str(token_id).strip() for token_id in token_ids if str(token_id).strip()]
+        if not clean_token_ids:
+            return {}
+
+        prices: dict[str, dict] = {}
+        try:
+            prices = await redis_price_cache.read_prices(clean_token_ids)
+        except Exception as exc:
+            print(f"  Redis live price read failed (using in-memory fallback): {exc}")
+            prices = {}
+        missing = [token_id for token_id in clean_token_ids if token_id not in prices]
+        if not missing:
+            return prices
+
+        # Local fallback for same-process WS cache if Redis is slower to catch up.
         try:
             feed_mgr = get_feed_manager()
             if not feed_mgr._started:
-                return {}
-            out: dict[str, dict] = {}
-            for token_id in token_ids:
+                return prices
+            for token_id in missing:
                 if not feed_mgr.is_fresh(token_id):
                     continue
                 mid = feed_mgr.cache.get_mid_price(token_id)
@@ -431,13 +409,14 @@ class ArbitrageScanner:
                     continue
                 bba = feed_mgr.cache.get_best_bid_ask(token_id)
                 if bba is None:
-                    out[token_id] = {"mid": float(mid), "bid": float(mid), "ask": float(mid)}
+                    prices[token_id] = {"mid": float(mid), "bid": float(mid), "ask": float(mid)}
                 else:
                     bid, ask = bba
-                    out[token_id] = {"mid": float(mid), "bid": float(bid), "ask": float(ask)}
-            return out
+                    prices[token_id] = {"mid": float(mid), "bid": float(bid), "ask": float(ask)}
         except Exception:
-            return {}
+            pass
+
+        return prices
 
     def _apply_live_prices_to_markets(self, markets: list, prices: dict[str, dict]) -> int:
         """Mutate market outcome prices from live token prices to keep fingerprints current."""
@@ -816,10 +795,27 @@ class ArbitrageScanner:
                     )
                 return market_id, merged, True
 
-        results: list[tuple[str, list[dict[str, float]], bool]] = []
+        updated = 0
+        completed = 0
+
+        def _apply_backfill_results(results: list[tuple[str, list[dict[str, float]], bool]]) -> None:
+            nonlocal updated, completed
+            for market_id, points, success in results:
+                if success:
+                    completed += 1
+                if not points:
+                    continue
+                merged_len = self._merge_market_history_points(market_id, points, now_ms)
+                if merged_len >= 2:
+                    updated += 1
+                    self._market_history_backfill_done.add(market_id)
+
         if polymarket_candidates:
-            poly_results = await asyncio.gather(*[_fetch_polymarket(mid) for mid in polymarket_candidates])
-            results.extend(poly_results)
+            poly_batch_size = max(1, self._market_history_backfill_concurrency * 2)
+            for i in range(0, len(polymarket_candidates), poly_batch_size):
+                batch = polymarket_candidates[i : i + poly_batch_size]
+                poly_results = await asyncio.gather(*[_fetch_polymarket(mid) for mid in batch])
+                _apply_backfill_results(poly_results)
 
         # Kalshi provides batched candlestick history by market ticker.
         if kalshi_candidates:
@@ -868,18 +864,7 @@ class ArbitrageScanner:
                         }
                     merged_points = [by_bucket[k] for k in sorted(by_bucket.keys())]
                     market_fetch_success = fetch_success and market_id in history_map
-                    results.append((market_id, merged_points, market_fetch_success))
-
-        updated = 0
-        completed = 0
-        for market_id, points, success in results:
-            if success:
-                completed += 1
-            if points:
-                merged_len = self._merge_market_history_points(market_id, points, now_ms)
-                if merged_len >= 2:
-                    updated += 1
-                    self._market_history_backfill_done.add(market_id)
+                    _apply_backfill_results([(market_id, merged_points, market_fetch_success)])
 
         if updated > 0:
             print(
@@ -1069,7 +1054,7 @@ class ArbitrageScanner:
             return MispricingType.SETTLEMENT_LAG
         if slug in {"combinatorial", "cross_market"}:
             return MispricingType.CROSS_MARKET
-        if slug in {"news_edge", "news_reaction", "news"}:
+        if slug == "news_edge":
             return MispricingType.NEWS_INFORMATION
         return MispricingType.WITHIN_MARKET
 
@@ -1262,7 +1247,6 @@ class ArbitrageScanner:
 
             # Priority-sort tokens so HOT/WARM markets get fresh prices first.
             # Build a set of prioritized token IDs from tiered scanning data.
-            PRICE_BATCH_CAP = 1500
             priority_token_ids: set[str] = set()
             if settings.TIERED_SCANNING_ENABLED and hasattr(self, "_prioritizer"):
                 try:
@@ -1278,34 +1262,37 @@ class ArbitrageScanner:
                 except Exception:
                     pass  # Fall through to unsorted if prioritizer fails
 
+            seen_ids: set[str] = set()
+            deduped_token_ids: list[str] = []
+            for token_id in all_token_ids:
+                if token_id in seen_ids:
+                    continue
+                seen_ids.add(token_id)
+                deduped_token_ids.append(token_id)
+            all_token_ids = deduped_token_ids
+
             if priority_token_ids:
                 # Prioritized tokens first, then rotate remaining cold tokens
                 prioritized = [t for t in all_token_ids if t in priority_token_ids]
                 remaining = [t for t in all_token_ids if t not in priority_token_ids]
-                # Rotate cold tokens across cycles so all eventually get fresh prices
                 if not hasattr(self, "_cold_token_rotation_offset"):
                     self._cold_token_rotation_offset = 0
                 if remaining:
                     offset = self._cold_token_rotation_offset % max(1, len(remaining))
                     remaining = remaining[offset:] + remaining[:offset]
-                    self._cold_token_rotation_offset += PRICE_BATCH_CAP - len(prioritized)
+                    self._cold_token_rotation_offset += max(1, len(all_token_ids) - len(prioritized))
                 sorted_token_ids = prioritized + remaining
             else:
                 sorted_token_ids = all_token_ids
 
-            # Batch price fetching with increased cap and priority sorting
             prices = {}
             if sorted_token_ids:
-                token_sample = sorted_token_ids[:PRICE_BATCH_CAP]
-                await self._set_activity(f"Fetching prices for {len(token_sample)} tokens...")
-                prices = await self.market_data.get_prices_batch(token_sample)
+                await self._set_activity(f"Reading cached live prices for {len(sorted_token_ids)} tokens...")
+                prices = await self._snapshot_ws_prices(sorted_token_ids)
                 print(
-                    f"  Fetched prices for {len(prices)}/{len(all_token_ids)} tokens "
+                    f"  Loaded prices for {len(prices)}/{len(all_token_ids)} tokens from Redis "
                     f"({len(priority_token_ids)} prioritized)"
                 )
-
-            # Overlay WebSocket real-time prices where available
-            prices = self._merge_ws_prices(prices, sorted_token_ids[:PRICE_BATCH_CAP])
             self._apply_live_prices_to_markets(markets, prices)
 
             # Cache full data for fast scans between full scans
@@ -1599,30 +1586,19 @@ class ArbitrageScanner:
             candidate_token_ids = self._collect_polymarket_tokens(candidate_markets)
             live_prices: dict[str, dict] = {}
             if reactive_mode:
-                ws_prices = self._snapshot_ws_prices(candidate_token_ids)
+                ws_prices = await self._snapshot_ws_prices(candidate_token_ids)
                 live_prices.update(ws_prices)
-                fallback_cap = max(0, int(settings.REALTIME_SCAN_HTTP_PRICE_FALLBACK_CAP or 200))
-                missing_tokens = [tid for tid in candidate_token_ids if tid not in ws_prices]
-                if missing_tokens and fallback_cap > 0:
-                    token_sample = missing_tokens[:fallback_cap]
-                    try:
-                        http_prices = await self.market_data.get_prices_batch(token_sample)
-                        live_prices.update(http_prices)
-                    except Exception:
-                        pass
                 if ws_prices:
                     print(f"  Reactive WS overlay: {len(ws_prices)}/{len(candidate_token_ids)} tokens")
             else:
-                token_sample = candidate_token_ids[:200]
+                token_sample = candidate_token_ids
                 if token_sample:
-                    await self._set_activity(f"Fast scan: fetching prices for {len(token_sample)} hot-tier tokens...")
-                    live_prices = await self.market_data.get_prices_batch(token_sample)
-                    print(f"  Fetched prices for {len(live_prices)} hot-tier tokens")
-                    live_prices = self._merge_ws_prices(live_prices, token_sample)
+                    await self._set_activity(f"Fast scan: reading live prices for {len(token_sample)} hot-tier tokens...")
+                    live_prices = await self._snapshot_ws_prices(token_sample)
+                    print(f"  Loaded prices for {len(live_prices)} hot-tier tokens from Redis cache")
 
-            merged_prices = {**self._cached_prices, **live_prices}
-            if live_prices:
-                self._cached_prices.update(live_prices)
+            merged_prices = dict(live_prices)
+            self._cached_prices = dict(live_prices)
             self._apply_live_prices_to_markets(candidate_markets, merged_prices)
             self._update_market_price_history(candidate_markets, merged_prices, now)
 
@@ -1630,7 +1606,7 @@ class ArbitrageScanner:
             if not changed_markets:
                 print(f"  All {len(candidate_markets)} candidate markets unchanged, skipping strategies")
                 await self._set_activity(f"Fast scan: {len(candidate_markets)} markets unchanged, skipping")
-                self._prioritizer.update_after_evaluation(candidate_markets, now)
+                await loop.run_in_executor(None, self._prioritizer.update_after_evaluation, candidate_markets, now)
                 self._last_scan = now
                 self._last_fast_scan = now
                 return self._opportunities
@@ -1858,8 +1834,10 @@ class ArbitrageScanner:
         config = getattr(instance, "config", None)
         candidates = []
         if isinstance(config, dict):
+            candidates.append(config.get("retention_max_opportunities"))
             candidates.append(config.get("max_opportunities_per_strategy"))
             candidates.append(config.get("max_opportunities"))
+        candidates.append(getattr(instance, "retention_max_opportunities", None))
         candidates.append(getattr(instance, "max_opportunities_per_strategy", None))
         candidates.append(getattr(instance, "max_opportunities", None))
 
@@ -1869,11 +1847,56 @@ class ArbitrageScanner:
                 return cap_value
         return fallback
 
+    @staticmethod
+    def _coerce_retention_minutes(raw_value: object) -> Optional[int]:
+        parsed = StrategySDK.parse_duration_minutes(raw_value)
+        if parsed is None:
+            return None
+        return max(0, min(int(parsed), 60 * 24 * 90))
+
+    @staticmethod
+    def _strategy_ttl_from_instance(instance: object, fallback: int) -> int:
+        if instance is None:
+            return fallback
+
+        config = getattr(instance, "config", None)
+        candidates: list[object] = []
+        if isinstance(config, dict):
+            candidates.extend(
+                [
+                    config.get("retention_max_age_minutes"),
+                    config.get("retention_window"),
+                    config.get("retention_period"),
+                    config.get("retention_duration"),
+                    config.get("opportunity_ttl_minutes"),
+                    config.get("opportunity_ttl"),
+                ]
+            )
+        candidates.extend(
+            [
+                getattr(instance, "retention_max_age_minutes", None),
+                getattr(instance, "retention_window", None),
+                getattr(instance, "opportunity_ttl_minutes", None),
+            ]
+        )
+
+        for candidate in candidates:
+            ttl = ArbitrageScanner._coerce_retention_minutes(candidate)
+            if ttl is not None:
+                return ttl
+        return fallback
+
     def _strategy_cap_for_key(self, strategy_key: str, fallback: int) -> int:
         key = str(strategy_key or "").strip().lower()
         if not key:
             return fallback
         return self._strategy_cap_from_instance(strategy_loader.get_instance(key), fallback)
+
+    def _strategy_ttl_for_key(self, strategy_key: str, fallback: int) -> int:
+        key = str(strategy_key or "").strip().lower()
+        if not key:
+            return fallback
+        return self._strategy_ttl_from_instance(strategy_loader.get_instance(key), fallback)
 
     def _apply_opportunity_caps(self, opportunities: list[Opportunity]) -> list[Opportunity]:
         """Limit pool size globally and per strategy to prevent strategy flood."""
@@ -1941,12 +1964,10 @@ class ArbitrageScanner:
         def _is_stale(opp: Opportunity) -> bool:
             if opp.last_seen_at is None:
                 return False
-            strategy_instance = strategy_loader.get_instance(opp.strategy)
-            ttl = None
-            if strategy_instance:
-                ttl = getattr(strategy_instance, "opportunity_ttl_minutes", None)
-            if ttl is None:
-                ttl = max(5, int(getattr(settings, "SCANNER_STALE_OPPORTUNITY_MINUTES", 45) or 45))
+            fallback_ttl = max(5, int(getattr(settings, "SCANNER_STALE_OPPORTUNITY_MINUTES", 45) or 45))
+            ttl = self._strategy_ttl_for_key(opp.strategy, fallback_ttl)
+            if ttl <= 0:
+                return False
             cutoff = now - timedelta(minutes=ttl)
             return _make_aware(opp.last_seen_at) < cutoff
 
@@ -2075,12 +2096,23 @@ class ArbitrageScanner:
             print(f"  AI scoring error: {e}")
 
     def _register_reactive_scanning(self):
-        """Register with WS FeedManager for reactive price-change scanning."""
+        """Register reactive token queueing from price-change signals."""
         if self._reactive_scan_registered:
             return
         if not settings.WS_FEED_ENABLED:
             return
         try:
+            async def _on_price_change(event: DataEvent) -> list:
+                token = str(event.token_id or "").strip()
+                if token:
+                    await self._queue_reactive_tokens({token})
+                return []
+
+            # Reactive queueing is sourced from cross-process PRICE_CHANGE fanout
+            # (crypto worker owns WS ingestion and publishes via event dispatcher).
+            event_dispatcher.subscribe("__scanner_reactive__", EventType.PRICE_CHANGE, _on_price_change)
+
+            # Keep local callback wiring when this process also owns WS feeds.
             feed_mgr = get_feed_manager()
             if feed_mgr._started:
 
@@ -2091,8 +2123,9 @@ class ArbitrageScanner:
                     _trigger_reactive,
                     debounce_seconds=float(settings.REALTIME_SCAN_DEBOUNCE_SECONDS),
                 )
-                self._reactive_scan_registered = True
-                print("  Reactive scanning registered (WS price-change triggers)")
+
+            self._reactive_scan_registered = True
+            print("  Reactive scanning registered (PRICE_CHANGE + local WS callbacks)")
         except Exception as e:
             print(f"  Reactive scanning registration failed: {e}")
 

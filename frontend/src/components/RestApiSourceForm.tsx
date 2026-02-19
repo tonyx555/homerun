@@ -22,7 +22,7 @@ export default function RestApiSourceForm({ config, onChange }: RestApiSourceFor
     onChange({ ...config, [key]: value })
   }
 
-  const apiUrl = String(config.api_url || '')
+  const apiUrl = String(config.url || '')
   const jsonPath = String(config.json_path || '')
   const pollInterval = String(config.poll_interval_minutes || '15')
 
@@ -56,7 +56,7 @@ export default function RestApiSourceForm({ config, onChange }: RestApiSourceFor
         <Input
           type="url"
           value={apiUrl}
-          onChange={(e) => update('api_url', e.target.value)}
+          onChange={(e) => update('url', e.target.value)}
           className="mt-1 h-8 text-xs font-mono"
           placeholder="https://api.example.com/v1/data"
           required

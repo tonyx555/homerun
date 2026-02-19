@@ -288,10 +288,6 @@ async def delete_trader_route(
             "open_live_positions": open_live_positions,
             "open_paper_positions": open_paper_positions,
             "open_other_positions": open_other_positions,
-            # Keep legacy response keys for clients that still read *_orders.
-            "open_live_orders": open_live_positions,
-            "open_paper_orders": open_paper_positions,
-            "open_other_orders": open_other_positions,
             "message": "Trader disabled and paused. Resolve open positions before permanent deletion.",
         }
 
@@ -305,9 +301,6 @@ async def delete_trader_route(
                 "open_live_positions": open_live_positions,
                 "open_paper_positions": open_paper_positions,
                 "open_other_positions": open_other_positions,
-                "open_live_orders": open_live_positions,
-                "open_paper_orders": open_paper_positions,
-                "open_other_orders": open_other_positions,
                 "suggested_action": TraderDeleteAction.disable.value,
             },
         )
@@ -322,9 +315,6 @@ async def delete_trader_route(
                 "open_live_positions": open_live_positions,
                 "open_paper_positions": open_paper_positions,
                 "open_other_positions": open_other_positions,
-                "open_live_orders": open_live_positions,
-                "open_paper_orders": open_paper_positions,
-                "open_other_orders": open_other_positions,
                 "suggested_action": TraderDeleteAction.disable.value,
             },
         )
@@ -360,9 +350,6 @@ async def delete_trader_route(
         "open_live_positions": open_live_positions,
         "open_paper_positions": open_paper_positions,
         "open_other_positions": open_other_positions,
-        "open_live_orders": open_live_positions,
-        "open_paper_orders": open_paper_positions,
-        "open_other_orders": open_other_positions,
     }
 
 
@@ -390,8 +377,6 @@ async def start_trader(trader_id: str, session: AsyncSession = Depends(get_db_se
             payload={
                 "open_live_positions": open_live,
                 "open_paper_positions": open_paper,
-                "open_live_orders": open_live,
-                "open_paper_orders": open_paper,
             },
         )
     elif mode == "paper" and open_paper > 0:
@@ -401,7 +386,7 @@ async def start_trader(trader_id: str, session: AsyncSession = Depends(get_db_se
             event_type="trader_start_notice",
             source="operator",
             message="Trader started with existing paper open positions",
-            payload={"open_paper_positions": open_paper, "open_paper_orders": open_paper},
+            payload={"open_paper_positions": open_paper},
         )
 
     await create_trader_event(

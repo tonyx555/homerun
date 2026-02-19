@@ -1,13 +1,11 @@
 """
-Multi-source news feed ingestion service.
+News feed ingestion service.
 
-Aggregates articles from:
-1. Google News RSS (free, broad, 5-30 min delay)
-2. GDELT DOC 2.0 API (free, global events, 15-min updates)
-3. Custom RSS feeds (user-configurable)
+All story inputs are sourced from DB-managed data sources:
+- data_sources.source_key = "stories"
+- source_kind in {"rss", "rest_api", "python"}
 
-Articles are deduplicated, stored in a rolling window, and
-made available for semantic matching against active markets.
+No feed URLs or topic/query providers are configured outside the Data Sources registry.
 """
 
 from __future__ import annotations
@@ -17,157 +15,95 @@ import html
 import hashlib
 import logging
 import re
-import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
-from xml.etree import ElementTree
 
-import httpx
-from sqlalchemy import select
+from sqlalchemy import desc, select
 
 from config import settings
-from models.database import AppSettings, AsyncSessionLocal
-from services.news.rss_config import (
-    default_custom_rss_feeds,
-    normalize_custom_rss_feeds,
-)
+from models.database import AsyncSessionLocal, DataSource, DataSourceRecord
+from services.data_source_runner import run_data_source
 
 logger = logging.getLogger(__name__)
 
-_HTTP_TIMEOUT = 12  # seconds
-_USER_AGENT = "Mozilla/5.0 (compatible; Homerun/2.0)"
-
-# Topic feeds for broad coverage
-_GOOGLE_NEWS_TOPICS = [
-    "breaking news",
-    "politics",
-    "business",
-    "markets",
-    "economy",
-    "inflation",
-    "federal reserve",
-    "supreme court",
-    "technology",
-    "artificial intelligence",
-    "science",
-    "sports",
-    "world",
-    "ukraine",
-    "china us relations",
-    "middle east",
-    "energy prices",
-    "cryptocurrency",
-    "bitcoin etf",
-]
-
-_GDELT_QUERIES = [
-    "prediction market",
-    "polymarket",
-    "kalshi",
-    "election odds",
-    "federal reserve policy",
-    "inflation report",
-    "jobs report",
-    "supreme court decision",
-    "ceasefire agreement",
-    "military escalation",
-    "trade sanctions",
-    "cryptocurrency regulation",
-    "bitcoin etf",
-]
-_GDELT_TIMESPAN = "6h"
+_MAX_SOURCE_FETCH_CONCURRENCY = 12
 
 
 @dataclass
 class NewsArticle:
     """A single news article from any source."""
 
-    article_id: str  # SHA-256 of URL for dedup
+    article_id: str
     title: str
     url: str
     source: str
     published: Optional[datetime] = None
     summary: str = ""
-    feed_source: str = ""  # "google_news", "gdelt", "custom_rss"
+    feed_source: str = ""
     category: str = ""
     fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
-    # Set after embedding
     embedding: Optional[list[float]] = None
 
 
 class NewsFeedService:
-    """
-    Aggregates news from multiple sources into a rolling article store.
-
-    Usage:
-        service = NewsFeedService()
-        new_articles = await service.fetch_all()
-        all_articles = service.get_articles()
-    """
+    """Aggregates stories from enabled DB-defined story sources."""
 
     def __init__(self) -> None:
-        self._articles: dict[str, NewsArticle] = {}  # article_id -> article
+        self._articles: dict[str, NewsArticle] = {}
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._ingest_stats: dict[str, int] = {
             "articles_dropped_low_text_quality": 0,
             "gdelt_summary_url_filtered": 0,
-            "google_summary_parsed": 0,
+            "source_fetch_failures": 0,
+            "source_rows_skipped": 0,
         }
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     async def fetch_all(self) -> list[NewsArticle]:
-        """Fetch from all enabled sources. Returns only NEW articles."""
+        """Fetch from all enabled story sources. Returns only NEW articles."""
         self._reset_ingest_stats()
         new_articles: list[NewsArticle] = []
-        rss_config = await self._load_rss_configuration()
-        custom_rss_feeds = list(rss_config.get("custom_rss_feeds") or [])
-        rss_enabled = bool(rss_config.get("rss_enabled", True))
 
-        tasks = [self._fetch_google_news_topics()]
+        try:
+            sources = await self._load_enabled_story_sources()
+        except Exception as exc:
+            logger.warning("Failed loading story sources: %s", exc)
+            return []
 
-        if settings.NEWS_GDELT_ENABLED:
-            tasks.append(self._fetch_gdelt())
+        if not sources:
+            logger.debug("No enabled story data sources configured")
+            return []
 
-        if custom_rss_feeds:
-            tasks.append(self._fetch_custom_rss_feeds(custom_rss_feeds))
-
-        if rss_enabled:
-            tasks.append(self._fetch_rss())
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for result in results:
-            if isinstance(result, Exception):
-                logger.warning("News fetch error: %s", result)
+        fetched_articles = await self._fetch_articles_from_sources(sources)
+        for article in fetched_articles:
+            if not _has_min_text_quality(article.title, article.summary):
+                self._inc_ingest_stat("articles_dropped_low_text_quality")
                 continue
-            if isinstance(result, list):
-                for article in result:
-                    if not _has_min_text_quality(article.title, article.summary):
-                        self._inc_ingest_stat("articles_dropped_low_text_quality")
-                        continue
-                    if article.article_id not in self._articles:
-                        self._articles[article.article_id] = article
-                        new_articles.append(article)
 
-        # Prune old articles
+            existing = self._articles.get(article.article_id)
+            if existing is None:
+                self._articles[article.article_id] = article
+                new_articles.append(article)
+            else:
+                # Keep freshest metadata if we already know the article.
+                if article.fetched_at >= existing.fetched_at:
+                    self._articles[article.article_id] = article
+
         self._prune_old_articles()
 
         logger.info(
             (
-                "News fetch complete: %d new, %d total in store "
-                "(articles_dropped_low_text_quality=%d, gdelt_summary_url_filtered=%d, "
-                "google_summary_parsed=%d)"
+                "News fetch complete: %d new, %d total, %d sources "
+                "(dropped_low_quality=%d, source_fetch_failures=%d, source_rows_skipped=%d)"
             ),
             len(new_articles),
             len(self._articles),
+            len(sources),
             self._ingest_stats["articles_dropped_low_text_quality"],
-            self._ingest_stats["gdelt_summary_url_filtered"],
-            self._ingest_stats["google_summary_parsed"],
+            self._ingest_stats["source_fetch_failures"],
+            self._ingest_stats["source_rows_skipped"],
         )
         return new_articles
 
@@ -180,11 +116,9 @@ class NewsFeedService:
         return articles
 
     def get_unembedded_articles(self) -> list[NewsArticle]:
-        """Get articles that haven't been embedded yet."""
         return [a for a in self._articles.values() if a.embedding is None]
 
     def clear(self) -> int:
-        """Clear all articles from the store."""
         count = len(self._articles)
         self._articles.clear()
         return count
@@ -194,36 +128,53 @@ class NewsFeedService:
         return len(self._articles)
 
     async def fetch_for_topics(self, topics: list[str]) -> list[NewsArticle]:
-        """On-demand fetch for specific topics (e.g. triggered by scanner).
+        """Topic-targeted fetch from configured story sources.
 
-        Useful for reactive news fetching when the scanner detects new markets
-        or price movements.  Only hits Google News RSS (fastest free source).
+        Topics are matched against source category overrides, names, descriptions,
+        and slugs; only matching sources are polled.
         """
-        if not topics:
+        normalized_topics = {
+            str(topic or "").strip().lower()
+            for topic in topics
+            if str(topic or "").strip()
+        }
+        if not normalized_topics:
             return []
+
+        sources = await self._load_enabled_story_sources()
+        targeted: list[DataSource] = []
+        for source in sources:
+            config = dict(source.config or {})
+            haystack_parts = [
+                str(source.slug or ""),
+                str(source.name or ""),
+                str(source.description or ""),
+                str(config.get("category_override") or ""),
+                str(config.get("category_filter") or ""),
+            ]
+            haystack = " ".join(haystack_parts).strip().lower()
+            if any(topic in haystack for topic in normalized_topics):
+                targeted.append(source)
+
+        if not targeted:
+            return []
+
+        fetched_articles = await self._fetch_articles_from_sources(targeted)
         new_articles: list[NewsArticle] = []
-        tasks = [self._fetch_google_news_rss(t, max_results=10) for t in topics[:5]]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for result in results:
-            if isinstance(result, list):
-                for article in result:
-                    if article.article_id not in self._articles:
-                        self._articles[article.article_id] = article
-                        new_articles.append(article)
+        for article in fetched_articles:
+            if article.article_id not in self._articles:
+                self._articles[article.article_id] = article
+                new_articles.append(article)
+
         if new_articles:
             logger.info(
-                "Reactive news fetch: %d new articles for %d topics",
+                "Reactive news fetch: %d new articles from %d targeted sources",
                 len(new_articles),
-                len(topics),
+                len(targeted),
             )
         return new_articles
 
-    # ------------------------------------------------------------------
-    # Background scanning
-    # ------------------------------------------------------------------
-
     async def start(self, interval_seconds: Optional[int] = None) -> None:
-        """Start continuous background news fetching."""
         if self._running:
             return
         self._running = True
@@ -232,7 +183,6 @@ class NewsFeedService:
         logger.info("News feed service started (interval=%ds)", interval)
 
     def stop(self) -> None:
-        """Stop background fetching."""
         self._running = False
         if self._task and not self._task.done():
             self._task.cancel()
@@ -242,301 +192,182 @@ class NewsFeedService:
         while self._running:
             try:
                 new_articles = await self.fetch_all()
-                # Persist to DB + prune expired rows periodically
                 if new_articles:
                     await self.persist_to_db()
                     await self.prune_db()
-                    # Push new article count to frontend via WS
                     try:
                         from api.websocket import broadcast_news_update
 
                         await broadcast_news_update(len(new_articles))
                     except Exception:
-                        pass  # WS not available yet during startup
-            except Exception as e:
-                logger.error("News scan loop error: %s", e)
+                        pass
+            except Exception as exc:
+                logger.error("News scan loop error: %s", exc)
             await asyncio.sleep(interval)
 
-    # ------------------------------------------------------------------
-    # Google News RSS
-    # ------------------------------------------------------------------
-
-    async def _fetch_google_news_topics(self) -> list[NewsArticle]:
-        """Fetch from Google News RSS for multiple topic feeds."""
-        all_articles: list[NewsArticle] = []
-        tasks = []
-        for topic in _GOOGLE_NEWS_TOPICS:
-            tasks.append(self._fetch_google_news_rss(topic))
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for result in results:
-            if isinstance(result, list):
-                all_articles.extend(result)
-        return all_articles
-
-    async def _fetch_google_news_rss(self, query: str, max_results: int = 40) -> list[NewsArticle]:
-        """Fetch articles from Google News RSS."""
-        try:
-            encoded = urllib.parse.quote(query)
-            url = f"https://news.google.com/rss/search?q={encoded}&hl=en-US&gl=US&ceid=US:en"
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-                resp = await client.get(url, headers={"User-Agent": _USER_AGENT})
-                if resp.status_code != 200:
-                    return []
-
-                root = ElementTree.fromstring(resp.text)
-                articles: list[NewsArticle] = []
-
-                for item in root.findall(".//item")[:max_results]:
-                    title = item.findtext("title", "").strip()
-                    link = item.findtext("link", "").strip()
-                    pub_date = item.findtext("pubDate", "").strip()
-                    source = item.findtext("source", "").strip()
-                    description = item.findtext("description", "").strip()
-
-                    if not link:
-                        continue
-
-                    # Extract source from title if not present
-                    if " - " in title and not source:
-                        parts = title.rsplit(" - ", 1)
-                        if len(parts) == 2:
-                            title = parts[0].strip()
-                            source = parts[1].strip()
-                    title = _strip_title_source_suffix(title, source)
-
-                    published = _parse_rss_date(pub_date)
-                    article_id = _make_article_id(link)
-                    summary = _clean_summary_text(description, max_len=500)
-                    if summary:
-                        self._inc_ingest_stat("google_summary_parsed")
-
-                    articles.append(
-                        NewsArticle(
-                            article_id=article_id,
-                            title=title,
-                            url=link,
-                            source=source or "Google News",
-                            published=published,
-                            summary=summary,
-                            feed_source="google_news",
-                            category=query,
-                        )
-                    )
-                return articles
-
-        except Exception as e:
-            logger.debug("Google News RSS fetch failed for '%s': %s", query, e)
-            return []
-
-    # ------------------------------------------------------------------
-    # GDELT DOC 2.0 API
-    # ------------------------------------------------------------------
-
-    async def _fetch_gdelt(self) -> list[NewsArticle]:
-        """Fetch recent articles from GDELT DOC 2.0 API.
-
-        GDELT monitors global news in 100+ languages and updates every 15 minutes.
-        The DOC API returns articles matching a query with metadata.
-        """
-        all_articles: list[NewsArticle] = []
-        tasks = [self._fetch_gdelt_query(q) for q in _GDELT_QUERIES]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for result in results:
-            if isinstance(result, list):
-                all_articles.extend(result)
-        return all_articles
-
-    async def _fetch_gdelt_query(self, query: str, max_results: int = 30) -> list[NewsArticle]:
-        """Fetch from GDELT DOC 2.0 API for a single query."""
-        try:
-            encoded = urllib.parse.quote(query)
-            url = (
-                f"https://api.gdeltproject.org/api/v2/doc/doc"
-                f"?query={encoded}&mode=artlist&maxrecords={max_results}"
-                f"&format=json&sort=datedesc&timespan={_GDELT_TIMESPAN}"
+    async def _load_enabled_story_sources(self) -> list[DataSource]:
+        async with AsyncSessionLocal() as session:
+            query = (
+                select(DataSource)
+                .where(DataSource.source_key == "stories")
+                .where(DataSource.enabled == True)  # noqa: E712
+                .order_by(DataSource.sort_order.asc(), DataSource.slug.asc())
             )
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-                resp = await client.get(url, headers={"User-Agent": _USER_AGENT})
-                if resp.status_code != 200:
+            return list((await session.execute(query)).scalars().all())
+
+    async def _fetch_articles_from_sources(self, sources: list[DataSource]) -> list[NewsArticle]:
+        sem = asyncio.Semaphore(_MAX_SOURCE_FETCH_CONCURRENCY)
+
+        async def _run(source: DataSource) -> list[NewsArticle]:
+            async with sem:
+                try:
+                    rows = await self._fetch_source_rows(source)
+                except Exception as exc:
+                    self._inc_ingest_stat("source_fetch_failures")
+                    logger.debug("Story source fetch failed for '%s': %s", source.slug, exc)
                     return []
 
-                data = resp.json()
-                raw_articles = data.get("articles", [])
-                articles: list[NewsArticle] = []
-
-                for raw in raw_articles[:max_results]:
-                    art_url = raw.get("url", "")
-                    title = raw.get("title", "")
-                    source = raw.get("domain", raw.get("source", ""))
-                    date_str = raw.get("seendate", "")
-
-                    if not art_url or not title:
+                out: list[NewsArticle] = []
+                for row in rows:
+                    article = self._row_to_article(source, row)
+                    if article is None:
+                        self._inc_ingest_stat("source_rows_skipped")
                         continue
+                    out.append(article)
+                return out
 
-                    published = _parse_gdelt_date(date_str)
-                    article_id = _make_article_id(art_url)
-                    summary = self._pick_gdelt_summary(raw)
-
-                    articles.append(
-                        NewsArticle(
-                            article_id=article_id,
-                            title=title,
-                            url=art_url,
-                            source=source,
-                            published=published,
-                            summary=summary,
-                            feed_source="gdelt",
-                            category=query,
-                        )
-                    )
-                return articles
-
-        except Exception as e:
-            logger.debug("GDELT fetch failed for '%s': %s", query, e)
-            return []
-
-    # ------------------------------------------------------------------
-    # Custom RSS feeds
-    # ------------------------------------------------------------------
-
-    async def _load_rss_configuration(self) -> dict[str, Any]:
-        """Read RSS feed config from DB app settings."""
-        default_custom = default_custom_rss_feeds()
-
-        try:
-            async with AsyncSessionLocal() as session:
-                result = await session.execute(select(AppSettings).where(AppSettings.id == "default"))
-                row = result.scalar_one_or_none()
-        except Exception as exc:
-            logger.debug("RSS config DB read failed, using defaults: %s", exc)
-            return {
-                "custom_rss_feeds": default_custom,
-                "rss_enabled": True,
-            }
-
-        if row is None:
-            return {
-                "custom_rss_feeds": default_custom,
-                "rss_enabled": True,
-            }
-
-        raw_custom = getattr(row, "news_rss_feeds_json", None)
-        custom_rows = normalize_custom_rss_feeds(raw_custom) if raw_custom else default_custom
-        raw_gov_enabled = getattr(row, "news_gov_rss_enabled", None)
-        rss_enabled = True if raw_gov_enabled is None else bool(raw_gov_enabled)
-        return {
-            "custom_rss_feeds": custom_rows,
-            "rss_enabled": rss_enabled,
-        }
-
-    async def _fetch_custom_rss_feeds(self, feed_rows: list[dict[str, Any]]) -> list[NewsArticle]:
-        """Fetch from user-configured RSS feed URLs."""
-        all_articles: list[NewsArticle] = []
-        tasks = [self._fetch_single_rss(feed_info) for feed_info in feed_rows if bool(feed_info.get("enabled", True))]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*[_run(source) for source in sources], return_exceptions=True)
+        flattened: list[NewsArticle] = []
         for result in results:
-            if isinstance(result, list):
-                all_articles.extend(result)
-        return all_articles
+            if isinstance(result, Exception):
+                self._inc_ingest_stat("source_fetch_failures")
+                continue
+            flattened.extend(result)
+        return flattened
 
-    async def _fetch_single_rss(self, feed_info: dict[str, Any], max_results: int = 20) -> list[NewsArticle]:
-        """Fetch from a single RSS feed URL."""
-        feed_url = str(feed_info.get("url") or "").strip()
-        if not feed_url:
-            return []
-        feed_name = str(feed_info.get("name") or "").strip() or feed_url
-        feed_category = str(feed_info.get("category") or "").strip().lower()
-        try:
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-                resp = await client.get(feed_url, headers={"User-Agent": _USER_AGENT})
-                if resp.status_code != 200:
-                    return []
-
-                root = ElementTree.fromstring(resp.text)
-                articles: list[NewsArticle] = []
-
-                # Try both RSS and Atom formats
-                items = root.findall(".//item") or root.findall(".//{http://www.w3.org/2005/Atom}entry")
-
-                for item in items[:max_results]:
-                    # RSS format
-                    title = (
-                        item.findtext("title", "").strip()
-                        or item.findtext("{http://www.w3.org/2005/Atom}title", "").strip()
-                    )
-                    link = item.findtext("link", "").strip()
-                    if not link:
-                        atom_link = item.find("{http://www.w3.org/2005/Atom}link")
-                        if atom_link is not None:
-                            link = atom_link.get("href", "")
-                    pub_date = (
-                        item.findtext("pubDate", "").strip()
-                        or item.findtext("{http://www.w3.org/2005/Atom}published", "").strip()
-                    )
-                    description = (
-                        item.findtext("description", "").strip()
-                        or item.findtext("{http://www.w3.org/2005/Atom}summary", "").strip()
-                    )
-
-                    if not link or not title:
-                        continue
-
-                    article_id = _make_article_id(link)
-                    published = _parse_rss_date(pub_date)
-
-                    articles.append(
-                        NewsArticle(
-                            article_id=article_id,
-                            title=title,
-                            url=link,
-                            source=feed_name,
-                            published=published,
-                            summary=_strip_html(description)[:500],
-                            feed_source="custom_rss",
-                            category=feed_category,
-                        )
-                    )
-                return articles
-
-        except Exception as e:
-            logger.debug("Custom RSS fetch failed for '%s': %s", feed_url, e)
+    async def _fetch_source_rows(self, source: DataSource) -> list[dict[str, Any]]:
+        config = dict(source.config or {})
+        limit = int(max(1, min(5000, _as_float(config.get("limit"), 200.0))))
+        slug = str(source.slug or "").strip().lower()
+        if not slug:
             return []
 
-    # ------------------------------------------------------------------
-    # Government RSS feeds
-    # ------------------------------------------------------------------
+        run_started_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
-    async def _fetch_rss(self) -> list[NewsArticle]:
-        """Fetch from official RSS feeds owned by the news domain."""
-        try:
-            from services.news.gov_rss_feeds import gov_rss_service
+        async with AsyncSessionLocal() as session:
+            row = await session.get(DataSource, source.id)
+            if row is None or not bool(row.enabled):
+                return []
 
-            gov_articles = await gov_rss_service.fetch_all(consumer="news")
-            articles: list[NewsArticle] = []
-            for ga in gov_articles:
-                articles.append(
-                    NewsArticle(
-                        article_id=ga.article_id,
-                        title=ga.title,
-                        url=ga.url,
-                        source=ga.source,
-                        published=ga.published,
-                        summary=ga.summary,
-                        feed_source="rss",
-                        category=ga.agency,
+            run_result = await run_data_source(session, row, max_records=limit, commit=True)
+            if str(run_result.get("status") or "").strip().lower() != "success":
+                return []
+
+            records = (
+                (
+                    await session.execute(
+                        select(DataSourceRecord)
+                        .where(DataSourceRecord.source_slug == slug)
+                        .where(DataSourceRecord.ingested_at >= run_started_at)
+                        .order_by(desc(DataSourceRecord.observed_at), desc(DataSourceRecord.ingested_at))
+                        .limit(limit)
                     )
                 )
-            return articles
-        except Exception as e:
-            logger.debug("RSS integration failed: %s", e)
-            return []
+                .scalars()
+                .all()
+            )
 
-    # ------------------------------------------------------------------
-    # Database persistence
-    # ------------------------------------------------------------------
+        out: list[dict[str, Any]] = []
+        for record in records:
+            payload = dict(record.payload_json or {}) if isinstance(record.payload_json, dict) else {}
+            transformed = dict(record.transformed_json or {}) if isinstance(record.transformed_json, dict) else {}
+            merged: dict[str, Any] = {}
+            merged.update(payload)
+            merged.update(transformed)
+            out.append(
+                {
+                    "external_id": record.external_id,
+                    "title": record.title or merged.get("title"),
+                    "summary": record.summary or merged.get("summary"),
+                    "category": record.category or merged.get("category"),
+                    "source": record.source or merged.get("source"),
+                    "url": record.url or merged.get("url"),
+                    "observed_at": record.observed_at or record.ingested_at,
+                    "payload": payload,
+                    "feed_source": merged.get("feed_source"),
+                    "tags": list(record.tags_json or []),
+                }
+            )
+        return out
+
+    def _row_to_article(self, source: DataSource, row: dict[str, Any]) -> NewsArticle | None:
+        config = dict(source.config or {})
+        url = _as_text(row.get("url"))
+        title = _as_text(row.get("title"))
+        if not url or not title:
+            return None
+
+        external_id = _as_text(row.get("external_id"))
+        if not external_id:
+            external_id = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+
+        source_name = (
+            _as_text(row.get("source"))
+            or _as_text(config.get("source_name"))
+            or _as_text(source.name)
+            or "news"
+        )
+        category = (
+            _as_text(row.get("category"))
+            or _as_text(config.get("category_override"))
+            or ""
+        ).lower()
+
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        feed_source = (
+            _as_text(row.get("feed_source"))
+            or _as_text(payload.get("feed_source"))
+            or _as_text(config.get("feed_source"))
+            or _infer_feed_source_from_slug(str(source.slug or ""))
+        ).lower()
+
+        observed_at = (
+            _parse_datetime(row.get("observed_at"))
+            or _parse_datetime(row.get("published"))
+            or _parse_datetime(row.get("published_at"))
+            or _parse_datetime(payload.get("published"))
+        )
+        fetched_at = (
+            _parse_datetime(row.get("fetched_at"))
+            or _parse_datetime(payload.get("fetched_at"))
+            or datetime.now(timezone.utc)
+        )
+
+        if feed_source == "gdelt":
+            summary = self._pick_gdelt_summary(row)
+        else:
+            summary = _clean_summary_text(
+                row.get("summary")
+                or row.get("description")
+                or payload.get("summary")
+                or payload.get("description")
+                or "",
+                max_len=2000,
+            )
+
+        return NewsArticle(
+            article_id=external_id,
+            title=title,
+            url=url,
+            source=source_name,
+            published=observed_at,
+            summary=summary,
+            feed_source=feed_source,
+            category=category,
+            fetched_at=fetched_at,
+        )
 
     async def persist_to_db(self) -> int:
-        """Persist in-memory articles to the database for long-term retention."""
         try:
             from models.database import AsyncSessionLocal, NewsArticleCache
             from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -575,12 +406,11 @@ class NewsFeedService:
 
             logger.debug("Persisted %d articles to DB", persisted)
             return persisted
-        except Exception as e:
-            logger.warning("Failed to persist articles to DB: %s", e)
+        except Exception as exc:
+            logger.warning("Failed to persist articles to DB: %s", exc)
             return 0
 
     async def load_from_db(self) -> int:
-        """Load articles from DB into in-memory store on startup."""
         try:
             from models.database import AsyncSessionLocal, NewsArticleCache
             from sqlalchemy import select
@@ -608,12 +438,11 @@ class NewsFeedService:
                     loaded += 1
             logger.info("Loaded %d articles from DB", loaded)
             return loaded
-        except Exception as e:
-            logger.warning("Failed to load articles from DB: %s", e)
+        except Exception as exc:
+            logger.warning("Failed to load articles from DB: %s", exc)
             return 0
 
     async def prune_db(self) -> int:
-        """Remove articles older than TTL from the database."""
         try:
             from models.database import AsyncSessionLocal, NewsArticleCache
             from sqlalchemy import delete
@@ -626,12 +455,11 @@ class NewsFeedService:
             if count:
                 logger.info("Pruned %d expired articles from DB", count)
             return count
-        except Exception as e:
-            logger.warning("Failed to prune DB articles: %s", e)
+        except Exception as exc:
+            logger.warning("Failed to prune DB articles: %s", exc)
             return 0
 
     def search_articles(self, query: str, max_age_hours: int = 168, limit: int = 50) -> list[NewsArticle]:
-        """Search articles by keyword in title / summary / category."""
         q = query.lower().strip()
         if not q:
             return []
@@ -651,30 +479,25 @@ class NewsFeedService:
         self._ingest_stats = {
             "articles_dropped_low_text_quality": 0,
             "gdelt_summary_url_filtered": 0,
-            "google_summary_parsed": 0,
+            "source_fetch_failures": 0,
+            "source_rows_skipped": 0,
         }
 
     def _inc_ingest_stat(self, key: str, delta: int = 1) -> None:
         self._ingest_stats[key] = int(self._ingest_stats.get(key, 0)) + int(delta)
 
-    def _pick_gdelt_summary(self, raw: dict) -> str:
-        for key in ("snippet", "description", "excerpt", "summary", "content"):
-            value = raw.get(key)
-            cleaned = _clean_summary_text(value, max_len=500)
-            if not cleaned:
+    def _pick_gdelt_summary(self, raw: dict[str, Any]) -> str:
+        for key in ("snippet", "summary", "description", "excerpt", "content", "body"):
+            text = _clean_summary_text(raw.get(key), max_len=2000)
+            if not text:
                 continue
-            if _looks_like_url(cleaned):
+            if _is_url_like_summary(text):
                 self._inc_ingest_stat("gdelt_summary_url_filtered")
                 continue
-            return cleaned
+            return text
         return ""
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
     def _prune_old_articles(self) -> None:
-        """Remove articles older than the configured TTL."""
         ttl_seconds = settings.NEWS_ARTICLE_TTL_HOURS * 3600
         cutoff = datetime.now(timezone.utc).timestamp() - ttl_seconds
         to_remove = [aid for aid, article in self._articles.items() if article.fetched_at.timestamp() < cutoff]
@@ -684,81 +507,91 @@ class NewsFeedService:
             logger.debug("Pruned %d old articles", len(to_remove))
 
 
-# ======================================================================
-# Module-level helpers
-# ======================================================================
-
-
-def _make_article_id(url: str) -> str:
-    """Create a deterministic article ID from URL."""
-    return hashlib.sha256(url.encode()).hexdigest()[:16]
-
-
-def _parse_rss_date(date_str: str) -> Optional[datetime]:
-    """Parse RFC 2822 date from RSS feeds."""
-    if not date_str:
+def _as_text(value: Any) -> str | None:
+    if value is None:
         return None
-    formats = [
+    text = str(value).strip()
+    return text or None
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except Exception:
+        return float(default)
+    if parsed != parsed:
+        return float(default)
+    return parsed
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=timezone.utc)
+
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+
+    for fmt in (
         "%a, %d %b %Y %H:%M:%S %z",
         "%a, %d %b %Y %H:%M:%S %Z",
         "%Y-%m-%dT%H:%M:%S%z",
         "%Y-%m-%dT%H:%M:%SZ",
-    ]
-    for fmt in formats:
+        "%Y%m%dT%H%M%S",
+    ):
         try:
-            return datetime.strptime(date_str.strip(), fmt)
+            parsed = datetime.strptime(text, fmt)
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
         except ValueError:
             continue
-    return None
 
-
-def _parse_gdelt_date(date_str: str) -> Optional[datetime]:
-    """Parse GDELT date format (YYYYMMDDTHHMMSSz or similar)."""
-    if not date_str:
-        return None
     try:
-        # GDELT uses YYYYMMDDTHHMMSSZ format
-        cleaned = date_str.replace("Z", "").replace("z", "")
-        return datetime.strptime(cleaned, "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
-    except ValueError:
-        pass
-    try:
-        return datetime.strptime(date_str[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        parsed = datetime.fromisoformat(text)
     except ValueError:
         return None
 
-
-def _strip_html(text: str) -> str:
-    """Remove HTML tags from a string."""
-    return re.sub(r"<[^>]+>", "", text).strip()
-
-
-def _looks_like_url(value: str) -> bool:
-    if not value:
-        return False
-    return bool(re.match(r"^https?://", value.strip(), flags=re.IGNORECASE))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
-def _clean_summary_text(value: object, max_len: int = 500) -> str:
-    if not isinstance(value, str):
-        return ""
-    text = html.unescape(_strip_html(value))
-    text = re.sub(r"\s+", " ", text).strip()
-    if not text:
-        return ""
-    return text[:max_len]
+def _infer_feed_source_from_slug(slug: str) -> str:
+    lowered = str(slug or "").strip().lower()
+    if "google" in lowered:
+        return "google_news"
+    if "gdelt" in lowered:
+        return "gdelt"
+    if "custom" in lowered:
+        return "custom_rss"
+    return "rss"
 
 
-def _strip_title_source_suffix(title: str, source: str) -> str:
-    if not title or not source:
-        return title
-    source_norm = source.strip()
-    if not source_norm:
-        return title
-    suffix = f" - {source_norm}"
-    if title.endswith(suffix):
-        return title[: -len(suffix)].strip()
-    return title
+def _merge_record_payloads(raw: dict[str, Any], transformed: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(raw)
+    merged = dict(raw)
+    merged.update(dict(transformed or {}))
+
+    payload_from_row = merged.get("payload")
+    if isinstance(payload_from_row, dict):
+        payload.update(payload_from_row)
+
+    merged["payload"] = payload
+    return merged
+
+
+async def _invoke_callable(func: Any, *args: Any, **kwargs: Any) -> Any:
+    result = func(*args, **kwargs)
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 def _has_min_text_quality(title: str, summary: str) -> bool:
@@ -771,8 +604,27 @@ def _has_min_text_quality(title: str, summary: str) -> bool:
     return True
 
 
-# ======================================================================
-# Singleton
-# ======================================================================
+def _clean_summary_text(value: Any, *, max_len: int = 2000) -> str:
+    text = _as_text(value) or ""
+    if not text:
+        return ""
+    cleaned = re.sub(r"<[^>]+>", " ", text)
+    cleaned = html.unescape(cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if len(cleaned) <= max_len:
+        return cleaned
+    return cleaned[:max_len].rstrip()
+
+
+def _is_url_like_summary(value: str) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    if text.startswith(("http://", "https://", "www.")) and " " not in text:
+        return True
+    if re.fullmatch(r"[a-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+", text) and "http" in text:
+        return True
+    return False
+
 
 news_feed_service = NewsFeedService()

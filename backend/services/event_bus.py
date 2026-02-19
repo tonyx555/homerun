@@ -1,55 +1,42 @@
-"""WebSocket broadcast bus — pushes real-time updates to connected frontend clients.
-
-**Purpose**: Workers publish events (scanner snapshot, signal updates, worker
-status changes) when they produce new data. The ``SnapshotBroadcaster``
-subscribes here and forwards deltas to all connected WebSocket clients so
-the frontend receives live updates without polling.
-
-**Not for strategy routing.** Strategies subscribe to ``DataEvent`` objects
-via ``event_dispatcher`` (``services.event_dispatcher``), not this bus.
-The two systems serve different purposes:
-
-- ``event_bus`` → frontend WebSocket broadcast (UI live updates)
-- ``event_dispatcher`` → strategy DataEvent routing (trading logic)
-
-Thread-safe: ``publish()`` can be called from any asyncio task in the same
-event loop.  Subscribers are invoked concurrently via ``asyncio.create_task``
-so a slow callback never blocks the publisher.
-"""
+"""WebSocket broadcast bus with Redis stream fan-out for cross-process delivery."""
 
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Awaitable, Callable, Dict, List
+import json
+import os
+import socket
+import uuid
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from config import settings
+from services.redis_streams import redis_streams
 from utils.logger import get_logger
 
 logger = get_logger("event_bus")
 
-# Type alias for subscriber callbacks.
 EventCallback = Callable[[str, Dict[str, Any]], Awaitable[None]]
 
 
 class EventBus:
-    """Minimalist async pub/sub for in-process event routing."""
-
     def __init__(self) -> None:
         self._subscribers: Dict[str, List[EventCallback]] = {}
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+        self._stream_key = str(settings.EVENT_BUS_STREAM_KEY)
+        self._stream_maxlen = int(settings.REDIS_EVENT_STREAM_MAXLEN)
+        self._read_block_ms = int(settings.REDIS_STREAM_BLOCK_MS)
+        self._read_count = int(settings.REDIS_STREAM_READ_COUNT)
+        self._instance_id = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+        self._listener_task: Optional[asyncio.Task] = None
+        self._start_lock = asyncio.Lock()
+        self._running = False
+        self._last_stream_id = "$"
 
     def subscribe(self, event_type: str, callback: EventCallback) -> None:
-        """Register *callback* for *event_type*.
-
-        Use ``"*"`` as event_type to receive every event (wildcard).
-        """
         self._subscribers.setdefault(event_type, []).append(callback)
         logger.debug("Subscribed to event_type=%s", event_type)
+        self._ensure_listener_started()
 
     def unsubscribe(self, event_type: str, callback: EventCallback) -> None:
-        """Remove a previously registered callback."""
         callbacks = self._subscribers.get(event_type)
         if callbacks is None:
             return
@@ -58,32 +45,101 @@ class EventBus:
         except ValueError:
             pass
 
-    async def publish(self, event_type: str, data: Dict[str, Any]) -> None:
-        """Publish an event to all matching subscribers.
+    def _ensure_listener_started(self) -> None:
+        if self._running:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self.start())
 
-        Matching includes exact event_type subscribers **and** wildcard
-        (``"*"``) subscribers.  Each callback is fired as a task so a slow
-        or failing subscriber does not block the publisher.
-        """
+    async def start(self) -> None:
+        if self._running:
+            return
+        async with self._start_lock:
+            if self._running:
+                return
+            self._running = True
+            self._last_stream_id = "$"
+            self._listener_task = asyncio.create_task(
+                self._run_stream_listener(),
+                name="event-bus-redis-listener",
+            )
+            logger.info(
+                "Event bus Redis listener started",
+                stream=self._stream_key,
+                instance=self._instance_id,
+            )
+
+    async def stop(self) -> None:
+        self._running = False
+        task = self._listener_task
+        self._listener_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    async def publish(self, event_type: str, data: Dict[str, Any]) -> None:
+        self._dispatch_local(event_type, data)
+        await self._publish_remote(event_type, data)
+
+    def _dispatch_local(self, event_type: str, data: Dict[str, Any]) -> None:
         callbacks: List[EventCallback] = []
         callbacks.extend(self._subscribers.get(event_type, []))
         callbacks.extend(self._subscribers.get("*", []))
-
         if not callbacks:
             return
-
         for cb in callbacks:
             try:
-                # Fire-and-forget: wrap in a task so the publisher is never
-                # blocked by a slow consumer.
                 asyncio.create_task(_safe_invoke(cb, event_type, data))
             except Exception:
-                # If we cannot even create the task (e.g. no running loop),
-                # log and move on -- never crash the worker.
                 logger.debug(
                     "Failed to schedule event callback",
                     event_type=event_type,
                 )
+
+    async def _publish_remote(self, event_type: str, data: Dict[str, Any]) -> None:
+        payload = {
+            "instance_id": self._instance_id,
+            "event_type": event_type,
+            "data": data,
+        }
+        await redis_streams.append_json(
+            self._stream_key,
+            payload,
+            maxlen=self._stream_maxlen,
+        )
+
+    async def _run_stream_listener(self) -> None:
+        own_marker = f"\"instance_id\":\"{self._instance_id}\""
+        while self._running:
+            messages = await redis_streams.read_raw(
+                self._stream_key,
+                last_id=self._last_stream_id,
+                block_ms=self._read_block_ms,
+                count=self._read_count,
+            )
+            if not messages:
+                continue
+            for entry_id, raw in messages:
+                self._last_stream_id = entry_id
+                if own_marker in raw:
+                    continue
+                try:
+                    payload = json.loads(raw)
+                except Exception:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                event_type = payload.get("event_type")
+                data = payload.get("data")
+                if not isinstance(event_type, str) or not isinstance(data, dict):
+                    continue
+                self._dispatch_local(event_type, data)
 
 
 async def _safe_invoke(
@@ -91,7 +147,6 @@ async def _safe_invoke(
     event_type: str,
     data: Dict[str, Any],
 ) -> None:
-    """Invoke a subscriber callback, swallowing any exception."""
     try:
         await cb(event_type, data)
     except Exception as exc:
@@ -102,7 +157,4 @@ async def _safe_invoke(
         )
 
 
-# ------------------------------------------------------------------
-# Module-level singleton -- import and use directly.
-# ------------------------------------------------------------------
 event_bus = EventBus()

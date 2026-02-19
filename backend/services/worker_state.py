@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
+import resource
+import subprocess
+import sys
 from datetime import datetime
+
+from config import settings
 from utils.utcnow import utcnow
 from typing import Any, Optional
 
 from sqlalchemy import select
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import WorkerControl, WorkerSnapshot
@@ -22,8 +31,36 @@ DEFAULT_WORKER_INTERVALS: dict[str, int] = {
     "tracked_traders": 60,
     "trader_orchestrator": 2,
     "discovery": 3600,
-    "world_intelligence": 300,
+    "events": 300,
 }
+SQLITE_LOCK_RETRY_ATTEMPTS = 6
+SQLITE_LOCK_BASE_DELAY_SECONDS = 0.15
+SQLITE_LOCK_MAX_DELAY_SECONDS = 1.5
+
+
+def _is_sqlite_lock_error(exc: Exception) -> bool:
+    message = str(getattr(exc, "orig", exc)).lower()
+    return "database is locked" in message or "database table is locked" in message
+
+
+def _sqlite_lock_retry_delay(attempt: int) -> float:
+    return min(SQLITE_LOCK_BASE_DELAY_SECONDS * (2**attempt), SQLITE_LOCK_MAX_DELAY_SECONDS)
+
+
+async def _commit_with_retry(session: AsyncSession) -> None:
+    for attempt in range(SQLITE_LOCK_RETRY_ATTEMPTS):
+        try:
+            if "sqlite" in settings.DATABASE_URL.lower():
+                await session.execute(text("PRAGMA busy_timeout=1500"))
+            await session.commit()
+            return
+        except OperationalError as exc:
+            await session.rollback()
+            is_locked = _is_sqlite_lock_error(exc)
+            is_last = attempt >= SQLITE_LOCK_RETRY_ATTEMPTS - 1
+            if not is_locked or is_last:
+                raise
+            await asyncio.sleep(_sqlite_lock_retry_delay(attempt))
 
 
 def _now() -> datetime:
@@ -32,6 +69,67 @@ def _now() -> datetime:
 
 def _default_interval(worker_name: str) -> int:
     return int(DEFAULT_WORKER_INTERVALS.get(worker_name, 60))
+
+
+def _read_process_rss_bytes(pid: int) -> Optional[int]:
+    if pid <= 0:
+        return None
+    try:
+        proc = subprocess.run(
+            ["ps", "-o", "rss=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=0.25,
+        )
+    except Exception:
+        return None
+
+    if proc.returncode != 0:
+        return None
+
+    output = str(proc.stdout or "").strip()
+    if not output:
+        return None
+
+    line = output.splitlines()[-1].strip()
+    if not line:
+        return None
+
+    try:
+        rss_kib = int(line.split()[0])
+    except (TypeError, ValueError):
+        return None
+
+    if rss_kib <= 0:
+        return None
+    return rss_kib * 1024
+
+
+def _read_peak_rss_bytes() -> Optional[int]:
+    try:
+        peak = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss or 0)
+    except Exception:
+        return None
+    if peak <= 0:
+        return None
+    if sys.platform == "darwin":
+        return peak
+    return peak * 1024
+
+
+def _with_runtime_process_stats(base_stats: Optional[dict[str, Any]]) -> dict[str, Any]:
+    stats_payload = dict(base_stats or {})
+    pid = os.getpid()
+    stats_payload["pid"] = pid
+
+    rss_bytes = _read_process_rss_bytes(pid)
+    if rss_bytes is None:
+        rss_bytes = _read_peak_rss_bytes()
+    if rss_bytes is not None and rss_bytes > 0:
+        stats_payload["rss_bytes"] = int(rss_bytes)
+        stats_payload["memory_mb"] = round(float(rss_bytes) / (1024 * 1024), 1)
+    return stats_payload
 
 
 async def ensure_worker_control(
@@ -149,8 +247,9 @@ async def write_worker_snapshot(
         row.interval_seconds = max(1, int(interval_seconds))
     row.lag_seconds = lag_seconds
     row.last_error = last_error
-    row.stats_json = stats or {}
-    await session.commit()
+    stats_payload = _with_runtime_process_stats(stats)
+    row.stats_json = stats_payload
+    await _commit_with_retry(session)
 
     # Publish worker status update event.
     try:
@@ -167,7 +266,6 @@ async def write_worker_snapshot(
                         "last_run_at": to_iso(last_run_at),
                         "lag_seconds": lag_seconds,
                         "last_error": last_error,
-                        "stats": stats or {},
                         "updated_at": to_iso(row.updated_at),
                     }
                 ],
@@ -212,7 +310,11 @@ async def read_worker_snapshot(
     }
 
 
-async def list_worker_snapshots(session: AsyncSession) -> list[dict[str, Any]]:
+async def list_worker_snapshots(
+    session: AsyncSession,
+    *,
+    include_stats: bool = True,
+) -> list[dict[str, Any]]:
     result = await session.execute(select(WorkerSnapshot).order_by(WorkerSnapshot.worker_name.asc()))
     rows = list(result.scalars().all())
 
@@ -220,20 +322,20 @@ async def list_worker_snapshots(session: AsyncSession) -> list[dict[str, Any]]:
     seen: set[str] = set()
     for row in rows:
         seen.add(row.worker_name)
-        out.append(
-            {
-                "worker_name": row.worker_name,
-                "running": bool(row.running),
-                "enabled": bool(row.enabled),
-                "current_activity": row.current_activity,
-                "interval_seconds": int(row.interval_seconds or _default_interval(row.worker_name)),
-                "last_run_at": to_iso(row.last_run_at),
-                "lag_seconds": row.lag_seconds,
-                "last_error": row.last_error,
-                "stats": row.stats_json or {},
-                "updated_at": to_iso(row.updated_at),
-            }
-        )
+        snapshot = {
+            "worker_name": row.worker_name,
+            "running": bool(row.running),
+            "enabled": bool(row.enabled),
+            "current_activity": row.current_activity,
+            "interval_seconds": int(row.interval_seconds or _default_interval(row.worker_name)),
+            "last_run_at": to_iso(row.last_run_at),
+            "lag_seconds": row.lag_seconds,
+            "last_error": row.last_error,
+            "updated_at": to_iso(row.updated_at),
+        }
+        if include_stats:
+            snapshot["stats"] = row.stats_json or {}
+        out.append(snapshot)
 
     for worker_name in DEFAULT_WORKER_INTERVALS:
         if worker_name in seen:

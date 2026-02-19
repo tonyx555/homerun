@@ -42,7 +42,13 @@ from services.smart_wallet_pool import (
 from services.wallet_tracker import wallet_tracker
 from services.worker_state import read_worker_snapshot
 from services.polymarket import polymarket_client
-from services.traders_firehose_pipeline import get_strategy_filtered_trader_opportunities
+from services.trader_data_access import (
+    annotate_trader_signal_source_context,
+    get_strategy_filtered_trader_signals,
+    get_trader_confluence_signals as load_trader_confluence_signals,
+    get_trader_tags as load_trader_tags,
+    get_traders_by_tag as load_traders_by_tag,
+)
 from utils.validation import validate_eth_address
 
 _safe_float = partial(safe_float, reject_nan_inf=True)
@@ -81,7 +87,7 @@ async def _load_tracked_trader_opportunities(
     limit: int,
     include_filtered: bool,
 ) -> list[dict[str, Any]]:
-    return await get_strategy_filtered_trader_opportunities(
+    return await get_strategy_filtered_trader_signals(
         limit=limit,
         include_filtered=include_filtered,
     )
@@ -280,8 +286,8 @@ def _labels_look_like_yes_no(labels: list[str]) -> bool:
         return False
     yes_text = str(labels[0] or "").strip().lower()
     no_text = str(labels[1] or "").strip().lower()
-    yes_aliases = {"yes", "buy yes", "up", "long", "true"}
-    no_aliases = {"no", "buy no", "down", "short", "false"}
+    yes_aliases = {"yes"}
+    no_aliases = {"no"}
     return yes_text in yes_aliases and no_text in no_aliases
 
 
@@ -378,7 +384,7 @@ def _signal_has_direction(signal: dict[str, Any]) -> bool:
         return True
 
     direction = str(signal.get("direction") or "").strip().lower()
-    if direction in {"buy_yes", "buy_no", "buy", "sell", "yes", "no"}:
+    if direction in {"buy_yes", "buy_no", "buy", "sell"}:
         return True
 
     signal_type = str(signal.get("signal_type") or "").strip().lower()
@@ -837,86 +843,26 @@ async def _attach_live_mid_prices_to_signal_rows(rows: list[dict[str, Any]]) -> 
 
 
 async def _annotate_trader_signal_rows(
-    session: AsyncSession,
+    _session: AsyncSession,
     rows: list[dict],
 ) -> list[dict]:
     if not rows:
         return rows
 
-    wallets_by_signal: list[list[str]] = []
-    unique_addresses: set[str] = set()
+    await annotate_trader_signal_source_context(rows)
+
     for row in rows:
-        addresses = _extract_signal_wallet_addresses(row)
-        wallets_by_signal.append(addresses)
-        unique_addresses.update(addresses)
-
-    pool_addresses: set[str] = set()
-    tracked_addresses: set[str] = set()
-    group_ids_by_address: dict[str, set[str]] = defaultdict(set)
-
-    if unique_addresses:
-        discovered_rows = await session.execute(
-            select(DiscoveredWallet.address, DiscoveredWallet.in_top_pool).where(
-                DiscoveredWallet.address.in_(list(unique_addresses))
-            )
-        )
-        for address, in_top_pool in discovered_rows.all():
-            normalized = _normalize_signal_wallet_address(address)
-            if normalized and bool(in_top_pool):
-                pool_addresses.add(normalized)
-
-        tracked_rows = await session.execute(
-            select(TrackedWallet.address).where(TrackedWallet.address.in_(list(unique_addresses)))
-        )
-        for (address,) in tracked_rows.all():
-            normalized = _normalize_signal_wallet_address(address)
-            if normalized:
-                tracked_addresses.add(normalized)
-
-        group_rows = await session.execute(
-            select(TraderGroupMember.wallet_address, TraderGroupMember.group_id)
-            .join(TraderGroup, TraderGroupMember.group_id == TraderGroup.id)
-            .where(
-                TraderGroup.is_active == True,  # noqa: E712
-                TraderGroupMember.wallet_address.in_(list(unique_addresses)),
-            )
-        )
-        for address, group_id in group_rows.all():
-            normalized = _normalize_signal_wallet_address(address)
-            if normalized and group_id:
-                group_ids_by_address[normalized].add(str(group_id))
-
-    for row, wallet_addresses in zip(rows, wallets_by_signal):
-        pool_wallets = sum(1 for addr in wallet_addresses if addr in pool_addresses)
-        tracked_wallets = sum(1 for addr in wallet_addresses if addr in tracked_addresses)
-        group_wallets = sum(1 for addr in wallet_addresses if group_ids_by_address.get(addr))
-        matched_group_ids = sorted(
-            {group_id for addr in wallet_addresses for group_id in group_ids_by_address.get(addr, set())}
-        )
-
-        has_qualified_source = bool(pool_wallets or tracked_wallets or group_wallets)
-        source_flags = {
-            "from_pool": pool_wallets > 0,
-            "from_tracked_traders": tracked_wallets > 0,
-            "from_trader_groups": group_wallets > 0,
-            "qualified": has_qualified_source,
-        }
-        source_breakdown = {
-            "wallets_considered": len(wallet_addresses),
-            "pool_wallets": pool_wallets,
-            "tracked_wallets": tracked_wallets,
-            "group_wallets": group_wallets,
-            "group_count": len(matched_group_ids),
-            "group_ids": matched_group_ids,
-        }
+        wallet_addresses = _extract_signal_wallet_addresses(row)
+        source_flags = row.get("source_flags") if isinstance(row.get("source_flags"), dict) else {}
+        source_breakdown = row.get("source_breakdown") if isinstance(row.get("source_breakdown"), dict) else {}
+        has_qualified_source = bool(source_flags.get("qualified"))
+        row["source_flags"] = source_flags
+        row["source_breakdown"] = source_breakdown
         validation = _build_signal_validation_payload(
             signal=row,
             wallet_addresses=wallet_addresses,
             has_qualified_source=has_qualified_source,
         )
-
-        row["source_flags"] = source_flags
-        row["source_breakdown"] = source_breakdown
         strategy_validation = row.get("validation")
         has_strategy_validation = isinstance(strategy_validation, dict) and (
             "is_tradeable" in row or "validation_reasons" in row
@@ -1478,10 +1424,10 @@ async def get_confluence_signals(
     among skilled traders.
     """
     try:
-        signals = await wallet_intelligence.confluence.get_active_signals(
+        signals = await load_trader_confluence_signals(
             min_strength=min_strength,
-            limit=limit,
             min_tier=min_tier,
+            limit=limit,
         )
         return {"signals": signals}
     except Exception as e:
@@ -2757,7 +2703,7 @@ async def get_all_tags():
     wallets currently carrying that tag.
     """
     try:
-        tags = await wallet_intelligence.tagger.get_all_tags()
+        tags = await load_trader_tags()
         return {"tags": tags}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -2775,10 +2721,7 @@ async def get_wallets_by_tag(
     sorted by rank score.
     """
     try:
-        wallets = await wallet_intelligence.tagger.get_wallets_by_tag(
-            tag_name=tag_name,
-            limit=limit,
-        )
+        wallets = await load_traders_by_tag(tag_name=tag_name, limit=limit)
         return {"wallets": wallets}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

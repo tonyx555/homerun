@@ -37,12 +37,9 @@ from services.shared_state import (
     write_scanner_snapshot,
 )
 from services.worker_state import write_worker_snapshot
+from utils.logger import setup_logging
 
-if not logging.root.handlers:
-    logging.basicConfig(
-        level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO")),
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"), json_format=False)
 logger = logging.getLogger("scanner_worker")
 
 
@@ -100,6 +97,21 @@ async def _hydrate_scanner_pool_from_snapshot() -> int:
         restored.append(opp)
 
     scanner._opportunities = restored
+    scanner._market_price_history = {}
+    scanner._remember_market_tokens_from_opportunities(restored)
+    now_ms = int(now.timestamp() * 1000)
+    restored_history_markets = 0
+    for opp in restored:
+        for market in opp.markets:
+            market_id = str(market.get("id", "") or "")
+            if not market_id:
+                continue
+            history = market.get("price_history")
+            if not isinstance(history, list) or not history:
+                continue
+            merged_len = scanner._merge_market_history_points(market_id, history, now_ms)
+            if merged_len >= 2:
+                restored_history_markets += 1
     if isinstance(existing_status, dict):
         parsed_last_scan = _parse_iso_utc(existing_status.get("last_scan"))
         if parsed_last_scan is not None:
@@ -107,9 +119,10 @@ async def _hydrate_scanner_pool_from_snapshot() -> int:
 
     if restored or dropped_expired:
         logger.info(
-            "Hydrated scanner pool from DB snapshot: restored=%d dropped_expired=%d",
+            "Hydrated scanner pool from DB snapshot: restored=%d dropped_expired=%d history_markets=%d",
             len(restored),
             dropped_expired,
+            restored_history_markets,
         )
     return len(restored)
 
@@ -175,50 +188,15 @@ async def _run_scan_loop() -> None:
 
     scanner.add_activity_callback(_on_activity)
 
-    feed_manager = None
-    ws_feeds_running = False
-
     async def _ensure_ws_feeds_running() -> None:
-        nonlocal feed_manager, ws_feeds_running
-        if ws_feeds_running or not settings.WS_FEED_ENABLED:
-            return
-        try:
-            from services.ws_feeds import get_feed_manager
-            from services.polymarket import polymarket_client
-
-            if feed_manager is None:
-                feed_manager = get_feed_manager()
-
-                async def _http_book_fallback(token_id: str):
-                    try:
-                        return await polymarket_client.get_order_book(token_id)
-                    except Exception:
-                        return None
-
-                feed_manager.set_http_fallback(_http_book_fallback)
-
-            if not feed_manager._started:
-                await feed_manager.start()
-            ws_feeds_running = True
-            logger.info("Scanner worker WebSocket feeds started")
-        except Exception as e:
-            logger.warning("Worker WS feeds failed to start (non-critical): %s", e)
+        return
 
     async def _stop_ws_feeds() -> None:
-        nonlocal ws_feeds_running
-        if not ws_feeds_running or feed_manager is None:
-            return
-        try:
-            await feed_manager.stop()
-            logger.info("Scanner worker WebSocket feeds paused")
-        except Exception as e:
-            logger.warning("Worker WS feeds failed to stop cleanly: %s", e)
-        finally:
-            ws_feeds_running = False
+        return
 
-    # Worker-owned WS feed manager enables reactive scanning and fresh
-    # order-book overlays in this process (scanner runs here, not in API).
-    await _ensure_ws_feeds_running()
+    # Scanner worker consumes Redis-backed live prices and cross-process
+    # PRICE_CHANGE events; crypto worker owns WS feed ingestion.
+    logger.info("Scanner worker initialized with Redis-driven price ingestion")
 
     # Opportunity recorder hooks into scanner callbacks in this process.
     try:
@@ -233,12 +211,20 @@ async def _run_scan_loop() -> None:
 
     # Write initial status so API doesn't show "Waiting for scanner worker" before first scan
     try:
-        current_count = len(scanner.get_opportunities())
+        current_opps = scanner.get_opportunities()
+        current_count = len(current_opps)
         async with AsyncSessionLocal() as session:
             if restored_count > 0:
                 activity = f"Scanner resumed with {restored_count} restored opportunities; next scan pending."
             else:
                 activity = "Scanner started; first scan pending."
+            startup_status = scanner.get_status()
+            startup_status["running"] = True
+            startup_status["enabled"] = True
+            startup_status["interval_seconds"] = int(startup_status.get("interval_seconds") or 60)
+            startup_status["current_activity"] = activity
+            startup_status["opportunities_count"] = current_count
+            await write_scanner_snapshot(session, current_opps, startup_status)
             await update_scanner_activity(session, activity)
             await write_worker_snapshot(
                 session,
@@ -256,6 +242,14 @@ async def _run_scan_loop() -> None:
             )
     except Exception:
         pass
+
+    stale_scan_streak = 0
+    scan_watchdog_seconds = max(
+        60,
+        int(settings.SCAN_INTERVAL_SECONDS),
+        int(settings.FAST_SCAN_INTERVAL_SECONDS),
+        int(settings.FULL_SCAN_INTERVAL_SECONDS),
+    )
 
     while True:
         async with AsyncSessionLocal() as session:
@@ -311,23 +305,58 @@ async def _run_scan_loop() -> None:
                 or (now - scanner._last_full_scan).total_seconds() >= full_interval
             )
 
+        scan_error: Exception | None = None
         try:
             if settings.TIERED_SCANNING_ENABLED and not run_full_scan and scanner._cached_markets:
                 reactive_tokens = await scanner.consume_reactive_tokens()
-                await scanner.scan_fast(reactive_token_ids=reactive_tokens)
-            else:
-                await scanner.scan_once(targeted_condition_ids=targeted_ids or None)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            network_resolution_error = _is_upstream_resolution_error(e)
-            if network_resolution_error:
-                logger.warning(
-                    "Scanner upstream DNS/network resolution failed; retaining previous snapshot where possible: %s",
-                    e,
+                await asyncio.wait_for(
+                    scanner.scan_fast(reactive_token_ids=reactive_tokens),
+                    timeout=scan_watchdog_seconds,
                 )
             else:
-                logger.exception("Scan failed: %s", e)
+                await asyncio.wait_for(
+                    scanner.scan_once(targeted_condition_ids=targeted_ids or None),
+                    timeout=scan_watchdog_seconds,
+                )
+            stale_scan_streak = 0
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError as exc:
+            stale_scan_streak += 1
+            logger.warning(
+                "Scanner scan cycle timed out after %ss (streak=%d)",
+                scan_watchdog_seconds,
+                stale_scan_streak,
+            )
+            if stale_scan_streak >= 2:
+                scanner._cached_markets = []
+                scanner._cached_events = []
+                scanner._cached_prices = {}
+            if stale_scan_streak >= 3:
+                try:
+                    await _stop_ws_feeds()
+                    await _ensure_ws_feeds_running()
+                except Exception as fb_exc:
+                    logger.warning("Scanner stale timeout heartbeat restart failed: %s", fb_exc)
+                stale_scan_streak = 0
+            scan_error = exc
+        except Exception as e:
+            stale_scan_streak = 0
+            scan_error = e
+
+        if scan_error is not None:
+            network_resolution_error = _is_upstream_resolution_error(scan_error)
+            timeout_error = isinstance(scan_error, asyncio.TimeoutError)
+            if timeout_error:
+                logger.warning("Scanner scan timeout handling after %.1fs: %s", scan_watchdog_seconds, scan_error)
+            elif network_resolution_error:
+                logger.warning(
+                    "Scanner upstream DNS/network resolution failed; retaining previous snapshot where possible: %s",
+                    scan_error,
+                )
+            else:
+                logger.exception("Scan failed: %s", scan_error)
+
             try:
                 prev_opps = scanner.get_opportunities()
             except Exception:
@@ -339,15 +368,33 @@ async def _run_scan_loop() -> None:
                     existing_opps, existing_status = await read_scanner_snapshot(session)
                 except Exception:
                     existing_opps, existing_status = [], {}
-                if not prev_opps and existing_opps:
-                    prev_opps = existing_opps
-                if isinstance(existing_status, dict):
-                    existing_last_scan = existing_status.get("last_scan")
+            if not prev_opps and existing_opps:
+                prev_opps = existing_opps
+            if isinstance(existing_status, dict):
+                existing_last_scan = existing_status.get("last_scan")
 
-                if network_resolution_error:
-                    activity = "Upstream market API DNS/network error; retaining last known snapshot."
-                else:
-                    activity = f"Last scan error: {e}"
+            if timeout_error and prev_opps:
+                try:
+                    attached = await scanner.attach_price_history_to_opportunities(
+                        prev_opps,
+                        timeout_seconds=18.0,
+                    )
+                    if attached > 0:
+                        logger.info(
+                            "Timeout recovery hydrated sparkline history for %d markets",
+                            attached,
+                        )
+                except Exception as history_exc:
+                    logger.debug("Timeout recovery sparkline hydration skipped: %s", history_exc)
+
+            if timeout_error:
+                activity = "Scanner cycle timeout; retaining last known snapshot."
+            elif network_resolution_error:
+                activity = "Upstream market API DNS/network error; retaining last known snapshot."
+            else:
+                activity = f"Last scan error: {scan_error}"
+
+            async with AsyncSessionLocal() as session:
                 await write_scanner_snapshot(
                     session,
                     prev_opps,
@@ -369,7 +416,7 @@ async def _run_scan_loop() -> None:
                     current_activity=activity,
                     interval_seconds=interval,
                     last_run_at=utcnow(),
-                    last_error=str(e),
+                    last_error=str(scan_error),
                     stats={
                         "opportunities_count": len(prev_opps),
                         "signals_emitted_last_run": 0,

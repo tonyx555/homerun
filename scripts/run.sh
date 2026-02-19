@@ -10,6 +10,117 @@ CYAN='\033[0;36m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+REDIS_HOST="${REDIS_HOST:-127.0.0.1}"
+REDIS_PORT="${REDIS_PORT:-6379}"
+REDIS_CONTAINER_NAME="${REDIS_CONTAINER_NAME:-homerun-redis}"
+REDIS_IMAGE="${REDIS_IMAGE:-redis:7-alpine}"
+
+redis_ping() {
+    python3 - "$REDIS_HOST" "$REDIS_PORT" <<'PY'
+import socket
+import sys
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+payload = b"*1\r\n$4\r\nPING\r\n"
+
+try:
+    with socket.create_connection((host, port), timeout=0.5) as sock:
+        sock.sendall(payload)
+        sock.settimeout(0.5)
+        data = sock.recv(64)
+        if b"+PONG" in data:
+            raise SystemExit(0)
+except Exception:
+    pass
+
+raise SystemExit(1)
+PY
+}
+
+wait_for_redis() {
+    for _ in $(seq 1 20); do
+        if redis_ping; then
+            return 0
+        fi
+        sleep 0.25
+    done
+    return 1
+}
+
+try_start_redis_docker() {
+    if ! command -v docker >/dev/null 2>&1; then
+        return 1
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        return 1
+    fi
+
+    if docker container inspect "$REDIS_CONTAINER_NAME" >/dev/null 2>&1; then
+        docker start "$REDIS_CONTAINER_NAME" >/dev/null 2>&1 || return 1
+    else
+        docker run \
+            --name "$REDIS_CONTAINER_NAME" \
+            --detach \
+            --publish "${REDIS_HOST}:${REDIS_PORT}:6379" \
+            "$REDIS_IMAGE" \
+            redis-server --save "" --appendonly no \
+            >/dev/null 2>&1 || return 1
+    fi
+    return 0
+}
+
+try_start_redis_local() {
+    if ! command -v redis-server >/dev/null 2>&1; then
+        return 1
+    fi
+    redis-server \
+        --bind "$REDIS_HOST" \
+        --port "$REDIS_PORT" \
+        --save "" \
+        --appendonly no \
+        --daemonize yes \
+        >/dev/null 2>&1 || return 1
+    return 0
+}
+
+has_redis_runtime() {
+    command -v docker >/dev/null 2>&1 || command -v redis-server >/dev/null 2>&1
+}
+
+bootstrap_redis_runtime() {
+    if has_redis_runtime; then
+        return 0
+    fi
+    echo -e "${CYAN}Redis runtime missing; invoking setup redis bootstrap...${NC}"
+    ./scripts/setup.sh --redis-only
+}
+
+ensure_redis() {
+    if redis_ping; then
+        echo -e "${GREEN}Redis already running on ${REDIS_HOST}:${REDIS_PORT}${NC}"
+        return 0
+    fi
+
+    bootstrap_redis_runtime
+
+    echo -e "${CYAN}Starting Redis...${NC}"
+    if try_start_redis_docker && wait_for_redis; then
+        echo -e "${GREEN}Redis started via Docker on ${REDIS_HOST}:${REDIS_PORT}${NC}"
+        return 0
+    fi
+
+    if try_start_redis_local && wait_for_redis; then
+        echo -e "${GREEN}Redis started via redis-server on ${REDIS_HOST}:${REDIS_PORT}${NC}"
+        return 0
+    fi
+
+    echo -e "${YELLOW}Failed to start Redis automatically.${NC}"
+    echo "Install Docker or redis-server, then rerun:"
+    echo "  docker run --name ${REDIS_CONTAINER_NAME} -d -p ${REDIS_HOST}:${REDIS_PORT}:6379 ${REDIS_IMAGE}"
+    exit 1
+}
+
 needs_setup() {
     if [ ! -d "backend/venv" ]; then
         return 0
@@ -65,6 +176,8 @@ if needs_setup; then
     echo -e "${YELLOW}Setup missing or stale. Running setup...${NC}"
     ./scripts/setup.sh
 fi
+
+ensure_redis
 
 # Ensure TUI dependencies are installed
 source backend/venv/bin/activate

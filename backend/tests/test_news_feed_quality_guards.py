@@ -1,5 +1,8 @@
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
@@ -10,6 +13,7 @@ from services.news.feed_service import (
     _clean_summary_text,
     _has_min_text_quality,
 )
+import services.news.feed_service as feed_service_module
 
 
 def test_google_description_is_normalized_for_summary():
@@ -38,3 +42,29 @@ def test_min_text_quality_rejects_short_title_without_summary():
         )
         is True
     )
+
+
+@pytest.mark.asyncio
+async def test_fetch_source_rows_handles_string_limit_without_name_error(monkeypatch):
+    service = NewsFeedService()
+
+    class DummySession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(feed_service_module, "AsyncSessionLocal", lambda: DummySession())
+
+    source = SimpleNamespace(
+        id="stories_test_id",
+        slug="stories_test",
+        config={"limit": "25"},
+    )
+
+    rows = await service._fetch_source_rows(source)
+    assert rows == []

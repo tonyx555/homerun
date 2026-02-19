@@ -30,6 +30,7 @@ from sqlalchemy import select
 from config import settings
 from models.database import AppSettings, AsyncSessionLocal
 from services.optimization.vwap import OrderBook, OrderBookLevel
+from services.redis_price_cache import redis_price_cache
 from utils.logger import get_logger
 from utils.secrets import decrypt_secret
 
@@ -62,7 +63,7 @@ def _is_expected_close(exc: Exception) -> bool:
 POLYMARKET_WS_URL = settings.CLOB_WS_URL
 KALSHI_WS_URL = settings.KALSHI_WS_URL
 
-DEFAULT_STALE_TTL = 15.0  # seconds before a cached price is considered stale
+DEFAULT_STALE_TTL = float(settings.WS_PRICE_STALE_SECONDS)
 DEFAULT_HEARTBEAT_INTERVAL = 10.0  # seconds between keep-alive pings
 DEFAULT_RECONNECT_BASE_DELAY = 1.0  # initial backoff delay in seconds
 DEFAULT_RECONNECT_MAX_DELAY = 60.0  # maximum backoff ceiling
@@ -185,6 +186,7 @@ class PriceCache:
         self._entries: Dict[str, CachedEntry] = {}
         self._history: Dict[str, deque[tuple[float, float, float, float]]] = {}
         self._on_change_callbacks: List[Callable[[str, float, float], None]] = []
+        self._on_update_callbacks: List[Callable[[str, float, float, float], None]] = []
         self._trades: Dict[str, deque] = {}
         self._trades_max = 500
         self._on_trade_callbacks: List[Callable] = []
@@ -196,6 +198,14 @@ class PriceCache:
         outside the lock so it must be thread-safe itself.
         """
         self._on_change_callbacks.append(callback)
+
+    def add_on_update_callback(self, callback: Callable[[str, float, float, float], None]) -> None:
+        """Register a callback invoked on every cache replacement.
+
+        The callback receives ``(token_id, mid, bid, ask)`` and is called
+        outside the lock so it must be thread-safe itself.
+        """
+        self._on_update_callbacks.append(callback)
 
     # -- mutations ----------------------------------------------------------
 
@@ -251,6 +261,13 @@ class PriceCache:
             for cb in self._on_change_callbacks:
                 try:
                     cb(token_id, old_mid, new_mid)
+                except Exception:
+                    pass
+
+        if self._on_update_callbacks:
+            for cb in self._on_update_callbacks:
+                try:
+                    cb(token_id, new_mid, best_bid, best_ask)
                 except Exception:
                     pass
 
@@ -653,6 +670,7 @@ class PolymarketWSFeed:
         async with websockets.connect(
             self._ws_url,
             ping_interval=None,  # we manage heartbeats ourselves
+            open_timeout=10,
             close_timeout=5,
         ) as ws:
             self._ws = ws
@@ -1011,6 +1029,7 @@ class KalshiWSFeed:
         async with websockets.connect(
             self._ws_url,
             ping_interval=None,
+            open_timeout=10,
             close_timeout=5,
             extra_headers=extra_headers,
         ) as ws:
@@ -1209,8 +1228,13 @@ class FeedManager:
         self._reactive_scan_callback: Optional[Callable[[Set[str]], Coroutine[Any, Any, None]]] = None
         self._debounce_task: Optional[asyncio.Task] = None
         self._debounce_seconds: float = 2.0  # coalesce changes over 2s window
+        self._redis_price_updates: Dict[str, tuple[float | None, float | None, float | None]] = {}
+        self._redis_update_lock = asyncio.Lock()
+        self._redis_flush_task: Optional[asyncio.Task] = None
+        self._redis_flush_interval_seconds: float = 0.5
         self._cache.add_on_change_callback(self._on_price_change)
         self._cache.add_on_trade_callback(self._on_trade)
+        self._cache.add_on_update_callback(self._on_price_update)
 
     @classmethod
     def get_instance(cls) -> "FeedManager":
@@ -1268,8 +1292,12 @@ class FeedManager:
         """Stop both feeds and clear cache."""
         if self._debounce_task and not self._debounce_task.done():
             self._debounce_task.cancel()
+        if self._redis_flush_task and not self._redis_flush_task.done():
+            self._redis_flush_task.cancel()
         await self._polymarket_feed.stop()
         await self._kalshi_feed.stop()
+        async with self._redis_update_lock:
+            self._redis_price_updates = {}
         self._cache.clear()
         self._started = False
         logger.info("FeedManager stopped")
@@ -1303,12 +1331,12 @@ class FeedManager:
 
         # Dispatch DataEvent for event-driven strategies
         try:
-            from services.data_events import DataEvent
+            from services.data_events import DataEvent, EventType
             from services.event_dispatcher import event_dispatcher
             from utils.utcnow import utcnow
 
             event = DataEvent(
-                event_type="price_change",
+                event_type=EventType.PRICE_CHANGE,
                 source="polymarket_ws",
                 timestamp=utcnow(),
                 token_id=token_id,
@@ -1323,12 +1351,12 @@ class FeedManager:
     def _on_trade(self, token_id: str, trade: "TradeRecord") -> None:
         """Dispatch a TRADE_EXECUTION DataEvent for each trade."""
         try:
-            from services.data_events import DataEvent
+            from services.data_events import DataEvent, EventType
             from services.event_dispatcher import event_dispatcher
             from utils.utcnow import utcnow
 
             event = DataEvent(
-                event_type="trade_execution",
+                event_type=EventType.TRADE_EXECUTION,
                 source="polymarket_ws",
                 timestamp=utcnow(),
                 token_id=token_id,
@@ -1343,6 +1371,43 @@ class FeedManager:
             loop.create_task(event_dispatcher.dispatch(event))
         except RuntimeError:
             pass  # No running event loop
+
+    def _on_price_update(self, token_id: str, mid: float, bid: float, ask: float) -> None:
+        """Buffer all price updates for periodic Redis persistence."""
+        if mid <= 0 or bid < 0 or ask < 0:
+            return
+        self._redis_price_updates[token_id] = (float(mid), float(bid), float(ask))
+        if self._redis_flush_task is None or self._redis_flush_task.done():
+            try:
+                loop = asyncio.get_running_loop()
+                self._redis_flush_task = loop.create_task(self._flush_redis_price_updates())
+            except RuntimeError:
+                pass
+
+    async def _flush_redis_price_updates(self) -> None:
+        """Batch in-memory WS updates into Redis snapshots."""
+        try:
+            while True:
+                await asyncio.sleep(self._redis_flush_interval_seconds)
+                updates: dict[str, tuple[float | None, float | None, float | None]] = {}
+                async with self._redis_update_lock:
+                    if not self._redis_price_updates:
+                        self._redis_flush_task = None
+                        return
+                    updates = dict(self._redis_price_updates)
+                    self._redis_price_updates = {}
+                try:
+                    await redis_price_cache.write_prices(updates)
+                except Exception as exc:
+                    async with self._redis_update_lock:
+                        self._redis_price_updates = {**updates, **self._redis_price_updates}
+                    logger.warning(
+                        "Redis live price flush failed",
+                        error=str(exc),
+                        token_count=len(updates),
+                    )
+        except asyncio.CancelledError:
+            return
 
     async def _debounced_trigger(self) -> None:
         """Wait for the debounce window, then fire the reactive scan callback."""

@@ -28,8 +28,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
-from models.database import LLMUsageLog, NewsTradeIntent, NewsWorkflowFinding
+from models.database import LLMUsageLog, NewsTradeIntent, NewsWorkflowFinding, Strategy
 from services.news import shared_state
+from services.strategy_sdk import StrategySDK
 
 logger = logging.getLogger(__name__)
 
@@ -289,6 +290,11 @@ class WorkflowOrchestrator:
         self._is_cycling = False
         self._negative_cache = _NegativeCache()
 
+    async def _load_news_strategy_filters(self, session: AsyncSession) -> dict[str, Any]:
+        row = (await session.execute(select(Strategy).where(Strategy.slug == "news_edge"))).scalar_one_or_none()
+        payload = row.config if row is not None and isinstance(row.config, dict) else {}
+        return StrategySDK.validate_news_filter_config(payload)
+
     async def run_cycle(self, session: AsyncSession) -> dict:
         """Run one cycle. Caller (worker) owns loop scheduling and control flow."""
         if self._is_cycling:
@@ -308,6 +314,7 @@ class WorkflowOrchestrator:
             from services.news.reranker import reranker
 
             wf_settings = await shared_state.get_news_settings(session)
+            news_strategy_filters = await self._load_news_strategy_filters(session)
 
             # 1) Sync articles from provider feeds.
             try:
@@ -547,14 +554,15 @@ class WorkflowOrchestrator:
             # min_semantic_signal: 0.05 lets through candidates with partial
             # semantic overlap; the reranker handles false positives.
             min_semantic_signal = float(wf_settings.get("min_semantic_signal", 0.05) or 0.05)
-            # min_edge_percent: 5% edge is meaningful in prediction markets
-            # (covers fees + slippage).  Old default of 8% filtered too many
-            # actionable opportunities.
-            min_edge = float(wf_settings.get("min_edge_percent", 5.0) or 5.0)
-            # min_confidence: 0.45 allows moderate-confidence signals through.
-            # News-driven edges often have inherent uncertainty; 0.6 was too
-            # strict and caused zero actionable findings in most cycles.
-            min_conf = float(wf_settings.get("min_confidence", 0.45) or 0.45)
+            # Business filtering thresholds are strategy-owned (news_edge config),
+            # validated through StrategySDK.
+            min_edge = float(news_strategy_filters.get("min_edge_percent", 5.0) or 5.0)
+            min_conf = float(news_strategy_filters.get("min_confidence", 0.45) or 0.45)
+            orchestrator_min_edge = float(news_strategy_filters.get("orchestrator_min_edge", 10.0) or 10.0)
+            require_verifier = bool(news_strategy_filters.get("require_verifier", True))
+            require_second_source = bool(news_strategy_filters.get("require_second_source", False))
+            min_supporting_articles = max(1, int(news_strategy_filters.get("min_supporting_articles", 2) or 2))
+            min_supporting_sources = max(1, int(news_strategy_filters.get("min_supporting_sources", 2) or 2))
             max_edge_evals_per_cluster = int(wf_settings.get("max_edge_evals_per_article", 6) or 6)
             cache_ttl_minutes = int(wf_settings.get("cache_ttl_minutes", 30) or 30)
 
@@ -671,7 +679,7 @@ class WorkflowOrchestrator:
                 if not reranked:
                     continue
 
-                if bool(wf_settings.get("require_verifier", True)):
+                if require_verifier:
                     verified, penalized, rejected = self._split_verified_candidates(
                         article=article,
                         event=event,
@@ -827,17 +835,20 @@ class WorkflowOrchestrator:
 
             deduped_findings = self._dedupe_findings(all_findings)
 
-            if bool(wf_settings.get("require_second_source", False)):
+            if require_second_source:
                 by_market_sources: dict[str, set[str]] = defaultdict(set)
                 for f in deduped_findings:
                     by_market_sources[f.market_id].update(self._finding_sources(f))
                 for f in deduped_findings:
-                    if len(by_market_sources.get(f.market_id, set())) < 2:
+                    if len(by_market_sources.get(f.market_id, set())) < min_supporting_sources:
                         f.actionable = False
                         self._mark_finding_rejected(
                             f,
                             reason="insufficient_source_diversity",
-                            details="Need at least two independent sources for actionable signal.",
+                            details=(
+                                "Need at least "
+                                f"{min_supporting_sources} independent sources for actionable signal."
+                            ),
                         )
 
             # Actionable findings must be backed by multiple corroborating articles.
@@ -845,22 +856,26 @@ class WorkflowOrchestrator:
                 if not finding.actionable:
                     continue
                 article_count, source_count = self._supporting_evidence_counts(finding)
-                if article_count < 2:
+                if article_count < min_supporting_articles:
                     finding.actionable = False
                     self._mark_finding_rejected(
                         finding,
                         reason="insufficient_article_support",
                         details=(
-                            f"Need at least two corroborating articles in the supporting cluster (got {article_count})."
+                            f"Need at least {min_supporting_articles} corroborating articles in "
+                            f"the supporting cluster (got {article_count})."
                         ),
                     )
                     continue
-                if source_count < 2:
+                if source_count < min_supporting_sources:
                     finding.actionable = False
                     self._mark_finding_rejected(
                         finding,
                         reason="insufficient_source_diversity",
-                        details=(f"Need at least two distinct outlets in supporting evidence (got {source_count})."),
+                        details=(
+                            f"Need at least {min_supporting_sources} distinct outlets in supporting evidence "
+                            f"(got {source_count})."
+                        ),
                     )
 
             actionable = [f for f in deduped_findings if f.actionable]
@@ -868,8 +883,10 @@ class WorkflowOrchestrator:
             if bool(wf_settings.get("orchestrator_enabled", True)):
                 intents = await intent_generator.generate(
                     actionable,
-                    min_edge=float(wf_settings.get("orchestrator_min_edge", 10.0) or 10.0),
+                    min_edge=orchestrator_min_edge,
                     min_confidence=min_conf,
+                    min_supporting_articles=min_supporting_articles,
+                    min_supporting_sources=min_supporting_sources,
                     market_metadata_by_id=market_metadata_by_id,
                 )
 

@@ -4,10 +4,72 @@ set -e
 # Navigate to project root (parent of scripts/)
 cd "$(dirname "$0")/.."
 
+REDIS_ONLY=0
+for arg in "$@"; do
+    case "$arg" in
+        --redis-only)
+            REDIS_ONLY=1
+            ;;
+    esac
+done
+
+run_with_optional_sudo() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+        return
+    fi
+    if command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+        return
+    fi
+    "$@"
+}
+
+ensure_redis_runtime() {
+    if command -v docker >/dev/null 2>&1 || command -v redis-server >/dev/null 2>&1; then
+        echo "Redis runtime prerequisite found (docker or redis-server)."
+        return 0
+    fi
+
+    echo "Redis runtime prerequisite missing. Attempting to install redis-server..."
+    if command -v brew >/dev/null 2>&1; then
+        if ! brew list redis >/dev/null 2>&1; then
+            brew install redis
+        fi
+    elif command -v apt-get >/dev/null 2>&1; then
+        run_with_optional_sudo apt-get update
+        run_with_optional_sudo apt-get install -y redis-server
+    elif command -v dnf >/dev/null 2>&1; then
+        run_with_optional_sudo dnf install -y redis
+    elif command -v yum >/dev/null 2>&1; then
+        run_with_optional_sudo yum install -y redis
+    elif command -v pacman >/dev/null 2>&1; then
+        run_with_optional_sudo pacman -Sy --noconfirm redis
+    else
+        echo "Error: no supported package manager found to install redis-server."
+        echo "Install Docker or redis-server manually, then rerun setup."
+        return 1
+    fi
+
+    if command -v docker >/dev/null 2>&1 || command -v redis-server >/dev/null 2>&1; then
+        echo "Redis runtime prerequisite is now available."
+        return 0
+    fi
+
+    echo "Error: automatic redis-server installation completed but redis-server is still unavailable."
+    echo "Install Docker or redis-server manually, then rerun setup."
+    return 1
+}
+
 echo "========================================="
 echo "  Autonomous Prediction Market Trading Platform Setup"
 echo "========================================="
 echo ""
+
+if [ "$REDIS_ONLY" -eq 1 ]; then
+    ensure_redis_runtime
+    exit 0
+fi
 
 # Check Python version
 if ! command -v python3 &> /dev/null; then
@@ -82,6 +144,10 @@ cd ..
 
 # Create data directory
 mkdir -p data
+
+echo ""
+echo "Ensuring Redis runtime prerequisites..."
+ensure_redis_runtime
 
 # Write setup fingerprint so run.sh can detect drift and auto-rerun setup.
 python3 - <<'PY'

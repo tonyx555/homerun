@@ -39,6 +39,7 @@ import {
 import { cn } from './lib/utils'
 import {
   getOpportunities,
+  getOpportunityIds,
   getOpportunityCounts,
   searchPolymarketOpportunities,
   evaluateSearchResults,
@@ -52,7 +53,7 @@ import {
   judgeOpportunitiesBulk,
   getSimulationAccounts,
   getNewsWorkflowFindings,
-  getWeatherWorkflowOpportunities,
+  getWeatherWorkflowOpportunityIds,
   getCryptoMarkets,
   getSignalStats,
   Opportunity,
@@ -110,6 +111,7 @@ type TradersSubTab = 'discovery' | 'pool' | 'tracked' | 'analysis'
 type OpportunitiesView = string
 
 const ITEMS_PER_PAGE = 20
+const ANALYZE_ALL_IDS_PAGE_SIZE = 500
 
 const NAV_ITEMS: { id: Tab; icon: React.ElementType; label: string; shortcut: string }[] = [
   { id: 'opportunities', icon: Zap, label: 'Opportunities', shortcut: '1' },
@@ -134,7 +136,7 @@ const WORKER_HEALTH_ORDER = [
   'crypto',
   'tracked_traders',
   'trader_orchestrator',
-  'world_intelligence',
+  'events',
 ] as const
 
 const WORKER_HEALTH_LABELS: Record<string, string> = {
@@ -145,7 +147,7 @@ const WORKER_HEALTH_LABELS: Record<string, string> = {
   crypto: 'Crypto',
   tracked_traders: 'Tracked Traders',
   trader_orchestrator: 'Orchestrator',
-  world_intelligence: 'World Intel',
+  events: 'Events',
 }
 
 const STRATEGY_SUBTYPE_LABELS: Record<string, Record<string, string>> = {
@@ -183,6 +185,16 @@ const STRATEGY_SUBTYPE_LABELS: Record<string, Record<string, string>> = {
   },
 }
 
+function normalizeStrategiesSourceFilter(source: unknown): string | null {
+  const value = String(source || '').trim().toLowerCase()
+  if (!value) return null
+  return value
+}
+
+function normalizeStrategiesSourceKey(value: unknown): string {
+  return normalizeStrategiesSourceFilter(value) || 'scanner'
+}
+
 function formatStrategySubtypeLabel(strategyType: string, subtypeKey: string): string {
   const map = STRATEGY_SUBTYPE_LABELS[strategyType] || {}
   if (map[subtypeKey]) return map[subtypeKey]
@@ -208,6 +220,11 @@ interface OpportunityTabConfig {
   icon: React.ElementType
   // Which view-mode switcher to show (card/list/terminal). Set false to hide switcher.
   hasViewModeSwitcher: boolean
+}
+
+type AnalyzeTargets = {
+  visibleIds: string[]
+  allIds: string[]
 }
 
 const OPPORTUNITY_TAB_CONFIG: Record<string, OpportunityTabConfig> = {
@@ -328,11 +345,13 @@ function App() {
   const [walletToAnalyze, setWalletToAnalyze] = useState<string | null>(null)
   const [walletUsername, setWalletUsername] = useState<string | null>(null)
   const [opportunitiesView, setOpportunitiesView] = useState<OpportunitiesView>('scanner')
-  const [dataView, setDataView] = useState<DataView>('events')
+  const [dataView, setDataView] = useState<DataView>('map')
   const [newsSearchQuery, setNewsSearchQuery] = useState('')
   const [oppsViewMode, setOppsViewMode] = useState<'card' | 'list' | 'terminal'>('card')
   const [polymarketSearchSubmitted, setPolymarketSearchSubmitted] = useState('')
   const [searchSort, setSearchSort] = useState<string>('competitive')
+  const [analyzeScope, setAnalyzeScope] = useState<'visible' | 'all'>('visible')
+  const [analyzeMenuOpen, setAnalyzeMenuOpen] = useState(false)
   const [executingOpportunity, setExecutingOpportunity] = useState<Opportunity | null>(null)
   const [copilotOpen, setCopilotOpen] = useState(false)
   const [copilotContext, setCopilotContext] = useState<{ type?: string; id?: string; label?: string }>({})
@@ -343,8 +362,12 @@ function App() {
   const [scannerActivity, setScannerActivity] = useState<string>('Idle')
   const [headerSearchQuery, setHeaderSearchQuery] = useState('')
   const [headerSearchOpen, setHeaderSearchOpen] = useState(false)
+  const [pendingStrategiesSourceFilter, setPendingStrategiesSourceFilter] = useState<string | null>(null)
+  const [weatherAnalyzeTargets, setWeatherAnalyzeTargets] = useState<AnalyzeTargets>({ visibleIds: [], allIds: [] })
+  const [tradersAnalyzeTargets, setTradersAnalyzeTargets] = useState<AnalyzeTargets>({ visibleIds: [], allIds: [] })
   const headerSearchRef = useRef<HTMLInputElement>(null)
   const headerSearchContainerRef = useRef<HTMLDivElement>(null)
+  const analyzeMenuRef = useRef<HTMLDivElement>(null)
   const [shortcutsHelpOpen, setShortcutsHelpOpen] = useAtom(shortcutsHelpOpenAtom)
   const queryClient = useQueryClient()
 
@@ -421,6 +444,16 @@ function App() {
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
 
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (analyzeMenuRef.current && !analyzeMenuRef.current.contains(e.target as Node)) {
+        setAnalyzeMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
   // Listen for tab navigation events from child components (e.g., settings flyouts)
   useEffect(() => {
     const handler = (e: Event) => {
@@ -429,6 +462,31 @@ function App() {
     }
     window.addEventListener('navigate-to-tab', handler as EventListener)
     return () => window.removeEventListener('navigate-to-tab', handler as EventListener)
+  }, [])
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<unknown>).detail
+      const detailObject =
+        typeof detail === 'object' && detail !== null
+          ? (detail as Record<string, unknown>)
+          : null
+      const subtab = detailObject
+        ? String(detailObject.subtab || '').trim().toLowerCase()
+        : String(detail || '').trim().toLowerCase()
+      if (subtab && subtab !== 'opportunity') return
+      setActiveTab('strategies')
+      const sourceFilter = detailObject
+        ? detailObject.sourceFilter ??
+          detailObject.source ??
+          detailObject.source_key ??
+          detailObject.sourceKey
+        : null
+      const nextFilter = normalizeStrategiesSourceFilter(sourceFilter)
+      setPendingStrategiesSourceFilter(nextFilter)
+    }
+    window.addEventListener('navigate-strategies-subtab', handler as EventListener)
+    return () => window.removeEventListener('navigate-strategies-subtab', handler as EventListener)
   }, [])
 
   // WebSocket for real-time updates
@@ -464,6 +522,10 @@ function App() {
     if (opportunitiesView !== 'crypto') {
       setCryptoSettingsOpen(false)
     }
+  }, [opportunitiesView])
+
+  useEffect(() => {
+    setAnalyzeMenuOpen(false)
   }, [opportunitiesView])
 
   // Queries — WS pushes are primary; polling is a degraded fallback.
@@ -544,6 +606,18 @@ function App() {
     return confluence
   }, [trackedTradersWorker])
 
+  const { data: tradersOpportunityCountData } = useQuery({
+    queryKey: ['opportunities', 'traders', 'count'],
+    queryFn: () =>
+      getOpportunities({
+        source: 'traders',
+        limit: 1,
+        offset: 0,
+      }),
+    enabled: activeTab === 'opportunities',
+    refetchInterval: isConnected ? false : 30000,
+  })
+
   const workerHealth = useMemo(() => {
     const byName = new Map(workers.map((worker) => [worker.worker_name, worker]))
     const rows = WORKER_HEALTH_ORDER.map((workerName) => {
@@ -599,6 +673,35 @@ function App() {
   })
 
   const selectedAccount = sandboxAccounts.find(a => a.id === selectedAccountId)
+  const strategyTypesBySourceKey = useMemo(() => {
+    const grouped: Record<string, string[]> = {}
+    for (const strategy of strategies) {
+      const key = normalizeStrategiesSourceKey(strategy.source_key)
+      if (!grouped[key]) grouped[key] = []
+      grouped[key].push(strategy.type)
+    }
+    return grouped
+  }, [strategies])
+  const isGenericDynamicOpportunityView =
+    opportunitiesView !== 'scanner'
+    && opportunitiesView !== 'search'
+    && opportunitiesView !== 'crypto'
+    && opportunitiesView !== 'news'
+    && opportunitiesView !== 'weather'
+    && opportunitiesView !== 'traders'
+  const activeSourceStrategyTypes = useMemo(
+    () => new Set(strategyTypesBySourceKey[opportunitiesView] || []),
+    [strategyTypesBySourceKey, opportunitiesView],
+  )
+  const displayOpportunities = useMemo(() => {
+    if (!isGenericDynamicOpportunityView) return opportunities
+    if (activeSourceStrategyTypes.size === 0) return opportunities
+    return opportunities.filter((opportunity) => activeSourceStrategyTypes.has(opportunity.strategy))
+  }, [activeSourceStrategyTypes, isGenericDynamicOpportunityView, opportunities])
+  const visibleOpportunityIds = useMemo(
+    () => Array.from(new Set(displayOpportunities.map((opportunity) => opportunity.id))),
+    [displayOpportunities],
+  )
 
   const {
     data: strategyFacetCounts,
@@ -657,7 +760,7 @@ function App() {
 
   const { data: weatherWorkflowExecutableCount } = useQuery({
     queryKey: ['weather-workflow-opportunities', 'count'],
-    queryFn: () => getWeatherWorkflowOpportunities({
+    queryFn: () => getWeatherWorkflowOpportunityIds({
       include_report_only: false,
       limit: 1,
       offset: 0,
@@ -673,7 +776,7 @@ function App() {
     refetchInterval: isConnected ? false : 30000,
   })
 
-  const tradersCount = trackedTradersExecutableCount ?? 0
+  const tradersCount = tradersOpportunityCountData?.total ?? trackedTradersExecutableCount ?? 0
   const newsCount = newsWorkflowFindingsCount?.total || 0
   const weatherCount = weatherWorkflowExecutableCount?.total || 0
   const cryptoCount = cryptoMarketCounts?.length || 0
@@ -698,8 +801,13 @@ function App() {
 
   // Build opportunities subtabs from the fixed supported source keys.
   const opportunityTabs = useMemo(() => {
-    const strategySourceKeys = new Set(strategies.map((s) => s.source_key || 'scanner'))
-    const allKeys = TAB_ORDER.filter((key) => strategySourceKeys.has(key) || key === 'scanner')
+    const strategySourceKeys = new Set(strategies.map((s) => normalizeStrategiesSourceKey(s.source_key)))
+    const knownKeys = TAB_ORDER.filter((key) => strategySourceKeys.has(key) || key === 'scanner')
+    const knownKeySet = new Set<string>(knownKeys)
+    const dynamicKeys = Array.from(strategySourceKeys)
+      .filter((key) => !knownKeySet.has(key))
+      .sort((a, b) => a.localeCompare(b))
+    const allKeys = [...knownKeys, ...dynamicKeys]
     return allKeys.map((key) => ({
       key,
       config: OPPORTUNITY_TAB_CONFIG[key] ?? {
@@ -711,6 +819,10 @@ function App() {
       count: tabCounts[key] ?? null,
     }))
   }, [strategies, tabCounts])
+  const activeOpportunityTab = useMemo(
+    () => opportunityTabs.find((tab) => tab.key === opportunitiesView) || null,
+    [opportunityTabs, opportunitiesView],
+  )
 
   // Polymarket search query (only runs when user submits a search)
   const { data: polymarketSearchData, isLoading: polySearchLoading } = useQuery({
@@ -723,11 +835,8 @@ function App() {
   const polymarketResults = polymarketSearchData?.opportunities || []
   const polymarketTotal = polymarketSearchData?.total || 0
 
-  // Resolve strategy filter: DB-native rows can still expose plugin_slug for compatibility.
   const strategyFilterSet = useMemo(() => {
     if (!selectedStrategy) return null
-    const plugin = strategies.find((s) => s.type === selectedStrategy && s.is_plugin)
-    if (plugin?.plugin_slug) return new Set([plugin.plugin_slug])
     return new Set([selectedStrategy])
   }, [selectedStrategy, strategies])
 
@@ -748,6 +857,61 @@ function App() {
     const start = currentPage * ITEMS_PER_PAGE
     return processedPolymarketResults.slice(start, start + ITEMS_PER_PAGE)
   }, [processedPolymarketResults, currentPage])
+  const searchVisibleOpportunityIds = useMemo(
+    () => Array.from(new Set(paginatedPolymarketResults.map((opportunity) => opportunity.id))),
+    [paginatedPolymarketResults],
+  )
+  const searchAllOpportunityIds = useMemo(
+    () => Array.from(new Set(processedPolymarketResults.map((opportunity) => opportunity.id))),
+    [processedPolymarketResults],
+  )
+  const activePanelAnalyzeTargets = useMemo<AnalyzeTargets>(() => {
+    if (opportunitiesView === 'weather') return weatherAnalyzeTargets
+    if (opportunitiesView === 'traders') return tradersAnalyzeTargets
+    return { visibleIds: [], allIds: [] }
+  }, [opportunitiesView, weatherAnalyzeTargets, tradersAnalyzeTargets])
+
+  const fetchAllOpportunityIds = useCallback(
+    async (strategyOverride?: string): Promise<string[]> => {
+      const ids: string[] = []
+      let offset = 0
+      let total = 0
+
+      while (offset <= total) {
+        const page = await getOpportunityIds({
+          strategy: (strategyOverride ?? selectedStrategy) || undefined,
+          sub_strategy: selectedStrategySubtype || undefined,
+          category: selectedCategory || undefined,
+          min_profit: minProfit,
+          max_risk: maxRisk,
+          search: searchQuery || undefined,
+          sort_by: sortBy,
+          sort_dir: sortDir,
+          limit: ANALYZE_ALL_IDS_PAGE_SIZE,
+          offset,
+        })
+        ids.push(...page.ids)
+        total = Math.max(0, Number(page.total || 0))
+        offset += Math.max(1, Number(page.limit || ANALYZE_ALL_IDS_PAGE_SIZE))
+
+        if (page.ids.length < 1 || offset >= total) {
+          break
+        }
+      }
+
+      return ids
+    },
+    [
+      selectedStrategy,
+      selectedStrategySubtype,
+      selectedCategory,
+      minProfit,
+      maxRisk,
+      searchQuery,
+      sortBy,
+      sortDir,
+    ],
+  )
 
   // Mutations
   const scanMutation = useMutation({
@@ -773,7 +937,42 @@ function App() {
   })
 
   const analyzeAllMutation = useMutation({
-    mutationFn: () => judgeOpportunitiesBulk({ force: true }),
+    mutationFn: async (scope: 'visible' | 'all') => {
+      let opportunityIds: string[] = []
+
+      if (opportunitiesView === 'search') {
+        opportunityIds = scope === 'all'
+          ? searchAllOpportunityIds
+          : searchVisibleOpportunityIds
+      } else if (opportunitiesView === 'weather' || opportunitiesView === 'traders') {
+        opportunityIds = scope === 'all'
+          ? activePanelAnalyzeTargets.allIds
+          : activePanelAnalyzeTargets.visibleIds
+      } else {
+        opportunityIds = visibleOpportunityIds
+
+        if (scope === 'all') {
+          if (isGenericDynamicOpportunityView && activeSourceStrategyTypes.size > 0) {
+            const perStrategyIds = await Promise.all(
+              Array.from(activeSourceStrategyTypes).map((strategyType) => fetchAllOpportunityIds(strategyType)),
+            )
+            opportunityIds = perStrategyIds.flat()
+          } else {
+            opportunityIds = await fetchAllOpportunityIds()
+          }
+        }
+      }
+
+      const uniqueOpportunityIds = Array.from(new Set(opportunityIds))
+      if (uniqueOpportunityIds.length === 0) {
+        throw new Error('No opportunities available for analysis')
+      }
+
+      return judgeOpportunitiesBulk({
+        opportunity_ids: uniqueOpportunityIds,
+        force: true,
+      })
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['opportunities'] })
     },
@@ -797,8 +996,56 @@ function App() {
     },
   })
 
-  // Opportunities are always rendered from real scanner data.
-  const displayOpportunities = opportunities
+  const analyzeAllCount = isGenericDynamicOpportunityView
+    ? displayOpportunities.length
+    : opportunitiesView === 'weather' || opportunitiesView === 'traders'
+      ? activePanelAnalyzeTargets.allIds.length
+    : opportunitiesView === 'search'
+      ? searchAllOpportunityIds.length
+      : totalOpportunities
+  const analyzeVisibleCount = opportunitiesView === 'search'
+    ? searchVisibleOpportunityIds.length
+    : opportunitiesView === 'weather' || opportunitiesView === 'traders'
+      ? activePanelAnalyzeTargets.visibleIds.length
+      : visibleOpportunityIds.length
+  const analyzeTargetCount = analyzeScope === 'visible'
+    ? analyzeVisibleCount
+    : analyzeAllCount
+  const showAnalyzeControl =
+    opportunitiesView === 'scanner'
+    || isGenericDynamicOpportunityView
+    || opportunitiesView === 'search'
+    || opportunitiesView === 'weather'
+    || opportunitiesView === 'traders'
+  const analyzeActionLabel = analyzeScope === 'visible' ? 'Analyze Visible' : 'Analyze All'
+  const showTopSettingsControl =
+    opportunitiesView === 'scanner'
+    || opportunitiesView === 'crypto'
+    || opportunitiesView === 'weather'
+    || opportunitiesView === 'news'
+    || opportunitiesView === 'traders'
+
+  const openOpportunitySettings = useCallback(() => {
+    if (opportunitiesView === 'scanner') {
+      setSearchFiltersOpen(true)
+      return
+    }
+    if (opportunitiesView === 'crypto') {
+      setCryptoSettingsOpen(true)
+      return
+    }
+    if (opportunitiesView === 'weather') {
+      window.dispatchEvent(new CustomEvent('open-weather-workflow-settings'))
+      return
+    }
+    if (opportunitiesView === 'news') {
+      window.dispatchEvent(new CustomEvent('open-news-workflow-settings'))
+      return
+    }
+    if (opportunitiesView === 'traders') {
+      window.dispatchEvent(new CustomEvent('open-trader-opportunities-settings'))
+    }
+  }, [opportunitiesView])
 
   const strategySubtypeOptions = useMemo(() => {
     const counts = subfilterCounts?.sub_strategies || {}
@@ -827,7 +1074,7 @@ function App() {
   const groupedStrategies = useMemo(() => {
     const groups: Record<string, typeof visibleStrategies> = {}
     for (const s of visibleStrategies) {
-      const key = s.source_key || 'scanner'
+      const key = normalizeStrategiesSourceKey(s.source_key)
       if (!groups[key]) groups[key] = []
       groups[key].push(s)
     }
@@ -1338,17 +1585,85 @@ function App() {
                       </div>
                     )}
 
-                    {opportunitiesView === 'scanner' && (
-                      <div className="ml-auto">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => setSearchFiltersOpen(true)}
-                          className="gap-1.5 text-xs h-8 bg-card text-muted-foreground hover:text-orange-400 border-border hover:border-orange-500/30"
-                        >
-                          <Settings className="w-3.5 h-3.5" />
-                          Settings
-                        </Button>
+                    {(showTopSettingsControl || showAnalyzeControl) && (
+                      <div className="ml-auto flex items-center gap-2">
+                        {showTopSettingsControl && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={openOpportunitySettings}
+                            className="gap-1.5 text-xs h-8 bg-card text-muted-foreground hover:text-orange-400 border-border hover:border-orange-500/30"
+                          >
+                            <Settings className="w-3.5 h-3.5" />
+                            Settings
+                          </Button>
+                        )}
+
+                        {showAnalyzeControl && (
+                          <div ref={analyzeMenuRef} className="relative inline-flex shrink-0">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => {
+                                setAnalyzeMenuOpen(false)
+                                analyzeAllMutation.mutate(analyzeScope)
+                              }}
+                              disabled={analyzeAllMutation.isPending || analyzeTargetCount === 0}
+                              className="rounded-r-none border-r-0 text-xs gap-1.5 h-8 px-2.5 whitespace-nowrap"
+                            >
+                              {analyzeAllMutation.isPending ? (
+                                <RefreshCw className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <Brain className="w-3 h-3" />
+                              )}
+                              {analyzeAllMutation.isPending ? 'Analyzing...' : analyzeActionLabel}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => setAnalyzeMenuOpen((open) => !open)}
+                              className="w-8 h-8 px-0 rounded-l-none"
+                            >
+                              <ChevronDown className={cn("w-3.5 h-3.5 transition-transform", analyzeMenuOpen && "rotate-180")} />
+                            </Button>
+                            {analyzeMenuOpen && (
+                              <div className="absolute right-0 top-full mt-1.5 w-44 rounded-lg border border-border bg-popover p-1.5 shadow-lg z-30">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setAnalyzeScope('visible')
+                                    setAnalyzeMenuOpen(false)
+                                  }}
+                                  className={cn(
+                                    "w-full rounded-md px-2 py-1.5 text-left text-xs transition-colors flex items-center justify-between",
+                                    analyzeScope === 'visible'
+                                      ? "bg-primary/15 text-primary"
+                                      : "text-muted-foreground hover:text-foreground hover:bg-muted/70"
+                                  )}
+                                >
+                                  <span>Analyze Visible</span>
+                                  <span className="font-data text-[10px]">{analyzeVisibleCount}</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setAnalyzeScope('all')
+                                    setAnalyzeMenuOpen(false)
+                                  }}
+                                  className={cn(
+                                    "w-full rounded-md px-2 py-1.5 text-left text-xs transition-colors flex items-center justify-between",
+                                    analyzeScope === 'all'
+                                      ? "bg-primary/15 text-primary"
+                                      : "text-muted-foreground hover:text-foreground hover:bg-muted/70"
+                                  )}
+                                >
+                                  <span>Analyze All</span>
+                                  <span className="font-data text-[10px]">{analyzeAllCount}</span>
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -1596,19 +1911,24 @@ function App() {
                       onExecute={setExecutingOpportunity}
                       onOpenCopilot={handleOpenCopilotForOpportunity}
                       onOpenCryptoSettings={() => setCryptoSettingsOpen(true)}
+                      showSettingsButton={false}
                     />
                   ) : opportunitiesView === 'news' ? (
-                    <NewsIntelligencePanel initialSearchQuery={newsSearchQuery} mode="workflow" />
+                    <NewsIntelligencePanel initialSearchQuery={newsSearchQuery} mode="workflow" showSettingsButton={false} />
                   ) : opportunitiesView === 'weather' ? (
                     <WeatherOpportunitiesPanel
                       onExecute={setExecutingOpportunity}
                       viewMode={oppsViewMode}
+                      showSettingsButton={false}
+                      onAnalyzeTargetsChange={setWeatherAnalyzeTargets}
                     />
                   ) : opportunitiesView === 'traders' ? (
                     <RecentTradesPanel
                       mode="opportunities"
                       viewMode={oppsViewMode}
                       onOpenCopilot={handleOpenCopilot}
+                      showSettingsButton={false}
+                      onAnalyzeTargetsChange={setTradersAnalyzeTargets}
                       onNavigateToWallet={(address) => {
                         setWalletToAnalyze(address)
                         setActiveTab('traders')
@@ -1618,6 +1938,17 @@ function App() {
                   ) : opportunitiesView !== 'scanner' ? (
                     // Generic fallback panel for unknown source_keys introduced by new strategies
                     <>
+                      <div className="mb-4 rounded-xl border border-border/40 bg-card/40 p-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-xs text-muted-foreground">
+                            {activeOpportunityTab?.config.label || 'Opportunities'} feed
+                          </span>
+                          <span className="inline-flex items-center justify-center rounded-full bg-primary/15 text-primary text-[10px] font-medium min-w-[20px] h-4 px-1.5">
+                            {totalOpportunities}
+                          </span>
+                        </div>
+                      </div>
+
                       {oppsViewMode === 'terminal' ? (
                         <OpportunityTerminal
                           opportunities={displayOpportunities}
@@ -1686,7 +2017,7 @@ function App() {
                     <>
                       {/* Markets Controls */}
                       <div className="mb-4 rounded-xl border border-border/40 bg-card/40 p-3">
-                        <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                        <div className="flex flex-wrap items-center gap-2">
                           <div className="relative min-w-[220px] flex-1">
                             <Search className="absolute left-2.5 top-1/2 transform -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
                             <Input
@@ -1858,20 +2189,6 @@ function App() {
                             Refresh
                           </Button>
 
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => analyzeAllMutation.mutate()}
-                            disabled={analyzeAllMutation.isPending || displayOpportunities.length === 0}
-                            className="text-xs gap-1.5 h-8 px-2.5 shrink-0 whitespace-nowrap"
-                          >
-                            {analyzeAllMutation.isPending ? (
-                              <RefreshCw className="w-3 h-3 animate-spin" />
-                            ) : (
-                              <Brain className="w-3 h-3" />
-                            )}
-                            {analyzeAllMutation.isPending ? 'Analyzing...' : 'Analyze'}
-                          </Button>
                         </div>
                       </div>
 
@@ -1980,7 +2297,10 @@ function App() {
             {activeTab === 'strategies' && (
               <div className="flex-1 overflow-hidden flex flex-col section-enter">
                 <div className="flex-1 overflow-hidden px-6 py-4 min-h-0">
-                  <StrategiesPanel />
+                  <StrategiesPanel
+                    initialSourceFilter={pendingStrategiesSourceFilter}
+                    onSourceFilterApplied={() => setPendingStrategiesSourceFilter(null)}
+                  />
                 </div>
               </div>
             )}

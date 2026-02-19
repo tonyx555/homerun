@@ -10,6 +10,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from api import routes_weather_workflow
+from models.opportunity import Opportunity
 
 
 @pytest.mark.asyncio
@@ -157,7 +158,7 @@ async def test_run_weather_workflow_executes_immediately(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_get_weather_opportunities_enforces_tradability_filters(monkeypatch):
+async def test_get_weather_opportunities_uses_snapshot_filters(monkeypatch):
     fake_session = object()
     get_mock = AsyncMock(return_value=[])
     monkeypatch.setattr(
@@ -185,7 +186,6 @@ async def test_get_weather_opportunities_enforces_tradability_filters(monkeypatc
         max_entry_price=0.2,
         location_query="Wellington",
         target_date=None,
-        require_tradable_markets=True,
         exclude_near_resolution=True,
         include_report_only=False,
     )
@@ -246,7 +246,68 @@ async def test_get_weather_opportunity_dates_uses_shared_date_counts(monkeypatch
         direction="buy_yes",
         max_entry_price=0.25,
         location_query="Wellington",
-        require_tradable_markets=True,
+        exclude_near_resolution=True,
+        include_report_only=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_weather_opportunity_ids_returns_filtered_ids(monkeypatch):
+    fake_session = object()
+    opp_a = Opportunity(
+        strategy="weather_edge",
+        title="A",
+        description="A",
+        total_cost=0.4,
+        expected_payout=0.5,
+        gross_profit=0.1,
+        fee=0.0,
+        net_profit=0.1,
+        roi_percent=25.0,
+        markets=[{"id": "a"}],
+        positions_to_take=[{"market": "a", "outcome": "YES", "price": 0.4}],
+    )
+    opp_b = Opportunity(
+        strategy="weather_edge",
+        title="B",
+        description="B",
+        total_cost=0.45,
+        expected_payout=0.5,
+        gross_profit=0.05,
+        fee=0.0,
+        net_profit=0.05,
+        roi_percent=11.11,
+        markets=[{"id": "b"}],
+        positions_to_take=[{"market": "b", "outcome": "NO", "price": 0.45}],
+    )
+    get_mock = AsyncMock(return_value=[opp_a, opp_b])
+    monkeypatch.setattr(
+        routes_weather_workflow.shared_state,
+        "get_weather_opportunities_from_db",
+        get_mock,
+    )
+
+    out = await routes_weather_workflow.get_weather_opportunity_ids(
+        session=fake_session,
+        direction="buy_yes",
+        location="Wellington",
+        limit=1,
+        offset=1,
+    )
+
+    assert out == {
+        "total": 2,
+        "offset": 1,
+        "limit": 1,
+        "ids": [opp_b.id],
+    }
+    get_mock.assert_awaited_once_with(
+        fake_session,
+        min_edge_percent=None,
+        direction="buy_yes",
+        max_entry_price=None,
+        location_query="Wellington",
+        target_date=None,
         exclude_near_resolution=True,
         include_report_only=False,
     )

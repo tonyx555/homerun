@@ -19,14 +19,6 @@ from models.database import (
 )
 from services.event_bus import event_bus
 from services.market_tradability import get_market_tradability_map
-from services.news.rss_config import (
-    default_custom_rss_feeds,
-    default_gov_rss_feeds,
-    merge_custom_rss_feeds,
-    merge_gov_rss_feeds,
-    normalize_custom_rss_feeds,
-    normalize_gov_rss_feeds,
-)
 
 NEWS_SNAPSHOT_ID = "latest"
 NEWS_CONTROL_ID = "default"
@@ -360,15 +352,9 @@ async def _get_or_create_app_settings(session: AsyncSession) -> AppSettings:
     mutated = False
     if db is None:
         db = AppSettings(id="default")
-        db.news_rss_feeds_json = default_custom_rss_feeds()
-        db.news_gov_rss_enabled = True
-        db.news_gov_rss_feeds_json = default_gov_rss_feeds()
         session.add(db)
         mutated = True
     else:
-        if getattr(db, "news_gov_rss_enabled", None) is None:
-            db.news_gov_rss_enabled = True
-            mutated = True
         # Lift legacy strict retrieval defaults that frequently produced zero
         # findings in live workflows.
         if getattr(db, "news_workflow_top_k", None) in (None, 8):
@@ -401,20 +387,6 @@ async def _get_or_create_app_settings(session: AsyncSession) -> AppSettings:
         if getattr(db, "news_workflow_min_confidence", None) in (None, 0.6):
             db.news_workflow_min_confidence = 0.45
             mutated = True
-        raw_custom_feeds = getattr(db, "news_rss_feeds_json", None)
-        existing_custom_feeds = normalize_custom_rss_feeds(raw_custom_feeds) if raw_custom_feeds else []
-        merged_custom_feeds = merge_custom_rss_feeds(existing_custom_feeds)
-        if (raw_custom_feeds is None and merged_custom_feeds) or merged_custom_feeds != existing_custom_feeds:
-            db.news_rss_feeds_json = merged_custom_feeds
-            mutated = True
-        raw_gov_feeds = getattr(db, "news_gov_rss_feeds_json", None)
-        normalized_gov_feeds = normalize_gov_rss_feeds(raw_gov_feeds) if raw_gov_feeds else []
-        merged_gov_feeds = merge_gov_rss_feeds(normalized_gov_feeds)
-        if not merged_gov_feeds:
-            merged_gov_feeds = default_gov_rss_feeds()
-        if (raw_gov_feeds is None and merged_gov_feeds) or merged_gov_feeds != normalized_gov_feeds:
-            db.news_gov_rss_feeds_json = merged_gov_feeds
-            mutated = True
     if mutated:
         await session.commit()
         await session.refresh(db)
@@ -423,12 +395,6 @@ async def _get_or_create_app_settings(session: AsyncSession) -> AppSettings:
 
 async def get_news_settings(session: AsyncSession) -> dict[str, Any]:
     db = await _get_or_create_app_settings(session)
-    raw_custom_feeds = getattr(db, "news_rss_feeds_json", None)
-    custom_rss_feeds = normalize_custom_rss_feeds(raw_custom_feeds) if raw_custom_feeds else default_custom_rss_feeds()
-    raw_gov_feeds = getattr(db, "news_gov_rss_feeds_json", None)
-    rss_sources = normalize_gov_rss_feeds(raw_gov_feeds) if raw_gov_feeds else default_gov_rss_feeds()
-    raw_gov_enabled = getattr(db, "news_gov_rss_enabled", None)
-    rss_enabled = True if raw_gov_enabled is None else bool(raw_gov_enabled)
 
     return {
         "enabled": bool(getattr(db, "news_workflow_enabled", True)),
@@ -462,12 +428,6 @@ async def get_news_settings(session: AsyncSession) -> dict[str, Any]:
         "cycle_llm_call_cap": int(getattr(db, "news_workflow_cycle_llm_call_cap", 30) or 30),
         "cache_ttl_minutes": int(getattr(db, "news_workflow_cache_ttl_minutes", 30) or 30),
         "max_edge_evals_per_article": int(getattr(db, "news_workflow_max_edge_evals_per_article", 6) or 6),
-        "rss_feeds": custom_rss_feeds,
-        "rss_enabled": rss_enabled,
-        "rss_sources": rss_sources,
-        # Backward-compatible API aliases. Keep until older clients are removed.
-        "gov_rss_enabled": rss_enabled,
-        "gov_rss_feeds": rss_sources,
     }
 
 
@@ -476,13 +436,6 @@ async def update_news_settings(
     updates: dict[str, Any],
 ) -> dict[str, Any]:
     db = await _get_or_create_app_settings(session)
-    if "gov_rss_enabled" in updates and "rss_enabled" not in updates:
-        updates["rss_enabled"] = updates.get("gov_rss_enabled")
-    if "gov_rss_feeds" in updates and "rss_sources" not in updates:
-        updates["rss_sources"] = updates.get("gov_rss_feeds")
-    if "custom_rss_feeds" in updates and "rss_feeds" not in updates:
-        updates["rss_feeds"] = updates.get("custom_rss_feeds")
-
     mapping = {
         "enabled": "news_workflow_enabled",
         "auto_run": "news_workflow_auto_run",
@@ -510,21 +463,12 @@ async def update_news_settings(
         "cycle_llm_call_cap": "news_workflow_cycle_llm_call_cap",
         "cache_ttl_minutes": "news_workflow_cache_ttl_minutes",
         "max_edge_evals_per_article": "news_workflow_max_edge_evals_per_article",
-        "rss_enabled": "news_gov_rss_enabled",
-        "gov_rss_enabled": "news_gov_rss_enabled",
     }
     for key, value in updates.items():
         col = mapping.get(key)
         if not col:
             continue
         setattr(db, col, value)
-
-    if "rss_feeds" in updates:
-        db.news_rss_feeds_json = normalize_custom_rss_feeds(updates.get("rss_feeds"))
-    if "rss_sources" in updates:
-        db.news_gov_rss_feeds_json = normalize_gov_rss_feeds(updates.get("rss_sources"))
-    elif "gov_rss_feeds" in updates:
-        db.news_gov_rss_feeds_json = normalize_gov_rss_feeds(updates.get("gov_rss_feeds"))
 
     db.updated_at = utcnow()
     await session.commit()

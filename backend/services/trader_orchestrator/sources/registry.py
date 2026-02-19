@@ -51,25 +51,14 @@ _SOURCE_ADAPTERS: dict[str, SourceAdapter] = {
     ),
 }
 
-_SOURCE_ALIASES: dict[str, str] = {
-    # Legacy UI/source keys mapped to canonical adapters.
-    "pool_traders": "traders",
-    "tracked_traders": "traders",
-    "insider": "traders",
-}
-
 
 def normalize_source_key(value: Any) -> str:
     key = str(value or "").strip().lower()
-    return _SOURCE_ALIASES.get(key, key)
+    return key
 
 
 def list_source_adapters() -> list[SourceAdapter]:
     return sorted(_SOURCE_ADAPTERS.values(), key=lambda item: item.key)
-
-
-def list_source_aliases() -> dict[str, str]:
-    return dict(_SOURCE_ALIASES)
 
 
 def get_source_adapter(source_key: str) -> SourceAdapter | None:

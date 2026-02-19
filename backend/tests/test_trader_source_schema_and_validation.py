@@ -24,12 +24,12 @@ async def _build_session_factory(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_source_schema_excludes_world_intelligence_and_omni(tmp_path):
+async def test_source_schema_excludes_events_and_omni(tmp_path):
     engine, session_factory = await _build_session_factory(tmp_path)
     async with session_factory() as session:
         schema = await build_trader_config_schema(session)
     source_keys = {str(source.get("key")) for source in schema.get("sources", [])}
-    assert "world_intelligence" not in source_keys
+    assert "events" not in source_keys
 
     strategy_keys = {
         str(option.get("key"))
@@ -52,8 +52,8 @@ async def test_crypto_schema_exposes_unified_strategies(tmp_path):
         "btc_eth_highfreq",
         "crypto_spike_reversion",
     }
-    # __passthrough__ is an expected system option
-    assert "__passthrough__" in crypto_strategies
+    # Passthrough pseudo-option should not be exposed in source strategy options.
+    assert "__passthrough__" not in crypto_strategies
     await engine.dispose()
 
 
@@ -76,9 +76,9 @@ async def test_scanner_and_weather_have_separate_strategy_sets(tmp_path):
         "tail_end_carry",
     }
     assert weather_strategies >= {"weather_edge", "weather_distribution"}
-    # __passthrough__ is an expected system option in all sources
-    assert "__passthrough__" in scanner_strategies
-    assert "__passthrough__" in weather_strategies
+    # Passthrough pseudo-option should not be exposed in source strategy options.
+    assert "__passthrough__" not in scanner_strategies
+    assert "__passthrough__" not in weather_strategies
     await engine.dispose()
 
 

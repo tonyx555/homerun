@@ -35,15 +35,15 @@ def _safe_bool(value: Any, default: bool = False) -> bool:
 
 def _direction_outcome_index(direction: Any) -> Optional[int]:
     normalized = str(direction or "").strip().lower()
-    if normalized in {"buy_yes", "yes", "up", "long_yes"}:
+    if normalized == "buy_yes":
         return 0
-    if normalized in {"buy_no", "no", "down", "long_no"}:
+    if normalized == "buy_no":
         return 1
     return None
 
 
 def _extract_signal_side_price(payload: dict[str, Any], outcome_idx: int) -> Optional[float]:
-    side_keys = ("yes", "up") if outcome_idx == 0 else ("no", "down")
+    side_keys = ("yes",) if outcome_idx == 0 else ("no",)
     for prefix in side_keys:
         for key in (
             f"{prefix}_price",
@@ -107,9 +107,9 @@ def _extract_winning_outcome_index(market_info: Optional[dict[str, Any]]) -> Opt
         pass
 
     winner_text = str(winner_raw).strip().lower()
-    if winner_text in {"yes", "up", "true"}:
+    if winner_text == "yes":
         return 0
-    if winner_text in {"no", "down", "false"}:
+    if winner_text == "no":
         return 1
     if outcomes:
         for idx, label in enumerate(outcomes):
@@ -144,9 +144,9 @@ def _extract_winning_outcome_index_from_prices(
                     parsed = safe_float(prices[idx])
                     if parsed is None:
                         continue
-                    if yes_price is None and label in {"yes", "up", "true"}:
+                    if yes_price is None and label == "yes":
                         yes_price = parsed
-                    if no_price is None and label in {"no", "down", "false"}:
+                    if no_price is None and label == "no":
                         no_price = parsed
             if yes_price is None:
                 yes_price = safe_float(prices[0])

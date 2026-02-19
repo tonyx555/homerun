@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -307,10 +307,12 @@ function resolveMarketOutcomes(market: Opportunity['markets'][number] | undefine
     ?? marketRow.outcomes
     ?? marketRow.tokens
   )
-  const prices = extractOutcomePrices(
-    marketRow.outcome_prices
+  const outcomePriceSource = marketRow.outcome_prices
     ?? marketRow.prices
-  )
+  let prices = extractOutcomePrices(outcomePriceSource)
+  if (prices.length === 0) {
+    prices = extractOutcomePrices(marketRow.tokens)
+  }
   return { labels, prices }
 }
 
@@ -376,6 +378,8 @@ function OpportunityCard({
   const [expanded, setExpanded] = useState(isModalView)
   const [aiExpanded, setAiExpanded] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
+  const sparklineRef = useRef<HTMLDivElement>(null)
+  const [sparklineWidth, setSparklineWidth] = useState(260)
   const queryClient = useQueryClient()
 
   // Temperature unit preference
@@ -411,6 +415,7 @@ function OpportunityCard({
   const recommendation = judgment?.recommendation || (isPending ? 'pending' : '')
   // Search result mode (market listing, not an arbitrage opportunity)
   const isSearch = opportunity.strategy === 'search'
+  const strategySdk = String(opportunity.strategy || '').trim().toLowerCase()
 
   // Risk color
   const riskColor = opportunity.risk_score < 0.3
@@ -646,6 +651,20 @@ function OpportunityCard({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [isModalView, modalOpen])
 
+  useEffect(() => {
+    if (!hasSparkline) return
+    if (!sparklineRef.current) return
+
+    const measure = () => {
+      if (!sparklineRef.current) return
+      setSparklineWidth(Math.max(240, sparklineRef.current.offsetWidth))
+    }
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(sparklineRef.current)
+    return () => ro.disconnect()
+  }, [hasSparkline, opportunity.id])
+
   return (
     <>
     <Card className={cn(
@@ -677,6 +696,15 @@ function OpportunityCard({
             {isSearch && (
               <Badge variant="outline" className="text-[10px] px-1.5 py-0 bg-blue-500/10 text-blue-400 border-blue-500/20">
                 {(opportunity as any).platform === 'kalshi' ? 'Kalshi' : 'Polymarket'}
+              </Badge>
+            )}
+            {!isSearch && strategySdk && (
+              <Badge
+                variant="outline"
+                className="max-w-[170px] truncate text-[9px] px-1.5 py-0 font-mono border-border/50 bg-muted/25 text-muted-foreground"
+                title={`StrategySDK: ${strategySdk}`}
+              >
+                SDK {strategySdk}
               </Badge>
             )}
             {opportunity.category && !isWeatherOpportunity && (
@@ -741,26 +769,25 @@ function OpportunityCard({
         </h3>
 
         {/* ── Row 3: Sparkline + Metrics ── */}
-        <div className="flex items-stretch gap-3">
+        <div className="space-y-1.5">
           {/* Sparkline */}
-          {market && hasSparkline && (
-            <div className="shrink-0">
+          {hasSparkline && (
+            <div ref={sparklineRef} className="w-full">
               <Sparkline
                 data={sparkSeries[0]?.data || []}
                 series={sparklineSeries}
-                width={isMultiMarket && sparkSeries.length > 4 ? 120 : 96}
-                height={40}
+                width={sparklineWidth}
+                height={44}
                 lineWidth={1.5}
                 showDots
               />
               <div className={cn(
-                "mt-0.5 flex flex-wrap gap-x-1.5 gap-y-0.5 px-0.5 text-[9px] font-data",
-                isMultiMarket && sparkSeries.length > 4 && "max-w-[120px]",
+                "mt-0 flex flex-wrap gap-x-1.5 gap-y-0.5 px-0.5 text-[9px] font-data"
               )}>
                 {sparkSeries.slice(0, isMultiMarket ? 6 : undefined).map((row, index) => (
                   <span
                     key={`${opportunity.id}-spark-${row.key}`}
-                    className={SPARKLINE_TEXT_CLASSES[index % SPARKLINE_TEXT_CLASSES.length]}
+                    className={cn('whitespace-nowrap', SPARKLINE_TEXT_CLASSES[index % SPARKLINE_TEXT_CLASSES.length])}
                   >
                     {compactOutcomeLabel(row.label, isMultiMarket ? 8 : 10)} {safeFixed(row.latest, 2)}
                   </span>
@@ -774,7 +801,7 @@ function OpportunityCard({
 
           {/* Metrics Grid */}
           {isSearch ? (
-            <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 flex-1 min-w-0">
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
               <MiniMetric label="Volume" value={formatCompact(opportunity.volume ?? opportunity.min_liquidity)} />
               <MiniMetric label="Liquidity" value={formatCompact(opportunity.min_liquidity)} />
               <MiniMetric label="Ends" value={timeUntil(opportunity.resolution_date)} />
@@ -786,7 +813,7 @@ function OpportunityCard({
             </div>
           ) : (
             isWeatherOpportunity ? (
-              <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 flex-1 min-w-0">
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
                 <MiniMetric
                   label="Market Px"
                   value={marketProbability != null ? `${safeFixed(marketProbability * 100, 1)}¢` : '—'}
@@ -806,7 +833,7 @@ function OpportunityCard({
                 />
               </div>
             ) : (
-              <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 flex-1 min-w-0">
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
                 <MiniMetric label="Cost" value={formatCompact(opportunity.total_cost)} />
                 <MiniMetric label="Liq" value={formatCompact(opportunity.min_liquidity)} />
                 <MiniMetric

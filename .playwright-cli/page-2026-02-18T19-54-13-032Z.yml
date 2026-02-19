@@ -1,0 +1,1794 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]:
+      - img [ref=e7]
+      - generic [ref=e9]: HOMERUN
+    - button "Select Account" [ref=e11] [cursor=pointer]:
+      - img [ref=e12]
+      - generic [ref=e14]: Select Account
+      - img [ref=e15]
+    - generic [ref=e17]:
+      - generic [ref=e18]:
+        - img [ref=e19]
+        - generic [ref=e23]: Balance
+        - generic [ref=e24]: $0.00
+      - generic [ref=e25]:
+        - img [ref=e26]
+        - generic [ref=e29]: PnL
+        - generic [ref=e30]: $0.00
+      - generic [ref=e31]:
+        - img [ref=e32]
+        - generic [ref=e34]: ROI
+        - generic [ref=e35]: 0.0%
+      - generic [ref=e36]:
+        - img [ref=e37]
+        - generic [ref=e39]: Positions
+        - generic [ref=e40]: "0"
+    - generic [ref=e43]:
+      - img [ref=e44]
+      - textbox "Search markets, wallets, traders..." [ref=e47]
+      - generic [ref=e48]: /
+    - generic [ref=e49]:
+      - button "Worker health status" [ref=e50]
+      - button [ref=e52] [cursor=pointer]:
+        - img [ref=e53]
+      - button "Pause" [ref=e59] [cursor=pointer]:
+        - img [ref=e60]
+        - text: Pause
+  - generic [ref=e63]:
+    - img [ref=e67]
+    - generic [ref=e73]:
+      - generic [ref=e74]:
+        - img [ref=e75]
+        - generic [ref=e77]: SYSTEM
+        - generic [ref=e78]: LIVE
+        - generic [ref=e79]: "|"
+      - generic [ref=e80]:
+        - img [ref=e81]
+        - generic [ref=e84]: SCAN
+        - generic [ref=e85]: 57s ago
+        - generic [ref=e86]: "|"
+      - generic [ref=e87]:
+        - img [ref=e88]
+        - generic [ref=e90]: WORKERS
+        - generic [ref=e91]: 0/8
+        - generic [ref=e92]: 8 ERR
+        - generic [ref=e93]: "|"
+      - generic [ref=e94]:
+        - img [ref=e95]
+        - generic [ref=e97]: MARKETS
+        - generic [ref=e98]: "22"
+        - generic [ref=e99]: "|"
+      - generic [ref=e100]:
+        - img [ref=e101]
+        - generic [ref=e105]: TRADERS
+        - generic [ref=e106]: "0"
+        - generic [ref=e107]: "|"
+      - generic [ref=e108]:
+        - img [ref=e109]
+        - generic [ref=e111]: NEWS
+        - generic [ref=e112]: "0"
+        - generic [ref=e113]: "|"
+      - generic [ref=e114]:
+        - img [ref=e115]
+        - generic [ref=e117]: WEATHER
+        - generic [ref=e118]: "0"
+        - generic [ref=e119]: "|"
+      - generic [ref=e120]:
+        - img [ref=e121]
+        - generic [ref=e123]: CRYPTO
+        - generic [ref=e124]: "0"
+        - generic [ref=e125]: "|"
+      - generic [ref=e126]:
+        - img [ref=e127]
+        - generic [ref=e129]: SIGNALS
+        - generic [ref=e130]: P:0 S:0 X:0
+        - generic [ref=e131]: F:0
+        - generic [ref=e132]: "|"
+      - generic [ref=e133]:
+        - img [ref=e134]
+        - generic [ref=e136]: STRATEGIES
+        - generic [ref=e137]: "0"
+        - generic [ref=e138]: "|"
+      - generic [ref=e139]:
+        - img [ref=e140]
+        - generic [ref=e143]: ORCH
+        - generic [ref=e144]: PAPER PAUSED
+        - generic [ref=e145]: "|"
+      - generic [ref=e146]:
+        - img [ref=e147]
+        - generic [ref=e151]: FUNNEL
+        - generic [ref=e152]: 0→0
+        - generic [ref=e153]: 0.0%
+        - generic [ref=e154]: "|"
+      - generic [ref=e155]:
+        - img [ref=e156]
+        - generic [ref=e159]: DAY PNL
+        - generic [ref=e160]: $0.00
+        - generic [ref=e161]: "|"
+      - generic [ref=e162]:
+        - img [ref=e163]
+        - generic [ref=e165]: EXPOSURE
+        - generic [ref=e166]: $0.00
+        - generic [ref=e167]: "|"
+      - generic [ref=e168]:
+        - img [ref=e169]
+        - generic [ref=e171]: OPEN ORD
+        - generic [ref=e172]: "0"
+        - generic [ref=e173]: "|"
+      - generic [ref=e174]:
+        - img [ref=e175]
+        - generic [ref=e177]: EVENTS 1M
+        - generic [ref=e178]: "0"
+        - generic [ref=e179]: "|"
+      - generic [ref=e180]:
+        - img [ref=e181]
+        - generic [ref=e183]: FLOW 1M
+        - generic [ref=e184]: D:0 O:0 S:0
+        - generic [ref=e185]: "|"
+      - generic [ref=e186]:
+        - img [ref=e187]
+        - generic [ref=e190]: SCANS 1M
+        - generic [ref=e191]: "0"
+        - generic [ref=e192]: "|"
+      - generic [ref=e193]:
+        - img [ref=e194]
+        - generic [ref=e196]: ALERTS 1M
+        - generic [ref=e197]: "0"
+        - generic [ref=e198]: "|"
+      - generic [ref=e199]:
+        - img [ref=e200]
+        - generic [ref=e202]: LAST EVT
+        - generic [ref=e203]: No recent events
+        - generic [ref=e204]: "|"
+      - generic [ref=e205]:
+        - img [ref=e206]
+        - generic [ref=e208]: SYSTEM
+        - generic [ref=e209]: LIVE
+        - generic [ref=e210]: "|"
+      - generic [ref=e211]:
+        - img [ref=e212]
+        - generic [ref=e215]: SCAN
+        - generic [ref=e216]: 57s ago
+        - generic [ref=e217]: "|"
+      - generic [ref=e218]:
+        - img [ref=e219]
+        - generic [ref=e221]: WORKERS
+        - generic [ref=e222]: 0/8
+        - generic [ref=e223]: 8 ERR
+        - generic [ref=e224]: "|"
+      - generic [ref=e225]:
+        - img [ref=e226]
+        - generic [ref=e228]: MARKETS
+        - generic [ref=e229]: "22"
+        - generic [ref=e230]: "|"
+      - generic [ref=e231]:
+        - img [ref=e232]
+        - generic [ref=e236]: TRADERS
+        - generic [ref=e237]: "0"
+        - generic [ref=e238]: "|"
+      - generic [ref=e239]:
+        - img [ref=e240]
+        - generic [ref=e242]: NEWS
+        - generic [ref=e243]: "0"
+        - generic [ref=e244]: "|"
+      - generic [ref=e245]:
+        - img [ref=e246]
+        - generic [ref=e248]: WEATHER
+        - generic [ref=e249]: "0"
+        - generic [ref=e250]: "|"
+      - generic [ref=e251]:
+        - img [ref=e252]
+        - generic [ref=e254]: CRYPTO
+        - generic [ref=e255]: "0"
+        - generic [ref=e256]: "|"
+      - generic [ref=e257]:
+        - img [ref=e258]
+        - generic [ref=e260]: SIGNALS
+        - generic [ref=e261]: P:0 S:0 X:0
+        - generic [ref=e262]: F:0
+        - generic [ref=e263]: "|"
+      - generic [ref=e264]:
+        - img [ref=e265]
+        - generic [ref=e267]: STRATEGIES
+        - generic [ref=e268]: "0"
+        - generic [ref=e269]: "|"
+      - generic [ref=e270]:
+        - img [ref=e271]
+        - generic [ref=e274]: ORCH
+        - generic [ref=e275]: PAPER PAUSED
+        - generic [ref=e276]: "|"
+      - generic [ref=e277]:
+        - img [ref=e278]
+        - generic [ref=e282]: FUNNEL
+        - generic [ref=e283]: 0→0
+        - generic [ref=e284]: 0.0%
+        - generic [ref=e285]: "|"
+      - generic [ref=e286]:
+        - img [ref=e287]
+        - generic [ref=e290]: DAY PNL
+        - generic [ref=e291]: $0.00
+        - generic [ref=e292]: "|"
+      - generic [ref=e293]:
+        - img [ref=e294]
+        - generic [ref=e296]: EXPOSURE
+        - generic [ref=e297]: $0.00
+        - generic [ref=e298]: "|"
+      - generic [ref=e299]:
+        - img [ref=e300]
+        - generic [ref=e302]: OPEN ORD
+        - generic [ref=e303]: "0"
+        - generic [ref=e304]: "|"
+      - generic [ref=e305]:
+        - img [ref=e306]
+        - generic [ref=e308]: EVENTS 1M
+        - generic [ref=e309]: "0"
+        - generic [ref=e310]: "|"
+      - generic [ref=e311]:
+        - img [ref=e312]
+        - generic [ref=e314]: FLOW 1M
+        - generic [ref=e315]: D:0 O:0 S:0
+        - generic [ref=e316]: "|"
+      - generic [ref=e317]:
+        - img [ref=e318]
+        - generic [ref=e321]: SCANS 1M
+        - generic [ref=e322]: "0"
+        - generic [ref=e323]: "|"
+      - generic [ref=e324]:
+        - img [ref=e325]
+        - generic [ref=e327]: ALERTS 1M
+        - generic [ref=e328]: "0"
+        - generic [ref=e329]: "|"
+      - generic [ref=e330]:
+        - img [ref=e331]
+        - generic [ref=e333]: LAST EVT
+        - generic [ref=e334]: No recent events
+        - generic [ref=e335]: "|"
+  - generic [ref=e336]:
+    - navigation [ref=e337]:
+      - button "Opportunities" [ref=e338] [cursor=pointer]:
+        - img [ref=e340]
+        - generic [ref=e342]: Opportunities
+      - button "Bots" [ref=e343] [cursor=pointer]:
+        - img [ref=e344]
+        - generic [ref=e347]: Bots
+      - button "Positions" [ref=e348] [cursor=pointer]:
+        - img [ref=e349]
+        - generic [ref=e352]: Positions
+      - button "Performance" [ref=e353] [cursor=pointer]:
+        - img [ref=e354]
+        - generic [ref=e356]: Performance
+      - button "Accounts" [ref=e357] [cursor=pointer]:
+        - img [ref=e358]
+        - generic [ref=e362]: Accounts
+      - button "Strategies" [ref=e363] [cursor=pointer]:
+        - img [ref=e364]
+        - generic [ref=e368]: Strategies
+      - button "Traders" [ref=e369] [cursor=pointer]:
+        - img [ref=e370]
+        - generic [ref=e375]: Traders
+      - button "Data" [ref=e376] [cursor=pointer]:
+        - img [ref=e377]
+        - generic [ref=e381]: Data
+      - button "AI" [ref=e382] [cursor=pointer]:
+        - img [ref=e383]
+        - generic [ref=e386]: AI
+      - button "Settings" [ref=e387] [cursor=pointer]:
+        - img [ref=e388]
+        - generic [ref=e391]: Settings
+    - main [ref=e392]:
+      - generic [ref=e394]:
+        - generic [ref=e395]:
+          - button "Markets 17" [ref=e396] [cursor=pointer]:
+            - img [ref=e397]
+            - text: Markets
+            - generic [ref=e400]: "17"
+          - generic [ref=e401]:
+            - button [ref=e402] [cursor=pointer]:
+              - img [ref=e403]
+            - button [ref=e408] [cursor=pointer]:
+              - img [ref=e409]
+            - button [ref=e410] [cursor=pointer]:
+              - img [ref=e411]
+          - button "Settings" [ref=e414] [cursor=pointer]:
+            - img [ref=e415]
+            - text: Settings
+        - generic [ref=e418]:
+          - img [ref=e419]
+          - generic [ref=e424]: Fetching prices for 1500 tokens...
+        - generic [ref=e426]:
+          - generic [ref=e427]:
+            - img [ref=e428]
+            - textbox "Search markets..." [ref=e431]
+          - combobox [ref=e432] [cursor=pointer]:
+            - generic: All Detectors
+            - img [ref=e433]
+          - button "Show Empty" [ref=e435] [cursor=pointer]
+          - combobox [ref=e436] [cursor=pointer]:
+            - generic: All Categories
+            - img [ref=e437]
+          - spinbutton [ref=e439]: "0"
+          - generic [ref=e440]:
+            - generic [ref=e441]:
+              - generic [ref=e442]: Risk
+              - generic [ref=e443]: "1.0"
+            - slider [ref=e444] [cursor=pointer]: "1"
+          - combobox [ref=e445] [cursor=pointer]:
+            - generic: AI Score
+            - img [ref=e446]
+          - 'button "Sort direction: descending" [ref=e448] [cursor=pointer]':
+            - img [ref=e449]
+          - button "Refresh" [ref=e451] [cursor=pointer]:
+            - img [ref=e452]
+            - text: Refresh
+          - button "Analyze" [ref=e457] [cursor=pointer]:
+            - img [ref=e458]
+            - text: Analyze
+        - generic [ref=e461]:
+          - generic [ref=e464]:
+            - generic [ref=e465]:
+              - generic [ref=e466]:
+                - generic [ref=e467]: NegRisk
+                - generic [ref=e468]: Daily Strikes
+              - generic [ref=e469]:
+                - generic [ref=e470]:
+                  - img [ref=e471]
+                  - generic [ref=e474]: +28.36%
+                - paragraph [ref=e475]: $1.30 net
+            - 'heading "Multi-Outcome Short: Will Israel strike Gaza on...?..." [level=3] [ref=e476]'
+            - generic [ref=e477]:
+              - generic [ref=e480]:
+                - generic [ref=e481]: Februar… 0.48
+                - generic [ref=e482]: Februar… 0.02
+                - generic [ref=e483]: Februar… 0.17
+                - generic [ref=e484]: Februar… 0.46
+                - generic [ref=e485]: Februar… 0.45
+                - generic [ref=e486]: Februar… 0.41
+                - generic [ref=e487]: "+1"
+              - generic [ref=e488]:
+                - generic [ref=e489]:
+                  - paragraph [ref=e490]: Cost
+                  - generic [ref=e492]: $4.58
+                - generic [ref=e493]:
+                  - paragraph [ref=e494]: Liq
+                  - generic [ref=e496]: $1.4K
+                - generic [ref=e497]:
+                  - paragraph [ref=e498]: Risk
+                  - generic [ref=e500]: 35%
+                - generic [ref=e503]:
+                  - paragraph [ref=e504]: Max Pos
+                  - generic [ref=e506]: $144
+            - generic [ref=e507]:
+              - generic [ref=e508]:
+                - img [ref=e509]
+                - text: No AI analysis
+              - button "Analyze" [ref=e512] [cursor=pointer]
+            - generic [ref=e513]:
+              - generic [ref=e514]:
+                - generic [ref=e515]:
+                  - generic [ref=e516]: BUY NO
+                  - generic [ref=e517]: Will Israel…
+                  - generic [ref=e518]: "@0.52"
+                - generic [ref=e519]:
+                  - generic [ref=e520]: ·
+                  - generic [ref=e521]: BUY NO
+                  - generic [ref=e522]: Will Israel…
+                  - generic [ref=e523]: "@0.98"
+                - generic [ref=e524]: "+5"
+              - generic [ref=e525]:
+                - generic [ref=e526]:
+                  - img [ref=e527]
+                  - text: "7"
+                - generic [ref=e531]:
+                  - img [ref=e532]
+                  - text: 4m
+            - generic [ref=e535]:
+              - link "PM" [ref=e536] [cursor=pointer]:
+                - /url: https://polymarket.com/event/will-israel-strike-gaza-on-224/will-israel-strike-gaza-on-february-22-2026
+                - img [ref=e537]
+                - text: PM
+              - button "AI" [ref=e541] [cursor=pointer]:
+                - img [ref=e542]
+                - text: AI
+              - button "News" [ref=e544] [cursor=pointer]:
+                - img [ref=e545]
+                - text: News
+              - generic [ref=e548]:
+                - button "Expand" [ref=e549] [cursor=pointer]:
+                  - img [ref=e550]
+                  - text: Expand
+                - button "More" [ref=e555] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e556]
+          - generic [ref=e560]:
+            - generic [ref=e561]:
+              - generic [ref=e562]:
+                - generic [ref=e563]: NegRisk
+                - generic [ref=e564]: Macro Indicators
+              - generic [ref=e565]:
+                - generic [ref=e566]:
+                  - img [ref=e567]
+                  - generic [ref=e570]: +28.31%
+                - paragraph [ref=e571]: $1.30 net
+            - 'heading "Multi-Outcome Short: Eurozone GDP growth in Q1 2026..." [level=3] [ref=e572]'
+            - generic [ref=e573]:
+              - generic [ref=e576]:
+                - generic [ref=e577]: 1.3-1.6% 0.46
+                - generic [ref=e578]: 0.5-0.8% 0.45
+                - generic [ref=e579]: 2.1-2.4% 0.44
+                - generic [ref=e580]: <0.5% 0.20
+                - generic [ref=e581]: 1.7-2.0% 0.44
+                - generic [ref=e582]: 0.9-1.2% 0.44
+                - generic [ref=e583]: "+1"
+              - generic [ref=e584]:
+                - generic [ref=e585]:
+                  - paragraph [ref=e586]: Cost
+                  - generic [ref=e588]: $4.58
+                - generic [ref=e589]:
+                  - paragraph [ref=e590]: Liq
+                  - generic [ref=e592]: $299
+                - generic [ref=e593]:
+                  - paragraph [ref=e594]: Risk
+                  - generic [ref=e596]: 50%
+                - generic [ref=e599]:
+                  - paragraph [ref=e600]: Max Pos
+                  - generic [ref=e602]: $29.93
+            - generic [ref=e603]:
+              - generic [ref=e604]:
+                - img [ref=e605]
+                - text: No AI analysis
+              - button "Analyze" [ref=e608] [cursor=pointer]
+            - generic [ref=e609]:
+              - generic [ref=e610]:
+                - generic [ref=e611]:
+                  - generic [ref=e612]: BUY NO
+                  - generic [ref=e613]: Will Eurozo…
+                  - generic [ref=e614]: "@0.54"
+                - generic [ref=e615]:
+                  - generic [ref=e616]: ·
+                  - generic [ref=e617]: BUY NO
+                  - generic [ref=e618]: Will Eurozo…
+                  - generic [ref=e619]: "@0.56"
+                - generic [ref=e620]: "+5"
+              - generic [ref=e621]:
+                - generic [ref=e622]:
+                  - img [ref=e623]
+                  - text: "7"
+                - generic [ref=e627]:
+                  - img [ref=e628]
+                  - text: 4m
+            - generic [ref=e631]:
+              - link "PM" [ref=e632] [cursor=pointer]:
+                - /url: https://polymarket.com/event/eurozone-gdp-growth-in-q1-2026/will-eurozone-gdp-growth-in-q1-2026-be-between-1pt3-and-1pt6
+                - img [ref=e633]
+                - text: PM
+              - button "AI" [ref=e637] [cursor=pointer]:
+                - img [ref=e638]
+                - text: AI
+              - button "News" [ref=e640] [cursor=pointer]:
+                - img [ref=e641]
+                - text: News
+              - generic [ref=e644]:
+                - button "Expand" [ref=e645] [cursor=pointer]:
+                  - img [ref=e646]
+                  - text: Expand
+                - button "More" [ref=e651] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e652]
+          - generic [ref=e656]:
+            - generic [ref=e657]:
+              - generic [ref=e658]:
+                - generic [ref=e659]: NegRisk
+                - generic [ref=e660]: Sports
+              - generic [ref=e661]:
+                - generic [ref=e662]:
+                  - img [ref=e663]
+                  - generic [ref=e666]: +24.44%
+                - paragraph [ref=e667]: $0.3850 net
+            - 'heading "NegRisk Short: Botafogo FR vs. CA Nacional Potosí..." [level=3] [ref=e668]'
+            - generic [ref=e669]:
+              - generic [ref=e672]:
+                - generic [ref=e673]: Botafog… 0.55
+                - generic [ref=e674]: Draw (B… 0.36
+                - generic [ref=e675]: CA Naci… 0.51
+              - generic [ref=e676]:
+                - generic [ref=e677]:
+                  - paragraph [ref=e678]: Cost
+                  - generic [ref=e680]: $1.57
+                - generic [ref=e681]:
+                  - paragraph [ref=e682]: Liq
+                  - generic [ref=e684]: $442
+                - generic [ref=e685]:
+                  - paragraph [ref=e686]: Risk
+                  - generic [ref=e688]: 30%
+                - generic [ref=e691]:
+                  - paragraph [ref=e692]: Max Pos
+                  - generic [ref=e694]: $44.23
+            - generic [ref=e695]:
+              - generic [ref=e696]:
+                - img [ref=e697]
+                - text: No AI analysis
+              - button "Analyze" [ref=e700] [cursor=pointer]
+            - generic [ref=e701]:
+              - generic [ref=e702]:
+                - generic [ref=e703]:
+                  - generic [ref=e704]: BUY NO
+                  - generic [ref=e705]: Will Botafo…
+                  - generic [ref=e706]: "@0.45"
+                - generic [ref=e707]:
+                  - generic [ref=e708]: ·
+                  - generic [ref=e709]: BUY NO
+                  - generic [ref=e710]: Will Botafo…
+                  - generic [ref=e711]: "@0.64"
+                - generic [ref=e712]: "+1"
+              - generic [ref=e713]:
+                - generic [ref=e714]:
+                  - img [ref=e715]
+                  - text: "3"
+                - generic [ref=e719]:
+                  - img [ref=e720]
+                  - text: 4m
+            - generic [ref=e723]:
+              - link "PM" [ref=e724] [cursor=pointer]:
+                - /url: https://polymarket.com/event/lib-bot-nap-2026-02-25/lib-bot-nap-2026-02-25-bot
+                - img [ref=e725]
+                - text: PM
+              - button "AI" [ref=e729] [cursor=pointer]:
+                - img [ref=e730]
+                - text: AI
+              - button "News" [ref=e732] [cursor=pointer]:
+                - img [ref=e733]
+                - text: News
+              - generic [ref=e736]:
+                - button "Expand" [ref=e737] [cursor=pointer]:
+                  - img [ref=e738]
+                  - text: Expand
+                - button "More" [ref=e743] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e744]
+          - generic [ref=e748]:
+            - generic [ref=e749]:
+              - generic [ref=e750]:
+                - generic [ref=e751]: NegRisk
+                - generic [ref=e752]: Music
+              - generic [ref=e753]:
+                - generic [ref=e754]:
+                  - img [ref=e755]
+                  - generic [ref=e758]: +22.55%
+                - paragraph [ref=e759]: $0.9015 net
+            - 'heading "NegRisk Short: Hilary Duff ''Luck... or Something'' First Week Albu..." [level=3] [ref=e760]'
+            - generic [ref=e761]:
+              - generic [ref=e764]:
+                - generic [ref=e765]: <20k 0.56
+                - generic [ref=e766]: 25k-30k 0.29
+                - generic [ref=e767]: 35k-40k 0.30
+                - generic [ref=e768]: 20k-25k 0.30
+                - generic [ref=e769]: 30k-35k 0.30
+                - generic [ref=e770]: 40k+ 0.25
+              - generic [ref=e771]:
+                - generic [ref=e772]:
+                  - paragraph [ref=e773]: Cost
+                  - generic [ref=e775]: $4.00
+                - generic [ref=e776]:
+                  - paragraph [ref=e777]: Liq
+                  - generic [ref=e779]: $272
+                - generic [ref=e780]:
+                  - paragraph [ref=e781]: Risk
+                  - generic [ref=e783]: 90%
+                - generic [ref=e786]:
+                  - paragraph [ref=e787]: Max Pos
+                  - generic [ref=e789]: $27.24
+            - generic [ref=e790]:
+              - generic [ref=e791]:
+                - img [ref=e792]
+                - text: No AI analysis
+              - button "Analyze" [ref=e795] [cursor=pointer]
+            - generic [ref=e796]:
+              - generic [ref=e797]:
+                - generic [ref=e798]:
+                  - generic [ref=e799]: BUY NO
+                  - generic [ref=e800]: Will 'Luck.…
+                  - generic [ref=e801]: "@0.44"
+                - generic [ref=e802]:
+                  - generic [ref=e803]: ·
+                  - generic [ref=e804]: BUY NO
+                  - generic [ref=e805]: Will 'Luck.…
+                  - generic [ref=e806]: "@0.71"
+                - generic [ref=e807]: "+4"
+              - generic [ref=e808]:
+                - generic [ref=e809]:
+                  - img [ref=e810]
+                  - text: "6"
+                - generic [ref=e814]:
+                  - img [ref=e815]
+                  - text: 4m
+            - generic [ref=e818]:
+              - link "PM" [ref=e819] [cursor=pointer]:
+                - /url: https://polymarket.com/event/hilary-duff-luck-or-something-first-week-album-sales/will-luck-or-something-hilary-duff-debut-week-album-sales-be-less-than-20k
+                - img [ref=e820]
+                - text: PM
+              - button "AI" [ref=e824] [cursor=pointer]:
+                - img [ref=e825]
+                - text: AI
+              - button "News" [ref=e827] [cursor=pointer]:
+                - img [ref=e828]
+                - text: News
+              - generic [ref=e831]:
+                - button "Expand" [ref=e832] [cursor=pointer]:
+                  - img [ref=e833]
+                  - text: Expand
+                - button "More" [ref=e838] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e839]
+          - generic [ref=e843]:
+            - generic [ref=e844]:
+              - generic [ref=e845]:
+                - generic [ref=e846]: NegRisk
+                - generic [ref=e847]: Politics
+              - generic [ref=e848]:
+                - generic [ref=e849]:
+                  - img [ref=e850]
+                  - generic [ref=e853]: +21.75%
+                - paragraph [ref=e854]: $1.05 net
+            - 'heading "Multi-Outcome Short: Will Israel strike Lebanon on...?..." [level=3] [ref=e855]'
+            - generic [ref=e856]:
+              - generic [ref=e859]:
+                - generic [ref=e860]: Februar… 0.38
+                - generic [ref=e861]: Februar… 0.39
+                - generic [ref=e862]: Februar… 0.40
+                - generic [ref=e863]: Februar… 0.41
+                - generic [ref=e864]: Februar… 0.01
+                - generic [ref=e865]: Februar… 0.14
+                - generic [ref=e866]: "+1"
+              - generic [ref=e867]:
+                - generic [ref=e868]:
+                  - paragraph [ref=e869]: Cost
+                  - generic [ref=e871]: $4.83
+                - generic [ref=e872]:
+                  - paragraph [ref=e873]: Liq
+                  - generic [ref=e875]: $832
+                - generic [ref=e876]:
+                  - paragraph [ref=e877]: Risk
+                  - generic [ref=e879]: 50%
+                - generic [ref=e882]:
+                  - paragraph [ref=e883]: Max Pos
+                  - generic [ref=e885]: $83.18
+            - generic [ref=e886]:
+              - generic [ref=e887]:
+                - img [ref=e888]
+                - text: No AI analysis
+              - button "Analyze" [ref=e891] [cursor=pointer]
+            - generic [ref=e892]:
+              - generic [ref=e893]:
+                - generic [ref=e894]:
+                  - generic [ref=e895]: BUY NO
+                  - generic [ref=e896]: Will Israel…
+                  - generic [ref=e897]: "@0.63"
+                - generic [ref=e898]:
+                  - generic [ref=e899]: ·
+                  - generic [ref=e900]: BUY NO
+                  - generic [ref=e901]: Will Israel…
+                  - generic [ref=e902]: "@0.61"
+                - generic [ref=e903]: "+5"
+              - generic [ref=e904]:
+                - generic [ref=e905]:
+                  - img [ref=e906]
+                  - text: "7"
+                - generic [ref=e910]:
+                  - img [ref=e911]
+                  - text: 4m
+            - generic [ref=e914]:
+              - link "PM" [ref=e915] [cursor=pointer]:
+                - /url: https://polymarket.com/event/will-israel-strike-lebanon-on-431/will-israel-strike-lebanon-on-february-23-2026
+                - img [ref=e916]
+                - text: PM
+              - button "AI" [ref=e920] [cursor=pointer]:
+                - img [ref=e921]
+                - text: AI
+              - button "News" [ref=e923] [cursor=pointer]:
+                - img [ref=e924]
+                - text: News
+              - generic [ref=e927]:
+                - button "Expand" [ref=e928] [cursor=pointer]:
+                  - img [ref=e929]
+                  - text: Expand
+                - button "More" [ref=e934] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e935]
+          - generic [ref=e939]:
+            - generic [ref=e940]:
+              - generic [ref=e941]:
+                - generic [ref=e942]: NegRisk
+                - generic [ref=e943]: Sports
+              - generic [ref=e944]:
+                - generic [ref=e945]:
+                  - img [ref=e946]
+                  - generic [ref=e949]: +21.74%
+                - paragraph [ref=e950]: $0.3500 net
+            - 'heading "NegRisk Short: EC Bahia vs. O''Higgins FC..." [level=3] [ref=e951]'
+            - generic [ref=e952]:
+              - generic [ref=e955]:
+                - generic [ref=e956]: EC Bahia 0.64
+                - generic [ref=e957]: Draw (E… 0.30
+                - generic [ref=e958]: O'Higgi… 0.45
+              - generic [ref=e959]:
+                - generic [ref=e960]:
+                  - paragraph [ref=e961]: Cost
+                  - generic [ref=e963]: $1.61
+                - generic [ref=e964]:
+                  - paragraph [ref=e965]: Liq
+                  - generic [ref=e967]: $357
+                - generic [ref=e968]:
+                  - paragraph [ref=e969]: Risk
+                  - generic [ref=e971]: 30%
+                - generic [ref=e974]:
+                  - paragraph [ref=e975]: Max Pos
+                  - generic [ref=e977]: $35.70
+            - generic [ref=e978]:
+              - generic [ref=e979]:
+                - img [ref=e980]
+                - text: No AI analysis
+              - button "Analyze" [ref=e983] [cursor=pointer]
+            - generic [ref=e984]:
+              - generic [ref=e985]:
+                - generic [ref=e986]:
+                  - generic [ref=e987]: BUY NO
+                  - generic [ref=e988]: Will EC Bah…
+                  - generic [ref=e989]: "@0.36"
+                - generic [ref=e990]:
+                  - generic [ref=e991]: ·
+                  - generic [ref=e992]: BUY NO
+                  - generic [ref=e993]: Will EC Bah…
+                  - generic [ref=e994]: "@0.69"
+                - generic [ref=e995]: "+1"
+              - generic [ref=e996]:
+                - generic [ref=e997]:
+                  - img [ref=e998]
+                  - text: "3"
+                - generic [ref=e1002]:
+                  - img [ref=e1003]
+                  - text: 4m
+            - generic [ref=e1006]:
+              - link "PM" [ref=e1007] [cursor=pointer]:
+                - /url: https://polymarket.com/event/lib-bah-ohi-2026-02-25/lib-bah-ohi-2026-02-25-bah
+                - img [ref=e1008]
+                - text: PM
+              - button "AI" [ref=e1012] [cursor=pointer]:
+                - img [ref=e1013]
+                - text: AI
+              - button "News" [ref=e1015] [cursor=pointer]:
+                - img [ref=e1016]
+                - text: News
+              - generic [ref=e1019]:
+                - button "Expand" [ref=e1020] [cursor=pointer]:
+                  - img [ref=e1021]
+                  - text: Expand
+                - button "More" [ref=e1026] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1027]
+          - generic [ref=e1031]:
+            - generic [ref=e1032]:
+              - generic [ref=e1033]:
+                - generic [ref=e1034]: NegRisk
+                - generic [ref=e1035]: Culture
+              - generic [ref=e1036]:
+                - generic [ref=e1037]:
+                  - img [ref=e1038]
+                  - generic [ref=e1041]: +20.65%
+                - paragraph [ref=e1042]: $1.17 net
+            - 'heading "NegRisk Short: Rob Zombie ''The Great Satan'' First Week Album Sale..." [level=3] [ref=e1043]'
+            - generic [ref=e1044]:
+              - generic [ref=e1047]:
+                - generic [ref=e1048]: 25k-30k 0.42
+                - generic [ref=e1049]: 45k-50k 0.34
+                - generic [ref=e1050]: 20k-25k 0.23
+                - generic [ref=e1051]: 50k+ 0.04
+                - generic [ref=e1052]: <20k 0.23
+                - generic [ref=e1053]: 30k-35k 0.42
+                - generic [ref=e1054]: "+2"
+              - generic [ref=e1055]:
+                - generic [ref=e1056]:
+                  - paragraph [ref=e1057]: Cost
+                  - generic [ref=e1059]: $5.69
+                - generic [ref=e1060]:
+                  - paragraph [ref=e1061]: Liq
+                  - generic [ref=e1063]: $266
+                - generic [ref=e1064]:
+                  - paragraph [ref=e1065]: Risk
+                  - generic [ref=e1067]: 50%
+                - generic [ref=e1070]:
+                  - paragraph [ref=e1071]: Max Pos
+                  - generic [ref=e1073]: $26.56
+            - generic [ref=e1074]:
+              - generic [ref=e1075]:
+                - img [ref=e1076]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1079] [cursor=pointer]
+            - generic [ref=e1080]:
+              - generic [ref=e1081]:
+                - generic [ref=e1082]:
+                  - generic [ref=e1083]: BUY NO
+                  - generic [ref=e1084]: Will 'The G…
+                  - generic [ref=e1085]: "@0.57"
+                - generic [ref=e1086]:
+                  - generic [ref=e1087]: ·
+                  - generic [ref=e1088]: BUY NO
+                  - generic [ref=e1089]: Will 'The G…
+                  - generic [ref=e1090]: "@0.66"
+                - generic [ref=e1091]: "+6"
+              - generic [ref=e1092]:
+                - generic [ref=e1093]:
+                  - img [ref=e1094]
+                  - text: "8"
+                - generic [ref=e1098]:
+                  - img [ref=e1099]
+                  - text: 4m
+            - generic [ref=e1102]:
+              - link "PM" [ref=e1103] [cursor=pointer]:
+                - /url: https://polymarket.com/event/rob-zombie-the-great-satan-first-week-album-sales/will-the-great-satan-rob-zombie-debut-week-album-sales-be-between-25k-and-30k
+                - img [ref=e1104]
+                - text: PM
+              - button "AI" [ref=e1108] [cursor=pointer]:
+                - img [ref=e1109]
+                - text: AI
+              - button "News" [ref=e1111] [cursor=pointer]:
+                - img [ref=e1112]
+                - text: News
+              - generic [ref=e1115]:
+                - button "Expand" [ref=e1116] [cursor=pointer]:
+                  - img [ref=e1117]
+                  - text: Expand
+                - button "More" [ref=e1122] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1123]
+          - generic [ref=e1127]:
+            - generic [ref=e1128]:
+              - generic [ref=e1129]:
+                - generic [ref=e1130]: NegRisk
+                - generic [ref=e1131]: Sports
+              - generic [ref=e1132]:
+                - generic [ref=e1133]:
+                  - img [ref=e1134]
+                  - generic [ref=e1137]: +20.62%
+                - paragraph [ref=e1138]: $0.3350 net
+            - 'heading "NegRisk Short: NEC vs. Fortuna Sittard..." [level=3] [ref=e1139]'
+            - generic [ref=e1140]:
+              - generic [ref=e1143]:
+                - generic [ref=e1144]: NEC 0.73
+                - generic [ref=e1145]: Draw (N… 0.23
+                - generic [ref=e1146]: Fortuna… 0.41
+              - generic [ref=e1147]:
+                - generic [ref=e1148]:
+                  - paragraph [ref=e1149]: Cost
+                  - generic [ref=e1151]: $1.63
+                - generic [ref=e1152]:
+                  - paragraph [ref=e1153]: Liq
+                  - generic [ref=e1155]: $434
+                - generic [ref=e1156]:
+                  - paragraph [ref=e1157]: Risk
+                  - generic [ref=e1159]: 30%
+                - generic [ref=e1162]:
+                  - paragraph [ref=e1163]: Max Pos
+                  - generic [ref=e1165]: $43.41
+            - generic [ref=e1166]:
+              - generic [ref=e1167]:
+                - img [ref=e1168]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1171] [cursor=pointer]
+            - generic [ref=e1172]:
+              - generic [ref=e1173]:
+                - generic [ref=e1174]:
+                  - generic [ref=e1175]: BUY NO
+                  - generic [ref=e1176]: Will NEC wi…
+                  - generic [ref=e1177]: "@0.27"
+                - generic [ref=e1178]:
+                  - generic [ref=e1179]: ·
+                  - generic [ref=e1180]: BUY NO
+                  - generic [ref=e1181]: Will NEC vs…
+                  - generic [ref=e1182]: "@0.77"
+                - generic [ref=e1183]: "+1"
+              - generic [ref=e1184]:
+                - generic [ref=e1185]:
+                  - img [ref=e1186]
+                  - text: "3"
+                - generic [ref=e1190]:
+                  - img [ref=e1191]
+                  - text: 4m
+            - generic [ref=e1194]:
+              - link "PM" [ref=e1195] [cursor=pointer]:
+                - /url: https://polymarket.com/event/ere-nec-sit-2026-02-28/ere-nec-sit-2026-02-28-nec
+                - img [ref=e1196]
+                - text: PM
+              - button "AI" [ref=e1200] [cursor=pointer]:
+                - img [ref=e1201]
+                - text: AI
+              - button "News" [ref=e1203] [cursor=pointer]:
+                - img [ref=e1204]
+                - text: News
+              - generic [ref=e1207]:
+                - button "Expand" [ref=e1208] [cursor=pointer]:
+                  - img [ref=e1209]
+                  - text: Expand
+                - button "More" [ref=e1214] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1215]
+          - generic [ref=e1219]:
+            - generic [ref=e1220]:
+              - generic [ref=e1221]:
+                - generic [ref=e1222]: NegRisk
+                - generic [ref=e1223]: Crypto
+              - generic [ref=e1224]:
+                - generic [ref=e1225]:
+                  - img [ref=e1226]
+                  - generic [ref=e1229]: +20.25%
+                - paragraph [ref=e1230]: $0.3300 net
+            - 'heading "Multi-Outcome Short: What price will Kinetiq hit in 2026?..." [level=3] [ref=e1231]'
+            - generic [ref=e1232]:
+              - generic [ref=e1235]:
+                - generic [ref=e1236]: $1 0.20
+                - generic [ref=e1237]: $0.7 0.56
+                - generic [ref=e1238]: $0.5 0.61
+              - generic [ref=e1239]:
+                - generic [ref=e1240]:
+                  - paragraph [ref=e1241]: Cost
+                  - generic [ref=e1243]: $1.63
+                - generic [ref=e1244]:
+                  - paragraph [ref=e1245]: Liq
+                  - generic [ref=e1247]: $562
+                - generic [ref=e1248]:
+                  - paragraph [ref=e1249]: Risk
+                  - generic [ref=e1251]: 60%
+                - generic [ref=e1254]:
+                  - paragraph [ref=e1255]: Max Pos
+                  - generic [ref=e1257]: $56.22
+            - generic [ref=e1258]:
+              - generic [ref=e1259]:
+                - img [ref=e1260]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1263] [cursor=pointer]
+            - generic [ref=e1264]:
+              - generic [ref=e1265]:
+                - generic [ref=e1266]:
+                  - generic [ref=e1267]: BUY NO
+                  - generic [ref=e1268]: Will Kineti…
+                  - generic [ref=e1269]: "@0.80"
+                - generic [ref=e1270]:
+                  - generic [ref=e1271]: ·
+                  - generic [ref=e1272]: BUY NO
+                  - generic [ref=e1273]: Will Kineti…
+                  - generic [ref=e1274]: "@0.43"
+                - generic [ref=e1275]: "+1"
+              - generic [ref=e1276]:
+                - generic [ref=e1277]:
+                  - img [ref=e1278]
+                  - text: "3"
+                - generic [ref=e1282]:
+                  - img [ref=e1283]
+                  - text: 4m
+            - generic [ref=e1286]:
+              - link "PM" [ref=e1287] [cursor=pointer]:
+                - /url: https://polymarket.com/event/what-price-will-kinetiq-hit-in-2026/will-kinetiq-reach-1-before-2027
+                - img [ref=e1288]
+                - text: PM
+              - button "AI" [ref=e1292] [cursor=pointer]:
+                - img [ref=e1293]
+                - text: AI
+              - button "News" [ref=e1295] [cursor=pointer]:
+                - img [ref=e1296]
+                - text: News
+              - generic [ref=e1299]:
+                - button "Expand" [ref=e1300] [cursor=pointer]:
+                  - img [ref=e1301]
+                  - text: Expand
+                - button "More" [ref=e1306] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1307]
+          - generic [ref=e1311]:
+            - generic [ref=e1312]:
+              - generic [ref=e1313]:
+                - generic [ref=e1314]: NegRisk
+                - generic [ref=e1315]: Macro Indicators
+              - generic [ref=e1316]:
+                - generic [ref=e1317]:
+                  - img [ref=e1318]
+                  - generic [ref=e1321]: +17.95%
+                - paragraph [ref=e1322]: $1.04 net
+            - 'heading "NegRisk Short: Canada Annual Inflation 2026..." [level=3] [ref=e1323]'
+            - generic [ref=e1324]:
+              - generic [ref=e1327]:
+                - generic [ref=e1328]: 1.5–1.9% 0.26
+                - generic [ref=e1329]: <1.0% 0.10
+                - generic [ref=e1330]: 1.0–1.4% 0.32
+                - generic [ref=e1331]: 2.0–2.4% 0.42
+                - generic [ref=e1332]: 2.5–2.9% 0.30
+                - generic [ref=e1333]: 4.0%+ 0.01
+                - generic [ref=e1334]: "+2"
+              - generic [ref=e1335]:
+                - generic [ref=e1336]:
+                  - paragraph [ref=e1337]: Cost
+                  - generic [ref=e1339]: $5.82
+                - generic [ref=e1340]:
+                  - paragraph [ref=e1341]: Liq
+                  - generic [ref=e1343]: $866
+                - generic [ref=e1344]:
+                  - paragraph [ref=e1345]: Risk
+                  - generic [ref=e1347]: 80%
+                - generic [ref=e1350]:
+                  - paragraph [ref=e1351]: Max Pos
+                  - generic [ref=e1353]: $86.60
+            - generic [ref=e1354]:
+              - generic [ref=e1355]:
+                - img [ref=e1356]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1359] [cursor=pointer]
+            - generic [ref=e1360]:
+              - generic [ref=e1361]:
+                - generic [ref=e1362]:
+                  - generic [ref=e1363]: BUY NO
+                  - generic [ref=e1364]: Will Canada…
+                  - generic [ref=e1365]: "@0.74"
+                - generic [ref=e1366]:
+                  - generic [ref=e1367]: ·
+                  - generic [ref=e1368]: BUY NO
+                  - generic [ref=e1369]: Will Canada…
+                  - generic [ref=e1370]: "@0.90"
+                - generic [ref=e1371]: "+6"
+              - generic [ref=e1372]:
+                - generic [ref=e1373]:
+                  - img [ref=e1374]
+                  - text: "8"
+                - generic [ref=e1378]:
+                  - img [ref=e1379]
+                  - text: 4m
+            - generic [ref=e1382]:
+              - link "PM" [ref=e1383] [cursor=pointer]:
+                - /url: https://polymarket.com/event/canada-annual-inflation-2026/will-canadas-2026-inflation-be-between-1pt5-and-1pt9
+                - img [ref=e1384]
+                - text: PM
+              - button "AI" [ref=e1388] [cursor=pointer]:
+                - img [ref=e1389]
+                - text: AI
+              - button "News" [ref=e1391] [cursor=pointer]:
+                - img [ref=e1392]
+                - text: News
+              - generic [ref=e1395]:
+                - button "Expand" [ref=e1396] [cursor=pointer]:
+                  - img [ref=e1397]
+                  - text: Expand
+                - button "More" [ref=e1402] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1403]
+          - generic [ref=e1407]:
+            - generic [ref=e1408]:
+              - generic [ref=e1409]:
+                - generic [ref=e1410]: NegRisk
+                - generic [ref=e1411]: Sports
+              - generic [ref=e1412]:
+                - generic [ref=e1413]:
+                  - img [ref=e1414]
+                  - generic [ref=e1417]: +17.01%
+                - paragraph [ref=e1418]: $0.2850 net
+            - 'heading "NegRisk Short: Racing Club vs. CS Independiente Rivadavia..." [level=3] [ref=e1419]'
+            - generic [ref=e1420]:
+              - generic [ref=e1423]:
+                - generic [ref=e1424]: Racing … 0.56
+                - generic [ref=e1425]: Draw (R… 0.34
+                - generic [ref=e1426]: CS Inde… 0.43
+              - generic [ref=e1427]:
+                - generic [ref=e1428]:
+                  - paragraph [ref=e1429]: Cost
+                  - generic [ref=e1431]: $1.68
+                - generic [ref=e1432]:
+                  - paragraph [ref=e1433]: Liq
+                  - generic [ref=e1435]: $470
+                - generic [ref=e1436]:
+                  - paragraph [ref=e1437]: Risk
+                  - generic [ref=e1439]: 30%
+                - generic [ref=e1442]:
+                  - paragraph [ref=e1443]: Max Pos
+                  - generic [ref=e1445]: $46.97
+            - generic [ref=e1446]:
+              - generic [ref=e1447]:
+                - img [ref=e1448]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1451] [cursor=pointer]
+            - generic [ref=e1452]:
+              - generic [ref=e1453]:
+                - generic [ref=e1454]:
+                  - generic [ref=e1455]: BUY NO
+                  - generic [ref=e1456]: Will Racing…
+                  - generic [ref=e1457]: "@0.45"
+                - generic [ref=e1458]:
+                  - generic [ref=e1459]: ·
+                  - generic [ref=e1460]: BUY NO
+                  - generic [ref=e1461]: Will Racing…
+                  - generic [ref=e1462]: "@0.67"
+                - generic [ref=e1463]: "+1"
+              - generic [ref=e1464]:
+                - generic [ref=e1465]:
+                  - img [ref=e1466]
+                  - text: "3"
+                - generic [ref=e1470]:
+                  - img [ref=e1471]
+                  - text: 4m
+            - generic [ref=e1474]:
+              - link "PM" [ref=e1475] [cursor=pointer]:
+                - /url: https://polymarket.com/event/arg-rac-riv1-2026-02-26/arg-rac-riv1-2026-02-26-rac
+                - img [ref=e1476]
+                - text: PM
+              - button "AI" [ref=e1480] [cursor=pointer]:
+                - img [ref=e1481]
+                - text: AI
+              - button "News" [ref=e1483] [cursor=pointer]:
+                - img [ref=e1484]
+                - text: News
+              - generic [ref=e1487]:
+                - button "Expand" [ref=e1488] [cursor=pointer]:
+                  - img [ref=e1489]
+                  - text: Expand
+                - button "More" [ref=e1494] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1495]
+          - generic [ref=e1499]:
+            - generic [ref=e1500]:
+              - generic [ref=e1501]:
+                - generic [ref=e1502]: NegRisk
+                - generic [ref=e1503]: Politics
+              - generic [ref=e1504]:
+                - generic [ref=e1505]:
+                  - img [ref=e1506]
+                  - generic [ref=e1509]: +16.95%
+                - paragraph [ref=e1510]: $0.7100 net
+            - 'heading "NegRisk Short: How many seats will IUML win in the next Kerala Le..." [level=3] [ref=e1511]'
+            - generic [ref=e1512]:
+              - generic [ref=e1515]:
+                - generic [ref=e1516]: <10 0.21
+                - generic [ref=e1517]: 22+ 0.39
+                - generic [ref=e1518]: 10–12 0.10
+                - generic [ref=e1519]: 13–15 0.36
+                - generic [ref=e1520]: 16–18 0.37
+                - generic [ref=e1521]: 19–21 0.37
+              - generic [ref=e1522]:
+                - generic [ref=e1523]:
+                  - paragraph [ref=e1524]: Cost
+                  - generic [ref=e1526]: $4.19
+                - generic [ref=e1527]:
+                  - paragraph [ref=e1528]: Liq
+                  - generic [ref=e1530]: $306
+                - generic [ref=e1531]:
+                  - paragraph [ref=e1532]: Risk
+                  - generic [ref=e1534]: 70%
+                - generic [ref=e1537]:
+                  - paragraph [ref=e1538]: Max Pos
+                  - generic [ref=e1540]: $30.64
+            - generic [ref=e1541]:
+              - generic [ref=e1542]:
+                - img [ref=e1543]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1546] [cursor=pointer]
+            - generic [ref=e1547]:
+              - generic [ref=e1548]:
+                - generic [ref=e1549]:
+                  - generic [ref=e1550]: BUY NO
+                  - generic [ref=e1551]: Will the In…
+                  - generic [ref=e1552]: "@0.79"
+                - generic [ref=e1553]:
+                  - generic [ref=e1554]: ·
+                  - generic [ref=e1555]: BUY NO
+                  - generic [ref=e1556]: Will the In…
+                  - generic [ref=e1557]: "@0.61"
+                - generic [ref=e1558]: "+4"
+              - generic [ref=e1559]:
+                - generic [ref=e1560]:
+                  - img [ref=e1561]
+                  - text: "6"
+                - generic [ref=e1565]:
+                  - img [ref=e1566]
+                  - text: 4m
+            - generic [ref=e1569]:
+              - link "PM" [ref=e1570] [cursor=pointer]:
+                - /url: https://polymarket.com/event/how-many-seats-will-iuml-win-in-the-2026-kerala-legislative-assembly-election/will-the-indian-union-muslim-league-iuml-win-fewer-than-10-seats-in-the-2026-kerala-legislative-assembly-election
+                - img [ref=e1571]
+                - text: PM
+              - button "AI" [ref=e1575] [cursor=pointer]:
+                - img [ref=e1576]
+                - text: AI
+              - button "News" [ref=e1578] [cursor=pointer]:
+                - img [ref=e1579]
+                - text: News
+              - generic [ref=e1582]:
+                - button "Expand" [ref=e1583] [cursor=pointer]:
+                  - img [ref=e1584]
+                  - text: Expand
+                - button "More" [ref=e1589] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1590]
+          - generic [ref=e1594]:
+            - generic [ref=e1595]:
+              - generic [ref=e1596]:
+                - generic [ref=e1597]: NegRisk
+                - generic [ref=e1598]: Politics
+              - generic [ref=e1599]:
+                - generic [ref=e1600]:
+                  - img [ref=e1601]
+                  - generic [ref=e1604]: +16.20%
+                - paragraph [ref=e1605]: $0.6830 net
+            - 'heading "NegRisk Short: Texas Democratic Senate Primary Margin of Victory..." [level=3] [ref=e1606]'
+            - generic [ref=e1607]:
+              - generic [ref=e1610]:
+                - generic [ref=e1611]: Talaric… 0.23
+                - generic [ref=e1612]: Talaric… 0.17
+                - generic [ref=e1613]: Talaric… 0.38
+                - generic [ref=e1614]: Crocket… 0.30
+                - generic [ref=e1615]: Crocket… 0.35
+                - generic [ref=e1616]: Talaric… 0.36
+              - generic [ref=e1617]:
+                - generic [ref=e1618]:
+                  - paragraph [ref=e1619]: Cost
+                  - generic [ref=e1621]: $4.22
+                - generic [ref=e1622]:
+                  - paragraph [ref=e1623]: Liq
+                  - generic [ref=e1625]: $423
+                - generic [ref=e1626]:
+                  - paragraph [ref=e1627]: Risk
+                  - generic [ref=e1629]: 50%
+                - generic [ref=e1632]:
+                  - paragraph [ref=e1633]: Max Pos
+                  - generic [ref=e1635]: $42.25
+            - generic [ref=e1636]:
+              - generic [ref=e1637]:
+                - img [ref=e1638]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1641] [cursor=pointer]
+            - generic [ref=e1642]:
+              - generic [ref=e1643]:
+                - generic [ref=e1644]:
+                  - generic [ref=e1645]: BUY NO
+                  - generic [ref=e1646]: Will James …
+                  - generic [ref=e1647]: "@0.78"
+                - generic [ref=e1648]:
+                  - generic [ref=e1649]: ·
+                  - generic [ref=e1650]: BUY NO
+                  - generic [ref=e1651]: Will James …
+                  - generic [ref=e1652]: "@0.83"
+                - generic [ref=e1653]: "+4"
+              - generic [ref=e1654]:
+                - generic [ref=e1655]:
+                  - img [ref=e1656]
+                  - text: "6"
+                - generic [ref=e1660]:
+                  - img [ref=e1661]
+                  - text: 4m
+            - generic [ref=e1664]:
+              - link "PM" [ref=e1665] [cursor=pointer]:
+                - /url: https://polymarket.com/event/texas-democratic-senate-primary-margin-of-victory/will-james-talarico-win-the-texas-democratic-senate-primary-by-15-or-more
+                - img [ref=e1666]
+                - text: PM
+              - button "AI" [ref=e1670] [cursor=pointer]:
+                - img [ref=e1671]
+                - text: AI
+              - button "News" [ref=e1673] [cursor=pointer]:
+                - img [ref=e1674]
+                - text: News
+              - generic [ref=e1677]:
+                - button "Expand" [ref=e1678] [cursor=pointer]:
+                  - img [ref=e1679]
+                  - text: Expand
+                - button "More" [ref=e1684] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1685]
+          - generic [ref=e1689]:
+            - generic [ref=e1690]:
+              - generic [ref=e1691]:
+                - generic [ref=e1692]: NegRisk
+                - generic [ref=e1693]: GDP
+              - generic [ref=e1694]:
+                - generic [ref=e1695]:
+                  - img [ref=e1696]
+                  - generic [ref=e1699]: +15.98%
+                - paragraph [ref=e1700]: $0.8100 net
+            - 'heading "NegRisk Short: UK Annual GDP Growth 2026..." [level=3] [ref=e1701]'
+            - generic [ref=e1702]:
+              - generic [ref=e1705]:
+                - generic [ref=e1706]: 0-1% 0.30
+                - generic [ref=e1707]: 3-4% 0.26
+                - generic [ref=e1708]: <0 0.34
+                - generic [ref=e1709]: 1-2% 0.28
+                - generic [ref=e1710]: 2-3% 0.29
+                - generic [ref=e1711]: 4-5% 0.12
+                - generic [ref=e1712]: "+1"
+              - generic [ref=e1713]:
+                - generic [ref=e1714]:
+                  - paragraph [ref=e1715]: Cost
+                  - generic [ref=e1717]: $5.07
+                - generic [ref=e1718]:
+                  - paragraph [ref=e1719]: Liq
+                  - generic [ref=e1721]: $766
+                - generic [ref=e1722]:
+                  - paragraph [ref=e1723]: Risk
+                  - generic [ref=e1725]: 80%
+                - generic [ref=e1728]:
+                  - paragraph [ref=e1729]: Max Pos
+                  - generic [ref=e1731]: $76.61
+            - generic [ref=e1732]:
+              - generic [ref=e1733]:
+                - img [ref=e1734]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1737] [cursor=pointer]
+            - generic [ref=e1738]:
+              - generic [ref=e1739]:
+                - generic [ref=e1740]:
+                  - generic [ref=e1741]: BUY NO
+                  - generic [ref=e1742]: Will UK ann…
+                  - generic [ref=e1743]: "@0.69"
+                - generic [ref=e1744]:
+                  - generic [ref=e1745]: ·
+                  - generic [ref=e1746]: BUY NO
+                  - generic [ref=e1747]: Will UK ann…
+                  - generic [ref=e1748]: "@0.74"
+                - generic [ref=e1749]: "+5"
+              - generic [ref=e1750]:
+                - generic [ref=e1751]:
+                  - img [ref=e1752]
+                  - text: "7"
+                - generic [ref=e1756]:
+                  - img [ref=e1757]
+                  - text: 4m
+            - generic [ref=e1760]:
+              - link "PM" [ref=e1761] [cursor=pointer]:
+                - /url: https://polymarket.com/event/uk-annual-gdp-growth-2026/will-uk-annual-gdp-growth-in-2026-be-between-0-and-1
+                - img [ref=e1762]
+                - text: PM
+              - button "AI" [ref=e1766] [cursor=pointer]:
+                - img [ref=e1767]
+                - text: AI
+              - button "News" [ref=e1769] [cursor=pointer]:
+                - img [ref=e1770]
+                - text: News
+              - generic [ref=e1773]:
+                - button "Expand" [ref=e1774] [cursor=pointer]:
+                  - img [ref=e1775]
+                  - text: Expand
+                - button "More" [ref=e1780] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1781]
+          - generic [ref=e1785]:
+            - generic [ref=e1786]:
+              - generic [ref=e1787]:
+                - generic [ref=e1788]: NegRisk
+                - generic [ref=e1789]: World
+              - generic [ref=e1790]:
+                - generic [ref=e1791]:
+                  - img [ref=e1792]
+                  - generic [ref=e1795]: +11.76%
+                - paragraph [ref=e1796]: $0.5155 net
+            - 'heading "NegRisk Short: Argentina Official USD Exchange Rate end of 2026? ..." [level=3] [ref=e1797]'
+            - generic [ref=e1798]:
+              - generic [ref=e1801]:
+                - generic [ref=e1802]: 1700.00… 0.32
+                - generic [ref=e1803]: 1900.00… 0.17
+                - generic [ref=e1804]: <1600.00 0.24
+                - generic [ref=e1805]: 1600.00… 0.40
+                - generic [ref=e1806]: 1800.00… 0.29
+                - generic [ref=e1807]: 2000.00+ 0.20
+              - generic [ref=e1808]:
+                - generic [ref=e1809]:
+                  - paragraph [ref=e1810]: Cost
+                  - generic [ref=e1812]: $4.38
+                - generic [ref=e1813]:
+                  - paragraph [ref=e1814]: Liq
+                  - generic [ref=e1816]: $541
+                - generic [ref=e1817]:
+                  - paragraph [ref=e1818]: Risk
+                  - generic [ref=e1820]: 80%
+                - generic [ref=e1823]:
+                  - paragraph [ref=e1824]: Max Pos
+                  - generic [ref=e1826]: $54.07
+            - generic [ref=e1827]:
+              - generic [ref=e1828]:
+                - img [ref=e1829]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1832] [cursor=pointer]
+            - generic [ref=e1833]:
+              - generic [ref=e1834]:
+                - generic [ref=e1835]:
+                  - generic [ref=e1836]: BUY NO
+                  - generic [ref=e1837]: Will the of…
+                  - generic [ref=e1838]: "@0.68"
+                - generic [ref=e1839]:
+                  - generic [ref=e1840]: ·
+                  - generic [ref=e1841]: BUY NO
+                  - generic [ref=e1842]: Will the of…
+                  - generic [ref=e1843]: "@0.83"
+                - generic [ref=e1844]: "+4"
+              - generic [ref=e1845]:
+                - generic [ref=e1846]:
+                  - img [ref=e1847]
+                  - text: "6"
+                - generic [ref=e1851]:
+                  - img [ref=e1852]
+                  - text: 4m
+            - generic [ref=e1855]:
+              - link "PM" [ref=e1856] [cursor=pointer]:
+                - /url: https://polymarket.com/event/argentina-official-usd-exchange-rate-end-of-2026-higher-brackets/will-the-official-usd-to-ars-exchange-rate-be-between-1700pt00-and-1799pt99-at-the-end-of-december-2026
+                - img [ref=e1857]
+                - text: PM
+              - button "AI" [ref=e1861] [cursor=pointer]:
+                - img [ref=e1862]
+                - text: AI
+              - button "News" [ref=e1864] [cursor=pointer]:
+                - img [ref=e1865]
+                - text: News
+              - generic [ref=e1868]:
+                - button "Expand" [ref=e1869] [cursor=pointer]:
+                  - img [ref=e1870]
+                  - text: Expand
+                - button "More" [ref=e1875] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1876]
+          - generic [ref=e1880]:
+            - generic [ref=e1881]:
+              - generic [ref=e1882]:
+                - generic [ref=e1883]: NegRisk
+                - generic [ref=e1884]: EFL Championship
+              - generic [ref=e1885]:
+                - generic [ref=e1886]:
+                  - img [ref=e1887]
+                  - generic [ref=e1890]: +11.68%
+                - paragraph [ref=e1891]: $0.2050 net
+            - 'heading "NegRisk Short: Stoke City FC vs. Oxford United FC..." [level=3] [ref=e1892]'
+            - generic [ref=e1893]:
+              - generic [ref=e1896]:
+                - generic [ref=e1897]: Oxford … 0.45
+                - generic [ref=e1898]: Stoke C… 0.54
+                - generic [ref=e1899]: Draw (S… 0.26
+              - generic [ref=e1900]:
+                - generic [ref=e1901]:
+                  - paragraph [ref=e1902]: Cost
+                  - generic [ref=e1904]: $1.76
+                - generic [ref=e1905]:
+                  - paragraph [ref=e1906]: Liq
+                  - generic [ref=e1908]: $648
+                - generic [ref=e1909]:
+                  - paragraph [ref=e1910]: Risk
+                  - generic [ref=e1912]: 30%
+                - generic [ref=e1915]:
+                  - paragraph [ref=e1916]: Max Pos
+                  - generic [ref=e1918]: $64.77
+            - generic [ref=e1919]:
+              - generic [ref=e1920]:
+                - img [ref=e1921]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1924] [cursor=pointer]
+            - generic [ref=e1925]:
+              - generic [ref=e1926]:
+                - generic [ref=e1927]:
+                  - generic [ref=e1928]: BUY NO
+                  - generic [ref=e1929]: Will Oxford…
+                  - generic [ref=e1930]: "@0.56"
+                - generic [ref=e1931]:
+                  - generic [ref=e1932]: ·
+                  - generic [ref=e1933]: BUY NO
+                  - generic [ref=e1934]: Will Stoke …
+                  - generic [ref=e1935]: "@0.46"
+                - generic [ref=e1936]: "+1"
+              - generic [ref=e1937]:
+                - generic [ref=e1938]:
+                  - img [ref=e1939]
+                  - text: "3"
+                - generic [ref=e1943]:
+                  - img [ref=e1944]
+                  - text: 4m
+            - generic [ref=e1947]:
+              - link "PM" [ref=e1948] [cursor=pointer]:
+                - /url: https://polymarket.com/event/elc-sto-oxf-2026-02-25/elc-sto-oxf-2026-02-25-oxf
+                - img [ref=e1949]
+                - text: PM
+              - button "AI" [ref=e1953] [cursor=pointer]:
+                - img [ref=e1954]
+                - text: AI
+              - button "News" [ref=e1956] [cursor=pointer]:
+                - img [ref=e1957]
+                - text: News
+              - generic [ref=e1960]:
+                - button "Expand" [ref=e1961] [cursor=pointer]:
+                  - img [ref=e1962]
+                  - text: Expand
+                - button "More" [ref=e1967] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1968]
+          - generic [ref=e1972]:
+            - generic [ref=e1973]:
+              - generic [ref=e1974]:
+                - generic [ref=e1975]: NegRisk
+                - generic [ref=e1976]: Games
+              - generic [ref=e1977]:
+                - generic [ref=e1978]:
+                  - img [ref=e1979]
+                  - generic [ref=e1982]: +9.19%
+                - paragraph [ref=e1983]: $0.1650 net
+            - 'heading "NegRisk Short: Gimnasia y Esgrima de La Plata vs. CA Rosario Cent..." [level=3] [ref=e1984]'
+            - generic [ref=e1985]:
+              - generic [ref=e1988]:
+                - generic [ref=e1989]: Gimnasi… 0.38
+                - generic [ref=e1990]: Draw (G… 0.36
+                - generic [ref=e1991]: CA Rosa… 0.47
+              - generic [ref=e1992]:
+                - generic [ref=e1993]:
+                  - paragraph [ref=e1994]: Cost
+                  - generic [ref=e1996]: $1.80
+                - generic [ref=e1997]:
+                  - paragraph [ref=e1998]: Liq
+                  - generic [ref=e2000]: $815
+                - generic [ref=e2001]:
+                  - paragraph [ref=e2002]: Risk
+                  - generic [ref=e2004]: 30%
+                - generic [ref=e2007]:
+                  - paragraph [ref=e2008]: Max Pos
+                  - generic [ref=e2010]: $81.46
+            - generic [ref=e2011]:
+              - generic [ref=e2012]:
+                - img [ref=e2013]
+                - text: No AI analysis
+              - button "Analyze" [ref=e2016] [cursor=pointer]
+            - generic [ref=e2017]:
+              - generic [ref=e2018]:
+                - generic [ref=e2019]:
+                  - generic [ref=e2020]: BUY NO
+                  - generic [ref=e2021]: Will Gimnas…
+                  - generic [ref=e2022]: "@0.63"
+                - generic [ref=e2023]:
+                  - generic [ref=e2024]: ·
+                  - generic [ref=e2025]: BUY NO
+                  - generic [ref=e2026]: Will Gimnas…
+                  - generic [ref=e2027]: "@0.64"
+                - generic [ref=e2028]: "+1"
+              - generic [ref=e2029]:
+                - generic [ref=e2030]:
+                  - img [ref=e2031]
+                  - text: "3"
+                - generic [ref=e2035]:
+                  - img [ref=e2036]
+                  - text: 4m
+            - generic [ref=e2039]:
+              - link "PM" [ref=e2040] [cursor=pointer]:
+                - /url: https://polymarket.com/event/arg-gim-ros-2026-02-25/arg-gim-ros-2026-02-25-gim
+                - img [ref=e2041]
+                - text: PM
+              - button "AI" [ref=e2045] [cursor=pointer]:
+                - img [ref=e2046]
+                - text: AI
+              - button "News" [ref=e2048] [cursor=pointer]:
+                - img [ref=e2049]
+                - text: News
+              - generic [ref=e2052]:
+                - button "Expand" [ref=e2053] [cursor=pointer]:
+                  - img [ref=e2054]
+                  - text: Expand
+                - button "More" [ref=e2059] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e2060]
+          - generic [ref=e2064]:
+            - generic [ref=e2065]:
+              - generic [ref=e2066]:
+                - generic [ref=e2067]: NegRisk
+                - generic [ref=e2068]: Politics
+              - generic [ref=e2069]:
+                - generic [ref=e2070]:
+                  - img [ref=e2071]
+                  - generic [ref=e2074]: +8.29%
+                - paragraph [ref=e2075]: $0.1500 net
+            - 'heading "NegRisk Short: NY-06 Democratic Primary Winner..." [level=3] [ref=e2076]'
+            - generic [ref=e2077]:
+              - generic [ref=e2080]:
+                - generic [ref=e2081]: Grace M… 0.76
+                - generic [ref=e2082]: Charles… 0.21
+                - generic [ref=e2083]: Yan Xio… 0.21
+              - generic [ref=e2084]:
+                - generic [ref=e2085]:
+                  - paragraph [ref=e2086]: Cost
+                  - generic [ref=e2088]: $1.81
+                - generic [ref=e2089]:
+                  - paragraph [ref=e2090]: Liq
+                  - generic [ref=e2092]: $1.0K
+                - generic [ref=e2093]:
+                  - paragraph [ref=e2094]: Risk
+                  - generic [ref=e2096]: 35%
+                - generic [ref=e2099]:
+                  - paragraph [ref=e2100]: Max Pos
+                  - generic [ref=e2102]: $100
+            - generic [ref=e2103]:
+              - generic [ref=e2104]:
+                - img [ref=e2105]
+                - text: No AI analysis
+              - button "Analyze" [ref=e2108] [cursor=pointer]
+            - generic [ref=e2109]:
+              - generic [ref=e2110]:
+                - generic [ref=e2111]:
+                  - generic [ref=e2112]: BUY NO
+                  - generic [ref=e2113]: Will Grace …
+                  - generic [ref=e2114]: "@0.24"
+                - generic [ref=e2115]:
+                  - generic [ref=e2116]: ·
+                  - generic [ref=e2117]: BUY NO
+                  - generic [ref=e2118]: Will Charle…
+                  - generic [ref=e2119]: "@0.78"
+                - generic [ref=e2120]: "+1"
+              - generic [ref=e2121]:
+                - generic [ref=e2122]:
+                  - img [ref=e2123]
+                  - text: "3"
+                - generic [ref=e2127]:
+                  - img [ref=e2128]
+                  - text: 4m
+            - generic [ref=e2131]:
+              - link "PM" [ref=e2132] [cursor=pointer]:
+                - /url: https://polymarket.com/event/ny-06-democratic-primary-winner/will-grace-meng-be-the-democratic-nominee-for-ny-06
+                - img [ref=e2133]
+                - text: PM
+              - button "AI" [ref=e2137] [cursor=pointer]:
+                - img [ref=e2138]
+                - text: AI
+              - button "News" [ref=e2140] [cursor=pointer]:
+                - img [ref=e2141]
+                - text: News
+              - generic [ref=e2144]:
+                - button "Expand" [ref=e2145] [cursor=pointer]:
+                  - img [ref=e2146]
+                  - text: Expand
+                - button "More" [ref=e2151] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e2152]
+          - generic [ref=e2156]:
+            - generic [ref=e2157]:
+              - generic [ref=e2158]:
+                - generic [ref=e2159]: Cross-Platform
+                - generic [ref=e2160]: Sports
+              - generic [ref=e2161]:
+                - generic [ref=e2162]:
+                  - img [ref=e2163]
+                  - generic [ref=e2166]: +7.10%
+                - paragraph [ref=e2167]: $0.0650 net
+            - 'heading "Cross-Platform: Club Brugge KV vs. Club Atlético de Madrid: Both Teams to Sc" [level=3] [ref=e2168]'
+            - generic [ref=e2169]:
+              - generic [ref=e2172]:
+                - generic [ref=e2173]: Both Te… 0.58
+                - generic [ref=e2174]: yes Bot… 0.50
+              - generic [ref=e2175]:
+                - generic [ref=e2176]:
+                  - paragraph [ref=e2177]: Cost
+                  - generic [ref=e2179]: $0.9150
+                - generic [ref=e2180]:
+                  - paragraph [ref=e2181]: Liq
+                  - generic [ref=e2183]: $970
+                - generic [ref=e2184]:
+                  - paragraph [ref=e2185]: Risk
+                  - generic [ref=e2187]: 88%
+                - generic [ref=e2190]:
+                  - paragraph [ref=e2191]: Max Pos
+                  - generic [ref=e2193]: $97.00
+            - generic [ref=e2194]:
+              - generic [ref=e2195]:
+                - img [ref=e2196]
+                - text: No AI analysis
+              - button "Analyze" [ref=e2199] [cursor=pointer]
+            - generic [ref=e2200]:
+              - generic [ref=e2201]:
+                - generic [ref=e2202]:
+                  - generic [ref=e2203]: BUY NO
+                  - generic [ref=e2204]: "@0.42"
+                - generic [ref=e2205]:
+                  - generic [ref=e2206]: ·
+                  - generic [ref=e2207]: BUY YES
+                  - generic [ref=e2208]: "@0.50"
+              - generic [ref=e2209]:
+                - generic [ref=e2210]:
+                  - img [ref=e2211]
+                  - text: "2"
+                - generic [ref=e2215]:
+                  - img [ref=e2216]
+                  - text: 1m
+            - generic [ref=e2219]:
+              - link "PM" [ref=e2220] [cursor=pointer]:
+                - /url: https://polymarket.com/event/ucl-bru1-atm1-2026-02-18-more-markets/ucl-bru1-atm1-2026-02-18-btts
+                - img [ref=e2221]
+                - text: PM
+              - button "AI" [ref=e2225] [cursor=pointer]:
+                - img [ref=e2226]
+                - text: AI
+              - button "News" [ref=e2228] [cursor=pointer]:
+                - img [ref=e2229]
+                - text: News
+              - generic [ref=e2232]:
+                - button "Expand" [ref=e2233] [cursor=pointer]:
+                  - img [ref=e2234]
+                  - text: Expand
+                - button "More" [ref=e2239] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e2240]
+          - generic [ref=e2244]:
+            - generic [ref=e2245]:
+              - generic [ref=e2246]:
+                - generic [ref=e2247]: NegRisk
+                - generic [ref=e2248]: Sports
+              - generic [ref=e2249]:
+                - generic [ref=e2250]:
+                  - img [ref=e2251]
+                  - generic [ref=e2254]: +6.81%
+                - paragraph [ref=e2255]: $0.1250 net
+            - 'heading "NegRisk Short: CA San Lorenzo de Almagro vs. Instituto AC Córdoba..." [level=3] [ref=e2256]'
+            - generic [ref=e2257]:
+              - generic [ref=e2260]:
+                - generic [ref=e2261]: CA San … 0.45
+                - generic [ref=e2262]: Draw (C… 0.46
+                - generic [ref=e2263]: Institu… 0.27
+              - generic [ref=e2264]:
+                - generic [ref=e2265]:
+                  - paragraph [ref=e2266]: Cost
+                  - generic [ref=e2268]: $1.83
+                - generic [ref=e2269]:
+                  - paragraph [ref=e2270]: Liq
+                  - generic [ref=e2272]: $764
+                - generic [ref=e2273]:
+                  - paragraph [ref=e2274]: Risk
+                  - generic [ref=e2276]: 50%
+                - generic [ref=e2279]:
+                  - paragraph [ref=e2280]: Max Pos
+                  - generic [ref=e2282]: $76.37
+            - generic [ref=e2283]:
+              - generic [ref=e2284]:
+                - img [ref=e2285]
+                - text: No AI analysis
+              - button "Analyze" [ref=e2288] [cursor=pointer]
+            - generic [ref=e2289]:
+              - generic [ref=e2290]:
+                - generic [ref=e2291]:
+                  - generic [ref=e2292]: BUY NO
+                  - generic [ref=e2293]: Will CA San…
+                  - generic [ref=e2294]: "@0.55"
+                - generic [ref=e2295]:
+                  - generic [ref=e2296]: ·
+                  - generic [ref=e2297]: BUY NO
+                  - generic [ref=e2298]: Will CA San…
+                  - generic [ref=e2299]: "@0.55"
+                - generic [ref=e2300]: "+1"
+              - generic [ref=e2301]:
+                - generic [ref=e2302]:
+                  - img [ref=e2303]
+                  - text: "3"
+                - generic [ref=e2307]:
+                  - img [ref=e2308]
+                  - text: 4m
+            - generic [ref=e2311]:
+              - link "PM" [ref=e2312] [cursor=pointer]:
+                - /url: https://polymarket.com/event/arg-slo-iac-2026-02-24/arg-slo-iac-2026-02-24-slo
+                - img [ref=e2313]
+                - text: PM
+              - button "AI" [ref=e2317] [cursor=pointer]:
+                - img [ref=e2318]
+                - text: AI
+              - button "News" [ref=e2320] [cursor=pointer]:
+                - img [ref=e2321]
+                - text: News
+              - generic [ref=e2324]:
+                - button "Expand" [ref=e2325] [cursor=pointer]:
+                  - img [ref=e2326]
+                  - text: Expand
+                - button "More" [ref=e2331] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e2332]
+        - generic [ref=e2335]:
+          - generic [ref=e2336]: 1 - 20 of 22
+          - generic [ref=e2337]:
+            - button "Prev" [disabled]:
+              - img
+              - text: Prev
+            - generic [ref=e2338]: 1/2
+            - button "Next" [ref=e2339] [cursor=pointer]:
+              - text: Next
+              - img [ref=e2340]
+  - button "K" [ref=e2343] [cursor=pointer]:
+    - img [ref=e2344]
+    - generic [ref=e2346]:
+      - img [ref=e2347]
+      - text: K

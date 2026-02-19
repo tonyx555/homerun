@@ -62,17 +62,17 @@ STRATEGY_META_BY_TYPE: dict[str, dict[str, object]] = {
     "event_driven": {
         "domain": "event_markets",
         "timeframe": "event",
-        "sources": ["scanner", "world_intelligence"],
+        "sources": ["scanner", "events"],
     },
     "bayesian_cascade": {
         "domain": "event_markets",
         "timeframe": "event",
-        "sources": ["scanner", "world_intelligence"],
+        "sources": ["scanner", "events"],
     },
     "stat_arb": {
         "domain": "event_markets",
         "timeframe": "event",
-        "sources": ["scanner", "world_intelligence"],
+        "sources": ["scanner", "events"],
     },
 }
 
@@ -186,18 +186,84 @@ async def _resolve_strategy_to_filter(strategy_param: Optional[str]) -> list[str
 
     Accepts:
         - Built-in strategy type: "basic", "negrisk", etc.
-        - Plugin slug: "plugin_<slug>" -> resolves to [slug]
+        - Execution strategy key: "slug"
     """
     if not strategy_param:
         return []
     strategy_param = strategy_param.strip().lower()
-
-    # Backward compatibility for legacy prefixed plugin keys.
-    if strategy_param.startswith("plugin_"):
-        strategy_param = strategy_param[7:]  # len("plugin_")
-
-    # Strategy slug used directly — no enum validation needed.
     return [strategy_param]
+
+
+async def _list_filtered_opportunities(
+    session: AsyncSession,
+    *,
+    min_profit: float,
+    max_risk: float,
+    strategy: Optional[str],
+    min_liquidity: float,
+    search: Optional[str],
+    category: Optional[str],
+    sort_by: Optional[str],
+    sort_dir: Optional[str],
+    exclude_strategy: Optional[str],
+    sub_strategy: Optional[str],
+    source: Literal["markets", "traders", "all"],
+) -> list[Opportunity]:
+    strategies = await _resolve_strategy_to_filter(strategy)
+    filter = OpportunityFilter(
+        min_profit=min_profit / 100,
+        max_risk=max_risk,
+        strategies=strategies,
+        min_liquidity=min_liquidity,
+        category=category,
+    )
+
+    opportunities = await shared_state.get_opportunities_from_db(session, filter, source=source)
+
+    if exclude_strategy:
+        opportunities = [opp for opp in opportunities if opp.strategy != exclude_strategy]
+
+    if search:
+        search_lower = search.lower()
+        opportunities = [
+            opp
+            for opp in opportunities
+            if search_lower in opp.title.lower()
+            or (opp.event_title and search_lower in opp.event_title.lower())
+            or any(search_lower in m.get("question", "").lower() for m in opp.markets)
+        ]
+
+    normalized_sub = _normalize_sub_strategy(sub_strategy)
+    if normalized_sub:
+        opportunities = [opp for opp in opportunities if _derive_opportunity_sub_strategy(opp) == normalized_sub]
+
+    reverse = sort_dir != "asc"
+    effective_sort = sort_by or "ai_score"
+
+    if effective_sort == "ai_score":
+        opportunities.sort(
+            key=lambda o: (
+                o.ai_analysis is not None and o.ai_analysis.recommendation != "pending",
+                o.ai_analysis.overall_score if o.ai_analysis else 0.0,
+                o.roi_percent,
+            ),
+            reverse=reverse,
+        )
+    elif effective_sort == "profit":
+        opportunities.sort(key=lambda o: o.net_profit, reverse=reverse)
+    elif effective_sort == "liquidity":
+        opportunities.sort(key=lambda o: o.min_liquidity, reverse=reverse)
+    elif effective_sort == "risk":
+        opportunities.sort(key=lambda o: o.risk_score, reverse=reverse)
+    elif effective_sort == "roi":
+        opportunities.sort(
+            key=lambda o: (
+                o.ai_analysis is not None and o.ai_analysis.recommendation in ("skip", "strong_skip"),
+                -o.roi_percent if reverse else o.roi_percent,
+            ),
+        )
+
+    return opportunities
 
 
 # ==================== OPPORTUNITIES ====================
@@ -237,71 +303,20 @@ async def get_opportunities(
     ),
 ):
     """Get current arbitrage opportunities (from DB snapshot)."""
-    strategies = await _resolve_strategy_to_filter(strategy)
-    filter = OpportunityFilter(
-        min_profit=min_profit / 100,  # Convert from percentage
+    opportunities = await _list_filtered_opportunities(
+        session,
+        min_profit=min_profit,
         max_risk=max_risk,
-        strategies=strategies,
+        strategy=strategy,
         min_liquidity=min_liquidity,
+        search=search,
         category=category,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        exclude_strategy=exclude_strategy,
+        sub_strategy=sub_strategy,
+        source=source,
     )
-
-    opportunities = await shared_state.get_opportunities_from_db(session, filter, source=source)
-
-    # Exclude a specific strategy if requested
-    if exclude_strategy:
-        opportunities = [opp for opp in opportunities if opp.strategy != exclude_strategy]
-
-    # Apply search filter if provided
-    if search:
-        search_lower = search.lower()
-        opportunities = [
-            opp
-            for opp in opportunities
-            if search_lower in opp.title.lower()
-            or (opp.event_title and search_lower in opp.event_title.lower())
-            or any(search_lower in m.get("question", "").lower() for m in opp.markets)
-        ]
-
-    # Apply strategy-specific subtype filter if provided.
-    normalized_sub = _normalize_sub_strategy(sub_strategy)
-    if normalized_sub:
-        opportunities = [opp for opp in opportunities if _derive_opportunity_sub_strategy(opp) == normalized_sub]
-
-    # Keep all analyzed opportunities visible in Markets, including STRONG SKIP.
-    # This allows users to review completed AI analysis on the opportunity card
-    # instead of seeing cards disappear after post-analysis refetch.
-
-    # Sort opportunities — uses inline ai_analysis (no DB queries needed)
-    reverse = sort_dir != "asc"
-
-    # Default to ai_score sorting (LLM buy rating) when no sort specified
-    effective_sort = sort_by or "ai_score"
-
-    if effective_sort == "ai_score":
-        # Scored opportunities first, sorted by overall_score, unscored last (by ROI)
-        opportunities.sort(
-            key=lambda o: (
-                o.ai_analysis is not None and o.ai_analysis.recommendation != "pending",
-                o.ai_analysis.overall_score if o.ai_analysis else 0.0,
-                o.roi_percent,
-            ),
-            reverse=reverse,
-        )
-    elif effective_sort == "profit":
-        opportunities.sort(key=lambda o: o.net_profit, reverse=reverse)
-    elif effective_sort == "liquidity":
-        opportunities.sort(key=lambda o: o.min_liquidity, reverse=reverse)
-    elif effective_sort == "risk":
-        opportunities.sort(key=lambda o: o.risk_score, reverse=reverse)
-    elif effective_sort == "roi":
-        # ROI sort, but deprioritize AI skip recommendations
-        opportunities.sort(
-            key=lambda o: (
-                o.ai_analysis is not None and o.ai_analysis.recommendation in ("skip", "strong_skip"),
-                -o.roi_percent if reverse else o.roi_percent,
-            ),
-        )
 
     # Apply pagination
     total = len(opportunities)
@@ -312,6 +327,64 @@ async def get_opportunities(
     # content-negotiation and CORS headers correctly.
     response.headers["X-Total-Count"] = str(total)
     return [_serialize_with_sub_strategy(o) for o in paginated]
+
+
+@router.get("/opportunities/ids")
+async def get_opportunity_ids(
+    session: AsyncSession = Depends(get_db_session),
+    min_profit: float = Query(0.0, description="Minimum profit percentage"),
+    max_risk: float = Query(1.0, description="Maximum risk score (0-1)"),
+    strategy: Optional[str] = Query(
+        None,
+        description="Filter by strategy type/slug (e.g. basic, negrisk, my_custom_strategy)",
+    ),
+    min_liquidity: float = Query(0.0, description="Minimum liquidity in USD"),
+    search: Optional[str] = Query(None, description="Search query for market titles"),
+    category: Optional[str] = Query(None, description="Filter by category (e.g., politics, sports, crypto)"),
+    sort_by: Optional[str] = Query(
+        None,
+        description="Sort field: ai_score (default), roi, profit, liquidity, risk",
+    ),
+    sort_dir: Optional[str] = Query("desc", description="Sort direction: asc or desc"),
+    exclude_strategy: Optional[str] = Query(
+        None,
+        description="Exclude a strategy type from results (e.g. btc_eth_highfreq)",
+    ),
+    sub_strategy: Optional[str] = Query(
+        None,
+        description="Filter by strategy-specific subtype (e.g. certainty_shock, pure_arb)",
+    ),
+    limit: int = Query(500, ge=1, le=2000, description="Maximum IDs to return"),
+    offset: int = Query(0, ge=0, description="Number of IDs to skip"),
+    source: Literal["markets", "traders", "all"] = Query(
+        "markets",
+        description="Opportunity source: markets, traders, all",
+    ),
+):
+    opportunities = await _list_filtered_opportunities(
+        session,
+        min_profit=min_profit,
+        max_risk=max_risk,
+        strategy=strategy,
+        min_liquidity=min_liquidity,
+        search=search,
+        category=category,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        exclude_strategy=exclude_strategy,
+        sub_strategy=sub_strategy,
+        source=source,
+    )
+
+    total = len(opportunities)
+    paginated = opportunities[offset : offset + limit]
+
+    return {
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "ids": [opp.id for opp in paginated],
+    }
 
 
 @router.get("/opportunities/search-polymarket")

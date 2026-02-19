@@ -118,6 +118,7 @@ async def refresh_strategy_runtime_if_needed(
     source_keys: list[str] | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
+    normalized_sources = _normalize_source_keys(source_keys)
     cache_key = _scope_cache_key(source_keys)
     revision_stamp = await read_strategy_revision_stamp(
         session,
@@ -130,7 +131,29 @@ async def refresh_strategy_runtime_if_needed(
     effective_stamp = f"{revision_stamp}::{file_override_stamp}"
     previous_stamp = _last_loaded_revision_stamps.get(cache_key)
 
-    if not force and previous_stamp == effective_stamp:
+    scope_fully_loaded = True
+    if normalized_sources:
+        enabled_rows = (
+            (
+                await session.execute(
+                    select(Strategy.slug).where(
+                        Strategy.enabled == True,  # noqa: E712
+                        func.lower(func.coalesce(Strategy.source_key, "")).in_(tuple(normalized_sources)),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for slug in enabled_rows:
+            normalized_slug = str(slug or "").strip().lower()
+            if not normalized_slug:
+                continue
+            if strategy_loader.get_strategy(normalized_slug) is None:
+                scope_fully_loaded = False
+                break
+
+    if not force and previous_stamp == effective_stamp and scope_fully_loaded:
         return {
             "refreshed": False,
             "revision_stamp": revision_stamp,
@@ -139,11 +162,12 @@ async def refresh_strategy_runtime_if_needed(
             "errors": dict(strategy_loader._errors),
         }
 
-    normalized_sources = _normalize_source_keys(source_keys)
     loaded = await strategy_loader.refresh_all_from_db(
         session=session,
         source_keys=normalized_sources or None,
-        prune_unlisted=True,
+        # In a shared in-process runtime, source-scoped refreshes must not
+        # unload strategies owned by other workers.
+        prune_unlisted=not bool(normalized_sources),
     )
     _last_loaded_revision_stamps[cache_key] = effective_stamp
 

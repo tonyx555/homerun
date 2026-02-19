@@ -1,0 +1,1582 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]:
+      - img [ref=e7]
+      - generic [ref=e9]: HOMERUN
+    - button "Select Account" [ref=e11] [cursor=pointer]:
+      - img [ref=e12]
+      - generic [ref=e14]: Select Account
+      - img [ref=e15]
+    - generic [ref=e17]:
+      - generic [ref=e18]:
+        - img [ref=e19]
+        - generic [ref=e23]: Balance
+        - generic [ref=e24]: $0.00
+      - generic [ref=e25]:
+        - img [ref=e26]
+        - generic [ref=e29]: PnL
+        - generic [ref=e30]: $0.00
+      - generic [ref=e31]:
+        - img [ref=e32]
+        - generic [ref=e34]: ROI
+        - generic [ref=e35]: 0.0%
+      - generic [ref=e36]:
+        - img [ref=e37]
+        - generic [ref=e39]: Positions
+        - generic [ref=e40]: "0"
+    - generic [ref=e43]:
+      - img [ref=e44]
+      - textbox "Search markets, wallets, traders..." [ref=e47]
+      - generic [ref=e48]: /
+    - generic [ref=e49]:
+      - button "Worker health status" [ref=e50]
+      - button [ref=e52] [cursor=pointer]:
+        - img [ref=e53]
+      - button "Pause" [ref=e59] [cursor=pointer]:
+        - img [ref=e60]
+        - text: Pause
+  - generic [ref=e63]:
+    - img [ref=e67]
+    - generic [ref=e73]:
+      - generic [ref=e74]:
+        - img [ref=e75]
+        - generic [ref=e77]: SYSTEM
+        - generic [ref=e78]: LIVE
+        - generic [ref=e79]: "|"
+      - generic [ref=e80]:
+        - img [ref=e81]
+        - generic [ref=e84]: SCAN
+        - generic [ref=e85]: 5m ago
+        - generic [ref=e86]: "|"
+      - generic [ref=e87]:
+        - img [ref=e88]
+        - generic [ref=e90]: WORKERS
+        - generic [ref=e91]: 0/8
+        - generic [ref=e92]: 8 ERR
+        - generic [ref=e93]: "|"
+      - generic [ref=e94]:
+        - img [ref=e95]
+        - generic [ref=e97]: MARKETS
+        - generic [ref=e98]: "500"
+        - generic [ref=e99]: "|"
+      - generic [ref=e100]:
+        - img [ref=e101]
+        - generic [ref=e105]: TRADERS
+        - generic [ref=e106]: "0"
+        - generic [ref=e107]: "|"
+      - generic [ref=e108]:
+        - img [ref=e109]
+        - generic [ref=e111]: NEWS
+        - generic [ref=e112]: "0"
+        - generic [ref=e113]: "|"
+      - generic [ref=e114]:
+        - img [ref=e115]
+        - generic [ref=e117]: WEATHER
+        - generic [ref=e118]: "0"
+        - generic [ref=e119]: "|"
+      - generic [ref=e120]:
+        - img [ref=e121]
+        - generic [ref=e123]: CRYPTO
+        - generic [ref=e124]: "0"
+        - generic [ref=e125]: "|"
+      - generic [ref=e126]:
+        - img [ref=e127]
+        - generic [ref=e129]: SIGNALS
+        - generic [ref=e130]: P:0 S:0 X:0
+        - generic [ref=e131]: F:0
+        - generic [ref=e132]: "|"
+      - generic [ref=e133]:
+        - img [ref=e134]
+        - generic [ref=e136]: STRATEGIES
+        - generic [ref=e137]: "0"
+        - generic [ref=e138]: "|"
+      - generic [ref=e139]:
+        - img [ref=e140]
+        - generic [ref=e143]: ORCH
+        - generic [ref=e144]: PAPER PAUSED
+        - generic [ref=e145]: "|"
+      - generic [ref=e146]:
+        - img [ref=e147]
+        - generic [ref=e151]: FUNNEL
+        - generic [ref=e152]: 0→0
+        - generic [ref=e153]: 0.0%
+        - generic [ref=e154]: "|"
+      - generic [ref=e155]:
+        - img [ref=e156]
+        - generic [ref=e159]: DAY PNL
+        - generic [ref=e160]: $0.00
+        - generic [ref=e161]: "|"
+      - generic [ref=e162]:
+        - img [ref=e163]
+        - generic [ref=e165]: EXPOSURE
+        - generic [ref=e166]: $0.00
+        - generic [ref=e167]: "|"
+      - generic [ref=e168]:
+        - img [ref=e169]
+        - generic [ref=e171]: OPEN ORD
+        - generic [ref=e172]: "0"
+        - generic [ref=e173]: "|"
+      - generic [ref=e174]:
+        - img [ref=e175]
+        - generic [ref=e177]: EVENTS 1M
+        - generic [ref=e178]: "0"
+        - generic [ref=e179]: "|"
+      - generic [ref=e180]:
+        - img [ref=e181]
+        - generic [ref=e183]: FLOW 1M
+        - generic [ref=e184]: D:0 O:0 S:0
+        - generic [ref=e185]: "|"
+      - generic [ref=e186]:
+        - img [ref=e187]
+        - generic [ref=e190]: SCANS 1M
+        - generic [ref=e191]: "0"
+        - generic [ref=e192]: "|"
+      - generic [ref=e193]:
+        - img [ref=e194]
+        - generic [ref=e196]: ALERTS 1M
+        - generic [ref=e197]: "0"
+        - generic [ref=e198]: "|"
+      - generic [ref=e199]:
+        - img [ref=e200]
+        - generic [ref=e202]: LAST EVT
+        - generic [ref=e203]: No recent events
+        - generic [ref=e204]: "|"
+      - generic [ref=e205]:
+        - img [ref=e206]
+        - generic [ref=e208]: SYSTEM
+        - generic [ref=e209]: LIVE
+        - generic [ref=e210]: "|"
+      - generic [ref=e211]:
+        - img [ref=e212]
+        - generic [ref=e215]: SCAN
+        - generic [ref=e216]: 5m ago
+        - generic [ref=e217]: "|"
+      - generic [ref=e218]:
+        - img [ref=e219]
+        - generic [ref=e221]: WORKERS
+        - generic [ref=e222]: 0/8
+        - generic [ref=e223]: 8 ERR
+        - generic [ref=e224]: "|"
+      - generic [ref=e225]:
+        - img [ref=e226]
+        - generic [ref=e228]: MARKETS
+        - generic [ref=e229]: "500"
+        - generic [ref=e230]: "|"
+      - generic [ref=e231]:
+        - img [ref=e232]
+        - generic [ref=e236]: TRADERS
+        - generic [ref=e237]: "0"
+        - generic [ref=e238]: "|"
+      - generic [ref=e239]:
+        - img [ref=e240]
+        - generic [ref=e242]: NEWS
+        - generic [ref=e243]: "0"
+        - generic [ref=e244]: "|"
+      - generic [ref=e245]:
+        - img [ref=e246]
+        - generic [ref=e248]: WEATHER
+        - generic [ref=e249]: "0"
+        - generic [ref=e250]: "|"
+      - generic [ref=e251]:
+        - img [ref=e252]
+        - generic [ref=e254]: CRYPTO
+        - generic [ref=e255]: "0"
+        - generic [ref=e256]: "|"
+      - generic [ref=e257]:
+        - img [ref=e258]
+        - generic [ref=e260]: SIGNALS
+        - generic [ref=e261]: P:0 S:0 X:0
+        - generic [ref=e262]: F:0
+        - generic [ref=e263]: "|"
+      - generic [ref=e264]:
+        - img [ref=e265]
+        - generic [ref=e267]: STRATEGIES
+        - generic [ref=e268]: "0"
+        - generic [ref=e269]: "|"
+      - generic [ref=e270]:
+        - img [ref=e271]
+        - generic [ref=e274]: ORCH
+        - generic [ref=e275]: PAPER PAUSED
+        - generic [ref=e276]: "|"
+      - generic [ref=e277]:
+        - img [ref=e278]
+        - generic [ref=e282]: FUNNEL
+        - generic [ref=e283]: 0→0
+        - generic [ref=e284]: 0.0%
+        - generic [ref=e285]: "|"
+      - generic [ref=e286]:
+        - img [ref=e287]
+        - generic [ref=e290]: DAY PNL
+        - generic [ref=e291]: $0.00
+        - generic [ref=e292]: "|"
+      - generic [ref=e293]:
+        - img [ref=e294]
+        - generic [ref=e296]: EXPOSURE
+        - generic [ref=e297]: $0.00
+        - generic [ref=e298]: "|"
+      - generic [ref=e299]:
+        - img [ref=e300]
+        - generic [ref=e302]: OPEN ORD
+        - generic [ref=e303]: "0"
+        - generic [ref=e304]: "|"
+      - generic [ref=e305]:
+        - img [ref=e306]
+        - generic [ref=e308]: EVENTS 1M
+        - generic [ref=e309]: "0"
+        - generic [ref=e310]: "|"
+      - generic [ref=e311]:
+        - img [ref=e312]
+        - generic [ref=e314]: FLOW 1M
+        - generic [ref=e315]: D:0 O:0 S:0
+        - generic [ref=e316]: "|"
+      - generic [ref=e317]:
+        - img [ref=e318]
+        - generic [ref=e321]: SCANS 1M
+        - generic [ref=e322]: "0"
+        - generic [ref=e323]: "|"
+      - generic [ref=e324]:
+        - img [ref=e325]
+        - generic [ref=e327]: ALERTS 1M
+        - generic [ref=e328]: "0"
+        - generic [ref=e329]: "|"
+      - generic [ref=e330]:
+        - img [ref=e331]
+        - generic [ref=e333]: LAST EVT
+        - generic [ref=e334]: No recent events
+        - generic [ref=e335]: "|"
+  - generic [ref=e336]:
+    - navigation [ref=e337]:
+      - button "Opportunities" [ref=e338] [cursor=pointer]:
+        - img [ref=e340]
+        - generic [ref=e342]: Opportunities
+      - button "Bots" [ref=e343] [cursor=pointer]:
+        - img [ref=e344]
+        - generic [ref=e347]: Bots
+      - button "Positions" [ref=e348] [cursor=pointer]:
+        - img [ref=e349]
+        - generic [ref=e352]: Positions
+      - button "Performance" [ref=e353] [cursor=pointer]:
+        - img [ref=e354]
+        - generic [ref=e356]: Performance
+      - button "Accounts" [ref=e357] [cursor=pointer]:
+        - img [ref=e358]
+        - generic [ref=e362]: Accounts
+      - button "Strategies" [ref=e363] [cursor=pointer]:
+        - img [ref=e364]
+        - generic [ref=e368]: Strategies
+      - button "Traders" [ref=e369] [cursor=pointer]:
+        - img [ref=e370]
+        - generic [ref=e375]: Traders
+      - button "Data" [ref=e376] [cursor=pointer]:
+        - img [ref=e377]
+        - generic [ref=e381]: Data
+      - button "AI" [ref=e382] [cursor=pointer]:
+        - img [ref=e383]
+        - generic [ref=e386]: AI
+      - button "Settings" [ref=e387] [cursor=pointer]:
+        - img [ref=e388]
+        - generic [ref=e391]: Settings
+    - main [ref=e392]:
+      - generic [ref=e394]:
+        - generic [ref=e395]:
+          - button "Markets 0" [ref=e396] [cursor=pointer]:
+            - img [ref=e397]
+            - text: Markets
+            - generic [ref=e400]: "0"
+          - generic [ref=e401]:
+            - button [ref=e402] [cursor=pointer]:
+              - img [ref=e403]
+            - button [ref=e408] [cursor=pointer]:
+              - img [ref=e409]
+            - button [ref=e410] [cursor=pointer]:
+              - img [ref=e411]
+          - button "Settings" [ref=e414] [cursor=pointer]:
+            - img [ref=e415]
+            - text: Settings
+        - generic [ref=e418]:
+          - img [ref=e419]
+          - generic [ref=e424]: Fetching prices for 1500 tokens...
+        - generic [ref=e426]:
+          - generic [ref=e427]:
+            - img [ref=e428]
+            - textbox "Search markets..." [ref=e431]
+          - combobox [ref=e432] [cursor=pointer]:
+            - generic: All Detectors
+            - img [ref=e433]
+          - button "Show Empty" [ref=e435] [cursor=pointer]
+          - combobox [ref=e436] [cursor=pointer]:
+            - generic: All Categories
+            - img [ref=e437]
+          - spinbutton [ref=e439]: "0"
+          - generic [ref=e440]:
+            - generic [ref=e441]:
+              - generic [ref=e442]: Risk
+              - generic [ref=e443]: "1.0"
+            - slider [ref=e444] [cursor=pointer]: "1"
+          - combobox [ref=e445] [cursor=pointer]:
+            - generic: AI Score
+            - img [ref=e446]
+          - 'button "Sort direction: descending" [ref=e448] [cursor=pointer]':
+            - img [ref=e449]
+          - button "Refresh" [ref=e451] [cursor=pointer]:
+            - img [ref=e452]
+            - text: Refresh
+          - button "Analyze" [ref=e457] [cursor=pointer]:
+            - img [ref=e458]
+            - text: Analyze
+        - generic [ref=e461]:
+          - generic [ref=e464]:
+            - generic [ref=e465]:
+              - generic [ref=e466]:
+                - generic [ref=e467]: Event-Driven
+                - generic [ref=e468]: Nov 4 Elections
+              - generic [ref=e469]:
+                - generic [ref=e470]:
+                  - img [ref=e471]
+                  - generic [ref=e474]: +108.25%
+                - paragraph [ref=e475]: $0.0866 net
+            - 'heading "Event-Driven: Will the Republican Party win the AL-07 House seat..." [level=3] [ref=e476]'
+            - generic [ref=e477]:
+              - generic [ref=e480]:
+                - generic [ref=e481]: Yes 0.08
+                - generic [ref=e482]: No 0.92
+              - generic [ref=e483]:
+                - generic [ref=e484]:
+                  - paragraph [ref=e485]: Cost
+                  - generic [ref=e487]: $0.0800
+                - generic [ref=e488]:
+                  - paragraph [ref=e489]: Liq
+                  - generic [ref=e491]: $4.7K
+                - generic [ref=e492]:
+                  - paragraph [ref=e493]: Risk
+                  - generic [ref=e495]: 60%
+                - generic [ref=e498]:
+                  - paragraph [ref=e499]: Max Pos
+                  - generic [ref=e501]: $470
+            - generic [ref=e502]:
+              - generic [ref=e503]:
+                - img [ref=e504]
+                - text: No AI analysis
+              - button "Analyze" [ref=e507] [cursor=pointer]
+            - generic [ref=e508]:
+              - generic [ref=e510]:
+                - generic [ref=e511]: BUY YES
+                - generic [ref=e512]: "@0.08"
+              - generic [ref=e513]:
+                - generic [ref=e514]:
+                  - img [ref=e515]
+                  - text: "1"
+                - generic [ref=e519]:
+                  - img [ref=e520]
+                  - text: 48m
+            - generic [ref=e523]:
+              - link "PM" [ref=e524] [cursor=pointer]:
+                - /url: https://polymarket.com/event/al-07-house-election-winner/will-the-republican-party-win-the-al-07-house-seat
+                - img [ref=e525]
+                - text: PM
+              - button "AI" [ref=e529] [cursor=pointer]:
+                - img [ref=e530]
+                - text: AI
+              - button "News" [ref=e532] [cursor=pointer]:
+                - img [ref=e533]
+                - text: News
+              - generic [ref=e536]:
+                - button "Expand" [ref=e537] [cursor=pointer]:
+                  - img [ref=e538]
+                  - text: Expand
+                - button "More" [ref=e543] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e544]
+          - generic [ref=e548]:
+            - generic [ref=e549]:
+              - generic [ref=e550]:
+                - generic [ref=e551]: Event-Driven
+                - generic [ref=e552]: Nov 4 Elections
+              - generic [ref=e553]:
+                - generic [ref=e554]:
+                  - img [ref=e555]
+                  - generic [ref=e558]: +108.25%
+                - paragraph [ref=e559]: $0.0866 net
+            - 'heading "Event-Driven: Will the Democratic Party win the AR-04 House seat..." [level=3] [ref=e560]'
+            - generic [ref=e561]:
+              - generic [ref=e564]:
+                - generic [ref=e565]: Yes 0.08
+                - generic [ref=e566]: No 0.92
+              - generic [ref=e567]:
+                - generic [ref=e568]:
+                  - paragraph [ref=e569]: Cost
+                  - generic [ref=e571]: $0.0800
+                - generic [ref=e572]:
+                  - paragraph [ref=e573]: Liq
+                  - generic [ref=e575]: $4.6K
+                - generic [ref=e576]:
+                  - paragraph [ref=e577]: Risk
+                  - generic [ref=e579]: 60%
+                - generic [ref=e582]:
+                  - paragraph [ref=e583]: Max Pos
+                  - generic [ref=e585]: $457
+            - generic [ref=e586]:
+              - generic [ref=e587]:
+                - img [ref=e588]
+                - text: No AI analysis
+              - button "Analyze" [ref=e591] [cursor=pointer]
+            - generic [ref=e592]:
+              - generic [ref=e594]:
+                - generic [ref=e595]: BUY YES
+                - generic [ref=e596]: "@0.08"
+              - generic [ref=e597]:
+                - generic [ref=e598]:
+                  - img [ref=e599]
+                  - text: "1"
+                - generic [ref=e603]:
+                  - img [ref=e604]
+                  - text: 48m
+            - generic [ref=e607]:
+              - link "PM" [ref=e608] [cursor=pointer]:
+                - /url: https://polymarket.com/event/ar-04-house-election-winner/will-the-democratic-party-win-the-ar-04-house-seat
+                - img [ref=e609]
+                - text: PM
+              - button "AI" [ref=e613] [cursor=pointer]:
+                - img [ref=e614]
+                - text: AI
+              - button "News" [ref=e616] [cursor=pointer]:
+                - img [ref=e617]
+                - text: News
+              - generic [ref=e620]:
+                - button "Expand" [ref=e621] [cursor=pointer]:
+                  - img [ref=e622]
+                  - text: Expand
+                - button "More" [ref=e627] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e628]
+          - generic [ref=e632]:
+            - generic [ref=e633]:
+              - generic [ref=e634]:
+                - generic [ref=e635]: Event-Driven
+                - generic [ref=e636]: Elections
+              - generic [ref=e637]:
+                - generic [ref=e638]:
+                  - img [ref=e639]
+                  - generic [ref=e642]: +108.25%
+                - paragraph [ref=e643]: $0.0866 net
+            - 'heading "Event-Driven: Will the Republican Party win the AZ-03 House seat..." [level=3] [ref=e644]'
+            - generic [ref=e645]:
+              - generic [ref=e648]:
+                - generic [ref=e649]: Yes 0.08
+                - generic [ref=e650]: No 0.92
+              - generic [ref=e651]:
+                - generic [ref=e652]:
+                  - paragraph [ref=e653]: Cost
+                  - generic [ref=e655]: $0.0800
+                - generic [ref=e656]:
+                  - paragraph [ref=e657]: Liq
+                  - generic [ref=e659]: $5.0K
+                - generic [ref=e660]:
+                  - paragraph [ref=e661]: Risk
+                  - generic [ref=e663]: 60%
+                - generic [ref=e666]:
+                  - paragraph [ref=e667]: Max Pos
+                  - generic [ref=e669]: $500
+            - generic [ref=e670]:
+              - generic [ref=e671]:
+                - img [ref=e672]
+                - text: No AI analysis
+              - button "Analyze" [ref=e675] [cursor=pointer]
+            - generic [ref=e676]:
+              - generic [ref=e678]:
+                - generic [ref=e679]: BUY YES
+                - generic [ref=e680]: "@0.08"
+              - generic [ref=e681]:
+                - generic [ref=e682]:
+                  - img [ref=e683]
+                  - text: "1"
+                - generic [ref=e687]:
+                  - img [ref=e688]
+                  - text: 48m
+            - generic [ref=e691]:
+              - link "PM" [ref=e692] [cursor=pointer]:
+                - /url: https://polymarket.com/event/az-03-house-election-winner/will-the-republican-party-win-the-az-03-house-seat
+                - img [ref=e693]
+                - text: PM
+              - button "AI" [ref=e697] [cursor=pointer]:
+                - img [ref=e698]
+                - text: AI
+              - button "News" [ref=e700] [cursor=pointer]:
+                - img [ref=e701]
+                - text: News
+              - generic [ref=e704]:
+                - button "Expand" [ref=e705] [cursor=pointer]:
+                  - img [ref=e706]
+                  - text: Expand
+                - button "More" [ref=e711] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e712]
+          - generic [ref=e716]:
+            - generic [ref=e717]:
+              - generic [ref=e718]:
+                - generic [ref=e719]: Event-Driven
+                - generic [ref=e720]: Elections
+              - generic [ref=e721]:
+                - generic [ref=e722]:
+                  - img [ref=e723]
+                  - generic [ref=e726]: +108.25%
+                - paragraph [ref=e727]: $0.0866 net
+            - 'heading "Event-Driven: Will the Republican Party win the CA-04 House seat..." [level=3] [ref=e728]'
+            - generic [ref=e729]:
+              - generic [ref=e732]:
+                - generic [ref=e733]: Yes 0.08
+                - generic [ref=e734]: No 0.92
+              - generic [ref=e735]:
+                - generic [ref=e736]:
+                  - paragraph [ref=e737]: Cost
+                  - generic [ref=e739]: $0.0800
+                - generic [ref=e740]:
+                  - paragraph [ref=e741]: Liq
+                  - generic [ref=e743]: $4.5K
+                - generic [ref=e744]:
+                  - paragraph [ref=e745]: Risk
+                  - generic [ref=e747]: 60%
+                - generic [ref=e750]:
+                  - paragraph [ref=e751]: Max Pos
+                  - generic [ref=e753]: $452
+            - generic [ref=e754]:
+              - generic [ref=e755]:
+                - img [ref=e756]
+                - text: No AI analysis
+              - button "Analyze" [ref=e759] [cursor=pointer]
+            - generic [ref=e760]:
+              - generic [ref=e762]:
+                - generic [ref=e763]: BUY YES
+                - generic [ref=e764]: "@0.08"
+              - generic [ref=e765]:
+                - generic [ref=e766]:
+                  - img [ref=e767]
+                  - text: "1"
+                - generic [ref=e771]:
+                  - img [ref=e772]
+                  - text: 48m
+            - generic [ref=e775]:
+              - link "PM" [ref=e776] [cursor=pointer]:
+                - /url: https://polymarket.com/event/ca-04-house-election-winner/will-the-republican-party-win-the-ca-04-house-seat
+                - img [ref=e777]
+                - text: PM
+              - button "AI" [ref=e781] [cursor=pointer]:
+                - img [ref=e782]
+                - text: AI
+              - button "News" [ref=e784] [cursor=pointer]:
+                - img [ref=e785]
+                - text: News
+              - generic [ref=e788]:
+                - button "Expand" [ref=e789] [cursor=pointer]:
+                  - img [ref=e790]
+                  - text: Expand
+                - button "More" [ref=e795] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e796]
+          - generic [ref=e800]:
+            - generic [ref=e801]:
+              - generic [ref=e802]:
+                - generic [ref=e803]: Event-Driven
+                - generic [ref=e804]: Nov 4 Elections
+              - generic [ref=e805]:
+                - generic [ref=e806]:
+                  - img [ref=e807]
+                  - generic [ref=e810]: +108.25%
+                - paragraph [ref=e811]: $0.0866 net
+            - 'heading "Event-Driven: Will the Republican Party win the CA-33 House seat..." [level=3] [ref=e812]'
+            - generic [ref=e813]:
+              - generic [ref=e816]:
+                - generic [ref=e817]: Yes 0.08
+                - generic [ref=e818]: No 0.92
+              - generic [ref=e819]:
+                - generic [ref=e820]:
+                  - paragraph [ref=e821]: Cost
+                  - generic [ref=e823]: $0.0800
+                - generic [ref=e824]:
+                  - paragraph [ref=e825]: Liq
+                  - generic [ref=e827]: $5.4K
+                - generic [ref=e828]:
+                  - paragraph [ref=e829]: Risk
+                  - generic [ref=e831]: 60%
+                - generic [ref=e834]:
+                  - paragraph [ref=e835]: Max Pos
+                  - generic [ref=e837]: $537
+            - generic [ref=e838]:
+              - generic [ref=e839]:
+                - img [ref=e840]
+                - text: No AI analysis
+              - button "Analyze" [ref=e843] [cursor=pointer]
+            - generic [ref=e844]:
+              - generic [ref=e846]:
+                - generic [ref=e847]: BUY YES
+                - generic [ref=e848]: "@0.08"
+              - generic [ref=e849]:
+                - generic [ref=e850]:
+                  - img [ref=e851]
+                  - text: "1"
+                - generic [ref=e855]:
+                  - img [ref=e856]
+                  - text: 48m
+            - generic [ref=e859]:
+              - link "PM" [ref=e860] [cursor=pointer]:
+                - /url: https://polymarket.com/event/ca-33-house-election-winner/will-the-republican-party-win-the-ca-33-house-seat
+                - img [ref=e861]
+                - text: PM
+              - button "AI" [ref=e865] [cursor=pointer]:
+                - img [ref=e866]
+                - text: AI
+              - button "News" [ref=e868] [cursor=pointer]:
+                - img [ref=e869]
+                - text: News
+              - generic [ref=e872]:
+                - button "Expand" [ref=e873] [cursor=pointer]:
+                  - img [ref=e874]
+                  - text: Expand
+                - button "More" [ref=e879] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e880]
+          - generic [ref=e884]:
+            - generic [ref=e885]:
+              - generic [ref=e886]:
+                - generic [ref=e887]: Event-Driven
+                - generic [ref=e888]: Nov 4 Elections
+              - generic [ref=e889]:
+                - generic [ref=e890]:
+                  - img [ref=e891]
+                  - generic [ref=e894]: +108.25%
+                - paragraph [ref=e895]: $0.0866 net
+            - 'heading "Event-Driven: Will the Republican Party win the CA-41 House seat..." [level=3] [ref=e896]'
+            - generic [ref=e897]:
+              - generic [ref=e900]:
+                - generic [ref=e901]: Yes 0.08
+                - generic [ref=e902]: No 0.92
+              - generic [ref=e903]:
+                - generic [ref=e904]:
+                  - paragraph [ref=e905]: Cost
+                  - generic [ref=e907]: $0.0800
+                - generic [ref=e908]:
+                  - paragraph [ref=e909]: Liq
+                  - generic [ref=e911]: $4.0K
+                - generic [ref=e912]:
+                  - paragraph [ref=e913]: Risk
+                  - generic [ref=e915]: 60%
+                - generic [ref=e918]:
+                  - paragraph [ref=e919]: Max Pos
+                  - generic [ref=e921]: $397
+            - generic [ref=e922]:
+              - generic [ref=e923]:
+                - img [ref=e924]
+                - text: No AI analysis
+              - button "Analyze" [ref=e927] [cursor=pointer]
+            - generic [ref=e928]:
+              - generic [ref=e930]:
+                - generic [ref=e931]: BUY YES
+                - generic [ref=e932]: "@0.08"
+              - generic [ref=e933]:
+                - generic [ref=e934]:
+                  - img [ref=e935]
+                  - text: "1"
+                - generic [ref=e939]:
+                  - img [ref=e940]
+                  - text: 48m
+            - generic [ref=e943]:
+              - link "PM" [ref=e944] [cursor=pointer]:
+                - /url: https://polymarket.com/event/ca-41-house-election-winner/will-the-republican-party-win-the-ca-41-house-seat
+                - img [ref=e945]
+                - text: PM
+              - button "AI" [ref=e949] [cursor=pointer]:
+                - img [ref=e950]
+                - text: AI
+              - button "News" [ref=e952] [cursor=pointer]:
+                - img [ref=e953]
+                - text: News
+              - generic [ref=e956]:
+                - button "Expand" [ref=e957] [cursor=pointer]:
+                  - img [ref=e958]
+                  - text: Expand
+                - button "More" [ref=e963] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e964]
+          - generic [ref=e968]:
+            - generic [ref=e969]:
+              - generic [ref=e970]:
+                - generic [ref=e971]: Event-Driven
+                - generic [ref=e972]: Politics
+              - generic [ref=e973]:
+                - generic [ref=e974]:
+                  - img [ref=e975]
+                  - generic [ref=e978]: +108.25%
+                - paragraph [ref=e979]: $0.0866 net
+            - 'heading "Event-Driven: Will the Republican Party win the CA-43 House seat..." [level=3] [ref=e980]'
+            - generic [ref=e981]:
+              - generic [ref=e984]:
+                - generic [ref=e985]: Yes 0.08
+                - generic [ref=e986]: No 0.92
+              - generic [ref=e987]:
+                - generic [ref=e988]:
+                  - paragraph [ref=e989]: Cost
+                  - generic [ref=e991]: $0.0800
+                - generic [ref=e992]:
+                  - paragraph [ref=e993]: Liq
+                  - generic [ref=e995]: $5.9K
+                - generic [ref=e996]:
+                  - paragraph [ref=e997]: Risk
+                  - generic [ref=e999]: 60%
+                - generic [ref=e1002]:
+                  - paragraph [ref=e1003]: Max Pos
+                  - generic [ref=e1005]: $594
+            - generic [ref=e1006]:
+              - generic [ref=e1007]:
+                - img [ref=e1008]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1011] [cursor=pointer]
+            - generic [ref=e1012]:
+              - generic [ref=e1014]:
+                - generic [ref=e1015]: BUY YES
+                - generic [ref=e1016]: "@0.08"
+              - generic [ref=e1017]:
+                - generic [ref=e1018]:
+                  - img [ref=e1019]
+                  - text: "1"
+                - generic [ref=e1023]:
+                  - img [ref=e1024]
+                  - text: 48m
+            - generic [ref=e1027]:
+              - link "PM" [ref=e1028] [cursor=pointer]:
+                - /url: https://polymarket.com/event/ca-43-house-election-winner/will-the-republican-party-win-the-ca-43-house-seat
+                - img [ref=e1029]
+                - text: PM
+              - button "AI" [ref=e1033] [cursor=pointer]:
+                - img [ref=e1034]
+                - text: AI
+              - button "News" [ref=e1036] [cursor=pointer]:
+                - img [ref=e1037]
+                - text: News
+              - generic [ref=e1040]:
+                - button "Expand" [ref=e1041] [cursor=pointer]:
+                  - img [ref=e1042]
+                  - text: Expand
+                - button "More" [ref=e1047] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1048]
+          - generic [ref=e1052]:
+            - generic [ref=e1053]:
+              - generic [ref=e1054]:
+                - generic [ref=e1055]: Event-Driven
+                - generic [ref=e1056]: Elections
+              - generic [ref=e1057]:
+                - generic [ref=e1058]:
+                  - img [ref=e1059]
+                  - generic [ref=e1062]: +108.25%
+                - paragraph [ref=e1063]: $0.0866 net
+            - 'heading "Event-Driven: Will the Republican Party win the CT-01 House seat..." [level=3] [ref=e1064]'
+            - generic [ref=e1065]:
+              - generic [ref=e1068]:
+                - generic [ref=e1069]: Yes 0.08
+                - generic [ref=e1070]: No 0.92
+              - generic [ref=e1071]:
+                - generic [ref=e1072]:
+                  - paragraph [ref=e1073]: Cost
+                  - generic [ref=e1075]: $0.0800
+                - generic [ref=e1076]:
+                  - paragraph [ref=e1077]: Liq
+                  - generic [ref=e1079]: $5.6K
+                - generic [ref=e1080]:
+                  - paragraph [ref=e1081]: Risk
+                  - generic [ref=e1083]: 60%
+                - generic [ref=e1086]:
+                  - paragraph [ref=e1087]: Max Pos
+                  - generic [ref=e1089]: $560
+            - generic [ref=e1090]:
+              - generic [ref=e1091]:
+                - img [ref=e1092]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1095] [cursor=pointer]
+            - generic [ref=e1096]:
+              - generic [ref=e1098]:
+                - generic [ref=e1099]: BUY YES
+                - generic [ref=e1100]: "@0.08"
+              - generic [ref=e1101]:
+                - generic [ref=e1102]:
+                  - img [ref=e1103]
+                  - text: "1"
+                - generic [ref=e1107]:
+                  - img [ref=e1108]
+                  - text: 48m
+            - generic [ref=e1111]:
+              - link "PM" [ref=e1112] [cursor=pointer]:
+                - /url: https://polymarket.com/event/ct-01-house-election-winner/will-the-republican-party-win-the-ct-01-house-seat
+                - img [ref=e1113]
+                - text: PM
+              - button "AI" [ref=e1117] [cursor=pointer]:
+                - img [ref=e1118]
+                - text: AI
+              - button "News" [ref=e1120] [cursor=pointer]:
+                - img [ref=e1121]
+                - text: News
+              - generic [ref=e1124]:
+                - button "Expand" [ref=e1125] [cursor=pointer]:
+                  - img [ref=e1126]
+                  - text: Expand
+                - button "More" [ref=e1131] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1132]
+          - generic [ref=e1136]:
+            - generic [ref=e1137]:
+              - generic [ref=e1138]:
+                - generic [ref=e1139]: Event-Driven
+                - generic [ref=e1140]: Politics
+              - generic [ref=e1141]:
+                - generic [ref=e1142]:
+                  - img [ref=e1143]
+                  - generic [ref=e1146]: +108.25%
+                - paragraph [ref=e1147]: $0.0866 net
+            - 'heading "Event-Driven: Will the Republican Party win the CT-03 House seat..." [level=3] [ref=e1148]'
+            - generic [ref=e1149]:
+              - generic [ref=e1152]:
+                - generic [ref=e1153]: Yes 0.08
+                - generic [ref=e1154]: No 0.92
+              - generic [ref=e1155]:
+                - generic [ref=e1156]:
+                  - paragraph [ref=e1157]: Cost
+                  - generic [ref=e1159]: $0.0800
+                - generic [ref=e1160]:
+                  - paragraph [ref=e1161]: Liq
+                  - generic [ref=e1163]: $5.3K
+                - generic [ref=e1164]:
+                  - paragraph [ref=e1165]: Risk
+                  - generic [ref=e1167]: 60%
+                - generic [ref=e1170]:
+                  - paragraph [ref=e1171]: Max Pos
+                  - generic [ref=e1173]: $532
+            - generic [ref=e1174]:
+              - generic [ref=e1175]:
+                - img [ref=e1176]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1179] [cursor=pointer]
+            - generic [ref=e1180]:
+              - generic [ref=e1182]:
+                - generic [ref=e1183]: BUY YES
+                - generic [ref=e1184]: "@0.08"
+              - generic [ref=e1185]:
+                - generic [ref=e1186]:
+                  - img [ref=e1187]
+                  - text: "1"
+                - generic [ref=e1191]:
+                  - img [ref=e1192]
+                  - text: 48m
+            - generic [ref=e1195]:
+              - link "PM" [ref=e1196] [cursor=pointer]:
+                - /url: https://polymarket.com/event/ct-03-house-election-winner/will-the-republican-party-win-the-ct-03-house-seat
+                - img [ref=e1197]
+                - text: PM
+              - button "AI" [ref=e1201] [cursor=pointer]:
+                - img [ref=e1202]
+                - text: AI
+              - button "News" [ref=e1204] [cursor=pointer]:
+                - img [ref=e1205]
+                - text: News
+              - generic [ref=e1208]:
+                - button "Expand" [ref=e1209] [cursor=pointer]:
+                  - img [ref=e1210]
+                  - text: Expand
+                - button "More" [ref=e1215] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1216]
+          - generic [ref=e1220]:
+            - generic [ref=e1221]:
+              - generic [ref=e1222]:
+                - generic [ref=e1223]: Event-Driven
+                - generic [ref=e1224]: Politics
+              - generic [ref=e1225]:
+                - generic [ref=e1226]:
+                  - img [ref=e1227]
+                  - generic [ref=e1230]: +108.25%
+                - paragraph [ref=e1231]: $0.0866 net
+            - 'heading "Event-Driven: Will the Republican Party win the CT-04 House seat..." [level=3] [ref=e1232]'
+            - generic [ref=e1233]:
+              - generic [ref=e1236]:
+                - generic [ref=e1237]: Yes 0.08
+                - generic [ref=e1238]: No 0.92
+              - generic [ref=e1239]:
+                - generic [ref=e1240]:
+                  - paragraph [ref=e1241]: Cost
+                  - generic [ref=e1243]: $0.0800
+                - generic [ref=e1244]:
+                  - paragraph [ref=e1245]: Liq
+                  - generic [ref=e1247]: $6.2K
+                - generic [ref=e1248]:
+                  - paragraph [ref=e1249]: Risk
+                  - generic [ref=e1251]: 60%
+                - generic [ref=e1254]:
+                  - paragraph [ref=e1255]: Max Pos
+                  - generic [ref=e1257]: $619
+            - generic [ref=e1258]:
+              - generic [ref=e1259]:
+                - img [ref=e1260]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1263] [cursor=pointer]
+            - generic [ref=e1264]:
+              - generic [ref=e1266]:
+                - generic [ref=e1267]: BUY YES
+                - generic [ref=e1268]: "@0.08"
+              - generic [ref=e1269]:
+                - generic [ref=e1270]:
+                  - img [ref=e1271]
+                  - text: "1"
+                - generic [ref=e1275]:
+                  - img [ref=e1276]
+                  - text: 48m
+            - generic [ref=e1279]:
+              - link "PM" [ref=e1280] [cursor=pointer]:
+                - /url: https://polymarket.com/event/ct-04-house-election-winner/will-the-republican-party-win-the-ct-04-house-seat
+                - img [ref=e1281]
+                - text: PM
+              - button "AI" [ref=e1285] [cursor=pointer]:
+                - img [ref=e1286]
+                - text: AI
+              - button "News" [ref=e1288] [cursor=pointer]:
+                - img [ref=e1289]
+                - text: News
+              - generic [ref=e1292]:
+                - button "Expand" [ref=e1293] [cursor=pointer]:
+                  - img [ref=e1294]
+                  - text: Expand
+                - button "More" [ref=e1299] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1300]
+          - generic [ref=e1304]:
+            - generic [ref=e1305]:
+              - generic [ref=e1306]:
+                - generic [ref=e1307]: Event-Driven
+                - generic [ref=e1308]: Nov 4 Elections
+              - generic [ref=e1309]:
+                - generic [ref=e1310]:
+                  - img [ref=e1311]
+                  - generic [ref=e1314]: +108.25%
+                - paragraph [ref=e1315]: $0.0866 net
+            - 'heading "Event-Driven: Will the Republican Party win the DE-AL House seat..." [level=3] [ref=e1316]'
+            - generic [ref=e1317]:
+              - generic [ref=e1320]:
+                - generic [ref=e1321]: Yes 0.08
+                - generic [ref=e1322]: No 0.92
+              - generic [ref=e1323]:
+                - generic [ref=e1324]:
+                  - paragraph [ref=e1325]: Cost
+                  - generic [ref=e1327]: $0.0800
+                - generic [ref=e1328]:
+                  - paragraph [ref=e1329]: Liq
+                  - generic [ref=e1331]: $5.4K
+                - generic [ref=e1332]:
+                  - paragraph [ref=e1333]: Risk
+                  - generic [ref=e1335]: 60%
+                - generic [ref=e1338]:
+                  - paragraph [ref=e1339]: Max Pos
+                  - generic [ref=e1341]: $535
+            - generic [ref=e1342]:
+              - generic [ref=e1343]:
+                - img [ref=e1344]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1347] [cursor=pointer]
+            - generic [ref=e1348]:
+              - generic [ref=e1350]:
+                - generic [ref=e1351]: BUY YES
+                - generic [ref=e1352]: "@0.08"
+              - generic [ref=e1353]:
+                - generic [ref=e1354]:
+                  - img [ref=e1355]
+                  - text: "1"
+                - generic [ref=e1359]:
+                  - img [ref=e1360]
+                  - text: 48m
+            - generic [ref=e1363]:
+              - link "PM" [ref=e1364] [cursor=pointer]:
+                - /url: https://polymarket.com/event/de-al-house-election-winner/will-the-republican-party-win-the-de-al-house-seat
+                - img [ref=e1365]
+                - text: PM
+              - button "AI" [ref=e1369] [cursor=pointer]:
+                - img [ref=e1370]
+                - text: AI
+              - button "News" [ref=e1372] [cursor=pointer]:
+                - img [ref=e1373]
+                - text: News
+              - generic [ref=e1376]:
+                - button "Expand" [ref=e1377] [cursor=pointer]:
+                  - img [ref=e1378]
+                  - text: Expand
+                - button "More" [ref=e1383] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1384]
+          - generic [ref=e1388]:
+            - generic [ref=e1389]:
+              - generic [ref=e1390]:
+                - generic [ref=e1391]: Event-Driven
+                - generic [ref=e1392]: Politics
+              - generic [ref=e1393]:
+                - generic [ref=e1394]:
+                  - img [ref=e1395]
+                  - generic [ref=e1398]: +108.25%
+                - paragraph [ref=e1399]: $0.0866 net
+            - 'heading "Event-Driven: Will the Democratic Party win the FL-08 House seat..." [level=3] [ref=e1400]'
+            - generic [ref=e1401]:
+              - generic [ref=e1404]:
+                - generic [ref=e1405]: Yes 0.08
+                - generic [ref=e1406]: No 0.92
+              - generic [ref=e1407]:
+                - generic [ref=e1408]:
+                  - paragraph [ref=e1409]: Cost
+                  - generic [ref=e1411]: $0.0800
+                - generic [ref=e1412]:
+                  - paragraph [ref=e1413]: Liq
+                  - generic [ref=e1415]: $4.3K
+                - generic [ref=e1416]:
+                  - paragraph [ref=e1417]: Risk
+                  - generic [ref=e1419]: 60%
+                - generic [ref=e1422]:
+                  - paragraph [ref=e1423]: Max Pos
+                  - generic [ref=e1425]: $432
+            - generic [ref=e1426]:
+              - generic [ref=e1427]:
+                - img [ref=e1428]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1431] [cursor=pointer]
+            - generic [ref=e1432]:
+              - generic [ref=e1434]:
+                - generic [ref=e1435]: BUY YES
+                - generic [ref=e1436]: "@0.08"
+              - generic [ref=e1437]:
+                - generic [ref=e1438]:
+                  - img [ref=e1439]
+                  - text: "1"
+                - generic [ref=e1443]:
+                  - img [ref=e1444]
+                  - text: 48m
+            - generic [ref=e1447]:
+              - link "PM" [ref=e1448] [cursor=pointer]:
+                - /url: https://polymarket.com/event/fl-08-house-election-winner/will-the-democratic-party-win-the-fl-08-house-seat
+                - img [ref=e1449]
+                - text: PM
+              - button "AI" [ref=e1453] [cursor=pointer]:
+                - img [ref=e1454]
+                - text: AI
+              - button "News" [ref=e1456] [cursor=pointer]:
+                - img [ref=e1457]
+                - text: News
+              - generic [ref=e1460]:
+                - button "Expand" [ref=e1461] [cursor=pointer]:
+                  - img [ref=e1462]
+                  - text: Expand
+                - button "More" [ref=e1467] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1468]
+          - generic [ref=e1472]:
+            - generic [ref=e1473]:
+              - generic [ref=e1474]:
+                - generic [ref=e1475]: Event-Driven
+                - generic [ref=e1476]: Elections
+              - generic [ref=e1477]:
+                - generic [ref=e1478]:
+                  - img [ref=e1479]
+                  - generic [ref=e1482]: +108.25%
+                - paragraph [ref=e1483]: $0.0866 net
+            - 'heading "Event-Driven: Will the Democratic Party win the FL-19 House seat..." [level=3] [ref=e1484]'
+            - generic [ref=e1485]:
+              - generic [ref=e1488]:
+                - generic [ref=e1489]: Yes 0.08
+                - generic [ref=e1490]: No 0.92
+              - generic [ref=e1491]:
+                - generic [ref=e1492]:
+                  - paragraph [ref=e1493]: Cost
+                  - generic [ref=e1495]: $0.0800
+                - generic [ref=e1496]:
+                  - paragraph [ref=e1497]: Liq
+                  - generic [ref=e1499]: $5.2K
+                - generic [ref=e1500]:
+                  - paragraph [ref=e1501]: Risk
+                  - generic [ref=e1503]: 60%
+                - generic [ref=e1506]:
+                  - paragraph [ref=e1507]: Max Pos
+                  - generic [ref=e1509]: $525
+            - generic [ref=e1510]:
+              - generic [ref=e1511]:
+                - img [ref=e1512]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1515] [cursor=pointer]
+            - generic [ref=e1516]:
+              - generic [ref=e1518]:
+                - generic [ref=e1519]: BUY YES
+                - generic [ref=e1520]: "@0.08"
+              - generic [ref=e1521]:
+                - generic [ref=e1522]:
+                  - img [ref=e1523]
+                  - text: "1"
+                - generic [ref=e1527]:
+                  - img [ref=e1528]
+                  - text: 48m
+            - generic [ref=e1531]:
+              - link "PM" [ref=e1532] [cursor=pointer]:
+                - /url: https://polymarket.com/event/fl-19-house-election-winner/will-the-democratic-party-win-the-fl-19-house-seat
+                - img [ref=e1533]
+                - text: PM
+              - button "AI" [ref=e1537] [cursor=pointer]:
+                - img [ref=e1538]
+                - text: AI
+              - button "News" [ref=e1540] [cursor=pointer]:
+                - img [ref=e1541]
+                - text: News
+              - generic [ref=e1544]:
+                - button "Expand" [ref=e1545] [cursor=pointer]:
+                  - img [ref=e1546]
+                  - text: Expand
+                - button "More" [ref=e1551] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1552]
+          - generic [ref=e1556]:
+            - generic [ref=e1557]:
+              - generic [ref=e1558]:
+                - generic [ref=e1559]: Event-Driven
+                - generic [ref=e1560]: rewards 5, 4.5, 50
+              - generic [ref=e1561]:
+                - generic [ref=e1562]:
+                  - img [ref=e1563]
+                  - generic [ref=e1566]: +108.25%
+                - paragraph [ref=e1567]: $0.0866 net
+            - 'heading "Event-Driven: Will the Republican Party win the GA-06 House seat..." [level=3] [ref=e1568]'
+            - generic [ref=e1569]:
+              - generic [ref=e1572]:
+                - generic [ref=e1573]: Yes 0.08
+                - generic [ref=e1574]: No 0.92
+              - generic [ref=e1575]:
+                - generic [ref=e1576]:
+                  - paragraph [ref=e1577]: Cost
+                  - generic [ref=e1579]: $0.0800
+                - generic [ref=e1580]:
+                  - paragraph [ref=e1581]: Liq
+                  - generic [ref=e1583]: $3.9K
+                - generic [ref=e1584]:
+                  - paragraph [ref=e1585]: Risk
+                  - generic [ref=e1587]: 60%
+                - generic [ref=e1590]:
+                  - paragraph [ref=e1591]: Max Pos
+                  - generic [ref=e1593]: $394
+            - generic [ref=e1594]:
+              - generic [ref=e1595]:
+                - img [ref=e1596]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1599] [cursor=pointer]
+            - generic [ref=e1600]:
+              - generic [ref=e1602]:
+                - generic [ref=e1603]: BUY YES
+                - generic [ref=e1604]: "@0.08"
+              - generic [ref=e1605]:
+                - generic [ref=e1606]:
+                  - img [ref=e1607]
+                  - text: "1"
+                - generic [ref=e1611]:
+                  - img [ref=e1612]
+                  - text: 48m
+            - generic [ref=e1615]:
+              - link "PM" [ref=e1616] [cursor=pointer]:
+                - /url: https://polymarket.com/event/ga-06-house-election-winner/will-the-republican-party-win-the-ga-06-house-seat
+                - img [ref=e1617]
+                - text: PM
+              - button "AI" [ref=e1621] [cursor=pointer]:
+                - img [ref=e1622]
+                - text: AI
+              - button "News" [ref=e1624] [cursor=pointer]:
+                - img [ref=e1625]
+                - text: News
+              - generic [ref=e1628]:
+                - button "Expand" [ref=e1629] [cursor=pointer]:
+                  - img [ref=e1630]
+                  - text: Expand
+                - button "More" [ref=e1635] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1636]
+          - generic [ref=e1640]:
+            - generic [ref=e1641]:
+              - generic [ref=e1642]:
+                - generic [ref=e1643]: Event-Driven
+                - generic [ref=e1644]: rewards 5, 4.5, 50
+              - generic [ref=e1645]:
+                - generic [ref=e1646]:
+                  - img [ref=e1647]
+                  - generic [ref=e1650]: +108.25%
+                - paragraph [ref=e1651]: $0.0866 net
+            - 'heading "Event-Driven: Will the Democratic Party win the GA-14 House seat..." [level=3] [ref=e1652]'
+            - generic [ref=e1653]:
+              - generic [ref=e1656]:
+                - generic [ref=e1657]: Yes 0.08
+                - generic [ref=e1658]: No 0.92
+              - generic [ref=e1659]:
+                - generic [ref=e1660]:
+                  - paragraph [ref=e1661]: Cost
+                  - generic [ref=e1663]: $0.0800
+                - generic [ref=e1664]:
+                  - paragraph [ref=e1665]: Liq
+                  - generic [ref=e1667]: $4.2K
+                - generic [ref=e1668]:
+                  - paragraph [ref=e1669]: Risk
+                  - generic [ref=e1671]: 60%
+                - generic [ref=e1674]:
+                  - paragraph [ref=e1675]: Max Pos
+                  - generic [ref=e1677]: $418
+            - generic [ref=e1678]:
+              - generic [ref=e1679]:
+                - img [ref=e1680]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1683] [cursor=pointer]
+            - generic [ref=e1684]:
+              - generic [ref=e1686]:
+                - generic [ref=e1687]: BUY YES
+                - generic [ref=e1688]: "@0.08"
+              - generic [ref=e1689]:
+                - generic [ref=e1690]:
+                  - img [ref=e1691]
+                  - text: "1"
+                - generic [ref=e1695]:
+                  - img [ref=e1696]
+                  - text: 48m
+            - generic [ref=e1699]:
+              - link "PM" [ref=e1700] [cursor=pointer]:
+                - /url: https://polymarket.com/event/ga-14-house-election-winner/will-the-democratic-party-win-the-ga-14-house-seat
+                - img [ref=e1701]
+                - text: PM
+              - button "AI" [ref=e1705] [cursor=pointer]:
+                - img [ref=e1706]
+                - text: AI
+              - button "News" [ref=e1708] [cursor=pointer]:
+                - img [ref=e1709]
+                - text: News
+              - generic [ref=e1712]:
+                - button "Expand" [ref=e1713] [cursor=pointer]:
+                  - img [ref=e1714]
+                  - text: Expand
+                - button "More" [ref=e1719] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1720]
+          - generic [ref=e1724]:
+            - generic [ref=e1725]:
+              - generic [ref=e1726]:
+                - generic [ref=e1727]: Event-Driven
+                - generic [ref=e1728]: Nov 4 Elections
+              - generic [ref=e1729]:
+                - generic [ref=e1730]:
+                  - img [ref=e1731]
+                  - generic [ref=e1734]: +108.25%
+                - paragraph [ref=e1735]: $0.0866 net
+            - 'heading "Event-Driven: Will the Republican Party win the MA-02 House seat..." [level=3] [ref=e1736]'
+            - generic [ref=e1737]:
+              - generic [ref=e1740]:
+                - generic [ref=e1741]: Yes 0.08
+                - generic [ref=e1742]: No 0.92
+              - generic [ref=e1743]:
+                - generic [ref=e1744]:
+                  - paragraph [ref=e1745]: Cost
+                  - generic [ref=e1747]: $0.0800
+                - generic [ref=e1748]:
+                  - paragraph [ref=e1749]: Liq
+                  - generic [ref=e1751]: $5.0K
+                - generic [ref=e1752]:
+                  - paragraph [ref=e1753]: Risk
+                  - generic [ref=e1755]: 60%
+                - generic [ref=e1758]:
+                  - paragraph [ref=e1759]: Max Pos
+                  - generic [ref=e1761]: $501
+            - generic [ref=e1762]:
+              - generic [ref=e1763]:
+                - img [ref=e1764]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1767] [cursor=pointer]
+            - generic [ref=e1768]:
+              - generic [ref=e1770]:
+                - generic [ref=e1771]: BUY YES
+                - generic [ref=e1772]: "@0.08"
+              - generic [ref=e1773]:
+                - generic [ref=e1774]:
+                  - img [ref=e1775]
+                  - text: "1"
+                - generic [ref=e1779]:
+                  - img [ref=e1780]
+                  - text: 48m
+            - generic [ref=e1783]:
+              - link "PM" [ref=e1784] [cursor=pointer]:
+                - /url: https://polymarket.com/event/ma-02-house-election-winner/will-the-republican-party-win-the-ma-02-house-seat
+                - img [ref=e1785]
+                - text: PM
+              - button "AI" [ref=e1789] [cursor=pointer]:
+                - img [ref=e1790]
+                - text: AI
+              - button "News" [ref=e1792] [cursor=pointer]:
+                - img [ref=e1793]
+                - text: News
+              - generic [ref=e1796]:
+                - button "Expand" [ref=e1797] [cursor=pointer]:
+                  - img [ref=e1798]
+                  - text: Expand
+                - button "More" [ref=e1803] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1804]
+          - generic [ref=e1808]:
+            - generic [ref=e1809]:
+              - generic [ref=e1810]:
+                - generic [ref=e1811]: Event-Driven
+                - generic [ref=e1812]: Elections
+              - generic [ref=e1813]:
+                - generic [ref=e1814]:
+                  - img [ref=e1815]
+                  - generic [ref=e1818]: +108.25%
+                - paragraph [ref=e1819]: $0.0866 net
+            - 'heading "Event-Driven: Will the Republican Party win the MA-06 House seat..." [level=3] [ref=e1820]'
+            - generic [ref=e1821]:
+              - generic [ref=e1824]:
+                - generic [ref=e1825]: Yes 0.08
+                - generic [ref=e1826]: No 0.92
+              - generic [ref=e1827]:
+                - generic [ref=e1828]:
+                  - paragraph [ref=e1829]: Cost
+                  - generic [ref=e1831]: $0.0800
+                - generic [ref=e1832]:
+                  - paragraph [ref=e1833]: Liq
+                  - generic [ref=e1835]: $4.7K
+                - generic [ref=e1836]:
+                  - paragraph [ref=e1837]: Risk
+                  - generic [ref=e1839]: 60%
+                - generic [ref=e1842]:
+                  - paragraph [ref=e1843]: Max Pos
+                  - generic [ref=e1845]: $469
+            - generic [ref=e1846]:
+              - generic [ref=e1847]:
+                - img [ref=e1848]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1851] [cursor=pointer]
+            - generic [ref=e1852]:
+              - generic [ref=e1854]:
+                - generic [ref=e1855]: BUY YES
+                - generic [ref=e1856]: "@0.08"
+              - generic [ref=e1857]:
+                - generic [ref=e1858]:
+                  - img [ref=e1859]
+                  - text: "1"
+                - generic [ref=e1863]:
+                  - img [ref=e1864]
+                  - text: 48m
+            - generic [ref=e1867]:
+              - link "PM" [ref=e1868] [cursor=pointer]:
+                - /url: https://polymarket.com/event/ma-06-house-election-winner/will-the-republican-party-win-the-ma-06-house-seat
+                - img [ref=e1869]
+                - text: PM
+              - button "AI" [ref=e1873] [cursor=pointer]:
+                - img [ref=e1874]
+                - text: AI
+              - button "News" [ref=e1876] [cursor=pointer]:
+                - img [ref=e1877]
+                - text: News
+              - generic [ref=e1880]:
+                - button "Expand" [ref=e1881] [cursor=pointer]:
+                  - img [ref=e1882]
+                  - text: Expand
+                - button "More" [ref=e1887] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1888]
+          - generic [ref=e1892]:
+            - generic [ref=e1893]:
+              - generic [ref=e1894]:
+                - generic [ref=e1895]: Event-Driven
+                - generic [ref=e1896]: rewards 5, 4.5, 50
+              - generic [ref=e1897]:
+                - generic [ref=e1898]:
+                  - img [ref=e1899]
+                  - generic [ref=e1902]: +108.25%
+                - paragraph [ref=e1903]: $0.0866 net
+            - 'heading "Event-Driven: Will the Republican Party win the MA-07 House seat..." [level=3] [ref=e1904]'
+            - generic [ref=e1905]:
+              - generic [ref=e1908]:
+                - generic [ref=e1909]: Yes 0.08
+                - generic [ref=e1910]: No 0.92
+              - generic [ref=e1911]:
+                - generic [ref=e1912]:
+                  - paragraph [ref=e1913]: Cost
+                  - generic [ref=e1915]: $0.0800
+                - generic [ref=e1916]:
+                  - paragraph [ref=e1917]: Liq
+                  - generic [ref=e1919]: $4.1K
+                - generic [ref=e1920]:
+                  - paragraph [ref=e1921]: Risk
+                  - generic [ref=e1923]: 60%
+                - generic [ref=e1926]:
+                  - paragraph [ref=e1927]: Max Pos
+                  - generic [ref=e1929]: $413
+            - generic [ref=e1930]:
+              - generic [ref=e1931]:
+                - img [ref=e1932]
+                - text: No AI analysis
+              - button "Analyze" [ref=e1935] [cursor=pointer]
+            - generic [ref=e1936]:
+              - generic [ref=e1938]:
+                - generic [ref=e1939]: BUY YES
+                - generic [ref=e1940]: "@0.08"
+              - generic [ref=e1941]:
+                - generic [ref=e1942]:
+                  - img [ref=e1943]
+                  - text: "1"
+                - generic [ref=e1947]:
+                  - img [ref=e1948]
+                  - text: 48m
+            - generic [ref=e1951]:
+              - link "PM" [ref=e1952] [cursor=pointer]:
+                - /url: https://polymarket.com/event/ma-07-house-election-winner/will-the-republican-party-win-the-ma-07-house-seat
+                - img [ref=e1953]
+                - text: PM
+              - button "AI" [ref=e1957] [cursor=pointer]:
+                - img [ref=e1958]
+                - text: AI
+              - button "News" [ref=e1960] [cursor=pointer]:
+                - img [ref=e1961]
+                - text: News
+              - generic [ref=e1964]:
+                - button "Expand" [ref=e1965] [cursor=pointer]:
+                  - img [ref=e1966]
+                  - text: Expand
+                - button "More" [ref=e1971] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e1972]
+          - generic [ref=e1976]:
+            - generic [ref=e1977]:
+              - generic [ref=e1978]:
+                - generic [ref=e1979]: Event-Driven
+                - generic [ref=e1980]: Elections
+              - generic [ref=e1981]:
+                - generic [ref=e1982]:
+                  - img [ref=e1983]
+                  - generic [ref=e1986]: +108.25%
+                - paragraph [ref=e1987]: $0.0866 net
+            - 'heading "Event-Driven: Will the Republican Party win the MA-08 House seat..." [level=3] [ref=e1988]'
+            - generic [ref=e1989]:
+              - generic [ref=e1992]:
+                - generic [ref=e1993]: Yes 0.08
+                - generic [ref=e1994]: No 0.92
+              - generic [ref=e1995]:
+                - generic [ref=e1996]:
+                  - paragraph [ref=e1997]: Cost
+                  - generic [ref=e1999]: $0.0800
+                - generic [ref=e2000]:
+                  - paragraph [ref=e2001]: Liq
+                  - generic [ref=e2003]: $6.5K
+                - generic [ref=e2004]:
+                  - paragraph [ref=e2005]: Risk
+                  - generic [ref=e2007]: 60%
+                - generic [ref=e2010]:
+                  - paragraph [ref=e2011]: Max Pos
+                  - generic [ref=e2013]: $650
+            - generic [ref=e2014]:
+              - generic [ref=e2015]:
+                - img [ref=e2016]
+                - text: No AI analysis
+              - button "Analyze" [ref=e2019] [cursor=pointer]
+            - generic [ref=e2020]:
+              - generic [ref=e2022]:
+                - generic [ref=e2023]: BUY YES
+                - generic [ref=e2024]: "@0.08"
+              - generic [ref=e2025]:
+                - generic [ref=e2026]:
+                  - img [ref=e2027]
+                  - text: "1"
+                - generic [ref=e2031]:
+                  - img [ref=e2032]
+                  - text: 48m
+            - generic [ref=e2035]:
+              - link "PM" [ref=e2036] [cursor=pointer]:
+                - /url: https://polymarket.com/event/ma-08-house-election-winner/will-the-republican-party-win-the-ma-08-house-seat
+                - img [ref=e2037]
+                - text: PM
+              - button "AI" [ref=e2041] [cursor=pointer]:
+                - img [ref=e2042]
+                - text: AI
+              - button "News" [ref=e2044] [cursor=pointer]:
+                - img [ref=e2045]
+                - text: News
+              - generic [ref=e2048]:
+                - button "Expand" [ref=e2049] [cursor=pointer]:
+                  - img [ref=e2050]
+                  - text: Expand
+                - button "More" [ref=e2055] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e2056]
+          - generic [ref=e2060]:
+            - generic [ref=e2061]:
+              - generic [ref=e2062]:
+                - generic [ref=e2063]: Event-Driven
+                - generic [ref=e2064]: Nov 4 Elections
+              - generic [ref=e2065]:
+                - generic [ref=e2066]:
+                  - img [ref=e2067]
+                  - generic [ref=e2070]: +108.25%
+                - paragraph [ref=e2071]: $0.0866 net
+            - 'heading "Event-Driven: Will the Republican Party win the MD-02 House seat..." [level=3] [ref=e2072]'
+            - generic [ref=e2073]:
+              - generic [ref=e2076]:
+                - generic [ref=e2077]: Yes 0.08
+                - generic [ref=e2078]: No 0.92
+              - generic [ref=e2079]:
+                - generic [ref=e2080]:
+                  - paragraph [ref=e2081]: Cost
+                  - generic [ref=e2083]: $0.0800
+                - generic [ref=e2084]:
+                  - paragraph [ref=e2085]: Liq
+                  - generic [ref=e2087]: $6.0K
+                - generic [ref=e2088]:
+                  - paragraph [ref=e2089]: Risk
+                  - generic [ref=e2091]: 60%
+                - generic [ref=e2094]:
+                  - paragraph [ref=e2095]: Max Pos
+                  - generic [ref=e2097]: $602
+            - generic [ref=e2098]:
+              - generic [ref=e2099]:
+                - img [ref=e2100]
+                - text: No AI analysis
+              - button "Analyze" [ref=e2103] [cursor=pointer]
+            - generic [ref=e2104]:
+              - generic [ref=e2106]:
+                - generic [ref=e2107]: BUY YES
+                - generic [ref=e2108]: "@0.08"
+              - generic [ref=e2109]:
+                - generic [ref=e2110]:
+                  - img [ref=e2111]
+                  - text: "1"
+                - generic [ref=e2115]:
+                  - img [ref=e2116]
+                  - text: 48m
+            - generic [ref=e2119]:
+              - link "PM" [ref=e2120] [cursor=pointer]:
+                - /url: https://polymarket.com/event/md-02-house-election-winner/will-the-republican-party-win-the-md-02-house-seat
+                - img [ref=e2121]
+                - text: PM
+              - button "AI" [ref=e2125] [cursor=pointer]:
+                - img [ref=e2126]
+                - text: AI
+              - button "News" [ref=e2128] [cursor=pointer]:
+                - img [ref=e2129]
+                - text: News
+              - generic [ref=e2132]:
+                - button "Expand" [ref=e2133] [cursor=pointer]:
+                  - img [ref=e2134]
+                  - text: Expand
+                - button "More" [ref=e2139] [cursor=pointer]:
+                  - text: More
+                  - img [ref=e2140]
+        - generic [ref=e2143]:
+          - generic [ref=e2144]: 1 - 20 of 500
+          - generic [ref=e2145]:
+            - button "Prev" [disabled]:
+              - img
+              - text: Prev
+            - generic [ref=e2146]: 1/25
+            - button "Next" [ref=e2147] [cursor=pointer]:
+              - text: Next
+              - img [ref=e2148]
+  - button "K" [ref=e2151] [cursor=pointer]:
+    - img [ref=e2152]
+    - generic [ref=e2154]:
+      - img [ref=e2155]
+      - text: K

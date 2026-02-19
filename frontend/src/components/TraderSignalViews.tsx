@@ -33,6 +33,7 @@ import type { Opportunity } from '../services/api'
 export interface UnifiedTraderSignal {
   id: string
   source: 'confluence' | 'insider'
+  strategy_sdk?: string
   market_id: string
   market_question: string
   market_slug?: string | null
@@ -211,12 +212,28 @@ function normalizeSignalQualityFlags(signal: {
   }
 }
 
+function resolveTraderStrategySdk(candidates: unknown[], fallback = 'traders_confluence'): string {
+  for (const candidate of candidates) {
+    const value = String(candidate || '').trim().toLowerCase()
+    if (value) return value
+  }
+  return fallback
+}
+
 export function normalizeConfluenceSignal(signal: TrackedTraderOpportunity): UnifiedTraderSignal {
   const direction = getConfluenceDirection(signal)
   const quality = normalizeSignalQualityFlags(signal)
+  const raw = signal as unknown as Record<string, unknown>
+  const strategySdk = resolveTraderStrategySdk([
+    raw.strategy_sdk,
+    raw.strategy_slug,
+    raw.strategy_key,
+    raw.strategy_type,
+  ])
   return {
     id: signal.id,
     source: 'confluence',
+    strategy_sdk: strategySdk,
     market_id: signal.market_id,
     market_question: signal.market_question || signal.market_id,
     market_slug: signal.market_slug,
@@ -278,6 +295,12 @@ export function normalizeTraderOpportunity(opportunity: Opportunity): UnifiedTra
   const validationReasons = Array.isArray(validation.reasons)
     ? validation.reasons.map((reason) => String(reason))
     : []
+  const strategySdk = resolveTraderStrategySdk([
+    strategyContext.strategy_sdk,
+    strategyContext.strategy_slug,
+    strategyContext.strategy_key,
+    opportunity.strategy,
+  ])
 
   const normalizedSourceFlags: UnifiedTraderSignal['source_flags'] = {
     from_pool: Boolean(sourceFlags.from_pool),
@@ -297,6 +320,7 @@ export function normalizeTraderOpportunity(opportunity: Opportunity): UnifiedTra
   return {
     id: opportunity.id,
     source: 'confluence',
+    strategy_sdk: strategySdk,
     market_id: String(market.id || ''),
     market_question: String(market.question || opportunity.title || ''),
     market_slug: String(market.slug || '') || null,
@@ -586,6 +610,7 @@ function TraderSignalCard({
       ? currentNo
       : currentYes ?? currentNo
   const sourceCoverageLabel = `${signal.source_coverage_score}/3`
+  const strategySdk = String(signal.strategy_sdk || 'traders_confluence').trim().toLowerCase()
 
   const qualityPillClass = signal.is_tradeable
     ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
@@ -691,6 +716,13 @@ function TraderSignalCard({
             {signal.is_tradeable ? <CheckCircle2 className="w-3 h-3" /> : <ShieldAlert className="w-3 h-3" />}
             {qualityLabel}
           </Badge>
+          <Badge
+            variant="outline"
+            className="max-w-[170px] truncate text-[9px] px-1.5 py-0 font-mono border-border/50 bg-muted/25 text-muted-foreground"
+            title={`StrategySDK: ${strategySdk}`}
+          >
+            SDK {strategySdk}
+          </Badge>
 
           <div className="ml-auto flex items-center gap-1 text-xs text-muted-foreground/70">
             <Clock className="w-3 h-3" />
@@ -734,15 +766,15 @@ function TraderSignalCard({
               data={sparkSeries[0]?.data || []}
               series={sparklineSeries}
               width={chartWidth}
-              height={44}
+              height={46}
               lineWidth={1.5}
               showDots
             />
-            <div className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 px-0.5 text-[11px] font-data font-bold">
+            <div className="mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5 px-0.5 text-[11px] font-data font-bold">
               {sparkSeries.map((row, index) => (
                 <span
                   key={`${signal.id}-spark-${row.key}`}
-                  className={SPARKLINE_TEXT_CLASSES[index % SPARKLINE_TEXT_CLASSES.length]}
+                  className={cn('whitespace-nowrap', SPARKLINE_TEXT_CLASSES[index % SPARKLINE_TEXT_CLASSES.length])}
                 >
                   {compactOutcomeLabel(row.label, 14)} {row.latest != null && Number.isFinite(row.latest) ? `${(row.latest * 100).toFixed(0)}¢` : '—'}
                 </span>

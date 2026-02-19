@@ -21,12 +21,9 @@ from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.weather.workflow_orchestrator import weather_workflow_orchestrator
 from services.weather import shared_state
 from services.worker_state import write_worker_snapshot
+from utils.logger import setup_logging
 
-if not logging.root.handlers:
-    logging.basicConfig(
-        level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO")),
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"), json_format=False)
 logger = logging.getLogger("weather_worker")
 
 

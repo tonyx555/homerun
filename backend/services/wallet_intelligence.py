@@ -27,9 +27,11 @@ from models.database import (
     MarketConfluenceSignal,
     CrossPlatformEntity,
     WalletActivityRollup,
+    TrackedWallet,
+    TraderGroup,
+    TraderGroupMember,
     AsyncSessionLocal,
 )
-from services.market_tradability import get_market_tradability_map
 from services.polymarket import polymarket_client
 from services.pause_state import global_pause_state
 from utils.logger import get_logger
@@ -45,9 +47,9 @@ logger = get_logger("wallet_intelligence")
 class ConfluenceDetector:
     """Detect markets where many smart wallets enter the same side together."""
 
-    MIN_WALLETS_WATCH = 5
-    MIN_WALLETS_HIGH = 10
-    MIN_WALLETS_EXTREME = 15
+    MIN_WALLETS_WATCH = 2
+    MIN_WALLETS_HIGH = 4
+    MIN_WALLETS_EXTREME = 6
     MIN_WALLET_RANK_SCORE = 0.20
     SIGNAL_DECAY_MINUTES = 90
 
@@ -253,18 +255,61 @@ class ConfluenceDetector:
                     ),
                 )
             )
-            wallets = list(result.scalars().all())
-            return [
-                {
-                    "address": w.address,
+            discovered = list(result.scalars().all())
+
+            wallet_map: dict[str, dict] = {}
+            for w in discovered:
+                address = str(w.address or "").strip().lower()
+                if not address:
+                    continue
+                wallet_map[address] = {
+                    "address": address,
                     "rank_score": w.rank_score or 0.0,
                     "composite_score": w.composite_score or 0.0,
                     "anomaly_score": w.anomaly_score or 0.0,
                     "cluster_id": w.cluster_id,
                     "in_top_pool": bool(w.in_top_pool),
                 }
-                for w in wallets
-            ]
+
+            tracked_rows = await session.execute(select(TrackedWallet.address))
+            for (address_raw,) in tracked_rows.all():
+                address = str(address_raw or "").strip().lower()
+                if not address:
+                    continue
+                wallet_map.setdefault(
+                    address,
+                    {
+                        "address": address,
+                        "rank_score": 0.0,
+                        "composite_score": 0.0,
+                        "anomaly_score": 0.0,
+                        "cluster_id": None,
+                        "in_top_pool": False,
+                    },
+                )
+
+            group_rows = await session.execute(
+                select(TraderGroupMember.wallet_address)
+                .join(TraderGroup, TraderGroupMember.group_id == TraderGroup.id)
+                .where(TraderGroup.is_active == True)  # noqa: E712
+            )
+            for (address_raw,) in group_rows.all():
+                address = str(address_raw or "").strip().lower()
+                if not address:
+                    continue
+                wallet_map.setdefault(
+                    address,
+                    {
+                        "address": address,
+                        "rank_score": 0.0,
+                        "composite_score": 0.0,
+                        "anomaly_score": 0.0,
+                        "cluster_id": None,
+                        "in_top_pool": False,
+                    },
+                )
+
+            return list(wallet_map.values())
 
     def _normalize_side(self, raw: Optional[str]) -> str:
         side = (raw or "").upper().strip()
@@ -433,8 +478,9 @@ class ConfluenceDetector:
                 select(MarketConfluenceSignal).where(
                     MarketConfluenceSignal.market_id == market_id,
                     MarketConfluenceSignal.outcome == outcome,
-                    MarketConfluenceSignal.is_active == True,  # noqa: E712
                 )
+                .order_by(MarketConfluenceSignal.last_seen_at.desc())
+                .limit(1)
             )
             existing = result.scalars().first()
 
@@ -458,6 +504,8 @@ class ConfluenceDetector:
                 existing.market_volume_24h = market_volume_24h
                 existing.last_seen_at = now
                 existing.detected_at = now
+                existing.is_active = True
+                existing.expired_at = None
                 if market_slug:
                     existing.market_slug = market_slug
                 if market_question:
@@ -527,24 +575,6 @@ class ConfluenceDetector:
             raw_signals = list(result.scalars().all())
 
             signals = [s for s in raw_signals if tier_rank.get((s.tier or "WATCH").upper(), 1) >= required_rank][:limit]
-
-            actionable = [s for s in signals if s.market_id]
-            if actionable:
-                tradability = await get_market_tradability_map([str(s.market_id) for s in actionable])
-                now = utcnow()
-                changed = False
-                kept: list[MarketConfluenceSignal] = []
-                for signal in signals:
-                    market_key = str(signal.market_id or "").strip().lower()
-                    if not market_key or tradability.get(market_key, True):
-                        kept.append(signal)
-                        continue
-                    signal.is_active = False
-                    signal.expired_at = now
-                    changed = True
-                if changed:
-                    await session.commit()
-                signals = kept
 
             return [
                 {

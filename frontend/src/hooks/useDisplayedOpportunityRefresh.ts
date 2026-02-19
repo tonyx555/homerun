@@ -43,7 +43,8 @@ export function useDisplayedOpportunityRefresh({
       if (opportunitiesView === 'scanner') {
         invalidateQueryKeys(queryClient, [
           ['opportunities'],
-          ['opportunity-counts'],
+          ['opportunity-strategy-counts'],
+          ['opportunity-category-counts'],
           ['opportunity-subfilters'],
           ['scanner-status'],
         ])
@@ -61,7 +62,7 @@ export function useDisplayedOpportunityRefresh({
       if (opportunitiesView === 'weather') {
         invalidateQueryKeys(queryClient, [
           ['weather-workflow-opportunities'],
-          ['weather-workflow-opportunity-date-source'],
+          ['weather-workflow-opportunity-ids-analyze-all'],
           ['weather-workflow-opportunity-dates'],
           ['weather-workflow-status'],
         ])

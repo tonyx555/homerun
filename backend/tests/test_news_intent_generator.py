@@ -150,3 +150,43 @@ async def test_intent_generator_requires_multi_article_multi_source_evidence():
     )
 
     assert intents == []
+
+
+@pytest.mark.asyncio
+async def test_intent_generator_respects_custom_supporting_thresholds():
+    generator = IntentGenerator()
+    finding = WorkflowFinding(
+        id="finding-4",
+        article_id="article-4",
+        market_id="mkt-4",
+        market_question="Will policy pass?",
+        market_price=0.41,
+        model_probability=0.63,
+        edge_percent=22.0,
+        direction="buy_yes",
+        confidence=0.78,
+        actionable=True,
+        evidence={
+            "cluster": {
+                "article_refs": [
+                    {
+                        "article_id": "article-4",
+                        "title": "Single source",
+                        "url": "https://example.com/only",
+                        "source": "Reuters",
+                    }
+                ]
+            }
+        },
+    )
+
+    intents = await generator.generate(
+        findings=[finding],
+        min_edge=10.0,
+        min_confidence=0.6,
+        min_supporting_articles=1,
+        min_supporting_sources=1,
+        market_metadata_by_id={"mkt-4": {"liquidity": 10000.0}},
+    )
+
+    assert len(intents) == 1

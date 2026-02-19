@@ -49,7 +49,7 @@ The app now upgrades the database to the latest migration revision on startup.
 If you want a clean start:
 
 ```bash
-rm -f data/arbitrage.db
+rm -f data/homerun.db
 ./scripts/run.sh
 ```
 
@@ -88,7 +88,7 @@ Then start both services again. See [WINDOWS.md](WINDOWS.md) for full Windows in
 If you need to reset the database on Windows:
 
 ```powershell
-Remove-Item data\arbitrage.db -ErrorAction SilentlyContinue
+Remove-Item data\homerun.db -ErrorAction SilentlyContinue
 ```
 
 ---
@@ -97,7 +97,7 @@ Remove-Item data\arbitrage.db -ErrorAction SilentlyContinue
 
 | Problem | Solution |
 |---------|----------|
-| `no such column` errors | Pull latest code (has Alembic migrations) or delete `data/arbitrage.db` |
+| `no such column` errors | Pull latest code (has Alembic migrations) or delete `data/homerun.db` |
 | Backend won't start | Check `python3 --version` (need 3.10+) |
 | Frontend won't start | Check `node --version` (need 18+), run `cd frontend && npm install` |
 | Port already in use | Kill existing process: `lsof -ti:8000 \| xargs kill` |

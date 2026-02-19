@@ -75,6 +75,8 @@ class MyCustomStrategy(BaseStrategy):
     default_config = {
         # Detection params
         "example_threshold": 0.05,
+        "max_opportunities": 120,
+        "retention_window": "45m",
         # Execution params
         "min_edge_percent": 3.0,
         "min_confidence": 0.4,
@@ -146,7 +148,9 @@ ALLOWED_IMPORT_PREFIXES = {
     "services.fee_model",
     "services.ai",
     "services.strategy_sdk",
+    "services.quality_filter",
     "services.data_source_sdk",
+    "services.traders_sdk",
     "services.weather",
     "services.data_events",
     "services.event_dispatcher",

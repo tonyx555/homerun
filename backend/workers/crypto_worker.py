@@ -31,12 +31,9 @@ from services.worker_state import (
     read_worker_snapshot,
     write_worker_snapshot,
 )
+from utils.logger import setup_logging
 
-if not logging.root.handlers:
-    logging.basicConfig(
-        level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO")),
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"), json_format=False)
 logger = logging.getLogger("crypto_worker")
 
 # Keep short in-memory oracle history per asset for chart sparkline payloads.
@@ -47,6 +44,7 @@ _MIN_LOOP_SLEEP_SECONDS = 0.1
 _VIEWER_HEARTBEAT_SECONDS = 20
 _WS_FEED_RETRY_INITIAL_SECONDS = 1.0
 _WS_FEED_RETRY_MAX_SECONDS = 60.0
+_WS_REACTIVE_DEBOUNCE_SECONDS = 0.2
 
 
 def _to_float(value: object) -> float | None:
@@ -237,6 +235,81 @@ def _restore_price_to_beat_from_snapshot_markets(markets: list[dict]) -> int:
     return restored
 
 
+def _market_token_ids(market) -> set[str]:
+    token_ids = getattr(market, "clob_token_ids", None) or []
+    return {
+        str(token_id).strip()
+        for token_id in token_ids
+        if str(token_id).strip() and len(str(token_id).strip()) > 20
+    }
+
+
+def _index_market_token_positions(markets: list) -> dict[str, set[int]]:
+    index: dict[str, set[int]] = {}
+    for market_index, market in enumerate(markets):
+        for token_id in _market_token_ids(market):
+            positions = index.get(token_id)
+            if positions is None:
+                positions = set()
+                index[token_id] = positions
+            positions.add(market_index)
+    return index
+
+
+def _markets_for_updated_tokens(
+    markets: list,
+    token_index: dict[str, set[int]],
+    updated_tokens: set[str],
+) -> list:
+    if not markets or not updated_tokens:
+        return []
+
+    market_positions: set[int] = set()
+    for token_id in updated_tokens:
+        market_positions.update(token_index.get(token_id, set()))
+
+    if not market_positions:
+        return []
+
+    return [markets[i] for i in sorted(market_positions)]
+
+
+async def _dispatch_crypto_opportunities(
+    markets_payload: list[dict],
+    *,
+    trigger: str,
+    run_at: datetime,
+    emit_lock: asyncio.Lock,
+) -> tuple[int, float]:
+    started = time.monotonic()
+    if not markets_payload:
+        return 0, 0.0
+
+    try:
+        async with emit_lock:
+            crypto_event = DataEvent(
+                event_type="crypto_update",
+                source="crypto_worker",
+                timestamp=run_at,
+                payload={"markets": markets_payload, "trigger": trigger},
+            )
+            opportunities = await event_dispatcher.dispatch(crypto_event)
+            async with AsyncSessionLocal() as session:
+                emitted = await bridge_opportunities_to_signals(
+                    session,
+                    opportunities,
+                    source="crypto",
+                )
+            try:
+                await event_bus.publish("crypto_markets_update", {"markets": markets_payload, "trigger": trigger})
+            except Exception:
+                pass
+            return emitted, round(time.monotonic() - started, 3)
+    except Exception as exc:
+        logger.warning("Crypto signal emission failed (%s): %s", trigger, exc)
+        return 0, round(time.monotonic() - started, 3)
+
+
 async def _is_autotrader_active(session) -> bool:
     """Whether trader orchestrator is actively running strategies."""
     try:
@@ -345,7 +418,16 @@ async def _run_loop() -> None:
     except Exception as exc:
         logger.warning("Crypto worker strategy startup sync failed: %s", exc)
 
-    startup_stats = {"market_count": 0, "signals_emitted_last_run": 0, "markets": []}
+    startup_stats = {
+        "market_count": 0,
+        "signals_emitted_last_run": 0,
+        "markets": [],
+        "ws_feeds": {
+            "healthy": False,
+            "started": False,
+            "enabled": bool(settings.WS_FEED_ENABLED),
+        },
+    }
     async with AsyncSessionLocal() as session:
         await ensure_worker_control(session, worker_name, default_interval=2)
         previous_snapshot = await read_worker_snapshot(session, worker_name)
@@ -356,6 +438,7 @@ async def _run_loop() -> None:
                 "market_count": len(previous_markets),
                 "signals_emitted_last_run": int(previous_stats.get("signals_emitted_last_run") or 0),
                 "markets": previous_markets,
+                "ws_feeds": startup_stats.get("ws_feeds", {"healthy": False, "started": False}),
             }
 
         restored = _restore_price_to_beat_from_snapshot_markets(previous_markets)
@@ -386,9 +469,20 @@ async def _run_loop() -> None:
     subscribed_tokens: set[str] = set()
     ws_feed_retry_delay_seconds = _WS_FEED_RETRY_INITIAL_SECONDS
     ws_feed_next_retry_monotonic = 0.0
+    token_to_market_indices: dict[str, set[int]] = {}
+    current_markets: list = []
+    ws_changed_tokens: set[str] = set()
+    ws_reactive_task: asyncio.Task[None] | None = None
+    ws_reactive_enabled = True
+    ws_reactive_callback_registered = False
+    emit_lock = asyncio.Lock()
 
     async def _ensure_ws_feeds_running() -> None:
-        nonlocal feed_manager, ws_feeds_running, ws_feed_retry_delay_seconds, ws_feed_next_retry_monotonic
+        nonlocal feed_manager
+        nonlocal ws_feeds_running
+        nonlocal ws_feed_retry_delay_seconds
+        nonlocal ws_feed_next_retry_monotonic
+        nonlocal ws_reactive_callback_registered
         if ws_feeds_running or not settings.WS_FEED_ENABLED:
             return
         now_monotonic = time.monotonic()
@@ -411,6 +505,11 @@ async def _run_loop() -> None:
 
             if not feed_manager._started:
                 await feed_manager.start()
+            if not ws_reactive_callback_registered:
+                feed_manager.cache.add_on_update_callback(
+                    _on_ws_price_update
+                )
+                ws_reactive_callback_registered = True
             ws_feeds_running = True
             ws_feed_retry_delay_seconds = _WS_FEED_RETRY_INITIAL_SECONDS
             ws_feed_next_retry_monotonic = 0.0
@@ -423,6 +522,63 @@ async def _run_loop() -> None:
                 "Crypto worker WS feeds failed to start (non-critical): %s; retrying in %.1fs",
                 exc,
                 retry_in,
+            )
+
+    def _snapshot_ws_feed_status() -> dict[str, object]:
+        if not settings.WS_FEED_ENABLED:
+            return {"healthy": False, "started": False, "enabled": False}
+        if not ws_feeds_running or feed_manager is None:
+            return {"healthy": False, "started": False, "enabled": True}
+        try:
+            return feed_manager.health_check()
+        except Exception:
+            return {"healthy": False, "started": bool(ws_feeds_running), "enabled": True}
+
+    startup_stats["ws_feeds"] = _snapshot_ws_feed_status()
+
+    def _on_ws_price_update(token_id: str, mid: float, bid: float, ask: float) -> None:
+        nonlocal ws_reactive_task
+        if not ws_reactive_enabled or mid <= 0:
+            return
+        token = str(token_id or "").strip()
+        if not token:
+            return
+        ws_changed_tokens.add(token)
+        if ws_reactive_task is not None and not ws_reactive_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            ws_reactive_task = loop.create_task(_drain_ws_price_updates())
+        except RuntimeError:
+            pass
+
+    async def _drain_ws_price_updates() -> None:
+        while True:
+            await asyncio.sleep(_WS_REACTIVE_DEBOUNCE_SECONDS)
+            if not ws_reactive_enabled:
+                ws_changed_tokens.clear()
+                return
+            if not current_markets:
+                ws_changed_tokens.clear()
+                return
+            if not ws_changed_tokens:
+                return
+            tokens = set(ws_changed_tokens)
+            ws_changed_tokens.clear()
+            selected_markets = _markets_for_updated_tokens(current_markets, token_to_market_indices, tokens)
+            if not selected_markets:
+                continue
+
+            ws_prices = _collect_ws_prices_for_markets(feed_manager, selected_markets)
+            payload = _build_crypto_market_payload(
+                selected_markets,
+                ws_prices=ws_prices,
+            )
+            await _dispatch_crypto_opportunities(
+                payload,
+                trigger="crypto_ws",
+                run_at=utcnow(),
+                emit_lock=emit_lock,
             )
 
     await _ensure_ws_feeds_running()
@@ -445,6 +601,7 @@ async def _run_loop() -> None:
         requested_run_at = control.get("requested_run_at")
         viewer_active = _is_recent_request(requested_run_at)
         fast_mode = bool(viewer_active or autotrader_active)
+        ws_reactive_enabled = bool(enabled and not paused)
         interval = configured_interval if fast_mode else max(configured_interval, _IDLE_INTERVAL_SECONDS)
 
         if (not enabled or paused) and not viewer_active:
@@ -457,8 +614,15 @@ async def _run_loop() -> None:
                     current_activity="Paused" if paused else "Disabled",
                     interval_seconds=interval,
                     last_run_at=None,
-                    stats={"market_count": 0, "signals_emitted_last_run": 0, "markets": []},
+                    stats={
+                        "market_count": 0,
+                        "signals_emitted_last_run": 0,
+                        "markets": [],
+                        "ws_feeds": _snapshot_ws_feed_status(),
+                    },
                 )
+            ws_reactive_enabled = False
+            ws_changed_tokens.clear()
             await asyncio.sleep(min(5, interval))
             continue
 
@@ -470,6 +634,7 @@ async def _run_loop() -> None:
                     await clear_worker_run_request(session, worker_name)
             except Exception:
                 pass
+            ws_changed_tokens.clear()
 
         await _ensure_ws_feeds_running()
 
@@ -482,32 +647,25 @@ async def _run_loop() -> None:
 
         try:
             svc = get_crypto_service()
-            markets = svc.get_live_markets()
+            markets = await asyncio.to_thread(svc.get_live_markets)
+            if markets is None:
+                markets = []
             if ws_feeds_running and feed_manager is not None:
                 subscribed_tokens = await _sync_ws_subscriptions(feed_manager, markets, subscribed_tokens)
+            current_markets = markets
+            token_to_market_indices = _index_market_token_positions(markets)
             ws_prices = _collect_ws_prices_for_markets(feed_manager, markets)
             markets_payload = _build_crypto_market_payload(
                 markets,
                 ws_prices=ws_prices,
             )
-            elapsed = round(time.monotonic() - started_at, 3)
-            try:
-                crypto_event = DataEvent(
-                    event_type="crypto_update",
-                    source="crypto_worker",
-                    timestamp=run_at,
-                    payload={"markets": markets_payload},
-                )
-                opportunities = await event_dispatcher.dispatch(crypto_event)
-                async with AsyncSessionLocal() as session:
-                    emitted = await bridge_opportunities_to_signals(
-                        session,
-                        opportunities,
-                        source="crypto",
-                    )
-            except Exception as exc:
-                emitted = 0
-                logger.warning("Crypto signal emission failed; continuing cycle: %s", exc)
+            emitted, dispatch_elapsed = await _dispatch_crypto_opportunities(
+                markets_payload,
+                trigger="periodic_scan",
+                run_at=run_at,
+                emit_lock=emit_lock,
+            )
+            elapsed = max(round(time.monotonic() - started_at, 3), dispatch_elapsed)
 
             async with AsyncSessionLocal() as session:
                 await write_worker_snapshot(
@@ -527,14 +685,9 @@ async def _run_loop() -> None:
                         "ws_prices_used": int(bool(ws_prices)),
                         "ws_token_prices": len(ws_prices),
                         "markets": markets_payload,
+                        "ws_feeds": _snapshot_ws_feed_status(),
                     },
                 )
-
-            # Publish crypto markets update event for immediate WS broadcast.
-            try:
-                await event_bus.publish("crypto_markets_update", {"markets": markets_payload})
-            except Exception:
-                pass  # fire-and-forget
 
             logger.info(
                 "Crypto cycle complete: markets=%s signals=%s duration=%.3fs fast_mode=%s sleep=%ss",
@@ -568,6 +721,7 @@ async def _run_loop() -> None:
                         "ws_prices_used": int(bool(ws_prices)),
                         "ws_token_prices": len(ws_prices),
                         "markets": markets_payload,
+                        "ws_feeds": _snapshot_ws_feed_status(),
                     },
                 )
 

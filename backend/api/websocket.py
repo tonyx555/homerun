@@ -2,7 +2,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from typing import Set
 import json
 
-from models.database import AsyncSessionLocal, WorldIntelligenceSnapshot
+from models.database import AsyncSessionLocal, EventsSnapshot
 from sqlalchemy import select
 from services import shared_state, wallet_tracker
 from services.news import shared_state as news_shared_state
@@ -11,7 +11,7 @@ from services.trader_orchestrator_state import (
     list_traders,
     read_orchestrator_snapshot,
 )
-from services.worker_state import list_worker_snapshots
+from services.worker_state import list_worker_snapshots, read_worker_snapshot
 from services.weather import shared_state as weather_shared_state
 from utils.market_urls import serialize_opportunity_with_links
 
@@ -69,7 +69,8 @@ async def handle_websocket(websocket: WebSocket):
         weather_opportunities = await weather_shared_state.get_weather_opportunities_from_db(session)
         weather_status = await weather_shared_state.get_weather_status_from_db(session)
         news_workflow_status = await news_shared_state.get_news_status_from_db(session)
-        worker_statuses = await list_worker_snapshots(session)
+        worker_statuses = await list_worker_snapshots(session, include_stats=False)
+        crypto_snapshot = await read_worker_snapshot(session, "crypto")
         orchestrator_status = await read_orchestrator_snapshot(session)
         traders = await list_traders(session)
         execution_sessions = await list_serialized_execution_sessions(
@@ -79,10 +80,21 @@ async def handle_websocket(websocket: WebSocket):
             limit=100,
         )
         world_snapshot = (
-            (await session.execute(select(WorldIntelligenceSnapshot).where(WorldIntelligenceSnapshot.id == "latest")))
+            (await session.execute(select(EventsSnapshot).where(EventsSnapshot.id == "latest")))
             .scalars()
             .one_or_none()
         )
+    crypto_markets = []
+    crypto_stats = crypto_snapshot.get("stats")
+    if isinstance(crypto_stats, dict):
+        raw_markets = crypto_stats.get("markets")
+        if isinstance(raw_markets, list):
+            crypto_markets = raw_markets
+    if crypto_markets:
+        for worker in worker_statuses:
+            if worker.get("worker_name") == "crypto":
+                worker["stats"] = {"markets": crypto_markets}
+                break
     await manager.send_personal(
         websocket,
         {
@@ -100,7 +112,7 @@ async def handle_websocket(websocket: WebSocket):
                 "trader_orchestrator_status": orchestrator_status,
                 "traders": traders,
                 "execution_sessions": execution_sessions,
-                "world_intelligence_status": {
+                "events_status": {
                     "status": (world_snapshot.status if world_snapshot else {}) or {},
                     "stats": (world_snapshot.stats if world_snapshot else {}) or {},
                     "updated_at": (
@@ -223,11 +235,11 @@ async def broadcast_weather_status(status: dict):
     await manager.broadcast({"type": "weather_status", "data": status})
 
 
-async def broadcast_world_intelligence_update(signals: list[dict], summary: dict):
-    """Broadcast world intelligence signal updates to all clients."""
+async def broadcast_events_update(signals: list[dict], summary: dict):
+    """Broadcast events signal updates to all clients."""
     await manager.broadcast(
         {
-            "type": "world_intelligence_update",
+            "type": "events_update",
             "data": {
                 "count": len(signals),
                 "signals": signals[:50],
@@ -237,9 +249,9 @@ async def broadcast_world_intelligence_update(signals: list[dict], summary: dict
     )
 
 
-async def broadcast_world_intelligence_status(status: dict):
-    """Broadcast world intelligence worker status changes."""
-    await manager.broadcast({"type": "world_intelligence_status", "data": status})
+async def broadcast_events_status(status: dict):
+    """Broadcast events worker status changes."""
+    await manager.broadcast({"type": "events_status", "data": status})
 
 
 # Register callbacks (scanner runs in worker process; no scanner callbacks here)

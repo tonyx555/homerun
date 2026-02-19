@@ -11,21 +11,17 @@ from datetime import datetime, timezone
 from functools import partial
 from typing import Any, Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import (
     AsyncSessionLocal,
-    DiscoveredWallet,
     Strategy,
-    TrackedWallet,
-    TraderGroup,
-    TraderGroupMember,
 )
 from models.opportunity import Opportunity
 from services.market_tradability import get_market_tradability_map
 from services.opportunity_strategy_catalog import ensure_system_opportunity_strategies_seeded
-from services.smart_wallet_pool import _looks_like_crypto_market, smart_wallet_pool
+from services.smart_wallet_pool import _looks_like_crypto_market
 from services.strategy_loader import strategy_loader
 from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.strategy_sdk import StrategySDK
@@ -38,13 +34,6 @@ _safe_float = partial(safe_float, reject_nan_inf=True)
 logger = get_logger("traders_firehose_pipeline")
 
 _STRATEGY_SLUG = "traders_confluence"
-
-
-def _normalize_wallet_address(value: object) -> Optional[str]:
-    text = str(value or "").strip().lower()
-    if not text or not text.startswith("0x"):
-        return None
-    return text
 
 
 def _parse_time(value: object) -> Optional[datetime]:
@@ -124,87 +113,6 @@ async def _resolve_traders_strategy(session: AsyncSession) -> Optional[Any]:
     instance = loaded.instance
     _apply_strategy_config(instance, config)
     return instance
-
-
-async def _annotate_source_flags(session: AsyncSession, rows: list[dict[str, Any]]) -> None:
-    if not rows:
-        return
-
-    all_addresses: set[str] = set()
-    wallets_per_row: list[list[str]] = []
-    for row in rows:
-        row_wallets: list[str] = []
-        for raw in row.get("wallets") or []:
-            normalized = _normalize_wallet_address(raw)
-            if not normalized:
-                continue
-            row_wallets.append(normalized)
-            all_addresses.add(normalized)
-        wallets_per_row.append(row_wallets)
-
-    pool_addresses: set[str] = set()
-    tracked_addresses: set[str] = set()
-    group_ids_by_address: dict[str, set[str]] = {}
-
-    if all_addresses:
-        addr_list = list(all_addresses)
-
-        discovered_rows = await session.execute(
-            select(DiscoveredWallet.address, DiscoveredWallet.in_top_pool).where(
-                func.lower(DiscoveredWallet.address).in_(addr_list)
-            )
-        )
-        for address, in_top_pool in discovered_rows.all():
-            normalized = _normalize_wallet_address(address)
-            if normalized and bool(in_top_pool):
-                pool_addresses.add(normalized)
-
-        tracked_rows = await session.execute(
-            select(TrackedWallet.address).where(func.lower(TrackedWallet.address).in_(addr_list))
-        )
-        for (address,) in tracked_rows.all():
-            normalized = _normalize_wallet_address(address)
-            if normalized:
-                tracked_addresses.add(normalized)
-
-        group_rows = await session.execute(
-            select(TraderGroupMember.wallet_address, TraderGroupMember.group_id)
-            .join(TraderGroup, TraderGroupMember.group_id == TraderGroup.id)
-            .where(
-                TraderGroup.is_active == True,  # noqa: E712
-                func.lower(TraderGroupMember.wallet_address).in_(addr_list),
-            )
-        )
-        for address, group_id in group_rows.all():
-            normalized = _normalize_wallet_address(address)
-            if not normalized:
-                continue
-            bucket = group_ids_by_address.setdefault(normalized, set())
-            if group_id:
-                bucket.add(str(group_id))
-
-    for row, wallets in zip(rows, wallets_per_row):
-        pool_wallets = sum(1 for addr in wallets if addr in pool_addresses)
-        tracked_wallets = sum(1 for addr in wallets if addr in tracked_addresses)
-        group_wallets = sum(1 for addr in wallets if group_ids_by_address.get(addr))
-        matched_group_ids = sorted({gid for addr in wallets for gid in group_ids_by_address.get(addr, set())})
-
-        row["source_flags"] = StrategySDK.normalize_trader_source_flags(
-            {
-                "from_pool": pool_wallets > 0,
-                "from_tracked_traders": tracked_wallets > 0,
-                "from_trader_groups": group_wallets > 0,
-                "qualified": bool(pool_wallets or tracked_wallets or group_wallets),
-            }
-        )
-        row["source_breakdown"] = {
-            "wallets_considered": len(wallets),
-            "pool_wallets": pool_wallets,
-            "tracked_wallets": tracked_wallets,
-            "group_wallets": group_wallets,
-            "group_count": len(matched_group_ids),
-            "group_ids": matched_group_ids,
-        }
 
 
 async def _annotate_firehose_context(rows: list[dict[str, Any]]) -> None:
@@ -319,11 +227,13 @@ async def apply_traders_firehose_strategy(
 
     async with AsyncSessionLocal() as session:
         strategy = await _resolve_traders_strategy(session)
-        await _annotate_source_flags(session, cloned_rows)
 
     if strategy is None:
         return []
 
+    from services.trader_data_access import annotate_trader_signal_source_context
+
+    await annotate_trader_signal_source_context(cloned_rows)
     await _annotate_firehose_context(cloned_rows)
     return _apply_strategy_filter(
         strategy,
@@ -340,9 +250,12 @@ async def get_strategy_filtered_trader_opportunities(
 ) -> list[dict[str, Any]]:
     safe_limit = max(1, int(limit))
     firehose_scan_limit = max(250, safe_limit * 6)
-    firehose_rows = await smart_wallet_pool.get_tracked_trader_firehose_signals(
+    from services.trader_data_access import get_trader_firehose_signals
+
+    firehose_rows = await get_trader_firehose_signals(
         limit=firehose_scan_limit,
         include_filtered=include_filtered,
+        include_source_context=False,
     )
     return await apply_traders_firehose_strategy(
         firehose_rows,

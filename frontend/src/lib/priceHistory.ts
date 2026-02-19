@@ -35,6 +35,7 @@ const HISTORY_KEY_ALIASES: Record<string, string> = {
   up: 'yes',
   up_price: 'yes',
   p: 'yes',
+  mid: 'yes',
   price: 'yes',
   n: 'no',
   no: 'no',
@@ -177,6 +178,27 @@ function parsePointValues(
 ): Map<string, number> {
   const values = new Map<string, number>()
 
+  const hasTimestampLike = (value: unknown): boolean => {
+    const numeric = typeof value === 'number'
+      ? value
+      : typeof value === 'string'
+        ? Number(value)
+        : NaN
+
+    if (!Number.isFinite(numeric)) return false
+    return numeric > 1_000_000_000
+  }
+
+  const outcomeIndexToKey = (index: number): string => {
+    const fallbackUsesBinaryKeys = fallbackKeys.has('yes') || fallbackKeys.has('no')
+    const fallbackUsesIndexedKeys = fallbackKeys.has('idx_0') || fallbackKeys.has('idx_1')
+    if (!fallbackUsesIndexedKeys && fallbackUsesBinaryKeys) {
+      if (index === 0) return 'yes'
+      if (index === 1) return 'no'
+    }
+    return `idx_${index}`
+  }
+
   const pushValue = (rawKey: string, rawValue: unknown) => {
     const normalizedKey = normalizeHistoryKey(rawKey)
     if (!normalizedKey) return
@@ -186,9 +208,10 @@ function parsePointValues(
   }
 
   if (Array.isArray(raw)) {
-    // [timestamp, p0, p1, p2, ...]
-    for (let i = 1; i < raw.length; i += 1) {
-      pushValue(`idx_${i - 1}`, raw[i])
+    // [timestamp?, p0, p1, p2, ...] where timestamp is optional.
+    const valueStart = hasTimestampLike(raw[0]) ? 1 : 0
+    for (let i = valueStart; i < raw.length; i += 1) {
+      pushValue(outcomeIndexToKey(i - valueStart), raw[i])
     }
     return values
   }
@@ -208,7 +231,7 @@ function parsePointValues(
     )
   )
   vectorPrices.forEach((value, i) => {
-    values.set(`idx_${i}`, value)
+    values.set(outcomeIndexToKey(i), value)
   })
 
   const byLabel = point.outcome_prices_by_label ?? point.outcomePricesByLabel

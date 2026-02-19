@@ -14,12 +14,14 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
+from sqlalchemy.exc import OperationalError
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 import enum
 import logging
 import os
+import asyncio
 
 from config import settings
 from models.types import PreciseFloat as Float
@@ -27,6 +29,24 @@ from models.types import PreciseFloat as Float
 logger = logging.getLogger(__name__)
 
 Base = declarative_base()
+
+
+class RetryableAsyncSession(AsyncSession):
+    _COMMIT_RETRY_ATTEMPTS = 4
+    _COMMIT_BASE_DELAY_SECONDS = 0.05
+
+    async def commit(self) -> None:
+        for attempt in range(1, self._COMMIT_RETRY_ATTEMPTS + 1):
+            try:
+                await super().commit()
+                return
+            except OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" not in message or attempt >= self._COMMIT_RETRY_ATTEMPTS:
+                    raise
+                await self.rollback()
+                delay = min(self._COMMIT_BASE_DELAY_SECONDS * (2 ** (attempt - 1)), 0.4)
+                await asyncio.sleep(delay)
 
 
 class TradeStatus(enum.Enum):
@@ -742,6 +762,7 @@ class AppSettings(Base):
     discovery_pool_min_size = Column(Integer, default=400)
     discovery_pool_max_size = Column(Integer, default=600)
     discovery_pool_active_window_hours = Column(Integer, default=72)
+    discovery_pool_inactive_rising_retention_hours = Column(Integer, default=336)
     discovery_pool_selection_score_floor = Column(Float, default=0.55)
     discovery_pool_max_hourly_replacement_rate = Column(Float, default=0.15)
     discovery_pool_replacement_score_cutoff = Column(Float, default=0.05)
@@ -931,37 +952,37 @@ class AppSettings(Base):
     news_rss_feeds_json = Column(JSON, default=list)
     news_gov_rss_enabled = Column(Boolean, default=True)
     news_gov_rss_feeds_json = Column(JSON, default=list)
-    world_intel_settings_json = Column(JSON, default=dict)
-    world_intel_acled_api_key = Column(String, nullable=True)
-    world_intel_acled_email = Column(String, nullable=True)
-    world_intel_opensky_username = Column(String, nullable=True)
-    world_intel_opensky_password = Column(String, nullable=True)
-    world_intel_aisstream_api_key = Column(String, nullable=True)
-    world_intel_cloudflare_radar_token = Column(String, nullable=True)
-    world_intel_country_reference_json = Column(JSON, default=list)
-    world_intel_country_reference_source = Column(String, nullable=True)
-    world_intel_country_reference_synced_at = Column(DateTime, nullable=True)
-    world_intel_ucdp_active_wars_json = Column(JSON, default=list)
-    world_intel_ucdp_minor_conflicts_json = Column(JSON, default=list)
-    world_intel_ucdp_source = Column(String, nullable=True)
-    world_intel_ucdp_year = Column(Integer, nullable=True)
-    world_intel_ucdp_synced_at = Column(DateTime, nullable=True)
-    world_intel_mid_iso3_json = Column(JSON, default=dict)
-    world_intel_mid_source = Column(String, nullable=True)
-    world_intel_mid_synced_at = Column(DateTime, nullable=True)
-    world_intel_trade_dependencies_json = Column(JSON, default=dict)
-    world_intel_trade_dependency_source = Column(String, nullable=True)
-    world_intel_trade_dependency_year = Column(Integer, nullable=True)
-    world_intel_trade_dependency_synced_at = Column(DateTime, nullable=True)
-    world_intel_chokepoints_json = Column(JSON, default=list)
-    world_intel_chokepoints_source = Column(String, nullable=True)
-    world_intel_chokepoints_synced_at = Column(DateTime, nullable=True)
-    world_intel_gdelt_news_enabled = Column(Boolean, default=True)
-    world_intel_gdelt_news_queries_json = Column(JSON, default=list)
-    world_intel_gdelt_news_timespan_hours = Column(Integer, default=6)
-    world_intel_gdelt_news_max_records = Column(Integer, default=40)
-    world_intel_gdelt_news_source = Column(String, nullable=True)
-    world_intel_gdelt_news_synced_at = Column(DateTime, nullable=True)
+    events_settings_json = Column(JSON, default=dict)
+    events_acled_api_key = Column(String, nullable=True)
+    events_acled_email = Column(String, nullable=True)
+    events_opensky_username = Column(String, nullable=True)
+    events_opensky_password = Column(String, nullable=True)
+    events_aisstream_api_key = Column(String, nullable=True)
+    events_cloudflare_radar_token = Column(String, nullable=True)
+    events_country_reference_json = Column(JSON, default=list)
+    events_country_reference_source = Column(String, nullable=True)
+    events_country_reference_synced_at = Column(DateTime, nullable=True)
+    events_ucdp_active_wars_json = Column(JSON, default=list)
+    events_ucdp_minor_conflicts_json = Column(JSON, default=list)
+    events_ucdp_source = Column(String, nullable=True)
+    events_ucdp_year = Column(Integer, nullable=True)
+    events_ucdp_synced_at = Column(DateTime, nullable=True)
+    events_mid_iso3_json = Column(JSON, default=dict)
+    events_mid_source = Column(String, nullable=True)
+    events_mid_synced_at = Column(DateTime, nullable=True)
+    events_trade_dependencies_json = Column(JSON, default=dict)
+    events_trade_dependency_source = Column(String, nullable=True)
+    events_trade_dependency_year = Column(Integer, nullable=True)
+    events_trade_dependency_synced_at = Column(DateTime, nullable=True)
+    events_chokepoints_json = Column(JSON, default=list)
+    events_chokepoints_source = Column(String, nullable=True)
+    events_chokepoints_synced_at = Column(DateTime, nullable=True)
+    events_gdelt_news_enabled = Column(Boolean, default=True)
+    events_gdelt_news_queries_json = Column(JSON, default=list)
+    events_gdelt_news_timespan_hours = Column(Integer, default=6)
+    events_gdelt_news_max_records = Column(Integer, default=40)
+    events_gdelt_news_source = Column(String, nullable=True)
+    events_gdelt_news_synced_at = Column(DateTime, nullable=True)
 
     # Independent Weather Workflow (forecast consensus -> opportunities/intents)
     weather_workflow_enabled = Column(Boolean, default=True)
@@ -1079,7 +1100,7 @@ class DataSource(Base):
     id = Column(String, primary_key=True)
     slug = Column(String, unique=True, nullable=False)
     source_key = Column(String, nullable=False, default="custom")
-    source_kind = Column(String, nullable=False, default="python")  # python | rss | gdelt | bridge
+    source_kind = Column(String, nullable=False, default="python")  # python | rss | rest_api
     name = Column(String, nullable=False)
     description = Column(Text, nullable=True)
     source_code = Column(Text, nullable=False, default="")
@@ -1088,6 +1109,7 @@ class DataSource(Base):
     enabled = Column(Boolean, default=True)
     status = Column(String, default="unloaded")  # unloaded | loaded | error
     error_message = Column(Text, nullable=True)
+    retention = Column(JSON, default=dict, nullable=False)
     config = Column(JSON, default=dict)
     config_schema = Column(JSON, default=dict)
     version = Column(Integer, default=1)
@@ -2679,13 +2701,13 @@ class TraderConfigRevision(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 
-# ==================== WORLD INTELLIGENCE ====================
+# ==================== EVENTS ====================
 
 
-class WorldIntelligenceSignal(Base):
-    """Aggregated world intelligence signal from any source."""
+class EventsSignal(Base):
+    """Aggregated events signal from any source."""
 
-    __tablename__ = "world_intelligence_signals"
+    __tablename__ = "events_signals"
 
     id = Column(String, primary_key=True)
     signal_type = Column(
@@ -2781,10 +2803,10 @@ class ConflictEventRecord(Base):
     )
 
 
-class WorldIntelligenceSnapshot(Base):
-    """Worker snapshot for world intelligence collector."""
+class EventsSnapshot(Base):
+    """Worker snapshot for events collector."""
 
-    __tablename__ = "world_intelligence_snapshots"
+    __tablename__ = "events_snapshots"
 
     id = Column(String, primary_key=True, default="latest")
     status = Column(JSON, nullable=True)
@@ -2817,7 +2839,7 @@ def _set_sqlite_pragma(dbapi_connection, connection_record):
 # Apply pragmas on each new SQLite connection
 event.listens_for(async_engine.sync_engine, "connect")(_set_sqlite_pragma)
 
-AsyncSessionLocal = sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+AsyncSessionLocal = sessionmaker(async_engine, class_=RetryableAsyncSession, expire_on_commit=False)
 
 
 def _run_alembic_upgrade(connection) -> None:

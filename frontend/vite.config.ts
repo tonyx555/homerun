@@ -17,6 +17,9 @@ logger.error = (msg, options) => {
   loggerError(msg, options)
 }
 
+const vitePort = Number(process.env.VITE_PORT || 3000)
+const viteStrictPort = String(process.env.VITE_STRICT_PORT || "").toLowerCase() === "true"
+
 export default defineConfig({
   plugins: [react()],
   customLogger: logger,
@@ -26,8 +29,8 @@ export default defineConfig({
     },
   },
   server: {
-    port: 3000,
-    strictPort: true,
+    port: vitePort,
+    strictPort: viteStrictPort,
     proxy: {
       '/api': {
         target: 'http://localhost:8000',

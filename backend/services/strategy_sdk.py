@@ -45,13 +45,14 @@ class StrategySDK:
     TRADER_SOURCE_SCOPE_CANONICAL = ("all", "tracked", "pool")
     TRADER_FILTER_DEFAULTS: dict[str, Any] = {
         "min_confidence": 0.45,
-        "min_tier": "high",
+        "min_tier": "low",
         "min_wallet_count": 2,
         "max_entry_price": 0.85,
+        "firehose_require_active_signal": True,
         "firehose_require_tradable_market": True,
-        "firehose_exclude_crypto_markets": True,
+        "firehose_exclude_crypto_markets": False,
         "firehose_require_qualified_source": True,
-        "firehose_max_age_minutes": 180,
+        "firehose_max_age_minutes": 720,
         "firehose_source_scope": "all",
         "firehose_side_filter": "all",
     }
@@ -66,6 +67,7 @@ class StrategySDK:
             },
             {"key": "min_wallet_count", "label": "Min Wallet Count", "type": "integer", "min": 1},
             {"key": "max_entry_price", "label": "Max Entry Price", "type": "number", "min": 0, "max": 1},
+            {"key": "firehose_require_active_signal", "label": "Require Active Signal", "type": "boolean"},
             {"key": "firehose_require_tradable_market", "label": "Require Tradable Market", "type": "boolean"},
             {"key": "firehose_exclude_crypto_markets", "label": "Exclude Crypto Markets", "type": "boolean"},
             {"key": "firehose_require_qualified_source", "label": "Require Qualified Source", "type": "boolean"},
@@ -89,6 +91,73 @@ class StrategySDK:
                 "options": ["all", "buy", "sell"],
             },
         ]
+    }
+    NEWS_FILTER_DEFAULTS: dict[str, Any] = {
+        "min_edge_percent": 5.0,
+        "min_confidence": 0.45,
+        "orchestrator_min_edge": 10.0,
+        "require_verifier": True,
+        "require_second_source": False,
+        "min_supporting_articles": 2,
+        "min_supporting_sources": 2,
+    }
+    NEWS_FILTER_CONFIG_SCHEMA: dict[str, Any] = {
+        "param_fields": [
+            {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
+            {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
+            {
+                "key": "orchestrator_min_edge",
+                "label": "Min Intent Edge (%)",
+                "type": "number",
+                "min": 0,
+                "max": 100,
+            },
+            {"key": "require_verifier", "label": "Require Verifier", "type": "boolean"},
+            {"key": "require_second_source", "label": "Require Second Source", "type": "boolean"},
+            {
+                "key": "min_supporting_articles",
+                "label": "Min Supporting Articles",
+                "type": "integer",
+                "min": 1,
+                "max": 10,
+            },
+            {
+                "key": "min_supporting_sources",
+                "label": "Min Supporting Sources",
+                "type": "integer",
+                "min": 1,
+                "max": 10,
+            },
+        ]
+    }
+    STRATEGY_RETENTION_CONFIG_SCHEMA: dict[str, Any] = {
+        "param_fields": [
+            {"key": "max_opportunities", "label": "Max Opportunities", "type": "integer", "min": 0, "max": 5000},
+            {
+                "key": "retention_window",
+                "label": "Retention Window (15m, 2d)",
+                "type": "string",
+            },
+        ]
+    }
+    _DURATION_VALUE_RE = re.compile(r"^\s*(?P<value>-?\d+(?:\.\d+)?)\s*(?P<unit>[a-z]+)?\s*$", re.IGNORECASE)
+    _DURATION_UNITS_TO_MINUTES: dict[str, int] = {
+        "m": 1,
+        "min": 1,
+        "mins": 1,
+        "minute": 1,
+        "minutes": 1,
+        "h": 60,
+        "hr": 60,
+        "hrs": 60,
+        "hour": 60,
+        "hours": 60,
+        "d": 1440,
+        "day": 1440,
+        "days": 1440,
+        "w": 10080,
+        "week": 10080,
+        "weeks": 10080,
     }
 
     @staticmethod
@@ -219,22 +288,109 @@ class StrategySDK:
         return dict(StrategySDK.TRADER_FILTER_CONFIG_SCHEMA)
 
     @staticmethod
+    def news_filter_defaults() -> dict[str, Any]:
+        return dict(StrategySDK.NEWS_FILTER_DEFAULTS)
+
+    @staticmethod
+    def news_filter_config_schema() -> dict[str, Any]:
+        return dict(StrategySDK.NEWS_FILTER_CONFIG_SCHEMA)
+
+    @staticmethod
+    def strategy_retention_config_schema() -> dict[str, Any]:
+        return dict(StrategySDK.STRATEGY_RETENTION_CONFIG_SCHEMA)
+
+    @staticmethod
+    def parse_duration_minutes(value: Any) -> Optional[int]:
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            parsed = int(value)
+            if parsed < 0:
+                return None
+            return parsed
+
+        text = str(value or "").strip().lower()
+        if not text:
+            return None
+        match = StrategySDK._DURATION_VALUE_RE.match(text)
+        if not match:
+            return None
+
+        try:
+            raw_value = float(match.group("value"))
+        except Exception:
+            return None
+        if raw_value < 0:
+            return None
+
+        unit = str(match.group("unit") or "").strip().lower()
+        if not unit:
+            return int(raw_value)
+        factor = StrategySDK._DURATION_UNITS_TO_MINUTES.get(unit)
+        if factor is None:
+            return None
+        return int(raw_value * factor)
+
+    @staticmethod
+    def normalize_strategy_retention_config(config: Any) -> dict[str, Any]:
+        if not isinstance(config, dict):
+            return {}
+        cfg = dict(config)
+
+        for key in ("max_opportunities", "retention_max_opportunities"):
+            if key not in cfg:
+                continue
+            try:
+                parsed = int(float(cfg.get(key)))
+            except Exception:
+                continue
+            cfg[key] = max(0, min(parsed, 5000))
+
+        retention_minutes: Optional[int] = None
+        for key in (
+            "retention_max_age_minutes",
+            "retention_window",
+            "retention_period",
+            "retention_duration",
+            "opportunity_ttl_minutes",
+            "opportunity_ttl",
+        ):
+            if key not in cfg:
+                continue
+            parsed = StrategySDK.parse_duration_minutes(cfg.get(key))
+            if parsed is None:
+                continue
+            retention_minutes = max(0, min(parsed, 60 * 24 * 90))
+            break
+
+        if retention_minutes is not None:
+            cfg["retention_max_age_minutes"] = retention_minutes
+            if "retention_window" not in cfg:
+                cfg["retention_window"] = f"{retention_minutes}m"
+
+        return cfg
+
+    @staticmethod
     def validate_trader_filter_config(config: Any) -> dict[str, Any]:
         cfg = dict(StrategySDK.TRADER_FILTER_DEFAULTS)
         if isinstance(config, dict):
             cfg.update({str(k): v for k, v in config.items() if str(k) != "_schema"})
 
         cfg["min_confidence"] = StrategySDK._coerce_float(cfg.get("min_confidence"), 0.45, 0.0, 1.0)
-        cfg["min_tier"] = StrategySDK.normalize_trader_tier(cfg.get("min_tier"), default="high")
+        cfg["min_tier"] = StrategySDK.normalize_trader_tier(cfg.get("min_tier"), default="low")
         cfg["min_wallet_count"] = StrategySDK._coerce_int(cfg.get("min_wallet_count"), 2, 1, 1000)
         cfg["max_entry_price"] = StrategySDK._coerce_float(cfg.get("max_entry_price"), 0.85, 0.0, 1.0)
+        cfg["firehose_require_active_signal"] = StrategySDK._coerce_bool(
+            cfg.get("firehose_require_active_signal"),
+            True,
+        )
         cfg["firehose_require_tradable_market"] = StrategySDK._coerce_bool(
             cfg.get("firehose_require_tradable_market"),
-            True,
+            False,
         )
         cfg["firehose_exclude_crypto_markets"] = StrategySDK._coerce_bool(
             cfg.get("firehose_exclude_crypto_markets"),
-            True,
+            False,
         )
         cfg["firehose_require_qualified_source"] = StrategySDK._coerce_bool(
             cfg.get("firehose_require_qualified_source"),
@@ -242,7 +398,7 @@ class StrategySDK:
         )
         cfg["firehose_max_age_minutes"] = StrategySDK._coerce_int(
             cfg.get("firehose_max_age_minutes"),
-            180,
+            720,
             0,
             1440,
         )
@@ -254,7 +410,22 @@ class StrategySDK:
             cfg.get("firehose_side_filter"),
             default="all",
         )
-        return cfg
+        return StrategySDK.normalize_strategy_retention_config(cfg)
+
+    @staticmethod
+    def validate_news_filter_config(config: Any) -> dict[str, Any]:
+        cfg = dict(StrategySDK.NEWS_FILTER_DEFAULTS)
+        if isinstance(config, dict):
+            cfg.update({str(k): v for k, v in config.items() if str(k) != "_schema"})
+
+        cfg["min_edge_percent"] = StrategySDK._coerce_float(cfg.get("min_edge_percent"), 5.0, 0.0, 100.0)
+        cfg["min_confidence"] = StrategySDK._coerce_float(cfg.get("min_confidence"), 0.45, 0.0, 1.0)
+        cfg["orchestrator_min_edge"] = StrategySDK._coerce_float(cfg.get("orchestrator_min_edge"), 10.0, 0.0, 100.0)
+        cfg["require_verifier"] = StrategySDK._coerce_bool(cfg.get("require_verifier"), True)
+        cfg["require_second_source"] = StrategySDK._coerce_bool(cfg.get("require_second_source"), False)
+        cfg["min_supporting_articles"] = StrategySDK._coerce_int(cfg.get("min_supporting_articles"), 2, 1, 10)
+        cfg["min_supporting_sources"] = StrategySDK._coerce_int(cfg.get("min_supporting_sources"), 2, 1, 10)
+        return StrategySDK.normalize_strategy_retention_config(cfg)
 
     @staticmethod
     def _strategy_config_dir() -> Path:
@@ -1118,6 +1289,7 @@ class StrategySDK:
         name: str | None = None,
         description: str | None = None,
         class_name: str | None = None,
+        retention: dict[str, Any] | None = None,
         config: dict[str, Any] | None = None,
         config_schema: dict[str, Any] | None = None,
         enabled: bool = True,
@@ -1136,6 +1308,7 @@ class StrategySDK:
                 name=name,
                 description=description,
                 class_name=class_name,
+                retention=retention,
                 config=config,
                 config_schema=config_schema,
                 enabled=enabled,
@@ -1157,6 +1330,7 @@ class StrategySDK:
         description: str | None = None,
         source_code: str | None = None,
         class_name: str | None = None,
+        retention: dict[str, Any] | None = None,
         config: dict[str, Any] | None = None,
         config_schema: dict[str, Any] | None = None,
         enabled: bool | None = None,
@@ -1175,6 +1349,7 @@ class StrategySDK:
                 description=description,
                 source_code=source_code,
                 class_name=class_name,
+                retention=retention,
                 config=config,
                 config_schema=config_schema,
                 enabled=enabled,
@@ -1226,4 +1401,146 @@ class StrategySDK:
             return await DataSourceSDK.get_recent_runs(source_slug=source_slug, limit=limit)
         except Exception as e:
             logger.warning("StrategySDK.get_data_source_runs failed: %s", e)
+            return []
+
+    # ── Trader data access ───────────────────────────────
+
+    @staticmethod
+    async def get_trader_firehose_signals(
+        *,
+        limit: int = 250,
+        include_filtered: bool = False,
+        include_source_context: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Read trader firehose rows (pool/tracked/group provenance included)."""
+        try:
+            from services.traders_sdk import TradersSDK
+
+            return await TradersSDK.get_firehose_signals(
+                limit=limit,
+                include_filtered=include_filtered,
+                include_source_context=include_source_context,
+            )
+        except Exception as e:
+            logger.warning("StrategySDK.get_trader_firehose_signals failed: %s", e)
+            return []
+
+    @staticmethod
+    async def get_trader_strategy_signals(
+        *,
+        limit: int = 50,
+        include_filtered: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Read strategy-filtered trader signals used by traders_confluence."""
+        try:
+            from services.traders_sdk import TradersSDK
+
+            return await TradersSDK.get_strategy_filtered_signals(
+                limit=limit,
+                include_filtered=include_filtered,
+            )
+        except Exception as e:
+            logger.warning("StrategySDK.get_trader_strategy_signals failed: %s", e)
+            return []
+
+    @staticmethod
+    async def get_trader_confluence_signals(
+        *,
+        min_strength: float = 0.0,
+        min_tier: str = "WATCH",
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Read active confluence signals from trader intelligence."""
+        try:
+            from services.traders_sdk import TradersSDK
+
+            return await TradersSDK.get_confluence_signals(
+                min_strength=min_strength,
+                min_tier=min_tier,
+                limit=limit,
+            )
+        except Exception as e:
+            logger.warning("StrategySDK.get_trader_confluence_signals failed: %s", e)
+            return []
+
+    @staticmethod
+    async def get_pooled_traders(
+        *,
+        limit: int = 200,
+        tier: str | None = None,
+        include_blacklisted: bool = True,
+        tracked_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Read wallets currently selected into the smart pool."""
+        try:
+            from services.traders_sdk import TradersSDK
+
+            return await TradersSDK.get_pooled_traders(
+                limit=limit,
+                tier=tier,
+                include_blacklisted=include_blacklisted,
+                tracked_only=tracked_only,
+            )
+        except Exception as e:
+            logger.warning("StrategySDK.get_pooled_traders failed: %s", e)
+            return []
+
+    @staticmethod
+    async def get_tracked_traders(
+        *,
+        limit: int = 200,
+        include_recent_activity: bool = False,
+        activity_hours: int = 24,
+    ) -> list[dict[str, Any]]:
+        """Read tracked trader wallets with optional activity enrichment."""
+        try:
+            from services.traders_sdk import TradersSDK
+
+            return await TradersSDK.get_tracked_traders(
+                limit=limit,
+                include_recent_activity=include_recent_activity,
+                activity_hours=activity_hours,
+            )
+        except Exception as e:
+            logger.warning("StrategySDK.get_tracked_traders failed: %s", e)
+            return []
+
+    @staticmethod
+    async def get_trader_groups(
+        *,
+        include_members: bool = False,
+        member_limit: int = 25,
+    ) -> list[dict[str, Any]]:
+        """Read trader groups with optional member payloads."""
+        try:
+            from services.traders_sdk import TradersSDK
+
+            return await TradersSDK.get_groups(
+                include_members=include_members,
+                member_limit=member_limit,
+            )
+        except Exception as e:
+            logger.warning("StrategySDK.get_trader_groups failed: %s", e)
+            return []
+
+    @staticmethod
+    async def get_trader_tags() -> list[dict[str, Any]]:
+        """Read trader tag definitions with wallet counts."""
+        try:
+            from services.traders_sdk import TradersSDK
+
+            return await TradersSDK.get_tags()
+        except Exception as e:
+            logger.warning("StrategySDK.get_trader_tags failed: %s", e)
+            return []
+
+    @staticmethod
+    async def get_traders_by_tag(tag_name: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Read wallets carrying a specific trader tag."""
+        try:
+            from services.traders_sdk import TradersSDK
+
+            return await TradersSDK.get_traders_by_tag(tag_name=tag_name, limit=limit)
+        except Exception as e:
+            logger.warning("StrategySDK.get_traders_by_tag failed: %s", e)
             return []

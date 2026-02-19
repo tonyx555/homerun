@@ -17,7 +17,8 @@ from datetime import datetime, timedelta, timezone
 from utils.utcnow import utcnow
 from typing import Any, Optional
 
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import case, func, or_, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import (
@@ -600,46 +601,82 @@ async def refresh_trade_signal_snapshots(session: AsyncSession) -> list[dict[str
             stats["oldest_pending_at"] = oldest_pending
 
     now = _utc_now()
-    existing_rows = (await session.execute(select(TradeSignalSnapshot))).scalars().all()
-    existing_by_source = {r.source: r for r in existing_rows}
+    updated_sources: set[str] = set()
 
     for source, stats in source_stats.items():
-        row = existing_by_source.get(source)
-        if row is None:
-            row = TradeSignalSnapshot(source=source)
-            session.add(row)
-
-        for key in (
-            "pending_count",
-            "selected_count",
-            "submitted_count",
-            "executed_count",
-            "skipped_count",
-            "expired_count",
-            "failed_count",
-        ):
-            setattr(row, key, int(stats.get(key, 0) or 0))
-
-        row.latest_signal_at = stats.get("latest_signal_at")
-        row.oldest_pending_at = stats.get("oldest_pending_at")
-        row.freshness_seconds = (
-            (now - stats["latest_signal_at"]).total_seconds() if stats.get("latest_signal_at") else None
-        )
-        row.updated_at = now
-        row.stats_json = {
-            "total": sum(
-                int(stats.get(k, 0) or 0)
-                for k in (
-                    "pending_count",
-                    "selected_count",
-                    "submitted_count",
-                    "executed_count",
-                    "skipped_count",
-                    "expired_count",
-                    "failed_count",
+        updated_sources.add(source)
+        payload = {
+            "source": source,
+            "pending_count": int(stats.get("pending_count", 0) or 0),
+            "selected_count": int(stats.get("selected_count", 0) or 0),
+            "submitted_count": int(stats.get("submitted_count", 0) or 0),
+            "executed_count": int(stats.get("executed_count", 0) or 0),
+            "skipped_count": int(stats.get("skipped_count", 0) or 0),
+            "expired_count": int(stats.get("expired_count", 0) or 0),
+            "failed_count": int(stats.get("failed_count", 0) or 0),
+            "latest_signal_at": stats.get("latest_signal_at"),
+            "oldest_pending_at": stats.get("oldest_pending_at"),
+            "freshness_seconds": (
+                (now - stats["latest_signal_at"]).total_seconds() if stats.get("latest_signal_at") else None
+            ),
+            "updated_at": now,
+            "stats_json": {
+                "total": sum(
+                    int(stats.get(k, 0) or 0)
+                    for k in (
+                        "pending_count",
+                        "selected_count",
+                        "submitted_count",
+                        "executed_count",
+                        "skipped_count",
+                        "expired_count",
+                        "failed_count",
+                    )
                 )
-            )
+            },
         }
+        stmt = sqlite_insert(TradeSignalSnapshot).values(**payload)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[TradeSignalSnapshot.source],
+            set_={
+                "pending_count": payload["pending_count"],
+                "selected_count": payload["selected_count"],
+                "submitted_count": payload["submitted_count"],
+                "executed_count": payload["executed_count"],
+                "skipped_count": payload["skipped_count"],
+                "expired_count": payload["expired_count"],
+                "failed_count": payload["failed_count"],
+                "latest_signal_at": payload["latest_signal_at"],
+                "oldest_pending_at": payload["oldest_pending_at"],
+                "freshness_seconds": payload["freshness_seconds"],
+                "updated_at": payload["updated_at"],
+                "stats_json": payload["stats_json"],
+            },
+        )
+        await session.execute(stmt)
+
+    zero_payload = {
+        "pending_count": 0,
+        "selected_count": 0,
+        "submitted_count": 0,
+        "executed_count": 0,
+        "skipped_count": 0,
+        "expired_count": 0,
+        "failed_count": 0,
+        "latest_signal_at": None,
+        "oldest_pending_at": None,
+        "freshness_seconds": None,
+        "updated_at": now,
+        "stats_json": {"total": 0},
+    }
+    if updated_sources:
+        await session.execute(
+            update(TradeSignalSnapshot)
+            .where(~TradeSignalSnapshot.source.in_(sorted(updated_sources)))
+            .values(**zero_payload)
+        )
+    else:
+        await session.execute(update(TradeSignalSnapshot).values(**zero_payload))
 
     await session.commit()
 
@@ -669,8 +706,8 @@ async def refresh_trade_signal_snapshots(session: AsyncSession) -> list[dict[str
 
 def _direction_from_outcome(outcome: Optional[str]) -> Optional[str]:
     val = (outcome or "").lower().strip()
-    if val in {"yes", "buy_yes"}:
+    if val == "yes":
         return "buy_yes"
-    if val in {"no", "buy_no"}:
+    if val == "no":
         return "buy_no"
     return None

@@ -25,15 +25,15 @@ def test_normalize_database_url_bootstraps_legacy_backend_db(tmp_path, monkeypat
     backend_dir.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    legacy_db = backend_dir / "arbitrage.db"
+    legacy_db = backend_dir / "homerun.db"
     legacy_bytes = b"legacy-db-bytes"
     legacy_db.write_bytes(legacy_bytes)
 
     monkeypatch.setattr(config, "_PROJECT_ROOT", project_root.resolve())
     monkeypatch.setattr(config, "_LEGACY_DB_PATH", legacy_db.resolve())
 
-    normalized = config.Settings._normalize_database_url("sqlite+aiosqlite:///./data/arbitrage.db")
-    expected_path = (project_root / "data" / "arbitrage.db").resolve()
+    normalized = config.Settings._normalize_database_url("sqlite+aiosqlite:///./data/homerun.db")
+    expected_path = (project_root / "data" / "homerun.db").resolve()
 
     assert normalized == f"sqlite+aiosqlite:///{expected_path}"
     assert expected_path.read_bytes() == legacy_bytes
@@ -46,16 +46,16 @@ def test_normalize_database_url_does_not_overwrite_existing_target(tmp_path, mon
     backend_dir.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    legacy_db = backend_dir / "arbitrage.db"
+    legacy_db = backend_dir / "homerun.db"
     legacy_db.write_bytes(b"legacy")
 
-    target_db = data_dir / "arbitrage.db"
+    target_db = data_dir / "homerun.db"
     target_db.write_bytes(b"current")
 
     monkeypatch.setattr(config, "_PROJECT_ROOT", project_root.resolve())
     monkeypatch.setattr(config, "_LEGACY_DB_PATH", legacy_db.resolve())
 
-    normalized = config.Settings._normalize_database_url("sqlite+aiosqlite:///./data/arbitrage.db")
+    normalized = config.Settings._normalize_database_url("sqlite+aiosqlite:///./data/homerun.db")
 
     assert normalized == f"sqlite+aiosqlite:///{target_db.resolve()}"
     assert target_db.read_bytes() == b"current"

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models.database import Strategy
 from services.trader_orchestrator.sources.registry import (
     list_source_adapters,
-    list_source_aliases,
+    normalize_source_key,
 )
 from services.opportunity_strategy_catalog import (
     build_system_opportunity_strategy_rows,
@@ -177,12 +177,20 @@ _TRADERS_SCOPE_FIELDS = [
 ]
 
 
-def _template_source_defaults() -> dict[str, dict[str, Any]]:
+def _normalize_strategy_source_key(value: Any) -> str:
+    return normalize_source_key(value)
+
+
+def _template_source_defaults(
+    adapter_keys: set[str],
+) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for template in TRADER_TEMPLATES:
         for source_config in list(template.get("source_configs") or []):
-            source_key = str(source_config.get("source_key") or "").strip().lower()
+            source_key = _normalize_strategy_source_key(source_config.get("source_key"))
             if not source_key:
+                continue
+            if source_key not in adapter_keys:
                 continue
             if source_key not in out:
                 out[source_key] = source_config
@@ -257,6 +265,7 @@ def _detection_plugin_has_evaluate(source_code: str, class_name: str | None = No
 
 async def _list_detection_strategies_with_evaluate(
     session: AsyncSession,
+    adapter_keys: set[str],
 ) -> dict[str, list[dict[str, Any]]]:
     """Query enabled Strategy rows and return those with evaluate() capability.
 
@@ -285,7 +294,9 @@ async def _list_detection_strategies_with_evaluate(
         if not _detection_plugin_has_evaluate(source_code, class_name):
             continue
 
-        source_key = str(row.source_key or "scanner").strip().lower()
+        source_key = _normalize_strategy_source_key(row.source_key)
+        if not source_key or source_key not in adapter_keys:
+            continue
         by_source.setdefault(source_key, []).append(
             {
                 "key": row.slug,
@@ -304,22 +315,19 @@ async def _list_detection_strategies_with_evaluate(
 
 async def build_trader_config_schema(session: AsyncSession) -> dict[str, Any]:
     adapters = list_source_adapters()
-    source_aliases = list_source_aliases()
-    aliases_by_canonical: dict[str, list[str]] = {}
-    for alias, canonical in source_aliases.items():
-        aliases_by_canonical.setdefault(canonical, []).append(alias)
+    adapter_keys = {adapter.key for adapter in adapters}
 
-    source_defaults = _template_source_defaults()
+    source_defaults = _template_source_defaults(adapter_keys)
     strategy_rows = await _list_enabled_strategy_rows(session)
     strategies_by_source: dict[str, list[Any]] = {}
     for row in strategy_rows:
-        source_key = str(_row_value(row, "source_key") or "").strip().lower()
-        if not source_key:
+        source_key = _normalize_strategy_source_key(_row_value(row, "source_key"))
+        if not source_key or source_key not in adapter_keys:
             continue
         strategies_by_source.setdefault(source_key, []).append(row)
 
     # Gather detection strategies (Strategy) that define evaluate().
-    detection_strategies_by_source = await _list_detection_strategies_with_evaluate(session)
+    detection_strategies_by_source = await _list_detection_strategies_with_evaluate(session, adapter_keys)
 
     sources: list[dict[str, Any]] = []
     for adapter in adapters:
@@ -350,25 +358,7 @@ async def build_trader_config_schema(session: AsyncSession) -> dict[str, Any]:
                 }
             )
 
-        # 2. Passthrough option: use the detection strategy's evaluate() method.
-        strategy_options.append(
-            {
-                "key": "__passthrough__",
-                "label": "Passthrough (use detection strategy)",
-                "description": (
-                    "Delegates execution gating to the detection strategy's evaluate() method. "
-                    "Uses the strategy that originally detected the opportunity."
-                ),
-                "default_params": {},
-                "param_fields": [],
-                "status": "active",
-                "version": 1,
-                "is_system": True,
-                "is_passthrough": True,
-            }
-        )
-
-        # 3. Detection strategies from Strategy table that have evaluate().
+        # 2. Detection strategies from Strategy table that have evaluate().
         existing_keys = {opt["key"] for opt in strategy_options}
         for det_opt in detection_strategies_by_source.get(adapter.key, []):
             if det_opt["key"] not in existing_keys:
@@ -394,7 +384,6 @@ async def build_trader_config_schema(session: AsyncSession) -> dict[str, Any]:
                 "description": adapter.description,
                 "domains": adapter.domains,
                 "signal_types": adapter.signal_types,
-                "aliases": sorted(aliases_by_canonical.get(adapter.key, [])),
                 "default_strategy_key": default_strategy_key,
                 "strategy_options": strategy_options,
                 "default_config": default_config,
@@ -404,7 +393,6 @@ async def build_trader_config_schema(session: AsyncSession) -> dict[str, Any]:
 
     return {
         "version": "2026-02-17",
-        "source_aliases": source_aliases,
         "sources": sources,
         "shared_risk_fields": list(_SHARED_RISK_FIELDS),
         "shared_exit_fields": list(_SHARED_EXIT_FIELDS),

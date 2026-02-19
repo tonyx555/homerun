@@ -706,7 +706,7 @@ class CryptoService:
             from api.websocket import broadcast_crypto_markets
             from services.chainlink_feed import get_chainlink_feed
 
-            markets = self.get_live_markets()
+            markets = await asyncio.to_thread(self.get_live_markets)
             if not markets:
                 return
 

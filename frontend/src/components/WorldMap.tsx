@@ -1,7 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useAtomValue } from 'jotai'
-import { createRoot } from 'react-dom/client'
 import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import {
@@ -10,12 +9,14 @@ import {
   getTensionPairs,
   getWorldRegions,
   getWorldSignals,
+  getWorldSourceStatus,
   type ConvergenceZone,
   type TensionPair,
   type WorldRegionChokepoint,
   type WorldRegionHotspot,
   type WorldSignal,
-} from '../services/worldIntelligenceApi'
+} from '../services/eventsApi'
+import { getUnifiedDataSources, type UnifiedDataSource } from '../services/api'
 import {
   buildCountryCentroids,
   formatCountry,
@@ -124,6 +125,42 @@ type CountryMetric = {
   combined_intensity: number
   display_intensity: number
   signal_count: number
+}
+
+type CountryPopupSummary = {
+  totalSignals: number
+  criticalSignals: number
+  riskSignals: number
+  newsSignals: number
+  tensionArcCount: number
+  convergenceCount: number
+  typeCounts: Record<string, number>
+  sourceCounts: Record<string, number>
+  headlinePreviews: string[]
+  arcPreviews: string[]
+}
+
+type FlyoutSelection = {
+  category: string
+  title: string
+  subtitle?: string
+  body?: string
+  iso3?: string
+  countryName?: string
+  lat?: number
+  lon?: number
+  source?: string
+  signalType?: string
+}
+
+type FlyoutTab = 'context' | 'layers' | 'sources'
+
+type FlyoutRelatedEvent = {
+  id: string
+  kind: 'signal' | 'tension' | 'convergence'
+  title: string
+  subtitle: string
+  score: number
 }
 
 const SIGNAL_COLORS_DARK: SignalPalette = {
@@ -261,6 +298,21 @@ function buildStyle(theme: 'dark' | 'light'): maplibregl.StyleSpecification {
 function clamp01(value: number): number {
   if (!Number.isFinite(value)) return 0
   return Math.max(0, Math.min(1, value))
+}
+
+function isFiniteCoordinatePair(lat: unknown, lon: unknown): lat is number {
+  return Number.isFinite(Number(lat)) && Number.isFinite(Number(lon))
+}
+
+function haversineDistanceKm(latA: number, lonA: number, latB: number, lonB: number): number {
+  const earthRadiusKm = 6371
+  const dLat = toRadians(latB - latA)
+  const dLon = toRadians(lonB - lonA)
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2)
+    + Math.cos(toRadians(latA)) * Math.cos(toRadians(latB)) * Math.sin(dLon / 2) * Math.sin(dLon / 2)
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+  return earthRadiusKm * c
 }
 
 function toRadians(value: number): number {
@@ -1317,299 +1369,542 @@ function updateSourceData(map: any, sourceId: string, data: unknown) {
   source?.setData(data as any)
 }
 
-function PopupCard({ title, subtitle, body }: { title: string; subtitle?: string; body?: string }) {
-  return (
-    <div className="text-[11px] leading-5 max-w-[260px]">
-      <div className="font-semibold text-foreground">{title}</div>
-      {subtitle ? <div className="text-muted-foreground mt-0.5">{subtitle}</div> : null}
-      {body ? <div className="text-foreground/90 mt-1">{body}</div> : null}
-    </div>
-  )
+type PopupDetailRow = {
+  label: string
+  value: string
 }
 
-function MapLegend({ colors }: { colors: SignalPalette }) {
-  const [collapsed, setCollapsed] = useState(true)
-
-  return (
-    <div className="text-[10px] space-y-1 min-w-[176px]">
-      <div className="flex items-center justify-between gap-2">
-        <div className="font-semibold text-[11px] text-foreground">Legend</div>
-        <button
-          type="button"
-          onClick={() => setCollapsed((prev) => !prev)}
-          className="text-[10px] leading-none rounded border border-border px-1.5 py-0.5 text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-colors"
-        >
-          {collapsed ? 'Show' : 'Hide'}
-        </button>
-      </div>
-
-      {!collapsed ? (
-        <>
-          {Object.entries(colors).map(([type, color]) => (
-            <div key={type} className="flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: color }} />
-              <span className="text-muted-foreground capitalize">{type.replace('_', ' ')}</span>
-            </div>
-          ))}
-          <div className="border-t border-border pt-1 mt-1.5 space-y-1.5">
-            <div className="flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 shrink-0 border border-red-500/70 bg-red-500/20" />
-              <span className="text-muted-foreground">Country intensity</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-3 h-0.5 shrink-0 bg-orange-500" />
-              <span className="text-muted-foreground">Tension border</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-3 h-0.5 shrink-0 bg-red-500" />
-              <span className="text-muted-foreground">Tension arc (rising)</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-3 h-0.5 shrink-0 bg-yellow-400" />
-              <span className="text-muted-foreground">Tension arc (stable)</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-3 h-0.5 shrink-0 bg-blue-400" />
-              <span className="text-muted-foreground">Tension arc (falling)</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 shrink-0 border border-sky-500/70 bg-sky-500/10" />
-              <span className="text-muted-foreground">Country boundary focus</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 shrink-0 rounded-full bg-red-500/80" />
-              <span className="text-muted-foreground">Conflict zone heat</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-full shrink-0 border-2 border-purple-500 bg-transparent" />
-              <span className="text-muted-foreground">Convergence zone</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 shrink-0 border border-blue-500/60 bg-blue-500/10" />
-              <span className="text-muted-foreground">Live military hotspot</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-[10px] leading-none text-muted-foreground">✈</span>
-              <span className="text-muted-foreground">Military aircraft</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-[10px] leading-none text-muted-foreground">⛴</span>
-              <span className="text-muted-foreground">Military vessels/carriers</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 shrink-0 rounded-full bg-emerald-500" />
-              <span className="text-muted-foreground">Chokepoint risk</span>
-            </div>
-          </div>
-        </>
-      ) : null}
-    </div>
-  )
+function splitPopupSegments(value?: string): string[] {
+  if (!value) return []
+  return value
+    .split('·')
+    .map((segment) => segment.trim())
+    .filter(Boolean)
 }
 
-function MapStats({
+function extractPopupDetails(segments: string[]): PopupDetailRow[] {
+  const rows: PopupDetailRow[] = []
+  for (const segment of segments) {
+    const separatorIndex = segment.indexOf(':')
+    if (separatorIndex <= 0 || separatorIndex >= segment.length - 1) continue
+    const label = segment.slice(0, separatorIndex).trim()
+    const value = segment.slice(separatorIndex + 1).trim()
+    if (!label || !value) continue
+    rows.push({ label, value })
+  }
+  return rows
+}
+
+function truncateText(value: string, maxLength = 84): string {
+  if (value.length <= maxLength) return value
+  return `${value.slice(0, maxLength - 1).trimEnd()}...`
+}
+
+function formatSignalTypeLabel(value: string): string {
+  const normalized = value.replace(/_/g, ' ').trim()
+  if (!normalized) return 'Unknown'
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1)
+}
+
+function summarizeTopCounts(
+  counts: Record<string, number>,
+  limit = 3,
+  labelFormatter?: (value: string) => string
+): string {
+  return Object.entries(counts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([label, count]) => `${labelFormatter ? labelFormatter(label) : label} ${count}`)
+    .join(', ')
+}
+
+const LAYER_LABELS: Partial<Record<keyof LayerToggles, string>> = {
+  countryIntensity: 'Country intensity',
+  tensionBorders: 'Tension borders',
+  tensionArcs: 'Tension arcs',
+  countryBoundaries: 'Country boundaries',
+  conflictZones: 'Conflict zones',
+  signals: 'Signals',
+  convergences: 'Convergences',
+  hotspots: 'Hotspots',
+  chokepoints: 'Chokepoints',
+  earthquakes: 'Earthquakes',
+}
+
+const LAYER_SHORT_LABELS: Partial<Record<keyof LayerToggles, string>> = {
+  countryIntensity: 'CI',
+  tensionBorders: 'TB',
+  tensionArcs: 'TA',
+  countryBoundaries: 'CB',
+  conflictZones: 'CF',
+  signals: 'SG',
+  convergences: 'CV',
+  hotspots: 'HS',
+  chokepoints: 'CP',
+  earthquakes: 'EQ',
+}
+
+const LAYER_COLORS: Partial<Record<keyof LayerToggles, string>> = {
+  countryIntensity: '#ef4444',
+  tensionBorders: '#f97316',
+  tensionArcs: '#f43f5e',
+  countryBoundaries: '#38bdf8',
+  conflictZones: '#dc2626',
+  signals: '#8b5cf6',
+  convergences: '#a855f7',
+  hotspots: '#3b82f6',
+  chokepoints: '#10b981',
+  earthquakes: '#f59e0b',
+}
+
+const EVENT_SOURCE_HEALTH_KEY_BY_SLUG: Record<string, string> = {
+  events_acled: 'acled',
+  events_gdelt_tensions: 'gdelt_tensions',
+  events_military: 'military',
+  events_infrastructure: 'infrastructure',
+  events_gdelt_news: 'gdelt_news',
+  events_usgs: 'usgs',
+}
+
+type LayerDockItem = {
+  key: keyof LayerToggles
+  label: string
+  short: string
+  color: string
+}
+
+type SourceHealthTone = 'ok' | 'degraded' | 'error' | 'disabled' | 'unknown'
+
+type DataSourceDockItem = {
+  id: string
+  name: string
+  slug: string
+  sourceKey: string
+  canonicalKey: string
+  aliases: string[]
+  enabled: boolean
+  status: string
+  tone: SourceHealthTone
+  count: number
+  signalCount: number
+}
+
+function formatLayerLabelFromKey(key: keyof LayerToggles): string {
+  const raw = String(key)
+  const withSpaces = raw.replace(/([a-z])([A-Z])/g, '$1 $2')
+  return withSpaces.charAt(0).toUpperCase() + withSpaces.slice(1)
+}
+
+function formatShortLayerLabel(label: string): string {
+  const letters = label
+    .split(/\s+/)
+    .map((part) => part.trim().charAt(0).toUpperCase())
+    .filter(Boolean)
+    .slice(0, 2)
+  return letters.join('') || 'LY'
+}
+
+function classifySourceHealthTone(enabled: boolean, details: any): SourceHealthTone {
+  if (!enabled) return 'disabled'
+  if (!details) return 'unknown'
+  if (details?.degraded) return 'degraded'
+  if (details?.ok === false) {
+    const rawError = String(details?.error || details?.last_error || '').toLowerCase()
+    if (
+      rawError.includes('missing_api_key')
+      || rawError.includes('disabled')
+      || rawError.includes('429')
+      || rawError.includes('403')
+      || rawError.includes('rate limited')
+    ) {
+      return 'degraded'
+    }
+    return 'error'
+  }
+  return 'ok'
+}
+
+function sourceToneClass(tone: SourceHealthTone): string {
+  if (tone === 'ok') return 'text-emerald-400'
+  if (tone === 'degraded') return 'text-yellow-400'
+  if (tone === 'error') return 'text-red-400'
+  if (tone === 'disabled') return 'text-muted-foreground'
+  return 'text-slate-400'
+}
+
+function sourceToneLabel(tone: SourceHealthTone, count: number): string {
+  if (tone === 'ok') return `ok (${count})`
+  if (tone === 'degraded') return `degraded (${count})`
+  if (tone === 'error') return 'error'
+  if (tone === 'disabled') return 'disabled'
+  return 'unknown'
+}
+
+function resolveEventSourceHealthKey(source: UnifiedDataSource): string | null {
+  const slug = String(source.slug || '').trim().toLowerCase()
+  if (!slug) return null
+  const mapped = EVENT_SOURCE_HEALTH_KEY_BY_SLUG[slug]
+  if (mapped) return mapped
+  if (String(source.source_key || '').trim().toLowerCase() !== 'events') return null
+  if (!slug.startsWith('events_')) return null
+  const suffix = slug.slice('events_'.length).trim().toLowerCase()
+  return suffix || null
+}
+
+function normalizeSourceToken(value: string): string {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^\w]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+}
+
+function MapRightDock({
+  selection,
+  relatedEvents,
+  tab,
+  onTabChange,
+  expanded,
+  onExpandedChange,
+  onCloseSelection,
+  layerItems,
+  toggles,
+  onToggle,
   signalCount,
   signalTotal,
+  criticalCount,
   geocodedSignalCount,
   convergenceCount,
   hotspotCount,
   byType,
-  criticalCount,
-  oldestSignalHours,
-  lastCollection,
   colors,
+  sourceItems,
+  sourceVisibility,
+  onToggleSource,
+  sourceError,
 }: {
+  selection: FlyoutSelection | null
+  relatedEvents: FlyoutRelatedEvent[]
+  tab: FlyoutTab
+  onTabChange: (next: FlyoutTab) => void
+  expanded: boolean
+  onExpandedChange: (next: boolean) => void
+  onCloseSelection: () => void
+  layerItems: LayerDockItem[]
+  toggles: LayerToggles
+  onToggle: (key: keyof LayerToggles) => void
   signalCount: number
   signalTotal: number
+  criticalCount: number
   geocodedSignalCount: number
   convergenceCount: number
   hotspotCount: number
   byType: Record<string, number>
-  criticalCount: number
-  oldestSignalHours: number | null
-  lastCollection: string | null
   colors: SignalPalette
+  sourceItems: DataSourceDockItem[]
+  sourceVisibility: Record<string, boolean>
+  onToggleSource: (canonicalKey: string) => void
+  sourceError: string | null
 }) {
-  const [expanded, setExpanded] = useState(false)
+  const signalLabel = signalTotal > signalCount ? `${signalCount}/${signalTotal}` : `${signalCount}`
+  const typeEntries = Object.entries(byType)
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6)
+  const bodySegments = splitPopupSegments(selection?.body)
+  const detailRows = extractPopupDetails(bodySegments)
+  const summaryRows = bodySegments.filter((segment) => !segment.includes(':'))
 
-  const oldestLabel = oldestSignalHours == null
-    ? null
-    : oldestSignalHours < 1
-      ? '<1h'
-      : oldestSignalHours < 24
-        ? `${Math.round(oldestSignalHours)}h`
-        : `${Math.round(oldestSignalHours / 24)}d`
-
-  const collectionLabel = lastCollection
-    ? (() => {
-        try {
-          return new Date(lastCollection).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        } catch {
-          return null
-        }
-      })()
-    : null
-
-  const typeEntries = Object.entries(byType).filter(([, count]) => count > 0)
+  const openContext = () => {
+    onTabChange('context')
+    onExpandedChange(true)
+  }
+  const openLayers = () => {
+    onTabChange('layers')
+    onExpandedChange(true)
+  }
+  const openSources = () => {
+    onTabChange('sources')
+    onExpandedChange(true)
+  }
 
   return (
-    <div className="absolute bottom-3 right-3 bg-background/90 backdrop-blur-sm border border-border rounded-lg p-2.5 text-[10px] z-10 space-y-1 min-w-[150px]">
-      <div className="flex items-center justify-between gap-3">
-        <div className="font-mono">
-          <span className="text-muted-foreground">Signals:</span>{' '}
-          <span className="text-foreground font-bold">
-            {signalTotal > signalCount ? `${signalCount}/${signalTotal}` : signalCount}
-          </span>
-        </div>
-        <button
-          type="button"
-          onClick={() => setExpanded((p) => !p)}
-          className="text-[9px] rounded border border-border px-1 py-0.5 text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-colors leading-none"
-        >
-          {expanded ? '▲' : '▼'}
-        </button>
-      </div>
-      <div className="font-mono">
-        <span className="text-muted-foreground">Critical:</span>{' '}
-        <span className={criticalCount > 0 ? 'text-red-400 font-bold' : 'text-foreground font-bold'}>{criticalCount}</span>
-      </div>
-      <div className="font-mono">
-        <span className="text-muted-foreground">Geocoded:</span>{' '}
-        <span className="text-emerald-500 font-bold">{geocodedSignalCount}</span>
-      </div>
-      <div className="font-mono">
-        <span className="text-muted-foreground">Convergences:</span>{' '}
-        <span className="text-purple-500 font-bold">{convergenceCount}</span>
-      </div>
-      <div className="font-mono">
-        <span className="text-muted-foreground">Hotspots:</span>{' '}
-        <span className="text-blue-500 font-bold">{hotspotCount}</span>
-      </div>
-      {oldestLabel ? (
-        <div className="font-mono">
-          <span className="text-muted-foreground">Oldest:</span>{' '}
-          <span className="text-foreground">{oldestLabel} ago</span>
-        </div>
-      ) : null}
-      {collectionLabel ? (
-        <div className="font-mono">
-          <span className="text-muted-foreground">Updated:</span>{' '}
-          <span className="text-foreground">{collectionLabel}</span>
-        </div>
-      ) : null}
-      {expanded && typeEntries.length > 0 ? (
-        <div className="border-t border-border pt-1 mt-0.5 space-y-0.5">
-          {typeEntries.map(([type, count]) => (
-            <div key={type} className="flex items-center gap-1.5 font-mono">
-              <span
-                className="w-1.5 h-1.5 rounded-full shrink-0"
-                style={{ backgroundColor: colors[type] || '#64748b' }}
-              />
-              <span className="text-muted-foreground capitalize">{type}</span>
-              <span className="ml-auto text-foreground font-bold">{count}</span>
-            </div>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  )
-}
-
-function LayerControls({
-  toggles,
-  onToggle,
-}: {
-  toggles: LayerToggles
-  onToggle: (key: keyof LayerToggles) => void
-}) {
-  const [collapsed, setCollapsed] = useState(true)
-  const items: Array<{ key: keyof LayerToggles; label: string }> = [
-    { key: 'countryIntensity', label: 'Country intensity' },
-    { key: 'tensionBorders', label: 'Tension borders' },
-    { key: 'tensionArcs', label: 'Tension arcs' },
-    { key: 'countryBoundaries', label: 'Country boundaries' },
-    { key: 'conflictZones', label: 'Conflict zones' },
-    { key: 'signals', label: 'Signals' },
-    { key: 'earthquakes', label: 'Earthquakes' },
-    { key: 'convergences', label: 'Convergences' },
-    { key: 'hotspots', label: 'Hotspots' },
-    { key: 'chokepoints', label: 'Chokepoints' },
-  ]
-
-  return (
-    <div className="space-y-1">
-      <div className="flex items-center justify-between gap-2">
-        <div className="text-[11px] font-semibold text-foreground">Map Layers</div>
-        <button
-          type="button"
-          onClick={() => setCollapsed((prev) => !prev)}
-          className="text-[10px] leading-none rounded border border-border px-1.5 py-0.5 text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-colors"
-        >
-          {collapsed ? 'Show' : 'Hide'}
-        </button>
-      </div>
-      {!collapsed ? items.map((item) => {
-        const enabled = toggles[item.key]
-        return (
+    <div
+      className={`absolute inset-y-0 right-0 z-20 border-l border-border/70 bg-background/94 backdrop-blur-md shadow-2xl transition-[width] duration-300 pointer-events-auto ${expanded ? 'w-[420px] max-w-[100vw]' : 'w-[58px]'}`}
+    >
+      <div className="h-full flex">
+        <div className="w-[58px] shrink-0 border-r border-border/60 bg-card/50 px-1.5 py-2.5 space-y-2">
           <button
-            key={item.key}
             type="button"
-            onClick={() => onToggle(item.key)}
-            className="w-full text-left flex items-center justify-between gap-2 rounded px-1.5 py-1 text-[10px] hover:bg-muted/50 transition-colors"
+            onClick={() => onExpandedChange(!expanded)}
+            className="w-full h-8 rounded-lg border border-border bg-background text-[11px] font-semibold text-muted-foreground hover:text-foreground hover:bg-muted/45 transition-colors"
+            title={expanded ? 'Collapse' : 'Expand'}
           >
-            <span className="text-muted-foreground">{item.label}</span>
-            <span className={enabled ? 'text-emerald-400 font-semibold' : 'text-muted-foreground'}>
-              {enabled ? 'ON' : 'OFF'}
-            </span>
+            {expanded ? '<' : '>'}
           </button>
-        )
-      }) : null}
+
+          <button
+            type="button"
+            onClick={openContext}
+            className={`relative w-full h-9 rounded-lg border text-[10px] font-semibold tracking-wide transition-colors ${tab === 'context' && expanded ? 'border-blue-500/45 bg-blue-500/15 text-blue-300' : 'border-border bg-background text-muted-foreground hover:text-foreground hover:bg-muted/45'}`}
+            title="Selected context"
+          >
+            CTX
+            {selection ? <span className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-emerald-400" /> : null}
+          </button>
+
+          <button
+            type="button"
+            onClick={openLayers}
+            className={`w-full h-9 rounded-lg border text-[10px] font-semibold tracking-wide transition-colors ${tab === 'layers' && expanded ? 'border-orange-500/45 bg-orange-500/15 text-orange-300' : 'border-border bg-background text-muted-foreground hover:text-foreground hover:bg-muted/45'}`}
+            title="Layer controls"
+          >
+            LYR
+          </button>
+
+          <button
+            type="button"
+            onClick={openSources}
+            className={`w-full h-9 rounded-lg border text-[10px] font-semibold tracking-wide transition-colors ${tab === 'sources' && expanded ? 'border-cyan-500/45 bg-cyan-500/15 text-cyan-300' : 'border-border bg-background text-muted-foreground hover:text-foreground hover:bg-muted/45'}`}
+            title="Data sources"
+          >
+            SRC
+          </button>
+
+          <div className="rounded-lg border border-border/70 bg-background/80 px-1 py-1.5 text-center">
+            <div className="text-[8px] leading-none text-muted-foreground uppercase">sig</div>
+            <div className="mt-1 text-[10px] leading-none font-semibold text-foreground">{signalLabel}</div>
+          </div>
+        </div>
+
+        {expanded ? (
+          <div className="flex-1 min-w-0 h-full flex flex-col">
+            <div className="shrink-0 border-b border-border/70 px-4 py-3 bg-gradient-to-r from-card/90 via-card/90 to-muted/55">
+              <div className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+                {tab === 'context' ? 'Selected Context' : tab === 'layers' ? 'Layer Control' : 'Data Source Control'}
+              </div>
+              <div className="mt-1 flex items-center justify-between gap-2">
+                <div className="text-sm font-semibold text-foreground">
+                  {tab === 'context'
+                    ? (selection ? `${selection.category} intelligence` : 'Nothing selected')
+                    : tab === 'layers'
+                      ? 'Map layers and signal legend'
+                      : 'Configured data sources'}
+                </div>
+                {tab === 'context' && selection ? (
+                  <button
+                    type="button"
+                    onClick={onCloseSelection}
+                    className="rounded-md border border-border px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-colors"
+                  >
+                    Clear
+                  </button>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-3 space-y-3">
+              {tab === 'context' ? (
+                <>
+                  {selection ? (
+                    <div className="space-y-3">
+                      <div className="space-y-2 rounded-xl border border-border/70 bg-gradient-to-br from-card via-card to-muted/30 p-3">
+                        <div className="text-[14px] font-semibold text-foreground leading-tight">{selection.title}</div>
+                        {selection.subtitle ? (
+                          <div className="flex flex-wrap gap-1.5">
+                            {splitPopupSegments(selection.subtitle).map((segment, index) => (
+                              <span
+                                key={`selection-subtitle-${segment}-${index}`}
+                                className="inline-flex items-center rounded-full border border-border bg-background/75 px-2 py-0.5 text-[10px] leading-4 text-muted-foreground"
+                              >
+                                {segment}
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+                        {summaryRows.length > 0 ? (
+                          <div className="flex flex-wrap gap-1.5">
+                            {summaryRows.map((row, index) => (
+                              <span
+                                key={`selection-summary-${row}-${index}`}
+                                className="inline-flex items-center rounded-md border border-border/70 bg-muted/45 px-2 py-1 text-[10px] leading-4 text-foreground/90"
+                              >
+                                {row}
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+                        {detailRows.length > 0 ? (
+                          <dl className="space-y-1.5 rounded-md border border-border/70 bg-background/70 p-2.5">
+                            {detailRows.map((row, index) => (
+                              <div key={`selection-detail-${row.label}-${index}`} className="grid grid-cols-[100px_minmax(0,1fr)] items-start gap-2">
+                                <dt className="text-[10px] uppercase tracking-wide text-muted-foreground">{row.label}</dt>
+                                <dd className="text-[11px] leading-4 text-foreground break-words">{row.value}</dd>
+                              </div>
+                            ))}
+                          </dl>
+                        ) : null}
+                      </div>
+
+                      <div className="rounded-xl border border-border/70 bg-card/70 p-2.5 space-y-1.5">
+                        <div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Nearby and Related</div>
+                        {relatedEvents.length > 0 ? relatedEvents.map((event) => (
+                          <div key={event.id} className="rounded-md border border-border/55 bg-background/70 px-2 py-1.5 space-y-0.5">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[9px] uppercase tracking-wide text-muted-foreground">{event.kind}</span>
+                              <span className="ml-auto text-[10px] font-semibold text-foreground">{Math.round(event.score)}</span>
+                            </div>
+                            <div className="text-[11px] text-foreground leading-4">{event.title}</div>
+                            <div className="text-[10px] text-muted-foreground leading-4">{event.subtitle}</div>
+                          </div>
+                        )) : (
+                          <div className="rounded-md border border-dashed border-border/60 bg-background/65 px-2 py-2 text-[11px] text-muted-foreground">
+                            No nearby or related events found for this selection.
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="rounded-xl border border-dashed border-border/70 bg-card/35 px-3 py-3 text-[11px] text-muted-foreground">
+                      Click a country, signal, hotspot, chokepoint, arc, or convergence to open context here.
+                    </div>
+                  )}
+                </>
+              ) : null}
+
+              {tab === 'layers' ? (
+                <>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="rounded-lg border border-border/70 bg-card/70 px-2.5 py-2">
+                      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Signals</div>
+                      <div className="mt-1 text-[14px] font-semibold text-foreground">{signalLabel}</div>
+                    </div>
+                    <div className="rounded-lg border border-border/70 bg-card/70 px-2.5 py-2">
+                      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Critical</div>
+                      <div className={`mt-1 text-[14px] font-semibold ${criticalCount > 0 ? 'text-red-400' : 'text-foreground'}`}>{criticalCount}</div>
+                    </div>
+                    <div className="rounded-lg border border-border/70 bg-card/70 px-2.5 py-2">
+                      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Geocoded</div>
+                      <div className="mt-1 text-[14px] font-semibold text-emerald-400">{geocodedSignalCount}</div>
+                    </div>
+                    <div className="rounded-lg border border-border/70 bg-card/70 px-2.5 py-2">
+                      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Convergences</div>
+                      <div className="mt-1 text-[14px] font-semibold text-purple-400">{convergenceCount}</div>
+                    </div>
+                    <div className="rounded-lg border border-border/70 bg-card/70 px-2.5 py-2 col-span-2">
+                      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Hotspots</div>
+                      <div className="mt-1 text-[14px] font-semibold text-blue-400">{hotspotCount}</div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-border/70 bg-card/70 p-2.5 space-y-1.5">
+                    <div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Layer Matrix</div>
+                    {layerItems.map((item) => {
+                      const enabled = toggles[item.key]
+                      return (
+                        <button
+                          key={item.key}
+                          type="button"
+                          onClick={() => onToggle(item.key)}
+                          className="w-full rounded-md border border-border/55 bg-background/65 px-2 py-1.5 text-left hover:bg-muted/40 transition-colors flex items-center justify-between gap-2"
+                        >
+                          <span className="flex items-center gap-2">
+                            <span className="inline-flex h-5 w-6 items-center justify-center rounded border border-border bg-background text-[9px] font-semibold tracking-wide text-muted-foreground">{item.short}</span>
+                            <span className="h-2 w-2 rounded-full shrink-0" style={{ backgroundColor: item.color }} />
+                            <span className="text-[11px] text-foreground">{item.label}</span>
+                          </span>
+                          <span className={enabled ? 'text-[10px] font-semibold text-emerald-400' : 'text-[10px] text-muted-foreground'}>
+                            {enabled ? 'ON' : 'OFF'}
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+
+                  <div className="rounded-xl border border-border/70 bg-card/70 p-2.5 space-y-1.5">
+                    <div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Source Layers</div>
+                    {sourceItems.length > 0 ? sourceItems.map((source) => {
+                      const visible = sourceVisibility[source.canonicalKey] ?? source.enabled
+                      return (
+                        <button
+                          key={`source-layer-${source.id}`}
+                          type="button"
+                          onClick={() => onToggleSource(source.canonicalKey)}
+                          className="w-full rounded-md border border-border/55 bg-background/65 px-2 py-1.5 text-left hover:bg-muted/40 transition-colors flex items-center justify-between gap-2"
+                        >
+                          <span className="min-w-0 flex items-center gap-2">
+                            <span className="inline-flex h-5 min-w-6 items-center justify-center rounded border border-border bg-background px-1 text-[9px] font-semibold tracking-wide text-muted-foreground">
+                              {source.sourceKey.slice(0, 3).toUpperCase()}
+                            </span>
+                            <span className="text-[11px] text-foreground truncate">{source.name}</span>
+                          </span>
+                          <span className={visible ? 'text-[10px] font-semibold text-emerald-400' : 'text-[10px] text-muted-foreground'}>
+                            {visible ? 'ON' : 'OFF'}
+                          </span>
+                        </button>
+                      )
+                    }) : (
+                      <div className="text-[11px] text-muted-foreground">No configured sources.</div>
+                    )}
+                  </div>
+
+                  <div className="rounded-xl border border-border/70 bg-card/70 p-2.5 space-y-1.5">
+                    <div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Signal Legend</div>
+                    {typeEntries.length > 0 ? typeEntries.map(([type, count]) => (
+                      <div key={type} className="flex items-center gap-2 text-[11px]">
+                        <span className="h-2 w-2 rounded-full shrink-0" style={{ backgroundColor: colors[type] || '#64748b' }} />
+                        <span className="text-foreground capitalize">{type.replace(/_/g, ' ')}</span>
+                        <span className="ml-auto font-semibold text-foreground">{count}</span>
+                      </div>
+                    )) : (
+                      <div className="text-[11px] text-muted-foreground">No active signals.</div>
+                    )}
+                  </div>
+                </>
+              ) : null}
+
+              {tab === 'sources' ? (
+                <div className="rounded-xl border border-border/70 bg-card/70 p-2.5 space-y-1.5">
+                  <div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Data SDK Sources</div>
+                  {sourceError ? (
+                    <div className="rounded-md border border-red-500/30 bg-red-500/10 px-2 py-1 text-[10px] text-red-400">
+                      {sourceError}
+                    </div>
+                  ) : null}
+                  {sourceItems.length > 0 ? sourceItems.map((source) => (
+                    <div key={source.id} className="rounded-md border border-border/55 bg-background/70 px-2 py-1.5 space-y-0.5">
+                      <div className="flex items-center justify-between gap-2 min-w-0">
+                        <div className="text-[11px] text-foreground truncate">{source.name}</div>
+                        <div className={`text-[10px] font-semibold shrink-0 ${sourceToneClass(source.tone)}`}>
+                          {sourceToneLabel(source.tone, source.count)}
+                        </div>
+                      </div>
+                      <div className="text-[10px] text-muted-foreground truncate flex items-center justify-between gap-2">
+                        <span className="truncate">{source.sourceKey} / {source.slug}</span>
+                        <span className="shrink-0">{source.signalCount} signals</span>
+                      </div>
+                      <div className="text-[10px] text-muted-foreground flex items-center justify-between gap-2">
+                        <span>{source.enabled ? 'enabled' : 'disabled'} / {source.status}</span>
+                        <button
+                          type="button"
+                          onClick={() => onToggleSource(source.canonicalKey)}
+                          className={`rounded border px-1.5 py-0.5 transition-colors ${((sourceVisibility[source.canonicalKey] ?? source.enabled) ? 'border-emerald-500/35 text-emerald-400 bg-emerald-500/10' : 'border-border text-muted-foreground hover:text-foreground hover:bg-muted/40')}`}
+                        >
+                          {(sourceVisibility[source.canonicalKey] ?? source.enabled) ? 'Shown' : 'Hidden'}
+                        </button>
+                      </div>
+                    </div>
+                  )) : (
+                    <div className="text-[11px] text-muted-foreground">No configured data sources.</div>
+                  )}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+      </div>
     </div>
   )
-}
-
-function MapControlDock({
-  colors,
-  toggles,
-  onToggle,
-}: {
-  colors: SignalPalette
-  toggles: LayerToggles
-  onToggle: (key: keyof LayerToggles) => void
-}) {
-  return (
-    <div className="absolute top-3 right-3 z-10 w-[228px] rounded-lg border border-border bg-background/90 backdrop-blur-sm shadow-sm overflow-hidden">
-      <div className="p-2.5">
-        <LayerControls toggles={toggles} onToggle={onToggle} />
-      </div>
-      <div className="border-t border-border" />
-      <div className="p-2.5">
-        <MapLegend colors={colors} />
-      </div>
-    </div>
-  )
-}
-
-function featurePointCoordinates(feature: MapGeoJSONFeature): LngLatTuple | null {
-  const geometry = feature.geometry as { type?: string; coordinates?: unknown }
-  if (geometry?.type !== 'Point' || !Array.isArray(geometry.coordinates)) return null
-  if (geometry.coordinates.length < 2) return null
-  const lon = Number(geometry.coordinates[0])
-  const lat = Number(geometry.coordinates[1])
-  if (!Number.isFinite(lon) || !Number.isFinite(lat)) return null
-  return [lon, lat]
-}
-
-function featureLineMidpoint(feature: MapGeoJSONFeature): LngLatTuple | null {
-  const geometry = feature.geometry as { type?: string; coordinates?: unknown }
-  if (geometry?.type !== 'LineString' || !Array.isArray(geometry.coordinates)) return null
-  if (geometry.coordinates.length === 0) return null
-  const mid = geometry.coordinates[Math.floor(geometry.coordinates.length / 2)]
-  if (!Array.isArray(mid) || mid.length < 2) return null
-  const lon = Number(mid[0])
-  const lat = Number(mid[1])
-  if (!Number.isFinite(lon) || !Number.isFinite(lat)) return null
-  return [normalizeLongitude(lon), lat]
 }
 
 function militaryEntityKey(signal: WorldSignal): string {
@@ -1633,11 +1928,13 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
 
   const containerRef = useRef<HTMLDivElement>(null)
   const mapRef = useRef<any>(null)
-  const popupRef = useRef<any>(null)
   const mapReadyRef = useRef(false)
   const [mapReady, setMapReady] = useState(false)
   const [mapInitError, setMapInitError] = useState<string | null>(null)
   const [layerToggles, setLayerToggles] = useState<LayerToggles>(DEFAULT_LAYER_TOGGLES)
+  const [flyoutExpanded, setFlyoutExpanded] = useState(false)
+  const [flyoutTab, setFlyoutTab] = useState<FlyoutTab>('context')
+  const [flyoutSelection, setFlyoutSelection] = useState<FlyoutSelection | null>(null)
   const [hoverTooltip, setHoverTooltip] = useState<{
     x: number
     y: number
@@ -1646,6 +1943,21 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
     tension: number
   } | null>(null)
   const pollingInterval = isConnected ? false : 180000
+  const sourceRefreshInterval = 120000
+
+  const { data: worldSourceStatusData } = useQuery({
+    queryKey: ['events-sources'],
+    queryFn: getWorldSourceStatus,
+    refetchInterval: sourceRefreshInterval,
+    staleTime: 60000,
+  })
+
+  const { data: unifiedDataSourcesData } = useQuery({
+    queryKey: ['unified-data-sources'],
+    queryFn: () => getUnifiedDataSources(),
+    refetchInterval: sourceRefreshInterval,
+    staleTime: 60000,
+  })
 
   const { data: signalsData, isLoading: signalsLoading } = useQuery({
     queryKey: ['world-signals-map', { page_size: MAP_SIGNAL_PAGE_SIZE, max: MAP_SIGNAL_MAX }],
@@ -1794,13 +2106,117 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
     EMPTY_COUNTRY_BOUNDARY_COLLECTION
   )
 
-  const signals = stableSignalsData.signals || []
+  const allSignals = stableSignalsData.signals || []
   const convergences = stableConvergenceData.zones || []
   const hotspots = stableRegionsData.hotspots || []
   const chokepoints = stableRegionsData.chokepoints || []
   const tensions = stableTensionsData.tensions || []
   const instabilityScores = stableInstabilityData.scores || []
+  const [sourceVisibilityByKey, setSourceVisibilityByKey] = useState<Record<string, boolean>>({})
   const countryCentroids = useMemo(() => buildCountryCentroids(stableCountryGeoData), [stableCountryGeoData])
+
+  const layerDockItems = useMemo<LayerDockItem[]>(
+    () => (Object.keys(LAYER_GROUPS) as Array<keyof LayerToggles>).map((key) => {
+      const label = LAYER_LABELS[key] || formatLayerLabelFromKey(key)
+      return {
+        key,
+        label,
+        short: LAYER_SHORT_LABELS[key] || formatShortLayerLabel(label),
+        color: LAYER_COLORS[key] || '#64748b',
+      }
+    }),
+    []
+  )
+
+  const sourceSignalCounts = useMemo(() => {
+    const counts: Record<string, number> = {}
+    for (const signal of allSignals) {
+      const key = normalizeSourceToken(signal.source || '')
+      if (!key) continue
+      counts[key] = (counts[key] || 0) + 1
+    }
+    return counts
+  }, [allSignals])
+
+  const sourceDockItems = useMemo<DataSourceDockItem[]>(() => {
+    const sourceHealthMap = worldSourceStatusData?.sources || {}
+    const sources = Array.isArray(unifiedDataSourcesData) ? unifiedDataSourcesData : []
+    return sources
+      .slice()
+      .sort((a, b) => {
+        if (a.enabled !== b.enabled) return Number(b.enabled) - Number(a.enabled)
+        const keyCompare = String(a.source_key || '').localeCompare(String(b.source_key || ''))
+        if (keyCompare !== 0) return keyCompare
+        return String(a.name || '').localeCompare(String(b.name || ''))
+      })
+      .map((source) => {
+        const healthKey = resolveEventSourceHealthKey(source)
+        const healthDetails = healthKey ? sourceHealthMap[healthKey] : null
+        const tone = classifySourceHealthTone(Boolean(source.enabled), healthDetails)
+        const count = Number(healthDetails?.count || 0)
+        const slugToken = normalizeSourceToken(String(source.slug || ''))
+        const sourceKeyToken = normalizeSourceToken(String(source.source_key || ''))
+        const healthToken = normalizeSourceToken(healthKey || '')
+        const aliases = new Set<string>()
+        if (slugToken) aliases.add(slugToken)
+        if (slugToken.startsWith('events_')) aliases.add(slugToken.slice('events_'.length))
+        if (sourceKeyToken && sourceKeyToken !== 'events') aliases.add(sourceKeyToken)
+        if (healthToken) aliases.add(healthToken)
+        const canonicalKey = healthToken || (slugToken.startsWith('events_') ? slugToken.slice('events_'.length) : slugToken) || source.id
+        aliases.add(canonicalKey)
+        let signalCount = 0
+        for (const alias of aliases) {
+          signalCount += Number(sourceSignalCounts[alias] || 0)
+        }
+        return {
+          id: source.id,
+          name: String(source.name || source.slug || source.id),
+          slug: String(source.slug || ''),
+          sourceKey: String(source.source_key || 'custom'),
+          canonicalKey,
+          aliases: [...aliases],
+          enabled: Boolean(source.enabled),
+          status: String(source.status || 'unknown'),
+          tone,
+          count,
+          signalCount,
+        }
+      })
+  }, [sourceSignalCounts, unifiedDataSourcesData, worldSourceStatusData?.sources])
+
+  useEffect(() => {
+    if (!sourceDockItems.length) return
+    setSourceVisibilityByKey((prev) => {
+      const next: Record<string, boolean> = {}
+      for (const source of sourceDockItems) {
+        next[source.canonicalKey] = prev[source.canonicalKey] ?? source.enabled
+      }
+      return next
+    })
+  }, [sourceDockItems])
+
+  const sourceAliasToCanonical = useMemo(() => {
+    const out: Record<string, string> = {}
+    for (const source of sourceDockItems) {
+      out[source.canonicalKey] = source.canonicalKey
+      for (const alias of source.aliases) {
+        if (!out[alias]) out[alias] = source.canonicalKey
+      }
+    }
+    return out
+  }, [sourceDockItems])
+
+  const signals = useMemo(() => {
+    if (!sourceDockItems.length) return allSignals
+    return allSignals.filter((signal) => {
+      const signalKey = normalizeSourceToken(signal.source || '')
+      if (!signalKey) return true
+      const canonical = sourceAliasToCanonical[signalKey]
+      if (!canonical) return true
+      const visible = sourceVisibilityByKey[canonical]
+      return visible ?? true
+    })
+  }, [allSignals, sourceAliasToCanonical, sourceDockItems.length, sourceVisibilityByKey])
 
   const geocodedSignalsGeoJSON = useMemo(
     () => signalsToGeoJSON(signals, colors, countryCentroids),
@@ -1832,6 +2248,119 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
     const oldestSignalHours = oldestMs != null ? (Date.now() - oldestMs) / 3_600_000 : null
     return { byType, criticalCount, oldestSignalHours }
   }, [signals])
+
+  const relatedEvents = useMemo<FlyoutRelatedEvent[]>(() => {
+    if (!flyoutSelection) return []
+
+    const selectedIso = normalizeCountryCode(flyoutSelection.iso3 || flyoutSelection.countryName || '')
+    const hasCenter = isFiniteCoordinatePair(flyoutSelection.lat, flyoutSelection.lon)
+    const centerLat = hasCenter ? Number(flyoutSelection.lat) : 0
+    const centerLon = hasCenter ? Number(flyoutSelection.lon) : 0
+    const rows: FlyoutRelatedEvent[] = []
+
+    for (const signal of signals) {
+      const signalIso = normalizeCountryCode(
+        signal.country_iso3
+        || signal.country_name
+        || signal.country
+        || ''
+      )
+      const severity = Number(signal.severity || 0)
+      let score = 0
+
+      if (selectedIso && signalIso === selectedIso) {
+        score = Math.max(score, 100 + severity * 100)
+      }
+      if (selectedIso) {
+        const pair = pairFromSignal(signal)
+        if (pair && (pair[0] === selectedIso || pair[1] === selectedIso)) {
+          score = Math.max(score, 90 + severity * 100)
+        }
+      }
+      if (hasCenter && isFiniteCoordinatePair(signal.latitude, signal.longitude)) {
+        const distanceKm = haversineDistanceKm(centerLat, centerLon, Number(signal.latitude), Number(signal.longitude))
+        if (distanceKm <= 1800) {
+          score = Math.max(score, 85 + severity * 100 - Math.min(60, distanceKm / 28))
+        }
+      }
+      if (score <= 0) continue
+
+      const ageHours = signal.detected_at ? (Date.now() - new Date(signal.detected_at).getTime()) / 3_600_000 : null
+      const ageLabel = ageHours == null
+        ? ''
+        : ageHours < 1
+          ? '<1h'
+          : ageHours < 24
+            ? `${Math.round(ageHours)}h`
+            : `${Math.round(ageHours / 24)}d`
+      rows.push({
+        id: `signal:${signal.signal_id}`,
+        kind: 'signal',
+        title: signal.title || `${formatSignalTypeLabel(signal.signal_type || 'signal')} signal`,
+        subtitle: `${formatSignalTypeLabel(signal.signal_type || 'signal')} · ${signal.source || 'unknown'}${ageLabel ? ` · ${ageLabel}` : ''}`,
+        score,
+      })
+    }
+
+    for (const pair of tensions) {
+      const isoA = normalizeCountryCode(pair.country_a_iso3 || pair.country_a_name || pair.country_a || '')
+      const isoB = normalizeCountryCode(pair.country_b_iso3 || pair.country_b_name || pair.country_b || '')
+      if (!isoA || !isoB) continue
+
+      let score = 0
+      if (selectedIso && (isoA === selectedIso || isoB === selectedIso)) {
+        score = Math.max(score, 95 + Number(pair.tension_score || 0))
+      }
+
+      if (hasCenter) {
+        const a = countryCentroids[isoA]
+        const b = countryCentroids[isoB]
+        if (a && b) {
+          const midLat = (a.latitude + b.latitude) / 2
+          const midLon = normalizeLongitude((a.longitude + b.longitude) / 2)
+          const distanceKm = haversineDistanceKm(centerLat, centerLon, midLat, midLon)
+          if (distanceKm <= 2400) {
+            score = Math.max(score, 70 + Number(pair.tension_score || 0) - Math.min(40, distanceKm / 60))
+          }
+        }
+      }
+      if (score <= 0) continue
+
+      rows.push({
+        id: `tension:${isoA}:${isoB}`,
+        kind: 'tension',
+        title: formatCountryPair(isoA, isoB),
+        subtitle: `Tension arc · ${Number(pair.tension_score || 0).toFixed(1)} · ${String(pair.trend || 'stable')}`,
+        score,
+      })
+    }
+
+    for (const convergence of convergences) {
+      const convergenceIso = normalizeCountryCode(convergence.country || '')
+      let score = 0
+      if (selectedIso && convergenceIso && convergenceIso === selectedIso) {
+        score = Math.max(score, 95 + Number(convergence.urgency_score || 0))
+      }
+      if (hasCenter && isFiniteCoordinatePair(convergence.latitude, convergence.longitude)) {
+        const distanceKm = haversineDistanceKm(centerLat, centerLon, Number(convergence.latitude), Number(convergence.longitude))
+        if (distanceKm <= 1500) {
+          score = Math.max(score, 75 + Number(convergence.urgency_score || 0) - Math.min(35, distanceKm / 40))
+        }
+      }
+      if (score <= 0) continue
+
+      rows.push({
+        id: `convergence:${convergence.grid_key}`,
+        kind: 'convergence',
+        title: `${formatCountry(convergence.country || convergenceIso || 'Unknown')} convergence`,
+        subtitle: `${Number(convergence.signal_count || 0)} signals · urgency ${Math.round(Number(convergence.urgency_score || 0))}`,
+        score,
+      })
+    }
+
+    rows.sort((a, b) => b.score - a.score)
+    return rows.slice(0, 8)
+  }, [countryCentroids, convergences, flyoutSelection, signals, tensions])
 
   const signalCountByIso3 = useMemo(() => {
     const out: Record<string, number> = {}
@@ -1910,6 +2439,96 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
     return out
   }, [signalCountByIso3, tensionScoreByIso3, instabilityScoreByIso3, stableCountryGeoData.features])
 
+  const countryPopupSummaryByIso3 = useMemo(() => {
+    const out: Record<string, CountryPopupSummary> = {}
+
+    const ensureCountry = (iso3: string): CountryPopupSummary => {
+      if (out[iso3]) return out[iso3]
+      const created: CountryPopupSummary = {
+        totalSignals: 0,
+        criticalSignals: 0,
+        riskSignals: 0,
+        newsSignals: 0,
+        tensionArcCount: 0,
+        convergenceCount: 0,
+        typeCounts: {},
+        sourceCounts: {},
+        headlinePreviews: [],
+        arcPreviews: [],
+      }
+      out[iso3] = created
+      return created
+    }
+
+    for (const signal of signals) {
+      const data = signal as unknown as Record<string, unknown>
+      const iso3 = normalizeCountryCode(String(
+        data.iso3 || data.country_iso3 || data.country_code || data.country_name || data.country || ''
+      ))
+      if (!iso3) continue
+
+      const entry = ensureCountry(iso3)
+      const signalType = String(data.signal_type || 'unknown').trim().toLowerCase()
+      const severity = Number(data.severity || 0)
+      const source = String(data.source || '').trim()
+      const title = String(data.title || '').trim()
+
+      entry.totalSignals += 1
+      if (severity >= 0.75) entry.criticalSignals += 1
+      if (signalType === 'news') {
+        entry.newsSignals += 1
+      } else {
+        entry.riskSignals += 1
+      }
+      entry.typeCounts[signalType] = (entry.typeCounts[signalType] || 0) + 1
+      if (source) {
+        entry.sourceCounts[source] = (entry.sourceCounts[source] || 0) + 1
+      }
+      if (signalType === 'news' && title && entry.headlinePreviews.length < 3) {
+        entry.headlinePreviews.push(truncateText(title, 72))
+      }
+    }
+
+    for (const convergence of convergences) {
+      const data = convergence as unknown as Record<string, unknown>
+      const iso3 = normalizeCountryCode(String(
+        data.iso3 || data.country_iso3 || data.country_code || data.country_name || data.country || ''
+      ))
+      if (!iso3) continue
+      const entry = ensureCountry(iso3)
+      entry.convergenceCount += 1
+    }
+
+    for (const pair of tensions) {
+      const data = pair as unknown as Record<string, unknown>
+      let pairCodes: [string, string] | null = parseCountryPair(String(data.country_pair || data.pair_name || data.pair || ''))
+      if (!pairCodes) {
+        const left = normalizeCountryCode(String(data.country_a || data.country_a_iso3 || ''))
+        const right = normalizeCountryCode(String(data.country_b || data.country_b_iso3 || ''))
+        if (left && right) pairCodes = [left, right]
+      }
+      if (!pairCodes) continue
+
+      const trend = String(data.trend || 'stable')
+      const score = Number(data.tension_score || 0)
+      const eventCount = Number(data.event_count || 0)
+      const pairLabel = truncateText(
+        `${pairCodes[0]}-${pairCodes[1]} ${score.toFixed(1)} ${trend}${eventCount > 0 ? ` (${eventCount})` : ''}`,
+        58
+      )
+
+      for (const iso3 of pairCodes) {
+        const entry = ensureCountry(iso3)
+        entry.tensionArcCount += 1
+        if (entry.arcPreviews.length < 2) {
+          entry.arcPreviews.push(pairLabel)
+        }
+      }
+    }
+
+    return out
+  }, [convergences, signals, tensions])
+
   const countriesStyledGeoJSON = useMemo(
     () => withCountryMetrics(stableCountryGeoData, countryMetricsByIso3),
     [stableCountryGeoData, countryMetricsByIso3]
@@ -1925,29 +2544,20 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
     [signals, countryCentroids]
   )
 
-  const openPopup = useCallback((coords: LngLatTuple, node: ReactNode) => {
-    if (!mapRef.current) return
-    popupRef.current?.remove()
+  const openSelection = useCallback((selection: FlyoutSelection) => {
+    setFlyoutSelection(selection)
+    setFlyoutTab('context')
+    setFlyoutExpanded(true)
+  }, [])
 
-    const mount = document.createElement('div')
-    const root = createRoot(mount)
-    root.render(node)
+  const closeSelection = useCallback(() => {
+    setFlyoutSelection(null)
+    setFlyoutTab('context')
+    setFlyoutExpanded(false)
+  }, [])
 
-    const popup = new maplibregl.Popup({
-      closeButton: true,
-      closeOnClick: true,
-      maxWidth: '320px',
-      className: 'world-map-popup',
-    })
-      .setLngLat(coords)
-      .setDOMContent(mount)
-      .addTo(mapRef.current)
-
-    popup.on('close', () => {
-      root.unmount()
-    })
-
-    popupRef.current = popup
+  const toggleSourceVisibility = useCallback((canonicalKey: string) => {
+    setSourceVisibilityByKey((prev) => ({ ...prev, [canonicalKey]: !(prev[canonicalKey] ?? true) }))
   }, [])
 
   useEffect(() => {
@@ -1993,8 +2603,6 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
     })
 
     return () => {
-      popupRef.current?.remove()
-      popupRef.current = null
       mapReadyRef.current = false
       setMapReady(false)
       mapRef.current = null
@@ -2072,8 +2680,6 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
       if (!event.features?.length) return
       const feature = event.features[0]
       const props = (feature.properties || {}) as Record<string, unknown>
-      const coords = featurePointCoordinates(feature)
-      if (!coords) return
 
       const signalType = String(props.signal_type || 'unknown')
       const severity = Math.round((Number(props.severity) || 0) * 100)
@@ -2136,16 +2742,31 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
         bodyParts.push([relatedMarketsLabel, relevanceLabel, previewLabel].filter(Boolean).join(' · '))
       }
 
-      openPopup(
-        coords,
-        <PopupCard
-          title={String(props.title || 'Signal')}
-          subtitle={`${props.country_name ? `${String(props.country_name)} · ` : ''}${String(props.source || '')}`}
-          body={bodyParts.join(' · ')}
-        />
-      )
+      const signalIso3 = normalizeCountryCode(String(
+        props.country_iso3
+        || props.country_code
+        || props.country_name
+        || props.country
+        || ''
+      )) || undefined
+      const signalLat = Number(props.latitude)
+      const signalLon = Number(props.longitude)
+      const hasSignalCoordinates = Number.isFinite(signalLat) && Number.isFinite(signalLon)
+
+      openSelection({
+        category: 'Signal',
+        title: String(props.title || 'Signal'),
+        subtitle: `${props.country_name ? `${String(props.country_name)} · ` : ''}${String(props.source || '')}`,
+        body: bodyParts.join(' · '),
+        iso3: signalIso3,
+        countryName: props.country_name ? String(props.country_name) : undefined,
+        lat: hasSignalCoordinates ? signalLat : undefined,
+        lon: hasSignalCoordinates ? signalLon : undefined,
+        source: String(props.source || ''),
+        signalType,
+      })
     },
-    [openPopup]
+    [openSelection]
   )
 
   const handleConvergenceClick = useCallback(
@@ -2153,18 +2774,28 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
       if (!event.features?.length) return
       const feature = event.features[0]
       const props = (feature.properties || {}) as Record<string, unknown>
-      const coords = featurePointCoordinates(feature)
-      if (!coords) return
-      openPopup(
-        coords,
-        <PopupCard
-          title="Convergence Zone"
-          subtitle={`${props.country_name ? `${String(props.country_name)} · ` : ''}${String(props.signal_count || 0)} signals`}
-          body={`Urgency: ${Math.round(Number(props.urgency_score) || 0)} · Types: ${String(props.signal_types || 'unknown')}`}
-        />
-      )
+      const convergenceIso3 = normalizeCountryCode(String(
+        props.country_iso3
+        || props.country_code
+        || props.country_name
+        || props.country
+        || ''
+      )) || undefined
+      const convergenceLat = Number(props.latitude)
+      const convergenceLon = Number(props.longitude)
+      const hasConvergenceCoordinates = Number.isFinite(convergenceLat) && Number.isFinite(convergenceLon)
+      openSelection({
+        category: 'Convergence',
+        title: 'Convergence Zone',
+        subtitle: `${props.country_name ? `${String(props.country_name)} · ` : ''}${String(props.signal_count || 0)} signals`,
+        body: `Urgency: ${Math.round(Number(props.urgency_score) || 0)} · Types: ${String(props.signal_types || 'unknown')}`,
+        iso3: convergenceIso3,
+        countryName: props.country_name ? String(props.country_name) : undefined,
+        lat: hasConvergenceCoordinates ? convergenceLat : undefined,
+        lon: hasConvergenceCoordinates ? convergenceLon : undefined,
+      })
     },
-    [openPopup]
+    [openSelection]
   )
 
   const handleHotspotClick = useCallback(
@@ -2172,9 +2803,6 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
       if (!event.features?.length) return
       const feature = event.features[0]
       const props = (feature.properties || {}) as Record<string, unknown>
-      const coords: LngLatTuple = event.lngLat
-        ? [event.lngLat.lng, event.lngLat.lat]
-        : [0, 0]
       const latMin = Number(props.lat_min)
       const latMax = Number(props.lat_max)
       const lonMin = Number(props.lon_min)
@@ -2208,17 +2836,19 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
       const body = hasBounds
         ? `Bounds: ${latMin.toFixed(1)}-${latMax.toFixed(1)} lat, ${lonMin.toFixed(1)}-${lonMax.toFixed(1)} lon · Events: ${eventCount || signalsInZone} · Signals: ${signalsInZone} · Convergences: ${convergencesInZone}${activityTypes ? ` · Types: ${activityTypes}` : ''}${lastDetectedAt ? ` · Last: ${new Date(lastDetectedAt).toLocaleTimeString()}` : ''}`
         : 'No bounding data available for this zone.'
+      const zoneLat = hasBounds ? (latMin + latMax) / 2 : event.lngLat?.lat
+      const zoneLon = hasBounds ? normalizeLongitude((lonMin + lonMax) / 2) : event.lngLat?.lng
 
-      openPopup(
-        coords,
-        <PopupCard
-          title={String(props.name || 'Hotspot')}
-          subtitle="Military monitoring hotspot"
-          body={body}
-        />
-      )
+      openSelection({
+        category: 'Hotspot',
+        title: String(props.name || 'Hotspot'),
+        subtitle: 'Military monitoring hotspot',
+        body,
+        lat: Number.isFinite(Number(zoneLat)) ? Number(zoneLat) : undefined,
+        lon: Number.isFinite(Number(zoneLon)) ? Number(zoneLon) : undefined,
+      })
     },
-    [convergences, geocodedSignalPoints, openPopup]
+    [convergences, geocodedSignalPoints, openSelection]
   )
 
   const handleChokepointClick = useCallback(
@@ -2226,8 +2856,6 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
       if (!event.features?.length) return
       const feature = event.features[0]
       const props = (feature.properties || {}) as Record<string, unknown>
-      const coords = featurePointCoordinates(feature)
-      if (!coords) return
       const risk = Number(props.risk_score || 0)
       const nearbySignals = Number(props.nearby_signal_count || 0)
       const dailyTransit = Number(props.daily_transit_total || 0)
@@ -2236,16 +2864,20 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
       const chokepointSource = String(props.chokepoint_source || '')
       const dailyMetricsDate = String(props.daily_metrics_date || props.daily_dataset_updated_at || '')
       const lastUpdated = String(props.last_updated || '')
-      openPopup(
-        coords,
-        <PopupCard
-          title={String(props.name || 'Chokepoint')}
-          subtitle={`Global trade chokepoint · Risk ${risk.toFixed(1)}`}
-          body={`Nearby signals: ${nearbySignals}${dailyTransit > 0 ? ` · Daily transit: ${dailyTransit}` : ''}${dailyCapacity > 0 ? ` · Capacity: ${dailyCapacity.toLocaleString()}` : ''}${chokepointSource ? ` · Base source: ${chokepointSource}` : ''}${source ? ` · Risk source: ${source}` : ''}${dailyMetricsDate ? ` · Daily feed: ${new Date(dailyMetricsDate).toLocaleDateString()}` : ''}${lastUpdated ? ` · Updated: ${new Date(lastUpdated).toLocaleTimeString()}` : ''}`}
-        />
-      )
+      const chokepointLat = Number(props.latitude)
+      const chokepointLon = Number(props.longitude)
+      const hasChokepointCoordinates = Number.isFinite(chokepointLat) && Number.isFinite(chokepointLon)
+      openSelection({
+        category: 'Chokepoint',
+        title: String(props.name || 'Chokepoint'),
+        subtitle: `Global trade chokepoint · Risk ${risk.toFixed(1)}`,
+        body: `Nearby signals: ${nearbySignals}${dailyTransit > 0 ? ` · Daily transit: ${dailyTransit}` : ''}${dailyCapacity > 0 ? ` · Capacity: ${dailyCapacity.toLocaleString()}` : ''}${chokepointSource ? ` · Base source: ${chokepointSource}` : ''}${source ? ` · Risk source: ${source}` : ''}${dailyMetricsDate ? ` · Daily feed: ${new Date(dailyMetricsDate).toLocaleDateString()}` : ''}${lastUpdated ? ` · Updated: ${new Date(lastUpdated).toLocaleTimeString()}` : ''}`,
+        lat: hasChokepointCoordinates ? chokepointLat : undefined,
+        lon: hasChokepointCoordinates ? chokepointLon : undefined,
+        source: source || undefined,
+      })
     },
-    [openPopup]
+    [openSelection]
   )
 
   const handleCountryHover = useCallback(
@@ -2300,23 +2932,57 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
         display_intensity: 0.06,
         signal_count: 0,
       }
-      const center = countryCentroids[iso3]
-      const coords: LngLatTuple = event.lngLat
-        ? [event.lngLat.lng, event.lngLat.lat]
-        : center
-          ? [center.longitude, center.latitude]
-          : [0, 0]
+      const countryCenter = countryCentroids[iso3]
+      const popupSummary = countryPopupSummaryByIso3[iso3]
+      const trackedSignals = popupSummary?.totalSignals ?? metrics.signal_count
+      const uniqueSources = popupSummary ? Object.keys(popupSummary.sourceCounts).length : 0
+      const summaryChips = popupSummary
+        ? [
+          popupSummary.riskSignals > 0 ? `Risk ${popupSummary.riskSignals}` : '',
+          popupSummary.newsSignals > 0 ? `News ${popupSummary.newsSignals}` : '',
+          popupSummary.criticalSignals > 0 ? `Critical ${popupSummary.criticalSignals}` : '',
+          popupSummary.tensionArcCount > 0 ? `Arcs ${popupSummary.tensionArcCount}` : '',
+          popupSummary.convergenceCount > 0 ? `Convergences ${popupSummary.convergenceCount}` : '',
+        ].filter(Boolean)
+        : []
 
-      openPopup(
-        coords,
-        <PopupCard
-          title={metrics.country_name || formatCountry(iso3)}
-          subtitle={`ISO3 ${iso3}`}
-          body={`Instability: ${metrics.instability_score.toFixed(1)} · Tension: ${metrics.tension_score.toFixed(1)} · Signals: ${metrics.signal_count}`}
-        />
-      )
+      const topSignalMix = popupSummary
+        ? summarizeTopCounts(popupSummary.typeCounts, 3, formatSignalTypeLabel)
+        : ''
+      const topSources = popupSummary
+        ? summarizeTopCounts(popupSummary.sourceCounts, 2)
+        : ''
+      const arcContext = popupSummary?.arcPreviews.length
+        ? popupSummary.arcPreviews.join(' | ')
+        : ''
+      const newsHighlights = popupSummary?.headlinePreviews.length
+        ? popupSummary.headlinePreviews.join(' | ')
+        : ''
+
+      const bodyParts = [
+        ...summaryChips,
+        `Instability: ${metrics.instability_score.toFixed(1)}`,
+        `Tension: ${metrics.tension_score.toFixed(1)}`,
+        `Signals: ${trackedSignals}`,
+        uniqueSources > 0 ? `Sources: ${uniqueSources}` : '',
+        topSignalMix ? `Signal mix: ${topSignalMix}` : '',
+        topSources ? `Top sources: ${topSources}` : '',
+        arcContext ? `Bilateral context: ${arcContext}` : '',
+        newsHighlights ? `News highlights: ${newsHighlights}` : '',
+      ].filter(Boolean)
+
+      openSelection({
+        category: 'Country',
+        title: metrics.country_name || formatCountry(iso3),
+        subtitle: `ISO3 ${iso3} · ${trackedSignals} tracked${uniqueSources > 0 ? ` · ${uniqueSources} sources` : ''}`,
+        body: bodyParts.join(' · '),
+        iso3,
+        countryName: metrics.country_name || formatCountry(iso3),
+        lat: countryCenter?.latitude,
+        lon: countryCenter?.longitude,
+      })
     },
-    [countryCentroids, countryMetricsByIso3, openPopup]
+    [countryCentroids, countryMetricsByIso3, countryPopupSummaryByIso3, openSelection]
   )
 
   const handleTensionArcClick = useCallback(
@@ -2324,24 +2990,23 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
       if (!event.features?.length) return
       const feature = event.features[0]
       const props = (feature.properties || {}) as Record<string, unknown>
-      const coords: LngLatTuple = event.lngLat
-        ? [event.lngLat.lng, event.lngLat.lat]
-        : (featureLineMidpoint(feature) || [0, 0])
       const score = Number(props.tension_score || 0)
       const trend = String(props.trend || 'stable')
       const eventCount = Number(props.event_count || 0)
       const eventTypes = String(props.top_event_types || '')
       const lastUpdated = String(props.last_updated || '')
-      openPopup(
-        coords,
-        <PopupCard
-          title={String(props.pair_name || 'Tension Arc')}
-          subtitle={`Score ${score.toFixed(1)} · ${trend}`}
-          body={`Events: ${eventCount}${eventTypes ? ` · Types: ${eventTypes}` : ''}${lastUpdated ? ` · Updated: ${new Date(lastUpdated).toLocaleTimeString()}` : ''}`}
-        />
-      )
+      const pairCodes = parseCountryPair(String(props.country_pair || props.pair_name || props.pair || ''))
+      openSelection({
+        category: 'Tension Arc',
+        title: String(props.pair_name || 'Tension Arc'),
+        subtitle: `Score ${score.toFixed(1)} · ${trend}`,
+        body: `Events: ${eventCount}${eventTypes ? ` · Types: ${eventTypes}` : ''}${lastUpdated ? ` · Updated: ${new Date(lastUpdated).toLocaleTimeString()}` : ''}`,
+        iso3: pairCodes?.[0] || undefined,
+        lat: event.lngLat?.lat,
+        lon: event.lngLat?.lng,
+      })
     },
-    [openPopup]
+    [openSelection]
   )
 
   const handleConflictClick = useCallback(
@@ -2349,19 +3014,27 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
       if (!event.features?.length) return
       const feature = event.features[0]
       const props = (feature.properties || {}) as Record<string, unknown>
-      const coords = featurePointCoordinates(feature) || (
-        event.lngLat ? [event.lngLat.lng, event.lngLat.lat] : [0, 0]
-      )
-      openPopup(
-        coords,
-        <PopupCard
-          title={String(props.title || 'Conflict Signal')}
-          subtitle={`${String(props.country_name || 'Unknown')} · ${String(props.source || 'unknown')}`}
-          body={`Severity: ${Math.round((Number(props.severity) || 0) * 100)}%`}
-        />
-      )
+      const conflictIso3 = normalizeCountryCode(String(
+        props.country_iso3
+        || props.country_code
+        || props.country_name
+        || props.country
+        || ''
+      )) || undefined
+      openSelection({
+        category: 'Conflict',
+        title: String(props.title || 'Conflict Signal'),
+        subtitle: `${String(props.country_name || 'Unknown')} · ${String(props.source || 'unknown')}`,
+        body: `Severity: ${Math.round((Number(props.severity) || 0) * 100)}%`,
+        iso3: conflictIso3,
+        countryName: props.country_name ? String(props.country_name) : undefined,
+        lat: Number.isFinite(Number(props.latitude)) ? Number(props.latitude) : undefined,
+        lon: Number.isFinite(Number(props.longitude)) ? Number(props.longitude) : undefined,
+        source: String(props.source || ''),
+        signalType: 'conflict',
+      })
     },
-    [openPopup]
+    [openSelection]
   )
 
   const handleEarthquakeClick = useCallback(
@@ -2369,9 +3042,6 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
       if (!event.features?.length) return
       const feature = event.features[0]
       const props = (feature.properties || {}) as Record<string, unknown>
-      const coords = featurePointCoordinates(feature) || (
-        event.lngLat ? [event.lngLat.lng, event.lngLat.lat] : [0, 0]
-      )
       let meta: Record<string, unknown> = {}
       try { meta = JSON.parse(String(props.metadata_json || '{}')) } catch { meta = {} }
       const mag = meta.magnitude != null ? `M${Number(meta.magnitude).toFixed(1)}` : ''
@@ -2379,17 +3049,42 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
       const tsunami = meta.tsunami ? '⚠ Tsunami warning' : ''
       const alert = meta.alert ? `Alert: ${meta.alert}` : ''
       const bodyParts = [mag, depth, tsunami, alert].filter(Boolean)
-      openPopup(
-        coords,
-        <PopupCard
-          title={String(props.title || 'Earthquake')}
-          subtitle={`${String(props.country_name || 'Unknown')} · USGS`}
-          body={bodyParts.join(' · ') || `Severity: ${Math.round((Number(props.severity) || 0) * 100)}%`}
-        />
-      )
+      const earthquakeIso3 = normalizeCountryCode(String(
+        props.country_iso3
+        || props.country_code
+        || props.country_name
+        || props.country
+        || ''
+      )) || undefined
+      openSelection({
+        category: 'Earthquake',
+        title: String(props.title || 'Earthquake'),
+        subtitle: `${String(props.country_name || 'Unknown')} · USGS`,
+        body: bodyParts.join(' · ') || `Severity: ${Math.round((Number(props.severity) || 0) * 100)}%`,
+        iso3: earthquakeIso3,
+        countryName: props.country_name ? String(props.country_name) : undefined,
+        lat: Number.isFinite(Number(props.latitude)) ? Number(props.latitude) : undefined,
+        lon: Number.isFinite(Number(props.longitude)) ? Number(props.longitude) : undefined,
+        source: 'USGS',
+        signalType: 'earthquake',
+      })
     },
-    [openPopup]
+    [openSelection]
   )
+
+  const handleMapBackgroundClick = useCallback((event: LayerClickEvent & { point?: { x: number; y: number } }) => {
+    const map = mapRef.current
+    if (!map || !event.point) return
+    const layers = CLICKABLE_LAYERS.filter((layerId) => Boolean(map.getLayer(layerId)))
+    if (!layers.length) {
+      closeSelection()
+      return
+    }
+    const features = map.queryRenderedFeatures(event.point, { layers: [...layers] as string[] })
+    if (!features?.length) {
+      closeSelection()
+    }
+  }, [closeSelection])
 
   useEffect(() => {
     const map = mapRef.current
@@ -2418,6 +3113,7 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
     map.on('click', 'hotspots-outline', handleHotspotClick)
     map.on('click', 'chokepoints-icon', handleChokepointClick)
     map.on('click', 'earthquakes-dot', handleEarthquakeClick)
+    map.on('click', handleMapBackgroundClick)
 
     map.on('mousemove', 'countries-fill-intensity', handleCountryHover)
     map.on('mouseleave', 'countries-fill-intensity', handleCountryHoverLeave)
@@ -2444,6 +3140,7 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
       map.off('click', 'hotspots-outline', handleHotspotClick)
       map.off('click', 'chokepoints-icon', handleChokepointClick)
       map.off('click', 'earthquakes-dot', handleEarthquakeClick)
+      map.off('click', handleMapBackgroundClick)
       map.off('mousemove', 'countries-fill-intensity', handleCountryHover)
       map.off('mouseleave', 'countries-fill-intensity', handleCountryHoverLeave)
       for (const layerId of CLICKABLE_LAYERS) {
@@ -2463,6 +3160,7 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
     handleHotspotClick,
     handleChokepointClick,
     handleEarthquakeClick,
+    handleMapBackgroundClick,
   ])
 
   const loading =
@@ -2478,30 +3176,37 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
     <div className="absolute inset-0 bg-background">
       <div ref={containerRef} className="w-full h-full" />
 
-      <MapControlDock
-        colors={colors}
+      <MapRightDock
+        selection={flyoutSelection}
+        relatedEvents={relatedEvents}
+        tab={flyoutTab}
+        onTabChange={setFlyoutTab}
+        expanded={flyoutExpanded}
+        onExpandedChange={setFlyoutExpanded}
+        onCloseSelection={closeSelection}
+        layerItems={layerDockItems}
         toggles={layerToggles}
         onToggle={(key) => {
           setLayerToggles((prev) => ({ ...prev, [key]: !prev[key] }))
         }}
-      />
-      <MapStats
         signalCount={signals.length}
         signalTotal={Number(stableSignalsData.total || signals.length)}
+        criticalCount={signalStatsExtra.criticalCount}
         geocodedSignalCount={geocodedSignalCount}
         convergenceCount={convergences.length}
         hotspotCount={hotspots.length}
         byType={signalStatsExtra.byType}
-        criticalCount={signalStatsExtra.criticalCount}
-        oldestSignalHours={signalStatsExtra.oldestSignalHours}
-        lastCollection={stableSignalsData.last_collection}
         colors={colors}
+        sourceItems={sourceDockItems}
+        sourceVisibility={sourceVisibilityByKey}
+        onToggleSource={toggleSourceVisibility}
+        sourceError={worldSourceStatusData?.errors?.[0] || null}
       />
 
       {coreError ? (
         <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20">
           <div className="px-3 py-2 rounded-md border border-red-500/30 bg-red-500/10 text-xs text-red-500">
-            Map data unavailable. Check world intelligence status.
+            Map data unavailable. Check events status.
           </div>
         </div>
       ) : null}
@@ -2509,7 +3214,7 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
       {!loading && !coreError && signals.length === 0 ? (
         <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20">
           <div className="px-3 py-2 rounded-md border border-border bg-background/90 text-xs text-muted-foreground">
-            No active world signals detected yet.
+            No active event signals detected yet.
           </div>
         </div>
       ) : null}
@@ -2532,30 +3237,6 @@ export default function WorldMap({ isConnected = true }: { isConnected?: boolean
           ) : null}
         </div>
       ) : null}
-
-
-      <style>{`
-        .world-map-popup .maplibregl-popup-content {
-          background: hsl(var(--card));
-          color: hsl(var(--card-foreground));
-          border: 1px solid hsl(var(--border));
-          border-radius: 10px;
-          box-shadow: 0 10px 28px rgba(0,0,0,0.22);
-          padding: 10px 12px;
-        }
-        .world-map-popup .maplibregl-popup-tip {
-          border-top-color: hsl(var(--card));
-        }
-        .world-map-popup .maplibregl-popup-close-button {
-          color: hsl(var(--muted-foreground));
-          font-size: 16px;
-          padding: 2px 6px;
-        }
-        .world-map-popup .maplibregl-popup-close-button:hover {
-          color: hsl(var(--foreground));
-          background: transparent;
-        }
-      `}</style>
     </div>
   )
 }

@@ -7,10 +7,14 @@ pattern shared by all signal sources.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from typing import Optional, Any
 
+from config import settings
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import OperationalError
+from sqlalchemy import text
 
 from models.opportunity import Opportunity
 from services.signal_bus import (
@@ -20,6 +24,19 @@ from services.signal_bus import (
     upsert_trade_signal,
 )
 from utils.utcnow import utcnow
+
+SQLITE_LOCK_RETRY_ATTEMPTS = 6
+SQLITE_LOCK_BASE_DELAY_SECONDS = 0.15
+SQLITE_LOCK_MAX_DELAY_SECONDS = 1.5
+
+
+def _is_sqlite_lock_error(exc: Exception) -> bool:
+    message = str(getattr(exc, "orig", exc)).lower()
+    return "database is locked" in message or "database table is locked" in message
+
+
+def _sqlite_lock_retry_delay(attempt: int) -> float:
+    return min(SQLITE_LOCK_BASE_DELAY_SECONDS * (2**attempt), SQLITE_LOCK_MAX_DELAY_SECONDS)
 
 
 async def bridge_opportunities_to_signals(
@@ -107,6 +124,17 @@ async def bridge_opportunities_to_signals(
         )
         emitted += 1
 
-    await session.commit()
-    await refresh_trade_signal_snapshots(session)
+    for attempt in range(SQLITE_LOCK_RETRY_ATTEMPTS):
+        try:
+            if "sqlite" in settings.DATABASE_URL.lower():
+                await session.execute(text("PRAGMA busy_timeout=1500"))
+            await session.commit()
+            await refresh_trade_signal_snapshots(session)
+            return emitted
+        except OperationalError as exc:
+            await session.rollback()
+            if not _is_sqlite_lock_error(exc) or attempt >= SQLITE_LOCK_RETRY_ATTEMPTS - 1:
+                raise
+            await asyncio.sleep(_sqlite_lock_retry_delay(attempt))
+
     return emitted

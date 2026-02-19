@@ -494,6 +494,13 @@ export interface OpportunitiesResponse {
   total: number
 }
 
+export interface OpportunityIdsResponse {
+  total: number
+  offset: number
+  limit: number
+  ids: string[]
+}
+
 export const getOpportunities = async (params?: {
   source?: 'markets' | 'traders' | 'all'
   min_profit?: number
@@ -515,6 +522,25 @@ export const getOpportunities = async (params?: {
     opportunities: response.data,
     total
   }
+}
+
+export const getOpportunityIds = async (params?: {
+  source?: 'markets' | 'traders' | 'all'
+  min_profit?: number
+  max_risk?: number
+  strategy?: string
+  sub_strategy?: string
+  min_liquidity?: number
+  search?: string
+  category?: string
+  sort_by?: string
+  sort_dir?: string
+  exclude_strategy?: string
+  limit?: number
+  offset?: number
+}): Promise<OpportunityIdsResponse> => {
+  const { data } = await api.get('/opportunities/ids', { params })
+  return unwrapApiData(data)
 }
 
 // ==================== CRYPTO MARKETS (independent infrastructure) ====================
@@ -561,6 +587,9 @@ export interface CryptoMarket {
   fees_enabled: boolean
   event_slug: string
   event_title: string
+  strategy_sdk?: string | null
+  strategy_key?: string | null
+  strategy?: string | null
   upcoming_markets: CryptoMarketUpcoming[]
   // Attached by API
   oracle_price: number | null
@@ -1811,7 +1840,6 @@ export interface TraderSourceStrategyOption {
 export interface TraderConfigSchema {
   version: string
   sources: TraderSource[]
-  source_aliases: Record<string, string>
   default_strategy_key?: string
   strategies?: Array<Record<string, any>>
   shared_risk_fields: Array<Record<string, any>>
@@ -1851,44 +1879,43 @@ export interface TraderStrategyValidationResult {
   warnings: string[]
 }
 
-const TRADER_SOURCE_ALIASES: Record<string, string> = {
-  tracked_traders: 'traders',
-  pool_traders: 'traders',
-  insider: 'traders',
+const DEFAULT_STRATEGY_BY_SOURCE: Record<string, string> = {
+  scanner: 'basic',
+  crypto: 'btc_eth_highfreq',
+  news: 'news_edge',
+  weather: 'weather_distribution',
+  traders: 'traders_confluence',
 }
 
-const LEGACY_STRATEGY_FALLBACK_BY_SOURCE: Record<string, string> = {
-  scanner: 'opportunity_general',
-  crypto: 'crypto_15m',
-  news: 'news_reaction',
-  weather: 'weather_consensus',
-  traders: 'traders_flow',
-}
+const DEFAULT_STRATEGY_KEY = 'btc_eth_highfreq'
 
 function normalizeTraderSourceKey(value: unknown): string {
+  return String(value || '').trim().toLowerCase()
+}
+
+function normalizeTraderStrategyKey(value: unknown): string {
   const key = String(value || '').trim().toLowerCase()
-  return TRADER_SOURCE_ALIASES[key] || key
+  return key || DEFAULT_STRATEGY_KEY
 }
 
 function normalizeTraderStrategyKeyForSource(sourceKey: string, value: unknown): string {
-  const key = String(value || '').trim().toLowerCase()
-  if (key === 'opportunity_weather') {
-    if (sourceKey === 'weather') return 'weather_consensus'
-    if (sourceKey === 'scanner') return 'opportunity_general'
+  const key = normalizeTraderStrategyKey(value)
+  const normalizedSource = normalizeTraderSourceKey(sourceKey)
+  if (key) {
+    return key
   }
-  return key
+  return DEFAULT_STRATEGY_BY_SOURCE[normalizedSource] || DEFAULT_STRATEGY_KEY
 }
 
-function withLegacyTraderFields(raw: any): Trader {
+function normalizeTraderFields(raw: any): Trader {
   const sourceConfigs = Array.isArray(raw?.source_configs) ? raw.source_configs : []
   const normalizedSourceConfigs = sourceConfigs
     .filter((item: any) => item && typeof item === 'object')
     .map((item: any) => {
       const sourceKey = normalizeTraderSourceKey(item.source_key)
-      const strategyKey = normalizeTraderStrategyKeyForSource(sourceKey, item.strategy_key)
       return {
         source_key: sourceKey,
-        strategy_key: String(strategyKey || LEGACY_STRATEGY_FALLBACK_BY_SOURCE[sourceKey] || ''),
+        strategy_key: normalizeTraderStrategyKeyForSource(sourceKey, item.strategy_key),
         strategy_params: item.strategy_params && typeof item.strategy_params === 'object' ? item.strategy_params : {},
         traders_scope: item.traders_scope && typeof item.traders_scope === 'object'
           ? {
@@ -1901,44 +1928,40 @@ function withLegacyTraderFields(raw: any): Trader {
     })
 
   const first = normalizedSourceConfigs[0]
-  const legacyStrategyKey = String(
-    raw?.strategy_key ||
-      first?.strategy_key ||
-      LEGACY_STRATEGY_FALLBACK_BY_SOURCE[first?.source_key || 'crypto'] ||
-      'crypto_15m'
-  )
-  const legacySources = Array.from(
+  const firstSourceKey = normalizeTraderSourceKey(first?.source_key || 'crypto')
+  const normalizedStrategy = normalizeTraderStrategyKeyForSource(firstSourceKey, raw?.strategy_key || first?.strategy_key)
+  const normalizedSources = Array.from(
     new Set(normalizedSourceConfigs.map((config: any) => String(config.source_key || '').trim()).filter(Boolean))
   )
-  const legacyParams = first?.strategy_params && typeof first.strategy_params === 'object' ? first.strategy_params : {}
+  const normalizedParams = first?.strategy_params && typeof first.strategy_params === 'object' ? first.strategy_params : {}
 
   return {
     ...raw,
     source_configs: normalizedSourceConfigs,
-    strategy_key: legacyStrategyKey,
-    sources: legacySources,
-    params: legacyParams,
+    strategy_key: normalizedStrategy,
+    sources: normalizedSources,
+    params: normalizedParams,
   }
 }
 
 export const getTraders = async (): Promise<Trader[]> => {
   const { data } = await api.get('/traders')
-  return (data.traders || []).map(withLegacyTraderFields)
+  return (data.traders || []).map(normalizeTraderFields)
 }
 
 export const createTrader = async (payload: Record<string, any>): Promise<Trader> => {
   const { data } = await api.post('/traders', payload)
-  return withLegacyTraderFields(data)
+  return normalizeTraderFields(data)
 }
 
 export const getTrader = async (traderId: string): Promise<Trader> => {
   const { data } = await api.get(`/traders/${traderId}`)
-  return withLegacyTraderFields(data)
+  return normalizeTraderFields(data)
 }
 
 export const updateTrader = async (traderId: string, payload: Record<string, any>): Promise<Trader> => {
   const { data } = await api.put(`/traders/${traderId}`, payload)
-  return withLegacyTraderFields(data)
+  return normalizeTraderFields(data)
 }
 
 export type TraderDeleteAction = 'block' | 'disable' | 'force_delete'
@@ -1950,9 +1973,9 @@ export const deleteTrader = async (
   status: string
   trader_id: string
   action?: TraderDeleteAction
-  open_live_orders?: number
-  open_paper_orders?: number
-  open_other_orders?: number
+  open_live_positions?: number
+  open_paper_positions?: number
+  open_other_positions?: number
   message?: string
 }> => {
   const { data } = await api.delete(`/traders/${traderId}`, { params: options })
@@ -2058,7 +2081,7 @@ export const getTraderStrategies = async (params?: {
   status?: string
 }): Promise<TraderStrategyDefinition[]> => {
   const { data } = await api.get('/strategy-manager', { params })
-  // Map unified response shape to legacy TraderStrategyDefinition shape
+  // Map unified response shape to TraderStrategyDefinition shape
   const items = data.items || data || []
   return items.map((s: any) => ({
     ...s,
@@ -2357,6 +2380,7 @@ export interface DiscoverySettings {
   pool_min_size: number
   pool_max_size: number
   pool_active_window_hours: number
+  pool_inactive_rising_retention_hours: number
   pool_selection_score_floor: number
   pool_max_hourly_replacement_rate: number
   pool_replacement_score_cutoff: number
@@ -2408,7 +2432,7 @@ export interface TradingProxySettings {
   require_vpn: boolean
 }
 
-export interface WorldIntelligenceSettings {
+export interface EventsSettings {
   enabled: boolean
   interval_seconds: number
   emit_trade_signals: boolean
@@ -2575,7 +2599,7 @@ export interface AllSettings {
   maintenance: MaintenanceSettings
   discovery: DiscoverySettings
   trading_proxy: TradingProxySettings
-  world_intelligence: WorldIntelligenceSettings
+  events: EventsSettings
   search_filters: SearchFilterSettings
   updated_at: string | null
 }
@@ -2590,7 +2614,7 @@ export interface UpdateSettingsRequest {
   maintenance?: Partial<MaintenanceSettings>
   discovery?: Partial<DiscoverySettings>
   trading_proxy?: Partial<TradingProxySettings>
-  world_intelligence?: Partial<WorldIntelligenceSettings>
+  events?: Partial<EventsSettings>
   search_filters?: Partial<SearchFilterSettings>
 }
 
@@ -2653,6 +2677,13 @@ export interface LLMModelsResponse {
   models: Record<string, LLMModelOption[]>
 }
 
+export interface LLMTestResponse {
+  status: string
+  message: string
+  provider?: string
+  model_count?: number
+}
+
 export interface RefreshModelsResponse {
   status: string
   message: string
@@ -2666,6 +2697,11 @@ export const getLLMModels = async (provider?: string): Promise<LLMModelsResponse
 
 export const refreshLLMModels = async (provider?: string): Promise<RefreshModelsResponse> => {
   const { data } = await api.post('/settings/llm/models/refresh', null, { params: provider ? { provider } : undefined })
+  return unwrapApiData(data)
+}
+
+export const testLLMConnection = async (provider?: string): Promise<LLMTestResponse> => {
+  const { data } = await api.post('/settings/test/llm', null, { params: provider ? { provider } : undefined })
   return unwrapApiData(data)
 }
 
@@ -2732,7 +2768,7 @@ export interface ValidationOverview {
     by_source: Array<Record<string, unknown>>
     by_strategy: Array<Record<string, unknown>>
   }
-  world_intel_resolver_7d?: {
+  events_resolver_7d?: {
     window_days: number
     signals_sampled: number
     candidates: number
@@ -3233,6 +3269,7 @@ export interface NewsWorkflowFinding {
   article_source: string
   article_url: string
   signal_key?: string | null
+  strategy_sdk?: string | null
   cache_key?: string | null
   market_question: string
   market_price: number
@@ -3346,24 +3383,6 @@ export interface NewsWorkflowStatus {
   stats: Record<string, unknown>
 }
 
-export interface NewsRssFeedConfig {
-  id: string
-  name: string
-  url: string
-  enabled: boolean
-  category: string
-}
-
-export interface NewsRssSourceConfig {
-  id: string
-  agency: string
-  name: string
-  url: string
-  priority: 'critical' | 'high' | 'medium' | 'low'
-  country_iso3: string
-  enabled: boolean
-}
-
 export interface NewsWorkflowSettings {
   enabled: boolean
   auto_run: boolean
@@ -3387,12 +3406,6 @@ export interface NewsWorkflowSettings {
   cycle_llm_call_cap: number
   cache_ttl_minutes: number
   max_edge_evals_per_article: number
-  rss_feeds: NewsRssFeedConfig[]
-  rss_enabled: boolean
-  rss_sources: NewsRssSourceConfig[]
-  // Backward-compatible payload keys from older backends.
-  gov_rss_enabled?: boolean
-  gov_rss_feeds?: NewsRssSourceConfig[]
   model: string | null
 }
 
@@ -3530,6 +3543,13 @@ export interface WeatherOpportunityDateBucket {
   count: number
 }
 
+export interface WeatherWorkflowOpportunityIdsResponse {
+  total: number
+  offset: number
+  limit: number
+  ids: string[]
+}
+
 export const getWeatherWorkflowStatus = async (): Promise<WeatherWorkflowStatus> => {
   const { data } = await api.get('/weather-workflow/status')
   return unwrapApiData(data)
@@ -3581,6 +3601,20 @@ export const getWeatherWorkflowOpportunityDates = async (params?: {
   include_report_only?: boolean
 }): Promise<{ total_dates: number; dates: WeatherOpportunityDateBucket[] }> => {
   const { data } = await api.get('/weather-workflow/opportunity-dates', { params })
+  return unwrapApiData(data)
+}
+
+export const getWeatherWorkflowOpportunityIds = async (params?: {
+  min_edge?: number
+  direction?: string
+  max_entry?: number
+  location?: string
+  target_date?: string
+  include_report_only?: boolean
+  limit?: number
+  offset?: number
+}): Promise<WeatherWorkflowOpportunityIdsResponse> => {
+  const { data } = await api.get('/weather-workflow/opportunity-ids', { params })
   return unwrapApiData(data)
 }
 
@@ -3758,6 +3792,10 @@ export interface UnifiedDataSource {
   status: string
   error_message: string | null
   version: number
+  retention: {
+    max_records?: number
+    max_age_days?: number
+  }
   config: Record<string, unknown>
   config_schema: Record<string, unknown> | null
   sort_order: number
@@ -3812,6 +3850,10 @@ export interface UnifiedDataSourceTemplatePreset {
   source_key: string
   source_kind: string
   source_code: string
+  retention?: {
+    max_records?: number
+    max_age_days?: number
+  }
   config: Record<string, unknown>
   config_schema: Record<string, unknown>
   is_system_seed?: boolean
@@ -3828,9 +3870,13 @@ export interface UnifiedDataSourceTemplateResponse {
 export const getUnifiedDataSources = async (params?: {
   source_key?: string
   enabled?: boolean
+  include_code?: boolean
 }): Promise<UnifiedDataSource[]> => {
   const { data } = await api.get('/data-sources', { params })
-  return data.items || []
+  const payload = unwrapApiData(data)
+  if (Array.isArray(payload)) return payload
+  if (Array.isArray(payload?.items)) return payload.items
+  return []
 }
 
 export const getUnifiedDataSource = async (id: string): Promise<UnifiedDataSource> => {
@@ -3845,6 +3891,10 @@ export const createUnifiedDataSource = async (payload: {
   name?: string
   description?: string
   source_code: string
+  retention?: {
+    max_records?: number
+    max_age_days?: number
+  }
   config?: Record<string, unknown>
   config_schema?: Record<string, unknown>
   enabled?: boolean
@@ -3862,6 +3912,10 @@ export const updateUnifiedDataSource = async (
     name: string
     description: string
     source_code: string
+    retention: {
+      max_records?: number
+      max_age_days?: number
+    }
     config: Record<string, unknown>
     config_schema: Record<string, unknown>
     enabled: boolean

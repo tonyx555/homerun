@@ -103,10 +103,7 @@ type PositionBookRow = {
 const CRYPTO_STRATEGY_MODES = ['auto', 'directional', 'pure_arb', 'rebalance'] as const
 const CRYPTO_ASSET_OPTIONS = ['BTC', 'ETH', 'SOL', 'XRP'] as const
 const CRYPTO_STRATEGY_OPTIONS = [
-  { key: 'crypto_5m', label: 'Crypto 5m', timeframe: '5m' },
-  { key: 'crypto_15m', label: 'Crypto 15m', timeframe: '15m' },
-  { key: 'crypto_1h', label: 'Crypto 1h', timeframe: '1h' },
-  { key: 'crypto_4h', label: 'Crypto 4h', timeframe: '4h' },
+  { key: 'btc_eth_highfreq', label: 'Crypto High Frequency', timeframe: null },
   { key: 'crypto_spike_reversion', label: 'Crypto Spike Reversion', timeframe: null },
 ] as const
 const CRYPTO_TIMEFRAME_OPTIONS = ['5m', '15m', '1h', '4h'] as const
@@ -240,7 +237,7 @@ const FALLBACK_TRADER_SOURCES: TraderSource[] = [
     description: 'News-driven intents and event reactions.',
     domains: ['event_markets'],
     signal_types: ['news_intent'],
-    strategy_options: [{ key: 'news_reaction', label: 'News Reaction', description: '', default_params: {}, param_fields: [] }],
+    strategy_options: [{ key: 'news_edge', label: 'News Edge', description: '', default_params: {}, param_fields: [] }],
   },
   {
     key: 'scanner',
@@ -248,10 +245,7 @@ const FALLBACK_TRADER_SOURCES: TraderSource[] = [
     description: 'Scanner-originated arbitrage opportunities.',
     domains: ['event_markets'],
     signal_types: ['opportunity'],
-    strategy_options: [
-      { key: 'opportunity_general', label: 'Opportunity General', description: '', default_params: {}, param_fields: [] },
-      { key: 'opportunity_structural', label: 'Opportunity Structural', description: '', default_params: {}, param_fields: [] },
-    ],
+    strategy_options: [{ key: 'basic', label: 'Opportunity General', description: '', default_params: {}, param_fields: [] }],
   },
   {
     key: 'traders',
@@ -259,7 +253,7 @@ const FALLBACK_TRADER_SOURCES: TraderSource[] = [
     description: 'Tracked/pool/individual/group wallet activity signals.',
     domains: ['event_markets'],
     signal_types: ['confluence'],
-    strategy_options: [{ key: 'traders_flow', label: 'Wallet Flow', description: '', default_params: {}, param_fields: [] }],
+    strategy_options: [{ key: 'traders_confluence', label: 'Wallet Confluence', description: '', default_params: {}, param_fields: [] }],
   },
   {
     key: 'weather',
@@ -267,34 +261,28 @@ const FALLBACK_TRADER_SOURCES: TraderSource[] = [
     description: 'Weather forecast probability dislocations.',
     domains: ['event_markets'],
     signal_types: ['weather_intent'],
-    strategy_options: [
-      { key: 'weather_consensus', label: 'Weather Consensus', description: '', default_params: {}, param_fields: [] },
-      { key: 'weather_alerts', label: 'Weather Alerts', description: '', default_params: {}, param_fields: [] },
-    ],
+    strategy_options: [{ key: 'weather_distribution', label: 'Weather Distribution', description: '', default_params: {}, param_fields: [] }],
   },
 ]
 
 const STRATEGY_LABELS: Record<string, string> = {
-  crypto_5m: 'Crypto 5m',
-  crypto_15m: 'Crypto 15m',
-  crypto_1h: 'Crypto 1h',
-  crypto_4h: 'Crypto 4h',
+  basic: 'Opportunity General',
+  btc_eth_highfreq: 'Crypto High-Frequency',
   crypto_spike_reversion: 'Crypto Spike Reversion',
-  news_reaction: 'News Reaction',
-  opportunity_general: 'Opportunity General',
-  opportunity_structural: 'Opportunity Structural',
-  weather_consensus: 'Weather Consensus',
-  weather_alerts: 'Weather Alerts',
-  traders_flow: 'Wallet Flow',
+  news_edge: 'News Reaction',
+  weather_distribution: 'Weather Distribution',
+  traders_confluence: 'Wallet Confluence',
+  flash_crash_reversion: 'Opportunity Flash Reversion',
+  tail_end_carry: 'Opportunity Tail Carry',
 }
 
-const DEFAULT_STRATEGY_KEY = 'crypto_15m'
+const DEFAULT_STRATEGY_KEY = 'btc_eth_highfreq'
 const DEFAULT_STRATEGY_BY_SOURCE: Record<string, string> = {
-  crypto: 'crypto_15m',
-  scanner: 'opportunity_general',
-  news: 'news_reaction',
-  weather: 'weather_consensus',
-  traders: 'traders_flow',
+  crypto: 'btc_eth_highfreq',
+  scanner: 'basic',
+  news: 'news_edge',
+  weather: 'weather_distribution',
+  traders: 'traders_confluence',
 }
 
 type StrategyOption = {
@@ -526,7 +514,6 @@ function csvToList(value: string): string[] {
 
 function normalizeSourceKey(value: string): string {
   const key = String(value || '').trim().toLowerCase()
-  if (key === 'tracked_traders' || key === 'pool_traders' || key === 'insider') return 'traders'
   return key
 }
 
@@ -551,11 +538,7 @@ function normalizeStrategyKey(value: unknown): string {
 function normalizeStrategyKeyForSource(sourceKey: string, value: unknown): string {
   const normalizedSource = normalizeSourceKey(sourceKey)
   const key = normalizeStrategyKey(value)
-  if (key === 'opportunity_weather') {
-    if (normalizedSource === 'weather') return 'weather_consensus'
-    if (normalizedSource === 'scanner') return 'opportunity_general'
-  }
-  return key
+  return key || DEFAULT_STRATEGY_BY_SOURCE[normalizedSource] || DEFAULT_STRATEGY_KEY
 }
 
 function normalizeResumePolicy(value: unknown): ResumePolicy {
@@ -566,8 +549,16 @@ function normalizeResumePolicy(value: unknown): ResumePolicy {
   return 'resume_full'
 }
 
-function strategyLabelForKey(key: string): string {
-  return STRATEGY_LABELS[key] || key
+function strategyLabelForKey(key: string, sourceCatalog: TraderSource[] = []): string {
+  const normalized = String(key || '').trim().toLowerCase()
+  for (const source of sourceCatalog) {
+    const option = (source.strategy_options || [])
+      .find((item) => String(item.key || '').trim().toLowerCase() === normalized)
+    if (option?.label) {
+      return String(option.label)
+    }
+  }
+  return STRATEGY_LABELS[normalized] || normalized || key
 }
 
 function asSignalSideFilter(value: unknown): TraderSignalFilters['side_filter'] {
@@ -579,9 +570,8 @@ function asSignalSideFilter(value: unknown): TraderSignalFilters['side_filter'] 
 
 function asSignalSourceFilter(value: unknown): TraderSignalFilters['source_filter'] {
   const source = String(value || '').trim().toLowerCase()
-  if (source === 'confluence') return 'all'
   if (source === 'tracked') return 'tracked'
-  if (source === 'pool' || source === 'insider') return 'pool'
+  if (source === 'pool') return 'pool'
   return 'all'
 }
 
@@ -626,9 +616,12 @@ function sourceStrategyDetails(source: TraderSource): StrategyOptionDetail[] {
     })
     .filter((item) => item.key)
   if (options.length > 0) return options
-  const fallback = DEFAULT_STRATEGY_BY_SOURCE[normalizeSourceKey(source.key)]
+  const fallback =
+    source.default_strategy_key ||
+    DEFAULT_STRATEGY_BY_SOURCE[normalizeSourceKey(source.key)]
   if (fallback) {
-    return [{ key: fallback, label: strategyLabelForKey(fallback), defaultParams: {}, paramFields: [] }]
+    const normalizedFallback = normalizeStrategyKeyForSource(source.key, fallback)
+    return [{ key: normalizedFallback, label: strategyLabelForKey(normalizedFallback, [source]), defaultParams: {}, paramFields: [] }]
   }
   return []
 }
@@ -733,6 +726,10 @@ function defaultStrategyForSource(sourceKey: string, sourceCatalog: TraderSource
   const normalized = normalizeSourceKey(sourceKey)
   const source = sourceCatalog.find((item) => normalizeSourceKey(item.key) === normalized)
   const options = source ? sourceStrategyOptions(source) : []
+  const preferred = source ? normalizeStrategyKeyForSource(normalized, source.default_strategy_key) : ''
+  if (preferred && options.some((option) => option.key === preferred)) {
+    return preferred
+  }
   if (options.length > 0) return options[0].key
   return DEFAULT_STRATEGY_BY_SOURCE[normalized] || DEFAULT_STRATEGY_KEY
 }
@@ -3484,7 +3481,7 @@ export default function TradingPanel() {
                       </p>
                     </div>
                   </div>
-                  {isCryptoStrategyDraft && ['crypto_5m', 'crypto_15m'].includes(cryptoStrategyKeyDraft) && Number(draftInterval || 0) >= 60 ? (
+                  {isCryptoStrategyDraft && cryptoStrategyKeyDraft === 'btc_eth_highfreq' && Number(draftInterval || 0) >= 60 ? (
                     <p className="text-xs text-amber-700 dark:text-amber-100">
                       60s is too slow for short-horizon crypto execution. Recommended cadence is 2s to 10s.
                     </p>

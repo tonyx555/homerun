@@ -23,6 +23,7 @@ This strategy:
 
 from __future__ import annotations
 
+import asyncio
 import re
 import threading
 import time
@@ -30,6 +31,7 @@ from collections import OrderedDict, defaultdict
 from typing import Any, Optional
 from config import settings
 from models import Market, Event, Opportunity
+from services.data_events import DataEvent, EventType
 from .base import BaseStrategy, DecisionCheck, ExitDecision, ScoringWeights, SizingConfig
 from services.quality_filter import QualityFilterOverrides
 from utils.converters import to_float
@@ -914,6 +916,24 @@ class CombinatorialStrategy(BaseStrategy):
                     opportunities.append(opp)
 
         return opportunities
+
+    async def on_event(self, event: DataEvent) -> list[Opportunity]:
+        """Run bounded heuristic detection in scanner loops.
+
+        The async LLM dependency path is intentionally excluded from
+        high-frequency MARKET_DATA_REFRESH dispatch because it can stall
+        the scanner cycle for minutes under load.
+        """
+        if event.event_type != EventType.MARKET_DATA_REFRESH:
+            return []
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            self.detect,
+            event.events or [],
+            event.markets or [],
+            event.prices or {},
+        )
 
     def _check_pair(
         self, market_a: Market, market_b: Market, prices: dict[str, dict]

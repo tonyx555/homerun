@@ -1,7 +1,10 @@
 import os
 import asyncio
+import signal
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from utils.utcnow import utcnow
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,7 +41,7 @@ from api.routes_kalshi import router as kalshi_router
 from api.routes_crypto import router as crypto_router
 from api.routes_news_workflow import router as news_workflow_router
 from api.routes_weather_workflow import router as weather_workflow_router
-from api.routes_world_intelligence import router as world_intelligence_router
+from api.routes_events import router as events_router
 from api.routes_signals import router as signals_router
 from api.routes_workers import router as workers_router
 from api.routes_validation import router as validation_router
@@ -56,6 +59,9 @@ from services.maintenance import maintenance_service
 from services.validation_service import validation_service
 from services.snapshot_broadcaster import snapshot_broadcaster
 from services.market_prioritizer import market_prioritizer
+from services.event_bus import event_bus
+from services.event_dispatcher import event_dispatcher
+from services.redis_streams import redis_streams
 from models.database import AppSettings, AsyncSessionLocal, init_database
 from models.model_registry import register_all_models
 from services import discovery_shared_state, shared_state
@@ -98,7 +104,173 @@ async def lifespan(app: FastAPI):
         "Thread pool executor configured",
         max_workers=max(cpu_count * 2 + 8, 16),
     )
-    worker_tasks: list[asyncio.Task] = []
+    worker_processes: dict[str, asyncio.subprocess.Process] = {}
+    worker_monitor_tasks: list[asyncio.Task] = []
+    workers_shutting_down = False
+
+    def _worker_name_from_module(module_name: str) -> str:
+        return module_name.split(".")[-1].replace("_worker", "")
+
+    def _parse_iso_utc(value: Optional[str]) -> Optional[datetime]:
+        if not value:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(text)
+        except Exception:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    async def _spawn_worker_process(module_name: str) -> asyncio.subprocess.Process:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "workers.runner",
+            module_name,
+            cwd=str(Path(__file__).resolve().parent),
+            env=os.environ.copy(),
+        )
+        logger.info(
+            "Worker process started",
+            worker=module_name.split(".")[-1],
+            pid=process.pid,
+        )
+        return process
+
+    async def _terminate_worker_process(module_name: str, process: asyncio.subprocess.Process) -> None:
+        if process.returncode is not None:
+            return
+        try:
+            process.send_signal(signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        except Exception as e:
+            logger.warning(
+                "Failed to signal worker process",
+                worker=_worker_name_from_module(module_name),
+                pid=process.pid,
+                error=str(e),
+            )
+            return
+
+        try:
+            await asyncio.wait_for(process.wait(), timeout=10)
+            return
+        except asyncio.TimeoutError:
+            pass
+
+        try:
+            process.kill()
+        except ProcessLookupError:
+            return
+        except Exception as e:
+            logger.warning(
+                "Failed to kill worker process",
+                worker=_worker_name_from_module(module_name),
+                pid=process.pid,
+                error=str(e),
+            )
+            return
+        try:
+            await process.wait()
+        except Exception:
+            pass
+
+    async def _restart_worker_process(module_name: str, *, reason: str) -> None:
+        if workers_shutting_down:
+            return
+
+        current = worker_processes.get(module_name)
+        if current is not None:
+            await _terminate_worker_process(module_name, current)
+
+        replacement = await _spawn_worker_process(module_name)
+        worker_processes[module_name] = replacement
+        logger.warning(
+            "Worker process restarted",
+            worker=_worker_name_from_module(module_name),
+            pid=replacement.pid,
+            reason=reason,
+        )
+
+    async def _monitor_worker_process(module_name: str) -> None:
+        while not workers_shutting_down:
+            process = worker_processes.get(module_name)
+            if process is None:
+                await asyncio.sleep(1.0)
+                continue
+
+            return_code = await process.wait()
+            if workers_shutting_down:
+                return
+            if worker_processes.get(module_name) is not process:
+                continue
+
+            logger.error(
+                "Worker process exited unexpectedly",
+                worker=_worker_name_from_module(module_name),
+                pid=process.pid,
+                return_code=return_code,
+            )
+            await asyncio.sleep(1.0)
+            await _restart_worker_process(
+                module_name,
+                reason=f"unexpected_exit:{return_code}",
+            )
+
+    async def _monitor_worker_freshness() -> None:
+        while not workers_shutting_down:
+            await asyncio.sleep(30.0)
+            if workers_shutting_down:
+                return
+            try:
+                async with AsyncSessionLocal() as session:
+                    snapshots = await list_worker_snapshots(session, include_stats=False)
+            except Exception as e:
+                logger.warning("Worker freshness check failed", error=str(e))
+                continue
+
+            snapshot_by_name = {
+                str(item.get("worker_name") or ""): item
+                for item in snapshots
+                if isinstance(item, dict)
+            }
+
+            now = utcnow()
+            for module_name, process in list(worker_processes.items()):
+                if process.returncode is not None:
+                    continue
+                worker_name = _worker_name_from_module(module_name)
+                snapshot = snapshot_by_name.get(worker_name)
+                if not snapshot:
+                    continue
+
+                updated_at = _parse_iso_utc(snapshot.get("updated_at"))
+                if updated_at is None:
+                    continue
+
+                interval_seconds = max(1, int(snapshot.get("interval_seconds") or 60))
+                stale_after_seconds = max(180, interval_seconds * 6)
+                if worker_name == "scanner":
+                    stale_after_seconds = max(stale_after_seconds, 360)
+                age_seconds = (now - updated_at).total_seconds()
+                if age_seconds <= stale_after_seconds:
+                    continue
+
+                logger.error(
+                    "Worker heartbeat stale; restarting",
+                    worker=worker_name,
+                    age_seconds=round(age_seconds, 1),
+                    stale_after_seconds=stale_after_seconds,
+                    current_activity=snapshot.get("current_activity"),
+                )
+                await _restart_worker_process(module_name, reason="stale_heartbeat")
 
     try:
         # Initialize database
@@ -139,114 +311,25 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"Failed to preload data source registries: {e}")
 
-        # Load persisted world-intelligence runtime config before any world
+        await event_bus.start()
+        await event_dispatcher.start()
+        redis_healthy = await redis_streams.ping()
+        if redis_healthy:
+            logger.info("Redis stream transport online")
+        else:
+            logger.warning("Redis stream transport unavailable at startup")
+
+        # Load persisted events runtime config before any world
         # source modules are imported (they snapshot some settings on import).
         try:
-            from config import apply_world_intelligence_settings
+            from config import apply_events_settings
 
-            await apply_world_intelligence_settings()
-            logger.info("World intelligence settings loaded from database")
+            await apply_events_settings()
+            logger.info("Events settings loaded from database")
         except Exception as e:
-            logger.warning(f"Failed to load world intelligence settings (using defaults): {e}")
+            logger.warning(f"Failed to load events settings (using defaults): {e}")
 
-        # Load DB-backed country reference catalog into runtime cache so
-        # country normalization uses dynamic records instead of static files.
-        try:
-            from services.world_intelligence.country_reference_source import (
-                load_country_reference_from_db,
-            )
-
-            async with AsyncSessionLocal() as session:
-                loaded_country_rows = await load_country_reference_from_db(session)
-            logger.info(
-                "World country reference loaded",
-                rows=loaded_country_rows,
-            )
-        except Exception as e:
-            logger.warning(f"Failed to load world country reference catalog: {e}")
-
-        # Load DB-backed UCDP conflict lists for instability scoring floors.
-        try:
-            from services.world_intelligence.ucdp_conflict_source import (
-                load_ucdp_conflict_lists_from_db,
-            )
-
-            async with AsyncSessionLocal() as session:
-                ucdp_status = await load_ucdp_conflict_lists_from_db(session)
-            logger.info(
-                "World UCDP conflict lists loaded",
-                source=ucdp_status.get("source"),
-                active_wars=ucdp_status.get("active_wars"),
-                minor_conflicts=ucdp_status.get("minor_conflicts"),
-            )
-        except Exception as e:
-            logger.warning(f"Failed to load UCDP conflict lists: {e}")
-
-        # Load DB-backed ITU MID mapping for vessel country normalization.
-        try:
-            from services.world_intelligence.mid_reference_source import (
-                load_mid_reference_from_db,
-            )
-
-            async with AsyncSessionLocal() as session:
-                mid_status = await load_mid_reference_from_db(session)
-            logger.info(
-                "World MID reference loaded",
-                source=mid_status.get("source"),
-                count=mid_status.get("count"),
-            )
-        except Exception as e:
-            logger.warning(f"Failed to load MID reference mapping: {e}")
-
-        # Load DB-backed trade dependency overlay for infrastructure cascade risk.
-        try:
-            from services.world_intelligence.trade_dependency_source import (
-                load_trade_dependencies_from_db,
-            )
-
-            async with AsyncSessionLocal() as session:
-                trade_status = await load_trade_dependencies_from_db(session)
-            logger.info(
-                "World trade dependency overlay loaded",
-                source=trade_status.get("source"),
-                countries=trade_status.get("countries"),
-            )
-        except Exception as e:
-            logger.warning(f"Failed to load trade dependency overlay: {e}")
-
-        # Load DB-backed chokepoint rows so runtime has a persisted fallback
-        # independent of static JSON files.
-        try:
-            from services.world_intelligence.chokepoint_reference_source import (
-                load_chokepoint_reference_from_db,
-            )
-
-            async with AsyncSessionLocal() as session:
-                chokepoint_status = await load_chokepoint_reference_from_db(session)
-            logger.info(
-                "World chokepoint reference loaded",
-                source=chokepoint_status.get("source"),
-                count=chokepoint_status.get("count"),
-            )
-        except Exception as e:
-            logger.warning(f"Failed to load chokepoint reference rows: {e}")
-
-        # Load DB-backed GDELT world-news query config for world-intelligence.
-        try:
-            from services.world_intelligence.gdelt_news_source import (
-                load_gdelt_news_config_from_db,
-            )
-
-            async with AsyncSessionLocal() as session:
-                gdelt_news_status = await load_gdelt_news_config_from_db(session)
-            logger.info(
-                "World GDELT news config loaded",
-                source=gdelt_news_status.get("source"),
-                queries=gdelt_news_status.get("queries"),
-                enabled=gdelt_news_status.get("enabled"),
-            )
-        except Exception as e:
-            logger.warning(f"Failed to load world GDELT news config: {e}")
+        logger.info("Events runtime configured for datasource-owned integrations")
 
         # Restore global pause state from persisted worker controls.
         # This keeps API-owned loops (copy trader, wallet tracker, LLM/trading gates)
@@ -260,7 +343,7 @@ async def lifespan(app: FastAPI):
                 orchestrator_control = await read_orchestrator_control(session)
                 crypto_control = await read_worker_control(session, "crypto")
                 tracked_control = await read_worker_control(session, "tracked_traders")
-                world_intel_control = await read_worker_control(session, "world_intelligence")
+                events_control = await read_worker_control(session, "events")
 
             should_pause = all(
                 bool(control.get("is_paused", False))
@@ -272,7 +355,7 @@ async def lifespan(app: FastAPI):
                     orchestrator_control,
                     crypto_control,
                     tracked_control,
-                    world_intel_control,
+                    events_control,
                 )
             )
             if should_pause:
@@ -453,9 +536,8 @@ async def lifespan(app: FastAPI):
 
         logger.info("All services started successfully")
 
-        # ── Start all workers in-process (P0 fix: EventDispatcher is in-process) ──
-        import importlib
-
+        # Start worker loops in separate subprocesses so heavy scanners
+        # cannot starve API request handling on the main event loop.
         _WORKER_MODULES = (
             "workers.scanner_worker",
             "workers.crypto_worker",
@@ -463,17 +545,21 @@ async def lifespan(app: FastAPI):
             "workers.weather_worker",
             "workers.tracked_traders_worker",
             "workers.trader_orchestrator_worker",
-            "workers.world_intelligence_worker",
+            "workers.events_worker",
             "workers.discovery_worker",
         )
         for mod_name in _WORKER_MODULES:
-            mod = importlib.import_module(mod_name)
-            task = asyncio.create_task(
-                mod.start_loop(),
-                name=mod_name.split(".")[-1],
+            process = await _spawn_worker_process(mod_name)
+            worker_processes[mod_name] = process
+            monitor_task = asyncio.create_task(
+                _monitor_worker_process(mod_name),
+                name=f"monitor-{mod_name.split('.')[-1]}",
             )
-            worker_tasks.append(task)
-        logger.info("All %d worker loops started in-process", len(worker_tasks))
+            worker_monitor_tasks.append(monitor_task)
+        worker_monitor_tasks.append(
+            asyncio.create_task(_monitor_worker_freshness(), name="monitor-worker-freshness")
+        )
+        logger.info("All %d worker processes started", len(worker_processes))
 
         yield
 
@@ -505,17 +591,20 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
 
-        # Cancel in-process worker tasks first.
-        for task in worker_tasks:
+        # Stop worker subprocesses first.
+        workers_shutting_down = True
+        for mod_name, process in list(worker_processes.items()):
+            await _terminate_worker_process(mod_name, process)
+        for task in worker_monitor_tasks:
             task.cancel()
-        for task in worker_tasks:
+        for task in worker_monitor_tasks:
             try:
                 await task
             except asyncio.CancelledError:
                 pass
             except Exception:
                 pass
-        logger.info("All worker tasks cancelled")
+        logger.info("All worker processes stopped")
 
         for task in tasks:
             task.cancel()
@@ -523,6 +612,10 @@ async def lifespan(app: FastAPI):
                 await task
             except asyncio.CancelledError:
                 pass
+
+        await event_dispatcher.stop()
+        await event_bus.stop()
+        await redis_streams.close()
 
         try:
             from services.polymarket import polymarket_client
@@ -590,7 +683,7 @@ app.include_router(weather_workflow_router, prefix="/api", tags=["Weather Workfl
 app.include_router(signals_router, prefix="/api", tags=["Signals"])
 app.include_router(workers_router, prefix="/api", tags=["Workers"])
 app.include_router(validation_router, prefix="/api", tags=["Validation"])
-app.include_router(world_intelligence_router, prefix="/api", tags=["World Intelligence"])
+app.include_router(events_router, prefix="/api", tags=["Events"])
 
 
 # WebSocket endpoint
@@ -617,9 +710,11 @@ async def readiness_check():
     """Readiness probe - is the service ready to accept traffic?"""
     async with AsyncSessionLocal() as session:
         scanner_status = await shared_state.get_scanner_status_from_db(session)
+    redis_healthy = await redis_streams.ping()
     checks = {
         "scanner": scanner_status.get("running", False),
         "database": True,
+        "redis": redis_healthy,
         "polymarket_api": True,
     }
 
@@ -629,6 +724,84 @@ async def readiness_check():
         "status": "ready" if all_ready else "not_ready",
         "checks": checks,
         "timestamp": utcnow().isoformat(),
+    }
+
+
+@app.get("/health/tui")
+async def tui_health_check():
+    """Lightweight health snapshot for high-frequency TUI polling."""
+    redis_healthy = await redis_streams.ping()
+    async with AsyncSessionLocal() as session:
+        scanner_status = await shared_state.get_scanner_status_from_db(session)
+        discovery_status = await discovery_shared_state.get_discovery_status_from_db(session)
+        try:
+            from services.news import shared_state as news_shared_state
+
+            news_workflow_status = await news_shared_state.get_news_status_from_db(session)
+        except Exception:
+            news_workflow_status = {}
+        worker_status_rows = await list_worker_snapshots(session, include_stats=True)
+        orchestrator_snapshot = await read_orchestrator_snapshot(session)
+
+    worker_status = {row.get("worker_name"): row for row in worker_status_rows}
+
+    return {
+        "status": "healthy",
+        "timestamp": utcnow().isoformat(),
+        "checks": {
+            "database": True,
+            "redis": redis_healthy,
+        },
+        "services": {
+            "scanner": {
+                "running": scanner_status.get("running", False),
+                "last_scan": scanner_status.get("last_scan"),
+                "opportunities_count": scanner_status.get("opportunities_count", 0),
+            },
+            "trader_orchestrator": {
+                "running": bool(orchestrator_snapshot.get("running", False)),
+                "stats": orchestrator_snapshot,
+            },
+            "ws_feeds": _get_ws_feeds_status(scanner_status, worker_status),
+            "redis": {
+                "healthy": redis_healthy,
+                "host": settings.REDIS_HOST,
+                "port": int(settings.REDIS_PORT),
+                "db": int(settings.REDIS_DB),
+            },
+            "news_workflow": {
+                "running": bool(news_workflow_status.get("running", False)),
+                "enabled": bool(news_workflow_status.get("enabled", False)),
+                "paused": bool(news_workflow_status.get("paused", False)),
+                "last_scan": news_workflow_status.get("last_scan"),
+                "next_scan": news_workflow_status.get("next_scan"),
+                "current_activity": news_workflow_status.get("current_activity"),
+                "last_error": news_workflow_status.get("last_error"),
+                "degraded_mode": bool(news_workflow_status.get("degraded_mode", False)),
+                "pending_intents": int(news_workflow_status.get("pending_intents", 0)),
+            },
+            "wallet_discovery": {
+                "running": bool(discovery_status.get("running", wallet_discovery._running)),
+                "last_run": discovery_status.get("last_run_at")
+                or (wallet_discovery._last_run_at.isoformat() if wallet_discovery._last_run_at else None),
+                "wallets_discovered": int(
+                    discovery_status.get(
+                        "wallets_discovered_last_run",
+                        wallet_discovery._wallets_discovered_last_run,
+                    )
+                ),
+                "wallets_analyzed": int(
+                    discovery_status.get(
+                        "wallets_analyzed_last_run",
+                        wallet_discovery._wallets_analyzed_last_run,
+                    )
+                ),
+                "current_activity": discovery_status.get("current_activity"),
+                "interval_minutes": discovery_status.get("run_interval_minutes"),
+                "paused": bool(discovery_status.get("paused", False)),
+            },
+            "workers": worker_status,
+        },
     }
 
 
@@ -659,13 +832,34 @@ def _get_ai_status() -> dict:
         return {"enabled": False}
 
 
-def _get_ws_feeds_status(scanner_status: Optional[dict] = None) -> dict:
+def _get_ws_feeds_status(
+    scanner_status: Optional[dict] = None,
+    worker_status: Optional[dict] = None,
+) -> dict:
     """Get WebSocket feeds status for health check."""
-    if isinstance(scanner_status, dict):
-        snapshot_ws = scanner_status.get("ws_feeds")
-        if isinstance(snapshot_ws, dict):
-            # Scanner worker owns live WS feed lifecycle in production runs.
-            return snapshot_ws
+    if not settings.WS_FEED_ENABLED:
+        return {"healthy": False, "started": False, "enabled": False}
+
+    def _first_snapshot_status() -> Optional[dict]:
+        if isinstance(scanner_status, dict):
+            snapshot_ws = scanner_status.get("ws_feeds")
+            if isinstance(snapshot_ws, dict) and snapshot_ws.get("healthy") is True:
+                return snapshot_ws
+
+        if isinstance(worker_status, dict):
+            crypto_status = worker_status.get("crypto")
+            if isinstance(crypto_status, dict):
+                crypto_stats = crypto_status.get("stats")
+                if isinstance(crypto_stats, dict):
+                    snapshot_ws = crypto_stats.get("ws_feeds")
+                    if isinstance(snapshot_ws, dict) and snapshot_ws.get("healthy") is True:
+                        return snapshot_ws
+        return None
+
+    snapshot_ws = _first_snapshot_status()
+    if isinstance(snapshot_ws, dict):
+        return snapshot_ws
+
     try:
         from services.ws_feeds import get_feed_manager
 
@@ -678,6 +872,7 @@ def _get_ws_feeds_status(scanner_status: Optional[dict] = None) -> dict:
 @app.get("/health/detailed")
 async def detailed_health_check():
     """Detailed health check with all system stats"""
+    redis_healthy = await redis_streams.ping()
     async with AsyncSessionLocal() as session:
         scanner_status = await shared_state.get_scanner_status_from_db(session)
         discovery_status = await discovery_shared_state.get_discovery_status_from_db(session)
@@ -690,7 +885,7 @@ async def detailed_health_check():
             news_workflow_status = await news_shared_state.get_news_status_from_db(session)
         except Exception:
             news_workflow_status = {}
-        worker_status_rows = await list_worker_snapshots(session)
+        worker_status_rows = await list_worker_snapshots(session, include_stats=True)
         orchestrator_snapshot = await read_orchestrator_snapshot(session)
     worker_status = {row.get("worker_name"): row for row in worker_status_rows}
     maintenance_enabled = bool(settings.AUTO_CLEANUP_ENABLED)
@@ -703,6 +898,10 @@ async def detailed_health_check():
     return {
         "status": "healthy",
         "timestamp": utcnow().isoformat(),
+        "checks": {
+            "database": True,
+            "redis": redis_healthy,
+        },
         "services": {
             "scanner": {
                 "running": scanner_status.get("running", False),
@@ -729,7 +928,13 @@ async def detailed_health_check():
             },
             "market_prioritizer": market_prioritizer.get_stats(),
             "ai_intelligence": _get_ai_status(),
-            "ws_feeds": _get_ws_feeds_status(scanner_status),
+            "ws_feeds": _get_ws_feeds_status(scanner_status, worker_status),
+            "redis": {
+                "healthy": redis_healthy,
+                "host": settings.REDIS_HOST,
+                "port": int(settings.REDIS_PORT),
+                "db": int(settings.REDIS_DB),
+            },
             "news_intelligence": _get_news_status(),
             "news_workflow": {
                 "running": bool(news_workflow_status.get("running", False)),

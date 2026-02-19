@@ -30,6 +30,7 @@ import {
   getSettings,
   updateSettings,
   testTelegramConnection,
+  testLLMConnection,
   testTradingProxy,
   flushDatabaseData,
   getLLMModels,
@@ -66,6 +67,7 @@ const DEFAULT_DISCOVERY_SETTINGS: DiscoverySettings = {
   pool_min_size: 400,
   pool_max_size: 600,
   pool_active_window_hours: 72,
+  pool_inactive_rising_retention_hours: 336,
   pool_selection_score_floor: 0.55,
   pool_max_hourly_replacement_rate: 0.15,
   pool_replacement_score_cutoff: 0.05,
@@ -345,6 +347,10 @@ export default function SettingsPanel({
 
   const testVpnMutation = useMutation({
     mutationFn: testTradingProxy,
+  })
+
+  const testLlmMutation = useMutation({
+    mutationFn: () => testLLMConnection(),
   })
 
   const flushDataMutation = useMutation({
@@ -814,6 +820,30 @@ export default function SettingsPanel({
                           <Save className="w-3.5 h-3.5 mr-1.5" />
                           Save
                         </Button>
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => testLlmMutation.mutate()}
+                          disabled={testLlmMutation.isPending}
+                        >
+                          <MessageSquare className="w-3.5 h-3.5 mr-1.5" />
+                          Test
+                        </Button>
+                        {testLlmMutation.data && (
+                          <Badge
+                            variant={testLlmMutation.data.status === 'success' ? "default" : "outline"}
+                            className={cn(
+                              "text-xs",
+                              testLlmMutation.data.status === 'success'
+                                ? "bg-green-500/10 text-green-400"
+                                : testLlmMutation.data.status === 'warning'
+                                  ? "bg-yellow-500/10 text-yellow-400"
+                                  : "bg-red-500/10 text-red-400"
+                            )}
+                          >
+                            {testLlmMutation.data.message}
+                          </Badge>
+                        )}
                       </div>
                     </div>
                   )}
