@@ -1904,6 +1904,26 @@ class ScannerSnapshot(Base):
     market_history_json = Column(JSON, default=dict)
 
 
+class MarketCatalog(Base):
+    """Persisted market catalog from upstream APIs (Polymarket, Kalshi).
+
+    Written by the catalog refresh task; read by scanner on startup and
+    as a fallback when the in-memory cache is empty.  Single row with
+    id='latest', same pattern as ScannerSnapshot.
+    """
+
+    __tablename__ = "market_catalog"
+
+    id = Column(String, primary_key=True, default="latest")
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    events_json = Column(JSON, default=list)  # list of Event.model_dump() dicts
+    markets_json = Column(JSON, default=list)  # list of Market.model_dump() dicts
+    event_count = Column(Integer, default=0)
+    market_count = Column(Integer, default=0)
+    fetch_duration_seconds = Column(Float, nullable=True)
+    error = Column(Text, nullable=True)
+
+
 class NewsWorkflowControl(Base):
     """Control flags for news workflow worker (pause, request one-time scan, lease)."""
 

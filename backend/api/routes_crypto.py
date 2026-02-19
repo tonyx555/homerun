@@ -22,6 +22,7 @@ router = APIRouter()
 logger = get_logger(__name__)
 
 _SNAPSHOT_FRESH_MAX_AGE_SECONDS = 10.0
+_SNAPSHOT_WARM_MAX_AGE_SECONDS = 120.0
 _SNAPSHOT_NEAREST_EXPIRY_MAX_SECONDS = 6 * 60 * 60
 
 
@@ -143,6 +144,11 @@ def _snapshot_has_reasonable_nearest_expiry(markets: list[dict]) -> bool:
 def _is_snapshot_fresh(snapshot: dict) -> bool:
     age = _snapshot_age_seconds(snapshot)
     return age is not None and age <= _SNAPSHOT_FRESH_MAX_AGE_SECONDS
+
+
+def _is_snapshot_warm(snapshot: dict) -> bool:
+    age = _snapshot_age_seconds(snapshot)
+    return age is not None and age <= _SNAPSHOT_WARM_MAX_AGE_SECONDS
 
 
 def _hydrate_price_to_beat_cache_from_snapshot(
@@ -279,6 +285,17 @@ async def get_crypto_markets(
     ):
         return markets
 
+    # Warm snapshot: data exists but is slightly stale (idle mode).  Return it
+    # immediately — the worker is already triggered to refresh via
+    # request_worker_run above, so the next poll will get fresh data.
+    if (
+        markets
+        and _is_snapshot_warm(snapshot)
+        and expected_timeframes.issubset(snapshot_timeframes)
+        and _snapshot_has_reasonable_nearest_expiry(markets)
+    ):
+        return markets
+
     live = await _build_live_markets_from_source(markets)
     if live:
         return live
@@ -292,7 +309,7 @@ async def get_oracle_prices(session: AsyncSession = Depends(get_db_session)):
     snapshot = await read_worker_snapshot(session, "crypto")
     markets = _snapshot_markets(snapshot)
 
-    if not markets or not _is_snapshot_fresh(snapshot):
+    if not markets or not (_is_snapshot_fresh(snapshot) or _is_snapshot_warm(snapshot)):
         live = await _build_live_markets_from_source(markets)
         if live:
             markets = live

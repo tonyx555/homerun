@@ -89,7 +89,7 @@ class Settings(BaseSettings):
     WS_HEARTBEAT_INTERVAL: float = 15.0  # Ping interval to keep connection alive
 
     # Scanner Settings
-    SCAN_WATCHDOG_SECONDS: int = 600  # Max seconds before scan_once is killed (must exceed fetch + strategy time)
+    SCAN_WATCHDOG_SECONDS: int = 600  # Max seconds before a scan cycle is killed
     SCAN_INTERVAL_SECONDS: int = 60
     SCANNER_STALE_OPPORTUNITY_MINUTES: int = 45
     # Prevent one strategy from flooding the opportunities surface.

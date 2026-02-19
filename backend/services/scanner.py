@@ -61,6 +61,7 @@ class ArbitrageScanner:
         self._last_scan: Optional[datetime] = None
         self._last_full_scan: Optional[datetime] = None
         self._last_fast_scan: Optional[datetime] = None
+        self._last_catalog_refresh: Optional[datetime] = None
         self._opportunities: list[Opportunity] = []
         self._scan_callbacks: List[Callable] = []
         self._status_callbacks: List[Callable] = []
@@ -897,6 +898,35 @@ class ArbitrageScanner:
                 out[mid] = hist[-limit:]
         return out
 
+    def get_broad_market_history(self, max_markets: int = 500) -> dict[str, list[dict[str, float]]]:
+        """Export history for all cached markets, sorted by recency, capped at *max_markets*.
+
+        Unlike ``get_market_history_for_opportunities`` which only returns history
+        for markets present in a specific opportunity set, this method exports the
+        broadest set of history available so other workers (traders, weather) can
+        hydrate their sparklines from the DB even when they run in a subprocess
+        with an empty in-memory cache.
+        """
+        export_points = self._market_history_export_points
+        limit = max(2, min(self._market_history_max_points, int(export_points)))
+
+        # Sort markets by most-recent data point (descending) so we keep the
+        # most relevant markets when capping at max_markets.
+        def _last_ts(hist: list[dict[str, float]]) -> float:
+            return float(hist[-1].get("t", 0)) if hist else 0.0
+
+        candidates = [
+            (mid, hist)
+            for mid, hist in self._market_price_history.items()
+            if len(hist) >= 2
+        ]
+        candidates.sort(key=lambda pair: _last_ts(pair[1]), reverse=True)
+
+        out: dict[str, list[dict[str, float]]] = {}
+        for mid, hist in candidates[:max_markets]:
+            out[mid] = hist[-limit:]
+        return out
+
     async def attach_price_history_to_opportunities(
         self,
         opportunities: list[Opportunity],
@@ -910,6 +940,21 @@ class ArbitrageScanner:
 
         ts = now or datetime.now(timezone.utc)
         self._remember_market_tokens_from_opportunities(opportunities)
+
+        # Hydrate local cache from the scanner worker's persisted market history.
+        # This is critical for subprocesses (tracked_traders, weather) that have
+        # their own scanner singleton with an empty _market_price_history.
+        needed_ids: set[str] = set()
+        for opp in opportunities:
+            for market in opp.markets:
+                mid = str(market.get("id", "") or "")
+                if mid and mid not in self._market_price_history:
+                    needed_ids.add(mid)
+        if needed_ids:
+            try:
+                await self._hydrate_history_from_db(needed_ids)
+            except Exception:
+                pass  # non-fatal; backfill will attempt API fetch below
 
         try:
             if timeout_seconds is not None and timeout_seconds > 0:
@@ -937,6 +982,33 @@ class ArbitrageScanner:
                 market["price_history"] = history
                 attached += 1
         return attached
+
+    async def _hydrate_history_from_db(self, market_ids: set[str]) -> int:
+        """Load persisted market history from the scanner snapshot into local cache."""
+        from models.database import AsyncSessionLocal, ScannerSnapshot
+        from sqlalchemy import select
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(ScannerSnapshot).where(ScannerSnapshot.id == "main")
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                return 0
+            db_history = row.market_history_json
+            if not isinstance(db_history, dict):
+                return 0
+
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        hydrated = 0
+        for mid in market_ids:
+            points = db_history.get(mid)
+            if not isinstance(points, list) or len(points) < 2:
+                continue
+            merged = self._merge_market_history_points(mid, points, now_ms)
+            if merged >= 2:
+                hydrated += 1
+        return hydrated
 
     async def _notify_status_change(self):
         """Notify all status callbacks of a change"""
@@ -1145,26 +1217,27 @@ class ArbitrageScanner:
         rows.sort(key=lambda row: str(row.get("type") or ""))
         return rows
 
-    async def scan_once(
-        self,
-        targeted_condition_ids: Optional[list] = None,
-    ) -> list[Opportunity]:
-        """Perform a single scan for arbitrage opportunities.
+    # ------------------------------------------------------------------
+    # Market catalog: fetch from upstream APIs, persist to DB, hydrate
+    # ------------------------------------------------------------------
 
-        If *targeted_condition_ids* is provided, only markets whose
-        condition_id matches one of the given IDs will be evaluated.
-        This allows the evaluate endpoint to run a focused scan
-        instead of a full market sweep.
+    async def refresh_catalog(self) -> int:
+        """Fetch market catalog from upstream APIs and persist to DB.
+
+        This is the slow, HTTP-bound operation (catalog fetch) that runs
+        independently on its own timer so scan_fast() is never blocked
+        by upstream API slowness.
+
+        Returns the number of markets in the refreshed catalog.
         """
         import time as _time
 
-        _scan_t0 = _time.monotonic()
-        print(f"[{utcnow().isoformat()}] Starting arbitrage scan...")
-        await self._set_activity("Fetching Polymarket events and markets...")
-        loop = asyncio.get_running_loop()
+        _t0 = _time.monotonic()
+        print(f"[{utcnow().isoformat()}] Refreshing market catalog...")
+        await self._set_activity("Catalog refresh: fetching Polymarket events and markets...")
 
         try:
-            # Fetch events and markets concurrently (they are independent)
+            # Phase 1 — Fetch events + markets concurrently
             _phase_t = _time.monotonic()
             events, markets = await asyncio.gather(
                 self.market_data.get_all_events(closed=False),
@@ -1172,36 +1245,12 @@ class ArbitrageScanner:
             )
             print(f"  [timing] Polymarket fetch: {_time.monotonic() - _phase_t:.1f}s")
 
-            # Filter out markets whose end_date has already passed —
-            # these are resolved events awaiting settlement and can't
-            # be traded profitably.
             now = datetime.now(timezone.utc)
             markets = [m for m in markets if m.end_date is None or _make_aware(m.end_date) > now]
-
-            # Also prune expired markets inside events so strategies
-            # like NegRisk that iterate event.markets don't pick them up.
             for event in events:
                 event.markets = [m for m in event.markets if m.end_date is None or _make_aware(m.end_date) > now]
 
-            # If targeted condition IDs are provided, narrow the scan to
-            # just those markets and the events that contain them.
-            if targeted_condition_ids:
-                _target_set = {cid.lower() for cid in targeted_condition_ids}
-                markets = [
-                    m for m in markets if getattr(m, "condition_id", getattr(m, "id", "")).lower() in _target_set
-                ]
-                for event in events:
-                    event.markets = [
-                        m
-                        for m in event.markets
-                        if getattr(m, "condition_id", getattr(m, "id", "")).lower() in _target_set
-                    ]
-                # Drop events with no remaining markets
-                events = [e for e in events if e.markets]
-                print(f"  Targeted scan: narrowed to {len(markets)} markets across {len(events)} events")
-
-            # Deduplicate: merge markets from events that aren't in the flat list.
-            # Events may contain nested markets beyond the flat market cap.
+            # Deduplicate: merge markets from events that aren't in the flat list
             flat_ids = {m.id for m in markets}
             extra_from_events = 0
             for event in events:
@@ -1213,103 +1262,49 @@ class ArbitrageScanner:
 
             dedup_msg = f" (+{extra_from_events} from events)" if extra_from_events else ""
             print(f"  Fetched {len(events)} Polymarket events and {len(markets)} markets{dedup_msg}")
-            await self._set_activity(f"Fetched {len(events)} events, {len(markets)} markets{dedup_msg}")
+            await self._set_activity(f"Catalog: {len(events)} events, {len(markets)} markets{dedup_msg}")
 
-            # Fetch Kalshi markets and merge them so ALL strategies
-            # (not just cross-platform) can detect opportunities on Kalshi.
-            kalshi_market_count = 0
-            kalshi_event_count = 0
+            # Phase 2 — Fetch Kalshi markets
             if settings.CROSS_PLATFORM_ENABLED:
-                await self._set_activity("Fetching Kalshi markets...")
+                await self._set_activity("Catalog refresh: fetching Kalshi markets...")
                 _phase_t = _time.monotonic()
                 try:
                     kalshi_markets = await self.market_data.get_cross_platform_markets(active=True)
                     kalshi_markets = [m for m in kalshi_markets if m.end_date is None or _make_aware(m.end_date) > now]
-                    kalshi_market_count = len(kalshi_markets)
                     markets.extend(kalshi_markets)
 
                     kalshi_events = await self.market_data.get_cross_platform_events(closed=False)
                     for ke in kalshi_events:
                         ke.markets = [m for m in ke.markets if m.end_date is None or _make_aware(m.end_date) > now]
-                    kalshi_event_count = len(kalshi_events)
                     events.extend(kalshi_events)
 
-                    if kalshi_market_count > 0:
-                        print(f"  Fetched {kalshi_event_count} Kalshi events and {kalshi_market_count} Kalshi markets")
+                    if kalshi_markets:
+                        print(f"  Fetched {len(kalshi_events)} Kalshi events and {len(kalshi_markets)} Kalshi markets")
                         print(f"  [timing] Kalshi fetch: {_time.monotonic() - _phase_t:.1f}s")
-                        await self._set_activity(
-                            f"Fetched {kalshi_event_count} Kalshi events, {kalshi_market_count} markets"
-                        )
                 except Exception as e:
                     print(f"  Kalshi fetch failed (non-fatal): {e}")
 
-            # Get live prices for Polymarket tokens only.
-            # Kalshi markets already have prices baked in from the API;
-            # their synthetic token IDs (e.g. "TICKER_yes") should not
-            # be sent to Polymarket's CLOB.
-            all_token_ids = []
-            for market in markets:
-                platform = str(getattr(market, "platform", "polymarket") or "polymarket").lower()
-                if platform != "polymarket":
-                    continue
-                for tid in market.clob_token_ids:
-                    token_id = str(tid or "").strip()
-                    if token_id:
-                        all_token_ids.append(token_id)
-
-            # Priority-sort tokens so HOT/WARM markets get fresh prices first.
-            # Build a set of prioritized token IDs from tiered scanning data.
-            priority_token_ids: set[str] = set()
-            if settings.TIERED_SCANNING_ENABLED and hasattr(self, "_prioritizer"):
-                try:
-                    tier_map = self._prioritizer.classify_all(markets, now)
-                    for tier_key in (MarketTier.HOT, MarketTier.WARM):
-                        for m in tier_map.get(tier_key, []):
-                            if str(getattr(m, "platform", "polymarket") or "polymarket").lower() != "polymarket":
-                                continue
-                            for tid in m.clob_token_ids:
-                                token_id = str(tid or "").strip()
-                                if token_id:
-                                    priority_token_ids.add(token_id)
-                except Exception:
-                    pass  # Fall through to unsorted if prioritizer fails
-
+            # Phase 3 — Read live prices from Redis for ALL tokens
+            all_token_ids = self._collect_polymarket_tokens(markets)
+            # Deduplicate
             seen_ids: set[str] = set()
-            deduped_token_ids: list[str] = []
-            for token_id in all_token_ids:
-                if token_id in seen_ids:
-                    continue
-                seen_ids.add(token_id)
-                deduped_token_ids.append(token_id)
-            all_token_ids = deduped_token_ids
+            deduped: list[str] = []
+            for tid in all_token_ids:
+                if tid not in seen_ids:
+                    seen_ids.add(tid)
+                    deduped.append(tid)
+            all_token_ids = deduped
 
-            if priority_token_ids:
-                # Prioritized tokens first, then rotate remaining cold tokens
-                prioritized = [t for t in all_token_ids if t in priority_token_ids]
-                remaining = [t for t in all_token_ids if t not in priority_token_ids]
-                if not hasattr(self, "_cold_token_rotation_offset"):
-                    self._cold_token_rotation_offset = 0
-                if remaining:
-                    offset = self._cold_token_rotation_offset % max(1, len(remaining))
-                    remaining = remaining[offset:] + remaining[:offset]
-                    self._cold_token_rotation_offset += max(1, len(all_token_ids) - len(prioritized))
-                sorted_token_ids = prioritized + remaining
-            else:
-                sorted_token_ids = all_token_ids
-
-            prices = {}
-            if sorted_token_ids:
+            prices: dict = {}
+            if all_token_ids:
                 _phase_t = _time.monotonic()
-                await self._set_activity(f"Reading cached live prices for {len(sorted_token_ids)} tokens...")
-                prices = await self._snapshot_ws_prices(sorted_token_ids)
-                print(
-                    f"  Loaded prices for {len(prices)}/{len(all_token_ids)} tokens from Redis "
-                    f"({len(priority_token_ids)} prioritized)"
-                )
+                await self._set_activity(f"Catalog refresh: reading prices for {len(all_token_ids)} tokens...")
+                prices = await self._snapshot_ws_prices(all_token_ids)
+                print(f"  Loaded prices for {len(prices)}/{len(all_token_ids)} tokens from Redis")
                 print(f"  [timing] Price load: {_time.monotonic() - _phase_t:.1f}s")
             self._apply_live_prices_to_markets(markets, prices)
 
-            # Cache full data for fast scans between full scans
+            # Phase 4 — Update in-memory caches
             self._cached_events = list(events)
             self._cached_markets = list(markets)
             self._cached_prices = dict(prices)
@@ -1317,231 +1312,109 @@ class ArbitrageScanner:
             self._rebuild_realtime_graph(events, markets)
             self._update_market_price_history(markets, prices, now)
 
-            # Subscribe to WebSocket feeds for active market tokens
+            # Phase 5 — Subscribe WS feeds to active tokens
             if settings.WS_FEED_ENABLED:
                 try:
                     feed_mgr = get_feed_manager()
                     if feed_mgr._started:
-                        # Subscribe to all active token IDs for real-time updates
-                        # The feed will auto-manage subscriptions
                         poly_tokens = [t for t in all_token_ids[:500] if len(t) > 20]
                         if poly_tokens:
                             await feed_mgr.polymarket_feed.subscribe(token_ids=poly_tokens[:200])
                 except Exception as e:
                     print(f"  WS subscription failed (non-critical): {e}")
 
-            # Tiered scanning: classify markets and apply change detection.
-            # These are CPU-bound operations on 6000+ markets — run them
-            # in the thread pool so the event loop stays responsive.
-            markets_to_evaluate = markets
-            unchanged_count = 0
-            if settings.TIERED_SCANNING_ENABLED:
-                try:
-
-                    def _run_prioritizer(prioritizer, mkts, ts):
-                        """Run all CPU-bound prioritizer work in a thread."""
-                        prioritizer.update_stability_scores()
-                        t_map = prioritizer.classify_all(mkts, ts)
-                        prioritizer.compute_attention_scores(mkts)
-                        changed = prioritizer.get_changed_markets(mkts)
-                        return t_map, changed
-
-                    try:
-                        tier_map, changed = await loop.run_in_executor(
-                            None, _run_prioritizer, self._prioritizer, markets, now
-                        )
-                    except RuntimeError as e:
-                        # Some monitor integrations require an active loop in the
-                        # current thread. Retry on the main loop instead of failing
-                        # the whole prioritizer pass.
-                        if "no current event loop" in str(e).lower():
-                            tier_map, changed = _run_prioritizer(self._prioritizer, markets, now)
-                        else:
-                            raise
-                    unchanged_count = len(markets) - len(changed)
-
-                    # For full scans, still run all markets through strategies
-                    # but log the change detection stats. The real savings come
-                    # from fast scans where we only evaluate changed markets.
-                    # However, for COLD-tier markets, we DO skip them if unchanged.
-                    cold_ids = {m.id for m in tier_map[MarketTier.COLD]}
-                    markets_to_evaluate = [
-                        m for m in markets if m.id not in cold_ids or self._prioritizer.has_market_changed(m)
-                    ]
-                    cold_skipped = len(markets) - len(markets_to_evaluate)
-
-                    print(
-                        f"  Tiers: {len(tier_map[MarketTier.HOT])} hot, "
-                        f"{len(tier_map[MarketTier.WARM])} warm, "
-                        f"{len(tier_map[MarketTier.COLD])} cold "
-                        f"({cold_skipped} unchanged cold skipped)"
-                    )
-                except Exception as e:
-                    print(f"  Prioritizer error (non-fatal, using all markets): {e}")
-                    markets_to_evaluate = markets
-
-            _phase_t = _time.monotonic()
-            if self._strategy_overrides is not None:
-                await self._set_activity("Running scanner strategy overrides...")
-                all_opportunities = await self._run_override_strategies(
-                    events=list(events),
-                    markets=markets_to_evaluate,
-                    prices=dict(prices),
-                )
-            else:
-                await self._ensure_runtime_strategies_loaded()
-                data_event = DataEvent(
-                    event_type=EventType.MARKET_DATA_REFRESH,
-                    source="scanner_refresh",
-                    timestamp=utcnow(),
-                    markets=markets_to_evaluate,
-                    events=list(events),
-                    prices=dict(prices),
-                    scan_mode="full_reconcile",
-                )
-                all_opportunities = await self._dispatch_market_refresh(
-                    data_event,
-                    full_market_snapshot=markets,
-                )
-                print(f"  Strategies dispatched: {len(all_opportunities)} raw opportunities from {len(markets_to_evaluate)} markets")
-                print(f"  [timing] Strategy dispatch: {_time.monotonic() - _phase_t:.1f}s")
-
-            # Update prioritizer state after evaluation (CPU-bound, run in thread)
-            if settings.TIERED_SCANNING_ENABLED:
-                try:
-                    await loop.run_in_executor(None, self._prioritizer.update_after_evaluation, markets, now)
-                except Exception:
-                    pass
-
-            # ----------------------------------------------------------
-            # STORE opportunities immediately so the API can serve them
-            # without waiting for slow LLM-based strategies (News Edge).
-            # ----------------------------------------------------------
-            if self._strategy_overrides is None:
-                all_opportunities = self._deduplicate_cross_strategy(all_opportunities)
-
-                pre_filter_count = len(all_opportunities)
-                if pre_filter_count > 0:
-                    by_strategy: dict[str, int] = {}
-                    for opp in all_opportunities:
-                        by_strategy[opp.strategy] = by_strategy.get(opp.strategy, 0) + 1
-                    print(f"  Pre-filter: {pre_filter_count} opportunities by strategy: {by_strategy}")
-
-                # Apply quality filters with full audit trail.
-                # Pass per-strategy QualityFilterOverrides so strategies that
-                # set quality_filter_overrides on their class have those thresholds
-                # respected (e.g. directional strategies relaxing the ROI cap).
-                _quality_reports: dict = {}
-                filtered_opportunities: list = []
-                rejection_reasons: dict[str, int] = {}
-                for opp in all_opportunities:
-                    strategy_instance = strategy_loader.get_instance(opp.strategy)
-                    overrides = (
-                        getattr(strategy_instance, "quality_filter_overrides", None) if strategy_instance else None
-                    )
-                    report = quality_filter.evaluate_opportunity(opp, overrides=overrides)
-                    _quality_reports[opp.stable_id or opp.id] = report
-                    if report.passed:
-                        filtered_opportunities.append(opp)
-                    else:
-                        for reason in report.rejection_reasons:
-                            rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
-                if pre_filter_count > 0:
-                    print(
-                        f"  Quality filter: {len(filtered_opportunities)}/{pre_filter_count} passed"
-                        f"{f', rejections: {rejection_reasons}' if rejection_reasons else ''}"
-                    )
-                all_opportunities = filtered_opportunities
-                self._quality_reports = _quality_reports
-            else:
-                self._quality_reports = {}
-
-            all_opportunities.sort(key=lambda x: x.roi_percent, reverse=True)
-            all_opportunities = self._apply_opportunity_caps(all_opportunities)
-
-            # Attach existing AI judgments from the database
+            # Phase 6 — Persist catalog to DB
+            duration = _time.monotonic() - _t0
             try:
-                await asyncio.wait_for(
-                    self._attach_ai_judgments(all_opportunities),
-                    timeout=15,
-                )
-            except asyncio.TimeoutError:
-                print("  AI judgment attach timed out (15s), continuing without")
-            except Exception:
-                pass
+                from models.database import AsyncSessionLocal
+                from services.shared_state import write_market_catalog
 
-            self._opportunities = self._merge_opportunities(all_opportunities)
-            try:
-                await asyncio.wait_for(
-                    self._backfill_market_history_for_opportunities(self._opportunities, now),
-                    timeout=12,
-                )
-            except asyncio.TimeoutError:
-                print("  Sparkline backfill timed out (12s), continuing with live history")
+                async with AsyncSessionLocal() as session:
+                    await write_market_catalog(
+                        session,
+                        events,
+                        markets,
+                        duration_seconds=duration,
+                    )
             except Exception as e:
-                print(f"  Sparkline backfill error (non-fatal): {e}")
-            self._last_scan = datetime.now(timezone.utc)
-            print(f"  Stored {len(self._opportunities)} opportunities")
-            print(f"  [timing] Total scan_once: {_time.monotonic() - _scan_t0:.1f}s")
+                print(f"  Catalog DB persist failed (non-fatal): {e}")
 
-            # News Edge: LLM-based analysis is now manual only (triggered
-            # from the UI via POST /news/edges or POST /news/edges/single)
-            # to avoid automatic spend on paid LLM providers.  We still
-            # pre-fetch articles + run semantic matching so the data is
-            # ready when the user clicks "Analyze".
+            self._last_catalog_refresh = now
+            self._last_full_scan = now
+
+            # Fire background news prefetch if enabled
             if settings.NEWS_EDGE_ENABLED:
                 asyncio.create_task(self._prefetch_news_matches(events, markets, prices))
 
-            # AI Intelligence: Score unscored opportunities (non-blocking)
-            # Only run if auto_ai_scoring is enabled (opt-in, default OFF).
-            # Manual per-opportunity analysis is always available via the UI.
-            if self._auto_ai_scoring:
-                try:
-                    from services.ai import get_llm_manager
-
-                    manager = get_llm_manager()
-                    if manager.is_available():
-                        # Cancel any still-running scoring task from a previous scan
-                        if self._ai_scoring_task and not self._ai_scoring_task.done():
-                            self._ai_scoring_task.cancel()
-                            try:
-                                await self._ai_scoring_task
-                            except (asyncio.CancelledError, Exception):
-                                pass
-                        # Score the full merged pool so retained opps get scored too
-                        self._ai_scoring_task = asyncio.create_task(self._ai_score_opportunities(self._opportunities))
-                except Exception:
-                    pass  # AI scoring is non-critical
-
-            # Notify callbacks (pass only newly detected opportunities)
-            for callback in self._scan_callbacks:
-                try:
-                    await callback(all_opportunities)
-                except Exception as e:
-                    print(f"  Callback error: {e}")
-
-            self._last_full_scan = now
-
-            scan_suffix = ""
-            if settings.TIERED_SCANNING_ENABLED and unchanged_count > 0:
-                scan_suffix = f" ({unchanged_count} unchanged markets detected)"
-
             print(
-                f"[{utcnow().isoformat()}] Scan complete. "
-                f"{len(all_opportunities)} detected this scan, "
-                f"{len(self._opportunities)} total in pool{scan_suffix}"
+                f"[{utcnow().isoformat()}] Catalog refresh complete: "
+                f"{len(events)} events, {len(markets)} markets in {duration:.1f}s"
             )
             await self._set_activity(
-                f"Scan complete — {len(all_opportunities)} found, {len(self._opportunities)} total in pool"
+                f"Catalog refresh complete — {len(events)} events, {len(markets)} markets"
             )
-            return self._opportunities
+            return len(markets)
 
         except Exception as e:
-            print(f"[{utcnow().isoformat()}] Scan error: {e}")
-            await self._set_activity(f"Scan error: {e}")
+            # Persist the error so UI can display catalog health
+            try:
+                from models.database import AsyncSessionLocal
+                from services.shared_state import write_market_catalog
+
+                async with AsyncSessionLocal() as session:
+                    await write_market_catalog(session, [], [], error=str(e))
+            except Exception:
+                pass
+            print(f"[{utcnow().isoformat()}] Catalog refresh error: {e}")
+            await self._set_activity(f"Catalog refresh error: {e}")
             raise
 
-    async def scan_fast(self, reactive_token_ids: Optional[list[str]] = None) -> list[Opportunity]:
+    async def _hydrate_catalog_from_db(self) -> int:
+        """Restore market catalog from DB on startup.
+
+        Populates _cached_events, _cached_markets, and derived caches so
+        that scan_fast() can run immediately without waiting for the first
+        HTTP catalog refresh.  Returns the number of markets loaded.
+        """
+        try:
+            from models.database import AsyncSessionLocal
+            from services.shared_state import read_market_catalog
+
+            async with AsyncSessionLocal() as session:
+                events, markets, metadata = await read_market_catalog(session)
+        except Exception as e:
+            print(f"  Catalog hydration from DB failed: {e}")
+            return 0
+
+        if not markets:
+            return 0
+
+        now = datetime.now(timezone.utc)
+        markets = [m for m in markets if m.end_date is None or _make_aware(m.end_date) > now]
+        for event in events:
+            event.markets = [m for m in event.markets if m.end_date is None or _make_aware(m.end_date) > now]
+
+        self._cached_events = events
+        self._cached_markets = markets
+        self._remember_market_tokens(markets)
+        self._rebuild_realtime_graph(events, markets)
+
+        catalog_age = metadata.get("updated_at")
+        if catalog_age:
+            self._last_catalog_refresh = catalog_age
+            # Also set _last_full_scan so scan_fast doesn't think it
+            # has never done a full scan.
+            if self._last_full_scan is None:
+                self._last_full_scan = catalog_age
+
+        print(f"  Hydrated catalog from DB: {len(events)} events, {len(markets)} markets")
+        return len(markets)
+
+    async def scan_fast(
+        self,
+        reactive_token_ids: Optional[list[str]] = None,
+        targeted_condition_ids: Optional[list] = None,
+    ) -> list[Opportunity]:
         """Fast scan with reactive token batching + timed HOT-tier fallback."""
         now = datetime.now(timezone.utc)
         reactive_tokens = [str(t or "").strip() for t in (reactive_token_ids or []) if str(t or "").strip()]
@@ -1550,8 +1423,12 @@ class ArbitrageScanner:
         print(f"[{now.isoformat()}] Starting fast scan ({mode_label})...")
 
         if not self._cached_markets:
-            print("  Fast scan cache empty; running full scan bootstrap")
-            return await self.scan_once()
+            print("  Fast scan cache empty; attempting DB catalog hydration...")
+            hydrated = await self._hydrate_catalog_from_db()
+            if not self._cached_markets:
+                print("  No catalog available yet (DB empty too); skipping scan cycle")
+                await self._set_activity("Waiting for catalog refresh...")
+                return self._opportunities
 
         await self._set_activity("Fast scan: preparing market batch...")
 
@@ -1615,6 +1492,17 @@ class ArbitrageScanner:
                     print("  No HOT-tier markets, skipping fast scan")
                     self._last_fast_scan = now
                     return self._opportunities
+
+            # If targeted condition IDs were requested (e.g. API evaluate
+            # endpoint), narrow candidate markets to just those IDs.
+            if targeted_condition_ids:
+                _target_set = {cid.lower() for cid in targeted_condition_ids}
+                candidate_markets = [
+                    m for m in self._cached_markets
+                    if getattr(m, "condition_id", getattr(m, "id", "")).lower() in _target_set
+                ]
+                affected_market_ids = [str(getattr(m, "id", "") or "") for m in candidate_markets]
+                print(f"  Targeted scan: narrowed to {len(candidate_markets)} markets")
 
             candidate_token_ids = self._collect_polymarket_tokens(candidate_markets)
             live_prices: dict[str, dict] = {}
@@ -2168,17 +2056,16 @@ class ArbitrageScanner:
     async def _scan_loop(self):
         """Internal scan loop with reactive + tiered polling.
 
-        When WS feeds are active, scans are triggered reactively by significant
-        price changes (>0.5% move on any subscribed token).  The timer-based
-        polling is kept as a fallback with extended intervals:
-          - Full scans: every FULL_SCAN_INTERVAL_SECONDS (default 120s)
-          - Fast scans: every FAST_SCAN_INTERVAL_SECONDS (default 15s) OR
-            immediately on WS price changes (debounced to 2s)
-          - Reactive scans skip HTTP price fetching entirely (uses WS cache)
-
-        When TIERED_SCANNING_ENABLED is disabled, falls back to the original
-        fixed-interval full scan.
+        Catalog refresh runs as a separate background task.  This loop
+        always uses scan_fast() which reads from the cached catalog +
+        Redis live prices — it never calls upstream HTTP APIs directly.
         """
+        # Hydrate catalog from DB so scan_fast works immediately
+        await self._hydrate_catalog_from_db()
+
+        # Start background catalog refresh
+        catalog_task = asyncio.create_task(self._catalog_refresh_background())
+
         while self._running:
             if not self._enabled:
                 await asyncio.sleep(self._interval_seconds)
@@ -2187,46 +2074,11 @@ class ArbitrageScanner:
             # Register reactive scanning on first enabled iteration
             self._register_reactive_scanning()
 
-            if not settings.TIERED_SCANNING_ENABLED:
-                # Legacy mode: simple fixed-interval full scan
-                try:
-                    await self.scan_once()
-                except Exception as e:
-                    print(f"Scan error: {e}")
-                await asyncio.sleep(self._interval_seconds)
-                continue
-
-            # Tiered scanning mode
-            now = datetime.now(timezone.utc)
-
-            # Determine if it's time for a full scan
-            full_interval = settings.FULL_SCAN_INTERVAL_SECONDS
-            needs_full = self._last_full_scan is None or (now - self._last_full_scan).total_seconds() >= full_interval
-
-            if needs_full:
-                try:
-                    await self.scan_once()
-                except Exception as e:
-                    print(f"Full scan error: {e}")
-            else:
-                # Fast scan (only if we have cached data from a previous full scan)
-                if self._cached_markets:
-                    # Check if crypto prediction triggers an immediate scan
-                    triggered = self._prioritizer.should_trigger_fast_scan(now)
-                    if triggered:
-                        print("  [TRIGGER] Crypto market creation imminent — fast scan")
-
-                    try:
-                        reactive_tokens = await self.consume_reactive_tokens()
-                        await self.scan_fast(reactive_token_ids=reactive_tokens)
-                    except Exception as e:
-                        print(f"Fast scan error: {e}")
-                else:
-                    # No cached data yet — force a full scan
-                    try:
-                        await self.scan_once()
-                    except Exception as e:
-                        print(f"Full scan error (first run): {e}")
+            try:
+                reactive_tokens = await self.consume_reactive_tokens()
+                await self.scan_fast(reactive_token_ids=reactive_tokens)
+            except Exception as e:
+                print(f"Scan error: {e}")
 
             # Wait for either the timer OR a reactive price-change trigger
             reactive_trigger = self._get_reactive_trigger()
@@ -2237,11 +2089,29 @@ class ArbitrageScanner:
             sleep_seconds = settings.FAST_SCAN_INTERVAL_SECONDS
             await self._set_activity(f"Idle — next scan in ≤{sleep_seconds}s (or on price change)")
             try:
-                # Wait for reactive trigger, but time out after the normal interval
                 await asyncio.wait_for(reactive_trigger.wait(), timeout=sleep_seconds)
                 await self._set_activity("Reactive scan triggered by WS price change")
             except asyncio.TimeoutError:
                 pass  # Normal timer-based fallback
+
+        # Clean up background catalog task
+        if catalog_task and not catalog_task.done():
+            catalog_task.cancel()
+
+    async def _catalog_refresh_background(self):
+        """Background loop that refreshes market catalog independently."""
+        while self._running:
+            interval = max(60, settings.FULL_SCAN_INTERVAL_SECONDS)
+            timeout = min(300, interval * 2.5)
+            try:
+                await asyncio.wait_for(self.refresh_catalog(), timeout=timeout)
+            except asyncio.TimeoutError:
+                print(f"  Catalog refresh timed out after {timeout:.0f}s")
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                print(f"  Catalog refresh failed: {e}")
+            await asyncio.sleep(interval)
 
     async def _attach_ai_judgments(self, opportunities: list):
         """Attach existing AI judgments from the DB to opportunity objects.
@@ -2341,10 +2211,11 @@ class ArbitrageScanner:
         await self.save_settings()
         await self._notify_status_change()
 
-        # Kick off an immediate scan in the background so this
-        # method returns quickly and doesn't block the API response.
+        # Kick off an immediate catalog refresh + scan in the background so
+        # this method returns quickly and doesn't block the API response.
         if self._running:
-            asyncio.create_task(self.scan_once())
+            asyncio.create_task(self.refresh_catalog())
+            asyncio.create_task(self.scan_fast())
 
     async def pause(self):
         """Pause all background services (scanner, trader orchestrator, copy trader, wallet tracker, discovery, etc.)."""

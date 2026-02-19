@@ -72,6 +72,34 @@ def _parse_iso_utc(value: Optional[str]) -> Optional[datetime]:
     return dt.astimezone(timezone.utc)
 
 
+async def _catalog_refresh_loop() -> None:
+    """Background loop that refreshes the market catalog independently.
+
+    Runs on its own timer (FULL_SCAN_INTERVAL_SECONDS) with its own timeout.
+    The scan loop never depends on this completing — it uses the cached catalog.
+    """
+    while True:
+        interval = max(60, settings.FULL_SCAN_INTERVAL_SECONDS)
+        timeout = min(300, interval * 2.5)
+        try:
+            await asyncio.wait_for(scanner.refresh_catalog(), timeout=timeout)
+        except asyncio.CancelledError:
+            return
+        except asyncio.TimeoutError:
+            logger.warning("Catalog refresh timed out after %.0fs", timeout)
+        except Exception as e:
+            logger.warning("Catalog refresh failed: %s", e)
+        await asyncio.sleep(interval)
+
+
+async def _one_shot_catalog_refresh() -> None:
+    """Fire-and-forget catalog refresh for manual scan requests."""
+    try:
+        await asyncio.wait_for(scanner.refresh_catalog(), timeout=180)
+    except Exception as e:
+        logger.warning("Manual catalog refresh failed (scan_fast will use cached catalog): %s", e)
+
+
 async def _hydrate_scanner_pool_from_snapshot() -> int:
     """Restore scanner in-memory pool from DB snapshot on worker startup."""
     try:
@@ -209,6 +237,11 @@ async def _run_scan_loop() -> None:
 
     logger.info("Scanner worker started (interval from DB)")
 
+    # Hydrate market catalog from DB so scan_fast works immediately
+    catalog_count = await scanner._hydrate_catalog_from_db()
+    if catalog_count:
+        logger.info("Hydrated market catalog from DB: %d markets", catalog_count)
+
     # Write initial status so API doesn't show "Waiting for scanner worker" before first scan
     try:
         current_opps = scanner.get_opportunities()
@@ -243,12 +276,15 @@ async def _run_scan_loop() -> None:
     except Exception:
         pass
 
+    # Start background catalog refresh loop as an independent asyncio task.
+    # This runs on its own timer and never blocks the scan loop.
+    catalog_task = asyncio.create_task(_catalog_refresh_loop())
+
     stale_scan_streak = 0
+    # scan_fast reads from Redis (no HTTP pagination), so watchdog can be tight.
     scan_watchdog_seconds = max(
-        int(settings.SCAN_WATCHDOG_SECONDS),
-        int(settings.SCAN_INTERVAL_SECONDS) * 3,
+        120,
         int(settings.FAST_SCAN_INTERVAL_SECONDS) * 3,
-        int(settings.FULL_SCAN_INTERVAL_SECONDS) * 3,
     )
 
     while True:
@@ -292,32 +328,23 @@ async def _run_scan_loop() -> None:
 
         await _ensure_ws_feeds_running()
 
-        # If the scan was explicitly requested, check for targeted condition IDs.
+        # If a manual scan was requested, trigger an immediate catalog refresh
+        # (non-blocking) so the next scan cycle uses the freshest data.
         targeted_ids = pop_targeted_condition_ids() if requested else []
+        if requested:
+            asyncio.create_task(_one_shot_catalog_refresh())
 
-        run_full_scan = bool(requested)
-        if not run_full_scan and settings.TIERED_SCANNING_ENABLED:
-            now = datetime.now(timezone.utc)
-            full_interval = max(10, settings.FULL_SCAN_INTERVAL_SECONDS)
-            run_full_scan = (
-                scanner._last_full_scan is None
-                or not scanner._cached_markets
-                or (now - scanner._last_full_scan).total_seconds() >= full_interval
-            )
-
+        # Always use scan_fast — catalog refresh runs independently.
         scan_error: Exception | None = None
         try:
-            if settings.TIERED_SCANNING_ENABLED and not run_full_scan and scanner._cached_markets:
-                reactive_tokens = await scanner.consume_reactive_tokens()
-                await asyncio.wait_for(
-                    scanner.scan_fast(reactive_token_ids=reactive_tokens),
-                    timeout=scan_watchdog_seconds,
-                )
-            else:
-                await asyncio.wait_for(
-                    scanner.scan_once(targeted_condition_ids=targeted_ids or None),
-                    timeout=scan_watchdog_seconds,
-                )
+            reactive_tokens = await scanner.consume_reactive_tokens()
+            await asyncio.wait_for(
+                scanner.scan_fast(
+                    reactive_token_ids=reactive_tokens,
+                    targeted_condition_ids=targeted_ids or None,
+                ),
+                timeout=scan_watchdog_seconds,
+            )
             stale_scan_streak = 0
         except asyncio.CancelledError:
             raise
@@ -328,10 +355,9 @@ async def _run_scan_loop() -> None:
                 scan_watchdog_seconds,
                 stale_scan_streak,
             )
-            if stale_scan_streak >= 4:
-                scanner._cached_markets = []
-                scanner._cached_events = []
-                scanner._cached_prices = {}
+            # NOTE: we no longer clear _cached_markets on timeout streaks.
+            # The catalog is persisted to DB and refreshed independently —
+            # clearing the in-memory cache would cause a degenerate loop.
             if stale_scan_streak >= 5:
                 try:
                     await _stop_ws_feeds()
@@ -406,7 +432,7 @@ async def _run_scan_loop() -> None:
                         "current_activity": activity,
                         "strategies": [],
                     },
-                    market_history=scanner.get_market_history_for_opportunities(prev_opps),
+                    market_history=scanner.get_broad_market_history(max_markets=500),
                 )
                 await write_worker_snapshot(
                     session,
@@ -514,7 +540,15 @@ async def _run_scan_loop() -> None:
                     except Exception as e:
                         logger.debug("Pre-write AI merge skipped: %s", e)
 
-                market_history = scanner.get_market_history_for_opportunities(opps)
+                # Write broad market history so subprocesses (traders, weather)
+                # can hydrate sparklines for any market, not just arb opportunities.
+                market_history = scanner.get_broad_market_history(max_markets=500)
+                # Ensure all opportunity markets are included even if they didn't
+                # make the top-500 recency cut.
+                opp_history = scanner.get_market_history_for_opportunities(opps)
+                for mid, hist in opp_history.items():
+                    if mid not in market_history:
+                        market_history[mid] = hist
                 await write_scanner_snapshot(session, opps, status, market_history=market_history)
                 emitted = await bridge_opportunities_to_signals(
                     session,

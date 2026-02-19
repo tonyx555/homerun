@@ -68,6 +68,7 @@ class MyCustomStrategy(BaseStrategy):
     mispricing_type = "within_market"  # or "cross_market", "settlement_lag", "news_information"
     source_key = "scanner"
     worker_affinity = "scanner"
+    subscriptions = ["market_data_refresh"]  # Required for scanner strategies
     opportunity_ttl_minutes = 45  # None = use global default
     allow_deduplication = True
     binary_only = True

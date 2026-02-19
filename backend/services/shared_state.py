@@ -193,6 +193,93 @@ async def write_scanner_snapshot(
         pass  # fire-and-forget
 
 
+# ---------------------------------------------------------------------------
+# Market catalog persistence (events + markets from upstream APIs)
+# ---------------------------------------------------------------------------
+
+CATALOG_ID = "latest"
+
+
+async def write_market_catalog(
+    session: AsyncSession,
+    events: list,
+    markets: list,
+    duration_seconds: float = 0.0,
+    error: str | None = None,
+) -> None:
+    """Persist the upstream market catalog (events + markets) to DB."""
+    from models.database import MarketCatalog
+
+    events_payload = []
+    for e in events:
+        try:
+            events_payload.append(e.model_dump(mode="json") if hasattr(e, "model_dump") else e)
+        except Exception:
+            pass
+
+    markets_payload = []
+    for m in markets:
+        try:
+            markets_payload.append(m.model_dump(mode="json") if hasattr(m, "model_dump") else m)
+        except Exception:
+            pass
+
+    result = await session.execute(
+        select(MarketCatalog).where(MarketCatalog.id == CATALOG_ID)
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        row = MarketCatalog(id=CATALOG_ID)
+        session.add(row)
+
+    row.updated_at = utcnow()
+    row.events_json = events_payload
+    row.markets_json = markets_payload
+    row.event_count = len(events_payload)
+    row.market_count = len(markets_payload)
+    row.fetch_duration_seconds = duration_seconds
+    row.error = error
+    await _commit_with_retry(session)
+
+
+async def read_market_catalog(
+    session: AsyncSession,
+) -> tuple[list, list, dict[str, Any]]:
+    """Read persisted market catalog. Returns (events, markets, metadata)."""
+    from models.database import MarketCatalog
+    from models.market import Event, Market
+
+    result = await session.execute(
+        select(MarketCatalog).where(MarketCatalog.id == CATALOG_ID)
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        return [], [], {"updated_at": None, "error": None}
+
+    events = []
+    for d in row.events_json or []:
+        try:
+            events.append(Event.model_validate(d))
+        except Exception:
+            pass
+
+    markets = []
+    for d in row.markets_json or []:
+        try:
+            markets.append(Market.model_validate(d))
+        except Exception:
+            pass
+
+    metadata: dict[str, Any] = {
+        "updated_at": row.updated_at,
+        "event_count": row.event_count,
+        "market_count": row.market_count,
+        "fetch_duration_seconds": row.fetch_duration_seconds,
+        "error": row.error,
+    }
+    return events, markets, metadata
+
+
 async def write_traders_snapshot(
     session: AsyncSession,
     opportunities: list[Opportunity],

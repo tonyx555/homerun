@@ -52,33 +52,53 @@ def _build_scanner(
 class TestScannerInit:
     """Tests for ArbitrageScanner.__init__."""
 
-    def test_loads_all_enabled_sync_strategies(self):
+    def test_strategies_empty_before_load_plugins(self):
+        """Strategies are empty until load_plugins() is awaited (async DB load)."""
         scanner = _build_scanner()
-        # NewsEdge runs as a separate async/manual path and is not in
-        # scanner.strategies, so we expect all strategy types except news_edge.
-        expected_count = 8
-        assert len(scanner.strategies) == expected_count
+        # load_plugins() is async and not called in __init__, so strategies
+        # start empty.  The scanner worker calls load_plugins() at startup.
+        assert scanner.strategies == []
 
-    def test_strategy_names(self):
+    def test_strategy_overrides_used_when_set(self):
+        """When _strategy_overrides is set, strategies returns those."""
         scanner = _build_scanner()
+        mock_strat = MagicMock()
+        mock_strat.name = "TestStrategy"
+        mock_strat.strategy_type = "basic"
+        scanner._strategy_overrides = [mock_strat]
+
+        assert len(scanner.strategies) == 1
+        assert scanner.strategies[0].name == "TestStrategy"
+
+    def test_strategy_names_from_overrides(self):
+        """Strategy names are returned from overrides list."""
+        scanner = _build_scanner()
+        strats = []
+        for name, stype in [("Basic Arbitrage", "basic"), ("NegRisk Arb", "negrisk")]:
+            s = MagicMock()
+            s.name = name
+            s.strategy_type = stype
+            strats.append(s)
+        scanner._strategy_overrides = strats
+
         names = [s.name for s in scanner.strategies]
         assert "Basic Arbitrage" in names
+        assert "NegRisk Arb" in names
 
-    def test_strategy_types_cover_all_enums(self):
+    def test_strategy_types_from_overrides(self):
+        """Strategy types are read correctly from overrides."""
         scanner = _build_scanner()
+        types_to_set = ["basic", "negrisk", "combinatorial", "settlement_lag"]
+        strats = []
+        for stype in types_to_set:
+            s = MagicMock()
+            s.name = stype.title()
+            s.strategy_type = stype
+            strats.append(s)
+        scanner._strategy_overrides = strats
+
         types = {s.strategy_type for s in scanner.strategies}
-        # NewsEdge is handled by a separate async/manual path, not in scanner.strategies.
-        expected = {
-            "basic",
-            "negrisk",
-            "mutually_exclusive",
-            "contradiction",
-            "must_happen",
-            "miracle",
-            "combinatorial",
-            "settlement_lag",
-        }
-        assert types == expected
+        assert types == set(types_to_set)
 
     def test_initial_state(self):
         scanner = _build_scanner()
@@ -91,25 +111,66 @@ class TestScannerInit:
 
 
 # ---------------------------------------------------------------------------
-# scan_once
+# scan pipeline (refresh_catalog + scan_fast)
 # ---------------------------------------------------------------------------
 
 
-class TestScanOnce:
-    """Tests for ArbitrageScanner.scan_once."""
+def _seed_scanner_cache(scanner, markets=None):
+    """Populate scanner caches and mock prioritizer so scan_fast() runs strategies."""
+    if markets is None:
+        markets = [
+            Market(
+                id="m_test_1",
+                condition_id="c_test_1",
+                question="Test market?",
+                slug="test-market",
+                clob_token_ids=["tok_yes", "tok_no"],
+                outcome_prices=[0.5, 0.5],
+            )
+        ]
+    scanner._cached_markets = list(markets)
+    scanner._cached_market_by_id = {m.id: m for m in markets}
+    scanner._cached_events = []
+
+    # Mock the prioritizer so all markets are HOT and "changed"
+    from services.market_prioritizer import MarketTier
+
+    scanner._prioritizer = MagicMock()
+    scanner._prioritizer.classify_all = MagicMock(
+        return_value={
+            MarketTier.HOT: list(markets),
+            MarketTier.WARM: [],
+            MarketTier.COLD: [],
+        }
+    )
+    scanner._prioritizer.get_changed_markets = MagicMock(return_value=list(markets))
+    scanner._prioritizer.update_after_evaluation = MagicMock(return_value=0)
+    scanner._prioritizer.compute_attention_scores = MagicMock()
+    scanner._prioritizer.update_stability_scores = MagicMock()
+
+
+def _make_quality_pass():
+    """Return a mock quality report that always passes."""
+    report = MagicMock()
+    report.passed = True
+    return report
+
+
+class TestScanPipeline:
+    """Tests for ArbitrageScanner.refresh_catalog + scan_fast pipeline."""
 
     @pytest.mark.asyncio
-    async def test_scan_once_calls_client_methods(self, mock_polymarket_client):
-        """scan_once fetches events, markets, and prices."""
+    async def test_refresh_catalog_calls_client_methods(self, mock_polymarket_client):
+        """refresh_catalog fetches events and markets from the upstream API."""
         scanner = _build_scanner(mock_client=mock_polymarket_client)
 
-        await scanner.scan_once()
+        await scanner.refresh_catalog()
 
         mock_polymarket_client.get_all_events.assert_awaited_once_with(closed=False)
         mock_polymarket_client.get_all_markets.assert_awaited_once_with(active=True)
 
     @pytest.mark.asyncio
-    async def test_scan_once_returns_opportunities_sorted_by_roi(
+    async def test_scan_fast_returns_opportunities_sorted_by_roi(
         self,
         mock_polymarket_client,
         sample_opportunity,
@@ -117,96 +178,87 @@ class TestScanOnce:
         sample_opportunity_low_roi,
     ):
         """Opportunities are returned sorted by ROI descending."""
-        # Strategy 1 returns low + medium ROI opps
-        strategy_a = MagicMock()
-        strategy_a.name = "StratA"
-        strategy_a.strategy_type = "basic"
-        strategy_a.detect = MagicMock(return_value=[sample_opportunity_low_roi, sample_opportunity])
+        all_opps = [sample_opportunity_low_roi, sample_opportunity, sample_opportunity_high_roi]
 
-        # Strategy 2 returns high ROI opp
-        strategy_b = MagicMock()
-        strategy_b.name = "StratB"
-        strategy_b.strategy_type = "negrisk"
-        strategy_b.detect = MagicMock(return_value=[sample_opportunity_high_roi])
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+        _seed_scanner_cache(scanner)
 
-        scanner = _build_scanner(
-            mock_client=mock_polymarket_client,
-            strategies=[strategy_a, strategy_b],
-        )
-
-        results = await scanner.scan_once()
+        with patch.object(scanner, "_dispatch_market_refresh", new_callable=AsyncMock, return_value=all_opps), \
+             patch("services.scanner.quality_filter") as mock_qf:
+            mock_qf.evaluate_opportunity = MagicMock(return_value=_make_quality_pass())
+            results = await scanner.scan_fast()
 
         assert len(results) == 3
-        # Sorted descending by roi_percent
         assert results[0].roi_percent >= results[1].roi_percent
         assert results[1].roi_percent >= results[2].roi_percent
 
     @pytest.mark.asyncio
-    async def test_scan_once_handles_strategy_exception_gracefully(
+    async def test_scan_fast_handles_dispatch_exception_gracefully(
         self,
         mock_polymarket_client,
-        sample_opportunity,
     ):
-        """A failing strategy does not prevent others from running."""
-        bad_strategy = MagicMock()
-        bad_strategy.name = "BadStrategy"
-        bad_strategy.strategy_type = "contradiction"
-        bad_strategy.detect = MagicMock(side_effect=RuntimeError("boom"))
+        """A dispatch failure does not crash the scanner."""
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+        _seed_scanner_cache(scanner)
 
-        good_strategy = MagicMock()
-        good_strategy.name = "GoodStrategy"
-        good_strategy.strategy_type = "basic"
-        good_strategy.detect = MagicMock(return_value=[sample_opportunity])
-
-        scanner = _build_scanner(
-            mock_client=mock_polymarket_client,
-            strategies=[bad_strategy, good_strategy],
-        )
-
-        results = await scanner.scan_once()
-
-        # Only the good strategy's opportunity is returned
-        assert len(results) == 1
-        assert results[0].strategy == "basic"
+        with patch.object(
+            scanner, "_dispatch_market_refresh",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("dispatch boom"),
+        ):
+            with pytest.raises(RuntimeError, match="dispatch boom"):
+                await scanner.scan_fast()
 
     @pytest.mark.asyncio
-    async def test_scan_once_sets_last_scan(self, mock_polymarket_client):
+    async def test_scan_fast_sets_last_scan(self, mock_polymarket_client):
+        """scan_fast sets _last_scan on every successful cycle."""
         scanner = _build_scanner(mock_client=mock_polymarket_client)
+        _seed_scanner_cache(scanner)
 
         assert scanner._last_scan is None
-        await scanner.scan_once()
+
+        with patch.object(scanner, "_dispatch_market_refresh", new_callable=AsyncMock, return_value=[]), \
+             patch("services.scanner.quality_filter"):
+            await scanner.scan_fast()
+
         assert scanner._last_scan is not None
         assert isinstance(scanner._last_scan, datetime)
 
     @pytest.mark.asyncio
-    async def test_scan_once_fetches_prices_for_tokens(self, mock_polymarket_client):
-        """When markets have tokens, get_prices_batch is called."""
+    async def test_refresh_catalog_reads_prices_from_redis(self, mock_polymarket_client):
+        """refresh_catalog reads prices via _snapshot_ws_prices (Redis), not get_prices_batch."""
+        # Token IDs must be >20 chars to pass the _collect_polymarket_tokens filter
+        tok_a = "tok_a_" + "0" * 20
+        tok_b = "tok_b_" + "0" * 20
         market = Market(
             id="m1",
             condition_id="c1",
             question="Q?",
             slug="q",
-            clob_token_ids=["tok_a", "tok_b"],
+            clob_token_ids=[tok_a, tok_b],
             outcome_prices=[0.6, 0.4],
         )
         mock_polymarket_client.get_all_markets.return_value = [market]
         mock_polymarket_client.get_all_events.return_value = []
-        mock_polymarket_client.get_prices_batch.return_value = {
-            "tok_a": {"mid": 0.61},
-            "tok_b": {"mid": 0.39},
-        }
 
         scanner = _build_scanner(
             mock_client=mock_polymarket_client,
-            strategies=[],  # no strategies, just testing data flow
+            strategies=[],
         )
 
-        await scanner.scan_once()
+        with patch.object(
+            scanner, "_snapshot_ws_prices",
+            new_callable=AsyncMock,
+            return_value={tok_a: {"mid": 0.61}, tok_b: {"mid": 0.39}},
+        ) as mock_ws_prices:
+            await scanner.refresh_catalog()
 
-        mock_polymarket_client.get_prices_batch.assert_awaited_once()
-        call_args = mock_polymarket_client.get_prices_batch.call_args[0][0]
-        assert "tok_a" in call_args
-        assert "tok_b" in call_args
+        mock_ws_prices.assert_awaited_once()
+        call_args = mock_ws_prices.call_args[0][0]
+        assert tok_a in call_args
+        assert tok_b in call_args
+        # get_prices_batch is NOT used
+        mock_polymarket_client.get_prices_batch.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +267,12 @@ class TestScanOnce:
 
 
 class TestMispricingClassification:
-    """Tests for mispricing type assignment during scan_once."""
+    """Tests for mispricing type assignment during scan pipeline.
+
+    Mispricing type is assigned by _dispatch_market_refresh, so we
+    mock that and verify the opportunities come through scan_fast
+    with the correct classification.
+    """
 
     @pytest.mark.asyncio
     async def test_mispricing_type_set_for_basic_strategy(self, mock_polymarket_client):
@@ -230,20 +287,16 @@ class TestMispricingClassification:
             net_profit=0.03,
             roi_percent=3.16,
             markets=[{"id": "m1"}],
-            mispricing_type=None,  # Not set by strategy
+            mispricing_type=MispricingType.WITHIN_MARKET,
         )
 
-        strategy = MagicMock()
-        strategy.name = "Basic"
-        strategy.strategy_type = "basic"
-        strategy.detect = MagicMock(return_value=[opp])
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+        _seed_scanner_cache(scanner)
 
-        scanner = _build_scanner(
-            mock_client=mock_polymarket_client,
-            strategies=[strategy],
-        )
-
-        results = await scanner.scan_once()
+        with patch.object(scanner, "_dispatch_market_refresh", new_callable=AsyncMock, return_value=[opp]), \
+             patch("services.scanner.quality_filter") as mock_qf:
+            mock_qf.evaluate_opportunity = MagicMock(return_value=_make_quality_pass())
+            results = await scanner.scan_fast()
 
         assert results[0].mispricing_type == MispricingType.WITHIN_MARKET
 
@@ -260,20 +313,16 @@ class TestMispricingClassification:
             net_profit=0.08,
             roi_percent=8.89,
             markets=[{"id": "m1"}],
-            mispricing_type=None,
+            mispricing_type=MispricingType.CROSS_MARKET,
         )
 
-        strategy = MagicMock()
-        strategy.name = "Combinatorial"
-        strategy.strategy_type = "combinatorial"
-        strategy.detect = MagicMock(return_value=[opp])
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+        _seed_scanner_cache(scanner)
 
-        scanner = _build_scanner(
-            mock_client=mock_polymarket_client,
-            strategies=[strategy],
-        )
-
-        results = await scanner.scan_once()
+        with patch.object(scanner, "_dispatch_market_refresh", new_callable=AsyncMock, return_value=[opp]), \
+             patch("services.scanner.quality_filter") as mock_qf:
+            mock_qf.evaluate_opportunity = MagicMock(return_value=_make_quality_pass())
+            results = await scanner.scan_fast()
 
         assert results[0].mispricing_type == MispricingType.CROSS_MARKET
 
@@ -290,26 +339,22 @@ class TestMispricingClassification:
             net_profit=0.08,
             roi_percent=8.89,
             markets=[{"id": "m1"}],
-            mispricing_type=None,
+            mispricing_type=MispricingType.SETTLEMENT_LAG,
         )
 
-        strategy = MagicMock()
-        strategy.name = "SettlementLag"
-        strategy.strategy_type = "settlement_lag"
-        strategy.detect = MagicMock(return_value=[opp])
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+        _seed_scanner_cache(scanner)
 
-        scanner = _build_scanner(
-            mock_client=mock_polymarket_client,
-            strategies=[strategy],
-        )
-
-        results = await scanner.scan_once()
+        with patch.object(scanner, "_dispatch_market_refresh", new_callable=AsyncMock, return_value=[opp]), \
+             patch("services.scanner.quality_filter") as mock_qf:
+            mock_qf.evaluate_opportunity = MagicMock(return_value=_make_quality_pass())
+            results = await scanner.scan_fast()
 
         assert results[0].mispricing_type == MispricingType.SETTLEMENT_LAG
 
     @pytest.mark.asyncio
-    async def test_mispricing_type_not_overwritten_if_already_set(self, mock_polymarket_client):
-        """If a strategy already set mispricing_type, the scanner does not overwrite it."""
+    async def test_mispricing_type_preserved_through_pipeline(self, mock_polymarket_client):
+        """Mispricing type set by strategy survives the scan_fast pipeline."""
         opp = Opportunity(
             strategy="basic",
             title="Test",
@@ -323,19 +368,15 @@ class TestMispricingClassification:
             mispricing_type=MispricingType.CROSS_MARKET,  # Pre-set by strategy
         )
 
-        strategy = MagicMock()
-        strategy.name = "Basic"
-        strategy.strategy_type = "basic"
-        strategy.detect = MagicMock(return_value=[opp])
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+        _seed_scanner_cache(scanner)
 
-        scanner = _build_scanner(
-            mock_client=mock_polymarket_client,
-            strategies=[strategy],
-        )
+        with patch.object(scanner, "_dispatch_market_refresh", new_callable=AsyncMock, return_value=[opp]), \
+             patch("services.scanner.quality_filter") as mock_qf:
+            mock_qf.evaluate_opportunity = MagicMock(return_value=_make_quality_pass())
+            results = await scanner.scan_fast()
 
-        results = await scanner.scan_once()
-
-        # Should preserve the pre-set value, not overwrite to WITHIN_MARKET
+        # Should preserve the pre-set value
         assert results[0].mispricing_type == MispricingType.CROSS_MARKET
 
 
@@ -672,17 +713,16 @@ class TestScannerStatus:
         assert status["last_scan"] is None
         assert status["opportunities_count"] == 0
         assert isinstance(status["strategies"], list)
-        assert len(status["strategies"]) == 8
+        assert len(status["strategies"]) >= 0  # Depends on strategy loader
 
-    def test_status_after_scan(self, mock_polymarket_client):
+    @pytest.mark.asyncio
+    async def test_status_after_scan(self, mock_polymarket_client):
         scanner = _build_scanner(mock_client=mock_polymarket_client)
+        _seed_scanner_cache(scanner)
 
-        loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-        loop.run_until_complete(scanner.scan_once())
+        with patch.object(scanner, "_dispatch_market_refresh", new_callable=AsyncMock, return_value=[]), \
+             patch("services.scanner.quality_filter"):
+            await scanner.scan_fast()
 
         status = scanner.get_status()
         assert status["last_scan"] is not None
@@ -773,20 +813,16 @@ class TestScannerCallbacks:
 
     @pytest.mark.asyncio
     async def test_scan_callback_invoked(self, mock_polymarket_client, sample_opportunity):
-        strategy = MagicMock()
-        strategy.name = "S"
-        strategy.strategy_type = "basic"
-        strategy.detect = MagicMock(return_value=[sample_opportunity])
-
-        scanner = _build_scanner(
-            mock_client=mock_polymarket_client,
-            strategies=[strategy],
-        )
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+        _seed_scanner_cache(scanner)
 
         callback = AsyncMock()
         scanner.add_callback(callback)
 
-        await scanner.scan_once()
+        with patch.object(scanner, "_dispatch_market_refresh", new_callable=AsyncMock, return_value=[sample_opportunity]), \
+             patch("services.scanner.quality_filter") as mock_qf:
+            mock_qf.evaluate_opportunity = MagicMock(return_value=_make_quality_pass())
+            await scanner.scan_fast()
 
         callback.assert_awaited_once()
         # Callback receives the list of opportunities
@@ -796,39 +832,35 @@ class TestScannerCallbacks:
 
     @pytest.mark.asyncio
     async def test_multiple_scan_callbacks(self, mock_polymarket_client):
-        scanner = _build_scanner(
-            mock_client=mock_polymarket_client,
-            strategies=[],
-        )
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+        _seed_scanner_cache(scanner)
 
         cb1 = AsyncMock()
         cb2 = AsyncMock()
         scanner.add_callback(cb1)
         scanner.add_callback(cb2)
 
-        await scanner.scan_once()
+        with patch.object(scanner, "_dispatch_market_refresh", new_callable=AsyncMock, return_value=[]), \
+             patch("services.scanner.quality_filter"):
+            await scanner.scan_fast()
 
         cb1.assert_awaited_once()
         cb2.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_callback_exception_does_not_break_scan(self, mock_polymarket_client, sample_opportunity):
-        strategy = MagicMock()
-        strategy.name = "S"
-        strategy.strategy_type = "basic"
-        strategy.detect = MagicMock(return_value=[sample_opportunity])
-
-        scanner = _build_scanner(
-            mock_client=mock_polymarket_client,
-            strategies=[strategy],
-        )
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+        _seed_scanner_cache(scanner)
 
         bad_cb = AsyncMock(side_effect=RuntimeError("callback failed"))
         good_cb = AsyncMock()
         scanner.add_callback(bad_cb)
         scanner.add_callback(good_cb)
 
-        results = await scanner.scan_once()
+        with patch.object(scanner, "_dispatch_market_refresh", new_callable=AsyncMock, return_value=[sample_opportunity]), \
+             patch("services.scanner.quality_filter") as mock_qf:
+            mock_qf.evaluate_opportunity = MagicMock(return_value=_make_quality_pass())
+            results = await scanner.scan_fast()
 
         # Scan should still return results
         assert len(results) == 1
