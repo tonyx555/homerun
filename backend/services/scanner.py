@@ -1149,16 +1149,21 @@ class ArbitrageScanner:
         This allows the evaluate endpoint to run a focused scan
         instead of a full market sweep.
         """
+        import time as _time
+
+        _scan_t0 = _time.monotonic()
         print(f"[{utcnow().isoformat()}] Starting arbitrage scan...")
         await self._set_activity("Fetching Polymarket events and markets...")
         loop = asyncio.get_running_loop()
 
         try:
             # Fetch events and markets concurrently (they are independent)
+            _phase_t = _time.monotonic()
             events, markets = await asyncio.gather(
                 self.market_data.get_all_events(closed=False),
                 self.market_data.get_all_markets(active=True),
             )
+            print(f"  [timing] Polymarket fetch: {_time.monotonic() - _phase_t:.1f}s")
 
             # Filter out markets whose end_date has already passed —
             # these are resolved events awaiting settlement and can't
@@ -1209,6 +1214,7 @@ class ArbitrageScanner:
             kalshi_event_count = 0
             if settings.CROSS_PLATFORM_ENABLED:
                 await self._set_activity("Fetching Kalshi markets...")
+                _phase_t = _time.monotonic()
                 try:
                     kalshi_markets = await self.market_data.get_cross_platform_markets(active=True)
                     kalshi_markets = [m for m in kalshi_markets if m.end_date is None or _make_aware(m.end_date) > now]
@@ -1223,6 +1229,7 @@ class ArbitrageScanner:
 
                     if kalshi_market_count > 0:
                         print(f"  Fetched {kalshi_event_count} Kalshi events and {kalshi_market_count} Kalshi markets")
+                        print(f"  [timing] Kalshi fetch: {_time.monotonic() - _phase_t:.1f}s")
                         await self._set_activity(
                             f"Fetched {kalshi_event_count} Kalshi events, {kalshi_market_count} markets"
                         )
@@ -1285,12 +1292,14 @@ class ArbitrageScanner:
 
             prices = {}
             if sorted_token_ids:
+                _phase_t = _time.monotonic()
                 await self._set_activity(f"Reading cached live prices for {len(sorted_token_ids)} tokens...")
                 prices = await self._snapshot_ws_prices(sorted_token_ids)
                 print(
                     f"  Loaded prices for {len(prices)}/{len(all_token_ids)} tokens from Redis "
                     f"({len(priority_token_ids)} prioritized)"
                 )
+                print(f"  [timing] Price load: {_time.monotonic() - _phase_t:.1f}s")
             self._apply_live_prices_to_markets(markets, prices)
 
             # Cache full data for fast scans between full scans
@@ -1364,6 +1373,7 @@ class ArbitrageScanner:
                     print(f"  Prioritizer error (non-fatal, using all markets): {e}")
                     markets_to_evaluate = markets
 
+            _phase_t = _time.monotonic()
             if self._strategy_overrides is not None:
                 await self._set_activity("Running scanner strategy overrides...")
                 all_opportunities = await self._run_override_strategies(
@@ -1386,6 +1396,8 @@ class ArbitrageScanner:
                     data_event,
                     full_market_snapshot=markets,
                 )
+                print(f"  Strategies dispatched: {len(all_opportunities)} raw opportunities from {len(markets_to_evaluate)} markets")
+                print(f"  [timing] Strategy dispatch: {_time.monotonic() - _phase_t:.1f}s")
 
             # Update prioritizer state after evaluation (CPU-bound, run in thread)
             if settings.TIERED_SCANNING_ENABLED:
@@ -1401,12 +1413,20 @@ class ArbitrageScanner:
             if self._strategy_overrides is None:
                 all_opportunities = self._deduplicate_cross_strategy(all_opportunities)
 
+                pre_filter_count = len(all_opportunities)
+                if pre_filter_count > 0:
+                    by_strategy: dict[str, int] = {}
+                    for opp in all_opportunities:
+                        by_strategy[opp.strategy] = by_strategy.get(opp.strategy, 0) + 1
+                    print(f"  Pre-filter: {pre_filter_count} opportunities by strategy: {by_strategy}")
+
                 # Apply quality filters with full audit trail.
                 # Pass per-strategy QualityFilterOverrides so strategies that
                 # set quality_filter_overrides on their class have those thresholds
                 # respected (e.g. directional strategies relaxing the ROI cap).
                 _quality_reports: dict = {}
                 filtered_opportunities: list = []
+                rejection_reasons: dict[str, int] = {}
                 for opp in all_opportunities:
                     strategy_instance = strategy_loader.get_instance(opp.strategy)
                     overrides = (
@@ -1416,6 +1436,14 @@ class ArbitrageScanner:
                     _quality_reports[opp.stable_id or opp.id] = report
                     if report.passed:
                         filtered_opportunities.append(opp)
+                    else:
+                        for reason in report.rejection_reasons:
+                            rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
+                if pre_filter_count > 0:
+                    print(
+                        f"  Quality filter: {len(filtered_opportunities)}/{pre_filter_count} passed"
+                        f"{f', rejections: {rejection_reasons}' if rejection_reasons else ''}"
+                    )
                 all_opportunities = filtered_opportunities
                 self._quality_reports = _quality_reports
             else:
@@ -1447,6 +1475,7 @@ class ArbitrageScanner:
                 print(f"  Sparkline backfill error (non-fatal): {e}")
             self._last_scan = datetime.now(timezone.utc)
             print(f"  Stored {len(self._opportunities)} opportunities")
+            print(f"  [timing] Total scan_once: {_time.monotonic() - _scan_t0:.1f}s")
 
             # News Edge: LLM-based analysis is now manual only (triggered
             # from the UI via POST /news/edges or POST /news/edges/single)

@@ -245,7 +245,7 @@ async def _run_scan_loop() -> None:
 
     stale_scan_streak = 0
     scan_watchdog_seconds = max(
-        180,
+        int(settings.SCAN_WATCHDOG_SECONDS),
         int(settings.SCAN_INTERVAL_SECONDS) * 3,
         int(settings.FAST_SCAN_INTERVAL_SECONDS) * 3,
         int(settings.FULL_SCAN_INTERVAL_SECONDS) * 3,
