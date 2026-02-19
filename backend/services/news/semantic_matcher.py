@@ -11,6 +11,7 @@ gracefully.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -128,6 +129,10 @@ class SemanticMatcher:
         self._market_embeddings: Optional[np.ndarray] = None
         self._faiss_index: Optional[object] = None  # faiss.IndexFlatIP
 
+        # Cache-hit tracking: skip redundant re-embedding when data hasn't changed
+        self._market_index_hash: Optional[str] = None
+        self._last_embed_count: int = 0  # articles embedded in last pass
+
     # ------------------------------------------------------------------
     # Initialization
     # ------------------------------------------------------------------
@@ -171,28 +176,61 @@ class SemanticMatcher:
         """Whether the full ML pipeline is available."""
         return self._model is not None
 
+    def get_model(self) -> Optional["SentenceTransformer"]:
+        """Return the loaded SentenceTransformer model (or None).
+
+        Other modules (e.g. MarketWatcherIndex) should call this to share
+        the single model instance instead of loading a duplicate.
+        """
+        if not self._initialized:
+            self.initialize()
+        return self._model
+
     # ------------------------------------------------------------------
     # Market index management
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _compute_market_hash(markets: list[MarketInfo]) -> str:
+        """Fast content hash of the market list for change detection."""
+        h = hashlib.md5(usedforsecurity=False)
+        for m in markets:
+            h.update(m.market_id.encode())
+            h.update(m.question.encode())
+        return h.hexdigest()
 
     def update_market_index(self, markets: list[MarketInfo]) -> int:
         """Rebuild the market embedding index.
 
         Call this after fetching new market data from the scanner.
+        Skips re-embedding when the market list is unchanged.
         Returns the number of markets indexed.
         """
         if not self._initialized:
             self.initialize()
 
-        texts = [self._market_to_text(m) for m in markets] if markets else []
+        if not markets:
+            with self._lock:
+                self._markets = markets
+                self._market_embeddings = None
+                self._faiss_index = None
+                self._market_index_hash = None
+            return 0
+
+        # Skip expensive re-embedding when the market set hasn't changed
+        new_hash = self._compute_market_hash(markets)
+        if new_hash == self._market_index_hash and self._market_embeddings is not None:
+            # Market IDs/questions unchanged — just update the MarketInfo list
+            # (prices may have changed, but embeddings don't depend on prices)
+            with self._lock:
+                self._markets = markets
+            logger.debug("Market index unchanged (%d markets), skipping re-embed", len(markets))
+            return len(markets)
+
+        texts = [self._market_to_text(m) for m in markets]
 
         with self._lock:
             self._markets = markets
-
-            if not markets:
-                self._market_embeddings = None
-                self._faiss_index = None
-                return 0
 
             if self._model is not None:
                 try:
@@ -203,6 +241,7 @@ class SemanticMatcher:
                     self._model = None
                     self._market_embeddings = None
                     self._faiss_index = None
+                    self._market_index_hash = None
                     return len(markets)
 
                 if _HAS_FAISS and self._market_embeddings.ndim == 2:
@@ -222,6 +261,8 @@ class SemanticMatcher:
             else:
                 self._market_embeddings = None
                 self._faiss_index = None
+
+            self._market_index_hash = new_hash
 
         logger.debug("Market index updated: %d markets", len(markets))
         return len(markets)
@@ -290,6 +331,117 @@ class SemanticMatcher:
                 return self._match_semantic(articles, top_k, threshold)
             else:
                 return self._match_tfidf(articles, top_k, threshold)
+
+    def find_matches(
+        self,
+        query: str,
+        top_k: int = 10,
+        threshold: Optional[float] = None,
+    ) -> list[dict]:
+        """Find cached news articles semantically similar to *query*.
+
+        This is the StrategySDK entry-point.  It embeds *query* on-the-fly
+        and searches the in-memory article store for the closest matches.
+        Articles must have been embedded by a prior ``embed_articles`` call
+        (done automatically by the scanner prefetch).
+
+        Args:
+            query: Free-text search string (e.g. a market question).
+            top_k: Maximum number of results.
+            threshold: Minimum similarity score.  Defaults to config value.
+
+        Returns:
+            List of dicts: title, source, score, published_at, summary.
+        """
+        if not self._initialized:
+            self.initialize()
+
+        if threshold is None:
+            threshold = settings.NEWS_SIMILARITY_THRESHOLD
+
+        if not query.strip():
+            return []
+
+        # Gather embedded articles from the feed store
+        try:
+            from services.news.feed_service import news_feed_service
+            articles = news_feed_service.get_articles(
+                max_age_hours=getattr(settings, "NEWS_ARTICLE_TTL_HOURS", 168),
+            )
+        except Exception:
+            articles = []
+
+        embedded = [a for a in articles if a.embedding is not None]
+
+        if self._model is not None and embedded:
+            # Semantic path: embed query, dot-product against article embeddings
+            with self._lock:
+                try:
+                    q_emb = self._model.encode(
+                        [query], show_progress_bar=False, normalize_embeddings=True,
+                    )
+                    q_vec = np.array(q_emb, dtype=np.float32)
+                    if q_vec.ndim == 1:
+                        q_vec = q_vec.reshape(1, -1)
+                except Exception as e:
+                    logger.warning("Query embedding failed in find_matches: %s", e)
+                    return []
+
+            try:
+                art_embs = np.array([a.embedding for a in embedded], dtype=np.float32)
+            except (ValueError, TypeError):
+                return []
+            if art_embs.ndim != 2 or q_vec.shape[1] != art_embs.shape[1]:
+                return []
+
+            sim = (q_vec @ art_embs.T).flatten()
+            top_indices = np.argsort(sim)[::-1][:top_k]
+            results = []
+            for idx in top_indices:
+                score = float(sim[int(idx)])
+                if score < threshold:
+                    continue
+                a = embedded[int(idx)]
+                results.append({
+                    "title": a.title,
+                    "source": a.source or "",
+                    "score": score,
+                    "published_at": str(a.published_at or a.fetched_at or ""),
+                    "summary": a.summary or "",
+                })
+            return results
+
+        # TF-IDF fallback (works even without ML deps)
+        if not articles:
+            return []
+        article_texts = [self._article_to_text(a) for a in articles]
+        vocab = _build_vocab(article_texts + [query])
+        if not vocab:
+            return []
+        query_vec = _tfidf_vector(query, vocab)
+        q_norm = np.linalg.norm(query_vec)
+        if q_norm == 0:
+            return []
+        scored: list[tuple[int, float]] = []
+        for i, a in enumerate(articles):
+            a_vec = _tfidf_vector(article_texts[i], vocab)
+            a_norm = np.linalg.norm(a_vec)
+            if a_norm == 0:
+                continue
+            score = float(np.dot(query_vec, a_vec) / (q_norm * a_norm))
+            if score >= threshold:
+                scored.append((i, score))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [
+            {
+                "title": articles[i].title,
+                "source": articles[i].source or "",
+                "score": s,
+                "published_at": str(articles[i].published_at or articles[i].fetched_at or ""),
+                "summary": articles[i].summary or "",
+            }
+            for i, s in scored[:top_k]
+        ]
 
     def _match_semantic(
         self,
@@ -470,6 +622,7 @@ class SemanticMatcher:
             "model": self._model_name if self.is_ml_mode else "tfidf_fallback",
             "markets_indexed": len(self._markets),
             "has_faiss": _HAS_FAISS,
+            "market_index_cached": self._market_index_hash is not None,
         }
 
 

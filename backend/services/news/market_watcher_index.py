@@ -10,6 +10,7 @@ Pattern from: Polymarket Agents (Chroma vector DB), Quant-tool (pgvector).
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -217,16 +218,37 @@ class MarketWatcherIndex:
         self._embeddings: Optional[np.ndarray] = None
         self._faiss_index: Optional[object] = None
         self._last_rebuild: Optional[datetime] = None
+        self._market_index_hash: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Initialization
     # ------------------------------------------------------------------
 
     def initialize(self) -> bool:
-        """Load embedding model. Returns True if ML mode available."""
+        """Load embedding model. Returns True if ML mode available.
+
+        Shares the model instance with ``semantic_matcher`` to avoid
+        loading duplicate ~80 MB weights into memory.
+        """
         with self._lock:
             if self._initialized:
                 return self._model is not None
+
+            # Try to borrow the already-loaded model from SemanticMatcher
+            try:
+                from services.news.semantic_matcher import semantic_matcher
+
+                shared = semantic_matcher.get_model()
+                if shared is not None:
+                    self._model = shared
+                    self._initialized = True
+                    logger.info(
+                        "Market watcher index sharing model with semantic_matcher"
+                    )
+                    return True
+            except Exception:
+                pass  # Fall through to standalone load
+
             if _HAS_TRANSFORMERS:
                 try:
                     # Avoid startup hangs when DNS/network is unavailable.
@@ -236,7 +258,7 @@ class MarketWatcherIndex:
                     self._model = SentenceTransformer(self._model_name, device=device)
                     self._model.encode(["test"], show_progress_bar=False, normalize_embeddings=True)
                     self._initialized = True
-                    logger.info("Market watcher index initialized (ML mode)")
+                    logger.info("Market watcher index initialized (standalone ML mode)")
                     return True
                 except Exception as e:
                     logger.warning("Failed to load embedding model: %s", e)
@@ -256,10 +278,51 @@ class MarketWatcherIndex:
     # Rebuild index from scanner markets
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _compute_market_hash(markets: list[IndexedMarket]) -> str:
+        """Fast content hash of the market list for change detection."""
+        h = hashlib.md5(usedforsecurity=False)
+        for m in markets:
+            h.update(m.market_id.encode())
+            h.update(m.question.encode())
+        return h.hexdigest()
+
     def rebuild(self, markets: list[IndexedMarket]) -> int:
-        """Rebuild the entire index from a list of markets."""
+        """Rebuild the entire index from a list of markets.
+
+        Skips the expensive embedding step when the market set is unchanged.
+        """
         if not self._initialized:
             self.initialize()
+
+        if not markets:
+            with self._lock:
+                self._markets = []
+                self._market_tokens = []
+                self._embeddings = None
+                self._faiss_index = None
+                self._market_index_hash = None
+                self._last_rebuild = datetime.now(timezone.utc)
+            return 0
+
+        # Skip re-embedding when the market set hasn't changed
+        new_hash = self._compute_market_hash(markets)
+        if new_hash == self._market_index_hash and self._embeddings is not None:
+            # Still tokenize keywords (cheap) and update market objects
+            tokens_list = []
+            for m in markets:
+                tags_text = " ".join(m.tags or [])
+                text = f"{m.question} {m.event_title} {m.category} {tags_text} {m.slug}"
+                m.keywords = _tokenize(text)
+                tokens_list.append(m.keywords)
+            with self._lock:
+                self._markets = markets
+                self._market_tokens = tokens_list
+            logger.debug(
+                "Market watcher index unchanged (%d markets), skipping re-embed",
+                len(markets),
+            )
+            return len(markets)
 
         # Tokenize for keyword search
         tokens_list = []
@@ -303,6 +366,7 @@ class MarketWatcherIndex:
         with self._lock:
             self._markets = markets
             self._market_tokens = tokens_list
+            self._market_index_hash = new_hash
             self._last_rebuild = datetime.now(timezone.utc)
 
         logger.info("Market watcher index rebuilt: %d markets", len(markets))

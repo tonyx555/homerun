@@ -1322,17 +1322,23 @@ class StrategySDK:
     ) -> list[dict]:
         """Get news articles semantically matched to a specific market.
 
+        Uses the semantic matcher to find cached news articles whose content
+        is most similar to the market's question.  Articles are embedded by
+        the scanner prefetch loop; this call is lightweight (numpy dot
+        product or FAISS search).
+
         Args:
-            market: A Market object.
+            market: A Market object (must have a ``question`` attribute).
             max_articles: Maximum number of articles to return.
 
         Returns:
-            List of article dicts with relevance_score.
+            List of article dicts with keys: title, source, relevance_score,
+            published_at, summary.
         """
         try:
             from services.news.semantic_matcher import semantic_matcher
 
-            question = getattr(market, "question", "")
+            question = getattr(market, "question", "") or ""
             if not question:
                 return []
 
@@ -1347,7 +1353,9 @@ class StrategySDK:
                 }
                 for m in (matches or [])
             ]
-        except Exception:
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).debug("get_news_for_market failed: %s", e)
             return []
 
     # ── Data source access ───────────────────────────────

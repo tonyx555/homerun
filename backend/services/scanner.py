@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from utils.utcnow import utcnow
 from typing import Optional, Callable, List, Set
@@ -26,6 +27,12 @@ from services.quality_filter import quality_filter
 from services.data_events import DataEvent, EventType
 from services.event_dispatcher import event_dispatcher
 from sqlalchemy import select
+
+# Persistent single-thread executor for news prefetch embedding work.
+# PyTorch/FAISS use thread-local state; a dedicated thread avoids segfaults.
+_NEWS_PREFETCH_EXECUTOR = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="news_prefetch",
+)
 
 
 def _make_aware(dt: Optional[datetime]) -> Optional[datetime]:
@@ -1763,7 +1770,6 @@ class ArbitrageScanner:
         try:
             from services.news.feed_service import news_feed_service
             from services.news.semantic_matcher import semantic_matcher
-            from concurrent.futures import ThreadPoolExecutor
 
             # Step 1: Fetch articles (free — RSS/GDELT)
             await news_feed_service.fetch_all()
@@ -1781,23 +1787,24 @@ class ArbitrageScanner:
                 return
 
             loop = asyncio.get_running_loop()
-            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="news_prefetch") as executor:
-                if not semantic_matcher._initialized:
-                    await loop.run_in_executor(executor, semantic_matcher.initialize)
+            executor = _NEWS_PREFETCH_EXECUTOR
 
-                await loop.run_in_executor(executor, semantic_matcher.update_market_index, market_infos)
+            if not semantic_matcher._initialized:
+                await loop.run_in_executor(executor, semantic_matcher.initialize)
 
-                # Step 3: Embed articles (local ML, free)
-                await loop.run_in_executor(executor, semantic_matcher.embed_articles, all_articles)
+            await loop.run_in_executor(executor, semantic_matcher.update_market_index, market_infos)
 
-                # Step 4: Match articles to markets (local, free)
-                matches = await loop.run_in_executor(
-                    executor,
-                    semantic_matcher.match_articles_to_markets,
-                    all_articles,
-                    3,
-                    settings.NEWS_SIMILARITY_THRESHOLD,
-                )
+            # Step 3: Embed articles (local ML, free)
+            await loop.run_in_executor(executor, semantic_matcher.embed_articles, all_articles)
+
+            # Step 4: Match articles to markets (local, free)
+            matches = await loop.run_in_executor(
+                executor,
+                semantic_matcher.match_articles_to_markets,
+                all_articles,
+                3,
+                settings.NEWS_SIMILARITY_THRESHOLD,
+            )
 
             print(
                 f"  News prefetch: {len(all_articles)} articles, "
