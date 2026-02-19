@@ -245,10 +245,10 @@ async def _run_scan_loop() -> None:
 
     stale_scan_streak = 0
     scan_watchdog_seconds = max(
-        60,
-        int(settings.SCAN_INTERVAL_SECONDS),
-        int(settings.FAST_SCAN_INTERVAL_SECONDS),
-        int(settings.FULL_SCAN_INTERVAL_SECONDS),
+        180,
+        int(settings.SCAN_INTERVAL_SECONDS) * 3,
+        int(settings.FAST_SCAN_INTERVAL_SECONDS) * 3,
+        int(settings.FULL_SCAN_INTERVAL_SECONDS) * 3,
     )
 
     while True:
@@ -328,11 +328,11 @@ async def _run_scan_loop() -> None:
                 scan_watchdog_seconds,
                 stale_scan_streak,
             )
-            if stale_scan_streak >= 2:
+            if stale_scan_streak >= 4:
                 scanner._cached_markets = []
                 scanner._cached_events = []
                 scanner._cached_prices = {}
-            if stale_scan_streak >= 3:
+            if stale_scan_streak >= 5:
                 try:
                     await _stop_ws_feeds()
                     await _ensure_ws_feeds_running()

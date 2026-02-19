@@ -11,9 +11,17 @@ $redisPort = if ($env:REDIS_PORT) { [int]$env:REDIS_PORT } else { 6379 }
 $redisContainerName = if ($env:REDIS_CONTAINER_NAME) { $env:REDIS_CONTAINER_NAME } else { "homerun-redis" }
 $redisImage = if ($env:REDIS_IMAGE) { $env:REDIS_IMAGE } else { "redis:7-alpine" }
 
+function Find-RedisServer {
+    $cmd = Get-Command redis-server -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    $wellKnown = "C:\Program Files\Redis\redis-server.exe"
+    if (Test-Path $wellKnown) { return $wellKnown }
+    return $null
+}
+
 function Test-RedisRuntimeAvailable {
     if (Get-Command docker -ErrorAction SilentlyContinue) { return $true }
-    if (Get-Command redis-server -ErrorAction SilentlyContinue) { return $true }
+    if (Find-RedisServer) { return $true }
     try {
         $svc = Get-Service -Name "Memurai" -ErrorAction SilentlyContinue
         if ($svc) { return $true }
@@ -37,8 +45,8 @@ function Ensure-RedisRuntime {
 
 function Test-RedisPing {
     param(
-        [string]$Host,
-        [int]$Port
+        [string]$RedisHost,
+        [int]$RedisPort
     )
 
     $client = $null
@@ -47,7 +55,7 @@ function Test-RedisPing {
         $client = [System.Net.Sockets.TcpClient]::new()
         $client.ReceiveTimeout = 500
         $client.SendTimeout = 500
-        $client.Connect($Host, $Port)
+        $client.Connect($RedisHost, $RedisPort)
         $stream = $client.GetStream()
         $payload = [System.Text.Encoding]::ASCII.GetBytes("*1`r`n`$4`r`nPING`r`n")
         $stream.Write($payload, 0, $payload.Length)
@@ -66,12 +74,12 @@ function Test-RedisPing {
 
 function Wait-ForRedis {
     param(
-        [string]$Host,
-        [int]$Port
+        [string]$RedisHost,
+        [int]$RedisPort
     )
 
     for ($i = 0; $i -lt 20; $i++) {
-        if (Test-RedisPing -Host $Host -Port $Port) {
+        if (Test-RedisPing -RedisHost $RedisHost -RedisPort $RedisPort) {
             return $true
         }
         Start-Sleep -Milliseconds 250
@@ -81,8 +89,8 @@ function Wait-ForRedis {
 
 function Start-RedisDocker {
     param(
-        [string]$Host,
-        [int]$Port,
+        [string]$RedisHost,
+        [int]$RedisPort,
         [string]$ContainerName,
         [string]$Image
     )
@@ -107,7 +115,7 @@ function Start-RedisDocker {
     }
 
     try {
-        docker run --name $ContainerName --detach --publish "${Host}:${Port}:6379" $Image redis-server --save "" --appendonly no *> $null
+        docker run --name $ContainerName --detach --publish "${RedisHost}:${RedisPort}:6379" $Image redis-server --save "" --appendonly no *> $null
         return ($LASTEXITCODE -eq 0)
     } catch {
         return $false
@@ -116,14 +124,14 @@ function Start-RedisDocker {
 
 function Start-RedisLocal {
     param(
-        [string]$Host,
-        [int]$Port
+        [string]$RedisHost,
+        [int]$RedisPort
     )
 
-    $redisServer = Get-Command redis-server -ErrorAction SilentlyContinue
-    if ($redisServer) {
+    $redisServerPath = Find-RedisServer
+    if ($redisServerPath) {
         try {
-            Start-Process -FilePath $redisServer.Source -ArgumentList @("--bind", $Host, "--port", "$Port", "--save", "", "--appendonly", "no") -WindowStyle Hidden | Out-Null
+            Start-Process -FilePath $redisServerPath -ArgumentList @("--bind", $RedisHost, "--port", "$RedisPort", "--save", "", "--appendonly", "no") -WindowStyle Hidden | Out-Null
             return $true
         } catch {
         }
@@ -145,14 +153,14 @@ function Start-RedisLocal {
 
 function Ensure-Redis {
     param(
-        [string]$Host,
-        [int]$Port,
+        [string]$RedisHost,
+        [int]$RedisPort,
         [string]$ContainerName,
         [string]$Image
     )
 
-    if (Test-RedisPing -Host $Host -Port $Port) {
-        Write-Host "Redis already running on ${Host}:${Port}" -ForegroundColor Green
+    if (Test-RedisPing -RedisHost $RedisHost -RedisPort $RedisPort) {
+        Write-Host "Redis already running on ${RedisHost}:${RedisPort}" -ForegroundColor Green
         return
     }
 
@@ -163,15 +171,15 @@ function Ensure-Redis {
     }
 
     Write-Host "Starting Redis..." -ForegroundColor Cyan
-    $dockerStarted = Start-RedisDocker -Host $Host -Port $Port -ContainerName $ContainerName -Image $Image
-    if ($dockerStarted -and (Wait-ForRedis -Host $Host -Port $Port)) {
-        Write-Host "Redis started via Docker on ${Host}:${Port}" -ForegroundColor Green
+    $dockerStarted = Start-RedisDocker -RedisHost $RedisHost -RedisPort $RedisPort -ContainerName $ContainerName -Image $Image
+    if ($dockerStarted -and (Wait-ForRedis -RedisHost $RedisHost -RedisPort $RedisPort)) {
+        Write-Host "Redis started via Docker on ${RedisHost}:${RedisPort}" -ForegroundColor Green
         return
     }
 
-    $localStarted = Start-RedisLocal -Host $Host -Port $Port
-    if ($localStarted -and (Wait-ForRedis -Host $Host -Port $Port)) {
-        Write-Host "Redis started via redis-server on ${Host}:${Port}" -ForegroundColor Green
+    $localStarted = Start-RedisLocal -RedisHost $RedisHost -RedisPort $RedisPort
+    if ($localStarted -and (Wait-ForRedis -RedisHost $RedisHost -RedisPort $RedisPort)) {
+        Write-Host "Redis started via redis-server on ${RedisHost}:${RedisPort}" -ForegroundColor Green
         return
     }
 
@@ -212,7 +220,7 @@ if (Test-NeedsSetup) {
     & .\scripts\setup.ps1
 }
 
-Ensure-Redis -Host $redisHost -Port $redisPort -ContainerName $redisContainerName -Image $redisImage
+Ensure-Redis -RedisHost $redisHost -RedisPort $redisPort -ContainerName $redisContainerName -Image $redisImage
 
 # Activate venv
 & backend\venv\Scripts\Activate.ps1

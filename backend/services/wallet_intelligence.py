@@ -20,6 +20,17 @@ from typing import Optional
 
 from sqlalchemy import and_, select, text, update, func, or_
 
+SQLITE_VAR_LIMIT = 900
+
+
+def _chunked_in(column, values: list, chunk_size: int = SQLITE_VAR_LIMIT):
+    if len(values) <= chunk_size:
+        return column.in_(values)
+    clauses = []
+    for i in range(0, len(values), chunk_size):
+        clauses.append(column.in_(values[i : i + chunk_size]))
+    return or_(*clauses)
+
 from models.database import (
     DiscoveredWallet,
     WalletTag,
@@ -87,7 +98,7 @@ class ConfluenceDetector:
             result = await session.execute(
                 select(WalletActivityRollup)
                 .where(
-                    WalletActivityRollup.wallet_address.in_(addresses),
+                    _chunked_in(WalletActivityRollup.wallet_address, addresses),
                     WalletActivityRollup.traded_at >= cutoff_60m,
                 )
                 .order_by(WalletActivityRollup.traded_at.desc())
@@ -411,7 +422,7 @@ class ConfluenceDetector:
             result = await session.execute(
                 select(func.sum(WalletActivityRollup.notional)).where(
                     WalletActivityRollup.market_id == market_id,
-                    WalletActivityRollup.wallet_address.in_(addresses),
+                    _chunked_in(WalletActivityRollup.wallet_address, addresses),
                     WalletActivityRollup.traded_at >= cutoff,
                     WalletActivityRollup.side.in_([opposite, "YES" if opposite == "BUY" else "NO"]),
                 )

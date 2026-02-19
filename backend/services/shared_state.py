@@ -13,6 +13,18 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy import select, or_
+
+SQLITE_VAR_LIMIT = 900
+
+
+def _chunked_in(column, values, chunk_size: int = SQLITE_VAR_LIMIT):
+    values = list(values)
+    if len(values) <= chunk_size:
+        return column.in_(values)
+    clauses = []
+    for i in range(0, len(values), chunk_size):
+        clauses.append(column.in_(values[i : i + chunk_size]))
+    return or_(*clauses)
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -292,7 +304,7 @@ async def _persist_incremental_state(
                     select(OpportunityState).where(
                         or_(
                             OpportunityState.is_active == True,  # noqa: E712
-                            OpportunityState.stable_id.in_(current_ids),
+                            _chunked_in(OpportunityState.stable_id, current_ids),
                         )
                     )
                 )

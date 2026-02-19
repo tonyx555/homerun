@@ -1007,7 +1007,6 @@ function App() {
     opportunitiesView === 'scanner'
     || opportunitiesView === 'crypto'
     || opportunitiesView === 'weather'
-    || opportunitiesView === 'news'
     || opportunitiesView === 'traders'
 
   const openOpportunitySettings = useCallback(() => {
@@ -1021,10 +1020,6 @@ function App() {
     }
     if (opportunitiesView === 'weather') {
       window.dispatchEvent(new CustomEvent('open-weather-workflow-settings'))
-      return
-    }
-    if (opportunitiesView === 'news') {
-      window.dispatchEvent(new CustomEvent('open-news-workflow-settings'))
       return
     }
     if (opportunitiesView === 'traders') {
@@ -1844,7 +1839,7 @@ function App() {
                       showSettingsButton={false}
                     />
                   ) : opportunitiesView === 'news' ? (
-                    <NewsIntelligencePanel initialSearchQuery={newsSearchQuery} mode="workflow" showSettingsButton={false} />
+                    <NewsIntelligencePanel initialSearchQuery={newsSearchQuery} mode="workflow" />
                   ) : opportunitiesView === 'weather' ? (
                     <WeatherOpportunitiesPanel
                       onExecute={setExecutingOpportunity}

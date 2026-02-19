@@ -2435,70 +2435,6 @@ export interface TradingProxySettings {
 export interface EventsSettings {
   enabled: boolean
   interval_seconds: number
-  emit_trade_signals: boolean
-  acled_api_key?: string | null
-  acled_email?: string | null
-  opensky_username?: string | null
-  opensky_password?: string | null
-  aisstream_api_key?: string | null
-  cloudflare_radar_token?: string | null
-  ais_enabled: boolean
-  ais_sample_seconds: number
-  ais_max_messages: number
-  airplanes_live_enabled: boolean
-  airplanes_live_timeout_seconds: number
-  airplanes_live_max_records: number
-  military_dedupe_radius_km: number
-  military_enabled: boolean
-  country_reference_sync_enabled: boolean
-  country_reference_sync_hours: number
-  country_reference_request_timeout_seconds: number
-  ucdp_sync_enabled: boolean
-  ucdp_sync_hours: number
-  ucdp_lookback_years: number
-  ucdp_max_pages: number
-  ucdp_request_timeout_seconds: number
-  mid_sync_enabled: boolean
-  mid_sync_hours: number
-  mid_request_timeout_seconds: number
-  trade_dependency_sync_enabled: boolean
-  trade_dependency_sync_hours: number
-  trade_dependency_request_timeout_seconds: number
-  trade_dependency_wb_per_page: number
-  trade_dependency_wb_max_pages: number
-  trade_dependency_base_divisor: number
-  trade_dependency_min_factor: number
-  trade_dependency_max_factor: number
-  chokepoints_enabled: boolean
-  chokepoints_refresh_seconds: number
-  chokepoints_request_timeout_seconds: number
-  chokepoints_max_daily_rows: number
-  chokepoints_db_sync_enabled: boolean
-  chokepoints_db_sync_hours: number
-  convergence_min_types: number
-  anomaly_threshold: number
-  anomaly_min_baseline_points: number
-  instability_signal_min: number
-  instability_critical: number
-  tension_critical: number
-  gdelt_query_delay_seconds: number
-  gdelt_max_concurrency: number
-  gdelt_news_enabled: boolean
-  gdelt_news_timespan_hours: number
-  gdelt_news_max_records: number
-  gdelt_news_request_timeout_seconds: number
-  gdelt_news_cache_seconds: number
-  gdelt_news_query_delay_seconds: number
-  gdelt_news_sync_enabled: boolean
-  gdelt_news_sync_hours: number
-  acled_rate_limit_per_min: number
-  acled_auth_rate_limit_per_min: number
-  acled_cb_max_failures: number
-  acled_cb_cooldown_seconds: number
-  opensky_cb_max_failures: number
-  opensky_cb_cooldown_seconds: number
-  usgs_enabled: boolean
-  usgs_min_magnitude: number
 }
 
 export interface SearchFilterSettings {
@@ -3383,32 +3319,6 @@ export interface NewsWorkflowStatus {
   stats: Record<string, unknown>
 }
 
-export interface NewsWorkflowSettings {
-  enabled: boolean
-  auto_run: boolean
-  scan_interval_seconds: number
-  top_k: number
-  rerank_top_n: number
-  similarity_threshold: number
-  keyword_weight: number
-  semantic_weight: number
-  event_weight: number
-  require_verifier: boolean
-  market_min_liquidity: number
-  market_max_days_to_resolution: number
-  min_keyword_signal: number
-  min_semantic_signal: number
-  min_edge_percent: number
-  min_confidence: number
-  require_second_source: boolean
-  cycle_spend_cap_usd: number
-  hourly_spend_cap_usd: number
-  cycle_llm_call_cap: number
-  cache_ttl_minutes: number
-  max_edge_evals_per_article: number
-  model: string | null
-}
-
 export const getNewsWorkflowStatus = async (): Promise<NewsWorkflowStatus> => {
   const { data } = await api.get('/news-workflow/status')
   return unwrapApiData(data)
@@ -3458,18 +3368,6 @@ export const getNewsWorkflowIntents = async (params?: {
 
 export const skipNewsWorkflowIntent = async (intentId: string): Promise<{ status: string; intent_id: string }> => {
   const { data } = await api.post(`/news-workflow/intents/${intentId}/skip`)
-  return unwrapApiData(data)
-}
-
-export const getNewsWorkflowSettings = async (): Promise<NewsWorkflowSettings> => {
-  const { data } = await api.get('/news-workflow/settings')
-  return unwrapApiData(data)
-}
-
-export const updateNewsWorkflowSettings = async (
-  settings: Partial<NewsWorkflowSettings>
-): Promise<{ status: string; settings: NewsWorkflowSettings }> => {
-  const { data } = await api.put('/news-workflow/settings', settings)
   return unwrapApiData(data)
 }
 

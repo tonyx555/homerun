@@ -28,6 +28,7 @@ from services.traders_firehose_pipeline import (
     apply_traders_firehose_strategy,
     build_strategy_trader_opportunities_from_rows,
 )
+from services.strategy_sdk import StrategySDK
 from services.wallet_intelligence import wallet_intelligence
 from services.worker_state import (
     clear_worker_run_request,
@@ -88,34 +89,8 @@ async def _trader_opportunity_intent_settings() -> dict[str, Any]:
 
 
 async def _pool_runtime_settings() -> dict[str, Any]:
-    config = {
-        "recompute_mode": "quality_only",
-        "target_pool_size": 500,
-        "min_pool_size": 400,
-        "max_pool_size": 600,
-        "active_window_hours": 72,
-        "inactive_rising_retention_hours": 336,
-        "selection_score_quality_target_floor": 0.55,
-        "max_hourly_replacement_rate": 0.15,
-        "replacement_score_cutoff": 0.05,
-        "max_cluster_share": 0.08,
-        "high_conviction_threshold": 0.72,
-        "insider_priority_threshold": 0.62,
-        "min_eligible_trades": 50,
-        "max_eligible_anomaly": 0.5,
-        "core_min_win_rate": 0.60,
-        "core_min_sharpe": 1.0,
-        "core_min_profit_factor": 1.5,
-        "rising_min_win_rate": 0.55,
-        "slo_min_analyzed_pct": 95.0,
-        "slo_min_profitable_pct": 80.0,
-        "leaderboard_wallet_trade_sample": 160,
-        "incremental_wallet_trade_sample": 80,
-        "full_sweep_interval_seconds": 1800,
-        "incremental_refresh_interval_seconds": 120,
-        "activity_reconciliation_interval_seconds": 120,
-        "pool_recompute_interval_seconds": 60,
-    }
+    _sdk = StrategySDK.POOL_ELIGIBILITY_DEFAULTS
+    config = {"recompute_mode": "quality_only", **_sdk}
     try:
         async with AsyncSessionLocal() as session:
             row = (await session.execute(select(AppSettings).where(AppSettings.id == "default"))).scalar_one_or_none()
@@ -123,105 +98,37 @@ async def _pool_runtime_settings() -> dict[str, Any]:
                 return config
             stored_mode = str(row.discovery_pool_recompute_mode or "quality_only").strip().lower()
             config["recompute_mode"] = POOL_RECOMPUTE_MODE_MAP.get(stored_mode, "quality_only")
-            config["target_pool_size"] = (
-                row.discovery_pool_target_size if row.discovery_pool_target_size is not None else 500
-            )
-            config["min_pool_size"] = row.discovery_pool_min_size if row.discovery_pool_min_size is not None else 400
-            config["max_pool_size"] = row.discovery_pool_max_size if row.discovery_pool_max_size is not None else 600
-            config["active_window_hours"] = (
-                row.discovery_pool_active_window_hours if row.discovery_pool_active_window_hours is not None else 72
-            )
-            config["inactive_rising_retention_hours"] = (
-                row.discovery_pool_inactive_rising_retention_hours
-                if row.discovery_pool_inactive_rising_retention_hours is not None
-                else 336
-            )
-            config["selection_score_quality_target_floor"] = (
-                row.discovery_pool_selection_score_floor
-                if row.discovery_pool_selection_score_floor is not None
-                else 0.55
-            )
-            config["max_hourly_replacement_rate"] = (
-                row.discovery_pool_max_hourly_replacement_rate
-                if row.discovery_pool_max_hourly_replacement_rate is not None
-                else 0.15
-            )
-            config["replacement_score_cutoff"] = (
-                row.discovery_pool_replacement_score_cutoff
-                if row.discovery_pool_replacement_score_cutoff is not None
-                else 0.05
-            )
-            config["max_cluster_share"] = (
-                row.discovery_pool_max_cluster_share if row.discovery_pool_max_cluster_share is not None else 0.08
-            )
-            config["high_conviction_threshold"] = (
-                row.discovery_pool_high_conviction_threshold
-                if row.discovery_pool_high_conviction_threshold is not None
-                else 0.72
-            )
-            config["insider_priority_threshold"] = (
-                row.discovery_pool_insider_priority_threshold
-                if row.discovery_pool_insider_priority_threshold is not None
-                else 0.62
-            )
-            config["min_eligible_trades"] = (
-                row.discovery_pool_min_eligible_trades if row.discovery_pool_min_eligible_trades is not None else 50
-            )
-            config["max_eligible_anomaly"] = (
-                row.discovery_pool_max_eligible_anomaly if row.discovery_pool_max_eligible_anomaly is not None else 0.5
-            )
-            config["core_min_win_rate"] = (
-                row.discovery_pool_core_min_win_rate if row.discovery_pool_core_min_win_rate is not None else 0.60
-            )
-            config["core_min_sharpe"] = (
-                row.discovery_pool_core_min_sharpe if row.discovery_pool_core_min_sharpe is not None else 1.0
-            )
-            config["core_min_profit_factor"] = (
-                row.discovery_pool_core_min_profit_factor
-                if row.discovery_pool_core_min_profit_factor is not None
-                else 1.5
-            )
-            config["rising_min_win_rate"] = (
-                row.discovery_pool_rising_min_win_rate if row.discovery_pool_rising_min_win_rate is not None else 0.55
-            )
-            config["slo_min_analyzed_pct"] = (
-                row.discovery_pool_slo_min_analyzed_pct if row.discovery_pool_slo_min_analyzed_pct is not None else 95.0
-            )
-            config["slo_min_profitable_pct"] = (
-                row.discovery_pool_slo_min_profitable_pct
-                if row.discovery_pool_slo_min_profitable_pct is not None
-                else 80.0
-            )
-            config["leaderboard_wallet_trade_sample"] = (
-                row.discovery_pool_leaderboard_wallet_trade_sample
-                if row.discovery_pool_leaderboard_wallet_trade_sample is not None
-                else 160
-            )
-            config["incremental_wallet_trade_sample"] = (
-                row.discovery_pool_incremental_wallet_trade_sample
-                if row.discovery_pool_incremental_wallet_trade_sample is not None
-                else 80
-            )
-            config["full_sweep_interval_seconds"] = (
-                row.discovery_pool_full_sweep_interval_seconds
-                if row.discovery_pool_full_sweep_interval_seconds is not None
-                else 1800
-            )
-            config["incremental_refresh_interval_seconds"] = (
-                row.discovery_pool_incremental_refresh_interval_seconds
-                if row.discovery_pool_incremental_refresh_interval_seconds is not None
-                else 120
-            )
-            config["activity_reconciliation_interval_seconds"] = (
-                row.discovery_pool_activity_reconciliation_interval_seconds
-                if row.discovery_pool_activity_reconciliation_interval_seconds is not None
-                else 120
-            )
-            config["pool_recompute_interval_seconds"] = (
-                row.discovery_pool_recompute_interval_seconds
-                if row.discovery_pool_recompute_interval_seconds is not None
-                else 60
-            )
+            # DB overrides — fallback to SDK defaults for each field.
+            _db_overrides = {
+                "target_pool_size": row.discovery_pool_target_size,
+                "min_pool_size": row.discovery_pool_min_size,
+                "max_pool_size": row.discovery_pool_max_size,
+                "active_window_hours": row.discovery_pool_active_window_hours,
+                "inactive_rising_retention_hours": row.discovery_pool_inactive_rising_retention_hours,
+                "selection_score_quality_target_floor": row.discovery_pool_selection_score_floor,
+                "max_hourly_replacement_rate": row.discovery_pool_max_hourly_replacement_rate,
+                "replacement_score_cutoff": row.discovery_pool_replacement_score_cutoff,
+                "max_cluster_share": row.discovery_pool_max_cluster_share,
+                "high_conviction_threshold": row.discovery_pool_high_conviction_threshold,
+                "insider_priority_threshold": row.discovery_pool_insider_priority_threshold,
+                "min_eligible_trades": row.discovery_pool_min_eligible_trades,
+                "max_eligible_anomaly": row.discovery_pool_max_eligible_anomaly,
+                "core_min_win_rate": row.discovery_pool_core_min_win_rate,
+                "core_min_sharpe": row.discovery_pool_core_min_sharpe,
+                "core_min_profit_factor": row.discovery_pool_core_min_profit_factor,
+                "rising_min_win_rate": row.discovery_pool_rising_min_win_rate,
+                "slo_min_analyzed_pct": row.discovery_pool_slo_min_analyzed_pct,
+                "slo_min_profitable_pct": row.discovery_pool_slo_min_profitable_pct,
+                "leaderboard_wallet_trade_sample": row.discovery_pool_leaderboard_wallet_trade_sample,
+                "incremental_wallet_trade_sample": row.discovery_pool_incremental_wallet_trade_sample,
+                "full_sweep_interval_seconds": row.discovery_pool_full_sweep_interval_seconds,
+                "incremental_refresh_interval_seconds": row.discovery_pool_incremental_refresh_interval_seconds,
+                "activity_reconciliation_interval_seconds": row.discovery_pool_activity_reconciliation_interval_seconds,
+                "pool_recompute_interval_seconds": row.discovery_pool_recompute_interval_seconds,
+            }
+            for key, db_value in _db_overrides.items():
+                if db_value is not None:
+                    config[key] = db_value
     except Exception as exc:
         logger.warning("Failed to read pool runtime settings: %s", exc)
     return config

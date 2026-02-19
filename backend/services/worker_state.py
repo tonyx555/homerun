@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import resource
 import subprocess
 import sys
 from datetime import datetime
@@ -107,7 +106,10 @@ def _read_process_rss_bytes(pid: int) -> Optional[int]:
 
 
 def _read_peak_rss_bytes() -> Optional[int]:
+    if sys.platform == "win32":
+        return None
     try:
+        import resource
         peak = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss or 0)
     except Exception:
         return None

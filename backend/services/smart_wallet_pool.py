@@ -17,8 +17,20 @@ from datetime import datetime, timedelta
 from utils.utcnow import utcnow, utcfromtimestamp
 from typing import Any, Optional
 
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+SQLITE_VAR_LIMIT = 900
+
+
+def _chunked_in(column, values: list, chunk_size: int = SQLITE_VAR_LIMIT):
+    """Build an OR of IN clauses to stay under SQLite's variable limit."""
+    if len(values) <= chunk_size:
+        return column.in_(values)
+    clauses = []
+    for i in range(0, len(values), chunk_size):
+        clauses.append(column.in_(values[i : i + chunk_size]))
+    return or_(*clauses)
 
 from models.database import (
     AsyncSessionLocal,
@@ -37,27 +49,29 @@ from utils.logger import get_logger
 
 logger = get_logger("smart_wallet_pool")
 
+# All pool eligibility defaults now live in StrategySDK.POOL_ELIGIBILITY_DEFAULTS.
+_SDK = StrategySDK.POOL_ELIGIBILITY_DEFAULTS
 
 # Pool sizing and activity windows
-TARGET_POOL_SIZE = 500
-MIN_POOL_SIZE = 400
-MAX_POOL_SIZE = 600
-ACTIVE_WINDOW_HOURS = 72
-INACTIVE_RISING_RETENTION_HOURS = 336
-SELECTION_SCORE_QUALITY_TARGET_FLOOR = 0.55
+TARGET_POOL_SIZE = _SDK["target_pool_size"]
+MIN_POOL_SIZE = _SDK["min_pool_size"]
+MAX_POOL_SIZE = _SDK["max_pool_size"]
+ACTIVE_WINDOW_HOURS = _SDK["active_window_hours"]
+INACTIVE_RISING_RETENTION_HOURS = _SDK["inactive_rising_retention_hours"]
+SELECTION_SCORE_QUALITY_TARGET_FLOOR = _SDK["selection_score_quality_target_floor"]
 
 # Scheduling targets
-FULL_SWEEP_INTERVAL = timedelta(minutes=30)
-INCREMENTAL_REFRESH_INTERVAL = timedelta(minutes=2)
-ACTIVITY_RECONCILIATION_INTERVAL = timedelta(minutes=2)
-POOL_RECOMPUTE_INTERVAL = timedelta(minutes=1)
+FULL_SWEEP_INTERVAL = timedelta(minutes=_SDK["full_sweep_interval_seconds"] // 60)
+INCREMENTAL_REFRESH_INTERVAL = timedelta(minutes=_SDK["incremental_refresh_interval_seconds"] // 60)
+ACTIVITY_RECONCILIATION_INTERVAL = timedelta(minutes=_SDK["activity_reconciliation_interval_seconds"] // 60)
+POOL_RECOMPUTE_INTERVAL = timedelta(minutes=_SDK["pool_recompute_interval_seconds"] // 60)
 
 # Churn guard
-MAX_HOURLY_REPLACEMENT_RATE = 0.15
-REPLACEMENT_SCORE_CUTOFF = 0.05
-MAX_CLUSTER_SHARE = 0.08
-HIGH_CONVICTION_THRESHOLD = 0.72
-INSIDER_PRIORITY_THRESHOLD = 0.62
+MAX_HOURLY_REPLACEMENT_RATE = _SDK["max_hourly_replacement_rate"]
+REPLACEMENT_SCORE_CUTOFF = _SDK["replacement_score_cutoff"]
+MAX_CLUSTER_SHARE = _SDK["max_cluster_share"]
+HIGH_CONVICTION_THRESHOLD = _SDK["high_conviction_threshold"]
+INSIDER_PRIORITY_THRESHOLD = _SDK["insider_priority_threshold"]
 
 # Pool override flags stored in DiscoveredWallet.source_flags
 POOL_FLAG_MANUAL_INCLUDE = "pool_manual_include"
@@ -77,16 +91,16 @@ POOL_RECOMPUTE_MODES = {
 }
 
 # Hard quality eligibility thresholds
-MIN_ELIGIBLE_TRADES = 50
-MAX_ELIGIBLE_ANOMALY = 0.5
-CORE_MIN_WIN_RATE = 0.60
-CORE_MIN_SHARPE = 1.0
-CORE_MIN_PROFIT_FACTOR = 1.5
-RISING_MIN_WIN_RATE = 0.55
+MIN_ELIGIBLE_TRADES = _SDK["min_eligible_trades"]
+MAX_ELIGIBLE_ANOMALY = _SDK["max_eligible_anomaly"]
+CORE_MIN_WIN_RATE = _SDK["core_min_win_rate"]
+CORE_MIN_SHARPE = _SDK["core_min_sharpe"]
+CORE_MIN_PROFIT_FACTOR = _SDK["core_min_profit_factor"]
+RISING_MIN_WIN_RATE = _SDK["rising_min_win_rate"]
 
 # Pool health SLOs
-SLO_MIN_ANALYZED_PCT = 95.0
-SLO_MIN_PROFITABLE_PCT = 80.0
+SLO_MIN_ANALYZED_PCT = _SDK["slo_min_analyzed_pct"]
+SLO_MIN_PROFITABLE_PCT = _SDK["slo_min_profitable_pct"]
 
 # Source categories for leaderboard matrix scan
 LEADERBOARD_PERIODS = ("DAY", "WEEK", "MONTH", "ALL")
@@ -104,8 +118,8 @@ LEADERBOARD_CATEGORIES = (
 
 # Fallback wallet-trade sampling so activity rollups still populate even if
 # market-level trade endpoints become sparse or schema-shift.
-LEADERBOARD_WALLET_TRADE_SAMPLE = 160
-INCREMENTAL_WALLET_TRADE_SAMPLE = 80
+LEADERBOARD_WALLET_TRADE_SAMPLE = _SDK["leaderboard_wallet_trade_sample"]
+INCREMENTAL_WALLET_TRADE_SAMPLE = _SDK["incremental_wallet_trade_sample"]
 
 # Signal metadata refresh controls (self-heals stale market titles/slugs)
 SIGNAL_METADATA_REFRESH_TTL = timedelta(minutes=20)
@@ -121,33 +135,7 @@ CRYPTO_MARKET_PATTERN = re.compile(
 )
 
 
-POOL_RUNTIME_DEFAULTS: dict[str, Any] = {
-    "target_pool_size": 500,
-    "min_pool_size": 400,
-    "max_pool_size": 600,
-    "active_window_hours": 72,
-    "inactive_rising_retention_hours": 336,
-    "selection_score_quality_target_floor": 0.55,
-    "max_hourly_replacement_rate": 0.15,
-    "replacement_score_cutoff": 0.05,
-    "max_cluster_share": 0.08,
-    "high_conviction_threshold": 0.72,
-    "insider_priority_threshold": 0.62,
-    "min_eligible_trades": 50,
-    "max_eligible_anomaly": 0.5,
-    "core_min_win_rate": 0.60,
-    "core_min_sharpe": 1.0,
-    "core_min_profit_factor": 1.5,
-    "rising_min_win_rate": 0.55,
-    "slo_min_analyzed_pct": 95.0,
-    "slo_min_profitable_pct": 80.0,
-    "leaderboard_wallet_trade_sample": 160,
-    "incremental_wallet_trade_sample": 80,
-    "full_sweep_interval_seconds": 1800,
-    "incremental_refresh_interval_seconds": 120,
-    "activity_reconciliation_interval_seconds": 120,
-    "pool_recompute_interval_seconds": 60,
-}
+POOL_RUNTIME_DEFAULTS: dict[str, Any] = dict(StrategySDK.POOL_ELIGIBILITY_DEFAULTS)
 
 
 def _looks_like_crypto_market(
@@ -748,7 +736,7 @@ class SmartWalletPoolService:
 
             addresses = {addr.lower() for s in signals for addr in (s.wallets or []) if isinstance(addr, str)}
             profile_rows = await session.execute(
-                select(DiscoveredWallet).where(DiscoveredWallet.address.in_(list(addresses)))
+                select(DiscoveredWallet).where(_chunked_in(DiscoveredWallet.address, list(addresses)))
             )
             profiles = {
                 w.address: {
@@ -1341,7 +1329,7 @@ class SmartWalletPoolService:
         addresses = list(candidates.keys())
         async with AsyncSessionLocal() as session:
             existing_result = await session.execute(
-                select(DiscoveredWallet).where(DiscoveredWallet.address.in_(addresses))
+                select(DiscoveredWallet).where(_chunked_in(DiscoveredWallet.address, addresses))
             )
             existing = {w.address: w for w in existing_result.scalars().all()}
 

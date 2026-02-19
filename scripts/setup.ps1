@@ -15,9 +15,17 @@ Write-Host "  Homerun Setup (Windows)" -ForegroundColor Green
 Write-Host "=========================================" -ForegroundColor Green
 Write-Host ""
 
+function Find-RedisServer {
+    $cmd = Get-Command redis-server -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    $wellKnown = "C:\Program Files\Redis\redis-server.exe"
+    if (Test-Path $wellKnown) { return $wellKnown }
+    return $null
+}
+
 function Test-RedisRuntimeAvailable {
     if (Get-Command docker -ErrorAction SilentlyContinue) { return $true }
-    if (Get-Command redis-server -ErrorAction SilentlyContinue) { return $true }
+    if (Find-RedisServer) { return $true }
     try {
         $svc = Get-Service -Name "Memurai" -ErrorAction SilentlyContinue
         if ($svc) { return $true }
@@ -37,7 +45,7 @@ function Ensure-RedisRuntime {
     $winget = Get-Command winget -ErrorAction SilentlyContinue
     if ($winget) {
         $wingetIds = @(
-            "tporadowski.redis",
+            "Redis.Redis",
             "Memurai.MemuraiDeveloper"
         )
         foreach ($id in $wingetIds) {

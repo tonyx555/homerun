@@ -514,7 +514,6 @@ Use `atomWithStorage` for anything that should survive page refresh. Use plain `
 ## What NOT to Do
 
 - Do not add type annotations, docstrings, or comments to code you did not change
-- Do not refactor surrounding code when fixing a bug
 - Do not add error handling for impossible states
 - Do not create wrapper functions for single-use operations
 - Do not add feature flags or environment variable toggles unless asked
@@ -524,3 +523,7 @@ Use `atomWithStorage` for anything that should survive page refresh. Use plain `
 - Do not add empty `except: pass` blocks
 - Do not add input validation for internal service-to-service calls
 - Do not preserve old function signatures when changing them — update all callers
+
+## Proactive Cleanup
+
+When working in a file or area of the codebase, **actively clean up dead code** you encounter — unused imports, orphaned types, stale references, dead functions, and unreachable branches. Dead code hides bugs and adds confusion. If removing something would require changes across many files, do it; follow the dependency chain to completion. Do not leave partial cleanup behind.

@@ -9,7 +9,6 @@ import {
   Play,
   Pause,
   Target,
-  Settings,
   Search,
   Trash2,
   Loader2,
@@ -51,7 +50,6 @@ import {
   inferMarketPlatform,
 } from '../lib/marketUrls'
 import { useWebSocket } from '../hooks/useWebSocket'
-import NewsWorkflowSettingsFlyout from './NewsWorkflowSettingsFlyout'
 import { Button } from './ui/button'
 import { Badge } from './ui/badge'
 import { Card } from './ui/card'
@@ -1081,8 +1079,6 @@ function SourceBreakdownBar({ sources }: { sources: Record<string, number> }) {
 interface NewsIntelligencePanelProps {
   initialSearchQuery?: string
   mode?: NewsPanelMode
-  onOpenDataSettings?: () => void
-  showSettingsButton?: boolean
 }
 
 function initialSubView(mode: NewsPanelMode, initialSearchQuery?: string): SubView {
@@ -1094,15 +1090,12 @@ function initialSubView(mode: NewsPanelMode, initialSearchQuery?: string): SubVi
 export default function NewsIntelligencePanel({
   initialSearchQuery,
   mode = 'all',
-  onOpenDataSettings,
-  showSettingsButton = true,
 }: NewsIntelligencePanelProps = {}) {
   const queryClient = useQueryClient()
   const { isConnected } = useWebSocket('/ws')
   const [subView, setSubView] = useState<SubView>(initialSubView(mode, initialSearchQuery))
   const [searchFilter, setSearchFilter] = useState(initialSearchQuery || '')
   const [feedSourceFilter, setFeedSourceFilter] = useState<string | null>(null)
-  const [workflowSettingsOpen, setWorkflowSettingsOpen] = useState(false)
   const [showFilteredWorkflow, setShowFilteredWorkflow] = useState(false)
 
   useEffect(() => {
@@ -1116,12 +1109,6 @@ export default function NewsIntelligencePanel({
     if (mode === 'workflow') setSubView('workflow')
     if (mode === 'feed') setSubView('feed')
   }, [mode])
-
-  useEffect(() => {
-    const handleOpenSettings = () => setWorkflowSettingsOpen(true)
-    window.addEventListener('open-news-workflow-settings', handleOpenSettings as EventListener)
-    return () => window.removeEventListener('open-news-workflow-settings', handleOpenSettings as EventListener)
-  }, [])
 
   const { data: workflowStatus } = useQuery({
     queryKey: ['news-workflow-status'],
@@ -1289,7 +1276,7 @@ export default function NewsIntelligencePanel({
   }, [hasNextPage, isFetchingNextPage, fetchNextPage])
 
   return (
-    <div className="max-w-[1600px] mx-auto">
+    <div className="h-full min-h-0 flex flex-col overflow-hidden">
       {mode === 'all' && (
         <div className="mb-2 flex items-center gap-2">
           <Button
@@ -1328,22 +1315,7 @@ export default function NewsIntelligencePanel({
         </div>
       )}
 
-      <div className="mb-4 rounded-xl border border-border/40 bg-card/40 p-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <Newspaper className="w-4 h-4 text-orange-400 shrink-0" />
-          <Badge
-            variant="outline"
-            className={cn(
-              'text-[10px] h-6',
-              workflowStatus?.paused
-                ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20'
-                : workflowStatus?.enabled
-                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                  : 'bg-muted/40 text-muted-foreground border-border'
-            )}
-          >
-            Autopilot {workflowStatus?.paused ? 'Paused' : workflowStatus?.enabled ? 'Active' : 'Disabled'}
-          </Badge>
+      <div className="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-border bg-card/50 shrink-0">
           {feedStatus?.running && (
             <Badge variant="outline" className="text-[10px] h-6 bg-green-500/10 text-green-400 border-green-500/20 gap-1">
               <Radio className="w-3 h-3" />
@@ -1362,7 +1334,7 @@ export default function NewsIntelligencePanel({
             <select
               value={feedSourceFilter ?? '_all'}
               onChange={(e) => setFeedSourceFilter(e.target.value === '_all' ? null : e.target.value)}
-              className="h-8 min-w-[150px] rounded-md border border-border bg-card px-2 text-xs text-foreground"
+              className="h-7 min-w-[150px] rounded-md border border-border bg-card px-2 text-xs text-foreground"
             >
               <option value="_all">All sources ({feedStatus?.article_count ?? 0})</option>
               {sourceKeys.map((src) => (
@@ -1381,7 +1353,7 @@ export default function NewsIntelligencePanel({
                 placeholder="Filter..."
                 value={searchFilter}
                 onChange={(e) => setSearchFilter(e.target.value)}
-                className={cn("pl-8 h-8 text-xs bg-card border-border", searchFilter ? "w-56 pr-8" : "w-48")}
+                className={cn("pl-8 h-7 text-xs bg-card border-border", searchFilter ? "w-56 pr-8" : "w-48")}
               />
               {searchFilter && (
                 <button
@@ -1398,7 +1370,7 @@ export default function NewsIntelligencePanel({
                 <Button
                   variant="outline"
                   size="sm"
-                  className="text-xs h-8 gap-1.5"
+                  className="h-7 text-xs gap-1"
                   onClick={() => (workflowStatus?.paused ? startWorkflowMutation.mutate() : pauseWorkflowMutation.mutate())}
                   disabled={startWorkflowMutation.isPending || pauseWorkflowMutation.isPending}
                 >
@@ -1408,40 +1380,18 @@ export default function NewsIntelligencePanel({
                 <Button
                   variant="outline"
                   size="sm"
-                  className="text-xs h-8 gap-1.5"
+                  className="h-7 text-xs gap-1"
                   onClick={() => refreshMutation.mutate()}
                   disabled={refreshMutation.isPending}
                 >
                   <RefreshCw className={cn("w-3.5 h-3.5", refreshMutation.isPending && "animate-spin")} />
                   Refresh
                 </Button>
-                {showSettingsButton && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="text-xs h-8 gap-1.5"
-                    onClick={() => setWorkflowSettingsOpen(true)}
-                  >
-                    <Settings className="w-3.5 h-3.5" />
-                    Settings
-                  </Button>
-                )}
-                {onOpenDataSettings && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="text-xs h-8 gap-1.5"
-                    onClick={onOpenDataSettings}
-                  >
-                    <Settings className="w-3.5 h-3.5" />
-                    Data Settings
-                  </Button>
-                )}
                 <Button
                   variant="outline"
                   size="sm"
                   className={cn(
-                    "text-xs h-8 gap-1.5",
+                    "h-7 text-xs gap-1",
                     showFilteredWorkflow
                       ? "text-amber-300 border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/20"
                       : "",
@@ -1456,28 +1406,17 @@ export default function NewsIntelligencePanel({
                 <Button
                   variant="outline"
                   size="sm"
-                  className="text-xs h-8 gap-1.5"
+                  className="h-7 text-xs gap-1"
                   onClick={() => refreshMutation.mutate()}
                   disabled={refreshMutation.isPending}
                 >
                   <RefreshCw className={cn("w-3.5 h-3.5", refreshMutation.isPending && "animate-spin")} />
                   Refresh
                 </Button>
-                {onOpenDataSettings && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="text-xs h-8 gap-1.5"
-                    onClick={onOpenDataSettings}
-                  >
-                    <Settings className="w-3.5 h-3.5" />
-                    Data Settings
-                  </Button>
-                )}
                 <Button
                   variant="ghost"
                   size="sm"
-                  className="text-xs h-8 gap-1 text-red-400 hover:text-red-400 hover:bg-red-500/10"
+                  className="h-7 text-xs gap-1 text-red-400 hover:text-red-400 hover:bg-red-500/10"
                   onClick={() => clearMutation.mutate()}
                   disabled={clearMutation.isPending}
                 >
@@ -1487,7 +1426,6 @@ export default function NewsIntelligencePanel({
               </>
             )}
           </div>
-        </div>
       </div>
 
       {subView === 'workflow' && (
@@ -1623,10 +1561,6 @@ export default function NewsIntelligencePanel({
         </>
       )}
 
-      <NewsWorkflowSettingsFlyout
-        isOpen={workflowSettingsOpen}
-        onClose={() => setWorkflowSettingsOpen(false)}
-      />
     </div>
   )
 }

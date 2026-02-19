@@ -92,6 +92,69 @@ class StrategySDK:
             },
         ]
     }
+    POOL_ELIGIBILITY_DEFAULTS: dict[str, Any] = {
+        "target_pool_size": 500,
+        "min_pool_size": 400,
+        "max_pool_size": 600,
+        "active_window_hours": 168,
+        "inactive_rising_retention_hours": 720,
+        "selection_score_quality_target_floor": 0.35,
+        "max_hourly_replacement_rate": 0.15,
+        "replacement_score_cutoff": 0.05,
+        "max_cluster_share": 0.08,
+        "high_conviction_threshold": 0.72,
+        "insider_priority_threshold": 0.62,
+        "min_eligible_trades": 25,
+        "max_eligible_anomaly": 0.5,
+        "core_min_win_rate": 0.60,
+        "core_min_sharpe": 0.5,
+        "core_min_profit_factor": 1.2,
+        "rising_min_win_rate": 0.50,
+        "slo_min_analyzed_pct": 95.0,
+        "slo_min_profitable_pct": 80.0,
+        "leaderboard_wallet_trade_sample": 160,
+        "incremental_wallet_trade_sample": 80,
+        "full_sweep_interval_seconds": 1800,
+        "incremental_refresh_interval_seconds": 120,
+        "activity_reconciliation_interval_seconds": 120,
+        "pool_recompute_interval_seconds": 60,
+    }
+    POOL_ELIGIBILITY_CONFIG_SCHEMA: dict[str, Any] = {
+        "param_fields": [
+            {"key": "target_pool_size", "label": "Target Pool Size", "type": "integer", "min": 10, "max": 5000},
+            {"key": "min_pool_size", "label": "Min Pool Size", "type": "integer", "min": 0, "max": 5000},
+            {"key": "max_pool_size", "label": "Max Pool Size", "type": "integer", "min": 1, "max": 10000},
+            {"key": "active_window_hours", "label": "Active Window (hrs)", "type": "integer", "min": 1, "max": 720},
+            {
+                "key": "inactive_rising_retention_hours",
+                "label": "Rising Retention (hrs)",
+                "type": "integer",
+                "min": 0,
+                "max": 8760,
+            },
+            {
+                "key": "selection_score_quality_target_floor",
+                "label": "Selection Score Floor",
+                "type": "number",
+                "min": 0,
+                "max": 1,
+            },
+            {"key": "min_eligible_trades", "label": "Min Eligible Trades", "type": "integer", "min": 1, "max": 100000},
+            {"key": "max_eligible_anomaly", "label": "Max Anomaly Score", "type": "number", "min": 0, "max": 5},
+            {"key": "core_min_win_rate", "label": "Core Min Win Rate", "type": "number", "min": 0, "max": 1},
+            {"key": "core_min_sharpe", "label": "Core Min Sharpe", "type": "number", "min": -10, "max": 20},
+            {"key": "core_min_profit_factor", "label": "Core Min Profit Factor", "type": "number", "min": 0, "max": 20},
+            {"key": "rising_min_win_rate", "label": "Rising Min Win Rate", "type": "number", "min": 0, "max": 1},
+            {
+                "key": "max_hourly_replacement_rate",
+                "label": "Max Hourly Replacement Rate",
+                "type": "number",
+                "min": 0,
+                "max": 1,
+            },
+            {"key": "max_cluster_share", "label": "Max Cluster Share", "type": "number", "min": 0.01, "max": 1},
+        ]
+    }
     NEWS_FILTER_DEFAULTS: dict[str, Any] = {
         "min_edge_percent": 5.0,
         "min_confidence": 0.45,
@@ -320,6 +383,73 @@ class StrategySDK:
     @staticmethod
     def trader_filter_config_schema() -> dict[str, Any]:
         return dict(StrategySDK.TRADER_FILTER_CONFIG_SCHEMA)
+
+    @staticmethod
+    def pool_eligibility_defaults() -> dict[str, Any]:
+        return dict(StrategySDK.POOL_ELIGIBILITY_DEFAULTS)
+
+    @staticmethod
+    def pool_eligibility_config_schema() -> dict[str, Any]:
+        return dict(StrategySDK.POOL_ELIGIBILITY_CONFIG_SCHEMA)
+
+    @staticmethod
+    def validate_pool_eligibility_config(config: Any) -> dict[str, Any]:
+        cfg = dict(StrategySDK.POOL_ELIGIBILITY_DEFAULTS)
+        if isinstance(config, dict):
+            cfg.update({str(k): v for k, v in config.items() if str(k) != "_schema"})
+
+        cfg["target_pool_size"] = StrategySDK._coerce_int(cfg.get("target_pool_size"), 500, 10, 5000)
+        cfg["min_pool_size"] = StrategySDK._coerce_int(cfg.get("min_pool_size"), 400, 0, 5000)
+        cfg["max_pool_size"] = StrategySDK._coerce_int(cfg.get("max_pool_size"), 600, 1, 10000)
+        cfg["active_window_hours"] = StrategySDK._coerce_int(cfg.get("active_window_hours"), 168, 1, 720)
+        cfg["inactive_rising_retention_hours"] = StrategySDK._coerce_int(
+            cfg.get("inactive_rising_retention_hours"), 720, 0, 8760
+        )
+        cfg["selection_score_quality_target_floor"] = StrategySDK._coerce_float(
+            cfg.get("selection_score_quality_target_floor"), 0.35, 0.0, 1.0
+        )
+        cfg["max_hourly_replacement_rate"] = StrategySDK._coerce_float(
+            cfg.get("max_hourly_replacement_rate"), 0.15, 0.0, 1.0
+        )
+        cfg["replacement_score_cutoff"] = StrategySDK._coerce_float(
+            cfg.get("replacement_score_cutoff"), 0.05, 0.0, 1.0
+        )
+        cfg["max_cluster_share"] = StrategySDK._coerce_float(cfg.get("max_cluster_share"), 0.08, 0.01, 1.0)
+        cfg["high_conviction_threshold"] = StrategySDK._coerce_float(
+            cfg.get("high_conviction_threshold"), 0.72, 0.0, 1.0
+        )
+        cfg["insider_priority_threshold"] = StrategySDK._coerce_float(
+            cfg.get("insider_priority_threshold"), 0.62, 0.0, 1.0
+        )
+        cfg["min_eligible_trades"] = StrategySDK._coerce_int(cfg.get("min_eligible_trades"), 25, 1, 100000)
+        cfg["max_eligible_anomaly"] = StrategySDK._coerce_float(cfg.get("max_eligible_anomaly"), 0.5, 0.0, 5.0)
+        cfg["core_min_win_rate"] = StrategySDK._coerce_float(cfg.get("core_min_win_rate"), 0.60, 0.0, 1.0)
+        cfg["core_min_sharpe"] = StrategySDK._coerce_float(cfg.get("core_min_sharpe"), 0.5, -10.0, 20.0)
+        cfg["core_min_profit_factor"] = StrategySDK._coerce_float(cfg.get("core_min_profit_factor"), 1.2, 0.0, 20.0)
+        cfg["rising_min_win_rate"] = StrategySDK._coerce_float(cfg.get("rising_min_win_rate"), 0.50, 0.0, 1.0)
+        cfg["slo_min_analyzed_pct"] = StrategySDK._coerce_float(cfg.get("slo_min_analyzed_pct"), 95.0, 0.0, 100.0)
+        cfg["slo_min_profitable_pct"] = StrategySDK._coerce_float(
+            cfg.get("slo_min_profitable_pct"), 80.0, 0.0, 100.0
+        )
+        cfg["leaderboard_wallet_trade_sample"] = StrategySDK._coerce_int(
+            cfg.get("leaderboard_wallet_trade_sample"), 160, 1, 5000
+        )
+        cfg["incremental_wallet_trade_sample"] = StrategySDK._coerce_int(
+            cfg.get("incremental_wallet_trade_sample"), 80, 1, 5000
+        )
+        cfg["full_sweep_interval_seconds"] = StrategySDK._coerce_int(
+            cfg.get("full_sweep_interval_seconds"), 1800, 10, 86400
+        )
+        cfg["incremental_refresh_interval_seconds"] = StrategySDK._coerce_int(
+            cfg.get("incremental_refresh_interval_seconds"), 120, 10, 86400
+        )
+        cfg["activity_reconciliation_interval_seconds"] = StrategySDK._coerce_int(
+            cfg.get("activity_reconciliation_interval_seconds"), 120, 10, 86400
+        )
+        cfg["pool_recompute_interval_seconds"] = StrategySDK._coerce_int(
+            cfg.get("pool_recompute_interval_seconds"), 60, 10, 86400
+        )
+        return cfg
 
     @staticmethod
     def news_filter_defaults() -> dict[str, Any]:

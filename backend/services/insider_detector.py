@@ -9,6 +9,17 @@ from utils.utcnow import utcnow
 from typing import Any, Optional
 
 from sqlalchemy import func, or_, select
+
+SQLITE_VAR_LIMIT = 900
+
+
+def _chunked_in(column, values: list, chunk_size: int = SQLITE_VAR_LIMIT):
+    if len(values) <= chunk_size:
+        return column.in_(values)
+    clauses = []
+    for i in range(0, len(values), chunk_size):
+        clauses.append(column.in_(values[i : i + chunk_size]))
+    return or_(*clauses)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import (
@@ -326,7 +337,7 @@ class InsiderDetectorService:
         rows = await session.execute(
             select(WalletActivityRollup)
             .where(
-                WalletActivityRollup.market_id.in_(market_ids),
+                _chunked_in(WalletActivityRollup.market_id, market_ids),
                 WalletActivityRollup.traded_at >= start,
                 WalletActivityRollup.traded_at <= end,
             )
@@ -493,7 +504,7 @@ class InsiderDetectorService:
         rows = await session.execute(
             select(NewsWorkflowFinding)
             .where(
-                NewsWorkflowFinding.market_id.in_(market_ids),
+                _chunked_in(NewsWorkflowFinding.market_id, market_ids),
                 NewsWorkflowFinding.created_at >= start,
                 NewsWorkflowFinding.created_at <= end,
             )

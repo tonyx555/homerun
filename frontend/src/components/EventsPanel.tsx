@@ -14,7 +14,6 @@ import {
   Swords,
   Wifi,
   Map as MapIcon,
-  Settings,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { formatCountry, normalizeCountryCode } from '../lib/worldCountries'
@@ -22,7 +21,6 @@ import { Button } from './ui/button'
 import { Badge } from './ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
 import ErrorBoundary from './ErrorBoundary'
-import EventsSettingsFlyout from './EventsSettingsFlyout'
 
 const WorldMap = lazy(() => import('./WorldMap'))
 import {
@@ -718,31 +716,15 @@ export default function EventsPanel({
   eventsOnly?: boolean
 }) {
   const [subView, setSubView] = useState<WorldSubView>(eventsOnly ? 'signals' : 'map')
-  const [settingsOpen, setSettingsOpen] = useState(false)
 
   if (eventsOnly) {
     return (
       <div className="h-full min-h-0 flex flex-col overflow-hidden">
-        <div className="flex items-center justify-end px-4 py-2 border-b border-border bg-card/50 shrink-0">
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-7 text-xs gap-1 shrink-0"
-            onClick={() => setSettingsOpen(true)}
-          >
-            <Settings className="w-3.5 h-3.5" />
-            Settings
-          </Button>
-        </div>
         <div className="flex-1 min-h-0 p-4">
           <ErrorBoundary fallback={<div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-500">This events view failed to render.</div>}>
             <SignalsView isConnected={isConnected} />
           </ErrorBoundary>
         </div>
-        <EventsSettingsFlyout
-          isOpen={settingsOpen}
-          onClose={() => setSettingsOpen(false)}
-        />
       </div>
     )
   }
@@ -763,15 +745,6 @@ export default function EventsPanel({
             {item.label}
           </Button>
         ))}
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-7 text-xs gap-1 ml-auto shrink-0"
-          onClick={() => setSettingsOpen(true)}
-        >
-          <Settings className="w-3.5 h-3.5" />
-          Settings
-        </Button>
       </div>
 
       {/* Content */}
@@ -794,11 +767,6 @@ export default function EventsPanel({
           </ErrorBoundary>
         </div>
       )}
-
-      <EventsSettingsFlyout
-        isOpen={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-      />
     </div>
   )
 }

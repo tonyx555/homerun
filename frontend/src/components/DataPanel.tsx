@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState } from 'react'
+import { lazy, Suspense } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Database, Globe2, Newspaper, Radio } from 'lucide-react'
 
@@ -7,7 +7,6 @@ import { getNewsFeedStatus, getUnifiedDataSources } from '../services/api'
 import { getEventsSummary } from '../services/eventsApi'
 import NewsIntelligencePanel from './NewsIntelligencePanel'
 import EventsPanel from './EventsPanel'
-import EventsSettingsFlyout from './EventsSettingsFlyout'
 import DataSourcesManager from './DataSourcesManager'
 import ErrorBoundary from './ErrorBoundary'
 import { Button } from './ui/button'
@@ -23,7 +22,6 @@ interface DataPanelProps {
 }
 
 export default function DataPanel({ isConnected, view, onViewChange }: DataPanelProps) {
-  const [dataSettingsOpen, setDataSettingsOpen] = useState(false)
   const { data: worldSummary } = useQuery({
     queryKey: ['events-summary'],
     queryFn: getEventsSummary,
@@ -149,8 +147,8 @@ export default function DataPanel({ isConnected, view, onViewChange }: DataPanel
       )}
 
       {view === 'stories' && (
-        <div className="flex-1 overflow-y-auto px-6 py-4">
-          <NewsIntelligencePanel mode="feed" onOpenDataSettings={() => setDataSettingsOpen(true)} />
+        <div className="flex-1 min-h-0 overflow-hidden px-6 py-4">
+          <NewsIntelligencePanel mode="feed" />
         </div>
       )}
 
@@ -161,11 +159,6 @@ export default function DataPanel({ isConnected, view, onViewChange }: DataPanel
           </ErrorBoundary>
         </div>
       )}
-
-      <EventsSettingsFlyout
-        isOpen={dataSettingsOpen}
-        onClose={() => setDataSettingsOpen(false)}
-      />
     </div>
   )
 }
