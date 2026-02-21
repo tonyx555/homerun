@@ -6,6 +6,16 @@ $ErrorActionPreference = "Stop"
 # Navigate to project root (parent of scripts\)
 Set-Location (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))
 
+$runServiceSmokeTest = $false
+$tuiArgs = @()
+foreach ($arg in $args) {
+    if ($arg -eq "--services-smoke-test") {
+        $runServiceSmokeTest = $true
+    } else {
+        $tuiArgs += $arg
+    }
+}
+
 $redisHost = if ($env:REDIS_HOST) { $env:REDIS_HOST } else { "127.0.0.1" }
 $redisPort = if ($env:REDIS_PORT) { [int]$env:REDIS_PORT } else { 6379 }
 $redisContainerName = if ($env:REDIS_CONTAINER_NAME) { $env:REDIS_CONTAINER_NAME } else { "homerun-redis" }
@@ -66,8 +76,50 @@ function Wait-ForService {
 function Find-RedisServer {
     $cmd = Get-Command redis-server -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
+
     $wellKnown = "C:\Program Files\Redis\redis-server.exe"
     if (Test-Path $wellKnown) { return $wellKnown }
+
+    return $null
+}
+
+function Find-PostgresBinDir {
+    if ($env:POSTGRES_BIN_DIR) {
+        $envBin = $env:POSTGRES_BIN_DIR
+        if (
+            (Test-Path (Join-Path $envBin "initdb.exe")) -and
+            (Test-Path (Join-Path $envBin "pg_ctl.exe"))
+        ) {
+            return $envBin
+        }
+    }
+
+    $initdb = Get-Command initdb -ErrorAction SilentlyContinue
+    $pgctl = Get-Command pg_ctl -ErrorAction SilentlyContinue
+    if ($initdb -and $pgctl) {
+        return (Split-Path -Parent $initdb.Source)
+    }
+
+    $roots = @(
+        "C:\Program Files\PostgreSQL",
+        "C:\Program Files (x86)\PostgreSQL"
+    )
+    foreach ($root in $roots) {
+        if (-not (Test-Path $root)) {
+            continue
+        }
+        $versions = Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending
+        foreach ($versionDir in $versions) {
+            $bin = Join-Path $versionDir.FullName "bin"
+            if (
+                (Test-Path (Join-Path $bin "initdb.exe")) -and
+                (Test-Path (Join-Path $bin "pg_ctl.exe"))
+            ) {
+                return $bin
+            }
+        }
+    }
+
     return $null
 }
 
@@ -280,9 +332,7 @@ function Cleanup-StartedRedis {
 
 function Test-PostgresRuntimeAvailable {
     if (Get-Command docker -ErrorAction SilentlyContinue) { return $true }
-    $initdb = Get-Command initdb -ErrorAction SilentlyContinue
-    $pgctl = Get-Command pg_ctl -ErrorAction SilentlyContinue
-    return [bool]($initdb -and $pgctl)
+    return [bool](Find-PostgresBinDir)
 }
 
 function Ensure-PostgresRuntime {
@@ -350,9 +400,14 @@ function Start-PostgresLocal {
         [string]$DataDir
     )
 
-    $initdb = Get-Command initdb -ErrorAction SilentlyContinue
-    $pgctl = Get-Command pg_ctl -ErrorAction SilentlyContinue
-    if (-not $initdb -or -not $pgctl) {
+    $binDir = Find-PostgresBinDir
+    if (-not $binDir) {
+        return $false
+    }
+
+    $initdbPath = Join-Path $binDir "initdb.exe"
+    $pgctlPath = Join-Path $binDir "pg_ctl.exe"
+    if (-not (Test-Path $initdbPath) -or -not (Test-Path $pgctlPath)) {
         return $false
     }
 
@@ -365,7 +420,7 @@ function Start-PostgresLocal {
     $pgVersionPath = Join-Path $DataDir "PG_VERSION"
     if (-not (Test-Path $pgVersionPath)) {
         try {
-            & $initdb.Source -D $DataDir -U $User *> $null
+            & $initdbPath -D $DataDir -U $User *> $null
             if ($LASTEXITCODE -ne 0) { return $false }
             $script:postgresLocalClusterCreatedByScript = $true
 
@@ -383,7 +438,7 @@ host all all ::1/128 trust
     }
 
     try {
-        & $pgctl.Source -D $DataDir -o "-h $Host -p $Port" -w start *> $null
+        & $pgctlPath -D $DataDir -o "-h $Host -p $Port" -w start *> $null
         return ($LASTEXITCODE -eq 0)
     } catch {
         return $false
@@ -451,9 +506,12 @@ function Cleanup-StartedPostgres {
     }
 
     if ($script:postgresStartMode -eq "local") {
-        $pgctl = Get-Command pg_ctl -ErrorAction SilentlyContinue
-        if ($pgctl) {
-            try { & $pgctl.Source -D $postgresDataDir -m fast -w stop *> $null } catch {}
+        $binDir = Find-PostgresBinDir
+        if ($binDir) {
+            $pgctlPath = Join-Path $binDir "pg_ctl.exe"
+            if (Test-Path $pgctlPath) {
+                try { & $pgctlPath -D $postgresDataDir -m fast -w stop *> $null } catch {}
+            }
         }
         if ($script:postgresLocalClusterCreatedByScript) {
             try { Remove-Item -Recurse -Force $postgresDataDir } catch {}
@@ -464,6 +522,7 @@ function Cleanup-StartedPostgres {
 function Test-NeedsSetup {
     if (-not (Test-Path "backend\venv")) { return $true }
     if (-not (Test-Path "frontend\node_modules")) { return $true }
+    if (-not (Test-Path "scripts\tooling\node_modules")) { return $true }
     if (-not (Test-Path ".setup-stamp.json")) { return $true }
 
     try {
@@ -484,6 +543,8 @@ function Test-NeedsSetup {
     if ($stamp.requirements_trading_sha256 -ne (Get-HashOrMissing "backend\requirements-trading.txt")) { return $true }
     if ($stamp.package_json_sha256 -ne (Get-HashOrMissing "frontend\package.json")) { return $true }
     if ($stamp.package_lock_sha256 -ne (Get-HashOrMissing "frontend\package-lock.json")) { return $true }
+    if ($stamp.launcher_tools_package_json_sha256 -ne (Get-HashOrMissing "scripts\tooling\package.json")) { return $true }
+    if ($stamp.launcher_tools_package_lock_sha256 -ne (Get-HashOrMissing "scripts\tooling\package-lock.json")) { return $true }
 
     return $false
 }
@@ -502,6 +563,11 @@ try {
         $env:DATABASE_URL = "postgresql+asyncpg://${postgresUser}:${postgresPassword}@${postgresHost}:${postgresPort}/${postgresDb}"
     }
 
+    & backend\venv\Scripts\python.exe .\scripts\ensure_postgres_ready.py --database-url $env:DATABASE_URL
+    if ($LASTEXITCODE -ne 0) {
+        throw "Postgres readiness validation failed"
+    }
+
     # Activate venv
     & backend\venv\Scripts\Activate.ps1
 
@@ -513,8 +579,13 @@ try {
         pip install -q textual rich
     }
 
+    if ($runServiceSmokeTest) {
+        python .\scripts\launcher_smoke.py
+        exit $LASTEXITCODE
+    }
+
     # Launch the TUI
-    python tui.py @args
+    python tui.py @tuiArgs
 } finally {
     Cleanup-StartedPostgres
     Cleanup-StartedRedis

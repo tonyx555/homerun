@@ -29,8 +29,47 @@ run_with_optional_sudo() {
     "$@"
 }
 
+resolve_redis_server() {
+    if command -v redis-server >/dev/null 2>&1; then
+        command -v redis-server
+        return 0
+    fi
+
+    if command -v brew >/dev/null 2>&1; then
+        local brew_prefix
+        brew_prefix="$(brew --prefix redis 2>/dev/null || true)"
+        if [ -n "$brew_prefix" ] && [ -x "$brew_prefix/bin/redis-server" ]; then
+            echo "$brew_prefix/bin/redis-server"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+resolve_postgres_bin_dir() {
+    if command -v initdb >/dev/null 2>&1 && command -v pg_ctl >/dev/null 2>&1; then
+        dirname "$(command -v initdb)"
+        return 0
+    fi
+
+    if command -v brew >/dev/null 2>&1; then
+        local formula
+        local brew_prefix
+        for formula in postgresql@18 postgresql@17 postgresql@16 postgresql@15 postgresql@14 postgresql@13 postgresql@12 postgresql; do
+            brew_prefix="$(brew --prefix "$formula" 2>/dev/null || true)"
+            if [ -n "$brew_prefix" ] && [ -x "$brew_prefix/bin/initdb" ] && [ -x "$brew_prefix/bin/pg_ctl" ]; then
+                echo "$brew_prefix/bin"
+                return 0
+            fi
+        done
+    fi
+
+    return 1
+}
+
 ensure_redis_runtime() {
-    if command -v docker >/dev/null 2>&1 || command -v redis-server >/dev/null 2>&1; then
+    if command -v docker >/dev/null 2>&1 || resolve_redis_server >/dev/null 2>&1; then
         echo "Redis runtime prerequisite found (docker or redis-server)."
         return 0
     fi
@@ -55,7 +94,7 @@ ensure_redis_runtime() {
         return 1
     fi
 
-    if command -v docker >/dev/null 2>&1 || command -v redis-server >/dev/null 2>&1; then
+    if command -v docker >/dev/null 2>&1 || resolve_redis_server >/dev/null 2>&1; then
         echo "Redis runtime prerequisite is now available."
         return 0
     fi
@@ -66,7 +105,7 @@ ensure_redis_runtime() {
 }
 
 has_postgres_runtime() {
-    command -v docker >/dev/null 2>&1 || (command -v initdb >/dev/null 2>&1 && command -v pg_ctl >/dev/null 2>&1)
+    command -v docker >/dev/null 2>&1 || resolve_postgres_bin_dir >/dev/null 2>&1
 }
 
 ensure_postgres_runtime() {
@@ -134,7 +173,6 @@ if ! command -v python3 &> /dev/null; then
 fi
 
 PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-PYTHON_MAJOR=$(python3 -c 'import sys; print(sys.version_info.major)')
 PYTHON_MINOR=$(python3 -c 'import sys; print(sys.version_info.minor)')
 echo "Found Python $PYTHON_VERSION"
 
@@ -197,6 +235,14 @@ npm install --silent 2>/dev/null || npm install
 
 cd ..
 
+echo ""
+echo "Setting up launcher tooling..."
+export CXXFLAGS="${CXXFLAGS:-} -std=c++20"
+npm --prefix scripts/tooling install --silent 2>/dev/null || npm --prefix scripts/tooling install
+
+echo "Verifying PowerShell launcher syntax..."
+node scripts/tooling/check_powershell_syntax.mjs scripts/run.ps1 scripts/setup.ps1
+
 # Create data directory
 mkdir -p data
 
@@ -231,6 +277,8 @@ stamp = {
     "requirements_trading_sha256": sha256(root / "backend" / "requirements-trading.txt"),
     "package_json_sha256": sha256(root / "frontend" / "package.json"),
     "package_lock_sha256": sha256(root / "frontend" / "package-lock.json"),
+    "launcher_tools_package_json_sha256": sha256(root / "scripts" / "tooling" / "package.json"),
+    "launcher_tools_package_lock_sha256": sha256(root / "scripts" / "tooling" / "package-lock.json"),
 }
 
 (root / ".setup-stamp.json").write_text(json.dumps(stamp, indent=2), encoding="utf-8")
@@ -244,6 +292,9 @@ echo "========================================="
 echo ""
 echo "To start the application, run:"
 echo "  ./scripts/run.sh"
+echo ""
+echo "Or run runtime validation only:"
+echo "  ./scripts/run.sh --services-smoke-test"
 echo ""
 echo "Or start services individually:"
 echo "  Backend:  cd backend && source venv/bin/activate && uvicorn main:app --reload"

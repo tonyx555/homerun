@@ -10,6 +10,19 @@ CYAN='\033[0;36m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+RUN_SERVICE_SMOKE_TEST=0
+TUI_ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --services-smoke-test)
+            RUN_SERVICE_SMOKE_TEST=1
+            ;;
+        *)
+            TUI_ARGS+=("$arg")
+            ;;
+    esac
+done
+
 REDIS_HOST="${REDIS_HOST:-127.0.0.1}"
 REDIS_PORT="${REDIS_PORT:-6379}"
 REDIS_CONTAINER_NAME="${REDIS_CONTAINER_NAME:-homerun-redis}"
@@ -30,6 +43,45 @@ POSTGRES_STARTED_BY_SCRIPT=0
 POSTGRES_START_MODE=""
 POSTGRES_DOCKER_CREATED_BY_SCRIPT=0
 POSTGRES_LOCAL_CLUSTER_CREATED_BY_SCRIPT=0
+
+resolve_redis_server() {
+    if command -v redis-server >/dev/null 2>&1; then
+        command -v redis-server
+        return 0
+    fi
+
+    if command -v brew >/dev/null 2>&1; then
+        local brew_prefix
+        brew_prefix="$(brew --prefix redis 2>/dev/null || true)"
+        if [ -n "$brew_prefix" ] && [ -x "$brew_prefix/bin/redis-server" ]; then
+            echo "$brew_prefix/bin/redis-server"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+resolve_postgres_bin_dir() {
+    if command -v initdb >/dev/null 2>&1 && command -v pg_ctl >/dev/null 2>&1; then
+        dirname "$(command -v initdb)"
+        return 0
+    fi
+
+    if command -v brew >/dev/null 2>&1; then
+        local formula
+        local brew_prefix
+        for formula in postgresql@18 postgresql@17 postgresql@16 postgresql@15 postgresql@14 postgresql@13 postgresql@12 postgresql; do
+            brew_prefix="$(brew --prefix "$formula" 2>/dev/null || true)"
+            if [ -n "$brew_prefix" ] && [ -x "$brew_prefix/bin/initdb" ] && [ -x "$brew_prefix/bin/pg_ctl" ]; then
+                echo "$brew_prefix/bin"
+                return 0
+            fi
+        done
+    fi
+
+    return 1
+}
 
 tcp_ping() {
     python3 - "$1" "$2" <<'PY'
@@ -123,10 +175,13 @@ try_start_redis_docker() {
 }
 
 try_start_redis_local() {
-    if ! command -v redis-server >/dev/null 2>&1; then
+    local redis_server
+    redis_server="$(resolve_redis_server 2>/dev/null || true)"
+    if [ -z "$redis_server" ]; then
         return 1
     fi
-    redis-server \
+
+    "$redis_server" \
         --bind "$REDIS_HOST" \
         --port "$REDIS_PORT" \
         --save "" \
@@ -137,7 +192,7 @@ try_start_redis_local() {
 }
 
 has_redis_runtime() {
-    command -v docker >/dev/null 2>&1 || command -v redis-server >/dev/null 2>&1
+    command -v docker >/dev/null 2>&1 || resolve_redis_server >/dev/null 2>&1
 }
 
 bootstrap_redis_runtime() {
@@ -231,14 +286,22 @@ try_start_postgres_docker() {
 }
 
 try_start_postgres_local() {
-    if ! command -v initdb >/dev/null 2>&1 || ! command -v pg_ctl >/dev/null 2>&1; then
+    local pg_bin_dir
+    local initdb_bin
+    local pg_ctl_bin
+
+    pg_bin_dir="$(resolve_postgres_bin_dir 2>/dev/null || true)"
+    if [ -z "$pg_bin_dir" ]; then
         return 1
     fi
+
+    initdb_bin="$pg_bin_dir/initdb"
+    pg_ctl_bin="$pg_bin_dir/pg_ctl"
 
     mkdir -p "$POSTGRES_DATA_DIR"
 
     if [ ! -f "$POSTGRES_DATA_DIR/PG_VERSION" ]; then
-        initdb -D "$POSTGRES_DATA_DIR" -U "$POSTGRES_USER" >/dev/null 2>&1 || return 1
+        "$initdb_bin" -D "$POSTGRES_DATA_DIR" -U "$POSTGRES_USER" >/dev/null 2>&1 || return 1
         POSTGRES_LOCAL_CLUSTER_CREATED_BY_SCRIPT=1
         cat > "$POSTGRES_DATA_DIR/pg_hba.conf" <<HBA
 local all all trust
@@ -251,12 +314,12 @@ HBA
         } >> "$POSTGRES_DATA_DIR/postgresql.conf"
     fi
 
-    pg_ctl -D "$POSTGRES_DATA_DIR" -o "-h ${POSTGRES_HOST} -p ${POSTGRES_PORT}" -w start >/dev/null 2>&1 || return 1
+    "$pg_ctl_bin" -D "$POSTGRES_DATA_DIR" -o "-h ${POSTGRES_HOST} -p ${POSTGRES_PORT}" -w start >/dev/null 2>&1 || return 1
     return 0
 }
 
 has_postgres_runtime() {
-    command -v docker >/dev/null 2>&1 || (command -v initdb >/dev/null 2>&1 && command -v pg_ctl >/dev/null 2>&1)
+    command -v docker >/dev/null 2>&1 || resolve_postgres_bin_dir >/dev/null 2>&1
 }
 
 bootstrap_postgres_runtime() {
@@ -283,8 +346,10 @@ cleanup_started_postgres() {
     fi
 
     if [ "$POSTGRES_START_MODE" = "local" ]; then
-        if command -v pg_ctl >/dev/null 2>&1; then
-            pg_ctl -D "$POSTGRES_DATA_DIR" -m fast -w stop >/dev/null 2>&1 || true
+        local pg_bin_dir
+        pg_bin_dir="$(resolve_postgres_bin_dir 2>/dev/null || true)"
+        if [ -n "$pg_bin_dir" ] && [ -x "$pg_bin_dir/pg_ctl" ]; then
+            "$pg_bin_dir/pg_ctl" -D "$POSTGRES_DATA_DIR" -m fast -w stop >/dev/null 2>&1 || true
         fi
         if [ "$POSTGRES_LOCAL_CLUSTER_CREATED_BY_SCRIPT" -eq 1 ]; then
             rm -rf "$POSTGRES_DATA_DIR" || true
@@ -332,6 +397,9 @@ needs_setup() {
     if [ ! -d "frontend/node_modules" ]; then
         return 0
     fi
+    if [ ! -d "scripts/tooling/node_modules" ]; then
+        return 0
+    fi
     if [ ! -f ".setup-stamp.json" ]; then
         return 0
     fi
@@ -366,6 +434,8 @@ current = {
     "requirements_trading_sha256": sha256(root / "backend" / "requirements-trading.txt"),
     "package_json_sha256": sha256(root / "frontend" / "package.json"),
     "package_lock_sha256": sha256(root / "frontend" / "package-lock.json"),
+    "launcher_tools_package_json_sha256": sha256(root / "scripts" / "tooling" / "package.json"),
+    "launcher_tools_package_lock_sha256": sha256(root / "scripts" / "tooling" / "package-lock.json"),
 }
 
 for key, value in current.items():
@@ -391,6 +461,8 @@ if [ -z "${DATABASE_URL:-}" ]; then
     export DATABASE_URL="postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}"
 fi
 
+backend/venv/bin/python scripts/ensure_postgres_ready.py --database-url "$DATABASE_URL"
+
 # Ensure TUI dependencies are installed
 source backend/venv/bin/activate
 python -c "import textual" 2>/dev/null || {
@@ -398,5 +470,10 @@ python -c "import textual" 2>/dev/null || {
     pip install -q textual rich
 }
 
+if [ "$RUN_SERVICE_SMOKE_TEST" -eq 1 ]; then
+    python scripts/launcher_smoke.py
+    exit $?
+fi
+
 # Launch the TUI
-python tui.py "$@"
+python tui.py "${TUI_ARGS[@]}"
