@@ -33,7 +33,7 @@ from services.trader_orchestrator.decision_gates import (
     apply_platform_decision_gates,
     is_within_trading_window_utc,
 )
-from services.worker_state import _commit_with_retry, _is_sqlite_lock_error
+from services.worker_state import _commit_with_retry, _is_retryable_db_error
 from services.trader_orchestrator.sources.registry import (
     normalize_source_key,
 )
@@ -79,7 +79,6 @@ _RESUME_POLICIES = {"resume_full", "manage_only", "flatten_then_start"}
 _PAPER_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
 _ORPHAN_CLEANUP_MAX_TRADERS_PER_CYCLE = 32
 _ORCHESTRATOR_CYCLE_LOCK_KEY = 0x54524F5243485354  # "TRORCHST"
-_ORCHESTRATOR_SQLITE_BUSY_TIMEOUT_MS = 250
 _orchestrator_lock_ctx: tuple[Any, Any] | None = None
 _TRADER_IDLE_MAINTENANCE_INTERVAL_SECONDS = 60
 _trader_idle_maintenance_last_run: dict[str, datetime] = {}
@@ -93,26 +92,15 @@ def _session_dialect_name(session: Any) -> str:
         return ""
 
 
-async def _apply_orchestrator_sqlite_busy_timeout(session: Any) -> None:
-    if "sqlite" not in settings.DATABASE_URL.lower():
-        return
-    if not hasattr(session, "execute"):
-        return
-    try:
-        await session.execute(text(f"PRAGMA busy_timeout={_ORCHESTRATOR_SQLITE_BUSY_TIMEOUT_MS}"))
-    except Exception:
-        return
-
-
 async def _write_orchestrator_snapshot_best_effort(session: Any, **snapshot_kwargs: Any) -> None:
     try:
         await write_orchestrator_snapshot(session, **snapshot_kwargs)
     except OperationalError as exc:
-        if not _is_sqlite_lock_error(exc):
+        if not _is_retryable_db_error(exc):
             raise
         if hasattr(session, "rollback"):
             await session.rollback()
-        logger.warning("Skipped orchestrator snapshot write due to SQLite lock")
+        logger.warning("Skipped orchestrator snapshot write due to transient DB error")
 
 
 async def submit_order(
@@ -249,7 +237,7 @@ def _strategy_instance_from_loaded(candidate: Any) -> Any:
 async def _try_acquire_orchestrator_cycle_lock(session: Any) -> bool:
     """Acquire a cross-process lock when running on PostgreSQL.
 
-    For non-PostgreSQL dialects (e.g. sqlite in local tests), fall back to
+    For non-PostgreSQL dialects, fall back to
     allowing the cycle to proceed.
     """
     dialect_name = _session_dialect_name(session)
@@ -523,7 +511,6 @@ async def _run_trader_once(
     orders_written = 0
 
     async with AsyncSessionLocal() as session:
-        await _apply_orchestrator_sqlite_busy_timeout(session)
         trader_id = str(trader["id"])
         source_configs = _normalize_source_configs(trader)
         if not source_configs:
@@ -1492,7 +1479,6 @@ async def _run_trader_once(
                 await _commit_with_retry(
                     session,
                     retry_attempts=2,
-                    busy_timeout_ms=250,
                     base_delay_seconds=0.05,
                     max_delay_seconds=0.1,
                 )
@@ -1617,7 +1603,6 @@ async def _run_trader_once_with_timeout(
         if trader_id:
             try:
                 async with AsyncSessionLocal() as session:
-                    await _apply_orchestrator_sqlite_busy_timeout(session)
                     await create_trader_event(
                         session,
                         trader_id=trader_id,
@@ -1635,10 +1620,10 @@ async def _run_trader_once_with_timeout(
                 logger.warning("Failed to persist trader timeout event: %s", exc)
         return 0, 0
     except OperationalError as exc:
-        if not _is_sqlite_lock_error(exc):
+        if not _is_retryable_db_error(exc):
             raise
         logger.warning(
-            "Trader cycle skipped due to SQLite lock for trader=%s process_signals=%s",
+            "Trader cycle skipped due to transient DB error for trader=%s process_signals=%s",
             trader_id,
             process_signals,
         )
@@ -1650,7 +1635,6 @@ async def run_worker_loop() -> None:
 
     try:
         async with AsyncSessionLocal() as session:
-            await _apply_orchestrator_sqlite_busy_timeout(session)
             await ensure_all_strategies_seeded(session)
             await refresh_strategy_runtime_if_needed(session, source_keys=None, force=True)
     except Exception as exc:
@@ -1674,14 +1658,13 @@ async def run_worker_loop() -> None:
                     continue
 
                 async with AsyncSessionLocal() as session:
-                    await _apply_orchestrator_sqlite_busy_timeout(session)
                     try:
                         await expire_stale_signals(session)
                     except OperationalError as exc:
-                        if _is_sqlite_lock_error(exc):
+                        if _is_retryable_db_error(exc):
                             if hasattr(session, "rollback"):
                                 await session.rollback()
-                            logger.warning("Skipped stale-signal expiry due to SQLite lock")
+                            logger.warning("Skipped stale-signal expiry due to transient DB error")
                         else:
                             raise
                     except Exception as exc:
@@ -1857,7 +1840,6 @@ async def run_worker_loop() -> None:
                     total_orders += orders
 
                 async with AsyncSessionLocal() as session:
-                    await _apply_orchestrator_sqlite_busy_timeout(session)
                     if force_cycle:
                         await update_orchestrator_control(session, requested_run_at=None)
                     metrics = await compute_orchestrator_metrics(session)
@@ -1878,7 +1860,6 @@ async def run_worker_loop() -> None:
                 logger.exception("Trader orchestrator worker cycle failed: %s", exc)
                 try:
                     async with AsyncSessionLocal() as session:
-                        await _apply_orchestrator_sqlite_busy_timeout(session)
                         control = await read_orchestrator_control(session)
                         await _write_orchestrator_snapshot_best_effort(
                             session,

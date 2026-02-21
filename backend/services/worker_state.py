@@ -9,14 +9,12 @@ import sys
 from copy import deepcopy
 from datetime import datetime
 
-from config import settings
 from utils.utcnow import utcnow
 from typing import Any, Optional
 
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
-from sqlalchemy import text
 from sqlalchemy import update as sa_update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,19 +34,28 @@ DEFAULT_WORKER_INTERVALS: dict[str, int] = {
     "discovery": 3600,
     "events": 300,
 }
-SQLITE_LOCK_RETRY_ATTEMPTS = 3
-SQLITE_LOCK_BASE_DELAY_SECONDS = 0.05
-SQLITE_LOCK_MAX_DELAY_SECONDS = 0.3
-SQLITE_LOCK_BUSY_TIMEOUT_MS = 500
+DB_RETRY_ATTEMPTS = 3
+DB_RETRY_BASE_DELAY_SECONDS = 0.05
+DB_RETRY_MAX_DELAY_SECONDS = 0.3
 
 
-def _is_sqlite_lock_error(exc: Exception) -> bool:
+def _is_retryable_db_error(exc: Exception) -> bool:
     message = str(getattr(exc, "orig", exc)).lower()
-    return "database is locked" in message or "database table is locked" in message
+    return any(
+        marker in message
+        for marker in (
+            "database is locked",
+            "database table is locked",
+            "deadlock detected",
+            "serialization failure",
+            "could not serialize access",
+            "lock not available",
+        )
+    )
 
 
-def _sqlite_lock_retry_delay(attempt: int) -> float:
-    return min(SQLITE_LOCK_BASE_DELAY_SECONDS * (2**attempt), SQLITE_LOCK_MAX_DELAY_SECONDS)
+def _db_retry_delay(attempt: int) -> float:
+    return min(DB_RETRY_BASE_DELAY_SECONDS * (2**attempt), DB_RETRY_MAX_DELAY_SECONDS)
 
 
 def _capture_pending_session_state(session: AsyncSession) -> dict[str, Any]:
@@ -128,30 +135,26 @@ async def _restore_pending_session_state(session: AsyncSession, snapshot: dict[s
 async def _commit_with_retry(
     session: AsyncSession,
     *,
-    retry_attempts: int = SQLITE_LOCK_RETRY_ATTEMPTS,
-    busy_timeout_ms: int = SQLITE_LOCK_BUSY_TIMEOUT_MS,
-    base_delay_seconds: float = SQLITE_LOCK_BASE_DELAY_SECONDS,
-    max_delay_seconds: float = SQLITE_LOCK_MAX_DELAY_SECONDS,
+    retry_attempts: int = DB_RETRY_ATTEMPTS,
+    base_delay_seconds: float = DB_RETRY_BASE_DELAY_SECONDS,
+    max_delay_seconds: float = DB_RETRY_MAX_DELAY_SECONDS,
 ) -> None:
     if not hasattr(session, "commit"):
         return
 
     attempts = max(1, int(retry_attempts))
-    timeout_ms = max(0, int(busy_timeout_ms))
     base_delay = max(0.0, float(base_delay_seconds))
     max_delay = max(base_delay, float(max_delay_seconds))
 
     pending_snapshot = _capture_pending_session_state(session)
     for attempt in range(attempts):
         try:
-            if "sqlite" in settings.DATABASE_URL.lower() and hasattr(session, "execute") and timeout_ms > 0:
-                await session.execute(text(f"PRAGMA busy_timeout={timeout_ms}"))
             await session.commit()
             return
         except OperationalError as exc:
             if hasattr(session, "rollback"):
                 await session.rollback()
-            is_locked = _is_sqlite_lock_error(exc)
+            is_locked = _is_retryable_db_error(exc)
             is_last = attempt >= attempts - 1
             if not is_locked or is_last:
                 raise

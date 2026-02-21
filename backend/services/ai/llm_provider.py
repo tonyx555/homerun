@@ -54,7 +54,7 @@ from utils.secrets import decrypt_secret
 
 logger = logging.getLogger(__name__)
 
-# Serialize LLM usage log writes to avoid SQLite "database is locked" under concurrent load
+# Serialize LLM usage log writes to avoid concurrent write conflicts under load
 _log_usage_lock = asyncio.Lock()
 
 

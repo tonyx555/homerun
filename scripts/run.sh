@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 # Navigate to project root (parent of scripts/)
 cd "$(dirname "$0")/.."
@@ -16,6 +16,48 @@ REDIS_CONTAINER_NAME="${REDIS_CONTAINER_NAME:-homerun-redis}"
 REDIS_IMAGE="${REDIS_IMAGE:-redis:7-alpine}"
 REDIS_STARTED_BY_SCRIPT=0
 REDIS_START_MODE=""
+REDIS_DOCKER_CREATED_BY_SCRIPT=0
+
+POSTGRES_HOST="${POSTGRES_HOST:-127.0.0.1}"
+POSTGRES_PORT="${POSTGRES_PORT:-5432}"
+POSTGRES_DB="${POSTGRES_DB:-homerun}"
+POSTGRES_USER="${POSTGRES_USER:-homerun}"
+POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-homerun}"
+POSTGRES_CONTAINER_NAME="${POSTGRES_CONTAINER_NAME:-homerun-postgres}"
+POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:16-alpine}"
+POSTGRES_DATA_DIR="${POSTGRES_DATA_DIR:-$(pwd)/data/postgres}"
+POSTGRES_STARTED_BY_SCRIPT=0
+POSTGRES_START_MODE=""
+POSTGRES_DOCKER_CREATED_BY_SCRIPT=0
+POSTGRES_LOCAL_CLUSTER_CREATED_BY_SCRIPT=0
+
+tcp_ping() {
+    python3 - "$1" "$2" <<'PY'
+import socket
+import sys
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+
+try:
+    with socket.create_connection((host, port), timeout=0.5):
+        raise SystemExit(0)
+except Exception:
+    raise SystemExit(1)
+PY
+}
+
+wait_for_service() {
+    local host="$1"
+    local port="$2"
+    for _ in $(seq 1 40); do
+        if tcp_ping "$host" "$port"; then
+            return 0
+        fi
+        sleep 0.25
+    done
+    return 1
+}
 
 redis_ping() {
     python3 - "$REDIS_HOST" "$REDIS_PORT" <<'PY'
@@ -57,16 +99,6 @@ except Exception:
 PY
 }
 
-wait_for_redis() {
-    for _ in $(seq 1 20); do
-        if redis_ping; then
-            return 0
-        fi
-        sleep 0.25
-    done
-    return 1
-}
-
 try_start_redis_docker() {
     if ! command -v docker >/dev/null 2>&1; then
         return 1
@@ -85,6 +117,7 @@ try_start_redis_docker() {
             "$REDIS_IMAGE" \
             redis-server --save "" --appendonly no \
             >/dev/null 2>&1 || return 1
+        REDIS_DOCKER_CREATED_BY_SCRIPT=1
     fi
     return 0
 }
@@ -123,6 +156,9 @@ cleanup_started_redis() {
     if [ "$REDIS_START_MODE" = "docker" ]; then
         if command -v docker >/dev/null 2>&1; then
             docker stop "$REDIS_CONTAINER_NAME" >/dev/null 2>&1 || true
+            if [ "$REDIS_DOCKER_CREATED_BY_SCRIPT" -eq 1 ]; then
+                docker rm "$REDIS_CONTAINER_NAME" >/dev/null 2>&1 || true
+            fi
         fi
         return 0
     fi
@@ -144,14 +180,14 @@ ensure_redis() {
     bootstrap_redis_runtime
 
     echo -e "${CYAN}Starting Redis...${NC}"
-    if try_start_redis_docker && wait_for_redis; then
+    if try_start_redis_docker && wait_for_service "$REDIS_HOST" "$REDIS_PORT"; then
         REDIS_STARTED_BY_SCRIPT=1
         REDIS_START_MODE="docker"
         echo -e "${GREEN}Redis started via Docker on ${REDIS_HOST}:${REDIS_PORT}${NC}"
         return 0
     fi
 
-    if try_start_redis_local && wait_for_redis; then
+    if try_start_redis_local && wait_for_service "$REDIS_HOST" "$REDIS_PORT"; then
         REDIS_STARTED_BY_SCRIPT=1
         REDIS_START_MODE="local"
         echo -e "${GREEN}Redis started via redis-server on ${REDIS_HOST}:${REDIS_PORT}${NC}"
@@ -159,9 +195,134 @@ ensure_redis() {
     fi
 
     echo -e "${YELLOW}Failed to start Redis automatically.${NC}"
-    echo "Install Docker or redis-server, then rerun:"
-    echo "  docker run --name ${REDIS_CONTAINER_NAME} -d -p ${REDIS_HOST}:${REDIS_PORT}:6379 ${REDIS_IMAGE}"
+    echo "Install Docker or redis-server, then rerun."
     exit 1
+}
+
+postgres_ping() {
+    tcp_ping "$POSTGRES_HOST" "$POSTGRES_PORT"
+}
+
+try_start_postgres_docker() {
+    if ! command -v docker >/dev/null 2>&1; then
+        return 1
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        return 1
+    fi
+
+    if docker container inspect "$POSTGRES_CONTAINER_NAME" >/dev/null 2>&1; then
+        docker start "$POSTGRES_CONTAINER_NAME" >/dev/null 2>&1 || return 1
+    else
+        docker run \
+            --name "$POSTGRES_CONTAINER_NAME" \
+            --detach \
+            --publish "${POSTGRES_HOST}:${POSTGRES_PORT}:5432" \
+            --env "POSTGRES_DB=${POSTGRES_DB}" \
+            --env "POSTGRES_USER=${POSTGRES_USER}" \
+            --env "POSTGRES_PASSWORD=${POSTGRES_PASSWORD}" \
+            --tmpfs /var/lib/postgresql/data:rw \
+            "$POSTGRES_IMAGE" \
+            >/dev/null 2>&1 || return 1
+        POSTGRES_DOCKER_CREATED_BY_SCRIPT=1
+    fi
+
+    return 0
+}
+
+try_start_postgres_local() {
+    if ! command -v initdb >/dev/null 2>&1 || ! command -v pg_ctl >/dev/null 2>&1; then
+        return 1
+    fi
+
+    mkdir -p "$POSTGRES_DATA_DIR"
+
+    if [ ! -f "$POSTGRES_DATA_DIR/PG_VERSION" ]; then
+        initdb -D "$POSTGRES_DATA_DIR" -U "$POSTGRES_USER" >/dev/null 2>&1 || return 1
+        POSTGRES_LOCAL_CLUSTER_CREATED_BY_SCRIPT=1
+        cat > "$POSTGRES_DATA_DIR/pg_hba.conf" <<HBA
+local all all trust
+host all all 127.0.0.1/32 trust
+host all all ::1/128 trust
+HBA
+        {
+            echo "listen_addresses = '${POSTGRES_HOST}'"
+            echo "port = ${POSTGRES_PORT}"
+        } >> "$POSTGRES_DATA_DIR/postgresql.conf"
+    fi
+
+    pg_ctl -D "$POSTGRES_DATA_DIR" -o "-h ${POSTGRES_HOST} -p ${POSTGRES_PORT}" -w start >/dev/null 2>&1 || return 1
+    return 0
+}
+
+has_postgres_runtime() {
+    command -v docker >/dev/null 2>&1 || (command -v initdb >/dev/null 2>&1 && command -v pg_ctl >/dev/null 2>&1)
+}
+
+bootstrap_postgres_runtime() {
+    if has_postgres_runtime; then
+        return 0
+    fi
+    echo -e "${CYAN}Postgres runtime missing; invoking setup postgres bootstrap...${NC}"
+    ./scripts/setup.sh --postgres-only
+}
+
+cleanup_started_postgres() {
+    if [ "$POSTGRES_STARTED_BY_SCRIPT" -ne 1 ]; then
+        return 0
+    fi
+
+    if [ "$POSTGRES_START_MODE" = "docker" ]; then
+        if command -v docker >/dev/null 2>&1; then
+            docker stop "$POSTGRES_CONTAINER_NAME" >/dev/null 2>&1 || true
+            if [ "$POSTGRES_DOCKER_CREATED_BY_SCRIPT" -eq 1 ]; then
+                docker rm "$POSTGRES_CONTAINER_NAME" >/dev/null 2>&1 || true
+            fi
+        fi
+        return 0
+    fi
+
+    if [ "$POSTGRES_START_MODE" = "local" ]; then
+        if command -v pg_ctl >/dev/null 2>&1; then
+            pg_ctl -D "$POSTGRES_DATA_DIR" -m fast -w stop >/dev/null 2>&1 || true
+        fi
+        if [ "$POSTGRES_LOCAL_CLUSTER_CREATED_BY_SCRIPT" -eq 1 ]; then
+            rm -rf "$POSTGRES_DATA_DIR" || true
+        fi
+    fi
+}
+
+ensure_postgres() {
+    if postgres_ping; then
+        echo -e "${GREEN}Postgres already running on ${POSTGRES_HOST}:${POSTGRES_PORT}${NC}"
+        return 0
+    fi
+
+    bootstrap_postgres_runtime
+
+    echo -e "${CYAN}Starting Postgres...${NC}"
+    if try_start_postgres_docker && wait_for_service "$POSTGRES_HOST" "$POSTGRES_PORT"; then
+        POSTGRES_STARTED_BY_SCRIPT=1
+        POSTGRES_START_MODE="docker"
+        echo -e "${GREEN}Postgres started via Docker on ${POSTGRES_HOST}:${POSTGRES_PORT}${NC}"
+        return 0
+    fi
+
+    if try_start_postgres_local && wait_for_service "$POSTGRES_HOST" "$POSTGRES_PORT"; then
+        POSTGRES_STARTED_BY_SCRIPT=1
+        POSTGRES_START_MODE="local"
+        echo -e "${GREEN}Postgres started via local postgres on ${POSTGRES_HOST}:${POSTGRES_PORT}${NC}"
+        return 0
+    fi
+
+    echo -e "${YELLOW}Failed to start Postgres automatically.${NC}"
+    echo "Install Docker or PostgreSQL tools (initdb + pg_ctl), then rerun."
+    exit 1
+}
+
+cleanup_started_services() {
+    cleanup_started_postgres
+    cleanup_started_redis
 }
 
 needs_setup() {
@@ -220,9 +381,15 @@ if needs_setup; then
     ./scripts/setup.sh
 fi
 
-trap cleanup_started_redis EXIT
+trap cleanup_started_services EXIT
 
 ensure_redis
+ensure_postgres
+
+# Ensure backend uses launcher-managed Postgres if DATABASE_URL wasn't provided.
+if [ -z "${DATABASE_URL:-}" ]; then
+    export DATABASE_URL="postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}"
+fi
 
 # Ensure TUI dependencies are installed
 source backend/venv/bin/activate

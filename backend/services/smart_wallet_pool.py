@@ -18,19 +18,7 @@ from utils.utcnow import utcnow, utcfromtimestamp
 from typing import Any, Optional
 
 from sqlalchemy import select, func, or_
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-
-SQLITE_VAR_LIMIT = 900
-
-
-def _chunked_in(column, values: list, chunk_size: int = SQLITE_VAR_LIMIT):
-    """Build an OR of IN clauses to stay under SQLite's variable limit."""
-    if len(values) <= chunk_size:
-        return column.in_(values)
-    clauses = []
-    for i in range(0, len(values), chunk_size):
-        clauses.append(column.in_(values[i : i + chunk_size]))
-    return or_(*clauses)
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from models.database import (
     AsyncSessionLocal,
@@ -48,6 +36,18 @@ from utils.converters import clamp
 from utils.logger import get_logger
 
 logger = get_logger("smart_wallet_pool")
+
+IN_CLAUSE_CHUNK_SIZE = 5000
+
+
+def _chunked_in(column, values: list, chunk_size: int = IN_CLAUSE_CHUNK_SIZE):
+    """Build an OR of IN clauses to stay under parameter-count limits."""
+    if len(values) <= chunk_size:
+        return column.in_(values)
+    clauses = []
+    for i in range(0, len(values), chunk_size):
+        clauses.append(column.in_(values[i : i + chunk_size]))
+    return or_(*clauses)
 
 # All pool eligibility defaults now live in StrategySDK.POOL_ELIGIBILITY_DEFAULTS.
 _SDK = StrategySDK.POOL_ELIGIBILITY_DEFAULTS
@@ -1395,7 +1395,7 @@ class SmartWalletPoolService:
                 }
                 for event in inserts
             ]
-            stmt = sqlite_insert(WalletActivityRollup).values(rows).prefix_with("OR IGNORE")
+            stmt = pg_insert(WalletActivityRollup).values(rows).on_conflict_do_nothing(index_elements=["id"])
             result = await session.execute(stmt)
             await session.commit()
             if result is None or result.rowcount is None:

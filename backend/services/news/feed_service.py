@@ -361,7 +361,7 @@ class NewsFeedService:
     async def persist_to_db(self) -> int:
         try:
             from models.database import AsyncSessionLocal, NewsArticleCache
-            from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
 
             articles = list(self._articles.values())
             if not articles:
@@ -371,7 +371,7 @@ class NewsFeedService:
             async with AsyncSessionLocal() as session:
                 for a in articles:
                     stmt = (
-                        sqlite_insert(NewsArticleCache)
+                        pg_insert(NewsArticleCache)
                         .values(
                             article_id=a.article_id,
                             url=a.url,

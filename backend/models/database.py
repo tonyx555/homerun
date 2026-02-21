@@ -10,23 +10,16 @@ from sqlalchemy import (
     Enum as SQLEnum,
     Index,
     UniqueConstraint,
-    event,
 )
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from sqlalchemy.exc import OperationalError
-from contextlib import contextmanager
 from datetime import datetime
-from pathlib import Path
 import enum
-import logging
-import os
 import asyncio
 
 from config import settings
 from models.types import PreciseFloat as Float
-
-logger = logging.getLogger(__name__)
 
 Base = declarative_base()
 
@@ -34,6 +27,14 @@ Base = declarative_base()
 class RetryableAsyncSession(AsyncSession):
     _COMMIT_RETRY_ATTEMPTS = 4
     _COMMIT_BASE_DELAY_SECONDS = 0.05
+    _COMMIT_RETRYABLE_MESSAGES = (
+        "database is locked",
+        "database table is locked",
+        "deadlock detected",
+        "serialization failure",
+        "could not serialize access",
+        "lock not available",
+    )
 
     async def commit(self) -> None:
         for attempt in range(1, self._COMMIT_RETRY_ATTEMPTS + 1):
@@ -41,8 +42,9 @@ class RetryableAsyncSession(AsyncSession):
                 await super().commit()
                 return
             except OperationalError as exc:
-                message = str(exc).lower()
-                if "locked" not in message or attempt >= self._COMMIT_RETRY_ATTEMPTS:
+                message = str(getattr(exc, "orig", exc)).lower()
+                retryable = any(marker in message for marker in self._COMMIT_RETRYABLE_MESSAGES)
+                if not retryable or attempt >= self._COMMIT_RETRY_ATTEMPTS:
                     raise
                 await self.rollback()
                 delay = min(self._COMMIT_BASE_DELAY_SECONDS * (2 ** (attempt - 1)), 0.4)
@@ -1583,7 +1585,7 @@ class DiscoveredWallet(Base):
     pool_membership_reason = Column(String, nullable=True)
     source_flags = Column(JSON, default=dict)  # {"leaderboard": true, ...}
 
-    # Tags (many-to-many via JSON for simplicity in SQLite)
+    # Tags (many-to-many via JSON for simplicity)
     tags = Column(JSON, default=list)  # ["smart_predictor", "whale", "consistent", ...]
 
     # Entity clustering
@@ -2769,28 +2771,12 @@ class EventsSnapshot(Base):
 
 # ==================== DATABASE SETUP ====================
 
-# SQLite-specific: improve concurrency (WAL + busy_timeout applied in _set_sqlite_pragma)
-_engine_kw: dict = {"echo": False}
-_SQLITE_BUSY_TIMEOUT_MS = 1500
-if "sqlite" in settings.DATABASE_URL:
-    _engine_kw["connect_args"] = {"timeout": _SQLITE_BUSY_TIMEOUT_MS / 1000}  # Fail fast on lock contention
-# For Postgres, pool_size/max_overflow can be set via env or here if needed
+_engine_kw: dict = {
+    "echo": False,
+    "pool_pre_ping": True,
+}
 
 async_engine = create_async_engine(settings.DATABASE_URL, **_engine_kw)
-
-
-def _set_sqlite_pragma(dbapi_connection, connection_record):
-    """Configure SQLite for better concurrent access (WAL mode, busy timeout)."""
-    if "sqlite" not in settings.DATABASE_URL:
-        return
-    cursor = dbapi_connection.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL")  # Allow concurrent reads during writes
-    cursor.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")  # Fail fast when locked (ms)
-    cursor.close()
-
-
-# Apply pragmas on each new SQLite connection
-event.listens_for(async_engine.sync_engine, "connect")(_set_sqlite_pragma)
 
 AsyncSessionLocal = sessionmaker(async_engine, class_=RetryableAsyncSession, expire_on_commit=False)
 
@@ -2807,90 +2793,13 @@ def _run_alembic_upgrade(connection) -> None:
     command.upgrade(alembic_cfg, "head")
 
 
-@contextmanager
-def _sqlite_migration_lock():
-    """Serialize Alembic upgrades across processes for SQLite databases."""
-    if "sqlite" not in settings.DATABASE_URL:
-        yield
-        return
-
-    lock_path = Path(__file__).resolve().parents[1] / ".alembic.sqlite.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Delete stale lock file if it has grown unreasonably (>4 KB).
-    try:
-        if lock_path.exists() and lock_path.stat().st_size > 4096:
-            lock_path.unlink(missing_ok=True)
-    except OSError:
-        pass
-
-    # Use "a" (append) so multiple processes can open the file without
-    # Windows blocking on a competing truncate ("w" causes PermissionError
-    # when 9 services race to open the same file).
-    lock_file = None
-    try:
-        lock_file = lock_path.open("a", encoding="utf-8")
-    except (PermissionError, OSError):
-        # Cannot even open the lock file — proceed without a lock.
-        logger.warning("Cannot open migration lock file, proceeding without lock")
-        yield
-        return
-
-    try:
-        if os.name == "posix":
-            import fcntl
-
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-            return
-
-        if os.name == "nt":
-            import msvcrt
-            import time
-
-            deadline = time.monotonic() + 30
-            locked = False
-            while True:
-                try:
-                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
-                    locked = True
-                    break
-                except (PermissionError, OSError):
-                    if time.monotonic() >= deadline:
-                        logger.warning("Could not acquire migration lock after 30s, proceeding without lock")
-                        break
-                    time.sleep(0.5)
-            try:
-                yield
-            finally:
-                if locked:
-                    try:
-                        lock_file.seek(0)
-                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-                    except (PermissionError, OSError):
-                        pass
-            return
-
-        # Unknown platform: continue without an OS-level file lock.
-        yield
-    finally:
-        try:
-            lock_file.close()
-        except (PermissionError, OSError):
-            pass
-
-
 async def init_database():
     """Initialize database and apply Alembic migrations."""
     from models.model_registry import register_all_models
 
     register_all_models()
-    with _sqlite_migration_lock():
-        async with async_engine.begin() as conn:
-            await conn.run_sync(_run_alembic_upgrade)
+    async with async_engine.begin() as conn:
+        await conn.run_sync(_run_alembic_upgrade)
 
 
 async def get_db_session() -> AsyncSession:

@@ -2,7 +2,8 @@
 # Run: .\scripts\setup.ps1
 
 param(
-    [switch]$RedisOnly
+    [switch]$RedisOnly,
+    [switch]$PostgresOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -77,8 +78,71 @@ function Ensure-RedisRuntime {
     return $false
 }
 
+function Test-PostgresRuntimeAvailable {
+    if (Get-Command docker -ErrorAction SilentlyContinue) { return $true }
+    $initdb = Get-Command initdb -ErrorAction SilentlyContinue
+    $pgctl = Get-Command pg_ctl -ErrorAction SilentlyContinue
+    return [bool]($initdb -and $pgctl)
+}
+
+function Ensure-PostgresRuntime {
+    if (Test-PostgresRuntimeAvailable) {
+        Write-Host "Postgres runtime prerequisite found (docker or initdb+pg_ctl)." -ForegroundColor Green
+        return $true
+    }
+
+    Write-Host "Postgres runtime prerequisite missing. Attempting to install..." -ForegroundColor Cyan
+
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if ($winget) {
+        $wingetIds = @(
+            "PostgreSQL.PostgreSQL",
+            "PostgreSQL.PostgreSQL.16"
+        )
+        foreach ($id in $wingetIds) {
+            try {
+                winget install --id $id --exact --silent --accept-source-agreements --accept-package-agreements *> $null
+                if (Test-PostgresRuntimeAvailable) {
+                    Write-Host "Postgres runtime installed via winget ($id)." -ForegroundColor Green
+                    return $true
+                }
+            } catch {
+            }
+        }
+    }
+
+    $choco = Get-Command choco -ErrorAction SilentlyContinue
+    if ($choco) {
+        try {
+            choco install postgresql -y *> $null
+            if (Test-PostgresRuntimeAvailable) {
+                Write-Host "Postgres runtime installed via Chocolatey." -ForegroundColor Green
+                return $true
+            }
+        } catch {
+        }
+    }
+
+    Write-Host "Failed to auto-install Postgres runtime prerequisites." -ForegroundColor Red
+    Write-Host "Install Docker Desktop or PostgreSQL tools (initdb + pg_ctl), then rerun setup." -ForegroundColor Yellow
+    return $false
+}
+
+if ($RedisOnly -and $PostgresOnly) {
+    if (-not (Ensure-RedisRuntime)) { exit 1 }
+    if (-not (Ensure-PostgresRuntime)) { exit 1 }
+    exit 0
+}
+
 if ($RedisOnly) {
     if (-not (Ensure-RedisRuntime)) {
+        exit 1
+    }
+    exit 0
+}
+
+if ($PostgresOnly) {
+    if (-not (Ensure-PostgresRuntime)) {
         exit 1
     }
     exit 0
@@ -167,6 +231,11 @@ if (-not (Test-Path "data")) {
 Write-Host ""
 Write-Host "Ensuring Redis runtime prerequisites..." -ForegroundColor Cyan
 if (-not (Ensure-RedisRuntime)) {
+    exit 1
+}
+
+Write-Host "Ensuring Postgres runtime prerequisites..." -ForegroundColor Cyan
+if (-not (Ensure-PostgresRuntime)) {
     exit 1
 }
 

@@ -1489,7 +1489,7 @@ class WalletDiscoveryEngine:
                 if key == "address":
                     continue
                 # Handle float('inf') and float('nan') values that cannot
-                # be serialized to JSON or stored in SQLite.
+                # be serialized to JSON or stored in the database.
                 if isinstance(value, float) and (math.isinf(value) or math.isnan(value)):
                     value = None
                 if hasattr(wallet, key):

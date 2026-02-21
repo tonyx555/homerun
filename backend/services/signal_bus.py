@@ -19,7 +19,7 @@ from typing import Any, Optional
 
 from config import settings
 from sqlalchemy import case, func, or_, select, update
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import (
@@ -722,7 +722,7 @@ async def refresh_trade_signal_snapshots(session: AsyncSession) -> list[dict[str
                 )
             },
         }
-        stmt = sqlite_insert(TradeSignalSnapshot).values(**payload)
+        stmt = pg_insert(TradeSignalSnapshot).values(**payload)
         stmt = stmt.on_conflict_do_update(
             index_elements=[TradeSignalSnapshot.source],
             set_={

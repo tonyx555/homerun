@@ -1,14 +1,18 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 # Navigate to project root (parent of scripts/)
 cd "$(dirname "$0")/.."
 
 REDIS_ONLY=0
+POSTGRES_ONLY=0
 for arg in "$@"; do
     case "$arg" in
         --redis-only)
             REDIS_ONLY=1
+            ;;
+        --postgres-only)
+            POSTGRES_ONLY=1
             ;;
     esac
 done
@@ -61,13 +65,64 @@ ensure_redis_runtime() {
     return 1
 }
 
+has_postgres_runtime() {
+    command -v docker >/dev/null 2>&1 || (command -v initdb >/dev/null 2>&1 && command -v pg_ctl >/dev/null 2>&1)
+}
+
+ensure_postgres_runtime() {
+    if has_postgres_runtime; then
+        echo "Postgres runtime prerequisite found (docker or initdb+pg_ctl)."
+        return 0
+    fi
+
+    echo "Postgres runtime prerequisite missing. Attempting to install PostgreSQL tools..."
+    if command -v brew >/dev/null 2>&1; then
+        if ! brew list postgresql@16 >/dev/null 2>&1 && ! brew list postgresql >/dev/null 2>&1; then
+            brew install postgresql@16 || brew install postgresql
+        fi
+    elif command -v apt-get >/dev/null 2>&1; then
+        run_with_optional_sudo apt-get update
+        run_with_optional_sudo apt-get install -y postgresql
+    elif command -v dnf >/dev/null 2>&1; then
+        run_with_optional_sudo dnf install -y postgresql-server
+    elif command -v yum >/dev/null 2>&1; then
+        run_with_optional_sudo yum install -y postgresql-server
+    elif command -v pacman >/dev/null 2>&1; then
+        run_with_optional_sudo pacman -Sy --noconfirm postgresql
+    else
+        echo "Error: no supported package manager found to install PostgreSQL."
+        echo "Install Docker or PostgreSQL tools (initdb + pg_ctl) manually, then rerun setup."
+        return 1
+    fi
+
+    if has_postgres_runtime; then
+        echo "Postgres runtime prerequisite is now available."
+        return 0
+    fi
+
+    echo "Error: automatic PostgreSQL installation completed but initdb/pg_ctl is still unavailable."
+    echo "Install Docker or PostgreSQL tools manually, then rerun setup."
+    return 1
+}
+
 echo "========================================="
 echo "  Autonomous Prediction Market Trading Platform Setup"
 echo "========================================="
 echo ""
 
+if [ "$REDIS_ONLY" -eq 1 ] && [ "$POSTGRES_ONLY" -eq 1 ]; then
+    ensure_redis_runtime
+    ensure_postgres_runtime
+    exit 0
+fi
+
 if [ "$REDIS_ONLY" -eq 1 ]; then
     ensure_redis_runtime
+    exit 0
+fi
+
+if [ "$POSTGRES_ONLY" -eq 1 ]; then
+    ensure_postgres_runtime
     exit 0
 fi
 
@@ -148,6 +203,9 @@ mkdir -p data
 echo ""
 echo "Ensuring Redis runtime prerequisites..."
 ensure_redis_runtime
+
+echo "Ensuring Postgres runtime prerequisites..."
+ensure_postgres_runtime
 
 # Write setup fingerprint so run.sh can detect drift and auto-rerun setup.
 python3 - <<'PY'

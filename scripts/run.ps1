@@ -11,6 +11,58 @@ $redisPort = if ($env:REDIS_PORT) { [int]$env:REDIS_PORT } else { 6379 }
 $redisContainerName = if ($env:REDIS_CONTAINER_NAME) { $env:REDIS_CONTAINER_NAME } else { "homerun-redis" }
 $redisImage = if ($env:REDIS_IMAGE) { $env:REDIS_IMAGE } else { "redis:7-alpine" }
 
+$postgresHost = if ($env:POSTGRES_HOST) { $env:POSTGRES_HOST } else { "127.0.0.1" }
+$postgresPort = if ($env:POSTGRES_PORT) { [int]$env:POSTGRES_PORT } else { 5432 }
+$postgresDb = if ($env:POSTGRES_DB) { $env:POSTGRES_DB } else { "homerun" }
+$postgresUser = if ($env:POSTGRES_USER) { $env:POSTGRES_USER } else { "homerun" }
+$postgresPassword = if ($env:POSTGRES_PASSWORD) { $env:POSTGRES_PASSWORD } else { "homerun" }
+$postgresContainerName = if ($env:POSTGRES_CONTAINER_NAME) { $env:POSTGRES_CONTAINER_NAME } else { "homerun-postgres" }
+$postgresImage = if ($env:POSTGRES_IMAGE) { $env:POSTGRES_IMAGE } else { "postgres:16-alpine" }
+$postgresDataDir = if ($env:POSTGRES_DATA_DIR) { $env:POSTGRES_DATA_DIR } else { Join-Path (Get-Location).Path "data\postgres" }
+
+$script:redisStartedByScript = $false
+$script:redisStartMode = ""
+$script:redisDockerCreatedByScript = $false
+$script:postgresStartedByScript = $false
+$script:postgresStartMode = ""
+$script:postgresDockerCreatedByScript = $false
+$script:postgresLocalClusterCreatedByScript = $false
+
+function Test-TcpPort {
+    param(
+        [string]$Host,
+        [int]$Port
+    )
+
+    $client = $null
+    try {
+        $client = [System.Net.Sockets.TcpClient]::new()
+        $client.ReceiveTimeout = 500
+        $client.SendTimeout = 500
+        $client.Connect($Host, $Port)
+        return $true
+    } catch {
+        return $false
+    } finally {
+        if ($client) { $client.Dispose() }
+    }
+}
+
+function Wait-ForService {
+    param(
+        [string]$Host,
+        [int]$Port
+    )
+
+    for ($i = 0; $i -lt 40; $i++) {
+        if (Test-TcpPort -Host $Host -Port $Port) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    return $false
+}
+
 function Find-RedisServer {
     $cmd = Get-Command redis-server -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
@@ -72,19 +124,27 @@ function Test-RedisPing {
     }
 }
 
-function Wait-ForRedis {
+function Send-RedisShutdown {
     param(
         [string]$RedisHost,
         [int]$RedisPort
     )
 
-    for ($i = 0; $i -lt 20; $i++) {
-        if (Test-RedisPing -RedisHost $RedisHost -RedisPort $RedisPort) {
-            return $true
-        }
-        Start-Sleep -Milliseconds 250
+    $client = $null
+    $stream = $null
+    try {
+        $client = [System.Net.Sockets.TcpClient]::new()
+        $client.ReceiveTimeout = 500
+        $client.SendTimeout = 500
+        $client.Connect($RedisHost, $RedisPort)
+        $stream = $client.GetStream()
+        $payload = [System.Text.Encoding]::ASCII.GetBytes("*2`r`n`$8`r`nSHUTDOWN`r`n`$6`r`nNOSAVE`r`n")
+        $stream.Write($payload, 0, $payload.Length)
+    } catch {
+    } finally {
+        if ($stream) { $stream.Dispose() }
+        if ($client) { $client.Dispose() }
     }
-    return $false
 }
 
 function Start-RedisDocker {
@@ -116,10 +176,14 @@ function Start-RedisDocker {
 
     try {
         docker run --name $ContainerName --detach --publish "${RedisHost}:${RedisPort}:6379" $Image redis-server --save "" --appendonly no *> $null
-        return ($LASTEXITCODE -eq 0)
+        if ($LASTEXITCODE -eq 0) {
+            $script:redisDockerCreatedByScript = $true
+            return $true
+        }
     } catch {
-        return $false
     }
+
+    return $false
 }
 
 function Start-RedisLocal {
@@ -172,13 +236,17 @@ function Ensure-Redis {
 
     Write-Host "Starting Redis..." -ForegroundColor Cyan
     $dockerStarted = Start-RedisDocker -RedisHost $RedisHost -RedisPort $RedisPort -ContainerName $ContainerName -Image $Image
-    if ($dockerStarted -and (Wait-ForRedis -RedisHost $RedisHost -RedisPort $RedisPort)) {
+    if ($dockerStarted -and (Wait-ForService -Host $RedisHost -Port $RedisPort)) {
+        $script:redisStartedByScript = $true
+        $script:redisStartMode = "docker"
         Write-Host "Redis started via Docker on ${RedisHost}:${RedisPort}" -ForegroundColor Green
         return
     }
 
     $localStarted = Start-RedisLocal -RedisHost $RedisHost -RedisPort $RedisPort
-    if ($localStarted -and (Wait-ForRedis -RedisHost $RedisHost -RedisPort $RedisPort)) {
+    if ($localStarted -and (Wait-ForService -Host $RedisHost -Port $RedisPort)) {
+        $script:redisStartedByScript = $true
+        $script:redisStartMode = "local"
         Write-Host "Redis started via redis-server on ${RedisHost}:${RedisPort}" -ForegroundColor Green
         return
     }
@@ -186,6 +254,211 @@ function Ensure-Redis {
     Write-Host "Failed to start Redis automatically." -ForegroundColor Red
     Write-Host "Install Docker or redis-server, then rerun." -ForegroundColor Yellow
     exit 1
+}
+
+function Cleanup-StartedRedis {
+    if (-not $script:redisStartedByScript) {
+        return
+    }
+
+    if ($script:redisStartMode -eq "docker") {
+        if (Get-Command docker -ErrorAction SilentlyContinue) {
+            try { docker stop $redisContainerName *> $null } catch {}
+            if ($script:redisDockerCreatedByScript) {
+                try { docker rm $redisContainerName *> $null } catch {}
+            }
+        }
+        return
+    }
+
+    if ($script:redisStartMode -eq "local") {
+        if (Test-RedisPing -RedisHost $redisHost -RedisPort $redisPort) {
+            Send-RedisShutdown -RedisHost $redisHost -RedisPort $redisPort
+        }
+    }
+}
+
+function Test-PostgresRuntimeAvailable {
+    if (Get-Command docker -ErrorAction SilentlyContinue) { return $true }
+    $initdb = Get-Command initdb -ErrorAction SilentlyContinue
+    $pgctl = Get-Command pg_ctl -ErrorAction SilentlyContinue
+    return [bool]($initdb -and $pgctl)
+}
+
+function Ensure-PostgresRuntime {
+    if (Test-PostgresRuntimeAvailable) {
+        return $true
+    }
+
+    Write-Host "Postgres runtime missing; invoking setup postgres bootstrap..." -ForegroundColor Cyan
+    try {
+        & .\scripts\setup.ps1 -PostgresOnly
+        return (Test-PostgresRuntimeAvailable)
+    } catch {
+        return $false
+    }
+}
+
+function Start-PostgresDocker {
+    param(
+        [string]$Host,
+        [int]$Port,
+        [string]$Db,
+        [string]$User,
+        [string]$Password,
+        [string]$ContainerName,
+        [string]$Image
+    )
+
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        return $false
+    }
+
+    try {
+        docker info *> $null
+        if ($LASTEXITCODE -ne 0) { return $false }
+    } catch {
+        return $false
+    }
+
+    try {
+        docker container inspect $ContainerName *> $null
+        if ($LASTEXITCODE -eq 0) {
+            docker start $ContainerName *> $null
+            return ($LASTEXITCODE -eq 0)
+        }
+    } catch {
+    }
+
+    try {
+        docker run --name $ContainerName --detach --publish "${Host}:${Port}:5432" --env "POSTGRES_DB=$Db" --env "POSTGRES_USER=$User" --env "POSTGRES_PASSWORD=$Password" --tmpfs /var/lib/postgresql/data:rw $Image *> $null
+        if ($LASTEXITCODE -eq 0) {
+            $script:postgresDockerCreatedByScript = $true
+            return $true
+        }
+    } catch {
+    }
+
+    return $false
+}
+
+function Start-PostgresLocal {
+    param(
+        [string]$Host,
+        [int]$Port,
+        [string]$User,
+        [string]$DataDir
+    )
+
+    $initdb = Get-Command initdb -ErrorAction SilentlyContinue
+    $pgctl = Get-Command pg_ctl -ErrorAction SilentlyContinue
+    if (-not $initdb -or -not $pgctl) {
+        return $false
+    }
+
+    try {
+        New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
+    } catch {
+        return $false
+    }
+
+    $pgVersionPath = Join-Path $DataDir "PG_VERSION"
+    if (-not (Test-Path $pgVersionPath)) {
+        try {
+            & $initdb.Source -D $DataDir -U $User *> $null
+            if ($LASTEXITCODE -ne 0) { return $false }
+            $script:postgresLocalClusterCreatedByScript = $true
+
+            @"
+local all all trust
+host all all 127.0.0.1/32 trust
+host all all ::1/128 trust
+"@ | Set-Content -Path (Join-Path $DataDir "pg_hba.conf") -Encoding UTF8
+
+            Add-Content -Path (Join-Path $DataDir "postgresql.conf") -Value "listen_addresses = '$Host'"
+            Add-Content -Path (Join-Path $DataDir "postgresql.conf") -Value "port = $Port"
+        } catch {
+            return $false
+        }
+    }
+
+    try {
+        & $pgctl.Source -D $DataDir -o "-h $Host -p $Port" -w start *> $null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
+}
+
+function Ensure-Postgres {
+    param(
+        [string]$Host,
+        [int]$Port,
+        [string]$Db,
+        [string]$User,
+        [string]$Password,
+        [string]$ContainerName,
+        [string]$Image,
+        [string]$DataDir
+    )
+
+    if (Test-TcpPort -Host $Host -Port $Port) {
+        Write-Host "Postgres already running on ${Host}:${Port}" -ForegroundColor Green
+        return
+    }
+
+    if (-not (Ensure-PostgresRuntime)) {
+        Write-Host "Failed to provision Postgres runtime automatically." -ForegroundColor Red
+        Write-Host "Install Docker Desktop or PostgreSQL tools (initdb + pg_ctl), then rerun." -ForegroundColor Yellow
+        exit 1
+    }
+
+    Write-Host "Starting Postgres..." -ForegroundColor Cyan
+    $dockerStarted = Start-PostgresDocker -Host $Host -Port $Port -Db $Db -User $User -Password $Password -ContainerName $ContainerName -Image $Image
+    if ($dockerStarted -and (Wait-ForService -Host $Host -Port $Port)) {
+        $script:postgresStartedByScript = $true
+        $script:postgresStartMode = "docker"
+        Write-Host "Postgres started via Docker on ${Host}:${Port}" -ForegroundColor Green
+        return
+    }
+
+    $localStarted = Start-PostgresLocal -Host $Host -Port $Port -User $User -DataDir $DataDir
+    if ($localStarted -and (Wait-ForService -Host $Host -Port $Port)) {
+        $script:postgresStartedByScript = $true
+        $script:postgresStartMode = "local"
+        Write-Host "Postgres started via local postgres on ${Host}:${Port}" -ForegroundColor Green
+        return
+    }
+
+    Write-Host "Failed to start Postgres automatically." -ForegroundColor Red
+    Write-Host "Install Docker Desktop or PostgreSQL tools (initdb + pg_ctl), then rerun." -ForegroundColor Yellow
+    exit 1
+}
+
+function Cleanup-StartedPostgres {
+    if (-not $script:postgresStartedByScript) {
+        return
+    }
+
+    if ($script:postgresStartMode -eq "docker") {
+        if (Get-Command docker -ErrorAction SilentlyContinue) {
+            try { docker stop $postgresContainerName *> $null } catch {}
+            if ($script:postgresDockerCreatedByScript) {
+                try { docker rm $postgresContainerName *> $null } catch {}
+            }
+        }
+        return
+    }
+
+    if ($script:postgresStartMode -eq "local") {
+        $pgctl = Get-Command pg_ctl -ErrorAction SilentlyContinue
+        if ($pgctl) {
+            try { & $pgctl.Source -D $postgresDataDir -m fast -w stop *> $null } catch {}
+        }
+        if ($script:postgresLocalClusterCreatedByScript) {
+            try { Remove-Item -Recurse -Force $postgresDataDir } catch {}
+        }
+    }
 }
 
 function Test-NeedsSetup {
@@ -220,18 +493,29 @@ if (Test-NeedsSetup) {
     & .\scripts\setup.ps1
 }
 
-Ensure-Redis -RedisHost $redisHost -RedisPort $redisPort -ContainerName $redisContainerName -Image $redisImage
-
-# Activate venv
-& backend\venv\Scripts\Activate.ps1
-
-# Ensure TUI dependencies are installed
 try {
-    python -c "import textual" 2>$null
-} catch {
-    Write-Host "Installing TUI dependencies..." -ForegroundColor Cyan
-    pip install -q textual rich
-}
+    Ensure-Redis -RedisHost $redisHost -RedisPort $redisPort -ContainerName $redisContainerName -Image $redisImage
+    Ensure-Postgres -Host $postgresHost -Port $postgresPort -Db $postgresDb -User $postgresUser -Password $postgresPassword -ContainerName $postgresContainerName -Image $postgresImage -DataDir $postgresDataDir
 
-# Launch the TUI
-python tui.py @args
+    # Ensure backend uses launcher-managed Postgres if DATABASE_URL wasn't provided.
+    if (-not $env:DATABASE_URL) {
+        $env:DATABASE_URL = "postgresql+asyncpg://${postgresUser}:${postgresPassword}@${postgresHost}:${postgresPort}/${postgresDb}"
+    }
+
+    # Activate venv
+    & backend\venv\Scripts\Activate.ps1
+
+    # Ensure TUI dependencies are installed
+    try {
+        python -c "import textual" 2>$null
+    } catch {
+        Write-Host "Installing TUI dependencies..." -ForegroundColor Cyan
+        pip install -q textual rich
+    }
+
+    # Launch the TUI
+    python tui.py @args
+} finally {
+    Cleanup-StartedPostgres
+    Cleanup-StartedRedis
+}

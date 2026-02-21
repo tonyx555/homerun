@@ -1,76 +1,7 @@
-import logging
-import shutil
-from pathlib import Path
 from typing import Optional
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
-
-# Get the directory where this config file is located.
-_BACKEND_DIR = Path(__file__).parent.resolve()
-
-
-def _detect_project_root(backend_dir: Path) -> Path:
-    """Resolve project root from the backend directory in the repo layout."""
-    return backend_dir.parent.resolve()
-
-
-_PROJECT_ROOT = _detect_project_root(_BACKEND_DIR)
-_DEFAULT_DB_PATH = (_PROJECT_ROOT / "data" / "homerun.db").resolve()
-_LEGACY_DB_PATH = (_BACKEND_DIR / "homerun.db").resolve()
-_SQLITE_ASYNC_PREFIX = "sqlite+aiosqlite:///"
-_SQLITE_SYNC_PREFIX = "sqlite:///"
-_LOGGER = logging.getLogger(__name__)
-
-
-def _safe_file_size(path: Path) -> int:
-    try:
-        return path.stat().st_size if path.exists() else 0
-    except OSError:
-        return 0
-
-
-def _bootstrap_legacy_sqlite_db(target_path: Path) -> None:
-    """One-time copy from legacy backend DB into canonical configured path."""
-    if target_path == _LEGACY_DB_PATH:
-        return
-
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    if _safe_file_size(target_path) > 0:
-        return
-
-    legacy_size = _safe_file_size(_LEGACY_DB_PATH)
-    if legacy_size <= 0:
-        return
-
-    try:
-        if not target_path.exists():
-            shutil.copy2(_LEGACY_DB_PATH, target_path)
-        else:
-            temp_copy = target_path.with_suffix(target_path.suffix + ".migrating")
-            shutil.copy2(_LEGACY_DB_PATH, temp_copy)
-            if _safe_file_size(target_path) == 0:
-                temp_copy.replace(target_path)
-            else:
-                temp_copy.unlink(missing_ok=True)
-                return
-        _LOGGER.warning(
-            "Bootstrapped canonical SQLite DB from legacy backend path",
-            extra={
-                "legacy_path": str(_LEGACY_DB_PATH),
-                "target_path": str(target_path),
-            },
-        )
-    except Exception as exc:
-        _LOGGER.warning(
-            "Failed to bootstrap canonical SQLite DB from legacy path",
-            extra={
-                "legacy_path": str(_LEGACY_DB_PATH),
-                "target_path": str(target_path),
-                "error": str(exc),
-            },
-        )
-
 
 class Settings(BaseSettings):
     # API Base URLs
@@ -151,8 +82,8 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: Optional[str] = None
     TELEGRAM_CHAT_ID: Optional[str] = None
 
-    # Database - canonical path under project-root data directory
-    DATABASE_URL: str = f"sqlite+aiosqlite:///{_DEFAULT_DB_PATH}"
+    # Database
+    DATABASE_URL: str = "postgresql+asyncpg://homerun:homerun@127.0.0.1:5432/homerun"
 
     # Redis (worker/event IPC)
     REDIS_HOST: str = "127.0.0.1"
@@ -508,7 +439,7 @@ class Settings(BaseSettings):
     @field_validator("DATABASE_URL", mode="before")
     @classmethod
     def _normalize_database_url(cls, value: object) -> object:
-        """Normalize DB URL so TUI/worker cwd changes never split databases."""
+        """Normalize DB URL from env/CLI input."""
         if value is None:
             return value
 
@@ -516,20 +447,7 @@ class Settings(BaseSettings):
         if not text:
             return text
 
-        # Convert relative SQLite paths to absolute project-root paths.
-        for prefix in (_SQLITE_ASYNC_PREFIX, _SQLITE_SYNC_PREFIX):
-            if not text.startswith(prefix):
-                continue
-            path_part = text[len(prefix) :]
-            if not path_part:
-                return text
-            if path_part in {":memory:", "/:memory:"}:
-                return f"{prefix}:memory:"
-            absolute = Path(path_part).resolve() if path_part.startswith("/") else (_PROJECT_ROOT / path_part).resolve()
-            _bootstrap_legacy_sqlite_db(absolute)
-            return f"{prefix}{absolute}"
-
-        return text
+        return text.rstrip("/")
 
     class Config:
         pass

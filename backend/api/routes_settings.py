@@ -854,9 +854,8 @@ async def update_settings(request: UpdateSettingsRequest):
             needs_filter_reload = update_flags["needs_filter_reload"]
             needs_events_reload = update_flags["needs_events_reload"]
 
-        # Re-initialize LLM manager OUTSIDE the DB session so the new
-        # session inside initialize() can see the just-committed data
-        # (SQLite + aiosqlite share a single connection in the pool).
+        # Re-initialize LLM manager OUTSIDE the DB session so initialize()
+        # reads newly committed settings from a fresh transaction.
         if needs_llm_reinit:
             try:
                 from services.ai import get_llm_manager

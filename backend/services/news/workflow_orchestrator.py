@@ -1772,12 +1772,12 @@ class WorkflowOrchestrator:
     async def _persist_findings(self, session: AsyncSession, findings: list) -> int:
         if not findings:
             return 0
-        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
 
         count = 0
         for f in findings:
             stmt = (
-                sqlite_insert(NewsWorkflowFinding)
+                pg_insert(NewsWorkflowFinding)
                 .values(
                     id=f.id,
                     article_id=f.article_id,

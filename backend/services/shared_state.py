@@ -8,16 +8,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from config import settings
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy import select, or_
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession
 
-SQLITE_VAR_LIMIT = 900
+SQL_IN_CLAUSE_CHUNK_SIZE = 900
 
 
-def _chunked_in(column, values, chunk_size: int = SQLITE_VAR_LIMIT):
+def _chunked_in(column, values, chunk_size: int = SQL_IN_CLAUSE_CHUNK_SIZE):
     values = list(values)
     if len(values) <= chunk_size:
         return column.in_(values)
@@ -25,9 +26,6 @@ def _chunked_in(column, values, chunk_size: int = SQLITE_VAR_LIMIT):
     for i in range(0, len(values), chunk_size):
         clauses.append(column.in_(values[i : i + chunk_size]))
     return or_(*clauses)
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import (
     ScannerControl,
@@ -46,10 +44,9 @@ logger = logging.getLogger(__name__)
 SNAPSHOT_ID = "latest"
 TRADERS_SNAPSHOT_ID = "traders_latest"
 CONTROL_ID = "default"
-SQLITE_LOCK_RETRY_ATTEMPTS = 3
-SQLITE_LOCK_BASE_DELAY_SECONDS = 0.05
-SQLITE_LOCK_MAX_DELAY_SECONDS = 0.3
-SQLITE_LOCK_BUSY_TIMEOUT_MS = 500
+DB_RETRY_ATTEMPTS = 3
+DB_RETRY_BASE_DELAY_SECONDS = 0.05
+DB_RETRY_MAX_DELAY_SECONDS = 0.3
 
 # In-memory targeted condition IDs for the next scan request.
 # Set by the evaluate endpoint, consumed and cleared by the scanner worker.
@@ -85,29 +82,37 @@ def _format_iso_utc_z(dt: Optional[datetime]) -> Optional[str]:
     return dt.replace(tzinfo=None).isoformat() + "Z"
 
 
-def _is_sqlite_lock_error(exc: Exception) -> bool:
+def _is_retryable_db_error(exc: Exception) -> bool:
     message = str(getattr(exc, "orig", exc)).lower()
-    return "database is locked" in message or "database table is locked" in message
+    return any(
+        marker in message
+        for marker in (
+            "database is locked",
+            "database table is locked",
+            "deadlock detected",
+            "serialization failure",
+            "could not serialize access",
+            "lock not available",
+        )
+    )
 
 
-def _sqlite_lock_retry_delay(attempt: int) -> float:
-    return min(SQLITE_LOCK_BASE_DELAY_SECONDS * (2**attempt), SQLITE_LOCK_MAX_DELAY_SECONDS)
+def _db_retry_delay(attempt: int) -> float:
+    return min(DB_RETRY_BASE_DELAY_SECONDS * (2**attempt), DB_RETRY_MAX_DELAY_SECONDS)
 
 
 async def _commit_with_retry(session: AsyncSession) -> None:
-    for attempt in range(SQLITE_LOCK_RETRY_ATTEMPTS):
+    for attempt in range(DB_RETRY_ATTEMPTS):
         try:
-            if "sqlite" in settings.DATABASE_URL.lower():
-                await session.execute(text(f"PRAGMA busy_timeout={SQLITE_LOCK_BUSY_TIMEOUT_MS}"))
             await session.commit()
             return
         except OperationalError as exc:
             await session.rollback()
-            is_locked = _is_sqlite_lock_error(exc)
-            is_last = attempt >= SQLITE_LOCK_RETRY_ATTEMPTS - 1
+            is_locked = _is_retryable_db_error(exc)
+            is_last = attempt >= DB_RETRY_ATTEMPTS - 1
             if not is_locked or is_last:
                 raise
-            await asyncio.sleep(_sqlite_lock_retry_delay(attempt))
+            await asyncio.sleep(_db_retry_delay(attempt))
 
 
 def _normalize_weather_edge_title(title: str) -> str:

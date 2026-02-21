@@ -25,6 +25,7 @@ from models.database import (
 )
 from services.data_source_runner import run_data_source
 from services.worker_state import (
+    _is_retryable_db_error,
     clear_worker_run_request,
     read_worker_control,
     read_worker_snapshot,
@@ -226,7 +227,7 @@ async def _persist_signals(signals: list[dict[str, Any]]) -> int:
         return 0
 
     try:
-        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
 
         persisted = 0
         async with AsyncSessionLocal() as session:
@@ -245,7 +246,7 @@ async def _persist_signals(signals: list[dict[str, Any]]) -> int:
                 ]
                 metadata = signal.get("metadata") if isinstance(signal.get("metadata"), dict) else {}
                 stmt = (
-                    sqlite_insert(EventsSignal)
+                    pg_insert(EventsSignal)
                     .values(
                         id=signal_id,
                         signal_type=signal_type,
@@ -304,7 +305,7 @@ async def _write_snapshot(
     signals: list[dict[str, Any]] | None = None,
     preserve_existing: bool = False,
 ) -> None:
-    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
 
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
@@ -330,7 +331,7 @@ async def _write_snapshot(
                 )
 
                 stmt = (
-                    sqlite_insert(EventsSnapshot)
+                    pg_insert(EventsSnapshot)
                     .values(
                         id="latest",
                         status=next_status,
@@ -352,7 +353,7 @@ async def _write_snapshot(
                 await session.commit()
             return
         except Exception as exc:
-            if "locked" in str(exc).lower() and attempt < max_attempts:
+            if _is_retryable_db_error(exc) and attempt < max_attempts:
                 await asyncio.sleep(0.15 * attempt)
                 continue
             logger.warning("Failed to write events snapshot: %s", exc)

@@ -20,17 +20,6 @@ from typing import Optional
 
 from sqlalchemy import and_, select, text, update, func, or_
 
-SQLITE_VAR_LIMIT = 900
-
-
-def _chunked_in(column, values: list, chunk_size: int = SQLITE_VAR_LIMIT):
-    if len(values) <= chunk_size:
-        return column.in_(values)
-    clauses = []
-    for i in range(0, len(values), chunk_size):
-        clauses.append(column.in_(values[i : i + chunk_size]))
-    return or_(*clauses)
-
 from models.database import (
     DiscoveredWallet,
     WalletTag,
@@ -48,6 +37,17 @@ from services.pause_state import global_pause_state
 from utils.logger import get_logger
 
 logger = get_logger("wallet_intelligence")
+
+IN_CLAUSE_CHUNK_SIZE = 5000
+
+
+def _chunked_in(column, values: list, chunk_size: int = IN_CLAUSE_CHUNK_SIZE):
+    if len(values) <= chunk_size:
+        return column.in_(values)
+    clauses = []
+    for i in range(0, len(values), chunk_size):
+        clauses.append(column.in_(values[i : i + chunk_size]))
+    return or_(*clauses)
 
 
 # ============================================================================
@@ -1272,7 +1272,7 @@ class WalletTagger:
     async def get_wallets_by_tag(self, tag_name: str, limit: int = 100) -> list[dict]:
         """Get wallets with a specific tag.
 
-        Since tags are stored as a JSON list in SQLite, we query all wallets
+        Since tags are stored as a JSON list in the database, we query all wallets
         and filter in Python. For larger datasets, consider a join table.
         """
         async with AsyncSessionLocal() as session:

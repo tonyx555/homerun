@@ -7,7 +7,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from sqlalchemy import and_, desc, func, or_, select, text, update as sa_update
+from sqlalchemy import and_, desc, func, or_, select, update as sa_update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,10 +34,10 @@ from models.database import (
 )
 from services.event_bus import event_bus
 from services.worker_state import (
-    SQLITE_LOCK_RETRY_ATTEMPTS,
+    DB_RETRY_ATTEMPTS,
     _commit_with_retry,
-    _is_sqlite_lock_error,
-    _sqlite_lock_retry_delay,
+    _is_retryable_db_error,
+    _db_retry_delay,
 )
 from services.simulation import simulation_service
 from services.trader_orchestrator.sources.registry import normalize_source_key
@@ -668,10 +668,8 @@ async def update_orchestrator_control(session: AsyncSession, **updates: Any) -> 
 
     payload["updated_at"] = _now()
 
-    for attempt in range(SQLITE_LOCK_RETRY_ATTEMPTS):
+    for attempt in range(DB_RETRY_ATTEMPTS):
         try:
-            if "sqlite" in settings.DATABASE_URL.lower():
-                await session.execute(text("PRAGMA busy_timeout=1500"))
             await session.execute(
                 sa_update(TraderOrchestratorControl)
                 .where(TraderOrchestratorControl.id == ORCHESTRATOR_CONTROL_ID)
@@ -681,11 +679,11 @@ async def update_orchestrator_control(session: AsyncSession, **updates: Any) -> 
             break
         except OperationalError as exc:
             await session.rollback()
-            is_locked = _is_sqlite_lock_error(exc)
-            is_last = attempt >= SQLITE_LOCK_RETRY_ATTEMPTS - 1
+            is_locked = _is_retryable_db_error(exc)
+            is_last = attempt >= DB_RETRY_ATTEMPTS - 1
             if not is_locked or is_last:
                 raise
-            await asyncio.sleep(_sqlite_lock_retry_delay(attempt))
+            await asyncio.sleep(_db_retry_delay(attempt))
 
     refreshed = await session.get(TraderOrchestratorControl, ORCHESTRATOR_CONTROL_ID)
     if refreshed is None:
@@ -726,7 +724,6 @@ async def write_orchestrator_snapshot(
     await _commit_with_retry(
         session,
         retry_attempts=2,
-        busy_timeout_ms=250,
         base_delay_seconds=0.05,
         max_delay_seconds=0.1,
     )
@@ -968,8 +965,7 @@ async def delete_trader(session: AsyncSession, trader_id: str, *, force: bool = 
         )
 
     if force and active_orders > 0:
-        # Force-delete should never leave active/open orders behind, even when
-        # SQLite FK cascade enforcement is unavailable in local/dev runtimes.
+        # Force-delete should never leave active/open orders behind.
         try:
             await cleanup_trader_open_orders(
                 session,
