@@ -319,7 +319,7 @@ async def mark_news_intent(
     if row is None:
         return False
     row.status = status
-    row.consumed_at = datetime.now(timezone.utc)
+    row.consumed_at = utcnow()
     if row.finding_id and status != "pending":
         finding = await session.execute(select(NewsWorkflowFinding).where(NewsWorkflowFinding.id == row.finding_id))
         finding_row = finding.scalar_one_or_none()
@@ -333,14 +333,15 @@ async def expire_stale_news_intents(
     session: AsyncSession,
     max_age_minutes: int,
 ) -> int:
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+    now = utcnow()
+    cutoff = now - timedelta(minutes=max_age_minutes)
     result = await session.execute(
         update(NewsTradeIntent)
         .where(NewsTradeIntent.status == "pending")
         .where(NewsTradeIntent.created_at < cutoff)
         .values(
             status="expired",
-            consumed_at=datetime.now(timezone.utc),
+            consumed_at=now,
         )
     )
     await _commit_with_retry(session)

@@ -36,7 +36,6 @@ $script:redisDockerCreatedByScript = $false
 $script:postgresStartedByScript = $false
 $script:postgresStartMode = ""
 $script:postgresDockerCreatedByScript = $false
-$script:postgresLocalClusterCreatedByScript = $false
 
 function Test-TcpPort {
     param(
@@ -357,7 +356,8 @@ function Start-PostgresDocker {
         [string]$User,
         [string]$Password,
         [string]$ContainerName,
-        [string]$Image
+        [string]$Image,
+        [string]$DataDir
     )
 
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
@@ -381,7 +381,8 @@ function Start-PostgresDocker {
     }
 
     try {
-        docker run --name $ContainerName --detach --publish "${Host}:${Port}:5432" --env "POSTGRES_DB=$Db" --env "POSTGRES_USER=$User" --env "POSTGRES_PASSWORD=$Password" --tmpfs /var/lib/postgresql/data:rw $Image *> $null
+        New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
+        docker run --name $ContainerName --detach --publish "${Host}:${Port}:5432" --env "POSTGRES_DB=$Db" --env "POSTGRES_USER=$User" --env "POSTGRES_PASSWORD=$Password" --volume "${DataDir}:/var/lib/postgresql/data" $Image *> $null
         if ($LASTEXITCODE -eq 0) {
             $script:postgresDockerCreatedByScript = $true
             return $true
@@ -422,7 +423,6 @@ function Start-PostgresLocal {
         try {
             & $initdbPath -D $DataDir -U $User *> $null
             if ($LASTEXITCODE -ne 0) { return $false }
-            $script:postgresLocalClusterCreatedByScript = $true
 
             @"
 local all all trust
@@ -469,7 +469,7 @@ function Ensure-Postgres {
     }
 
     Write-Host "Starting Postgres..." -ForegroundColor Cyan
-    $dockerStarted = Start-PostgresDocker -Host $Host -Port $Port -Db $Db -User $User -Password $Password -ContainerName $ContainerName -Image $Image
+    $dockerStarted = Start-PostgresDocker -Host $Host -Port $Port -Db $Db -User $User -Password $Password -ContainerName $ContainerName -Image $Image -DataDir $DataDir
     if ($dockerStarted -and (Wait-ForService -Host $Host -Port $Port)) {
         $script:postgresStartedByScript = $true
         $script:postgresStartMode = "docker"
@@ -512,9 +512,6 @@ function Cleanup-StartedPostgres {
             if (Test-Path $pgctlPath) {
                 try { & $pgctlPath -D $postgresDataDir -m fast -w stop *> $null } catch {}
             }
-        }
-        if ($script:postgresLocalClusterCreatedByScript) {
-            try { Remove-Item -Recurse -Force $postgresDataDir } catch {}
         }
     }
 }

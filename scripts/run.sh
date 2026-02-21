@@ -42,7 +42,6 @@ POSTGRES_DATA_DIR="${POSTGRES_DATA_DIR:-$(pwd)/data/postgres}"
 POSTGRES_STARTED_BY_SCRIPT=0
 POSTGRES_START_MODE=""
 POSTGRES_DOCKER_CREATED_BY_SCRIPT=0
-POSTGRES_LOCAL_CLUSTER_CREATED_BY_SCRIPT=0
 
 resolve_redis_server() {
     if command -v redis-server >/dev/null 2>&1; then
@@ -269,6 +268,7 @@ try_start_postgres_docker() {
     if docker container inspect "$POSTGRES_CONTAINER_NAME" >/dev/null 2>&1; then
         docker start "$POSTGRES_CONTAINER_NAME" >/dev/null 2>&1 || return 1
     else
+        mkdir -p "$POSTGRES_DATA_DIR"
         docker run \
             --name "$POSTGRES_CONTAINER_NAME" \
             --detach \
@@ -276,7 +276,7 @@ try_start_postgres_docker() {
             --env "POSTGRES_DB=${POSTGRES_DB}" \
             --env "POSTGRES_USER=${POSTGRES_USER}" \
             --env "POSTGRES_PASSWORD=${POSTGRES_PASSWORD}" \
-            --tmpfs /var/lib/postgresql/data:rw \
+            --volume "${POSTGRES_DATA_DIR}:/var/lib/postgresql/data" \
             "$POSTGRES_IMAGE" \
             >/dev/null 2>&1 || return 1
         POSTGRES_DOCKER_CREATED_BY_SCRIPT=1
@@ -302,7 +302,6 @@ try_start_postgres_local() {
 
     if [ ! -f "$POSTGRES_DATA_DIR/PG_VERSION" ]; then
         "$initdb_bin" -D "$POSTGRES_DATA_DIR" -U "$POSTGRES_USER" >/dev/null 2>&1 || return 1
-        POSTGRES_LOCAL_CLUSTER_CREATED_BY_SCRIPT=1
         cat > "$POSTGRES_DATA_DIR/pg_hba.conf" <<HBA
 local all all trust
 host all all 127.0.0.1/32 trust
@@ -350,9 +349,6 @@ cleanup_started_postgres() {
         pg_bin_dir="$(resolve_postgres_bin_dir 2>/dev/null || true)"
         if [ -n "$pg_bin_dir" ] && [ -x "$pg_bin_dir/pg_ctl" ]; then
             "$pg_bin_dir/pg_ctl" -D "$POSTGRES_DATA_DIR" -m fast -w stop >/dev/null 2>&1 || true
-        fi
-        if [ "$POSTGRES_LOCAL_CLUSTER_CREATED_BY_SCRIPT" -eq 1 ]; then
-            rm -rf "$POSTGRES_DATA_DIR" || true
         fi
     fi
 }

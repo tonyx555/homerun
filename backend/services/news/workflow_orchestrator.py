@@ -1229,6 +1229,14 @@ class WorkflowOrchestrator:
             dt = dt.astimezone(timezone.utc)
         return dt
 
+    @staticmethod
+    def _to_naive_utc(value: Optional[datetime]) -> Optional[datetime]:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+
     @classmethod
     def _is_temporally_compatible(cls, article, event, candidate) -> bool:
         market_end = cls._coerce_datetime(getattr(candidate, "end_date", None))
@@ -1291,7 +1299,7 @@ class WorkflowOrchestrator:
             },
             reasoning=f"Rejected before edge estimation: {reason}.",
             actionable=False,
-            created_at=datetime.now(timezone.utc),
+            created_at=utcnow(),
         )
 
     def _split_verified_candidates(self, article, event, reranked, llm_was_requested: bool = False):
@@ -1721,7 +1729,7 @@ class WorkflowOrchestrator:
     ) -> dict[str, NewsWorkflowFinding]:
         if not cache_keys:
             return {}
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(1, ttl_minutes))
+        cutoff = utcnow() - timedelta(minutes=max(1, ttl_minutes))
         result = await session.execute(
             select(NewsWorkflowFinding)
             .where(NewsWorkflowFinding.cache_key.in_(cache_keys))
@@ -1776,6 +1784,7 @@ class WorkflowOrchestrator:
 
         count = 0
         for f in findings:
+            created_at = self._to_naive_utc(getattr(f, "created_at", None)) or utcnow()
             stmt = (
                 pg_insert(NewsWorkflowFinding)
                 .values(
@@ -1802,7 +1811,7 @@ class WorkflowOrchestrator:
                     evidence=f.evidence,
                     reasoning=f.reasoning,
                     actionable=f.actionable,
-                    created_at=f.created_at,
+                    created_at=created_at,
                 )
                 .on_conflict_do_update(
                     index_elements=["id"],
@@ -1823,7 +1832,7 @@ class WorkflowOrchestrator:
                         "evidence": f.evidence,
                         "reasoning": f.reasoning,
                         "actionable": f.actionable,
-                        "created_at": f.created_at,
+                        "created_at": created_at,
                     },
                 )
             )
@@ -1838,22 +1847,28 @@ class WorkflowOrchestrator:
 
         count = 0
         for intent in intents:
-            signal_key = intent.get("signal_key")
+            normalized_intent = dict(intent)
+            for key in ("created_at", "consumed_at"):
+                value = normalized_intent.get(key)
+                if isinstance(value, datetime):
+                    normalized_intent[key] = self._to_naive_utc(value)
+
+            signal_key = normalized_intent.get("signal_key")
             query = select(NewsTradeIntent)
             if signal_key:
                 query = query.where(NewsTradeIntent.signal_key == signal_key)
             else:
-                query = query.where(NewsTradeIntent.id == intent["id"])
+                query = query.where(NewsTradeIntent.id == normalized_intent["id"])
             existing_result = await session.execute(query)
             existing = existing_result.scalar_one_or_none()
             if existing is None:
-                session.add(NewsTradeIntent(**intent))
+                session.add(NewsTradeIntent(**normalized_intent))
                 count += 1
                 continue
 
             # Preserve consumed outcomes and only refresh pending/submitted rows.
             if existing.status in {"pending", "submitted"}:
-                for key, value in intent.items():
+                for key, value in normalized_intent.items():
                     setattr(existing, key, value)
                 count += 1
 

@@ -50,6 +50,13 @@ def _chunked_in(column, values: list, chunk_size: int = IN_CLAUSE_CHUNK_SIZE):
     return or_(*clauses)
 
 
+def _iter_chunks(values: list[str], chunk_size: int = IN_CLAUSE_CHUNK_SIZE):
+    for i in range(0, len(values), chunk_size):
+        chunk = values[i : i + chunk_size]
+        if chunk:
+            yield chunk
+
+
 # ============================================================================
 #  SUBSYSTEM 1: Multi-Wallet Confluence Detection (Priority 4)
 # ============================================================================
@@ -95,15 +102,18 @@ class ConfluenceDetector:
         addresses = list(wallet_map.keys())
 
         async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                select(WalletActivityRollup)
-                .where(
-                    _chunked_in(WalletActivityRollup.wallet_address, addresses),
-                    WalletActivityRollup.traded_at >= cutoff_60m,
+            events: list[WalletActivityRollup] = []
+            for address_chunk in _iter_chunks(addresses):
+                result = await session.execute(
+                    select(WalletActivityRollup)
+                    .where(
+                        WalletActivityRollup.wallet_address.in_(address_chunk),
+                        WalletActivityRollup.traded_at >= cutoff_60m,
+                    )
+                    .order_by(WalletActivityRollup.traded_at.desc())
                 )
-                .order_by(WalletActivityRollup.traded_at.desc())
-            )
-            events = list(result.scalars().all())
+                events.extend(result.scalars().all())
+            events.sort(key=lambda row: row.traded_at or datetime.min, reverse=True)
 
         if not events:
             await self.expire_old_signals()
@@ -418,17 +428,22 @@ class ConfluenceDetector:
         cutoff: datetime,
     ) -> float:
         opposite = "SELL" if side == "BUY" else "BUY"
+        if not addresses:
+            return 0.0
+        total_notional = 0.0
         async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                select(func.sum(WalletActivityRollup.notional)).where(
-                    WalletActivityRollup.market_id == market_id,
-                    _chunked_in(WalletActivityRollup.wallet_address, addresses),
-                    WalletActivityRollup.traded_at >= cutoff,
-                    WalletActivityRollup.side.in_([opposite, "YES" if opposite == "BUY" else "NO"]),
+            for address_chunk in _iter_chunks(addresses):
+                result = await session.execute(
+                    select(func.sum(WalletActivityRollup.notional)).where(
+                        WalletActivityRollup.market_id == market_id,
+                        WalletActivityRollup.wallet_address.in_(address_chunk),
+                        WalletActivityRollup.traded_at >= cutoff,
+                        WalletActivityRollup.side.in_([opposite, "YES" if opposite == "BUY" else "NO"]),
+                    )
                 )
-            )
-            value = result.scalar() or 0.0
-            return float(value or 0.0)
+                value = result.scalar() or 0.0
+                total_notional += float(value or 0.0)
+        return total_notional
 
     async def _resolve_market_context(self, market_id: str) -> dict:
         market_slug = None
