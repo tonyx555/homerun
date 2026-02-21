@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/License-MIT-green" alt="License" />
 </p>
 
-![Homerun Dashboard — Market Scanner](./screenshots/dashboard-scanner.png)
+![Homerun Dashboard — Market Scanner](screenshots/dashboard-scanner.png)
 
 ## Quick Links
 
@@ -125,7 +125,7 @@ make run
 
 ## Wire Any Source Into Any Strategy
 
-![Global Event Map — Data Sources](./screenshots/map.png)
+![Global Event Map — Data Sources](screenshots/map.png)
 
 Two ways to connect source data into strategy logic:
 
@@ -185,7 +185,7 @@ Or create it from the UI: `Data -> Sources`.
 
 ## Write a Strategy (full Python)
 
-![Strategy Editor — Source Code & Settings](./screenshots/strategy-editor.png)
+![Strategy Editor — Source Code & Settings](screenshots/strategy-editor.png)
 
 ```python
 from models import Opportunity
