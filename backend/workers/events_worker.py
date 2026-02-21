@@ -32,6 +32,7 @@ from services.worker_state import (
     write_worker_snapshot,
 )
 from utils.logger import setup_logging
+from utils.utcnow import utcnow
 
 setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"), json_format=False)
 logger = logging.getLogger("events_worker")
@@ -41,6 +42,18 @@ _IDLE_SLEEP_SECONDS = 5
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _utcnow_naive() -> datetime:
+    return utcnow()
+
+
+def _to_naive_utc(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
+    return _utcnow_naive()
 
 
 def _to_aware(value: Any) -> datetime:
@@ -238,7 +251,7 @@ async def _persist_signals(signals: list[dict[str, Any]]) -> int:
                 signal_type = str(signal.get("signal_type") or "world").strip().lower() or "world"
                 raw_country = str(signal.get("country") or "").strip().upper() or None
                 country_iso3 = _as_iso3(raw_country)
-                detected_at = _to_aware(signal.get("detected_at"))
+                detected_at = _to_naive_utc(signal.get("detected_at"))
                 related_market_ids = [
                     str(item or "").strip()
                     for item in _as_list(signal.get("related_market_ids"))
@@ -337,7 +350,7 @@ async def _write_snapshot(
                         status=next_status,
                         signals_json=next_signals,
                         stats=next_stats,
-                        updated_at=_utcnow(),
+                        updated_at=_utcnow_naive(),
                     )
                     .on_conflict_do_update(
                         index_elements=["id"],
@@ -345,7 +358,7 @@ async def _write_snapshot(
                             "status": next_status,
                             "signals_json": next_signals,
                             "stats": next_stats,
-                            "updated_at": _utcnow(),
+                            "updated_at": _utcnow_naive(),
                         },
                     )
                 )

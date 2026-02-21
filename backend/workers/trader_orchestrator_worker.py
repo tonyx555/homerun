@@ -1488,18 +1488,20 @@ async def _run_trader_once(
 
 async def _reconcile_orphan_open_orders(session: Any) -> dict[str, int]:
     """Close/cancel open orders for trader_ids that no longer exist."""
+    mode_key_expr = func.lower(func.coalesce(TraderOrder.mode, ""))
+    status_key_expr = func.lower(func.coalesce(TraderOrder.status, ""))
     rows = (
         await session.execute(
             select(
                 TraderOrder.trader_id,
-                func.lower(func.coalesce(TraderOrder.mode, "")).label("mode_key"),
+                mode_key_expr.label("mode_key"),
                 func.count(TraderOrder.id).label("count"),
             )
             .select_from(TraderOrder)
             .outerjoin(Trader, Trader.id == TraderOrder.trader_id)
             .where(Trader.id.is_(None))
-            .where(func.lower(func.coalesce(TraderOrder.status, "")).in_(tuple(_PAPER_ACTIVE_ORDER_STATUSES)))
-            .group_by(TraderOrder.trader_id, func.lower(func.coalesce(TraderOrder.mode, "")))
+            .where(status_key_expr.in_(tuple(_PAPER_ACTIVE_ORDER_STATUSES)))
+            .group_by(TraderOrder.trader_id, mode_key_expr)
             .limit(_ORPHAN_CLEANUP_MAX_TRADERS_PER_CYCLE)
         )
     ).all()
@@ -1674,6 +1676,8 @@ async def run_worker_loop() -> None:
                     try:
                         await refresh_strategy_runtime_if_needed(session, source_keys=None)
                     except Exception as exc:
+                        if hasattr(session, "rollback"):
+                            await session.rollback()
                         logger.warning("Failed strategy runtime refresh pass: %s", exc)
 
                     try:
@@ -1684,6 +1688,8 @@ async def run_worker_loop() -> None:
                                 extra={"orphan_cleanup": orphan_cleanup},
                             )
                     except Exception as exc:
+                        if hasattr(session, "rollback"):
+                            await session.rollback()
                         logger.warning("Failed orphan-order reconciliation pass: %s", exc)
 
                     control = await read_orchestrator_control(session)
