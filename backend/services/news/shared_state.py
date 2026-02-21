@@ -278,6 +278,24 @@ async def count_pending_news_intents(session: AsyncSession) -> int:
     return len(rows)
 
 
+async def list_news_findings(
+    session: AsyncSession,
+    *,
+    limit: int = 200,
+    actionable_only: bool = False,
+    max_age_minutes: Optional[int] = None,
+) -> list[NewsWorkflowFinding]:
+    query = select(NewsWorkflowFinding).order_by(NewsWorkflowFinding.created_at.desc())
+    if actionable_only:
+        query = query.where(NewsWorkflowFinding.actionable.is_(True))
+    if max_age_minutes is not None and int(max_age_minutes) > 0:
+        cutoff = utcnow() - timedelta(minutes=int(max_age_minutes))
+        query = query.where(NewsWorkflowFinding.created_at >= cutoff)
+    query = query.limit(max(1, int(limit)))
+    result = await session.execute(query)
+    return list(result.scalars().all())
+
+
 async def list_news_intents(
     session: AsyncSession,
     status_filter: Optional[str] = None,

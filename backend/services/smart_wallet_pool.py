@@ -2358,7 +2358,7 @@ class SmartWalletPoolService:
 
             wallet_ws_monitor.set_wallets_for_source("discovery_pool", pool_addresses)
             # Ensure the monitor is running even if copy trading is disabled.
-            asyncio.create_task(wallet_ws_monitor.start())
+            await wallet_ws_monitor.start()
         except Exception as e:
             logger.warning("Failed to sync discovery pool WS memberships", error=str(e))
 

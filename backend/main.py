@@ -12,7 +12,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 from pathlib import Path
 from typing import Optional
-import traceback
 from sqlalchemy import select
 
 # Keep native ML/linear algebra threading conservative for long-running
@@ -26,7 +25,7 @@ os.environ.setdefault("NEWS_FAISS_THREADS", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("EMBEDDING_DEVICE", "cpu")
 
-from config import settings
+from config import settings, RUNTIME_SETTINGS_PRECEDENCE
 from api import router, handle_websocket
 from api.routes_simulation import simulation_router
 from api.routes_copy_trading import copy_trading_router
@@ -74,13 +73,82 @@ from services.trader_orchestrator_state import (
 from services.weather import shared_state as weather_shared_state
 from services.worker_state import list_worker_snapshots, read_worker_control
 from utils.logger import setup_logging, get_logger
-from utils.rate_limiter import rate_limiter
+from utils.rate_limiter import rate_limiter, TokenBucket
 
 register_all_models()
 
 # Setup logging
 setup_logging(level=settings.LOG_LEVEL if hasattr(settings, "LOG_LEVEL") else "INFO")
 logger = get_logger("main")
+
+
+class InboundAPIRateLimiter:
+    def __init__(self) -> None:
+        self._buckets: dict[str, TokenBucket] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._last_seen: dict[str, float] = {}
+        self._last_cleanup: float = 0.0
+
+    def _lock_for(self, key: str) -> asyncio.Lock:
+        lock = self._locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[key] = lock
+        return lock
+
+    def _bucket_for(self, key: str) -> TokenBucket:
+        bucket = self._buckets.get(key)
+        if bucket is not None:
+            return bucket
+
+        capacity = max(1, int(settings.API_RATE_LIMIT_BURST))
+        window_seconds = max(1, int(settings.API_RATE_LIMIT_WINDOW_SECONDS))
+        refill_rate = max(1, int(settings.API_RATE_LIMIT_REQUESTS_PER_WINDOW)) / float(window_seconds)
+        bucket = TokenBucket(
+            capacity=float(capacity),
+            tokens=float(capacity),
+            refill_rate=float(refill_rate),
+        )
+        self._buckets[key] = bucket
+        return bucket
+
+    def _cleanup(self, now_monotonic: float) -> None:
+        if now_monotonic - self._last_cleanup < 60:
+            return
+        stale_after_seconds = max(300, int(settings.API_RATE_LIMIT_WINDOW_SECONDS) * 20)
+        stale_keys = [key for key, ts in self._last_seen.items() if now_monotonic - ts >= stale_after_seconds]
+        for key in stale_keys:
+            self._last_seen.pop(key, None)
+            self._buckets.pop(key, None)
+            self._locks.pop(key, None)
+        self._last_cleanup = now_monotonic
+
+    async def consume(self, client_key: str) -> tuple[bool, float, float]:
+        key = str(client_key or "unknown")
+        lock = self._lock_for(key)
+        async with lock:
+            bucket = self._bucket_for(key)
+            bucket.refill()
+            now_monotonic = asyncio.get_running_loop().time()
+            self._last_seen[key] = now_monotonic
+            self._cleanup(now_monotonic)
+            if bucket.tokens >= 1:
+                bucket.consume(1)
+                return True, 0.0, bucket.tokens
+            wait_seconds = bucket.wait_time(1)
+            return False, wait_seconds, bucket.tokens
+
+    def status(self) -> dict[str, object]:
+        return {
+            "enabled": bool(settings.API_RATE_LIMIT_ENABLED),
+            "requests_per_window": int(settings.API_RATE_LIMIT_REQUESTS_PER_WINDOW),
+            "window_seconds": int(settings.API_RATE_LIMIT_WINDOW_SECONDS),
+            "burst": int(settings.API_RATE_LIMIT_BURST),
+            "tracked_clients": len(self._buckets),
+        }
+
+
+inbound_api_rate_limiter = InboundAPIRateLimiter()
 
 
 @asynccontextmanager
@@ -156,7 +224,7 @@ async def lifespan(app: FastAPI):
                 "Failed to signal worker process",
                 worker=_worker_name_from_module(module_name),
                 pid=process.pid,
-                error=str(e),
+                exc_info=e,
             )
             return
 
@@ -175,7 +243,7 @@ async def lifespan(app: FastAPI):
                 "Failed to kill worker process",
                 worker=_worker_name_from_module(module_name),
                 pid=process.pid,
-                error=str(e),
+                exc_info=e,
             )
             return
         try:
@@ -234,7 +302,7 @@ async def lifespan(app: FastAPI):
                 async with AsyncSessionLocal() as session:
                     snapshots = await list_worker_snapshots(session, include_stats=False)
             except Exception as e:
-                logger.warning("Worker freshness check failed", error=str(e))
+                logger.warning("Worker freshness check failed", exc_info=e)
                 continue
 
             snapshot_by_name = {
@@ -318,17 +386,21 @@ async def lifespan(app: FastAPI):
         else:
             logger.warning("Redis stream transport unavailable at startup")
 
-        # Load persisted events runtime config before any world
-        # source modules are imported (they snapshot some settings on import).
+        # Apply all DB runtime overrides using one deterministic precedence chain.
         try:
-            from config import apply_events_settings
+            from config import apply_runtime_settings_overrides
 
-            await apply_events_settings()
-            logger.info("Events settings loaded from database")
-        except Exception as e:
-            logger.warning(f"Failed to load events settings (using defaults): {e}")
-
-        logger.info("Events runtime configured for datasource-owned integrations")
+            await apply_runtime_settings_overrides()
+            logger.info(
+                "Runtime settings overrides applied",
+                precedence=RUNTIME_SETTINGS_PRECEDENCE,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to apply runtime settings overrides (using env/defaults)",
+                precedence=RUNTIME_SETTINGS_PRECEDENCE,
+                exc_info=exc,
+            )
 
         # Restore global pause state from persisted worker controls.
         # This keeps API-owned loops (copy trader, wallet tracker, LLM/trading gates)
@@ -364,15 +436,6 @@ async def lifespan(app: FastAPI):
             logger.info("Global pause state restored", paused=should_pause)
         except Exception as e:
             logger.warning(f"Failed to restore global pause state (continuing): {e}")
-
-        # Load persisted search filter settings from DB into config singleton
-        try:
-            from config import apply_search_filters
-
-            await apply_search_filters()
-            logger.info("Search filter settings loaded from database")
-        except Exception as e:
-            logger.warning(f"Failed to load search filter settings (using defaults): {e}")
 
         # Pre-flight configuration validation
         from services.config_validator import config_validator
@@ -483,7 +546,7 @@ async def lifespan(app: FastAPI):
                         row.cleanup_resolved_trade_days or cleanup_config["resolved_trade_days"]
                     )
         except Exception as e:
-            logger.warning("Failed to load DB maintenance settings; using env defaults", error=str(e))
+            logger.warning("Failed to load DB maintenance settings; using env defaults", exc_info=e)
 
         if cleanup_enabled:
             cleanup_task = asyncio.create_task(
@@ -560,7 +623,7 @@ async def lifespan(app: FastAPI):
         yield
 
     except Exception as e:
-        logger.critical("Startup failed", error=str(e), traceback=traceback.format_exc())
+        logger.critical("Startup failed", exc_info=e)
         raise
 
     finally:
@@ -638,8 +701,7 @@ async def global_exception_handler(request: Request, exc: Exception):
         "Unhandled exception",
         path=request.url.path,
         method=request.method,
-        error=str(exc),
-        traceback=traceback.format_exc(),
+        exc_info=exc,
     )
     return JSONResponse(status_code=500, content={"detail": "Internal server error", "error": str(exc)})
 
@@ -653,6 +715,47 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["X-Total-Count"],
 )
+
+
+@app.middleware("http")
+async def inbound_api_rate_limit(request: Request, call_next):
+    if not bool(settings.API_RATE_LIMIT_ENABLED):
+        return await call_next(request)
+    if request.method.upper() == "OPTIONS":
+        return await call_next(request)
+    if not request.url.path.startswith("/api"):
+        return await call_next(request)
+
+    client_ip = request.headers.get("x-forwarded-for", "")
+    if client_ip:
+        client_ip = client_ip.split(",")[0].strip()
+    if not client_ip:
+        client_ip = request.client.host if request.client else "unknown"
+    route_key = request.url.path
+    client_key = f"{client_ip}:{route_key}"
+
+    allowed, wait_seconds, remaining_tokens = await inbound_api_rate_limiter.consume(client_key)
+    if not allowed:
+        retry_after = max(1, int(wait_seconds + 0.999))
+        return JSONResponse(
+            status_code=429,
+            content={
+                "detail": "API rate limit exceeded. Please retry shortly.",
+                "retry_after_seconds": retry_after,
+            },
+            headers={
+                "Retry-After": str(retry_after),
+                "X-RateLimit-Limit": str(int(settings.API_RATE_LIMIT_REQUESTS_PER_WINDOW)),
+                "X-RateLimit-Window": str(int(settings.API_RATE_LIMIT_WINDOW_SECONDS)),
+                "X-RateLimit-Remaining": str(int(max(0.0, remaining_tokens))),
+            },
+        )
+
+    response = await call_next(request)
+    response.headers["X-RateLimit-Limit"] = str(int(settings.API_RATE_LIMIT_REQUESTS_PER_WINDOW))
+    response.headers["X-RateLimit-Window"] = str(int(settings.API_RATE_LIMIT_WINDOW_SECONDS))
+    response.headers["X-RateLimit-Remaining"] = str(int(max(0.0, remaining_tokens)))
+    return response
 
 
 # API routes
@@ -719,6 +822,7 @@ async def readiness_check():
     return {
         "status": "ready" if all_ready else "not_ready",
         "checks": checks,
+        "api_rate_limit": inbound_api_rate_limiter.status(),
         "timestamp": utcnow().isoformat(),
     }
 
@@ -797,6 +901,7 @@ async def tui_health_check():
                 "paused": bool(discovery_status.get("paused", False)),
             },
             "workers": worker_status,
+            "api_rate_limit": inbound_api_rate_limiter.status(),
         },
     }
 
@@ -966,6 +1071,7 @@ async def detailed_health_check():
             "workers": worker_status,
         },
         "rate_limits": rate_limiter.get_status(),
+        "api_rate_limit": inbound_api_rate_limiter.status(),
         "config": {
             "scan_interval": settings.SCAN_INTERVAL_SECONDS,
             "min_profit_threshold": settings.MIN_PROFIT_THRESHOLD,
@@ -996,6 +1102,12 @@ async def metrics():
     news_running = 1 if news_status.get("running", False) else 0
     news_degraded = 1 if news_status.get("degraded_mode", False) else 0
     news_last_error = 1 if news_status.get("last_error") else 0
+    api_rate_status = inbound_api_rate_limiter.status()
+    api_rate_enabled = 1 if api_rate_status.get("enabled") else 0
+    api_rate_limit = int(api_rate_status.get("requests_per_window") or 0)
+    api_rate_window = int(api_rate_status.get("window_seconds") or 0)
+    api_rate_burst = int(api_rate_status.get("burst") or 0)
+    api_rate_clients = int(api_rate_status.get("tracked_clients") or 0)
 
     metrics_text = f"""# HELP polymarket_opportunities_total Total detected opportunities
 # TYPE polymarket_opportunities_total gauge
@@ -1064,6 +1176,26 @@ polymarket_news_workflow_degraded_mode {news_degraded}
 # HELP polymarket_news_workflow_last_error_flag News workflow last error flag
 # TYPE polymarket_news_workflow_last_error_flag gauge
 polymarket_news_workflow_last_error_flag {news_last_error}
+
+# HELP polymarket_api_rate_limit_enabled Inbound API rate limit enabled flag
+# TYPE polymarket_api_rate_limit_enabled gauge
+polymarket_api_rate_limit_enabled {api_rate_enabled}
+
+# HELP polymarket_api_rate_limit_requests_per_window Inbound API request limit per window
+# TYPE polymarket_api_rate_limit_requests_per_window gauge
+polymarket_api_rate_limit_requests_per_window {api_rate_limit}
+
+# HELP polymarket_api_rate_limit_window_seconds Inbound API rate limit window seconds
+# TYPE polymarket_api_rate_limit_window_seconds gauge
+polymarket_api_rate_limit_window_seconds {api_rate_window}
+
+# HELP polymarket_api_rate_limit_burst Inbound API rate limit burst capacity
+# TYPE polymarket_api_rate_limit_burst gauge
+polymarket_api_rate_limit_burst {api_rate_burst}
+
+# HELP polymarket_api_rate_limit_tracked_clients Number of active inbound rate-limit buckets
+# TYPE polymarket_api_rate_limit_tracked_clients gauge
+polymarket_api_rate_limit_tracked_clients {api_rate_clients}
 """
 
     return JSONResponse(content=metrics_text, media_type="text/plain")

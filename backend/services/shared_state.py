@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import select, or_
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -554,6 +554,52 @@ async def read_scanner_snapshot(
     return opportunities, status
 
 
+async def read_scanner_status(
+    session: AsyncSession,
+    *,
+    include_opportunity_count: bool = True,
+) -> dict[str, Any]:
+    """Read scanner status without deserializing opportunity payloads."""
+    result = await session.execute(
+        select(
+            ScannerSnapshot.running,
+            ScannerSnapshot.enabled,
+            ScannerSnapshot.interval_seconds,
+            ScannerSnapshot.last_scan_at,
+            ScannerSnapshot.current_activity,
+            ScannerSnapshot.strategies_json,
+            ScannerSnapshot.tiered_scanning_json,
+            ScannerSnapshot.ws_feeds_json,
+        ).where(ScannerSnapshot.id == SNAPSHOT_ID)
+    )
+    row = result.one_or_none()
+    if row is None:
+        return _default_status()
+
+    opportunities_count = 0
+    if include_opportunity_count:
+        opportunities_count = int(
+            (
+                await session.execute(
+                    select(func.count()).select_from(OpportunityState).where(OpportunityState.is_active == True)  # noqa: E712
+                )
+            ).scalar_one()
+            or 0
+        )
+
+    return {
+        "running": bool(row.running),
+        "enabled": bool(row.enabled),
+        "interval_seconds": int(row.interval_seconds or 60),
+        "last_scan": _format_iso_utc_z(row.last_scan_at),
+        "opportunities_count": opportunities_count,
+        "current_activity": row.current_activity,
+        "strategies": row.strategies_json or [],
+        "tiered_scanning": row.tiered_scanning_json,
+        "ws_feeds": row.ws_feeds_json,
+    }
+
+
 async def read_traders_snapshot(
     session: AsyncSession,
 ) -> tuple[list[Opportunity], dict[str, Any]]:
@@ -735,6 +781,14 @@ async def get_opportunities_from_db(
     else:
         opportunities, _ = await read_scanner_snapshot(session)
 
+    # Release the DB connection before price overlays/tradability checks,
+    # which may perform network or cache I/O.
+    try:
+        if session.in_transaction():
+            await session.rollback()
+    except Exception:
+        pass
+
     for opp in opportunities:
         opp.title = _normalize_weather_edge_title(opp.title)
 
@@ -814,8 +868,7 @@ async def get_opportunities_from_db(
 
 async def get_scanner_status_from_db(session: AsyncSession) -> dict[str, Any]:
     """Get scanner status from DB (API use)."""
-    _, status = await read_scanner_snapshot(session)
-    return status
+    return await read_scanner_status(session)
 
 
 # ---------- Scanner control (API writes, worker reads) ----------

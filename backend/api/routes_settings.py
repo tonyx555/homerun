@@ -884,27 +884,17 @@ async def update_settings(request: UpdateSettingsRequest):
                     f"Failed to re-initialize trading proxy: {reinit_err}",
                 )
 
-        # Reload search filter config into the running settings singleton
-        if needs_filter_reload:
+        # Reload DB-backed runtime settings into the singleton when any
+        # settings-backed runtime filters changed.
+        if needs_filter_reload or needs_events_reload:
             try:
-                from config import apply_search_filters
+                from config import apply_runtime_settings_overrides
 
-                await apply_search_filters()
-                logger.info("Search filter config reloaded after settings update")
+                await apply_runtime_settings_overrides()
+                logger.info("Runtime settings overrides reloaded after settings update")
             except Exception as reinit_err:
                 logger.error(
-                    f"Failed to reload search filters: {reinit_err}",
-                )
-
-        if needs_events_reload:
-            try:
-                from config import apply_events_settings
-
-                await apply_events_settings()
-                logger.info("Events config reloaded after settings update")
-            except Exception as reinit_err:
-                logger.error(
-                    f"Failed to reload events settings: {reinit_err}",
+                    f"Failed to reload runtime settings overrides: {reinit_err}",
                 )
 
         logger.info("Settings updated successfully")

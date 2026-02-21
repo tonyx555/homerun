@@ -79,7 +79,7 @@ _RESUME_POLICIES = {"resume_full", "manage_only", "flatten_then_start"}
 _PAPER_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
 _ORPHAN_CLEANUP_MAX_TRADERS_PER_CYCLE = 32
 _ORCHESTRATOR_CYCLE_LOCK_KEY = 0x54524F5243485354  # "TRORCHST"
-_orchestrator_lock_ctx: tuple[Any, Any] | None = None
+_orchestrator_lock_session: Any | None = None
 _TRADER_IDLE_MAINTENANCE_INTERVAL_SECONDS = 60
 _trader_idle_maintenance_last_run: dict[str, datetime] = {}
 
@@ -274,13 +274,12 @@ async def _release_orchestrator_cycle_lock(session: Any) -> None:
 
 async def _ensure_orchestrator_cycle_lock_owner() -> bool:
     """Own the cross-process orchestrator lock for this worker process."""
-    global _orchestrator_lock_ctx
+    global _orchestrator_lock_session
 
-    if _orchestrator_lock_ctx is not None:
+    if _orchestrator_lock_session is not None:
         return True
 
-    session_ctx = AsyncSessionLocal()
-    session = await session_ctx.__aenter__()
+    session = AsyncSessionLocal()
     keep_lock_session = False
     try:
         acquired = await _try_acquire_orchestrator_cycle_lock(session)
@@ -288,29 +287,29 @@ async def _ensure_orchestrator_cycle_lock_owner() -> bool:
             return False
 
         if _session_dialect_name(session) == "postgresql":
-            _orchestrator_lock_ctx = (session_ctx, session)
+            _orchestrator_lock_session = session
             keep_lock_session = True
             logger.info("Acquired orchestrator cross-process cycle lock")
 
         return True
     finally:
         if not keep_lock_session:
-            await session_ctx.__aexit__(None, None, None)
+            await session.close()
 
 
 async def _release_orchestrator_cycle_lock_owner() -> None:
     """Release owned lock session on shutdown/error."""
-    global _orchestrator_lock_ctx
-    if _orchestrator_lock_ctx is None:
+    global _orchestrator_lock_session
+    if _orchestrator_lock_session is None:
         return
 
-    session_ctx, session = _orchestrator_lock_ctx
-    _orchestrator_lock_ctx = None
+    session = _orchestrator_lock_session
+    _orchestrator_lock_session = None
     try:
         await _release_orchestrator_cycle_lock(session)
         logger.info("Released orchestrator cross-process cycle lock")
     finally:
-        await session_ctx.__aexit__(None, None, None)
+        await session.close()
 
 
 def _query_sources_for_configs(source_configs: dict[str, dict[str, Any]]) -> list[str]:

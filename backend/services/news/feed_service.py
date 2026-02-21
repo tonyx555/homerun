@@ -91,7 +91,10 @@ class NewsFeedService:
                 new_articles.append(article)
             else:
                 # Keep freshest metadata if we already know the article.
-                if article.fetched_at >= existing.fetched_at:
+                incoming_fetched_at = _to_naive_utc(article.fetched_at) or utcnow()
+                existing_fetched_at = _to_naive_utc(existing.fetched_at) or utcnow()
+                if incoming_fetched_at >= existing_fetched_at:
+                    article.fetched_at = incoming_fetched_at
                     self._articles[article.article_id] = article
 
         self._prune_old_articles()
@@ -523,8 +526,8 @@ def _parse_datetime(value: Any) -> datetime | None:
         return None
     if isinstance(value, datetime):
         if value.tzinfo is not None:
-            return value.astimezone(timezone.utc)
-        return value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
 
     text = str(value).strip()
     if not text:
@@ -542,8 +545,8 @@ def _parse_datetime(value: Any) -> datetime | None:
         try:
             parsed = datetime.strptime(text, fmt)
             if parsed.tzinfo is None:
-                return parsed.replace(tzinfo=timezone.utc)
-            return parsed.astimezone(timezone.utc)
+                return parsed
+            return parsed.astimezone(timezone.utc).replace(tzinfo=None)
         except ValueError:
             continue
 
@@ -553,8 +556,8 @@ def _parse_datetime(value: Any) -> datetime | None:
         return None
 
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        return parsed
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def _to_naive_utc(value: datetime | None) -> datetime | None:

@@ -64,11 +64,19 @@ class ArbitrageScanner:
         self._last_fast_scan: Optional[datetime] = None
         self._last_catalog_refresh: Optional[datetime] = None
         self._last_full_snapshot_strategy_scan: Optional[datetime] = None
+        self._last_full_snapshot_strategy_duration_seconds: Optional[float] = None
+        self._last_full_snapshot_strategy_error: Optional[str] = None
+        self._last_full_snapshot_strategy_market_count: int = 0
+        self._last_full_snapshot_strategy_opportunity_count: int = 0
+        self._last_full_snapshot_strategy_count: int = 0
+        self._full_snapshot_strategy_running: bool = False
+        self._last_fast_scan_duration_seconds: Optional[float] = None
         self._opportunities: list[Opportunity] = []
         self._scan_callbacks: List[Callable] = []
         self._status_callbacks: List[Callable] = []
         self._activity_callbacks: List[Callable] = []
         self._scan_task: Optional[asyncio.Task] = None
+        self._scan_lock: asyncio.Lock = asyncio.Lock()
 
         # Live scanning activity line (streamed to frontend via WebSocket)
         self._current_activity: str = "Idle"
@@ -911,6 +919,16 @@ class ArbitrageScanner:
             return True
         return (now - self._last_full_snapshot_strategy_scan).total_seconds() >= float(interval)
 
+    @staticmethod
+    def _fast_strategy_timeout_seconds() -> float:
+        configured = float(getattr(settings, "SCANNER_FAST_STRATEGY_TIMEOUT_SECONDS", 12.0) or 12.0)
+        return max(3.0, configured)
+
+    @staticmethod
+    def _full_snapshot_strategy_timeout_seconds() -> float:
+        configured = float(getattr(settings, "SCANNER_FULL_SNAPSHOT_STRATEGY_TIMEOUT_SECONDS", 60.0) or 60.0)
+        return max(5.0, configured)
+
     def _select_full_snapshot_markets(self, now: datetime, changed_markets: list, hot_markets: list) -> list:
         cap = int(getattr(settings, "SCANNER_FULL_SNAPSHOT_MAX_MARKETS", 0) or 0)
         pool = [market for market in self._cached_markets if self._is_market_active(market, now)]
@@ -1041,16 +1059,26 @@ class ArbitrageScanner:
         full_slugs: Optional[set[str]] = None,
         full_market_snapshot: Optional[list] = None,
         full_prices: Optional[dict[str, dict]] = None,
+        handler_timeout_seconds: Optional[float] = None,
     ) -> list[Opportunity]:
         """Dispatch market_data_refresh with per-strategy incremental/full routing."""
         if incremental_slugs is None or full_slugs is None:
             incremental_slugs, full_slugs = self._partition_market_refresh_strategies()
         if not incremental_slugs and not full_slugs:
-            return await event_dispatcher.dispatch(event)
+            return await event_dispatcher.dispatch(
+                event,
+                handler_timeout_seconds=handler_timeout_seconds,
+            )
 
         all_opportunities: list[Opportunity] = []
         if incremental_slugs:
-            all_opportunities.extend(await event_dispatcher.dispatch(event, include_strategies=incremental_slugs))
+            all_opportunities.extend(
+                await event_dispatcher.dispatch(
+                    event,
+                    include_strategies=incremental_slugs,
+                    handler_timeout_seconds=handler_timeout_seconds,
+                )
+            )
 
         if full_slugs:
             snapshot_markets = list(full_market_snapshot if full_market_snapshot is not None else (event.markets or []))
@@ -1075,7 +1103,13 @@ class ArbitrageScanner:
                 changed_market_ids=event.changed_market_ids,
                 affected_market_ids=event.affected_market_ids,
             )
-            all_opportunities.extend(await event_dispatcher.dispatch(full_event, include_strategies=full_slugs))
+            all_opportunities.extend(
+                await event_dispatcher.dispatch(
+                    full_event,
+                    include_strategies=full_slugs,
+                    handler_timeout_seconds=handler_timeout_seconds,
+                )
+            )
 
         return all_opportunities
 
@@ -2035,280 +2069,426 @@ class ArbitrageScanner:
         reactive_token_ids: Optional[list[str]] = None,
         targeted_condition_ids: Optional[list] = None,
     ) -> list[Opportunity]:
-        """Fast scan with reactive token batching + timed HOT-tier fallback."""
-        now = datetime.now(timezone.utc)
-        reactive_tokens = [str(t or "").strip() for t in (reactive_token_ids or []) if str(t or "").strip()]
-        reactive_mode = bool(reactive_tokens)
-        mode_label = "reactive" if reactive_mode else "timer"
-        print(f"[{now.isoformat()}] Starting fast scan ({mode_label})...")
+        """Fast scan with reactive token batching + timed HOT-tier fallback.
 
-        if not self._cached_markets:
-            print("  Fast scan cache empty; attempting DB catalog hydration...")
-            hydrated = await self._hydrate_catalog_from_db()
+        This lane only runs incremental scanner strategies. Full-snapshot
+        strategies run in a separate heavy lane.
+        """
+        cycle_started = time.monotonic()
+        async with self._scan_lock:
+            now = datetime.now(timezone.utc)
+            reactive_tokens = [str(t or "").strip() for t in (reactive_token_ids or []) if str(t or "").strip()]
+            reactive_mode = bool(reactive_tokens)
+            mode_label = "reactive" if reactive_mode else "timer"
+            print(f"[{now.isoformat()}] Starting fast scan ({mode_label})...")
+
             if not self._cached_markets:
-                print("  No catalog available yet (DB empty too); skipping scan cycle")
-                await self._set_activity("Waiting for catalog refresh...")
-                return self._opportunities
+                print("  Fast scan cache empty; attempting DB catalog hydration...")
+                await self._hydrate_catalog_from_db()
+                if not self._cached_markets:
+                    print("  No catalog available yet (DB empty too); skipping scan cycle")
+                    await self._set_activity("Waiting for catalog refresh...")
+                    return self._opportunities
 
-        await self._set_activity("Fast scan: preparing market batch...")
+            await self._set_activity("Fast scan: preparing market batch...")
 
-        try:
-            new_markets: list = []
-            if settings.INCREMENTAL_FETCH_ENABLED and not reactive_mode:
-                try:
-                    new_markets = await self.market_data.get_recent_markets(since_minutes=5)
-                    if new_markets:
-                        print(f"  Incremental: {len(new_markets)} recently created markets")
-                except Exception as e:
-                    print(f"  Incremental fetch failed (non-fatal): {e}")
+            try:
+                new_markets: list = []
+                if settings.INCREMENTAL_FETCH_ENABLED and not reactive_mode:
+                    try:
+                        new_markets = await self.market_data.get_recent_markets(since_minutes=5)
+                        if new_markets:
+                            print(f"  Incremental: {len(new_markets)} recently created markets")
+                    except Exception as e:
+                        print(f"  Incremental fetch failed (non-fatal): {e}")
 
-            cached_market_ids = {m.id for m in self._cached_markets}
-            truly_new = [m for m in new_markets if m.id not in cached_market_ids and self._is_market_active(m, now)]
-            if truly_new:
-                self._cached_markets.extend(truly_new)
-                self._cached_events, self._cached_markets = self._prune_active_catalog(
-                    self._cached_events,
-                    self._cached_markets,
-                    now,
-                )
-                self._cached_events, self._cached_markets = self._enforce_catalog_caps(
-                    self._cached_events,
-                    self._cached_markets,
-                )
-                print(f"  Added {len(truly_new)} brand-new markets to cache")
-                self._remember_market_tokens(self._cached_markets)
-                self._rebuild_realtime_graph(self._cached_events, self._cached_markets)
-                self._trim_runtime_market_caches({str(getattr(m, "id", "") or "") for m in self._cached_markets})
-
-            loop = asyncio.get_running_loop()
-
-            affected_market_ids: list[str] = []
-            candidate_markets: list = []
-            if reactive_mode:
-                affected_market_ids = self._resolve_affected_market_ids(reactive_tokens)
-                self._last_reactive_batch_markets = len(affected_market_ids)
-                candidate_markets = [
-                    self._cached_market_by_id[mid] for mid in affected_market_ids if mid in self._cached_market_by_id
-                ]
-                candidate_markets = [m for m in candidate_markets if self._is_market_active(m, now)]
-                if not candidate_markets:
-                    print(
-                        "  Reactive batch had no currently cached/active markets; falling back to HOT-tier timer path"
+                cached_market_ids = {m.id for m in self._cached_markets}
+                truly_new = [m for m in new_markets if m.id not in cached_market_ids and self._is_market_active(m, now)]
+                if truly_new:
+                    self._cached_markets.extend(truly_new)
+                    self._cached_events, self._cached_markets = self._prune_active_catalog(
+                        self._cached_events,
+                        self._cached_markets,
+                        now,
                     )
-                    reactive_mode = False
+                    self._cached_events, self._cached_markets = self._enforce_catalog_caps(
+                        self._cached_events,
+                        self._cached_markets,
+                    )
+                    print(f"  Added {len(truly_new)} brand-new markets to cache")
+                    self._remember_market_tokens(self._cached_markets)
+                    self._rebuild_realtime_graph(self._cached_events, self._cached_markets)
+                    self._trim_runtime_market_caches({str(getattr(m, "id", "") or "") for m in self._cached_markets})
 
-            if not reactive_mode:
-                self._last_reactive_batch_markets = 0
+                loop = asyncio.get_running_loop()
 
-                def _classify_cached(prioritizer, mkts, ts):
-                    prioritizer.update_stability_scores()
-                    return prioritizer.classify_all(mkts, ts)
+                affected_market_ids: list[str] = []
+                candidate_markets: list = []
+                if reactive_mode:
+                    affected_market_ids = self._resolve_affected_market_ids(reactive_tokens)
+                    self._last_reactive_batch_markets = len(affected_market_ids)
+                    candidate_markets = [
+                        self._cached_market_by_id[mid] for mid in affected_market_ids if mid in self._cached_market_by_id
+                    ]
+                    candidate_markets = [m for m in candidate_markets if self._is_market_active(m, now)]
+                    if not candidate_markets:
+                        print(
+                            "  Reactive batch had no currently cached/active markets; falling back to HOT-tier timer path"
+                        )
+                        reactive_mode = False
 
-                tier_map = await loop.run_in_executor(
-                    None, _classify_cached, self._prioritizer, self._cached_markets, now
-                )
-                candidate_markets = [m for m in tier_map[MarketTier.HOT] if self._is_market_active(m, now)]
-                affected_market_ids = [str(getattr(m, "id", "") or "") for m in candidate_markets]
-                if not candidate_markets:
-                    print("  No HOT-tier markets, skipping fast scan")
-                    self._opportunities = await self.refresh_opportunity_prices(self._opportunities, now=now, drop_stale=True)
+                if not reactive_mode:
+                    self._last_reactive_batch_markets = 0
+
+                    def _classify_cached(prioritizer, mkts, ts):
+                        prioritizer.update_stability_scores()
+                        return prioritizer.classify_all(mkts, ts)
+
+                    tier_map = await loop.run_in_executor(
+                        None, _classify_cached, self._prioritizer, self._cached_markets, now
+                    )
+                    candidate_markets = [m for m in tier_map[MarketTier.HOT] if self._is_market_active(m, now)]
+                    affected_market_ids = [str(getattr(m, "id", "") or "") for m in candidate_markets]
+                    if not candidate_markets:
+                        print("  No HOT-tier markets, skipping fast scan")
+                        self._opportunities = await self.refresh_opportunity_prices(
+                            self._opportunities,
+                            now=now,
+                            drop_stale=True,
+                        )
+                        self._last_scan = now
+                        self._last_fast_scan = now
+                        return self._opportunities
+
+                    if truly_new:
+                        existing_candidate_ids = {str(getattr(m, "id", "") or "") for m in candidate_markets}
+                        for market in truly_new:
+                            market_id = str(getattr(market, "id", "") or "")
+                            if not market_id or market_id in existing_candidate_ids:
+                                continue
+                            if not self._is_market_active(market, now):
+                                continue
+                            candidate_markets.append(market)
+                            existing_candidate_ids.add(market_id)
+
+                # If targeted condition IDs were requested (e.g. API evaluate
+                # endpoint), narrow candidate markets to just those IDs.
+                if targeted_condition_ids:
+                    _target_set = {cid.lower() for cid in targeted_condition_ids}
+                    candidate_markets = [
+                        m for m in self._cached_markets
+                        if getattr(m, "condition_id", getattr(m, "id", "")).lower() in _target_set
+                    ]
+                    candidate_markets = [m for m in candidate_markets if self._is_market_active(m, now)]
+                    affected_market_ids = [str(getattr(m, "id", "") or "") for m in candidate_markets]
+                    print(f"  Targeted scan: narrowed to {len(candidate_markets)} markets")
+                elif not reactive_mode:
+                    timer_cap = max(10, int(settings.REALTIME_SCAN_MAX_BATCH_MARKETS or 800))
+                    if len(candidate_markets) > timer_cap:
+                        candidate_markets = sorted(candidate_markets, key=self._market_priority_key, reverse=True)[:timer_cap]
+                        affected_market_ids = [str(getattr(m, "id", "") or "") for m in candidate_markets]
+
+                candidate_token_ids = self._collect_live_token_ids(candidate_markets)
+                live_prices: dict[str, dict] = {}
+                if reactive_mode:
+                    ws_prices = await self._snapshot_ws_prices(candidate_token_ids)
+                    live_prices.update(ws_prices)
+                    if ws_prices:
+                        print(f"  Reactive WS overlay: {len(ws_prices)}/{len(candidate_token_ids)} tokens")
+                else:
+                    token_sample = candidate_token_ids
+                    if token_sample:
+                        await self._set_activity(
+                            f"Fast scan: reading live prices for {len(token_sample)} hot-tier tokens..."
+                        )
+                        live_prices = await self._snapshot_ws_prices(token_sample)
+                        print(f"  Loaded prices for {len(live_prices)} hot-tier tokens from Redis cache")
+
+                merged_prices = dict(live_prices)
+                self._cached_prices.update(live_prices)
+                self._apply_live_prices_to_markets(candidate_markets, merged_prices)
+                self._update_market_price_history(candidate_markets, merged_prices, now)
+
+                changed_markets = await loop.run_in_executor(None, self._prioritizer.get_changed_markets, candidate_markets)
+                if not changed_markets:
+                    print(f"  All {len(candidate_markets)} candidate markets unchanged, skipping strategies")
+                    await self._set_activity(f"Fast scan: {len(candidate_markets)} markets unchanged, skipping")
+                    await loop.run_in_executor(None, self._prioritizer.update_after_evaluation, candidate_markets, now)
+                    self._opportunities = await self.refresh_opportunity_prices(
+                        self._opportunities,
+                        now=now,
+                        drop_stale=True,
+                    )
                     self._last_scan = now
                     self._last_fast_scan = now
                     return self._opportunities
 
-                if truly_new:
-                    existing_candidate_ids = {str(getattr(m, "id", "") or "") for m in candidate_markets}
-                    for market in truly_new:
-                        market_id = str(getattr(market, "id", "") or "")
-                        if not market_id or market_id in existing_candidate_ids:
-                            continue
-                        if not self._is_market_active(market, now):
-                            continue
-                        candidate_markets.append(market)
-                        existing_candidate_ids.add(market_id)
+                if reactive_mode:
+                    markets_for_strategies = candidate_markets
+                    source = "scanner_fast_reactive"
+                    scan_mode = "realtime_reactive"
+                else:
+                    markets_for_strategies = changed_markets
+                    source = "scanner_fast_timer"
+                    scan_mode = "fast_timer"
 
-            # If targeted condition IDs were requested (e.g. API evaluate
-            # endpoint), narrow candidate markets to just those IDs.
-            if targeted_condition_ids:
-                _target_set = {cid.lower() for cid in targeted_condition_ids}
-                candidate_markets = [
-                    m for m in self._cached_markets
-                    if getattr(m, "condition_id", getattr(m, "id", "")).lower() in _target_set
-                ]
-                candidate_markets = [m for m in candidate_markets if self._is_market_active(m, now)]
-                affected_market_ids = [str(getattr(m, "id", "") or "") for m in candidate_markets]
-                print(f"  Targeted scan: narrowed to {len(candidate_markets)} markets")
-            elif not reactive_mode:
-                timer_cap = max(10, int(settings.REALTIME_SCAN_MAX_BATCH_MARKETS or 800))
-                if len(candidate_markets) > timer_cap:
-                    candidate_markets = sorted(candidate_markets, key=self._market_priority_key, reverse=True)[:timer_cap]
-                    affected_market_ids = [str(getattr(m, "id", "") or "") for m in candidate_markets]
+                markets_for_strategies = [m for m in markets_for_strategies if self._is_market_active(m, now)]
+                changed_market_ids = [str(getattr(m, "id", "") or "") for m in changed_markets]
+                affected_ids_payload = [str(getattr(m, "id", "") or "") for m in markets_for_strategies]
 
-            candidate_token_ids = self._collect_live_token_ids(candidate_markets)
-            live_prices: dict[str, dict] = {}
-            if reactive_mode:
-                ws_prices = await self._snapshot_ws_prices(candidate_token_ids)
-                live_prices.update(ws_prices)
-                if ws_prices:
-                    print(f"  Reactive WS overlay: {len(ws_prices)}/{len(candidate_token_ids)} tokens")
-            else:
-                token_sample = candidate_token_ids
-                if token_sample:
-                    await self._set_activity(
-                        f"Fast scan: reading live prices for {len(token_sample)} hot-tier tokens..."
+                print(
+                    f"  Fast scan batch: {len(changed_market_ids)} changed / "
+                    f"{len(affected_ids_payload)} dispatched markets ({scan_mode})"
+                )
+
+                await self._ensure_runtime_strategies_loaded()
+                incremental_slugs, _ = self._partition_market_refresh_strategies()
+                if not incremental_slugs:
+                    print("  No incremental MARKET_DATA_REFRESH strategies enabled; skipping dispatch")
+                    self._opportunities = await self.refresh_opportunity_prices(
+                        self._opportunities,
+                        now=now,
+                        drop_stale=True,
                     )
-                    live_prices = await self._snapshot_ws_prices(token_sample)
-                    print(f"  Loaded prices for {len(live_prices)} hot-tier tokens from Redis cache")
+                    self._last_scan = now
+                    self._last_fast_scan = now
+                    return self._opportunities
 
-            merged_prices = dict(live_prices)
-            self._cached_prices.update(live_prices)
-            self._apply_live_prices_to_markets(candidate_markets, merged_prices)
-            self._update_market_price_history(candidate_markets, merged_prices, now)
+                await self._set_activity(
+                    f"Fast scan: running strategies on {len(affected_ids_payload)} markets ({scan_mode})..."
+                )
 
-            changed_markets = await loop.run_in_executor(None, self._prioritizer.get_changed_markets, candidate_markets)
-            if not changed_markets:
-                print(f"  All {len(candidate_markets)} candidate markets unchanged, skipping strategies")
-                await self._set_activity(f"Fast scan: {len(candidate_markets)} markets unchanged, skipping")
-                await loop.run_in_executor(None, self._prioritizer.update_after_evaluation, candidate_markets, now)
+                fast_data_event = DataEvent(
+                    event_type=EventType.MARKET_DATA_REFRESH,
+                    source=source,
+                    timestamp=utcnow(),
+                    payload={
+                        "scan_mode": scan_mode,
+                        "strategy_batch": "incremental",
+                        "changed_token_count": len(reactive_tokens) if reactive_mode else 0,
+                        "changed_market_count": len(changed_market_ids),
+                        "affected_market_count": len(affected_ids_payload),
+                    },
+                    markets=markets_for_strategies,
+                    events=list(self._cached_events),
+                    prices=dict(merged_prices),
+                    scan_mode=scan_mode,
+                    changed_token_ids=list(reactive_tokens) if reactive_mode else None,
+                    changed_market_ids=changed_market_ids,
+                    affected_market_ids=affected_ids_payload,
+                )
+                fast_opportunities = await self._dispatch_market_refresh(
+                    fast_data_event,
+                    incremental_slugs=incremental_slugs,
+                    full_slugs=set(),
+                    handler_timeout_seconds=self._fast_strategy_timeout_seconds(),
+                )
+
+                fast_opportunities = self._deduplicate_cross_strategy(fast_opportunities)
+                fast_quality_reports: dict = {}
+                fast_filtered: list = []
+                for opp in fast_opportunities:
+                    strategy_instance = strategy_loader.get_instance(opp.strategy)
+                    overrides = getattr(strategy_instance, "quality_filter_overrides", None) if strategy_instance else None
+                    report = quality_filter.evaluate_opportunity(opp, overrides=overrides)
+                    fast_quality_reports[opp.stable_id or opp.id] = report
+                    if report.passed:
+                        fast_filtered.append(opp)
+                fast_opportunities = fast_filtered
+                self._quality_reports.update(fast_quality_reports)
+                fast_opportunities.sort(key=lambda x: x.roi_percent, reverse=True)
+                fast_opportunities = self._apply_opportunity_caps(fast_opportunities)
+
+                def _update_prioritizer_state(prioritizer, mkts, ts):
+                    unchanged_count = prioritizer.update_after_evaluation(mkts, ts)
+                    prioritizer.compute_attention_scores(mkts)
+                    return unchanged_count
+
+                unchanged = await loop.run_in_executor(
+                    None,
+                    _update_prioritizer_state,
+                    self._prioritizer,
+                    candidate_markets,
+                    now,
+                )
+
+                if fast_opportunities:
+                    await self._attach_ai_judgments(fast_opportunities)
+                    self._opportunities = self._merge_opportunities(fast_opportunities)
+
                 self._opportunities = await self.refresh_opportunity_prices(self._opportunities, now=now, drop_stale=True)
+                if self._opportunities:
+                    self._opportunities.sort(key=lambda opp: opp.roi_percent, reverse=True)
+                    self._opportunities = self._apply_opportunity_caps(self._opportunities)
+                    self._queue_market_history_backfill(self._opportunities)
+
                 self._last_scan = now
                 self._last_fast_scan = now
+                self._fast_scan_cycle += 1
+
+                for callback in self._scan_callbacks:
+                    try:
+                        await callback(fast_opportunities)
+                    except Exception as e:
+                        print(f"  Callback error: {e}")
+
+                print(
+                    f"[{now.isoformat()}] Fast scan complete ({scan_mode}). "
+                    f"{len(fast_opportunities)} detected, "
+                    f"{len(self._opportunities)} total in pool "
+                    f"({unchanged} unchanged markets skipped)"
+                )
+                await self._set_activity(
+                    f"Fast scan complete — {len(fast_opportunities)} found, {len(self._opportunities)} total"
+                )
                 return self._opportunities
 
-            if reactive_mode:
-                markets_for_strategies = candidate_markets
-                source = "scanner_fast_reactive"
-                scan_mode = "realtime_reactive"
-            else:
-                markets_for_strategies = changed_markets
-                source = "scanner_fast_timer"
-                scan_mode = "fast_timer"
+            except Exception as e:
+                print(f"[{utcnow().isoformat()}] Fast scan error: {e}")
+                await self._set_activity(f"Fast scan error: {e}")
+                raise
+            finally:
+                self._last_fast_scan_duration_seconds = round(max(0.0, time.monotonic() - cycle_started), 3)
 
-            markets_for_strategies = [m for m in markets_for_strategies if self._is_market_active(m, now)]
-            changed_market_ids = [str(getattr(m, "id", "") or "") for m in changed_markets]
-            affected_ids_payload = [str(getattr(m, "id", "") or "") for m in markets_for_strategies]
+    async def scan_full_snapshot_strategies(
+        self,
+        *,
+        reason: str = "scheduled",
+        targeted_condition_ids: Optional[list[str]] = None,
+        force: bool = False,
+    ) -> list[Opportunity]:
+        """Run only full-snapshot MARKET_DATA_REFRESH strategies on a bounded market set."""
+        cycle_started = time.monotonic()
+        async with self._scan_lock:
+            now = datetime.now(timezone.utc)
+            if not force and not targeted_condition_ids and not self._full_snapshot_strategy_due(now):
+                return self._opportunities
 
-            print(
-                f"  Fast scan batch: {len(changed_market_ids)} changed / "
-                f"{len(affected_ids_payload)} dispatched markets ({scan_mode})"
-            )
+            if not self._cached_markets:
+                await self._hydrate_catalog_from_db()
+                if not self._cached_markets:
+                    return self._opportunities
 
-            await self._ensure_runtime_strategies_loaded()
-            incremental_slugs, full_slugs = self._partition_market_refresh_strategies()
-            run_full_snapshot = bool(full_slugs) and (
-                bool(targeted_condition_ids) or self._full_snapshot_strategy_due(now)
-            )
-            full_snapshot_markets: list = []
-            full_snapshot_prices: dict[str, dict] = {}
-            if run_full_snapshot:
-                full_snapshot_markets = self._select_full_snapshot_markets(now, changed_markets, candidate_markets)
-                if full_snapshot_markets:
-                    full_token_ids = self._collect_live_token_ids(full_snapshot_markets)
-                    if full_token_ids:
-                        await self._set_activity(
-                            f"Fast scan: refreshing full-snapshot batch ({len(full_snapshot_markets)} markets)..."
-                        )
-                        full_snapshot_prices = await self._snapshot_ws_prices(full_token_ids)
-                    self._apply_live_prices_to_markets(full_snapshot_markets, full_snapshot_prices)
-                    self._update_market_price_history(full_snapshot_markets, full_snapshot_prices, now)
-                    self._last_full_snapshot_strategy_scan = now
+            self._full_snapshot_strategy_running = True
+            self._last_full_snapshot_strategy_error = None
+
+            try:
+                await self._ensure_runtime_strategies_loaded()
+                _, full_slugs = self._partition_market_refresh_strategies()
+                self._last_full_snapshot_strategy_count = len(full_slugs)
+                if not full_slugs:
+                    return self._opportunities
+
+                if targeted_condition_ids:
+                    target_set = {str(cid or "").strip().lower() for cid in targeted_condition_ids if str(cid or "").strip()}
+                    full_snapshot_markets = [
+                        market
+                        for market in self._cached_markets
+                        if str(getattr(market, "condition_id", getattr(market, "id", "")) or "").lower() in target_set
+                        and self._is_market_active(market, now)
+                    ]
                 else:
-                    run_full_snapshot = False
+                    full_snapshot_markets = self._select_full_snapshot_markets(now, [], [])
 
-            await self._set_activity(
-                f"Fast scan: running strategies on {len(affected_ids_payload)} markets ({scan_mode})..."
-            )
+                if not full_snapshot_markets:
+                    self._last_full_snapshot_strategy_market_count = 0
+                    self._last_full_snapshot_strategy_opportunity_count = 0
+                    return self._opportunities
 
-            fast_data_event = DataEvent(
-                event_type=EventType.MARKET_DATA_REFRESH,
-                source=source,
-                timestamp=utcnow(),
-                payload={
-                    "scan_mode": scan_mode,
-                    "changed_token_count": len(reactive_tokens) if reactive_mode else 0,
-                    "changed_market_count": len(changed_market_ids),
-                    "affected_market_count": len(affected_ids_payload),
-                    "full_snapshot_market_count": len(full_snapshot_markets) if run_full_snapshot else 0,
-                },
-                markets=markets_for_strategies,
-                events=list(self._cached_events),
-                prices=dict(merged_prices),
-                scan_mode=scan_mode,
-                changed_token_ids=list(reactive_tokens) if reactive_mode else None,
-                changed_market_ids=changed_market_ids,
-                affected_market_ids=affected_ids_payload,
-            )
-            fast_opportunities = await self._dispatch_market_refresh(
-                fast_data_event,
-                incremental_slugs=incremental_slugs,
-                full_slugs=full_slugs if run_full_snapshot else set(),
-                full_market_snapshot=full_snapshot_markets if run_full_snapshot else None,
-                full_prices=full_snapshot_prices if run_full_snapshot else None,
-            )
+                self._last_full_snapshot_strategy_market_count = len(full_snapshot_markets)
+                await self._set_activity(
+                    f"Heavy lane: running full-snapshot strategies on {len(full_snapshot_markets)} markets..."
+                )
 
-            fast_opportunities = self._deduplicate_cross_strategy(fast_opportunities)
-            fast_quality_reports: dict = {}
-            fast_filtered: list = []
-            for opp in fast_opportunities:
-                strategy_instance = strategy_loader.get_instance(opp.strategy)
-                overrides = getattr(strategy_instance, "quality_filter_overrides", None) if strategy_instance else None
-                report = quality_filter.evaluate_opportunity(opp, overrides=overrides)
-                fast_quality_reports[opp.stable_id or opp.id] = report
-                if report.passed:
-                    fast_filtered.append(opp)
-            fast_opportunities = fast_filtered
-            self._quality_reports.update(fast_quality_reports)
-            fast_opportunities.sort(key=lambda x: x.roi_percent, reverse=True)
-            fast_opportunities = self._apply_opportunity_caps(fast_opportunities)
+                token_ids = self._collect_live_token_ids(full_snapshot_markets)
+                full_snapshot_prices: dict[str, dict] = {}
+                if token_ids:
+                    full_snapshot_prices = await self._snapshot_ws_prices(token_ids)
+                self._cached_prices.update(full_snapshot_prices)
+                self._apply_live_prices_to_markets(full_snapshot_markets, full_snapshot_prices)
+                self._update_market_price_history(full_snapshot_markets, full_snapshot_prices, now)
 
-            def _update_prioritizer_state(prioritizer, mkts, ts):
-                unchanged_count = prioritizer.update_after_evaluation(mkts, ts)
-                prioritizer.compute_attention_scores(mkts)
-                return unchanged_count
+                market_ids = [str(getattr(market, "id", "") or "") for market in full_snapshot_markets]
+                full_event = DataEvent(
+                    event_type=EventType.MARKET_DATA_REFRESH,
+                    source="scanner_full_snapshot",
+                    timestamp=utcnow(),
+                    payload={
+                        "scan_mode": "full_snapshot_heavy",
+                        "strategy_batch": "full_snapshot",
+                        "reason": reason,
+                        "affected_market_count": len(market_ids),
+                    },
+                    markets=full_snapshot_markets,
+                    events=list(self._cached_events),
+                    prices=dict(full_snapshot_prices),
+                    scan_mode="full_snapshot_heavy",
+                    changed_market_ids=market_ids,
+                    affected_market_ids=market_ids,
+                )
 
-            unchanged = await loop.run_in_executor(
-                None,
-                _update_prioritizer_state,
-                self._prioritizer,
-                candidate_markets,
-                now,
-            )
+                full_opportunities = await self._dispatch_market_refresh(
+                    full_event,
+                    incremental_slugs=set(),
+                    full_slugs=full_slugs,
+                    full_market_snapshot=full_snapshot_markets,
+                    full_prices=full_snapshot_prices,
+                    handler_timeout_seconds=self._full_snapshot_strategy_timeout_seconds(),
+                )
+                full_opportunities = self._deduplicate_cross_strategy(full_opportunities)
 
-            if fast_opportunities:
-                await self._attach_ai_judgments(fast_opportunities)
-                self._opportunities = self._merge_opportunities(fast_opportunities)
+                full_quality_reports: dict = {}
+                full_filtered: list[Opportunity] = []
+                for opp in full_opportunities:
+                    strategy_instance = strategy_loader.get_instance(opp.strategy)
+                    overrides = getattr(strategy_instance, "quality_filter_overrides", None) if strategy_instance else None
+                    report = quality_filter.evaluate_opportunity(opp, overrides=overrides)
+                    full_quality_reports[opp.stable_id or opp.id] = report
+                    if report.passed:
+                        full_filtered.append(opp)
+                self._quality_reports.update(full_quality_reports)
 
-            self._opportunities = await self.refresh_opportunity_prices(self._opportunities, now=now, drop_stale=True)
-            if self._opportunities:
-                self._opportunities.sort(key=lambda opp: opp.roi_percent, reverse=True)
-                self._opportunities = self._apply_opportunity_caps(self._opportunities)
-                self._queue_market_history_backfill(self._opportunities)
+                full_filtered.sort(key=lambda item: item.roi_percent, reverse=True)
+                full_filtered = self._apply_opportunity_caps(full_filtered)
+                self._last_full_snapshot_strategy_opportunity_count = len(full_filtered)
 
-            self._last_scan = now
-            self._last_fast_scan = now
-            self._fast_scan_cycle += 1
+                if full_filtered:
+                    await self._attach_ai_judgments(full_filtered)
+                    self._opportunities = self._merge_opportunities(full_filtered)
 
-            for callback in self._scan_callbacks:
-                try:
-                    await callback(fast_opportunities)
-                except Exception as e:
-                    print(f"  Callback error: {e}")
+                self._opportunities = await self.refresh_opportunity_prices(
+                    self._opportunities,
+                    now=now,
+                    drop_stale=True,
+                )
+                if self._opportunities:
+                    self._opportunities.sort(key=lambda opp: opp.roi_percent, reverse=True)
+                    self._opportunities = self._apply_opportunity_caps(self._opportunities)
+                    self._queue_market_history_backfill(self._opportunities)
 
-            print(
-                f"[{now.isoformat()}] Fast scan complete ({scan_mode}). "
-                f"{len(fast_opportunities)} detected, "
-                f"{len(self._opportunities)} total in pool "
-                f"({unchanged} unchanged markets skipped)"
-            )
-            await self._set_activity(
-                f"Fast scan complete — {len(fast_opportunities)} found, {len(self._opportunities)} total"
-            )
-            return self._opportunities
+                self._last_scan = now
+                self._last_full_snapshot_strategy_scan = now
 
-        except Exception as e:
-            print(f"[{utcnow().isoformat()}] Fast scan error: {e}")
-            await self._set_activity(f"Fast scan error: {e}")
-            raise
+                for callback in self._scan_callbacks:
+                    try:
+                        await callback(full_filtered)
+                    except Exception as e:
+                        print(f"  Callback error: {e}")
+
+                await self._set_activity(
+                    f"Heavy lane complete — {len(full_filtered)} opportunities ({len(full_snapshot_markets)} markets)"
+                )
+                return self._opportunities
+            except Exception as exc:
+                self._last_full_snapshot_strategy_error = str(exc)
+                await self._set_activity(f"Heavy lane error: {exc}")
+                raise
+            finally:
+                self._full_snapshot_strategy_running = False
+                self._last_full_snapshot_strategy_duration_seconds = round(
+                    max(0.0, time.monotonic() - cycle_started),
+                    3,
+                )
 
     async def _prefetch_news_matches(self, events, markets, prices):
         """Pre-fetch news articles and run semantic matching (no LLM calls).
@@ -2946,11 +3126,20 @@ class ArbitrageScanner:
                 "full_scan_interval": settings.FULL_SCAN_INTERVAL_SECONDS,
                 "full_snapshot_strategy_interval": settings.SCANNER_FULL_SNAPSHOT_STRATEGY_INTERVAL_SECONDS,
                 "full_snapshot_strategy_max_markets": settings.SCANNER_FULL_SNAPSHOT_MAX_MARKETS,
+                "fast_strategy_timeout_seconds": self._fast_strategy_timeout_seconds(),
+                "full_snapshot_strategy_timeout_seconds": self._full_snapshot_strategy_timeout_seconds(),
+                "full_snapshot_strategy_running": self._full_snapshot_strategy_running,
                 "realtime_debounce_seconds": settings.REALTIME_SCAN_DEBOUNCE_SECONDS,
                 "fast_scan_cycle": self._fast_scan_cycle,
                 "last_full_scan": to_iso(self._last_full_scan),
                 "last_fast_scan": to_iso(self._last_fast_scan),
+                "last_fast_scan_duration_seconds": self._last_fast_scan_duration_seconds,
                 "last_full_snapshot_strategy_scan": to_iso(self._last_full_snapshot_strategy_scan),
+                "last_full_snapshot_strategy_duration_seconds": self._last_full_snapshot_strategy_duration_seconds,
+                "last_full_snapshot_strategy_error": self._last_full_snapshot_strategy_error,
+                "last_full_snapshot_strategy_market_count": self._last_full_snapshot_strategy_market_count,
+                "last_full_snapshot_strategy_opportunity_count": self._last_full_snapshot_strategy_opportunity_count,
+                "last_full_snapshot_strategy_count": self._last_full_snapshot_strategy_count,
                 "cached_markets": len(self._cached_markets),
                 "cached_events": len(self._cached_events),
                 "pending_reactive_tokens": len(self._pending_reactive_tokens),

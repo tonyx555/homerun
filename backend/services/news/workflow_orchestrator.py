@@ -29,9 +29,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
 from services.shared_state import _commit_with_retry
-from models.database import LLMUsageLog, NewsTradeIntent, NewsWorkflowFinding, Strategy
+from models.database import LLMUsageLog, NewsTradeIntent, NewsWorkflowFinding
 from services.news import shared_state
-from services.strategy_sdk import StrategySDK
 
 logger = logging.getLogger(__name__)
 
@@ -291,11 +290,6 @@ class WorkflowOrchestrator:
         self._is_cycling = False
         self._negative_cache = _NegativeCache()
 
-    async def _load_news_strategy_filters(self, session: AsyncSession) -> dict[str, Any]:
-        row = (await session.execute(select(Strategy).where(Strategy.slug == "news_edge"))).scalar_one_or_none()
-        payload = row.config if row is not None and isinstance(row.config, dict) else {}
-        return StrategySDK.validate_news_filter_config(payload)
-
     async def run_cycle(self, session: AsyncSession) -> dict:
         """Run one cycle. Caller (worker) owns loop scheduling and control flow."""
         if self._is_cycling:
@@ -315,7 +309,6 @@ class WorkflowOrchestrator:
             from services.news.reranker import reranker
 
             wf_settings = await shared_state.get_news_settings(session)
-            news_strategy_filters = await self._load_news_strategy_filters(session)
 
             # 1) Sync articles from provider feeds.
             try:
@@ -555,15 +548,15 @@ class WorkflowOrchestrator:
             # min_semantic_signal: 0.05 lets through candidates with partial
             # semantic overlap; the reranker handles false positives.
             min_semantic_signal = float(wf_settings.get("min_semantic_signal", 0.05) or 0.05)
-            # Business filtering thresholds are strategy-owned (news_edge config),
-            # validated through StrategySDK.
-            min_edge = float(news_strategy_filters.get("min_edge_percent", 5.0) or 5.0)
-            min_conf = float(news_strategy_filters.get("min_confidence", 0.45) or 0.45)
-            orchestrator_min_edge = float(news_strategy_filters.get("orchestrator_min_edge", 10.0) or 10.0)
-            require_verifier = bool(news_strategy_filters.get("require_verifier", True))
-            require_second_source = bool(news_strategy_filters.get("require_second_source", False))
-            min_supporting_articles = max(1, int(news_strategy_filters.get("min_supporting_articles", 2) or 2))
-            min_supporting_sources = max(1, int(news_strategy_filters.get("min_supporting_sources", 2) or 2))
+            # Trade/business gating is strategy-owned (news_edge on_event config).
+            # Keep workflow thresholds permissive so strategies decide.
+            min_edge = 0.0
+            min_conf = 0.0
+            orchestrator_min_edge = 0.0
+            require_verifier = False
+            require_second_source = False
+            min_supporting_articles = 1
+            min_supporting_sources = 1
             max_edge_evals_per_cluster = int(wf_settings.get("max_edge_evals_per_article", 6) or 6)
             cache_ttl_minutes = int(wf_settings.get("cache_ttl_minutes", 30) or 30)
 
