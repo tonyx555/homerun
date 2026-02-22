@@ -2142,18 +2142,7 @@ async def run_worker_loop() -> None:
                                     skip_cycle = True
 
                         if not skip_cycle and mode == "live":
-                            if not bool(settings.TRADING_ENABLED):
-                                await _write_orchestrator_snapshot_best_effort(
-                                    session,
-                                    running=False,
-                                    enabled=True,
-                                    current_activity="Blocked: live trading disabled in config/settings",
-                                    interval_seconds=cycle_interval,
-                                    last_error=None,
-                                    stats=await compute_orchestrator_metrics(session),
-                                )
-                                skip_cycle = True
-                            elif not _is_live_credentials_configured(app_settings):
+                            if not _is_live_credentials_configured(app_settings):
                                 await _write_orchestrator_snapshot_best_effort(
                                     session,
                                     running=False,

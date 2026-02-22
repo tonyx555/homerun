@@ -3224,11 +3224,6 @@ async def _build_preflight_checks(
 
     return [
         {
-            "id": "trading_enabled_env",
-            "ok": bool(settings.TRADING_ENABLED),
-            "message": "TRADING_ENABLED must be true in environment config",
-        },
-        {
             "id": "live_credentials_configured",
             "ok": live_creds_ready,
             "message": "At least one live venue credential set must be configured",

@@ -529,13 +529,12 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"Fill monitor start failed (non-critical): {e}")
 
-        # Initialize trading service if configured
-        if settings.TRADING_ENABLED:
-            trading_initialized = await trading_service.initialize()
-            if trading_initialized:
-                logger.info("Trading service initialized")
-            else:
-                logger.warning("Trading service initialization failed - check credentials")
+        # Initialize trading service if credentials are configured
+        trading_initialized = await trading_service.initialize()
+        if trading_initialized:
+            logger.info("Trading service initialized")
+        else:
+            logger.info("Trading service not initialized - credentials not configured")
 
         # Start background cleanup if enabled (DB settings override env defaults).
         cleanup_enabled = bool(settings.AUTO_CLEANUP_ENABLED)
@@ -1075,7 +1074,6 @@ async def detailed_health_check():
                 "active_configs": len(copy_trader._active_configs),
             },
             "trading": {
-                "enabled": settings.TRADING_ENABLED,
                 "initialized": trading_service.is_ready(),
                 "stats": trading_service.get_stats().__dict__ if trading_service.is_ready() else None,
             },
@@ -1184,10 +1182,6 @@ polymarket_tracked_wallets {len(await wallet_tracker.get_all_wallets())}
 # HELP polymarket_copy_configs Active copy trading configurations
 # TYPE polymarket_copy_configs gauge
 polymarket_copy_configs {len(copy_trader._active_configs)}
-
-# HELP polymarket_trading_enabled Trading enabled status
-# TYPE polymarket_trading_enabled gauge
-polymarket_trading_enabled {1 if settings.TRADING_ENABLED else 0}
 
 # HELP polymarket_trader_orchestrator_running Trader orchestrator running status
 # TYPE polymarket_trader_orchestrator_running gauge

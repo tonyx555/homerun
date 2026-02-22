@@ -4,7 +4,7 @@ Trading API Routes
 Endpoints for real trading on Polymarket.
 
 IMPORTANT: These endpoints execute real trades with real money.
-Ensure TRADING_ENABLED=true and proper credentials are configured.
+Ensure proper credentials are configured.
 """
 
 from fastapi import APIRouter, HTTPException
@@ -119,7 +119,6 @@ class CancelAllOrdersResponse(BaseModel):
 
 
 class TradingStatusResponse(BaseModel):
-    enabled: bool
     initialized: bool
     authenticated: bool
     credentials_configured: bool
@@ -175,7 +174,6 @@ async def get_trading_status():
             auth_error = str(exc)
 
     return TradingStatusResponse(
-        enabled=settings.TRADING_ENABLED,
         initialized=initialized,
         authenticated=authenticated,
         credentials_configured=credentials_configured,
@@ -233,7 +231,7 @@ async def initialize_trading():
     else:
         raise HTTPException(
             status_code=400,
-            detail="Failed to initialize trading. Check credentials and TRADING_ENABLED setting.",
+            detail="Failed to initialize trading. Check credentials are configured.",
         )
 
 
@@ -242,7 +240,7 @@ async def place_order(request: PlaceOrderRequest):
     """
     Place a new order.
 
-    Requires trading to be enabled and initialized.
+    Requires trading to be initialized.
     """
     if not trading_service.is_ready():
         raise HTTPException(status_code=400, detail="Trading service not initialized")

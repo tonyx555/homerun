@@ -13,7 +13,6 @@ Setup:
    - POLYMARKET_API_KEY
    - POLYMARKET_API_SECRET
    - POLYMARKET_API_PASSPHRASE
-3. Set TRADING_ENABLED=true to enable real trading
 """
 
 import asyncio
@@ -323,10 +322,6 @@ class TradingService:
         """
         init_lock = self._get_init_lock()
         async with init_lock:
-            if not settings.TRADING_ENABLED:
-                logger.warning("Trading is disabled. Set TRADING_ENABLED=true to enable.")
-                return False
-
             private_key, api_key, api_secret, api_passphrase, credential_source = await self._resolve_polymarket_credentials()
             if not all([private_key, api_key, api_secret, api_passphrase]):
                 logger.error("Missing Polymarket API credentials. Cannot initialize trading.")
@@ -1111,9 +1106,6 @@ class TradingService:
         if not self.is_ready():
             return False, "Trading service not initialized"
 
-        if not settings.TRADING_ENABLED:
-            return False, "Trading is disabled"
-
         min_order_size = _to_decimal(settings.MIN_ORDER_SIZE_USD)
         max_trade_size = _to_decimal(settings.MAX_TRADE_SIZE_USD)
         max_daily_volume = _to_decimal(settings.MAX_DAILY_TRADE_VOLUME)
@@ -1778,7 +1770,9 @@ class TradingService:
     async def get_balance(self) -> dict:
         """Get wallet balance"""
         if not self.is_ready():
-            return {"error": "Trading not initialized"}
+            await self.ensure_initialized()
+        if not self.is_ready():
+            return {"error": "Polymarket credentials not configured"}
 
         try:
             address = self._get_wallet_address()

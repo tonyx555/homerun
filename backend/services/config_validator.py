@@ -87,12 +87,13 @@ class ConfigValidator:
         # Depth analysis
         self._check_range(result, "MIN_DEPTH_USD", settings.MIN_DEPTH_USD, 1, 100_000)
 
-        # Trading credentials (only if trading is enabled)
-        if settings.TRADING_ENABLED:
-            self._check_private_key(result, settings.POLYMARKET_PRIVATE_KEY)
-            self._check_required(result, "POLYMARKET_API_KEY", settings.POLYMARKET_API_KEY)
-            self._check_required(result, "POLYMARKET_API_SECRET", settings.POLYMARKET_API_SECRET)
-            self._check_required(result, "POLYMARKET_API_PASSPHRASE", settings.POLYMARKET_API_PASSPHRASE)
+        # Trading credentials (optional - warns if partially configured)
+        has_private_key = bool(settings.POLYMARKET_PRIVATE_KEY)
+        has_api_creds = bool(settings.POLYMARKET_API_KEY and settings.POLYMARKET_API_SECRET and settings.POLYMARKET_API_PASSPHRASE)
+        if has_private_key and not has_api_creds:
+            self._add_warning(result, "POLYMARKET_PRIVATE_KEY set but API credentials (KEY/SECRET/PASSPHRASE) missing")
+        elif has_api_creds and not has_private_key:
+            self._add_warning(result, "Polymarket API credentials set but POLYMARKET_PRIVATE_KEY missing")
 
         # Telegram (optional but warn if partially configured)
         has_token = bool(settings.TELEGRAM_BOT_TOKEN)
@@ -125,9 +126,6 @@ class ConfigValidator:
     def validate_trading_ready(self, settings) -> ValidationResult:
         """Stricter validation specifically for enabling live trading."""
         result = self.validate_all(settings)
-
-        if not settings.TRADING_ENABLED:
-            self._add_error(result, "TRADING_ENABLED must be true")
 
         if not settings.POLYMARKET_PRIVATE_KEY:
             self._add_error(result, "POLYMARKET_PRIVATE_KEY required for live trading")

@@ -1300,7 +1300,6 @@ export const analyzeAndTrackWallet = async (params: {
 // ==================== TRADING ====================
 
 export interface TradingStatus {
-  enabled: boolean
   initialized: boolean
   authenticated: boolean
   credentials_configured: boolean

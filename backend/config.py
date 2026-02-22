@@ -127,7 +127,6 @@ class Settings(BaseSettings):
     POLYMARKET_API_PASSPHRASE: Optional[str] = None
 
     # Trading Safety Limits
-    TRADING_ENABLED: bool = False  # Must be explicitly enabled
     MAX_TRADE_SIZE_USD: float = 100.0  # Maximum single trade size
     MAX_DAILY_TRADE_VOLUME: float = 1000.0  # Maximum daily trading volume
     MAX_OPEN_POSITIONS: int = 10  # Maximum concurrent open positions
