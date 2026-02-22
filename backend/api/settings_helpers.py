@@ -318,7 +318,6 @@ def scanner_payload(settings: AppSettings) -> dict[str, Any]:
 
 def trading_payload(settings: AppSettings) -> dict[str, Any]:
     return {
-        "trading_enabled": settings.trading_enabled,
         "max_trade_size_usd": settings.max_trade_size_usd,
         "max_daily_trade_volume": settings.max_daily_trade_volume,
         "max_open_positions": settings.max_open_positions,
@@ -713,7 +712,6 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
 
     if trading:
         trade = trading
-        settings.trading_enabled = trade.trading_enabled
         settings.max_trade_size_usd = trade.max_trade_size_usd
         settings.max_daily_trade_volume = trade.max_daily_trade_volume
         settings.max_open_positions = trade.max_open_positions

@@ -3208,7 +3208,6 @@ async def _build_preflight_checks(
     trader_count: int,
 ) -> list[dict[str, Any]]:
     app_settings = await session.get(AppSettings, "default")
-    db_trading_enabled = bool(app_settings.trading_enabled) if app_settings is not None else False
     polymarket_ready = bool(
         app_settings is not None
         and decrypt_secret(app_settings.polymarket_api_key)
@@ -3228,11 +3227,6 @@ async def _build_preflight_checks(
             "id": "trading_enabled_env",
             "ok": bool(settings.TRADING_ENABLED),
             "message": "TRADING_ENABLED must be true in environment config",
-        },
-        {
-            "id": "trading_enabled_setting",
-            "ok": db_trading_enabled,
-            "message": "trading_enabled must be true in app settings",
         },
         {
             "id": "live_credentials_configured",

@@ -2496,7 +2496,6 @@ export interface DiscoverySettings {
 }
 
 export interface TradingSettingsConfig {
-  trading_enabled: boolean
   max_trade_size_usd: number
   max_daily_trade_volume: number
   max_open_positions: number

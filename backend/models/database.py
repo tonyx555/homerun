@@ -833,7 +833,6 @@ class AppSettings(Base):
     discovery_pool_recompute_interval_seconds = Column(Integer, default=60)
 
     # Trading Safety Settings
-    trading_enabled = Column(Boolean, default=False)
     max_trade_size_usd = Column(Float, default=100.0)
     max_daily_trade_volume = Column(Float, default=1000.0)
     max_open_positions = Column(Integer, default=10)

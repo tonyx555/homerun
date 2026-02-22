@@ -2142,11 +2142,7 @@ async def run_worker_loop() -> None:
                                     skip_cycle = True
 
                         if not skip_cycle and mode == "live":
-                            app_settings = await session.get(AppSettings, "default")
-                            trading_enabled = bool(settings.TRADING_ENABLED) and bool(
-                                app_settings.trading_enabled if app_settings is not None else False
-                            )
-                            if not trading_enabled:
+                            if not bool(settings.TRADING_ENABLED):
                                 await _write_orchestrator_snapshot_best_effort(
                                     session,
                                     running=False,

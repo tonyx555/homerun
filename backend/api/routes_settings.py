@@ -142,7 +142,6 @@ class ScannerSettingsModel(BaseModel):
 class TradingSettings(BaseModel):
     """Trading safety configuration"""
 
-    trading_enabled: bool = Field(default=False, description="Enable live trading")
     max_trade_size_usd: float = Field(default=100.0, ge=1, description="Maximum single trade size")
     max_daily_trade_volume: float = Field(default=1000.0, ge=10, description="Maximum daily trading volume")
     max_open_positions: int = Field(default=10, ge=1, le=100, description="Maximum concurrent open positions")
