@@ -218,11 +218,15 @@ async def get_vpn_status():
 
 @router.post("/initialize")
 async def initialize_trading():
-    """Initialize the trading service with configured credentials"""
+    """Initialize the trading service with configured credentials.
+    If already initialized, re-runs the USDC allowance approval (useful
+    after funding the wallet with MATIC for gas)."""
     if trading_service.is_ready():
+        # Re-run allowance approval in case the wallet was just funded with MATIC.
+        await trading_service._approve_clob_allowance()
         return {
             "status": "already_initialized",
-            "message": "Trading service already initialized",
+            "message": "Trading service already initialized; USDC allowance re-checked",
         }
 
     success = await trading_service.initialize()
@@ -233,6 +237,16 @@ async def initialize_trading():
             status_code=400,
             detail="Failed to initialize trading. Check credentials are configured.",
         )
+
+
+@router.post("/approve-allowance")
+async def approve_clob_allowance():
+    """Re-run the on-chain USDC approve for the CLOB exchange contract.
+    Call this after funding the trading wallet with MATIC for gas fees."""
+    if not trading_service.is_ready():
+        raise HTTPException(status_code=400, detail="Trading service not initialized")
+    await trading_service._approve_clob_allowance()
+    return {"status": "success", "message": "USDC allowance check/approve completed"}
 
 
 @router.post("/orders", response_model=OrderResponse)
