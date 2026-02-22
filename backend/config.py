@@ -140,6 +140,7 @@ class Settings(BaseSettings):
     POLYGON_RPC_URL: str = "https://rpc-mainnet.matic.quiknode.pro"
     POLYGON_WS_URL: str = "wss://polygon-bor-rpc.publicnode.com"
     CHAIN_ID: int = 137  # Polygon mainnet
+    POLYMARKET_SIGNATURE_TYPE: int = 1  # 0=EOA, 1=POLY_PROXY, 2=POLY_GNOSIS_SAFE
 
     # Depth Analysis
     MIN_DEPTH_USD: float = 200.0  # Minimum order book depth to allow trade

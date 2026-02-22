@@ -469,12 +469,15 @@ class TradingService:
                     api_passphrase=api_passphrase,
                 )
 
-                # Initialize client
+                # Initialize client with configured signature type (default POLY_PROXY=1).
+                # This ensures the builder signs orders correctly even if the DB
+                # restore and balance probe both fail during init.
                 self._client = ClobClient(
                     host=settings.CLOB_API_URL,
                     key=private_key,
                     chain_id=settings.CHAIN_ID,
                     creds=creds,
+                    signature_type=int(getattr(settings, "POLYMARKET_SIGNATURE_TYPE", 1)),
                 )
                 self._wallet_address = Account.from_key(private_key).address
                 self._initialized = True
