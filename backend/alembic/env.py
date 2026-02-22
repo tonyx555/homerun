@@ -52,8 +52,10 @@ def do_run_migrations(connection: Connection) -> None:
         compare_server_default=True,
     )
 
-    with context.begin_transaction():
-        context.run_migrations()
+    # Do NOT wrap in begin_transaction() — migrations that use autocommit_block()
+    # (e.g. ALTER TYPE ... ADD VALUE) require Alembic to manage its own transaction
+    # state. An outer begin_transaction() breaks autocommit_block()'s assertion.
+    context.run_migrations()
 
 
 async def run_async_migrations() -> None:

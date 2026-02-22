@@ -38,8 +38,9 @@ def _build_scanner(
         from services.scanner import ArbitrageScanner
 
         scanner = ArbitrageScanner(data_provider=data_provider)
-        if strategies is not None:
-            scanner.strategies = strategies
+        # Default to empty overrides so scan_fast never attempts a live DB load.
+        # Tests that need specific strategies can still pass them explicitly.
+        scanner.strategies = strategies if strategies is not None else []
         return scanner
 
 

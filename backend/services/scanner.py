@@ -1107,6 +1107,38 @@ class ArbitrageScanner:
         full_snapshot: set[str] = set()
         within_market = str(MispricingType.WITHIN_MARKET.value).lower()
 
+        # When strategy overrides are active (e.g. in tests), partition from those
+        # instances instead of the global strategy_loader. An empty override list
+        # still signals "override mode" so dispatch is not skipped.
+        if self._strategy_overrides is not None:
+            for instance in self._strategy_overrides:
+                slug = getattr(instance, "slug", None) or getattr(instance, "name", "__override__")
+                if getattr(instance, "worker_affinity", "scanner") != "scanner":
+                    continue
+                subscriptions = set(getattr(instance, "subscriptions", None) or [])
+                if "*" in subscriptions:
+                    full_snapshot.add(slug)
+                    continue
+                if EventType.MARKET_DATA_REFRESH not in subscriptions:
+                    continue
+                mode = str(getattr(instance, "realtime_processing_mode", "auto") or "auto").strip().lower()
+                if mode == "incremental":
+                    incremental.add(slug)
+                    continue
+                if mode == "full_snapshot":
+                    full_snapshot.add(slug)
+                    continue
+                mispricing = str(getattr(instance, "mispricing_type", "") or "").strip().lower()
+                if mispricing == within_market:
+                    incremental.add(slug)
+                else:
+                    full_snapshot.add(slug)
+            # In override mode with no matching strategies, use a sentinel so
+            # _dispatch_market_refresh is still invoked (strategies handle themselves).
+            if not incremental and not full_snapshot:
+                incremental.add("__override__")
+            return incremental, full_snapshot
+
         for slug, loaded in strategy_loader._loaded.items():
             instance = loaded.instance
             if getattr(instance, "worker_affinity", "scanner") != "scanner":
