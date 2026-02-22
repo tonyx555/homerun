@@ -15,14 +15,6 @@
 
 ![Homerun Dashboard — Market Scanner](../screenshots/dashboard-scanner.png)
 
-## Quick Links
-
-- Start local dev: `make setup && make dev`
-- Start terminal UI: `make run`
-- Strategy API docs: `GET /api/strategy-manager/docs`
-- Data source API docs: `GET /api/data-sources/docs`
-- FastAPI swagger: `http://localhost:8000/docs`
-
 ## TL;DR
 
 Homerun is a full-stack platform for building and running prediction-market trading systems where:
@@ -46,82 +38,13 @@ Most trading bots force a rigid pipeline or a toy DSL. Homerun does not.
 - Unified opportunity model across scanner/news/weather/events/trader flows.
 - Built for prediction markets first (binary contracts, event settlement, cross-venue dislocations).
 
-## Architecture
+## Quick Links
 
-```text
-External APIs / RSS / Python Sources
-                |
-                v
-       Data Source Runtime
-  (fetch -> transform -> upsert)
-                |
-                v
-      data_source_records table  <-----+
-                |                      |
-                |                  StrategySDK
-                |             (read/run/list sources)
-                v                      |
-   Event Dispatcher + Workers          |
-  (market/news/weather/events/traders) |
-                |                      |
-                +----------> Strategy Runtime (DB-loaded Python)
-                               detect / evaluate / should_exit
-                                          |
-                                          v
-                                    Opportunity + Signal
-                                          |
-                                          v
-                                 Trader Orchestrator
-                              (risk gates + order manager)
-                                          |
-                                          v
-                              Paper / Live execution paths
-```
-
-## Current State (Accurate)
-
-- Unified strategy registry: `strategies` table managed by `/api/strategy-manager/*`.
-- Unified data-source registry: `data_sources` table managed by `/api/data-sources/*`.
-- Strategy runtime refresh is revision-driven (`strategy_runtime_revisions`) and hot-reloadable.
-- Data-source runtime includes validation, reload, immediate run, run history, and record inspection.
-- Code backtesting endpoints are live for all strategy lifecycle phases:
-  - `POST /api/validation/code-backtest`
-  - `POST /api/validation/code-backtest/evaluate`
-  - `POST /api/validation/code-backtest/exit`
-- Unified opportunities endpoint supports source scoping:
-  - `GET /api/opportunities?source=markets|traders|all`
-
-## Quick Start
-
-### Prereqs
-
-- Python 3
-- Node.js
-- Docker or `redis-server` (setup script can bootstrap Redis runtime prerequisites)
-
-### Local dev (frontend + backend)
-
-```bash
-git clone <your-repo-url>
-cd homerun
-make setup
-make dev
-```
-
-App endpoints:
-
-- Frontend: `http://localhost:3000`
-- Backend API: `http://localhost:8000`
-- FastAPI docs: `http://localhost:8000/docs`
-- WebSocket: `ws://localhost:8000/ws`
-
-### Terminal mode (TUI)
-
-```bash
-make run
-```
-
-`make run` launches the Textual/Rich TUI (`tui.py`) and ensures Redis is up.
+- Start local dev: `make setup && make dev`
+- Start terminal UI: `make run`
+- Strategy API docs: `GET /api/strategy-manager/docs`
+- Data source API docs: `GET /api/data-sources/docs`
+- FastAPI swagger: `http://localhost:8000/docs`
 
 ## Wire Any Source Into Any Strategy
 
@@ -266,14 +189,70 @@ Then use:
 
 Or create/edit it from the UI: `Strategies`.
 
-## Built-In Packs
+## Architecture
 
-System seeds currently include:
+```text
+External APIs / RSS / Python Sources
+                |
+                v
+       Data Source Runtime
+  (fetch -> transform -> upsert)
+                |
+                v
+      data_source_records table  <-----+
+                |                      |
+                |                  StrategySDK
+                |             (read/run/list sources)
+                v                      |
+   Event Dispatcher + Workers          |
+  (market/news/weather/events/traders) |
+                |                      |
+                +----------> Strategy Runtime (DB-loaded Python)
+                               detect / evaluate / should_exit
+                                          |
+                                          v
+                                    Opportunity + Signal
+                                          |
+                                          v
+                                 Trader Orchestrator
+                              (risk gates + order manager)
+                                          |
+                                          v
+                              Paper / Live execution paths
+```
 
-- 25 built-in opportunity strategies.
-- 39 prebuilt data-source presets (events + stories) plus a full custom Python source template.
 
-You can disable system seeds, clone them, or replace with your own strategy/source code.
+## Quick Start
+
+### Prereqs
+
+- Python 3
+- Node.js
+- Docker or `redis-server` (setup script can bootstrap Redis runtime prerequisites)
+
+### Local dev (frontend + backend)
+
+```bash
+git clone <your-repo-url>
+cd homerun
+make setup
+make dev
+```
+
+App endpoints:
+
+- Frontend: `http://localhost:3000`
+- Backend API: `http://localhost:8000`
+- FastAPI docs: `http://localhost:8000/docs`
+- WebSocket: `ws://localhost:8000/ws`
+
+### Terminal mode (TUI)
+
+```bash
+make run
+```
+
+`make run` launches the Textual/Rich TUI (`tui.py`) and ensures Redis is up.
 
 ## Key API Surface
 
