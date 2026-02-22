@@ -2142,6 +2142,7 @@ async def run_worker_loop() -> None:
                                     skip_cycle = True
 
                         if not skip_cycle and mode == "live":
+                            app_settings = await session.get(AppSettings, "default")
                             if not _is_live_credentials_configured(app_settings):
                                 await _write_orchestrator_snapshot_best_effort(
                                     session,

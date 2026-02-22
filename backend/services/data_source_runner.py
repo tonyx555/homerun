@@ -12,7 +12,7 @@ from sqlalchemy import delete, desc, func, select
 from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.database import DataSource, DataSourceRecord, DataSourceRun
+from models.database import AsyncSessionLocal, DataSource, DataSourceRecord, DataSourceRun
 from services.data_source_catalog import default_data_source_retention_policy
 from services.data_source_loader import DataSourceValidationError, data_source_loader
 from utils.logger import get_logger
@@ -535,25 +535,16 @@ async def run_data_source(
         error_message = str(exc)
         logger.error("Data source run failed", source_slug=source_slug, exc_info=exc)
 
-        # The session transaction may be tainted (e.g. autoflush hit
-        # a transient transaction error). Roll back so we can persist the error
-        # run row cleanly.
+        session_is_broken = _is_retryable_db_disconnect_error(exc)
+
+        # Roll back tainted transaction so we can persist the error run row.
         try:
             await session.rollback()
         except Exception:
             pass
 
-        # Re-attach the source and run_row to the fresh transaction so the
-        # error state is persisted.
-        try:
-            source = await session.get(DataSource, source_id)
-            if source is not None:
-                source.status = "error"
-                source.error_message = error_message
-        except Exception:
-            pass
-
-        run_row = DataSourceRun(
+        completed_at = _utcnow_naive()
+        error_run_row = DataSourceRun(
             id=uuid.uuid4().hex,
             data_source_id=source_id,
             source_slug=source_slug,
@@ -565,10 +556,48 @@ async def run_data_source(
             error_message=error_message,
             metadata_json={},
             started_at=started_at,
-            completed_at=None,
-            duration_ms=None,
+            completed_at=completed_at,
+            duration_ms=int((completed_at - started_at).total_seconds() * 1000),
         )
-        session.add(run_row)
+
+        if session_is_broken:
+            # The underlying connection is closed; open a fresh session.
+            try:
+                async with AsyncSessionLocal() as fresh_session:
+                    src = await fresh_session.get(DataSource, source_id)
+                    if src is not None:
+                        src.status = "error"
+                        src.error_message = error_message
+                    fresh_session.add(error_run_row)
+                    await fresh_session.commit()
+            except Exception as persist_exc:
+                logger.warning(
+                    "Failed to persist error run row for %s: %s",
+                    source_slug,
+                    persist_exc,
+                )
+        else:
+            try:
+                src = await session.get(DataSource, source_id)
+                if src is not None:
+                    src.status = "error"
+                    src.error_message = error_message
+            except Exception:
+                pass
+            session.add(error_run_row)
+
+        return {
+            "run_id": error_run_row.id,
+            "source_slug": source_slug,
+            "status": "error",
+            "fetched_count": fetched_count,
+            "transformed_count": transformed_count,
+            "upserted_count": upserted_count,
+            "skipped_count": skipped_count,
+            "error_message": error_message,
+            "duration_ms": error_run_row.duration_ms,
+            "retention_pruned_count": 0,
+        }
 
     completed_at = _utcnow_naive()
     run_row.fetched_count = fetched_count
