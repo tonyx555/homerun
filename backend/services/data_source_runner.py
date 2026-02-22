@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import delete, desc, func, select
-from sqlalchemy.exc import InterfaceError, OperationalError
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import AsyncSessionLocal, DataSource, DataSourceRecord, DataSourceRun
@@ -27,7 +27,9 @@ _DB_DISCONNECT_RETRY_BASE_DELAY_SECONDS = 0.2
 
 
 def _is_retryable_db_disconnect_error(exc: Exception) -> bool:
-    if not isinstance(exc, (OperationalError, InterfaceError)):
+    # DBAPIError is the base for InterfaceError and OperationalError, but also
+    # wraps ConnectionDoesNotExistError which comes up as a plain DBAPIError.
+    if not isinstance(exc, (DBAPIError, OperationalError, InterfaceError)):
         return False
     markers = (
         "connection is closed",
@@ -37,6 +39,9 @@ def _is_retryable_db_disconnect_error(exc: Exception) -> bool:
         "terminating connection",
         "connection reset by peer",
         "broken pipe",
+        "connection was closed",
+        "connectiondoesnotexist",
+        "closed in the middle of operation",
     )
     # Check orig first (direct asyncpg errors), then fall back to the full
     # stringified exception which captures autoflush-wrapped InterfaceError

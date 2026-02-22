@@ -12,6 +12,8 @@ import os
 import socket
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
+
 from config import settings
 from models.database import AsyncSessionLocal
 from services.news import shared_state
@@ -28,6 +30,27 @@ setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"), json_format=False)
 logger = logging.getLogger("news_worker")
 
 _IDLE_SLEEP_SECONDS = 5
+
+_DB_DISCONNECT_MARKERS = (
+    "connection is closed",
+    "underlying connection is closed",
+    "connection has been closed",
+    "closed the connection unexpectedly",
+    "terminating connection",
+    "connection reset by peer",
+    "broken pipe",
+    "connection was closed",
+    "connectiondoesnotexist",
+    "closed in the middle of operation",
+    "transaction.rollback(): the underlying connection is closed",
+)
+
+
+def _is_db_disconnect_error(exc: Exception) -> bool:
+    if not isinstance(exc, (DBAPIError, InterfaceError, OperationalError)):
+        return False
+    full_msg = str(exc).lower()
+    return any(marker in full_msg for marker in _DB_DISCONNECT_MARKERS)
 
 
 async def emit_news_intent_signals(session, opportunities: list) -> int:
@@ -391,7 +414,10 @@ async def _run_loop() -> None:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.exception("News workflow cycle failed: %s", exc)
+            if _is_db_disconnect_error(exc):
+                logger.warning("News workflow cycle hit transient DB disconnect (will retry): %s", exc)
+            else:
+                logger.exception("News workflow cycle failed: %s", exc)
             next_scheduled_run_at = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=interval)
             try:
                 async with AsyncSessionLocal() as session:
