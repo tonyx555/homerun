@@ -89,7 +89,6 @@ def _install_fake_clob_modules(monkeypatch) -> None:
 
 
 def _configure_limits(monkeypatch) -> None:
-    monkeypatch.setattr(settings, "TRADING_ENABLED", True)
     monkeypatch.setattr(settings, "MIN_ORDER_SIZE_USD", 1.0)
     monkeypatch.setattr(settings, "MAX_TRADE_SIZE_USD", 10_000.0)
     monkeypatch.setattr(settings, "MAX_DAILY_TRADE_VOLUME", 10_000.0)

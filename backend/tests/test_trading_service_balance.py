@@ -46,7 +46,7 @@ class _BalanceClient:
 async def test_get_balance_returns_error_when_service_not_initialized():
     service = TradingService()
     result = await service.get_balance()
-    assert result == {"error": "Trading not initialized"}
+    assert result == {"error": "Polymarket credentials not configured"}
 
 
 @pytest.mark.asyncio

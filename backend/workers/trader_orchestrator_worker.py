@@ -9,7 +9,6 @@ from typing import Any
 
 from sqlalchemy import func, select, text
 
-from config import settings
 from models.database import (
     AppSettings,
     AsyncSessionLocal,

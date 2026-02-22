@@ -34,11 +34,8 @@ def test_apply_update_request_trading_updates_safety_fields_only():
     settings.max_daily_trade_volume = 1000.0
     settings.max_open_positions = 10
     settings.max_slippage_percent = 2.0
-    settings.trading_enabled = False
-
     request = _make_request(
         SimpleNamespace(
-            trading_enabled=True,
             max_trade_size_usd=250.0,
             max_daily_trade_volume=5000.0,
             max_open_positions=20,
@@ -48,7 +45,6 @@ def test_apply_update_request_trading_updates_safety_fields_only():
 
     apply_update_request(settings, request)
 
-    assert settings.trading_enabled is True
     assert settings.max_trade_size_usd == 250.0
     assert settings.max_daily_trade_volume == 5000.0
     assert settings.max_open_positions == 20

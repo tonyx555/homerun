@@ -11,7 +11,6 @@ from sqlalchemy import and_, desc, func, or_, select, update as sa_update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config import settings
 from models.database import (
     AppSettings,
     ExecutionSession,
@@ -32,6 +31,7 @@ from models.database import (
     TraderSignalCursor,
     TraderSignalConsumption,
 )
+from utils.logger import get_logger
 from services.event_bus import event_bus
 from services.worker_state import (
     DB_RETRY_ATTEMPTS,
@@ -55,6 +55,8 @@ from services.trader_orchestrator.templates import (
 from utils.utcnow import utcnow
 from utils.secrets import decrypt_secret
 from utils.converters import safe_float, safe_int, to_iso
+
+logger = get_logger(__name__)
 
 ORCHESTRATOR_CONTROL_ID = "default"
 ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS = 5

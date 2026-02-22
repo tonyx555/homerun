@@ -23,7 +23,12 @@ def upgrade() -> None:
     if bind.dialect.name != "postgresql":
         return
 
-    with op.get_context().autocommit_block():
+    ctx = op.get_context()
+    try:
+        with ctx.autocommit_block():
+            op.execute(sa.text("ALTER TYPE tradestatus ADD VALUE IF NOT EXISTS 'CLOSED_WIN'"))
+            op.execute(sa.text("ALTER TYPE tradestatus ADD VALUE IF NOT EXISTS 'CLOSED_LOSS'"))
+    except AssertionError:
         op.execute(sa.text("ALTER TYPE tradestatus ADD VALUE IF NOT EXISTS 'CLOSED_WIN'"))
         op.execute(sa.text("ALTER TYPE tradestatus ADD VALUE IF NOT EXISTS 'CLOSED_LOSS'"))
 
