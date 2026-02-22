@@ -2935,6 +2935,16 @@ async_engine = create_async_engine(settings.DATABASE_URL, **_engine_kw)
 AsyncSessionLocal = sessionmaker(async_engine, class_=RetryableAsyncSession, expire_on_commit=False)
 
 
+async def recover_pool() -> None:
+    """Drop all pooled connections and force fresh ones on next checkout.
+
+    Call after consecutive DB disconnect errors to clear stale connections
+    that pool_pre_ping cannot reclaim fast enough during mass-disconnect
+    scenarios (e.g. PostgreSQL restart).
+    """
+    await async_engine.dispose()
+
+
 def _run_alembic_upgrade(connection) -> None:
     from alembic import command
     from alembic.config import Config

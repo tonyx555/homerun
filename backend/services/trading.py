@@ -489,6 +489,13 @@ class TradingService:
                     logger.warning("Trading HTTP transport patch failed; using py-clob-client default transport")
 
                 await self._restore_runtime_state()
+                # Apply restored sig_type to builder immediately so that even if
+                # the get_balance() probe below fails, orders are signed correctly.
+                if isinstance(self._balance_signature_type, int):
+                    builder = getattr(self._client, "builder", None)
+                    if builder is not None and getattr(builder, "sig_type", None) != self._balance_signature_type:
+                        builder.sig_type = self._balance_signature_type
+                        logger.info("Restored builder sig_type=%s from runtime state", self._balance_signature_type)
                 await self._approve_clob_allowance()
                 # Probe all signature types to find which one has balance/allowance.
                 # This sets self._balance_signature_type and builder.sig_type so that
@@ -1412,6 +1419,14 @@ class TradingService:
         try:
             await self._sync_trading_transport()
 
+            # Ensure builder.sig_type matches the detected balance signature type
+            # before signing. Without this, a stale sig_type=0 (EOA) causes
+            # "invalid signature" on POLY_PROXY wallets.
+            if isinstance(self._balance_signature_type, int):
+                builder = getattr(self._client, "builder", None)
+                if builder is not None and getattr(builder, "sig_type", None) != self._balance_signature_type:
+                    builder.sig_type = self._balance_signature_type
+
             # Build and sign order using py-clob-client
             from py_clob_client.clob_types import OrderArgs
             from py_clob_client.order_builder.constants import BUY, SELL
@@ -2014,7 +2029,7 @@ class TradingService:
 
             primary_snapshot, primary_error = await fetch_balance_snapshot(primary_signature_type)
             if primary_error:
-                return {"error": primary_error}
+                primary_snapshot = None
 
             best_snapshot = primary_snapshot
             needs_probe = (
@@ -2031,7 +2046,7 @@ class TradingService:
                         continue
                     candidate_snapshot, candidate_error = await fetch_balance_snapshot(signature_type)
                     if candidate_error:
-                        return {"error": candidate_error}
+                        continue
                     if candidate_snapshot is None:
                         continue
                     if best_snapshot is None:

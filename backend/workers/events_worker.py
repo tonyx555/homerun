@@ -22,6 +22,7 @@ from models.database import (
     DataSourceRecord,
     EventsSignal,
     EventsSnapshot,
+    recover_pool,
 )
 from services.data_source_runner import run_data_source
 from services.worker_state import (
@@ -38,6 +39,7 @@ setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"), json_format=False)
 logger = logging.getLogger("events_worker")
 
 _IDLE_SLEEP_SECONDS = 5
+_MAX_CONSECUTIVE_DB_FAILURES = 3
 
 
 def _utcnow() -> datetime:
@@ -526,6 +528,7 @@ async def _run_loop() -> None:
         logger.warning("Events data source seed/refresh failed: %s", exc)
 
     next_scheduled_run_at: datetime | None = None
+    consecutive_db_failures = 0
 
     while True:
         try:
@@ -685,6 +688,7 @@ async def _run_loop() -> None:
                     stats=stats,
                 )
 
+            consecutive_db_failures = 0
             logger.info(
                 "Events cycle complete: signals=%d persisted=%d duration=%.2fs sources=%d",
                 len(signals),
@@ -697,7 +701,24 @@ async def _run_loop() -> None:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            is_db_disconnect = _is_retryable_db_error(exc)
+            if is_db_disconnect:
+                consecutive_db_failures += 1
+            else:
+                consecutive_db_failures = 0
+
             logger.exception("Events cycle failed: %s", exc)
+
+            if is_db_disconnect and consecutive_db_failures >= _MAX_CONSECUTIVE_DB_FAILURES:
+                logger.warning(
+                    "DB disconnect streak=%d; disposing connection pool",
+                    consecutive_db_failures,
+                )
+                try:
+                    await recover_pool()
+                except Exception:
+                    pass
+
             try:
                 existing_stats = await _read_existing_worker_stats()
                 async with AsyncSessionLocal() as session:
@@ -726,7 +747,15 @@ async def _run_loop() -> None:
                 )
             except Exception:
                 pass
-            await asyncio.sleep(min(_IDLE_SLEEP_SECONDS, settings.EVENTS_INTERVAL_SECONDS))
+
+            if is_db_disconnect:
+                sleep_seconds = min(
+                    _IDLE_SLEEP_SECONDS * (2 ** (consecutive_db_failures - 1)),
+                    float(settings.EVENTS_INTERVAL_SECONDS),
+                )
+            else:
+                sleep_seconds = min(_IDLE_SLEEP_SECONDS, settings.EVENTS_INTERVAL_SECONDS)
+            await asyncio.sleep(sleep_seconds)
 
 
 async def start_loop() -> None:

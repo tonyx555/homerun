@@ -586,6 +586,12 @@ async def run_data_source(
                 if _attempt < _persist_attempts - 1 and _is_retryable_db_disconnect_error(persist_exc):
                     await asyncio.sleep(_db_disconnect_retry_delay(_attempt))
                     continue
+                if _is_retryable_db_disconnect_error(persist_exc):
+                    try:
+                        from models.database import recover_pool
+                        await recover_pool()
+                    except Exception:
+                        pass
                 logger.warning(
                     "Failed to persist error run row for %s: %s",
                     source_slug,
