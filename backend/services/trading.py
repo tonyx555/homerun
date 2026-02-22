@@ -309,15 +309,92 @@ class TradingService:
         return patch_clob_client_proxy()
 
     async def _approve_clob_allowance(self) -> None:
-        """Approve USDC spending allowance for the CLOB exchange contract.
+        """Ensure on-chain USDC ERC-20 allowance is set for the CLOB exchange contract.
 
         Polymarket's CLOB API rejects orders with 'not enough balance / allowance'
-        if the ERC-20 allowance hasn't been approved on-chain for each signature
-        type. This is a one-time (or periodic) on-chain transaction. We call it
-        for all signature types at init time so orders succeed immediately.
+        when the wallet's USDC.allowance(owner, ctf_exchange) is 0 on Polygon.
+        This submits a real on-chain USDC.approve(ctf_exchange, MAX_UINT256) if
+        the current allowance is below a safe threshold, then calls
+        update_balance_allowance to refresh the CLOB server's cached view.
         """
         if not self.is_ready():
             return
+
+        # --- Step 1: on-chain ERC-20 approve via web3 ---
+        try:
+            from web3 import Web3
+            from py_clob_client.config import get_contract_config
+            from eth_account import Account
+
+            _ERC20_ABI = [
+                {
+                    "name": "approve",
+                    "type": "function",
+                    "inputs": [
+                        {"name": "spender", "type": "address"},
+                        {"name": "amount", "type": "uint256"},
+                    ],
+                    "outputs": [{"name": "", "type": "bool"}],
+                    "stateMutability": "nonpayable",
+                },
+                {
+                    "name": "allowance",
+                    "type": "function",
+                    "inputs": [
+                        {"name": "owner", "type": "address"},
+                        {"name": "spender", "type": "address"},
+                    ],
+                    "outputs": [{"name": "", "type": "uint256"}],
+                    "stateMutability": "view",
+                },
+            ]
+            _MAX_UINT256 = 2**256 - 1
+            # Require at least $500k USDC (6 decimals) before re-approving
+            _MIN_ALLOWANCE = 500_000 * 10**6
+
+            def _do_on_chain_approve(private_key: str, chain_id: int) -> str:
+                rpc_url = settings.POLYGON_RPC_URL or "https://polygon-rpc.com"
+                w3 = Web3(Web3.HTTPProvider(rpc_url))
+                contract_cfg = get_contract_config(chain_id)
+                if contract_cfg is None:
+                    return "no contract config"
+                usdc_addr = Web3.to_checksum_address(contract_cfg.collateral)
+                exchange_addr = Web3.to_checksum_address(contract_cfg.exchange)
+                account = Account.from_key(private_key)
+                owner_addr = account.address
+                usdc = w3.eth.contract(address=usdc_addr, abi=_ERC20_ABI)
+                current_allowance = usdc.functions.allowance(owner_addr, exchange_addr).call()
+                if current_allowance >= _MIN_ALLOWANCE:
+                    return f"sufficient (current={current_allowance // 10**6} USDC)"
+                nonce = w3.eth.get_transaction_count(owner_addr)
+                tx = usdc.functions.approve(exchange_addr, _MAX_UINT256).build_transaction(
+                    {
+                        "from": owner_addr,
+                        "nonce": nonce,
+                        "gas": 100_000,
+                        "gasPrice": w3.eth.gas_price,
+                        "chainId": chain_id,
+                    }
+                )
+                signed = w3.eth.account.sign_transaction(tx, private_key)
+                tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+                receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+                return f"tx={tx_hash.hex()} status={receipt.status}"
+
+            # Resolve private key for web3 signing
+            private_key, _, _, _, _ = await self._resolve_polymarket_credentials()
+            if private_key:
+                result = await asyncio.to_thread(
+                    _do_on_chain_approve, private_key, settings.CHAIN_ID
+                )
+                logger.info("USDC on-chain allowance check/approve: %s", result)
+            else:
+                logger.warning("No private key available for on-chain USDC approve")
+
+        except Exception as exc:
+            logger.warning("On-chain USDC allowance approval failed (non-fatal): %s", exc)
+
+        # --- Step 2: refresh CLOB server's cached view of balance/allowance ---
         try:
             from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
 
@@ -326,21 +403,19 @@ class TradingService:
                     asset_type=AssetType.COLLATERAL,
                     signature_type=sig_type,
                 )
-        except Exception:
-            logger.warning("Could not import BalanceAllowanceParams; skipping allowance approval")
-            return
 
-        for sig_type in POLYMARKET_SIGNATURE_TYPES:
-            try:
-                params = build_params(sig_type)
-                await asyncio.to_thread(self._client.update_balance_allowance, params)
-                logger.info("CLOB allowance approved", signature_type=sig_type)
-            except Exception as exc:
-                logger.warning(
-                    "CLOB allowance approval failed for signature_type=%d (non-fatal)",
-                    sig_type,
-                    exc_info=exc,
-                )
+            for sig_type in POLYMARKET_SIGNATURE_TYPES:
+                try:
+                    params = build_params(sig_type)
+                    await asyncio.to_thread(self._client.update_balance_allowance, params)
+                except Exception as exc:
+                    logger.debug(
+                        "CLOB balance-allowance cache refresh failed for sig_type=%d: %s",
+                        sig_type,
+                        exc,
+                    )
+        except Exception as exc:
+            logger.warning("CLOB balance-allowance cache refresh failed (non-fatal): %s", exc)
 
     async def ensure_initialized(self) -> bool:
         if self.is_ready():

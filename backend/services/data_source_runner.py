@@ -542,9 +542,7 @@ async def run_data_source(
         error_message = str(exc)
         logger.error("Data source run failed", source_slug=source_slug, exc_info=exc)
 
-        session_is_broken = _is_retryable_db_disconnect_error(exc)
-
-        # Roll back tainted transaction so we can persist the error run row.
+        # Roll back tainted transaction.
         try:
             await session.rollback()
         except Exception:
@@ -567,31 +565,24 @@ async def run_data_source(
             duration_ms=int((completed_at - started_at).total_seconds() * 1000),
         )
 
-        if session_is_broken:
-            # The underlying connection is closed; open a fresh session.
-            try:
-                async with AsyncSessionLocal() as fresh_session:
-                    src = await fresh_session.get(DataSource, source_id)
-                    if src is not None:
-                        src.status = "error"
-                        src.error_message = error_message
-                    fresh_session.add(error_run_row)
-                    await fresh_session.commit()
-            except Exception as persist_exc:
-                logger.warning(
-                    "Failed to persist error run row for %s: %s",
-                    source_slug,
-                    persist_exc,
-                )
-        else:
-            try:
-                src = await session.get(DataSource, source_id)
+        # Always persist the error run row via a fresh session. The original
+        # session is in an indeterminate post-rollback state and may be shared
+        # with concurrent callers (e.g. asyncio.gather in feed_service). Using
+        # it here risks "another operation is in progress" asyncpg errors.
+        try:
+            async with AsyncSessionLocal() as fresh_session:
+                src = await fresh_session.get(DataSource, source_id)
                 if src is not None:
                     src.status = "error"
                     src.error_message = error_message
-            except Exception:
-                pass
-            session.add(error_run_row)
+                fresh_session.add(error_run_row)
+                await fresh_session.commit()
+        except Exception as persist_exc:
+            logger.warning(
+                "Failed to persist error run row for %s: %s",
+                source_slug,
+                persist_exc,
+            )
 
         return {
             "run_id": error_run_row.id,
