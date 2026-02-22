@@ -353,22 +353,14 @@ async def run_data_source(
     started_at = _utcnow_naive()
     runtime = data_source_loader.get_runtime(source_slug)
 
-    run_row = DataSourceRun(
-        id=uuid.uuid4().hex,
-        data_source_id=source_id,
-        source_slug=source_slug,
-        status="success",
-        fetched_count=0,
-        transformed_count=0,
-        upserted_count=0,
-        skipped_count=0,
-        error_message=None,
-        metadata_json={},
-        started_at=started_at,
-        completed_at=None,
-        duration_ms=None,
-    )
-    session.add(run_row)
+    # Build run_row but do NOT add it to the session yet. Adding it upfront
+    # causes SQLAlchemy autoflush to try to INSERT it when the subsequent
+    # SELECT queries run. If the connection dies between add() and the
+    # SELECT, autoflush throws InterfaceError on the INSERT — before we even
+    # reach the exception handler. We add it to the session only at the end
+    # (success path) or via a fresh session (error path).
+    run_row_id = uuid.uuid4().hex
+    run_row: DataSourceRun | None = None
 
     fetched_count = 0
     transformed_count = 0
@@ -507,8 +499,6 @@ async def run_data_source(
 
         source.status = "loaded"
         source.error_message = None
-        run_row.status = "success"
-        run_row.error_message = None
     except Exception as exc:
         if _retry_on_disconnect and _is_retryable_db_disconnect_error(exc):
             try:
@@ -597,23 +587,36 @@ async def run_data_source(
             "retention_pruned_count": 0,
         }
 
+    # Build and add run_row here — only after all the fetch/upsert work
+    # succeeded. Deferring the add() until this point prevents SQLAlchemy
+    # autoflush from trying to INSERT it during the SELECT queries above
+    # (which would fail with InterfaceError if the connection died).
     completed_at = _utcnow_naive()
-    run_row.fetched_count = fetched_count
-    run_row.transformed_count = transformed_count
-    run_row.upserted_count = upserted_count
-    run_row.skipped_count = skipped_count
-    run_row.metadata_json = {
-        "max_records": safe_max_records,
-        "retention": dict(retention_policy),
-        "retention_pruned": {
-            "max_age_deleted": int(retention_pruned.get("max_age_deleted") or 0),
-            "max_records_deleted": int(retention_pruned.get("max_records_deleted") or 0),
-            "total_deleted": int(retention_pruned.get("max_age_deleted") or 0)
-            + int(retention_pruned.get("max_records_deleted") or 0),
+    run_row = DataSourceRun(
+        id=run_row_id,
+        data_source_id=source_id,
+        source_slug=source_slug,
+        status="success",
+        fetched_count=fetched_count,
+        transformed_count=transformed_count,
+        upserted_count=upserted_count,
+        skipped_count=skipped_count,
+        error_message=None,
+        metadata_json={
+            "max_records": safe_max_records,
+            "retention": dict(retention_policy),
+            "retention_pruned": {
+                "max_age_deleted": int(retention_pruned.get("max_age_deleted") or 0),
+                "max_records_deleted": int(retention_pruned.get("max_records_deleted") or 0),
+                "total_deleted": int(retention_pruned.get("max_age_deleted") or 0)
+                + int(retention_pruned.get("max_records_deleted") or 0),
+            },
         },
-    }
-    run_row.completed_at = completed_at
-    run_row.duration_ms = int((completed_at - started_at).total_seconds() * 1000)
+        started_at=started_at,
+        completed_at=completed_at,
+        duration_ms=int((completed_at - started_at).total_seconds() * 1000),
+    )
+    session.add(run_row)
 
     if commit:
         await session.commit()

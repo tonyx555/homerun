@@ -353,8 +353,27 @@ class TradingService:
             _MIN_ALLOWANCE = 500_000 * 10**6
 
             def _do_on_chain_approve(private_key: str, chain_id: int) -> str:
-                rpc_url = settings.POLYGON_RPC_URL or "https://polygon-rpc.com"
-                w3 = Web3(Web3.HTTPProvider(rpc_url))
+                # Try configured RPC first, then fall back to known-working public nodes.
+                # polygon-rpc.com returns 401; quiknode and tenderly are reliable free nodes.
+                _rpc_candidates = [
+                    url for url in [
+                        settings.POLYGON_RPC_URL,
+                        "https://rpc-mainnet.matic.quiknode.pro",
+                        "https://polygon.gateway.tenderly.co",
+                    ] if url
+                ]
+                w3 = None
+                last_err = None
+                for rpc_url in _rpc_candidates:
+                    try:
+                        candidate = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 10}))
+                        candidate.eth.block_number  # quick connectivity check
+                        w3 = candidate
+                        break
+                    except Exception as e:
+                        last_err = e
+                if w3 is None:
+                    raise RuntimeError(f"All Polygon RPCs failed; last error: {last_err}")
                 contract_cfg = get_contract_config(chain_id)
                 if contract_cfg is None:
                     return "no contract config"
