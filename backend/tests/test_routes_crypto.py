@@ -17,7 +17,18 @@ from api import routes_crypto
 async def test_get_crypto_markets_uses_fresh_worker_snapshot(monkeypatch):
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     near_future = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
-    snapshot_markets = [{"id": "m1", "asset": "BTC", "timeframe": "15min", "end_time": near_future}]
+    snapshot_markets = [
+        {
+            "id": "m1",
+            "asset": "BTC",
+            "timeframe": "15min",
+            "end_time": near_future,
+            "oracle_price": 65000.0,
+            "oracle_prices_by_source": {
+                "chainlink": {"price": 65000.0},
+            },
+        }
+    ]
 
     monkeypatch.setattr(
         routes_crypto,
@@ -54,6 +65,41 @@ async def test_get_crypto_markets_falls_back_when_snapshot_stale(monkeypatch):
             }
         ),
     )
+    fallback_mock = AsyncMock(return_value=live_markets)
+    monkeypatch.setattr(routes_crypto, "_build_live_markets_from_source", fallback_mock)
+
+    out = await routes_crypto.get_crypto_markets(object())
+    assert out == live_markets
+    fallback_mock.assert_awaited_once_with(snapshot_markets)
+
+
+@pytest.mark.asyncio
+async def test_get_crypto_markets_falls_back_when_snapshot_missing_oracle_payload(monkeypatch):
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    near_future = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+    snapshot_markets = [
+        {
+            "id": "snapshot-market",
+            "asset": "BTC",
+            "timeframe": "15min",
+            "end_time": near_future,
+            "oracle_price": None,
+            "oracle_prices_by_source": {},
+        }
+    ]
+    live_markets = [{"id": "live-market", "asset": "BTC", "oracle_price": 67123.45}]
+
+    monkeypatch.setattr(
+        routes_crypto,
+        "read_worker_snapshot",
+        AsyncMock(
+            return_value={
+                "updated_at": now,
+                "stats": {"markets": snapshot_markets},
+            }
+        ),
+    )
+    monkeypatch.setattr(routes_crypto, "_configured_timeframes", lambda: {"15m"})
     fallback_mock = AsyncMock(return_value=live_markets)
     monkeypatch.setattr(routes_crypto, "_build_live_markets_from_source", fallback_mock)
 
@@ -124,3 +170,16 @@ async def test_source_fallback_hydrates_price_to_beat_from_snapshot(monkeypatch)
     out = await routes_crypto._build_live_markets_from_source([{"slug": "btc-updown-123", "price_to_beat": 67890.12}])
     assert out and out[0]["price_to_beat"] == 67890.12
     assert svc._price_to_beat["btc-updown-123"] == 67890.12
+
+
+def test_oracle_history_payload_uses_tail_window():
+    feed = SimpleNamespace(
+        _history={
+            "BTC": [(idx, float(idx)) for idx in range(1, 121)],
+        }
+    )
+
+    out = routes_crypto._oracle_history_payload(feed, "BTC")
+    assert len(out) == 80
+    assert out[0] == {"t": 41, "p": 41.0}
+    assert out[-1] == {"t": 120, "p": 120.0}

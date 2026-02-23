@@ -8,9 +8,9 @@ import {
   ChevronRight,
   Clock3,
   Copy,
+  ExternalLink,
   Filter,
   Loader2,
-  Pause,
   Play,
   Plus,
   Settings,
@@ -24,9 +24,12 @@ import {
   createTrader,
   deleteTrader,
   getAllTraderOrders,
+  getTraderOrders,
   getTraderDecisionDetail,
   getTraderDecisions,
   getTraderEvents,
+  getValidationJob,
+  getLiveTruthMonitorRaw,
   getTraderConfigSchema,
   getTraderOrchestratorOverview,
   getTraderSources,
@@ -35,21 +38,24 @@ import {
   getWallets,
   createCopyConfig,
   disableCopyConfig,
-  pauseTrader,
   runTraderOnce,
   runTraderOrchestratorLivePreflight,
   setTraderOrchestratorLiveKillSwitch,
-  startTrader,
   startTraderOrchestrator,
   startTraderOrchestratorLive,
   stopTraderOrchestrator,
   stopTraderOrchestratorLive,
+  enqueueLiveTruthMonitorJob,
+  exportLiveTruthMonitorArtifact,
   type Trader,
   type TraderConfigSchema,
   type TraderEvent,
   type TraderOrder,
   type TraderSourceConfig,
   type TraderSource,
+  type ValidationJob,
+  type LiveTruthMonitorArtifact,
+  type LiveTruthMonitorRawResponse,
   updateCopyConfig,
   updateDiscoverySettings,
   updateTrader,
@@ -61,6 +67,7 @@ import {
 } from '../services/api'
 import { discoveryApi } from '../services/discoveryApi'
 import { cn } from '../lib/utils'
+import { getTraderOrderPlatformLinks } from '../lib/marketUrls'
 import { selectedAccountIdAtom } from '../store/atoms'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
@@ -74,12 +81,17 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '
 import { Switch } from './ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs'
+import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip'
+import { FlashNumber } from './AnimatedNumber'
 import StrategyConfigForm from './StrategyConfigForm'
 
 type FeedFilter = 'all' | 'decision' | 'order' | 'event'
 type TradeStatusFilter = 'all' | 'open' | 'resolved' | 'failed'
 type AllBotsTab = 'overview' | 'trades' | 'positions'
 type TradeAction = 'BUY' | 'SELL'
+type PositionDirectionFilter = 'all' | 'yes' | 'no'
+type PositionSortField = 'exposure' | 'updated' | 'edge' | 'confidence' | 'unrealized'
+type PositionSortDirection = 'asc' | 'desc'
 
 type TerminalLeg = {
   action: TradeAction | null
@@ -106,14 +118,36 @@ type PositionBookRow = {
   traderName: string
   marketId: string
   marketQuestion: string
+  sourceSummary: string
+  executionSummary: string
   direction: string
   exposureUsd: number
   averagePrice: number | null
+  markPrice: number | null
+  markUpdatedAt: string | null
+  markFresh: boolean
+  unrealizedPnl: number | null
   weightedEdge: number | null
   weightedConfidence: number | null
   orderCount: number
+  liveOrderCount: number
+  paperOrderCount: number
   lastUpdated: string | null
   statusSummary: string
+  links: {
+    polymarket: string | null
+    kalshi: string | null
+  }
+}
+
+type TraderRuntimeStatus = 'running' | 'paused_engine' | 'disabled'
+
+type TraderStatusPresentation = {
+  key: TraderRuntimeStatus
+  label: string
+  dotClassName: string
+  badgeVariant: 'default' | 'secondary' | 'outline'
+  badgeClassName: string
 }
 
 const CRYPTO_STRATEGY_MODES = ['auto', 'directional', 'pure_arb', 'rebalance'] as const
@@ -452,6 +486,65 @@ function shortId(value: string | null | undefined): string {
   return value.length <= 12 ? value : `${value.slice(0, 6)}...${value.slice(-4)}`
 }
 
+function compactText(value: string | null | undefined, maxChars = 96): string {
+  const text = cleanText(value)
+  if (!text) return 'No reason provided'
+  if (text.length <= maxChars) return text
+  return `${text.slice(0, Math.max(1, maxChars - 1)).trimEnd()}…`
+}
+
+function buildOrderMarketLinks(order: TraderOrder, payload: Record<string, unknown>): { polymarket: string | null; kalshi: string | null } {
+  const links = getTraderOrderPlatformLinks({
+    source: order.source,
+    marketId: order.market_id,
+    marketQuestion: order.market_question,
+    payload,
+  })
+  return {
+    polymarket: links.polymarketUrl,
+    kalshi: links.kalshiUrl,
+  }
+}
+
+function isTraderExecutionEnabled(
+  trader: Pick<Trader, 'is_enabled' | 'is_paused'> | null | undefined
+): boolean {
+  return Boolean(trader?.is_enabled) && !Boolean(trader?.is_paused)
+}
+
+function resolveTraderStatusPresentation(
+  trader: Pick<Trader, 'is_enabled' | 'is_paused'> | null | undefined,
+  orchestratorExecutionActive: boolean
+): TraderStatusPresentation {
+  if (!isTraderExecutionEnabled(trader)) {
+    return {
+      key: 'disabled',
+      label: 'Disabled',
+      dotClassName: 'bg-zinc-500',
+      badgeVariant: 'outline',
+      badgeClassName: '',
+    }
+  }
+
+  if (!orchestratorExecutionActive) {
+    return {
+      key: 'paused_engine',
+      label: 'Paused (Engine)',
+      dotClassName: 'bg-amber-400',
+      badgeVariant: 'outline',
+      badgeClassName: 'border-amber-500/30 bg-amber-500/10 text-amber-300',
+    }
+  }
+
+  return {
+    key: 'running',
+    label: 'Running',
+    dotClassName: 'bg-emerald-500',
+    badgeVariant: 'default',
+    badgeClassName: '',
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -726,7 +819,34 @@ function decisionFailedChecksDetail(decision: {
   return rendered.join(' | ')
 }
 
+function orderCloseLifecycleReason(order: TraderOrder): string | null {
+  const payload = isRecord(order.payload) ? order.payload : null
+  if (!payload) return null
+  const positionClose = isRecord(payload.position_close) ? payload.position_close : null
+  const pendingExit = isRecord(payload.pending_live_exit) ? payload.pending_live_exit : null
+  const closeTrigger = cleanText(positionClose ? positionClose.close_trigger : null)
+  const closeReason = cleanText(positionClose ? positionClose.reason : null)
+  const pendingTrigger = cleanText(pendingExit ? pendingExit.close_trigger : null)
+  const pendingReason = cleanText(pendingExit ? pendingExit.reason : null)
+  const primary = closeTrigger || pendingTrigger || closeReason || pendingReason
+  if (!primary) return null
+  const secondary = closeReason || pendingReason
+  if (
+    secondary
+    && primary.toLowerCase() !== secondary.toLowerCase()
+    && !primary.toLowerCase().includes(secondary.toLowerCase())
+  ) {
+    return `${primary} • ${secondary}`
+  }
+  return primary
+}
+
 function orderReasonDetail(order: TraderOrder): string {
+  const status = normalizeStatus(order.status)
+  const closeLifecycleReason = orderCloseLifecycleReason(order)
+  if ((RESOLVED_ORDER_STATUSES.has(status) || FAILED_ORDER_STATUSES.has(status)) && closeLifecycleReason) {
+    return closeLifecycleReason
+  }
   const payload = isRecord(order.payload) ? order.payload : null
   const legPayload = payload && isRecord(payload.leg) ? payload.leg : null
   return (
@@ -736,8 +856,158 @@ function orderReasonDetail(order: TraderOrder): string {
     || (payload ? cleanText(payload.reason) : null)
     || (payload ? cleanText(payload.message) : null)
     || (legPayload ? cleanText(legPayload.reason) : null)
-    || (normalizeStatus(order.status) === 'executed' ? 'Execution filled' : 'No reason provided')
+    || closeLifecycleReason
+    || (status === 'executed' ? 'Execution filled' : 'No reason provided')
   )
+}
+
+function orderCloseHeadlineFromReason(reason: string): string {
+  const normalizedReason = reason.toLowerCase()
+  if (normalizedReason.includes('stop loss')) return 'Stop loss'
+  if (normalizedReason.includes('take profit')) return 'Take profit'
+  if (normalizedReason.includes('trailing stop')) return 'Trailing stop'
+  if (normalizedReason.includes('max hold')) return 'Max hold'
+  if (normalizedReason.includes('market inactive')) return 'Market inactive'
+  if (normalizedReason.includes('external_wallet_flatten') || normalizedReason.includes('external wallet')) return 'External flatten'
+  if (normalizedReason.includes('resolution')) return 'Resolution'
+  return 'Closed'
+}
+
+function orderFailureHeadline(order: TraderOrder): string {
+  const reason = orderReasonDetail(order)
+  const normalizedReason = reason.toLowerCase()
+  const payload = isRecord(order.payload) ? order.payload : null
+  const submission = payload ? cleanText(payload.submission)?.toLowerCase() || '' : ''
+  const priceResolution = payload ? cleanText(payload.price_resolution)?.toLowerCase() || '' : ''
+  const resolvedPrice = payload ? toFiniteNumber(payload.resolved_price) : null
+
+  if (
+    normalizedReason.includes('could not resolve a valid live price')
+    || (
+      submission === 'rejected'
+      && priceResolution === 'live_quote'
+      && resolvedPrice !== null
+      && resolvedPrice <= 0
+    )
+  ) {
+    return 'No live quote'
+  }
+  if (normalizedReason.includes('maximum open positions')) {
+    return 'Position cap hit'
+  }
+  if (normalizedReason.includes('allowance') || normalizedReason.includes('not enough balance')) {
+    return 'Balance/allowance'
+  }
+  if (normalizedReason.includes('invalid signature')) {
+    return 'Signature invalid'
+  }
+  if (
+    normalizedReason.includes('below minimum')
+    || normalizedReason.includes('min order')
+    || normalizedReason.includes('exit_notional_below_min')
+  ) {
+    return 'Below minimum size'
+  }
+  if (normalizedReason.includes('global pause')) {
+    return 'Global pause'
+  }
+  if (normalizedReason.includes('kill switch')) {
+    return 'Kill switch active'
+  }
+  return 'Execution rejected'
+}
+
+function orderOutcomeSummary(order: TraderOrder): { headline: string; detail: string } {
+  const status = normalizeStatus(order.status)
+  const reason = orderReasonDetail(order)
+  if (FAILED_ORDER_STATUSES.has(status)) {
+    return {
+      headline: orderFailureHeadline(order),
+      detail: reason,
+    }
+  }
+  if (RESOLVED_ORDER_STATUSES.has(status)) {
+    return {
+      headline: orderCloseHeadlineFromReason(reason),
+      detail: reason,
+    }
+  }
+  if (OPEN_ORDER_STATUSES.has(status)) {
+    return {
+      headline: 'In flight',
+      detail: reason,
+    }
+  }
+  return {
+    headline: status.toUpperCase(),
+    detail: reason,
+  }
+}
+
+function normalizeExecutionToken(value: unknown): string | null {
+  const text = cleanText(value)
+  if (!text) return null
+  return text.replace(/[\s-]+/g, '_').toLowerCase()
+}
+
+function orderExecutionTypeSummary(order: TraderOrder): string {
+  const payload = isRecord(order.payload) ? order.payload : null
+  const legPayload = payload && isRecord(payload.leg) ? payload.leg : null
+  const paperSimulation = payload && isRecord(payload.paper_simulation) ? payload.paper_simulation : null
+
+  const pricePolicy = normalizeExecutionToken(
+    (legPayload ? legPayload.price_policy : null)
+    ?? (paperSimulation ? paperSimulation.price_policy : null)
+    ?? (payload ? payload.price_policy : null)
+  )
+  const timeInForceRaw = cleanText(
+    (legPayload ? legPayload.time_in_force : null)
+    ?? (paperSimulation ? paperSimulation.time_in_force : null)
+    ?? (payload ? payload.time_in_force : null)
+    ?? (payload ? payload.order_type : null)
+  )
+  const timeInForce = timeInForceRaw ? timeInForceRaw.replace(/\s+/g, '').toUpperCase() : null
+  const postOnly = Boolean(
+    (legPayload ? legPayload.post_only : null)
+    ?? (paperSimulation ? paperSimulation.post_only : null)
+    ?? (payload ? payload.post_only : null)
+  )
+  const priceResolution = normalizeExecutionToken(payload ? payload.price_resolution : null)
+
+  let executionMode: 'LIMIT' | 'MARKET' | null = null
+  let liquidityRole: 'MAKER' | 'TAKER' | null = null
+
+  if (pricePolicy === 'market' || pricePolicy === 'marketable' || pricePolicy === 'aggressive') {
+    executionMode = 'MARKET'
+    liquidityRole = 'TAKER'
+  } else if (pricePolicy === 'taker_limit' || pricePolicy === 'taker') {
+    executionMode = 'LIMIT'
+    liquidityRole = 'TAKER'
+  } else if (pricePolicy === 'maker_limit' || pricePolicy === 'maker' || pricePolicy === 'post_only') {
+    executionMode = 'LIMIT'
+    liquidityRole = 'MAKER'
+  } else if (pricePolicy) {
+    executionMode = 'LIMIT'
+  } else if (priceResolution === 'explicit_limit' || timeInForce) {
+    executionMode = 'LIMIT'
+  }
+
+  if (!executionMode) return '—'
+
+  const parts: string[] = [executionMode]
+  if (liquidityRole) parts.push(liquidityRole)
+  if (postOnly) parts.push('POST')
+  if (timeInForce) parts.push(timeInForce)
+  return parts.join(' · ')
+}
+
+function summarizeExecutionTypes(labels: Iterable<string>): string {
+  const unique = Array.from(
+    new Set(Array.from(labels).filter((label) => Boolean(label) && label !== '—'))
+  )
+  if (unique.length === 0) return '—'
+  if (unique.length <= 2) return unique.join(' | ')
+  return `${unique.slice(0, 2).join(' | ')} +${unique.length - 2}`
 }
 
 function eventReasonDetail(event: TraderEvent): string {
@@ -766,6 +1036,32 @@ function parseJsonObject(text: string): { value: Record<string, unknown> | null;
   }
 }
 
+function parseTraderDeleteLiveExposure(error: unknown): { message: string; summary: string } | null {
+  if (typeof error !== 'object' || error === null || !('response' in error)) return null
+  const maybeResponse = (error as { response?: { data?: unknown } }).response
+  if (!maybeResponse || typeof maybeResponse !== 'object') return null
+  const responseData = maybeResponse.data
+  if (!isRecord(responseData)) return null
+  const detail = responseData.detail
+  if (!isRecord(detail)) return null
+  if (String(detail.code || '') !== 'open_live_exposure') return null
+
+  const message = cleanText(detail.message) || 'Trader has live exposure.'
+  const livePositions = Math.max(0, Math.trunc(toNumber(detail.open_live_positions)))
+  const liveOrders = Math.max(0, Math.trunc(toNumber(detail.open_live_orders)))
+  const otherPositions = Math.max(0, Math.trunc(toNumber(detail.open_other_positions)))
+  const otherOrders = Math.max(0, Math.trunc(toNumber(detail.open_other_orders)))
+  const parts: string[] = []
+  if (livePositions > 0) parts.push(`${livePositions} live position(s)`)
+  if (liveOrders > 0) parts.push(`${liveOrders} live active order(s)`)
+  if (otherPositions > 0) parts.push(`${otherPositions} unknown position(s)`)
+  if (otherOrders > 0) parts.push(`${otherOrders} unknown active order(s)`)
+  return {
+    message,
+    summary: parts.join(' • '),
+  }
+}
+
 function errorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error) return error.message || fallback
   if (typeof error === 'object' && error !== null && 'response' in error) {
@@ -782,6 +1078,17 @@ function errorMessage(error: unknown, fallback: string): string {
     }
   }
   return fallback
+}
+
+function downloadBlobFile(filename: string, blob: Blob): void {
+  const link = document.createElement('a')
+  const objectUrl = window.URL.createObjectURL(blob)
+  link.href = objectUrl
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.URL.revokeObjectURL(objectUrl)
 }
 
 function toBoolean(value: unknown, fallback = false): boolean {
@@ -1283,16 +1590,27 @@ function buildPositionBookRows(orders: TraderOrder[], traderNameById: Record<str
     traderName: string
     marketId: string
     marketQuestion: string
+    sources: Set<string>
+    executionTypes: Set<string>
     direction: string
     exposureUsd: number
     weightedPrice: number
+    weightedMark: number
+    markWeight: number
     weightedEdge: number
     edgeWeight: number
     weightedConfidence: number
     confidenceWeight: number
+    unrealizedPnl: number
+    hasUnrealizedPnl: boolean
     orderCount: number
+    liveOrderCount: number
+    paperOrderCount: number
+    markUpdatedAt: string | null
     lastUpdated: string | null
     statuses: Set<string>
+    polymarketLink: string | null
+    kalshiLink: string | null
   }>()
 
   for (const order of orders) {
@@ -1303,11 +1621,39 @@ function buildPositionBookRows(orders: TraderOrder[], traderNameById: Record<str
     const marketId = String(order.market_id || 'unknown')
     const direction = String(order.direction || 'flat').toUpperCase()
     const key = `${traderId}:${marketId}:${direction}`
+    const orderPayload = isRecord(order.payload) ? order.payload : {}
+    const positionState = isRecord(orderPayload.position_state) ? orderPayload.position_state : {}
+    const markPrice = toNumber(
+      order.current_price
+      ?? positionState.last_mark_price
+      ?? orderPayload.market_price
+      ?? orderPayload.resolved_price
+    )
+    const filledSize = toNumber(
+      order.filled_shares
+      ?? orderPayload.filled_size
+      ?? positionState.filled_size
+    )
+    const filledNotional = toNumber(
+      order.filled_notional_usd
+      ?? order.notional_usd
+    )
+    let unrealizedPnl: number | null = null
+    if (order.unrealized_pnl !== null && order.unrealized_pnl !== undefined) {
+      unrealizedPnl = toNumber(order.unrealized_pnl)
+    } else if (markPrice > 0 && filledSize > 0 && filledNotional > 0) {
+      unrealizedPnl = (markPrice * filledSize) - filledNotional
+    }
     const notional = Math.abs(toNumber(order.notional_usd))
     const px = toNumber(order.effective_price ?? order.entry_price)
     const edge = toNumber(order.edge_percent)
     const confidence = toNumber(order.confidence)
     const traderName = traderNameById[traderId] || shortId(traderId)
+    const mode = normalizeStatus(order.mode)
+    const sourceLabel = cleanText(order.source)?.toUpperCase() || 'UNKNOWN'
+    const executionSummary = orderExecutionTypeSummary(order)
+    const links = buildOrderMarketLinks(order, orderPayload)
+    const markUpdatedAt = cleanText(order.mark_updated_at) || cleanText(positionState.last_marked_at)
 
     if (!buckets.has(key)) {
       buckets.set(key, {
@@ -1315,16 +1661,27 @@ function buildPositionBookRows(orders: TraderOrder[], traderNameById: Record<str
         traderName,
         marketId,
         marketQuestion: String(order.market_question || order.market_id || 'Unknown market'),
+        sources: new Set<string>(),
+        executionTypes: new Set<string>(),
         direction,
         exposureUsd: 0,
         weightedPrice: 0,
+        weightedMark: 0,
+        markWeight: 0,
         weightedEdge: 0,
         edgeWeight: 0,
         weightedConfidence: 0,
         confidenceWeight: 0,
+        unrealizedPnl: 0,
+        hasUnrealizedPnl: false,
         orderCount: 0,
+        liveOrderCount: 0,
+        paperOrderCount: 0,
+        markUpdatedAt: null,
         lastUpdated: null,
         statuses: new Set<string>(),
+        polymarketLink: null,
+        kalshiLink: null,
       })
     }
 
@@ -1333,34 +1690,205 @@ function buildPositionBookRows(orders: TraderOrder[], traderNameById: Record<str
 
     bucket.exposureUsd += notional
     bucket.weightedPrice += px > 0 && notional > 0 ? px * notional : 0
+    bucket.weightedMark += markPrice > 0 && notional > 0 ? markPrice * notional : 0
+    bucket.markWeight += markPrice > 0 && notional > 0 ? notional : 0
     bucket.weightedEdge += edge !== 0 && notional > 0 ? edge * notional : 0
     bucket.edgeWeight += edge !== 0 && notional > 0 ? notional : 0
     bucket.weightedConfidence += confidence !== 0 && notional > 0 ? confidence * notional : 0
     bucket.confidenceWeight += confidence !== 0 && notional > 0 ? notional : 0
+    if (unrealizedPnl !== null) {
+      bucket.unrealizedPnl += unrealizedPnl
+      bucket.hasUnrealizedPnl = true
+    }
     bucket.orderCount += 1
+    if (mode === 'live') {
+      bucket.liveOrderCount += 1
+    } else if (mode === 'paper') {
+      bucket.paperOrderCount += 1
+    }
+    bucket.sources.add(sourceLabel)
+    if (executionSummary !== '—') {
+      bucket.executionTypes.add(executionSummary)
+    }
     bucket.lastUpdated = toTs(order.updated_at) > toTs(bucket.lastUpdated)
       ? (order.updated_at || order.executed_at || order.created_at || null)
       : bucket.lastUpdated
+    bucket.markUpdatedAt = toTs(markUpdatedAt) > toTs(bucket.markUpdatedAt)
+      ? markUpdatedAt
+      : bucket.markUpdatedAt
     bucket.statuses.add(status)
+    if (!bucket.polymarketLink && links.polymarket) {
+      bucket.polymarketLink = links.polymarket
+    }
+    if (!bucket.kalshiLink && links.kalshi) {
+      bucket.kalshiLink = links.kalshi
+    }
   }
 
   return Array.from(buckets.entries())
-    .map(([key, bucket]) => ({
-      key,
-      traderId: bucket.traderId,
-      traderName: bucket.traderName,
-      marketId: bucket.marketId,
-      marketQuestion: bucket.marketQuestion,
-      direction: bucket.direction,
-      exposureUsd: bucket.exposureUsd,
-      averagePrice: bucket.exposureUsd > 0 ? bucket.weightedPrice / bucket.exposureUsd : null,
-      weightedEdge: bucket.edgeWeight > 0 ? bucket.weightedEdge / bucket.edgeWeight : null,
-      weightedConfidence: bucket.confidenceWeight > 0 ? bucket.weightedConfidence / bucket.confidenceWeight : null,
-      orderCount: bucket.orderCount,
-      lastUpdated: bucket.lastUpdated,
-      statusSummary: Array.from(bucket.statuses).join(', '),
-    }))
+    .map((entry) => {
+      const [key, bucket] = entry
+      const markFresh = toTs(bucket.markUpdatedAt) > 0 && (Date.now() - toTs(bucket.markUpdatedAt)) <= 15_000
+      return {
+        key,
+        traderId: bucket.traderId,
+        traderName: bucket.traderName,
+        marketId: bucket.marketId,
+        marketQuestion: bucket.marketQuestion,
+        sourceSummary: Array.from(bucket.sources).join(', '),
+        executionSummary: summarizeExecutionTypes(bucket.executionTypes),
+        direction: bucket.direction,
+        exposureUsd: bucket.exposureUsd,
+        averagePrice: bucket.exposureUsd > 0 ? bucket.weightedPrice / bucket.exposureUsd : null,
+        markPrice: bucket.markWeight > 0 ? bucket.weightedMark / bucket.markWeight : null,
+        markUpdatedAt: bucket.markUpdatedAt,
+        markFresh,
+        unrealizedPnl: bucket.hasUnrealizedPnl ? bucket.unrealizedPnl : null,
+        weightedEdge: bucket.edgeWeight > 0 ? bucket.weightedEdge / bucket.edgeWeight : null,
+        weightedConfidence: bucket.confidenceWeight > 0 ? bucket.weightedConfidence / bucket.confidenceWeight : null,
+        orderCount: bucket.orderCount,
+        liveOrderCount: bucket.liveOrderCount,
+        paperOrderCount: bucket.paperOrderCount,
+        lastUpdated: bucket.lastUpdated,
+        statusSummary: Array.from(bucket.statuses).join(', '),
+        links: {
+          polymarket: bucket.polymarketLink,
+          kalshi: bucket.kalshiLink,
+        },
+      }
+    })
     .sort((a, b) => b.exposureUsd - a.exposureUsd)
+}
+
+function isYesDirection(value: string): boolean {
+  const normalized = String(value || '').trim().toUpperCase()
+  return normalized === 'YES' || normalized === 'BUY' || normalized === 'LONG' || normalized === 'UP'
+}
+
+function isNoDirection(value: string): boolean {
+  const normalized = String(value || '').trim().toUpperCase()
+  return normalized === 'NO' || normalized === 'SELL' || normalized === 'SHORT' || normalized === 'DOWN'
+}
+
+function compareNullableNumber(
+  left: number | null,
+  right: number | null,
+  sortDirection: PositionSortDirection
+): number {
+  if (left === null && right === null) return 0
+  if (left === null) return 1
+  if (right === null) return -1
+  return sortDirection === 'asc' ? left - right : right - left
+}
+
+function sortPositionRows(
+  rows: PositionBookRow[],
+  sortField: PositionSortField,
+  sortDirection: PositionSortDirection
+): PositionBookRow[] {
+  const sorted = [...rows]
+  sorted.sort((left, right) => {
+    if (sortField === 'exposure') {
+      return sortDirection === 'asc'
+        ? left.exposureUsd - right.exposureUsd
+        : right.exposureUsd - left.exposureUsd
+    }
+
+    if (sortField === 'updated') {
+      const leftTs = toTs(left.lastUpdated || left.markUpdatedAt)
+      const rightTs = toTs(right.lastUpdated || right.markUpdatedAt)
+      return sortDirection === 'asc' ? leftTs - rightTs : rightTs - leftTs
+    }
+
+    if (sortField === 'edge') {
+      const delta = compareNullableNumber(left.weightedEdge, right.weightedEdge, sortDirection)
+      if (delta !== 0) return delta
+      return right.exposureUsd - left.exposureUsd
+    }
+
+    if (sortField === 'confidence') {
+      const delta = compareNullableNumber(left.weightedConfidence, right.weightedConfidence, sortDirection)
+      if (delta !== 0) return delta
+      return right.exposureUsd - left.exposureUsd
+    }
+
+    const delta = compareNullableNumber(left.unrealizedPnl, right.unrealizedPnl, sortDirection)
+    if (delta !== 0) return delta
+    return right.exposureUsd - left.exposureUsd
+  })
+  return sorted
+}
+
+function summarizePositionRows(rows: PositionBookRow[]): {
+  totalRows: number
+  yesRows: number
+  noRows: number
+  totalExposure: number
+  totalUnrealizedPnl: number
+  rowsWithUnrealized: number
+  avgEdge: number
+  avgConfidence: number
+  liveOrders: number
+  paperOrders: number
+  markedRows: number
+  freshMarks: number
+} {
+  let yesRows = 0
+  let noRows = 0
+  let totalExposure = 0
+  let totalUnrealizedPnl = 0
+  let rowsWithUnrealized = 0
+  let edgeWeighted = 0
+  let edgeWeight = 0
+  let confidenceWeighted = 0
+  let confidenceWeight = 0
+  let liveOrders = 0
+  let paperOrders = 0
+  let markedRows = 0
+  let freshMarks = 0
+
+  for (const row of rows) {
+    totalExposure += row.exposureUsd
+    if (isYesDirection(row.direction)) yesRows += 1
+    if (isNoDirection(row.direction)) noRows += 1
+    if (row.unrealizedPnl !== null) {
+      totalUnrealizedPnl += row.unrealizedPnl
+      rowsWithUnrealized += 1
+    }
+    if (row.weightedEdge !== null && row.exposureUsd > 0) {
+      edgeWeighted += row.weightedEdge * row.exposureUsd
+      edgeWeight += row.exposureUsd
+    }
+    if (row.weightedConfidence !== null && row.exposureUsd > 0) {
+      confidenceWeighted += row.weightedConfidence * row.exposureUsd
+      confidenceWeight += row.exposureUsd
+    }
+    liveOrders += row.liveOrderCount
+    paperOrders += row.paperOrderCount
+    if (row.markPrice !== null) markedRows += 1
+    if (row.markFresh) freshMarks += 1
+  }
+
+  return {
+    totalRows: rows.length,
+    yesRows,
+    noRows,
+    totalExposure,
+    totalUnrealizedPnl,
+    rowsWithUnrealized,
+    avgEdge: edgeWeight > 0 ? edgeWeighted / edgeWeight : 0,
+    avgConfidence: confidenceWeight > 0 ? confidenceWeighted / confidenceWeight : 0,
+    liveOrders,
+    paperOrders,
+    markedRows,
+    freshMarks,
+  }
+}
+
+function positionMetaLine(row: PositionBookRow): string {
+  const sourceOrStatus = cleanText(row.sourceSummary) || cleanText(row.statusSummary) || 'n/a'
+  if (row.executionSummary === '—') return sourceOrStatus
+  return `${sourceOrStatus} • ${row.executionSummary}`
 }
 
 function FlyoutSection({
@@ -1424,7 +1952,11 @@ function FlyoutSection({
   )
 }
 
-export default function TradingPanel() {
+type TradingPanelProps = {
+  isConnected?: boolean
+}
+
+export default function TradingPanel({ isConnected = false }: TradingPanelProps = {}) {
   const queryClient = useQueryClient()
   const [selectedAccountId] = useAtom(selectedAccountIdAtom)
   const [selectedTraderId, setSelectedTraderId] = useState<string | null>(null)
@@ -1434,10 +1966,18 @@ export default function TradingPanel() {
   const [tradeSearch, setTradeSearch] = useState('')
   const [decisionSearch, setDecisionSearch] = useState('')
   const [confirmLiveStartOpen, setConfirmLiveStartOpen] = useState(false)
-  const [workTab, setWorkTab] = useState<'terminal' | 'positions' | 'trades' | 'decisions' | 'risk'>('terminal')
+  const [workTab, setWorkTab] = useState<'terminal' | 'positions' | 'trades' | 'monitor' | 'decisions' | 'risk'>('terminal')
   const [allBotsTab, setAllBotsTab] = useState<AllBotsTab>('overview')
   const [allBotsTradeStatusFilter, setAllBotsTradeStatusFilter] = useState<TradeStatusFilter>('all')
   const [allBotsTradeSearch, setAllBotsTradeSearch] = useState('')
+  const [positionSearch, setPositionSearch] = useState('')
+  const [positionDirectionFilter, setPositionDirectionFilter] = useState<PositionDirectionFilter>('all')
+  const [positionSortField, setPositionSortField] = useState<PositionSortField>('exposure')
+  const [positionSortDirection, setPositionSortDirection] = useState<PositionSortDirection>('desc')
+  const [allBotsPositionSearch, setAllBotsPositionSearch] = useState('')
+  const [allBotsPositionDirectionFilter, setAllBotsPositionDirectionFilter] = useState<PositionDirectionFilter>('all')
+  const [allBotsPositionSortField, setAllBotsPositionSortField] = useState<PositionSortField>('exposure')
+  const [allBotsPositionSortDirection, setAllBotsPositionSortDirection] = useState<PositionSortDirection>('desc')
 
   const [traderFlyoutOpen, setTraderFlyoutOpen] = useState(false)
   const [traderFlyoutMode, setTraderFlyoutMode] = useState<'create' | 'edit'>('create')
@@ -1448,19 +1988,27 @@ export default function TradingPanel() {
   const [draftInterval, setDraftInterval] = useState('60')
   const [draftSources, setDraftSources] = useState('')
   const [draftEnabled, setDraftEnabled] = useState(true)
-  const [draftPaused, setDraftPaused] = useState(false)
   const [draftTradersScopeModes, setDraftTradersScopeModes] = useState<TradersScopeMode[]>(['tracked', 'pool'])
   const [draftTradersIndividualWallets, setDraftTradersIndividualWallets] = useState<string[]>([])
   const [draftTradersGroupIds, setDraftTradersGroupIds] = useState<string[]>([])
   const [draftParams, setDraftParams] = useState('{}')
   const [draftRisk, setDraftRisk] = useState('{}')
   const [draftMetadata, setDraftMetadata] = useState('{}')
+  const [draftCopyFromTraderId, setDraftCopyFromTraderId] = useState('')
   const [advancedConfig, setAdvancedConfig] = useState<TraderAdvancedConfig>(defaultAdvancedConfig())
   const [saveError, setSaveError] = useState<string | null>(null)
   const [deleteAction, setDeleteAction] = useState<'block' | 'disable' | 'force_delete'>('disable')
   const [deleteConfirmName, setDeleteConfirmName] = useState('')
   const [draftCopyTrading, setDraftCopyTrading] = useState<CopyTradingFormState>(DEFAULT_COPY_TRADING)
   const [draftSignalFilters, setDraftSignalFilters] = useState<TraderSignalFilters>(DEFAULT_SIGNAL_FILTERS)
+  const [liveTruthDurationSeconds, setLiveTruthDurationSeconds] = useState('300')
+  const [liveTruthPollSeconds, setLiveTruthPollSeconds] = useState('1.0')
+  const [liveTruthRunLlm, setLiveTruthRunLlm] = useState(true)
+  const [liveTruthIncludeStrategySource, setLiveTruthIncludeStrategySource] = useState(true)
+  const [liveTruthModel, setLiveTruthModel] = useState('')
+  const [liveTruthMaxAlertsForLlm, setLiveTruthMaxAlertsForLlm] = useState('80')
+  const [liveTruthJobId, setLiveTruthJobId] = useState<string | null>(null)
+  const [liveTruthError, setLiveTruthError] = useState<string | null>(null)
 
   const overviewQuery = useQuery({
     queryKey: ['trader-orchestrator-overview'],
@@ -1542,15 +2090,17 @@ export default function TradingPanel() {
 
   const allOrdersQuery = useQuery({
     queryKey: ['trader-orders-all'],
-    queryFn: () => getAllTraderOrders(220),
+    queryFn: () => getAllTraderOrders(5000),
     enabled: traderIds.length > 0,
-    refetchInterval: 5000,
+    refetchInterval: isConnected ? 15000 : 1000,
+    staleTime: 0,
+    refetchOnMount: 'always',
   })
 
   const allDecisionsQuery = useQuery({
     queryKey: ['trader-decisions-all', traderIdsKey],
     enabled: traderIds.length > 0,
-    refetchInterval: 5000,
+    refetchInterval: false,
     queryFn: async () => {
       const grouped = await Promise.all(
         traderIds.map((traderId) => getTraderDecisions(traderId, { limit: 160 }))
@@ -1564,7 +2114,7 @@ export default function TradingPanel() {
   const allEventsQuery = useQuery({
     queryKey: ['trader-events-all', traderIdsKey],
     enabled: traderIds.length > 0,
-    refetchInterval: 5000,
+    refetchInterval: false,
     queryFn: async () => {
       const grouped = await Promise.all(
         traderIds.map((traderId) => getTraderEvents(traderId, { limit: 80 }))
@@ -1584,9 +2134,25 @@ export default function TradingPanel() {
     [traders, selectedTraderId]
   )
 
+  const selectedOrdersQuery = useQuery({
+    queryKey: ['trader-orders', selectedTraderId],
+    enabled: Boolean(selectedTraderId),
+    refetchInterval: selectedTraderId ? (isConnected ? 15000 : 1000) : false,
+    queryFn: () => getTraderOrders(String(selectedTraderId), { limit: 5000 }),
+    staleTime: 0,
+    refetchOnMount: 'always',
+  })
+
   const selectedOrders = useMemo(
-    () => allOrders.filter((order) => order.trader_id === selectedTraderId),
-    [allOrders, selectedTraderId]
+    () => {
+      if (!selectedTraderId) return []
+      const queryRows = selectedOrdersQuery.data
+      if (Array.isArray(queryRows)) {
+        return queryRows
+      }
+      return allOrders.filter((order) => order.trader_id === selectedTraderId)
+    },
+    [allOrders, selectedOrdersQuery.data, selectedTraderId]
   )
 
   const selectedDecisions = useMemo(
@@ -2057,10 +2623,50 @@ export default function TradingPanel() {
     refetchInterval: 7000,
   })
 
+  const liveTruthJobQuery = useQuery({
+    queryKey: ['validation-job-live-truth', liveTruthJobId],
+    queryFn: () => getValidationJob(String(liveTruthJobId)),
+    enabled: Boolean(liveTruthJobId),
+    refetchInterval: (query) => {
+      const status = normalizeStatus((query.state.data as ValidationJob | undefined)?.status)
+      return status === 'queued' || status === 'running' ? 1500 : false
+    },
+  })
+
+  const liveTruthJobStatus = normalizeStatus(liveTruthJobQuery.data?.status)
+  const liveTruthJobRunning = liveTruthJobStatus === 'queued' || liveTruthJobStatus === 'running'
+  const liveTruthJobCompleted = liveTruthJobStatus === 'completed'
+  const liveTruthJobFailed = liveTruthJobStatus === 'failed'
+  const liveTruthJobProgressPct = Math.round(Math.max(0, Math.min(1, toNumber(liveTruthJobQuery.data?.progress))) * 100)
+
+  const liveTruthRawQuery = useQuery({
+    queryKey: ['validation-live-truth-raw', liveTruthJobId],
+    queryFn: () => getLiveTruthMonitorRaw(String(liveTruthJobId), { max_alerts: 250 }),
+    enabled: Boolean(liveTruthJobId) && liveTruthJobCompleted,
+    staleTime: 0,
+    refetchOnMount: 'always',
+  })
+
+  const liveTruthRaw = liveTruthRawQuery.data as LiveTruthMonitorRawResponse | undefined
+  const liveTruthReport = liveTruthRaw?.monitor?.report
+  const liveTruthSummary = liveTruthRaw?.monitor?.summary || {}
+  const liveTruthAlertsByRule = liveTruthReport?.alerts_by_rule || {}
+  const liveTruthAlertRuleRows = useMemo(
+    () => Object.entries(liveTruthAlertsByRule).sort((a, b) => Number(b[1]) - Number(a[1])),
+    [liveTruthAlertsByRule]
+  )
+  const liveTruthLlm = liveTruthRaw?.llm_analysis || {}
+  const liveTruthHasLlm = isRecord(liveTruthLlm) && Object.keys(liveTruthLlm).length > 0
+  const liveTruthLlmAnalysis = isRecord(liveTruthLlm.analysis) ? liveTruthLlm.analysis : null
+  const liveTruthLlmStrategyChanges = Array.isArray(liveTruthLlmAnalysis?.strategy_changes)
+    ? liveTruthLlmAnalysis.strategy_changes.filter((item): item is Record<string, unknown> => isRecord(item))
+    : []
+
   const refreshAll = () => {
     queryClient.invalidateQueries({ queryKey: ['trader-orchestrator-overview'] })
     queryClient.invalidateQueries({ queryKey: ['traders-list'] })
     queryClient.invalidateQueries({ queryKey: ['trader-orders-all'] })
+    queryClient.invalidateQueries({ queryKey: ['trader-orders'] })
     queryClient.invalidateQueries({ queryKey: ['trader-decisions-all'] })
     queryClient.invalidateQueries({ queryKey: ['trader-events-all'] })
     queryClient.invalidateQueries({ queryKey: ['trader-decision-detail'] })
@@ -2068,49 +2674,10 @@ export default function TradingPanel() {
     queryClient.invalidateQueries({ queryKey: ['settings-discovery'] })
   }
 
-  const openCreateTraderFlyout = () => {
-    const defaultSources = defaultSourceKeys.length > 0 ? defaultSourceKeys.map((key) => normalizeSourceKey(key)) : ['crypto']
-    const defaultStrategies = Object.fromEntries(
-      defaultSources.map((sourceKey) => [sourceKey, defaultStrategyForSource(sourceKey, sourceCards)])
-    ) as Record<string, string>
-    setTraderFlyoutMode('create')
-    setDraftName('')
-    setDraftDescription('')
-    setDraftStrategyKey(normalizeStrategyKey(defaultStrategies.crypto || DEFAULT_STRATEGY_KEY))
-    setDraftSourceStrategies(defaultStrategies)
-    setDraftInterval('5')
-    setDraftSources(defaultSources.join(', '))
-    setDraftEnabled(true)
-    setDraftPaused(false)
-    setDraftTradersScopeModes(['tracked', 'pool'])
-    setDraftTradersIndividualWallets([])
-    setDraftTradersGroupIds([])
-    setDraftParams('{}')
-    setDraftRisk(JSON.stringify(isRecord(traderConfigSchema?.shared_risk_defaults) ? traderConfigSchema.shared_risk_defaults : {}, null, 2))
-    setDraftMetadata(
-      JSON.stringify(isRecord(traderConfigSchema?.default_runtime_metadata) ? traderConfigSchema.default_runtime_metadata : {}, null, 2)
-    )
-    setAdvancedConfig(defaultAdvancedConfig())
-    setDeleteAction('disable')
-    setDeleteConfirmName('')
-    setSaveError(null)
-    const resolvedCopy = activeCopyMode && activeCopyMode.mode !== 'disabled'
-      ? copyTradingFromActiveMode(activeCopyMode)
-      : copyTradingDefaults
-    setDraftCopyTrading({
-      ...resolvedCopy,
-      account_id: resolvedCopy.account_id || defaultCopyTradingAccountId,
-    })
-    setDraftSignalFilters(
-      normalizeSignalFiltersConfig({
-        ...defaultSignalFilters,
-        ...signalFiltersFromDiscoverySettings(discoverySettingsQuery.data),
-      })
-    )
-    setTraderFlyoutOpen(true)
-  }
-
-  const openEditTraderFlyout = (trader: Trader) => {
+  const applyTraderDraftSettings = (
+    trader: Trader,
+    options: { preserveName?: boolean; preserveCopyFrom?: boolean } = {}
+  ) => {
     const traderSourceConfigs = Array.isArray(trader.source_configs) ? trader.source_configs : []
     const normalizedSourceKeys = uniqueSourceList(
       traderSourceConfigs.map((config) => normalizeSourceKey(String(config.source_key || '')))
@@ -2130,21 +2697,23 @@ export default function TradingPanel() {
         primaryParams) as Record<string, unknown>
     const tradersScope = traderSourceConfigs.find((config) => normalizeSourceKey(String(config.source_key || '')) === 'traders')?.traders_scope
 
-    setSelectedTraderId(trader.id)
-    setTraderFlyoutMode('edit')
-    setDraftName(trader.name)
+    if (!options.preserveName) {
+      setDraftName(trader.name)
+    }
     setDraftDescription(trader.description || '')
     setDraftStrategyKey(normalizeStrategyKey(sourceStrategyMap.crypto || DEFAULT_STRATEGY_KEY))
     setDraftSourceStrategies(sourceStrategyMap)
     setDraftInterval(String(trader.interval_seconds || 60))
     setDraftSources(normalizedSourceKeys.join(', ') || defaultSourceCsv)
-    setDraftEnabled(Boolean(trader.is_enabled))
-    setDraftPaused(Boolean(trader.is_paused))
+    setDraftEnabled(isTraderExecutionEnabled(trader))
     const risk = trader.risk_limits || {}
     const metadata = trader.metadata || {}
     setDraftParams(JSON.stringify(primaryParams, null, 2))
     setDraftRisk(JSON.stringify(risk, null, 2))
     setDraftMetadata(JSON.stringify(metadata, null, 2))
+    if (!options.preserveCopyFrom) {
+      setDraftCopyFromTraderId('')
+    }
     setAdvancedConfig(computeAdvancedConfig(cryptoParams))
     setDraftTradersScopeModes(
       (tradersScope?.modes || ['tracked', 'pool'])
@@ -2159,9 +2728,91 @@ export default function TradingPanel() {
     setDraftTradersGroupIds(
       (tradersScope?.group_ids || []).map((groupId) => String(groupId || '').trim()).filter(Boolean)
     )
+  }
+
+  const applyCreateCopyFromSelection = (value: string) => {
+    const sourceTraderId = value === '__none__' ? '' : String(value || '').trim()
+    setDraftCopyFromTraderId(sourceTraderId)
+    if (!sourceTraderId) {
+      setSaveError(null)
+      return
+    }
+
+    const sourceTrader = traders.find((trader) => trader.id === sourceTraderId)
+    if (!sourceTrader) {
+      setSaveError('Selected copy source bot was not found. Refresh and try again.')
+      return
+    }
+
+    applyTraderDraftSettings(sourceTrader, { preserveName: true, preserveCopyFrom: true })
+    setSaveError(null)
+  }
+
+  const openCreateTraderFlyout = () => {
+    const defaultSources = defaultSourceKeys.length > 0 ? defaultSourceKeys.map((key) => normalizeSourceKey(key)) : ['crypto']
+    const defaultStrategies = Object.fromEntries(
+      defaultSources.map((sourceKey) => [sourceKey, defaultStrategyForSource(sourceKey, sourceCards)])
+    ) as Record<string, string>
+    setTraderFlyoutMode('create')
+    setDraftName('')
+    setDraftDescription('')
+    setDraftStrategyKey(normalizeStrategyKey(defaultStrategies.crypto || DEFAULT_STRATEGY_KEY))
+    setDraftSourceStrategies(defaultStrategies)
+    setDraftInterval('5')
+    setDraftSources(defaultSources.join(', '))
+    setDraftEnabled(true)
+    setDraftTradersScopeModes(['tracked', 'pool'])
+    setDraftTradersIndividualWallets([])
+    setDraftTradersGroupIds([])
+    setDraftParams('{}')
+    setDraftRisk(JSON.stringify(isRecord(traderConfigSchema?.shared_risk_defaults) ? traderConfigSchema.shared_risk_defaults : {}, null, 2))
+    setDraftMetadata(
+      JSON.stringify(isRecord(traderConfigSchema?.default_runtime_metadata) ? traderConfigSchema.default_runtime_metadata : {}, null, 2)
+    )
+    setDraftCopyFromTraderId('')
+    setAdvancedConfig(defaultAdvancedConfig())
     setDeleteAction('disable')
     setDeleteConfirmName('')
     setSaveError(null)
+    setLiveTruthError(null)
+    setLiveTruthJobId(null)
+    setLiveTruthDurationSeconds('300')
+    setLiveTruthPollSeconds('1.0')
+    setLiveTruthRunLlm(true)
+    setLiveTruthIncludeStrategySource(true)
+    setLiveTruthModel('')
+    setLiveTruthMaxAlertsForLlm('80')
+    const resolvedCopy = activeCopyMode && activeCopyMode.mode !== 'disabled'
+      ? copyTradingFromActiveMode(activeCopyMode)
+      : copyTradingDefaults
+    setDraftCopyTrading({
+      ...resolvedCopy,
+      account_id: resolvedCopy.account_id || defaultCopyTradingAccountId,
+    })
+    setDraftSignalFilters(
+      normalizeSignalFiltersConfig({
+        ...defaultSignalFilters,
+        ...signalFiltersFromDiscoverySettings(discoverySettingsQuery.data),
+      })
+    )
+    setTraderFlyoutOpen(true)
+  }
+
+  const openEditTraderFlyout = (trader: Trader) => {
+    setSelectedTraderId(trader.id)
+    setTraderFlyoutMode('edit')
+    applyTraderDraftSettings(trader)
+    setDeleteAction('disable')
+    setDeleteConfirmName('')
+    setSaveError(null)
+    setLiveTruthError(null)
+    setLiveTruthJobId(null)
+    setLiveTruthDurationSeconds('300')
+    setLiveTruthPollSeconds('1.0')
+    setLiveTruthRunLlm(true)
+    setLiveTruthIncludeStrategySource(true)
+    setLiveTruthModel('')
+    setLiveTruthMaxAlertsForLlm('80')
     const resolvedCopy = activeCopyMode && activeCopyMode.mode !== 'disabled'
       ? copyTradingFromActiveMode(activeCopyMode)
       : copyTradingDefaults
@@ -2410,13 +3061,13 @@ export default function TradingPanel() {
     onSuccess: refreshAll,
   })
 
-  const traderStartMutation = useMutation({
-    mutationFn: (traderId: string) => startTrader(traderId),
+  const traderEnableMutation = useMutation({
+    mutationFn: (traderId: string) => updateTrader(traderId, { is_enabled: true, is_paused: false }),
     onSuccess: refreshAll,
   })
 
-  const traderPauseMutation = useMutation({
-    mutationFn: (traderId: string) => pauseTrader(traderId),
+  const traderDisableMutation = useMutation({
+    mutationFn: (traderId: string) => updateTrader(traderId, { is_enabled: false, is_paused: false }),
     onSuccess: refreshAll,
   })
 
@@ -2425,8 +3076,57 @@ export default function TradingPanel() {
     onSuccess: refreshAll,
   })
 
+  const runLiveTruthMonitorMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedTrader) {
+        throw new Error('Select a bot before running monitor diagnostics.')
+      }
+      const durationSeconds = Math.max(10, Math.min(7200, Math.trunc(toNumber(liveTruthDurationSeconds || 300))))
+      const pollSeconds = Math.max(0.2, Math.min(10, toNumber(liveTruthPollSeconds || 1.0)))
+      const maxAlertsForLlm = Math.max(1, Math.min(400, Math.trunc(toNumber(liveTruthMaxAlertsForLlm || 80))))
+      const request = {
+        trader_id: selectedTrader.id,
+        duration_seconds: durationSeconds,
+        poll_seconds: pollSeconds,
+        run_llm_analysis: liveTruthRunLlm,
+        include_strategy_source: liveTruthIncludeStrategySource,
+        max_alerts_for_llm: maxAlertsForLlm,
+        ...(liveTruthModel.trim() ? { llm_model: liveTruthModel.trim() } : {}),
+      }
+      return enqueueLiveTruthMonitorJob(request)
+    },
+    onMutate: () => {
+      setLiveTruthError(null)
+      setLiveTruthJobId(null)
+    },
+    onSuccess: (result) => {
+      setLiveTruthError(null)
+      setLiveTruthJobId(result.job_id)
+    },
+    onError: (error: unknown) => {
+      setLiveTruthError(errorMessage(error, 'Failed to enqueue live truth monitor job'))
+    },
+  })
+
+  const exportLiveTruthArtifactMutation = useMutation({
+    mutationFn: async (artifact: LiveTruthMonitorArtifact) => {
+      if (!liveTruthJobId) {
+        throw new Error('Run monitor diagnostics first.')
+      }
+      return exportLiveTruthMonitorArtifact(liveTruthJobId, artifact)
+    },
+    onSuccess: ({ filename, blob }) => {
+      setLiveTruthError(null)
+      downloadBlobFile(filename, blob)
+    },
+    onError: (error: unknown) => {
+      setLiveTruthError(errorMessage(error, 'Failed to export monitor artifact'))
+    },
+  })
+
   const createTraderMutation = useMutation({
     mutationFn: async () => {
+      const copyFromTraderId = String(draftCopyFromTraderId || '').trim()
       const parsedParams = parseJsonObject(draftParams || '{}')
       if (!parsedParams.value) {
         throw new Error(`Strategy params JSON error: ${parsedParams.error || 'invalid object'}`)
@@ -2455,16 +3155,30 @@ export default function TradingPanel() {
 
       await persistGlobalWalletSettings()
 
-      return createTrader({
+      const payload: Record<string, unknown> = {
         name: draftName.trim(),
         description: draftDescription.trim() || null,
         interval_seconds: Math.max(1, Math.trunc(toNumber(draftInterval || 60))),
         source_configs: buildDraftSourceConfigs(parsedParams.value),
         risk_limits: parsedRisk.value,
         metadata: parsedMetadata.value,
-        is_enabled: draftEnabled,
-        is_paused: draftPaused,
-      })
+      }
+
+      if (copyFromTraderId) {
+        payload.copy_from_trader_id = copyFromTraderId
+
+        const sourceTrader = traders.find((trader) => trader.id === copyFromTraderId)
+        const sourceExecutionEnabled = isTraderExecutionEnabled(sourceTrader)
+        if (!sourceTrader || draftEnabled !== sourceExecutionEnabled) {
+          payload.is_enabled = draftEnabled
+          payload.is_paused = !draftEnabled
+        }
+      } else {
+        payload.is_enabled = draftEnabled
+        payload.is_paused = false
+      }
+
+      return createTrader(payload)
     },
     onSuccess: (trader) => {
       setSaveError(null)
@@ -2515,7 +3229,7 @@ export default function TradingPanel() {
         risk_limits: parsedRisk.value,
         metadata: parsedMetadata.value,
         is_enabled: draftEnabled,
-        is_paused: draftPaused,
+        is_paused: false,
       })
     },
     onSuccess: () => {
@@ -2547,6 +3261,21 @@ export default function TradingPanel() {
       refreshAll()
     },
     onError: (error: unknown) => {
+      const liveExposure = parseTraderDeleteLiveExposure(error)
+      if (liveExposure) {
+        setDeleteAction('force_delete')
+        setDeleteConfirmName('')
+        setSaveError(
+          [
+            liveExposure.message,
+            liveExposure.summary ? `Current exposure: ${liveExposure.summary}.` : null,
+            'Select Force Delete and type the bot name to confirm permanent deletion.',
+          ]
+            .filter(Boolean)
+            .join(' ')
+        )
+        return
+      }
       setSaveError(errorMessage(error, 'Failed to delete or disable bot'))
     },
   })
@@ -2556,9 +3285,10 @@ export default function TradingPanel() {
   const killSwitchOn = Boolean(overviewQuery.data?.control?.kill_switch)
   const globalMode = String(overviewQuery.data?.control?.mode || 'paper').toLowerCase()
   const orchestratorEnabled = Boolean(overviewQuery.data?.control?.is_enabled) && !Boolean(overviewQuery.data?.control?.is_paused)
-  const orchestratorRunning = Boolean(worker?.running)
-  const workerActivity = String(worker?.current_activity || '').toLowerCase()
-  const orchestratorBlocked = orchestratorEnabled && !orchestratorRunning && workerActivity.startsWith('blocked')
+  const workerActivity = String(worker?.current_activity || '').trim().toLowerCase()
+  const orchestratorWorkerRunning = Boolean(worker?.running)
+  const orchestratorRunning = orchestratorEnabled && orchestratorWorkerRunning
+  const orchestratorBlocked = orchestratorEnabled && !orchestratorWorkerRunning && workerActivity.startsWith('blocked')
   const orchestratorStatusLabel = orchestratorBlocked ? 'BLOCKED' : orchestratorRunning ? 'RUNNING' : 'STOPPED'
 
   const modeMismatch = selectedAccountValid && orchestratorEnabled && globalMode !== selectedAccountMode
@@ -2732,6 +3462,29 @@ export default function TradingPanel() {
     [globalPositionBook, selectedTraderId]
   )
 
+  const filteredSelectedPositionBook = useMemo(() => {
+    const query = positionSearch.trim().toLowerCase()
+    const rows = selectedPositionBook.filter((row) => {
+      if (positionDirectionFilter === 'yes' && !isYesDirection(row.direction)) return false
+      if (positionDirectionFilter === 'no' && !isNoDirection(row.direction)) return false
+      if (!query) return true
+      const haystack = `${row.marketQuestion} ${row.marketId} ${row.sourceSummary} ${row.statusSummary} ${row.direction} ${row.executionSummary}`.toLowerCase()
+      return haystack.includes(query)
+    })
+    return sortPositionRows(rows, positionSortField, positionSortDirection)
+  }, [
+    positionDirectionFilter,
+    positionSearch,
+    positionSortDirection,
+    positionSortField,
+    selectedPositionBook,
+  ])
+
+  const selectedPositionSummary = useMemo(
+    () => summarizePositionRows(filteredSelectedPositionBook),
+    [filteredSelectedPositionBook]
+  )
+
   const selectedTraderSummary = useMemo(() => {
     let resolved = 0
     let wins = 0
@@ -2824,11 +3577,136 @@ export default function TradingPanel() {
         if (!matchesStatus) return false
         if (!q) return true
 
-        const haystack = `${order.market_question || ''} ${order.market_id || ''} ${order.source || ''} ${order.direction || ''}`.toLowerCase()
+        const haystack = `${order.market_question || ''} ${order.market_id || ''} ${order.source || ''} ${order.direction || ''} ${orderExecutionTypeSummary(order)}`.toLowerCase()
         return haystack.includes(q)
       })
       .slice(0, 250)
   }, [selectedOrders, tradeSearch, tradeStatusFilter])
+
+  const selectedTradeRows = useMemo(() => {
+    return filteredTradeHistory.map((order) => {
+      const status = normalizeStatus(order.status)
+      const pnl = toNumber(order.actual_profit)
+      const orderPayload = order.payload && typeof order.payload === 'object' ? order.payload : {}
+      const providerReconciliation = orderPayload.provider_reconciliation && typeof orderPayload.provider_reconciliation === 'object'
+        ? orderPayload.provider_reconciliation
+        : {}
+      const providerSnapshot = providerReconciliation.snapshot && typeof providerReconciliation.snapshot === 'object'
+        ? providerReconciliation.snapshot
+        : {}
+      const positionState = orderPayload.position_state && typeof orderPayload.position_state === 'object'
+        ? orderPayload.position_state
+        : {}
+      const pendingExit = orderPayload.pending_live_exit && typeof orderPayload.pending_live_exit === 'object'
+        ? orderPayload.pending_live_exit
+        : {}
+      const pendingExitStatus = normalizeStatus(String(pendingExit.status || ''))
+      const fillPx = toNumber(
+        order.average_fill_price
+        ?? providerReconciliation.average_fill_price
+        ?? providerSnapshot.average_fill_price
+        ?? order.effective_price
+        ?? order.entry_price
+      )
+      const markPx = toNumber(
+        order.current_price
+        ?? positionState.last_mark_price
+        ?? orderPayload.market_price
+        ?? orderPayload.resolved_price
+      )
+      const filledSize = toNumber(
+        order.filled_shares
+        ?? providerReconciliation.filled_size
+        ?? providerSnapshot.filled_size
+        ?? orderPayload.filled_size
+      )
+      const filledNotional = toNumber(
+        order.filled_notional_usd
+        ?? providerReconciliation.filled_notional_usd
+        ?? providerSnapshot.filled_notional_usd
+        ?? order.notional_usd
+      )
+      let unrealized = toNumber(order.unrealized_pnl)
+      if ((order.unrealized_pnl === null || order.unrealized_pnl === undefined) && markPx > 0 && filledSize > 0 && filledNotional > 0) {
+        unrealized = (markPx * filledSize) - filledNotional
+      }
+      const markUpdatedAtRaw = String(order.mark_updated_at || positionState.last_marked_at || '')
+      const markUpdatedTs = toTs(markUpdatedAtRaw)
+      const markFresh = markUpdatedTs > 0 && (Date.now() - markUpdatedTs) <= 15_000
+      const providerSnapshotStatus = normalizeStatus(
+        String(
+          order.provider_snapshot_status
+          || providerReconciliation.snapshot_status
+          || providerSnapshot.normalized_status
+          || providerSnapshot.status
+          || ''
+        )
+      )
+      const links = buildOrderMarketLinks(order, orderPayload)
+      const outcome = orderOutcomeSummary(order)
+      const executionSummary = orderExecutionTypeSummary(order)
+      return {
+        order,
+        status,
+        pnl,
+        fillPx,
+        markPx,
+        filledSize,
+        filledNotional,
+        unrealized,
+        providerSnapshotStatus,
+        pendingExitStatus,
+        pendingExit,
+        markFresh,
+        links,
+        executionSummary,
+        outcomeHeadline: outcome.headline,
+        outcomeDetail: outcome.detail,
+        outcomeDetailCompact: compactText(outcome.detail, 96),
+      }
+    })
+  }, [filteredTradeHistory])
+
+  const selectedTradeTotals = useMemo(() => {
+    let total = 0
+    let open = 0
+    let resolved = 0
+    let wins = 0
+    let losses = 0
+    let failed = 0
+    let totalNotional = 0
+    let realizedPnl = 0
+    let unrealizedPnl = 0
+    for (const row of selectedTradeRows) {
+      total += 1
+      totalNotional += Math.abs(toNumber(row.order.notional_usd))
+      if (OPEN_ORDER_STATUSES.has(row.status)) {
+        open += 1
+        unrealizedPnl += row.unrealized
+      }
+      if (RESOLVED_ORDER_STATUSES.has(row.status)) {
+        resolved += 1
+        realizedPnl += row.pnl
+        if (row.pnl > 0) wins += 1
+        if (row.pnl < 0) losses += 1
+      }
+      if (FAILED_ORDER_STATUSES.has(row.status)) {
+        failed += 1
+      }
+    }
+    return {
+      total,
+      open,
+      resolved,
+      wins,
+      losses,
+      failed,
+      totalNotional,
+      realizedPnl,
+      unrealizedPnl,
+      winRate: resolved > 0 ? (wins / resolved) * 100 : 0,
+    }
+  }, [selectedTradeRows])
 
   const filteredAllTradeHistory = useMemo(() => {
     const q = allBotsTradeSearch.trim().toLowerCase()
@@ -2844,11 +3722,34 @@ export default function TradingPanel() {
         if (!matchesStatus) return false
         if (!q) return true
 
-        const haystack = `${order.market_question || ''} ${order.market_id || ''} ${order.source || ''} ${order.direction || ''} ${traderNameById[String(order.trader_id || '')] || ''}`.toLowerCase()
+        const haystack = `${order.market_question || ''} ${order.market_id || ''} ${order.source || ''} ${order.direction || ''} ${traderNameById[String(order.trader_id || '')] || ''} ${orderExecutionTypeSummary(order)}`.toLowerCase()
         return haystack.includes(q)
       })
       .slice(0, 300)
   }, [allBotsTradeSearch, allBotsTradeStatusFilter, allOrders, traderNameById])
+
+  const filteredAllPositionBook = useMemo(() => {
+    const query = allBotsPositionSearch.trim().toLowerCase()
+    const rows = globalPositionBook.filter((row) => {
+      if (allBotsPositionDirectionFilter === 'yes' && !isYesDirection(row.direction)) return false
+      if (allBotsPositionDirectionFilter === 'no' && !isNoDirection(row.direction)) return false
+      if (!query) return true
+      const haystack = `${row.traderName} ${row.marketQuestion} ${row.marketId} ${row.sourceSummary} ${row.statusSummary} ${row.direction} ${row.executionSummary}`.toLowerCase()
+      return haystack.includes(query)
+    })
+    return sortPositionRows(rows, allBotsPositionSortField, allBotsPositionSortDirection)
+  }, [
+    allBotsPositionDirectionFilter,
+    allBotsPositionSearch,
+    allBotsPositionSortDirection,
+    allBotsPositionSortField,
+    globalPositionBook,
+  ])
+
+  const allBotsPositionSummary = useMemo(
+    () => summarizePositionRows(filteredAllPositionBook),
+    [filteredAllPositionBook]
+  )
 
   const activityRows = useMemo(() => {
     const decisionsById = new Map(allDecisions.map((decision) => [decision.id, decision]))
@@ -2903,10 +3804,12 @@ export default function TradingPanel() {
       const fallbackMarket = cleanText(order.market_question) || cleanText(order.market_id)
       const marketLabel = primaryMarketLabel([leg], fallbackMarket)
       const reason = orderReasonDetail(order)
+      const outcome = orderOutcomeSummary(order)
       const detailParts = [
         `Markets: ${renderMarketsDetail([leg], fallbackMarket)}`,
         `Notional: ${formatCurrency(toNumber(order.notional_usd))}`,
         `Mode: ${String(order.mode || '').toUpperCase() || 'N/A'}`,
+        `Outcome: ${outcome.headline}`,
         `Reason: ${reason}`,
       ]
       if (RESOLVED_ORDER_STATUSES.has(status)) {
@@ -3032,18 +3935,33 @@ export default function TradingPanel() {
   }, [globalSummary.topTraderRows, traders])
 
   const enabledTraderCount = useMemo(
-    () => traders.filter((trader) => trader.is_enabled).length,
+    () => traders.filter((trader) => isTraderExecutionEnabled(trader)).length,
     [traders]
   )
-
-  const pausedTraderCount = useMemo(
-    () => traders.filter((trader) => trader.is_enabled && trader.is_paused).length,
+  const activeCryptoTraderCount = useMemo(
+    () =>
+      traders.filter((trader) => {
+        if (!isTraderExecutionEnabled(trader)) return false
+        return traderSourceKeys(trader).some((sourceKey) => isCryptoSourceKey(sourceKey))
+      }).length,
     [traders]
+  )
+  const highFrequencyCryptoLoopActive = orchestratorEnabled && !killSwitchOn && activeCryptoTraderCount > 0
+  const effectiveGlobalLoopLabel = highFrequencyCryptoLoopActive
+    ? 'REAL-TIME (event-driven + high-frequency monitor)'
+    : 'REAL-TIME (event-driven)'
+  const effectiveGlobalLoopDetail = highFrequencyCryptoLoopActive
+    ? 'Signal events wake the orchestrator immediately with high-frequency monitoring active.'
+    : 'Signal events wake the orchestrator immediately.'
+
+  const disabledTraderCount = useMemo(
+    () => Math.max(0, traders.length - enabledTraderCount),
+    [traders.length, enabledTraderCount]
   )
 
   const runningTraderCount = useMemo(
-    () => traders.filter((trader) => trader.is_enabled && !trader.is_paused).length,
-    [traders]
+    () => (orchestratorRunning ? enabledTraderCount : 0),
+    [orchestratorRunning, enabledTraderCount]
   )
 
 
@@ -3107,15 +4025,11 @@ export default function TradingPanel() {
 
   const tradersRunningDisplay = orchestratorRunning ? toNumber(metrics?.traders_running) : 0
   const displayAvgEdge = normalizeEdgePercent(globalSummary.avgEdge)
-  const selectedTraderStatusLabel = !orchestratorRunning
-    ? 'Engine Off'
-    : !selectedTrader?.is_enabled
-      ? 'Disabled'
-      : selectedTrader?.is_paused
-        ? 'Paused'
-        : 'Running'
-  const selectedTraderCanResume = Boolean(selectedTrader?.is_enabled && selectedTrader?.is_paused)
-  const selectedTraderCanPause = Boolean(selectedTrader?.is_enabled && !selectedTrader?.is_paused)
+  const selectedTraderStatus = resolveTraderStatusPresentation(selectedTrader, orchestratorRunning)
+  const selectedTraderExecutionEnabled = isTraderExecutionEnabled(selectedTrader)
+  const selectedTraderCanEnable = Boolean(selectedTrader && !selectedTraderExecutionEnabled)
+  const selectedTraderCanDisable = Boolean(selectedTrader && selectedTraderExecutionEnabled)
+  const selectedTraderControlPending = traderEnableMutation.isPending || traderDisableMutation.isPending
   const showingAllBotsDashboard = !selectedTraderId
 
   const requestOrchestratorStart = () => {
@@ -3140,8 +4054,12 @@ export default function TradingPanel() {
   const canStopOrchestrator = !controlBusy && orchestratorEnabled
   const startStopIsConfigured = orchestratorEnabled
   const startStopIsRunning = orchestratorRunning
-  const startStopDisabled = startStopIsConfigured ? !canStopOrchestrator : !canStartOrchestrator
-  const startStopPending = startStopIsConfigured ? stopByModeMutation.isPending : startBySelectedAccountMutation.isPending
+  const startStopIsStarting =
+    startBySelectedAccountMutation.isPending ||
+    (startStopIsConfigured && !startStopIsRunning && workerActivity.includes('start command queued'))
+  const startStopIsStopping = stopByModeMutation.isPending
+  const startStopPending = startStopIsStarting || startStopIsStopping
+  const startStopDisabled = startStopPending || (startStopIsConfigured ? !canStopOrchestrator : !canStartOrchestrator)
 
   const runStartStopCommand = () => {
     if (startStopIsConfigured) {
@@ -3185,18 +4103,32 @@ export default function TradingPanel() {
             ) : (
               <Play className="w-3.5 h-3.5 mr-1" />
             )}
-            {startStopIsConfigured
-              ? (startStopIsRunning ? 'Stop' : 'Start')
-              : selectedAccountMode.toUpperCase()}
+            {startStopIsStarting
+              ? 'Starting...'
+              : startStopIsStopping
+                ? 'Stopping...'
+                : startStopIsConfigured
+                  ? (startStopIsRunning ? 'Stop' : 'Start')
+                  : selectedAccountMode.toUpperCase()}
           </Button>
           <div className="flex items-center gap-1.5 rounded border border-red-500/30 bg-red-500/5 px-1.5 py-0.5">
             <ShieldAlert className="w-3 h-3 text-red-400" />
-            <Switch
-              checked={killSwitchOn}
-              onCheckedChange={(enabled) => killSwitchMutation.mutate(enabled)}
-              disabled={controlBusy}
-              className="scale-[0.8]"
-            />
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="inline-flex">
+                  <Switch
+                    checked={killSwitchOn}
+                    onCheckedChange={(enabled) => killSwitchMutation.mutate(enabled)}
+                    disabled={controlBusy}
+                    className="scale-[0.8]"
+                  />
+                </span>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" className="max-w-[320px] text-xs leading-snug">
+                Blocks new entry orders only. Bots stay running in manage-only mode so existing positions and orders can
+                still be monitored, sold, and reconciled.
+              </TooltipContent>
+            </Tooltip>
           </div>
         </div>
 
@@ -3229,7 +4161,16 @@ export default function TradingPanel() {
         </div>
 
         <div className="ml-auto flex items-center gap-1 text-[10px] text-muted-foreground">
-          <span className={cn('w-1.5 h-1.5 rounded-full', worker?.last_error ? 'bg-amber-400' : 'bg-emerald-500')} />
+          <span
+            className={cn(
+              'w-1.5 h-1.5 rounded-full',
+              worker?.last_error
+                ? 'bg-amber-400'
+                : orchestratorRunning
+                  ? 'bg-emerald-500'
+                  : 'bg-amber-400'
+            )}
+          />
           <Clock3 className="w-3 h-3" />
           {formatTimestamp(worker?.last_run_at)}
         </div>
@@ -3261,7 +4202,7 @@ export default function TradingPanel() {
                 All Bots
               </button>
               {traders.map((trader) => {
-                const traderStatus = !trader.is_enabled ? 'disabled' : trader.is_paused ? 'paused' : 'running'
+                const traderStatus = resolveTraderStatusPresentation(trader, orchestratorRunning)
                 const isActive = trader.id === selectedTraderId
                 const traderSources = traderSourceKeys(trader)
                 return (
@@ -3279,8 +4220,7 @@ export default function TradingPanel() {
                     <div className="flex items-center gap-1.5">
                       <span className={cn(
                         'w-1.5 h-1.5 rounded-full shrink-0',
-                        traderStatus === 'running' && orchestratorRunning ? 'bg-emerald-500' :
-                        traderStatus === 'paused' ? 'bg-amber-400' : 'bg-zinc-500'
+                        traderStatus.dotClassName
                       )} />
                       <span className="text-[11px] font-medium truncate leading-tight">{trader.name}</span>
                     </div>
@@ -3322,7 +4262,7 @@ export default function TradingPanel() {
                     <div className="rounded-md border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-1.5">
                       <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Running Bots</p>
                       <p className="text-sm font-mono">{runningTraderCount}/{enabledTraderCount}</p>
-                      <p className="text-[10px] text-muted-foreground">Paused {pausedTraderCount}</p>
+                      <p className="text-[10px] text-muted-foreground">Disabled {disabledTraderCount}</p>
                     </div>
                     <div className="rounded-md border border-cyan-500/25 bg-cyan-500/10 px-2.5 py-1.5">
                       <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Selected Signals</p>
@@ -3468,15 +4408,14 @@ export default function TradingPanel() {
                               </TableHeader>
                               <TableBody>
                                 {allBotsLeaderboardRows.map((row) => {
-                                  const traderStatus = !row.trader.is_enabled ? 'disabled' : row.trader.is_paused ? 'paused' : 'running'
+                                  const traderStatus = resolveTraderStatusPresentation(row.trader, orchestratorRunning)
                                   return (
                                     <TableRow key={row.trader.id} className="text-xs">
                                       <TableCell className="py-1">
                                         <div className="flex items-center gap-1.5">
                                           <span className={cn(
                                             'w-1.5 h-1.5 rounded-full shrink-0',
-                                            traderStatus === 'running' && orchestratorRunning ? 'bg-emerald-500' :
-                                            traderStatus === 'paused' ? 'bg-amber-400' : 'bg-zinc-500'
+                                            traderStatus.dotClassName
                                           )} />
                                           <span className="truncate max-w-[170px]" title={row.trader.name}>{row.trader.name}</span>
                                         </div>
@@ -3580,10 +4519,13 @@ export default function TradingPanel() {
                                   <TableHead className="text-[11px]">Bot</TableHead>
                                   <TableHead className="text-[11px]">Market</TableHead>
                                   <TableHead className="text-[11px]">Dir</TableHead>
-                                  <TableHead className="text-[11px]">Status</TableHead>
+                                  <TableHead className="text-[11px]">Status / Reason</TableHead>
                                   <TableHead className="text-[11px] text-right">Notional</TableHead>
+                                  <TableHead className="text-[11px] text-right">Fill Px</TableHead>
+                                  <TableHead className="text-[11px] text-right">Mark Px</TableHead>
+                                  <TableHead className="text-[11px] text-right">U-P&amp;L</TableHead>
                                   <TableHead className="text-[11px] text-right">Edge</TableHead>
-                                  <TableHead className="text-[11px] text-right">P&amp;L</TableHead>
+                                  <TableHead className="text-[11px] text-right">R-P&amp;L</TableHead>
                                   <TableHead className="text-[11px]">Mode</TableHead>
                                   <TableHead className="text-[11px]">Created</TableHead>
                                 </TableRow>
@@ -3592,6 +4534,48 @@ export default function TradingPanel() {
                                 {filteredAllTradeHistory.map((order) => {
                                   const status = normalizeStatus(order.status)
                                   const pnl = toNumber(order.actual_profit)
+                                  const orderPayload = order.payload && typeof order.payload === 'object' ? order.payload : {}
+                                  const providerReconciliation = orderPayload.provider_reconciliation && typeof orderPayload.provider_reconciliation === 'object'
+                                    ? orderPayload.provider_reconciliation
+                                    : {}
+                                  const providerSnapshot = providerReconciliation.snapshot && typeof providerReconciliation.snapshot === 'object'
+                                    ? providerReconciliation.snapshot
+                                    : {}
+                                  const positionState = orderPayload.position_state && typeof orderPayload.position_state === 'object'
+                                    ? orderPayload.position_state
+                                    : {}
+                                  const fillPx = toNumber(
+                                    order.average_fill_price
+                                    ?? providerReconciliation.average_fill_price
+                                    ?? providerSnapshot.average_fill_price
+                                    ?? order.effective_price
+                                    ?? order.entry_price
+                                  )
+                                  const markPx = toNumber(
+                                    order.current_price
+                                    ?? positionState.last_mark_price
+                                    ?? orderPayload.market_price
+                                    ?? orderPayload.resolved_price
+                                  )
+                                  const filledSize = toNumber(
+                                    order.filled_shares
+                                    ?? providerReconciliation.filled_size
+                                    ?? providerSnapshot.filled_size
+                                    ?? orderPayload.filled_size
+                                  )
+                                  const filledNotional = toNumber(
+                                    order.filled_notional_usd
+                                    ?? providerReconciliation.filled_notional_usd
+                                    ?? providerSnapshot.filled_notional_usd
+                                    ?? order.notional_usd
+                                  )
+                                  let unrealized = toNumber(order.unrealized_pnl)
+                                  if ((order.unrealized_pnl === null || order.unrealized_pnl === undefined) && markPx > 0 && filledSize > 0 && filledNotional > 0) {
+                                    unrealized = (markPx * filledSize) - filledNotional
+                                  }
+                                  const outcome = orderOutcomeSummary(order)
+                                  const outcomeDetailCompact = compactText(outcome.detail, 120)
+                                  const executionSummary = orderExecutionTypeSummary(order)
                                   return (
                                     <TableRow key={order.id} className="text-xs">
                                       <TableCell className="py-1 max-w-[140px] truncate" title={traderNameById[String(order.trader_id || '')] || shortId(order.trader_id)}>
@@ -3606,11 +4590,40 @@ export default function TradingPanel() {
                                         </Badge>
                                       </TableCell>
                                       <TableCell className="py-1">
-                                        <Badge variant={OPEN_ORDER_STATUSES.has(status) ? 'default' : RESOLVED_ORDER_STATUSES.has(status) ? (pnl >= 0 ? 'default' : 'destructive') : 'outline'} className="text-[10px] h-5 px-1.5">
-                                          {status}
-                                        </Badge>
+                                        <div className="min-w-0 space-y-0.5">
+                                          <div className="flex min-w-0 items-center gap-1">
+                                            <Badge variant={OPEN_ORDER_STATUSES.has(status) ? 'default' : RESOLVED_ORDER_STATUSES.has(status) ? (pnl >= 0 ? 'default' : 'destructive') : 'outline'} className="text-[10px] h-5 px-1.5">
+                                              {status}
+                                            </Badge>
+                                            <Badge
+                                              variant="outline"
+                                              title={outcome.detail}
+                                              className={cn(
+                                                'h-5 max-w-[180px] truncate px-1.5 text-[10px]',
+                                                FAILED_ORDER_STATUSES.has(status) ? 'border-red-500/40 bg-red-500/5 text-red-500' :
+                                                RESOLVED_ORDER_STATUSES.has(status) ? 'border-emerald-500/40 bg-emerald-500/5 text-emerald-500' :
+                                                'text-muted-foreground'
+                                              )}
+                                            >
+                                              {outcome.headline}
+                                            </Badge>
+                                            {executionSummary !== '—' && (
+                                              <Badge variant="outline" title={`Execution: ${executionSummary}`} className="h-5 px-1.5 text-[10px] text-muted-foreground">
+                                                {executionSummary}
+                                              </Badge>
+                                            )}
+                                          </div>
+                                          <p className="truncate text-[10px] text-muted-foreground" title={outcome.detail}>
+                                            {outcomeDetailCompact}
+                                          </p>
+                                        </div>
                                       </TableCell>
                                       <TableCell className="text-right font-mono py-1">{formatCurrency(toNumber(order.notional_usd))}</TableCell>
+                                      <TableCell className="text-right font-mono py-1">{fillPx > 0 ? fillPx.toFixed(3) : '\u2014'}</TableCell>
+                                      <TableCell className="text-right font-mono py-1">{markPx > 0 ? markPx.toFixed(3) : '\u2014'}</TableCell>
+                                      <TableCell className={cn('text-right font-mono py-1', unrealized > 0 ? 'text-emerald-500' : unrealized < 0 ? 'text-red-500' : '')}>
+                                        {OPEN_ORDER_STATUSES.has(status) ? formatCurrency(unrealized) : '\u2014'}
+                                      </TableCell>
                                       <TableCell className="text-right font-mono py-1">{formatPercent(toNumber(order.edge_percent))}</TableCell>
                                       <TableCell className={cn('text-right font-mono py-1', pnl > 0 ? 'text-emerald-500' : pnl < 0 ? 'text-red-500' : '')}>
                                         {RESOLVED_ORDER_STATUSES.has(status) ? formatCurrency(pnl) : '\u2014'}
@@ -3629,45 +4642,189 @@ export default function TradingPanel() {
                   </TabsContent>
 
                   <TabsContent value="positions" className="mt-2 flex-1 min-h-0 overflow-hidden">
-                    <div className="h-full min-h-0 overflow-hidden">
-                      {globalPositionBook.length === 0 ? (
-                        <div className="h-full flex items-center justify-center text-sm text-muted-foreground">No open positions.</div>
-                      ) : (
-                        <ScrollArea className="h-full min-h-0 rounded-md border border-border/60 bg-card/80">
-                          <Table>
-                            <TableHeader>
-                              <TableRow>
-                                <TableHead className="text-[11px]">Bot</TableHead>
-                                <TableHead className="text-[11px]">Market</TableHead>
-                                <TableHead className="text-[11px]">Dir</TableHead>
-                                <TableHead className="text-[11px] text-right">Exposure</TableHead>
-                                <TableHead className="text-[11px] text-right">AvgPx</TableHead>
-                                <TableHead className="text-[11px] text-right">Edge</TableHead>
-                                <TableHead className="text-[11px] text-right">Conf</TableHead>
-                                <TableHead className="text-[11px] text-right">Orders</TableHead>
-                                <TableHead className="text-[11px]">Updated</TableHead>
-                              </TableRow>
-                            </TableHeader>
-                            <TableBody>
-                              {globalPositionBook.map((row) => (
-                                <TableRow key={row.key} className="text-xs">
-                                  <TableCell className="py-1 max-w-[140px] truncate" title={row.traderName}>{row.traderName}</TableCell>
-                                  <TableCell className="max-w-[300px] truncate py-1" title={row.marketQuestion}>{row.marketQuestion}</TableCell>
-                                  <TableCell className="py-1">
-                                    <Badge variant={row.direction === 'YES' ? 'default' : 'secondary'} className="text-[10px] h-5 px-1.5">{row.direction}</Badge>
-                                  </TableCell>
-                                  <TableCell className="text-right font-mono py-1">{formatCurrency(row.exposureUsd)}</TableCell>
-                                  <TableCell className="text-right font-mono py-1">{row.averagePrice !== null ? row.averagePrice.toFixed(3) : 'n/a'}</TableCell>
-                                  <TableCell className="text-right font-mono py-1">{row.weightedEdge !== null ? formatPercent(row.weightedEdge) : 'n/a'}</TableCell>
-                                  <TableCell className="text-right font-mono py-1">{row.weightedConfidence !== null ? formatPercent(normalizeConfidencePercent(row.weightedConfidence)) : 'n/a'}</TableCell>
-                                  <TableCell className="text-right font-mono py-1">{row.orderCount}</TableCell>
-                                  <TableCell className="py-1 text-[10px] text-muted-foreground">{formatShortDate(row.lastUpdated)}</TableCell>
+                    <div className="h-full flex flex-col min-h-0 gap-1.5">
+                      <div className="shrink-0 flex flex-wrap items-center gap-1">
+                        <Input
+                          value={allBotsPositionSearch}
+                          onChange={(event) => setAllBotsPositionSearch(event.target.value)}
+                          placeholder="Search bot, market, source..."
+                          className="h-6 w-56 text-[11px]"
+                        />
+                        {(['all', 'yes', 'no'] as PositionDirectionFilter[]).map((direction) => (
+                          <Button
+                            key={direction}
+                            size="sm"
+                            variant={allBotsPositionDirectionFilter === direction ? 'default' : 'outline'}
+                            onClick={() => setAllBotsPositionDirectionFilter(direction)}
+                            className="h-5 px-2 text-[10px]"
+                          >
+                            {direction}
+                          </Button>
+                        ))}
+                        <Select
+                          value={allBotsPositionSortField}
+                          onValueChange={(value) => setAllBotsPositionSortField(value as PositionSortField)}
+                        >
+                          <SelectTrigger className="h-6 w-[132px] text-[11px]">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="exposure">Exposure</SelectItem>
+                            <SelectItem value="unrealized">U-P&L</SelectItem>
+                            <SelectItem value="edge">Edge</SelectItem>
+                            <SelectItem value="confidence">Confidence</SelectItem>
+                            <SelectItem value="updated">Updated</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => setAllBotsPositionSortDirection((current) => (current === 'asc' ? 'desc' : 'asc'))}
+                          className="h-5 px-2 text-[10px]"
+                        >
+                          {allBotsPositionSortDirection === 'desc' ? 'desc' : 'asc'}
+                        </Button>
+                        <span className="ml-auto text-[10px] font-mono text-muted-foreground">{filteredAllPositionBook.length} rows</span>
+                      </div>
+                      <div className="shrink-0 grid grid-cols-2 gap-1 sm:grid-cols-4 lg:grid-cols-8">
+                        <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                          <p className="text-[9px] uppercase text-muted-foreground">Positions</p>
+                          <p className="text-xs font-mono">{allBotsPositionSummary.totalRows}</p>
+                        </div>
+                        <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                          <p className="text-[9px] uppercase text-muted-foreground">YES / NO</p>
+                          <p className="text-xs font-mono">{allBotsPositionSummary.yesRows} / {allBotsPositionSummary.noRows}</p>
+                        </div>
+                        <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                          <p className="text-[9px] uppercase text-muted-foreground">Exposure</p>
+                          <p className="text-xs font-mono">{formatCurrency(allBotsPositionSummary.totalExposure, true)}</p>
+                        </div>
+                        <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                          <p className="text-[9px] uppercase text-muted-foreground">U-P&amp;L</p>
+                          <p className={cn(
+                            'text-xs font-mono',
+                            allBotsPositionSummary.totalUnrealizedPnl > 0 ? 'text-emerald-500' : allBotsPositionSummary.totalUnrealizedPnl < 0 ? 'text-red-500' : ''
+                          )}
+                          >
+                            {allBotsPositionSummary.rowsWithUnrealized > 0
+                              ? formatCurrency(allBotsPositionSummary.totalUnrealizedPnl, true)
+                              : '—'}
+                          </p>
+                        </div>
+                        <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                          <p className="text-[9px] uppercase text-muted-foreground">Avg Edge</p>
+                          <p className="text-xs font-mono">{formatPercent(allBotsPositionSummary.avgEdge)}</p>
+                        </div>
+                        <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                          <p className="text-[9px] uppercase text-muted-foreground">Avg Conf</p>
+                          <p className="text-xs font-mono">{formatPercent(normalizeConfidencePercent(allBotsPositionSummary.avgConfidence))}</p>
+                        </div>
+                        <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                          <p className="text-[9px] uppercase text-muted-foreground">Live / Paper</p>
+                          <p className="text-xs font-mono">{allBotsPositionSummary.liveOrders} / {allBotsPositionSummary.paperOrders}</p>
+                        </div>
+                        <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                          <p className="text-[9px] uppercase text-muted-foreground">Marks</p>
+                          <p className="text-xs font-mono">{allBotsPositionSummary.freshMarks} / {allBotsPositionSummary.markedRows}</p>
+                        </div>
+                      </div>
+                      <div className="flex-1 min-h-0 overflow-hidden">
+                        {filteredAllPositionBook.length === 0 ? (
+                          <div className="h-full flex items-center justify-center text-sm text-muted-foreground">No positions matching filters.</div>
+                        ) : (
+                          <ScrollArea className="h-full min-h-0 rounded-md border border-border/60 bg-card/80">
+                            <Table>
+                              <TableHeader>
+                                <TableRow>
+                                  <TableHead className="text-[11px]">Bot</TableHead>
+                                  <TableHead className="text-[11px]">Market</TableHead>
+                                  <TableHead className="text-[11px]">L</TableHead>
+                                  <TableHead className="text-[11px]">Dir</TableHead>
+                                  <TableHead className="text-[11px] text-right">Exposure</TableHead>
+                                  <TableHead className="text-[11px] text-right">Avg Px</TableHead>
+                                  <TableHead className="text-[11px] text-right">Mark</TableHead>
+                                  <TableHead className="text-[11px] text-right">U-P&amp;L</TableHead>
+                                  <TableHead className="text-[11px] text-right">Edge</TableHead>
+                                  <TableHead className="text-[11px] text-right">Conf</TableHead>
+                                  <TableHead className="text-[11px] text-right">Orders</TableHead>
+                                  <TableHead className="text-[11px] text-right">Mode</TableHead>
+                                  <TableHead className="text-[11px]">Updated</TableHead>
                                 </TableRow>
-                              ))}
-                            </TableBody>
-                          </Table>
-                        </ScrollArea>
-                      )}
+                              </TableHeader>
+                              <TableBody>
+                                {filteredAllPositionBook.map((row) => (
+                                  <TableRow key={row.key} className="text-xs">
+                                    <TableCell className="py-1 max-w-[140px] truncate" title={row.traderName}>
+                                      {row.traderName}
+                                    </TableCell>
+                                    <TableCell className="max-w-[280px] truncate py-1" title={row.marketQuestion}>
+                                      <p className="truncate">{row.marketQuestion}</p>
+                                      <p className="text-[10px] text-muted-foreground truncate" title={positionMetaLine(row)}>
+                                        {positionMetaLine(row)}
+                                      </p>
+                                    </TableCell>
+                                    <TableCell className="py-1">
+                                      <div className="flex items-center gap-1">
+                                        {row.links.polymarket && (
+                                          <a
+                                            href={row.links.polymarket}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="inline-flex h-4 w-4 items-center justify-center rounded border border-border/70 text-muted-foreground transition-colors hover:text-foreground"
+                                            title="Open Polymarket market"
+                                          >
+                                            <ExternalLink className="h-3 w-3" />
+                                          </a>
+                                        )}
+                                        {row.links.kalshi && (
+                                          <a
+                                            href={row.links.kalshi}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="inline-flex h-4 w-4 items-center justify-center rounded border border-border/70 text-muted-foreground transition-colors hover:text-foreground"
+                                            title="Open Kalshi market"
+                                          >
+                                            <ExternalLink className="h-3 w-3" />
+                                          </a>
+                                        )}
+                                        {!row.links.polymarket && !row.links.kalshi && (
+                                          <span className="text-[9px] text-muted-foreground">—</span>
+                                        )}
+                                      </div>
+                                    </TableCell>
+                                    <TableCell className="py-1">
+                                      <Badge variant={isYesDirection(row.direction) ? 'default' : 'secondary'} className="text-[10px] h-5 px-1.5">
+                                        {row.direction}
+                                      </Badge>
+                                    </TableCell>
+                                    <TableCell className="text-right font-mono py-1">{formatCurrency(row.exposureUsd)}</TableCell>
+                                    <TableCell className="text-right font-mono py-1">{row.averagePrice !== null ? row.averagePrice.toFixed(3) : '—'}</TableCell>
+                                    <TableCell className={cn('text-right font-mono py-1', row.markFresh && 'text-sky-300')}>
+                                      {row.markPrice !== null ? (
+                                        <FlashNumber
+                                          value={row.markPrice}
+                                          decimals={3}
+                                          className={cn('font-mono text-xs', row.markFresh ? 'data-glow-blue' : '')}
+                                          positiveClass="data-glow-green"
+                                          negativeClass="data-glow-red"
+                                        />
+                                      ) : '—'}
+                                    </TableCell>
+                                    <TableCell className={cn('text-right font-mono py-1', (row.unrealizedPnl || 0) > 0 ? 'text-emerald-500' : (row.unrealizedPnl || 0) < 0 ? 'text-red-500' : '')}>
+                                      {row.unrealizedPnl !== null ? formatCurrency(row.unrealizedPnl) : '—'}
+                                    </TableCell>
+                                    <TableCell className="text-right font-mono py-1">{row.weightedEdge !== null ? formatPercent(row.weightedEdge) : '—'}</TableCell>
+                                    <TableCell className="text-right font-mono py-1">{row.weightedConfidence !== null ? formatPercent(normalizeConfidencePercent(row.weightedConfidence)) : '—'}</TableCell>
+                                    <TableCell className="text-right font-mono py-1">{row.orderCount}</TableCell>
+                                    <TableCell className="text-right font-mono py-1">{row.liveOrderCount}L/{row.paperOrderCount}P</TableCell>
+                                    <TableCell className="py-1 text-[10px] text-muted-foreground">{formatShortDate(row.lastUpdated || row.markUpdatedAt)}</TableCell>
+                                  </TableRow>
+                                ))}
+                              </TableBody>
+                            </Table>
+                          </ScrollArea>
+                        )}
+                      </div>
                     </div>
                   </TabsContent>
                 </Tabs>
@@ -3678,8 +4835,11 @@ export default function TradingPanel() {
               {selectedTrader && (
                 <div className="shrink-0 rounded-lg border border-border/70 bg-card px-3 py-1.5 flex flex-wrap items-center gap-x-3 gap-y-1">
                   <span className="text-sm font-semibold">{selectedTrader.name}</span>
-                  <Badge className="h-5 px-1.5 text-[10px]" variant={selectedTraderStatusLabel === 'Running' ? 'default' : selectedTraderStatusLabel === 'Paused' ? 'secondary' : 'outline'}>
-                    {selectedTraderStatusLabel}
+                  <Badge
+                    className={cn('h-5 px-1.5 text-[10px]', selectedTraderStatus.badgeClassName)}
+                    variant={selectedTraderStatus.badgeVariant}
+                  >
+                    {selectedTraderStatus.label}
                   </Badge>
                   <div className="hidden md:flex items-center gap-2 text-[11px] font-mono text-muted-foreground">
                     <span className={selectedTraderSummary.pnl >= 0 ? 'text-emerald-500' : 'text-red-500'}>{formatCurrency(selectedTraderSummary.pnl)}</span>
@@ -3693,11 +4853,23 @@ export default function TradingPanel() {
                     <span>Edge {formatPercent(normalizeEdgePercent(selectedTraderSummary.avgEdge))}</span>
                   </div>
                   <div className="ml-auto flex items-center gap-1">
-                    <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]" disabled={!selectedTraderCanResume} onClick={() => traderStartMutation.mutate(selectedTrader.id)}>
-                      <Play className="w-3 h-3 mr-0.5" /> Resume
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-6 px-2 text-[10px]"
+                      disabled={selectedTraderControlPending || !selectedTraderCanEnable}
+                      onClick={() => traderEnableMutation.mutate(selectedTrader.id)}
+                    >
+                      <Play className="w-3 h-3 mr-0.5" /> Enable
                     </Button>
-                    <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]" disabled={!selectedTraderCanPause} onClick={() => traderPauseMutation.mutate(selectedTrader.id)}>
-                      <Pause className="w-3 h-3 mr-0.5" /> Pause
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-6 px-2 text-[10px]"
+                      disabled={selectedTraderControlPending || !selectedTraderCanDisable}
+                      onClick={() => traderDisableMutation.mutate(selectedTrader.id)}
+                    >
+                      <Square className="w-3 h-3 mr-0.5" /> Disable
                     </Button>
                     <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]" onClick={() => traderRunOnceMutation.mutate(selectedTrader.id)} disabled={traderRunOnceMutation.isPending}>
                       <Zap className="w-3 h-3 mr-0.5" /> Once
@@ -3714,6 +4886,7 @@ export default function TradingPanel() {
                   { key: 'terminal' as const, label: 'Terminal' },
                   { key: 'positions' as const, label: 'Positions' },
                   { key: 'trades' as const, label: 'Trades' },
+                  { key: 'monitor' as const, label: 'Monitor' },
                   { key: 'decisions' as const, label: 'Decisions' },
                   { key: 'risk' as const, label: 'Risk' },
                 ]).map((tab) => (
@@ -3790,41 +4963,185 @@ export default function TradingPanel() {
                 )}
 
                 {workTab === 'positions' && (
-                  <div className="h-full min-h-0 overflow-hidden px-1">
-                    {selectedPositionBook.length === 0 ? (
-                      <div className="h-full flex items-center justify-center text-sm text-muted-foreground">No open positions.</div>
-                    ) : (
-                      <ScrollArea className="h-full min-h-0">
-                        <Table>
-                          <TableHeader>
-                            <TableRow>
-                              <TableHead className="text-[11px]">Market</TableHead>
-                              <TableHead className="text-[11px]">Dir</TableHead>
-                              <TableHead className="text-[11px] text-right">Exposure</TableHead>
-                              <TableHead className="text-[11px] text-right">AvgPx</TableHead>
-                              <TableHead className="text-[11px] text-right">Edge</TableHead>
-                              <TableHead className="text-[11px] text-right">Conf</TableHead>
-                              <TableHead className="text-[11px] text-right">Orders</TableHead>
-                            </TableRow>
-                          </TableHeader>
-                          <TableBody>
-                            {selectedPositionBook.map((row) => (
-                              <TableRow key={row.key} className="text-xs">
-                                <TableCell className="max-w-[240px] truncate py-1" title={row.marketQuestion}>{row.marketQuestion}</TableCell>
-                                <TableCell className="py-1">
-                                  <Badge variant={row.direction === 'YES' ? 'default' : 'secondary'} className="text-[10px] h-5 px-1.5">{row.direction}</Badge>
-                                </TableCell>
-                                <TableCell className="text-right font-mono py-1">{formatCurrency(row.exposureUsd)}</TableCell>
-                                <TableCell className="text-right font-mono py-1">{row.averagePrice !== null ? row.averagePrice.toFixed(3) : 'n/a'}</TableCell>
-                                <TableCell className="text-right font-mono py-1">{row.weightedEdge !== null ? formatPercent(row.weightedEdge) : 'n/a'}</TableCell>
-                                <TableCell className="text-right font-mono py-1">{row.weightedConfidence !== null ? formatPercent(normalizeConfidencePercent(row.weightedConfidence)) : 'n/a'}</TableCell>
-                                <TableCell className="text-right font-mono py-1">{row.orderCount}</TableCell>
+                  <div className="h-full flex flex-col min-h-0 gap-1.5">
+                    <div className="shrink-0 flex flex-wrap items-center gap-1 px-1">
+                      <Input
+                        value={positionSearch}
+                        onChange={(event) => setPositionSearch(event.target.value)}
+                        placeholder="Search market, source..."
+                        className="h-6 w-44 text-[11px]"
+                      />
+                      {(['all', 'yes', 'no'] as PositionDirectionFilter[]).map((direction) => (
+                        <Button
+                          key={direction}
+                          size="sm"
+                          variant={positionDirectionFilter === direction ? 'default' : 'outline'}
+                          onClick={() => setPositionDirectionFilter(direction)}
+                          className="h-5 px-2 text-[10px]"
+                        >
+                          {direction}
+                        </Button>
+                      ))}
+                      <Select
+                        value={positionSortField}
+                        onValueChange={(value) => setPositionSortField(value as PositionSortField)}
+                      >
+                        <SelectTrigger className="h-6 w-[132px] text-[11px]">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="exposure">Exposure</SelectItem>
+                          <SelectItem value="unrealized">U-P&L</SelectItem>
+                          <SelectItem value="edge">Edge</SelectItem>
+                          <SelectItem value="confidence">Confidence</SelectItem>
+                          <SelectItem value="updated">Updated</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setPositionSortDirection((current) => (current === 'asc' ? 'desc' : 'asc'))}
+                        className="h-5 px-2 text-[10px]"
+                      >
+                        {positionSortDirection === 'desc' ? 'desc' : 'asc'}
+                      </Button>
+                      <span className="ml-auto text-[10px] font-mono text-muted-foreground">{filteredSelectedPositionBook.length} rows</span>
+                    </div>
+                    <div className="shrink-0 grid grid-cols-2 gap-1 px-1 sm:grid-cols-4 lg:grid-cols-8">
+                      <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                        <p className="text-[9px] uppercase text-muted-foreground">Positions</p>
+                        <p className="text-xs font-mono">{selectedPositionSummary.totalRows}</p>
+                      </div>
+                      <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                        <p className="text-[9px] uppercase text-muted-foreground">YES / NO</p>
+                        <p className="text-xs font-mono">{selectedPositionSummary.yesRows} / {selectedPositionSummary.noRows}</p>
+                      </div>
+                      <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                        <p className="text-[9px] uppercase text-muted-foreground">Exposure</p>
+                        <p className="text-xs font-mono">{formatCurrency(selectedPositionSummary.totalExposure, true)}</p>
+                      </div>
+                      <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                        <p className="text-[9px] uppercase text-muted-foreground">U-P&amp;L</p>
+                        <p className={cn(
+                          'text-xs font-mono',
+                          selectedPositionSummary.totalUnrealizedPnl > 0 ? 'text-emerald-500' : selectedPositionSummary.totalUnrealizedPnl < 0 ? 'text-red-500' : ''
+                        )}
+                        >
+                          {selectedPositionSummary.rowsWithUnrealized > 0
+                            ? formatCurrency(selectedPositionSummary.totalUnrealizedPnl, true)
+                            : '—'}
+                        </p>
+                      </div>
+                      <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                        <p className="text-[9px] uppercase text-muted-foreground">Avg Edge</p>
+                        <p className="text-xs font-mono">{formatPercent(selectedPositionSummary.avgEdge)}</p>
+                      </div>
+                      <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                        <p className="text-[9px] uppercase text-muted-foreground">Avg Conf</p>
+                        <p className="text-xs font-mono">{formatPercent(normalizeConfidencePercent(selectedPositionSummary.avgConfidence))}</p>
+                      </div>
+                      <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                        <p className="text-[9px] uppercase text-muted-foreground">Live / Paper</p>
+                        <p className="text-xs font-mono">{selectedPositionSummary.liveOrders} / {selectedPositionSummary.paperOrders}</p>
+                      </div>
+                      <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                        <p className="text-[9px] uppercase text-muted-foreground">Marks</p>
+                        <p className="text-xs font-mono">{selectedPositionSummary.freshMarks} / {selectedPositionSummary.markedRows}</p>
+                      </div>
+                    </div>
+                    <div className="flex-1 min-h-0 overflow-hidden px-1">
+                      {filteredSelectedPositionBook.length === 0 ? (
+                        <div className="h-full flex items-center justify-center text-sm text-muted-foreground">No positions matching filters.</div>
+                      ) : (
+                        <ScrollArea className="h-full min-h-0 rounded-md border border-border/60 bg-card/60">
+                          <Table>
+                            <TableHeader>
+                              <TableRow>
+                                <TableHead className="text-[11px]">Market</TableHead>
+                                <TableHead className="text-[11px]">L</TableHead>
+                                <TableHead className="text-[11px]">Dir</TableHead>
+                                <TableHead className="text-[11px] text-right">Exposure</TableHead>
+                                <TableHead className="text-[11px] text-right">Avg Px</TableHead>
+                                <TableHead className="text-[11px] text-right">Mark</TableHead>
+                                <TableHead className="text-[11px] text-right">U-P&amp;L</TableHead>
+                                <TableHead className="text-[11px] text-right">Edge</TableHead>
+                                <TableHead className="text-[11px] text-right">Conf</TableHead>
+                                <TableHead className="text-[11px] text-right">Orders</TableHead>
+                                <TableHead className="text-[11px] text-right">Mode</TableHead>
+                                <TableHead className="text-[11px]">Updated</TableHead>
                               </TableRow>
-                            ))}
-                          </TableBody>
-                        </Table>
-                      </ScrollArea>
-                    )}
+                            </TableHeader>
+                            <TableBody>
+                              {filteredSelectedPositionBook.map((row) => (
+                                <TableRow key={row.key} className="text-xs">
+                                  <TableCell className="max-w-[260px] truncate py-1" title={row.marketQuestion}>
+                                    <p className="truncate">{row.marketQuestion}</p>
+                                    <p className="text-[10px] text-muted-foreground truncate" title={positionMetaLine(row)}>
+                                      {positionMetaLine(row)}
+                                    </p>
+                                  </TableCell>
+                                  <TableCell className="py-1">
+                                    <div className="flex items-center gap-1">
+                                      {row.links.polymarket && (
+                                        <a
+                                          href={row.links.polymarket}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          className="inline-flex h-4 w-4 items-center justify-center rounded border border-border/70 text-muted-foreground transition-colors hover:text-foreground"
+                                          title="Open Polymarket market"
+                                        >
+                                          <ExternalLink className="h-3 w-3" />
+                                        </a>
+                                      )}
+                                      {row.links.kalshi && (
+                                        <a
+                                          href={row.links.kalshi}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          className="inline-flex h-4 w-4 items-center justify-center rounded border border-border/70 text-muted-foreground transition-colors hover:text-foreground"
+                                          title="Open Kalshi market"
+                                        >
+                                          <ExternalLink className="h-3 w-3" />
+                                        </a>
+                                      )}
+                                      {!row.links.polymarket && !row.links.kalshi && (
+                                        <span className="text-[9px] text-muted-foreground">—</span>
+                                      )}
+                                    </div>
+                                  </TableCell>
+                                  <TableCell className="py-1">
+                                    <Badge variant={isYesDirection(row.direction) ? 'default' : 'secondary'} className="text-[10px] h-5 px-1.5">
+                                      {row.direction}
+                                    </Badge>
+                                  </TableCell>
+                                  <TableCell className="text-right font-mono py-1">{formatCurrency(row.exposureUsd)}</TableCell>
+                                  <TableCell className="text-right font-mono py-1">{row.averagePrice !== null ? row.averagePrice.toFixed(3) : '—'}</TableCell>
+                                  <TableCell className={cn('text-right font-mono py-1', row.markFresh && 'text-sky-300')}>
+                                    {row.markPrice !== null ? (
+                                      <FlashNumber
+                                        value={row.markPrice}
+                                        decimals={3}
+                                        className={cn('font-mono text-xs', row.markFresh ? 'data-glow-blue' : '')}
+                                        positiveClass="data-glow-green"
+                                        negativeClass="data-glow-red"
+                                      />
+                                    ) : '—'}
+                                  </TableCell>
+                                  <TableCell className={cn('text-right font-mono py-1', (row.unrealizedPnl || 0) > 0 ? 'text-emerald-500' : (row.unrealizedPnl || 0) < 0 ? 'text-red-500' : '')}>
+                                    {row.unrealizedPnl !== null ? formatCurrency(row.unrealizedPnl) : '—'}
+                                  </TableCell>
+                                  <TableCell className="text-right font-mono py-1">{row.weightedEdge !== null ? formatPercent(row.weightedEdge) : '—'}</TableCell>
+                                  <TableCell className="text-right font-mono py-1">{row.weightedConfidence !== null ? formatPercent(normalizeConfidencePercent(row.weightedConfidence)) : '—'}</TableCell>
+                                  <TableCell className="text-right font-mono py-1">{row.orderCount}</TableCell>
+                                  <TableCell className="text-right font-mono py-1">{row.liveOrderCount}L/{row.paperOrderCount}P</TableCell>
+                                  <TableCell className="py-1 text-[10px] text-muted-foreground">{formatShortDate(row.lastUpdated || row.markUpdatedAt)}</TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        </ScrollArea>
+                      )}
+                    </div>
                   </div>
                 )}
 
@@ -3836,50 +5153,455 @@ export default function TradingPanel() {
                         <Button key={status} size="sm" variant={tradeStatusFilter === status ? 'default' : 'outline'} onClick={() => setTradeStatusFilter(status)} className="h-5 px-2 text-[10px]">{status}</Button>
                       ))}
                     </div>
+                    <div className="shrink-0 grid grid-cols-2 gap-1 px-1 sm:grid-cols-4 lg:grid-cols-8">
+                      <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                        <p className="text-[9px] uppercase text-muted-foreground">Orders</p>
+                        <p className="text-xs font-mono">{selectedTradeTotals.total}</p>
+                      </div>
+                      <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                        <p className="text-[9px] uppercase text-muted-foreground">Open</p>
+                        <p className="text-xs font-mono">{selectedTradeTotals.open}</p>
+                      </div>
+                      <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                        <p className="text-[9px] uppercase text-muted-foreground">Win / Loss</p>
+                        <p className="text-xs font-mono">{selectedTradeTotals.wins} / {selectedTradeTotals.losses}</p>
+                      </div>
+                      <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                        <p className="text-[9px] uppercase text-muted-foreground">Win Rate</p>
+                        <p className="text-xs font-mono">{formatPercent(selectedTradeTotals.winRate)}</p>
+                      </div>
+                      <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                        <p className="text-[9px] uppercase text-muted-foreground">Failed</p>
+                        <p className="text-xs font-mono">{selectedTradeTotals.failed}</p>
+                      </div>
+                      <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                        <p className="text-[9px] uppercase text-muted-foreground">Notional</p>
+                        <p className="text-xs font-mono">{formatCurrency(selectedTradeTotals.totalNotional, true)}</p>
+                      </div>
+                      <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                        <p className="text-[9px] uppercase text-muted-foreground">R-P&amp;L</p>
+                        <p className={cn('text-xs font-mono', selectedTradeTotals.realizedPnl > 0 ? 'text-emerald-500' : selectedTradeTotals.realizedPnl < 0 ? 'text-red-500' : '')}>
+                          {formatCurrency(selectedTradeTotals.realizedPnl, true)}
+                        </p>
+                      </div>
+                      <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                        <p className="text-[9px] uppercase text-muted-foreground">U-P&amp;L</p>
+                        <p className={cn('text-xs font-mono', selectedTradeTotals.unrealizedPnl > 0 ? 'text-emerald-500' : selectedTradeTotals.unrealizedPnl < 0 ? 'text-red-500' : '')}>
+                          {formatCurrency(selectedTradeTotals.unrealizedPnl, true)}
+                        </p>
+                      </div>
+                    </div>
                     <div className="flex-1 min-h-0 overflow-hidden px-1">
-                      {filteredTradeHistory.length === 0 ? (
+                      {selectedTradeRows.length === 0 ? (
                         <div className="h-full flex items-center justify-center text-sm text-muted-foreground">No trades matching filters.</div>
                       ) : (
                         <ScrollArea className="h-full min-h-0">
-                          <Table>
+                          <div className="w-full overflow-x-auto">
+                          <Table className="w-full table-fixed">
                             <TableHeader>
                               <TableRow>
-                                <TableHead className="text-[11px]">Market</TableHead>
-                                <TableHead className="text-[11px]">Dir</TableHead>
-                                <TableHead className="text-[11px]">Status</TableHead>
-                                <TableHead className="text-[11px] text-right">Notional</TableHead>
-                                <TableHead className="text-[11px] text-right">Edge</TableHead>
-                                <TableHead className="text-[11px] text-right">P&amp;L</TableHead>
-                                <TableHead className="text-[11px]">Mode</TableHead>
-                                <TableHead className="text-[11px]">Created</TableHead>
+                                <TableHead className="w-[22%] text-[10px]">Market</TableHead>
+                                <TableHead className="w-[4%] text-[10px]">L</TableHead>
+                                <TableHead className="w-[6%] text-[10px]">Dir</TableHead>
+                                <TableHead className="w-[18%] text-[10px]">Status / Reason</TableHead>
+                                <TableHead className="w-[9%] text-[10px] text-right">Notional</TableHead>
+                                <TableHead className="w-[7%] text-[10px] text-right">Fill</TableHead>
+                                <TableHead className="w-[7%] text-[10px] text-right">Mark</TableHead>
+                                <TableHead className="w-[9%] text-[10px] text-right">U-P&amp;L</TableHead>
+                                <TableHead className="w-[6%] text-[10px] text-right">Edge</TableHead>
+                                <TableHead className="w-[9%] text-[10px] text-right">R-P&amp;L</TableHead>
+                                <TableHead className="w-[6%] text-[10px]">Prov</TableHead>
+                                <TableHead className="w-[8%] text-[10px]">Created</TableHead>
                               </TableRow>
                             </TableHeader>
                             <TableBody>
-                              {filteredTradeHistory.map((order) => {
-                                const status = normalizeStatus(order.status)
-                                const pnl = toNumber(order.actual_profit)
+                              {selectedTradeRows.map((row) => {
+                                const { order, status, pnl, fillPx, markPx, unrealized, providerSnapshotStatus, pendingExitStatus, pendingExit, markFresh, links, executionSummary, outcomeHeadline, outcomeDetail, outcomeDetailCompact } = row
+                                const pendingExitError = pendingExit && typeof pendingExit === 'object'
+                                  ? String((pendingExit as Record<string, unknown>).last_error || (pendingExit as Record<string, unknown>).error || '').trim()
+                                  : ''
+                                const pendingExitNextRetry = pendingExit && typeof pendingExit === 'object'
+                                  ? String((pendingExit as Record<string, unknown>).next_retry_at || '').trim()
+                                  : ''
+                                const pendingExitLabel = pendingExitStatus === 'failed' && OPEN_ORDER_STATUSES.has(status)
+                                  ? 'E:RETRY'
+                                  : `E:${pendingExitStatus.slice(0, 4).toUpperCase()}`
                                 return (
-                                  <TableRow key={order.id} className="text-xs">
-                                    <TableCell className="max-w-[220px] truncate py-1" title={order.market_question || order.market_id}>{order.market_question || shortId(order.market_id)}</TableCell>
-                                    <TableCell className="py-1">
-                                      <Badge variant={String(order.direction || '').toUpperCase() === 'YES' ? 'default' : 'secondary'} className="text-[10px] h-5 px-1.5">{String(order.direction || '').toUpperCase()}</Badge>
+                                  <TableRow key={order.id} className="text-[11px] leading-tight">
+                                    <TableCell className="max-w-[220px] truncate py-0.5" title={order.market_question || order.market_id}>
+                                      {order.market_question || shortId(order.market_id)}
                                     </TableCell>
-                                    <TableCell className="py-1">
-                                      <Badge variant={OPEN_ORDER_STATUSES.has(status) ? 'default' : RESOLVED_ORDER_STATUSES.has(status) ? (pnl >= 0 ? 'default' : 'destructive') : 'outline'} className="text-[10px] h-5 px-1.5">{status}</Badge>
+                                    <TableCell className="py-0.5">
+                                      <div className="flex items-center gap-1">
+                                        {links.polymarket && (
+                                          <a
+                                            href={links.polymarket}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="inline-flex h-4 w-4 items-center justify-center rounded border border-border/70 text-muted-foreground transition-colors hover:text-foreground"
+                                            title="Open Polymarket market"
+                                          >
+                                            <ExternalLink className="h-3 w-3" />
+                                          </a>
+                                        )}
+                                        {links.kalshi && (
+                                          <a
+                                            href={links.kalshi}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="inline-flex h-4 w-4 items-center justify-center rounded border border-border/70 text-muted-foreground transition-colors hover:text-foreground"
+                                            title="Open Kalshi market"
+                                          >
+                                            <ExternalLink className="h-3 w-3" />
+                                          </a>
+                                        )}
+                                        {!links.polymarket && !links.kalshi && (
+                                          <span className="text-[9px] text-muted-foreground">\u2014</span>
+                                        )}
+                                      </div>
                                     </TableCell>
-                                    <TableCell className="text-right font-mono py-1">{formatCurrency(toNumber(order.notional_usd))}</TableCell>
-                                    <TableCell className="text-right font-mono py-1">{formatPercent(toNumber(order.edge_percent))}</TableCell>
-                                    <TableCell className={cn('text-right font-mono py-1', pnl > 0 ? 'text-emerald-500' : pnl < 0 ? 'text-red-500' : '')}>{RESOLVED_ORDER_STATUSES.has(status) ? formatCurrency(pnl) : '\u2014'}</TableCell>
-                                    <TableCell className="py-1 uppercase text-[10px]">{String(order.mode || '').toUpperCase()}</TableCell>
-                                    <TableCell className="py-1 text-[10px] text-muted-foreground">{formatShortDate(order.created_at)}</TableCell>
+                                    <TableCell className="py-0.5">
+                                      <Badge variant={String(order.direction || '').toUpperCase() === 'YES' ? 'default' : 'secondary'} className="text-[9px] h-4 px-1">{String(order.direction || '').toUpperCase()}</Badge>
+                                    </TableCell>
+                                    <TableCell className="py-0.5">
+                                      <div className="min-w-0 space-y-0.5">
+                                        <div className="flex min-w-0 items-center gap-1">
+                                          <Badge variant={OPEN_ORDER_STATUSES.has(status) ? 'default' : RESOLVED_ORDER_STATUSES.has(status) ? (pnl >= 0 ? 'default' : 'destructive') : 'outline'} className="text-[9px] h-4 px-1 w-fit">{status}</Badge>
+                                          <Badge
+                                            variant="outline"
+                                            title={outcomeDetail}
+                                            className={cn(
+                                              'h-4 max-w-[132px] truncate px-1 text-[9px]',
+                                              FAILED_ORDER_STATUSES.has(status) ? 'border-red-500/40 bg-red-500/5 text-red-500' :
+                                              RESOLVED_ORDER_STATUSES.has(status) ? 'border-emerald-500/40 bg-emerald-500/5 text-emerald-500' :
+                                              'text-muted-foreground'
+                                            )}
+                                          >
+                                            {outcomeHeadline}
+                                          </Badge>
+                                          {executionSummary !== '—' && (
+                                            <Badge variant="outline" title={`Execution: ${executionSummary}`} className="h-4 max-w-[128px] truncate px-1 text-[9px] text-muted-foreground">
+                                              {executionSummary}
+                                            </Badge>
+                                          )}
+                                          {pendingExitStatus && pendingExitStatus !== 'unknown' && (
+                                            <span
+                                              title={
+                                                `exit:${pendingExitStatus}`
+                                                + (pendingExitError ? ` • ${pendingExitError}` : '')
+                                                + (pendingExitNextRetry ? ` • next_retry:${formatTimestamp(pendingExitNextRetry)}` : '')
+                                              }
+                                              className={cn('text-[9px] uppercase', pendingExitStatus === 'failed' ? 'text-amber-400' : 'text-muted-foreground')}
+                                            >
+                                              {pendingExitLabel}
+                                            </span>
+                                          )}
+                                        </div>
+                                        <p className="truncate text-[9px] text-muted-foreground" title={outcomeDetail}>
+                                          {outcomeDetailCompact}
+                                        </p>
+                                      </div>
+                                    </TableCell>
+                                    <TableCell className="text-right font-mono py-0.5 text-[10px]">{formatCurrency(toNumber(order.notional_usd), true)}</TableCell>
+                                    <TableCell className="text-right font-mono py-0.5 text-[10px]">{fillPx > 0 ? fillPx.toFixed(3) : '\u2014'}</TableCell>
+                                    <TableCell className={cn('text-right font-mono py-0.5 text-[10px]', markFresh && 'text-sky-300')}>
+                                      {markPx > 0 ? (
+                                        <FlashNumber
+                                          value={markPx}
+                                          decimals={3}
+                                          className={cn('font-mono text-[10px]', markFresh ? 'data-glow-blue' : '')}
+                                          positiveClass="data-glow-green"
+                                          negativeClass="data-glow-red"
+                                        />
+                                      ) : '\u2014'}
+                                    </TableCell>
+                                    <TableCell className={cn('text-right font-mono py-0.5 text-[10px]', unrealized > 0 ? 'text-emerald-500' : unrealized < 0 ? 'text-red-500' : '')}>
+                                      {OPEN_ORDER_STATUSES.has(status) ? (
+                                        <FlashNumber
+                                          value={unrealized}
+                                          decimals={2}
+                                          prefix="$"
+                                          className={cn('font-mono text-[10px]', unrealized > 0 ? 'text-emerald-500' : unrealized < 0 ? 'text-red-500' : '')}
+                                          positiveClass="data-glow-green"
+                                          negativeClass="data-glow-red"
+                                        />
+                                      ) : '\u2014'}
+                                    </TableCell>
+                                    <TableCell className="text-right font-mono py-0.5 text-[10px]">{formatPercent(toNumber(order.edge_percent))}</TableCell>
+                                    <TableCell className={cn('text-right font-mono py-0.5 text-[10px]', pnl > 0 ? 'text-emerald-500' : pnl < 0 ? 'text-red-500' : '')}>{RESOLVED_ORDER_STATUSES.has(status) ? formatCurrency(pnl, true) : '\u2014'}</TableCell>
+                                    <TableCell className="py-0.5">
+                                      <span
+                                        title={order.provider_clob_order_id || order.provider_order_id || ''}
+                                        className={cn('text-[9px] uppercase', providerSnapshotStatus === 'filled' ? 'text-emerald-500' : providerSnapshotStatus === 'failed' ? 'text-red-500' : 'text-muted-foreground')}
+                                      >
+                                        {providerSnapshotStatus || '\u2014'}
+                                      </span>
+                                    </TableCell>
+                                    <TableCell className="py-0.5 text-[9px] text-muted-foreground">
+                                      <span title={`${String(order.mode || '').toUpperCase()} • ${formatTimestamp(order.created_at)}`}>
+                                        {formatShortDate(order.created_at)}
+                                      </span>
+                                    </TableCell>
                                   </TableRow>
                                 )
                               })}
                             </TableBody>
                           </Table>
+                          </div>
                         </ScrollArea>
                       )}
                     </div>
+                  </div>
+                )}
+
+                {workTab === 'monitor' && (
+                  <div className="h-full min-h-0 overflow-hidden px-1">
+                    <ScrollArea className="h-full min-h-0 rounded-md border border-border/50 bg-muted/10">
+                      <div className="space-y-2 p-2">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <p className="text-[11px] font-medium">Live Truth Monitor</p>
+                          <Badge variant="outline" className="h-4 px-1.5 text-[9px] font-mono">
+                            {liveTruthJobId ? shortId(liveTruthJobId) : 'idle'}
+                          </Badge>
+                          {liveTruthJobId ? (
+                            <>
+                              <span
+                                className={cn(
+                                  'rounded px-1.5 py-0.5 text-[9px] font-semibold',
+                                  liveTruthJobFailed
+                                    ? 'bg-red-500/15 text-red-500'
+                                    : liveTruthJobCompleted
+                                      ? 'bg-emerald-500/15 text-emerald-500'
+                                      : 'bg-amber-500/15 text-amber-500'
+                                )}
+                              >
+                                {liveTruthJobStatus.toUpperCase()}
+                              </span>
+                              <span className="text-[9px] text-muted-foreground">{liveTruthJobProgressPct}%</span>
+                            </>
+                          ) : null}
+                        </div>
+
+                        <p className="text-[10px] text-muted-foreground/80">
+                          Run live-trading lifecycle diagnostics, send findings to LLM, and export raw artifacts.
+                        </p>
+
+                        {!selectedTrader ? (
+                          <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-700 dark:text-amber-100">
+                            Select a bot to run monitor diagnostics.
+                          </div>
+                        ) : null}
+
+                        <div className="grid gap-2 md:grid-cols-3">
+                          <div>
+                            <Label className="text-[11px] text-muted-foreground">Duration (seconds)</Label>
+                            <Input
+                              type="number"
+                              min={10}
+                              max={7200}
+                              value={liveTruthDurationSeconds}
+                              onChange={(event) => setLiveTruthDurationSeconds(event.target.value)}
+                              className="mt-1 h-8 text-xs font-mono"
+                            />
+                          </div>
+                          <div>
+                            <Label className="text-[11px] text-muted-foreground">Poll (seconds)</Label>
+                            <Input
+                              type="number"
+                              min={0.2}
+                              max={10}
+                              step={0.1}
+                              value={liveTruthPollSeconds}
+                              onChange={(event) => setLiveTruthPollSeconds(event.target.value)}
+                              className="mt-1 h-8 text-xs font-mono"
+                            />
+                          </div>
+                          <div>
+                            <Label className="text-[11px] text-muted-foreground">Max Alerts To LLM</Label>
+                            <Input
+                              type="number"
+                              min={1}
+                              max={400}
+                              value={liveTruthMaxAlertsForLlm}
+                              onChange={(event) => setLiveTruthMaxAlertsForLlm(event.target.value)}
+                              className="mt-1 h-8 text-xs font-mono"
+                              disabled={!liveTruthRunLlm}
+                            />
+                          </div>
+                        </div>
+
+                        <div className="grid gap-2 md:grid-cols-2">
+                          <div className="rounded-md border border-border/60 p-2">
+                            <div className="flex items-center justify-between">
+                              <p className="text-xs font-medium">Analyze with LLM</p>
+                              <Switch checked={liveTruthRunLlm} onCheckedChange={setLiveTruthRunLlm} />
+                            </div>
+                            <p className="mt-1 text-[10px] text-muted-foreground/80">
+                              Sends monitor summary + alert samples to configured LLM provider.
+                            </p>
+                          </div>
+                          <div className="rounded-md border border-border/60 p-2">
+                            <div className="flex items-center justify-between">
+                              <p className="text-xs font-medium">Include Strategy Source</p>
+                              <Switch
+                                checked={liveTruthIncludeStrategySource}
+                                onCheckedChange={setLiveTruthIncludeStrategySource}
+                                disabled={!liveTruthRunLlm}
+                              />
+                            </div>
+                            <p className="mt-1 text-[10px] text-muted-foreground/80">
+                              Adds active strategy code to LLM context for file-level change suggestions.
+                            </p>
+                          </div>
+                        </div>
+
+                        <div>
+                          <Label className="text-[11px] text-muted-foreground">LLM Model (optional override)</Label>
+                          <Input
+                            value={liveTruthModel}
+                            onChange={(event) => setLiveTruthModel(event.target.value)}
+                            placeholder="Use app default model"
+                            className="mt-1 h-8 text-xs font-mono"
+                            disabled={!liveTruthRunLlm}
+                          />
+                        </div>
+
+                        <Button
+                          size="sm"
+                          className="h-8 text-xs"
+                          onClick={() => runLiveTruthMonitorMutation.mutate()}
+                          disabled={runLiveTruthMonitorMutation.isPending || liveTruthJobRunning || !selectedTrader}
+                        >
+                          {runLiveTruthMonitorMutation.isPending || liveTruthJobRunning ? (
+                            <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                          ) : (
+                            <Play className="w-3.5 h-3.5 mr-1.5" />
+                          )}
+                          {liveTruthJobRunning ? 'Monitoring...' : 'Run Monitor'}
+                        </Button>
+
+                        {liveTruthJobId ? (
+                          <div className="rounded-md border border-border/60 bg-muted/20 p-2">
+                            <p className="text-[10px] text-muted-foreground/80">
+                              {String(liveTruthJobQuery.data?.message || 'No job status message')}
+                            </p>
+                            {liveTruthJobQuery.data?.error ? (
+                              <p className="mt-1 text-[10px] text-red-500">{String(liveTruthJobQuery.data.error)}</p>
+                            ) : null}
+                          </div>
+                        ) : null}
+
+                        {liveTruthError ? (
+                          <p className="text-[10px] text-red-500">{liveTruthError}</p>
+                        ) : null}
+
+                        {liveTruthRawQuery.isPending ? (
+                          <p className="text-[10px] text-muted-foreground/80">Loading monitor artifacts...</p>
+                        ) : null}
+                        {liveTruthRawQuery.error ? (
+                          <p className="text-[10px] text-red-500">
+                            {errorMessage(liveTruthRawQuery.error, 'Failed to load monitor artifacts')}
+                          </p>
+                        ) : null}
+
+                        {liveTruthReport ? (
+                          <div className="rounded-md border border-emerald-500/25 bg-emerald-500/5 p-2 space-y-2">
+                            <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px]">
+                              <span>Alerts: {Math.trunc(toNumber(liveTruthReport.alert_count))}</span>
+                              <span>Heartbeats: {Math.trunc(toNumber(liveTruthReport.heartbeat_count))}</span>
+                              <span>Transitions: {Math.trunc(toNumber(liveTruthReport.transition_count))}</span>
+                              <span>Lines: {Math.trunc(toNumber(liveTruthReport.line_count))}</span>
+                            </div>
+                            <div className="flex flex-wrap gap-1.5">
+                              {liveTruthAlertRuleRows.slice(0, 8).map(([rule, count]) => (
+                                <span key={rule} className="rounded-full bg-background/70 border border-border/70 px-1.5 py-0.5 text-[10px]">
+                                  {rule}: {Math.trunc(toNumber(count))}
+                                </span>
+                              ))}
+                              {liveTruthAlertRuleRows.length === 0 ? (
+                                <span className="text-[10px] text-muted-foreground/80">No alert rules triggered.</span>
+                              ) : null}
+                            </div>
+                            <p className="text-[10px] text-muted-foreground/80 font-mono break-all">
+                              {String(liveTruthRaw?.monitor?.summary_path || liveTruthRaw?.monitor?.report_path || '')}
+                            </p>
+                            <p className="text-[10px] text-muted-foreground/80">
+                              Trader: {String(liveTruthSummary.target_trader_name || selectedTrader?.name || 'n/a')} ({String(liveTruthSummary.target_trader_id || selectedTrader?.id || 'n/a')})
+                            </p>
+                          </div>
+                        ) : null}
+
+                        {liveTruthHasLlm ? (
+                          <div className="rounded-md border border-sky-500/25 bg-sky-500/5 p-2 space-y-1.5">
+                            <p className="text-[11px] font-medium">
+                              LLM: {String(liveTruthLlm.status || 'unknown')}
+                              {liveTruthLlm.requested_model ? ` (${String(liveTruthLlm.requested_model)})` : ''}
+                            </p>
+                            {liveTruthLlm.error ? (
+                              <p className="text-[10px] text-red-500">{String(liveTruthLlm.error)}</p>
+                            ) : null}
+                            {liveTruthLlmAnalysis && typeof liveTruthLlmAnalysis.assessment === 'string' ? (
+                              <p className="text-[10px] text-muted-foreground/85">{liveTruthLlmAnalysis.assessment}</p>
+                            ) : null}
+                            {liveTruthLlmStrategyChanges.length > 0 ? (
+                              <div className="space-y-1">
+                                {liveTruthLlmStrategyChanges.slice(0, 3).map((change, index) => (
+                                  <div key={`${index}-${String(change.title || '')}`} className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                                    <p className="text-[10px] font-medium">{String(change.title || 'Strategy change')}</p>
+                                    <p className="text-[10px] text-muted-foreground/80">{String(change.target || '')}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : null}
+
+                        {liveTruthJobCompleted && liveTruthJobId ? (
+                          <div className="flex flex-wrap gap-1.5">
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="h-6 px-2 text-[10px]"
+                              onClick={() => exportLiveTruthArtifactMutation.mutate('summary_json')}
+                              disabled={exportLiveTruthArtifactMutation.isPending}
+                            >
+                              Export Summary
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="h-6 px-2 text-[10px]"
+                              onClick={() => exportLiveTruthArtifactMutation.mutate('report_jsonl')}
+                              disabled={exportLiveTruthArtifactMutation.isPending}
+                            >
+                              Export Report
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="h-6 px-2 text-[10px]"
+                              onClick={() => exportLiveTruthArtifactMutation.mutate('llm_analysis_json')}
+                              disabled={exportLiveTruthArtifactMutation.isPending}
+                            >
+                              Export LLM
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="h-6 px-2 text-[10px]"
+                              onClick={() => exportLiveTruthArtifactMutation.mutate('bundle_json')}
+                              disabled={exportLiveTruthArtifactMutation.isPending}
+                            >
+                              Export Bundle
+                            </Button>
+                          </div>
+                        ) : null}
+                      </div>
+                    </ScrollArea>
                   </div>
                 )}
 
@@ -4121,6 +5843,7 @@ export default function TradingPanel() {
           if (!open) {
             setSaveError(null)
             setDeleteConfirmName('')
+            setLiveTruthError(null)
           }
         }}
       >
@@ -4155,6 +5878,32 @@ export default function TradingPanel() {
                     <Label>Description</Label>
                     <Input value={draftDescription} onChange={(event) => setDraftDescription(event.target.value)} className="mt-1" />
                   </div>
+
+                  {traderFlyoutMode === 'create' ? (
+                    <div>
+                      <Label>Copy Settings From Existing Bot (Optional)</Label>
+                      <Select
+                        value={draftCopyFromTraderId || '__none__'}
+                        onValueChange={applyCreateCopyFromSelection}
+                      >
+                        <SelectTrigger className="mt-1">
+                          <SelectValue placeholder="Start from scratch" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__none__">Start from scratch</SelectItem>
+                          {traders.map((trader) => (
+                            <SelectItem key={trader.id} value={trader.id}>
+                              {trader.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <p className="mt-1 text-[10px] text-muted-foreground/75 leading-tight">
+                        Creates a new bot with copied source config, strategy params, interval, risk limits, runtime metadata,
+                        and enabled/paused flags from the selected bot. Trades, decisions, orders, and events are never copied.
+                      </p>
+                    </div>
+                  ) : null}
                 </FlyoutSection>
 
                 <FlyoutSection
@@ -4581,11 +6330,22 @@ export default function TradingPanel() {
                       </p>
                     </div>
                     <div className="rounded-md border border-border/60 bg-muted/15 px-3 py-2">
-                      <p className="text-[11px] font-medium">Global Orchestrator Loop</p>
-                      <p className="mt-1 text-sm font-mono">{toNumber(overviewQuery.data?.control?.run_interval_seconds)}s</p>
+                      <p className="text-[11px] font-medium">Global Orchestrator Runtime</p>
+                      <p className="mt-2 text-[11px] font-medium">Execution Mode</p>
+                      <p className="mt-1 text-sm font-mono">{effectiveGlobalLoopLabel}</p>
                       <p className="mt-1 text-[10px] text-muted-foreground/70">
-                        Separate worker-level cadence. Bots run only when due on both schedules.
+                        {effectiveGlobalLoopDetail}
                       </p>
+                      {highFrequencyCryptoLoopActive ? (
+                        <p className="mt-1 text-[10px] text-emerald-600 dark:text-emerald-300">
+                          High-frequency mode active ({activeCryptoTraderCount} crypto bot
+                          {activeCryptoTraderCount === 1 ? '' : 's'} enabled).
+                        </p>
+                      ) : (
+                        <p className="mt-1 text-[10px] text-amber-600 dark:text-amber-300">
+                          Enable an active crypto bot to activate high-frequency monitoring.
+                        </p>
+                      )}
                     </div>
                   </div>
                   {isCryptoStrategyDraft && cryptoStrategyKeyDraft === 'btc_eth_highfreq' && Number(draftInterval || 0) >= 60 ? (
@@ -4792,24 +6552,17 @@ export default function TradingPanel() {
                   title="Runtime State"
                   icon={Play}
                   iconClassName="text-emerald-500"
-                  count={`${draftEnabled ? 'enabled' : 'disabled'} / ${draftPaused ? 'paused' : 'active'}`}
+                  count={`${draftEnabled ? 'enabled' : 'disabled'}`}
                   defaultOpen={false}
                   subtitle="Lifecycle controls applied when this bot is loaded by the orchestrator."
                 >
-                  <div className="grid gap-3 md:grid-cols-2">
+                  <div className="grid gap-3">
                     <div className="rounded-md border border-border p-3">
                       <div className="flex items-center justify-between">
                         <span className="text-sm">Enabled</span>
                         <Switch checked={draftEnabled} onCheckedChange={(checked) => setDraftEnabled(checked)} />
                       </div>
                       <p className="mt-2 text-xs text-muted-foreground">Disabled bots are excluded from orchestrator cycles.</p>
-                    </div>
-                    <div className="rounded-md border border-border p-3">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm">Paused</span>
-                        <Switch checked={draftPaused} onCheckedChange={(checked) => setDraftPaused(checked)} />
-                      </div>
-                      <p className="mt-2 text-xs text-muted-foreground">Paused bots stay loaded but do not execute decisions.</p>
                     </div>
                   </div>
                 </FlyoutSection>
@@ -4907,13 +6660,16 @@ export default function TradingPanel() {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="disable">Disable + Pause (Recommended)</SelectItem>
+                        <SelectItem value="disable">Disable (Recommended)</SelectItem>
                         <SelectItem value="block">Delete (No Open Positions)</SelectItem>
-                        <SelectItem value="force_delete">Force Delete (Danger)</SelectItem>
+                        <SelectItem value="force_delete">Force Delete (Override Live Checks)</SelectItem>
                       </SelectContent>
                     </Select>
                     {deleteAction === 'force_delete' ? (
                       <div>
+                        <p className="text-[11px] text-amber-500/90 mb-1">
+                          Override mode: use when live orders were already closed manually on Polymarket.
+                        </p>
                         <Label className="text-xs">
                           Type bot name to confirm force delete: <span className="font-mono">{selectedTrader.name}</span>
                         </Label>
@@ -4933,7 +6689,13 @@ export default function TradingPanel() {
                       }
                       onClick={() => deleteTraderMutation.mutate({ traderId: selectedTrader.id, action: deleteAction })}
                     >
-                      {deleteAction === 'disable' ? 'Disable Bot' : 'Delete Bot'}
+                      {deleteTraderMutation.isPending
+                        ? 'Processing...'
+                        : deleteAction === 'disable'
+                          ? 'Disable Bot'
+                          : deleteAction === 'force_delete'
+                            ? 'Force Delete Bot'
+                            : 'Delete Bot'}
                     </Button>
                   </FlyoutSection>
                 ) : null}
@@ -4943,7 +6705,7 @@ export default function TradingPanel() {
 
             <div className="border-t border-border px-4 py-3 flex flex-wrap items-center justify-end gap-2">
               {saveError ? (
-                <div className="mr-auto text-xs text-red-500 max-w-[65%] truncate" title={saveError}>
+                <div className="mr-auto text-xs text-red-500 max-w-[65%] break-words leading-tight" title={saveError}>
                   {saveError}
                 </div>
               ) : null}
@@ -4963,7 +6725,7 @@ export default function TradingPanel() {
                 disabled={
                   traderFlyoutBusy ||
                   !draftName.trim() ||
-                  effectiveDraftSources.length === 0
+                  (traderFlyoutMode === 'create' && !draftCopyFromTraderId && effectiveDraftSources.length === 0)
                 }
               >
                 {traderFlyoutMode === 'create' ? 'Create Bot' : 'Save Bot'}

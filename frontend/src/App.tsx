@@ -148,6 +148,7 @@ const WORKER_HEALTH_ORDER = [
   'crypto',
   'tracked_traders',
   'trader_orchestrator',
+  'trader_reconciliation',
   'events',
 ] as const
 
@@ -159,6 +160,7 @@ const WORKER_HEALTH_LABELS: Record<string, string> = {
   crypto: 'Crypto',
   tracked_traders: 'Tracked Traders',
   trader_orchestrator: 'Orchestrator',
+  trader_reconciliation: 'Reconciliation',
   events: 'Events',
 }
 
@@ -314,6 +316,16 @@ function resolveWorkerHealth(worker?: WorkerStatus): {
       ? Boolean(control.is_enabled)
       : Boolean(worker.enabled)
   const running = Boolean(worker.running)
+  const activity = String(worker.current_activity || '').trim()
+  const activityKey = activity.toLowerCase()
+  const activeHint =
+    activityKey.length > 0
+    && !activityKey.startsWith('idle')
+    && !activityKey.startsWith('paused')
+    && !activityKey.startsWith('disabled')
+    && !activityKey.startsWith('stopped')
+    && !activityKey.startsWith('waiting')
+    && !activityKey.startsWith('blocked')
   const lastError = String(worker.last_error || '').trim()
 
   if (lastError) {
@@ -326,7 +338,7 @@ function resolveWorkerHealth(worker?: WorkerStatus): {
       detail: String(worker.current_activity || 'Paused by operator'),
     }
   }
-  if (running) {
+  if (running || (enabled && !paused && activeHint)) {
     return {
       state: 'RUNNING',
       tone: 'green',
@@ -885,11 +897,12 @@ function App() {
     refetchInterval: 10000,
     retry: false,
   })
+  const headerPolymarketReady = Boolean(headerTradingStatus?.authenticated || headerTradingStatus?.initialized)
 
   const { data: headerTradingPositions = [] } = useQuery({
     queryKey: ['live-positions'],
     queryFn: getTradingPositions,
-    enabled: isLiveAccountSelected && selectedLivePlatform === 'polymarket' && !!headerTradingStatus?.initialized,
+    enabled: isLiveAccountSelected && selectedLivePlatform === 'polymarket' && headerPolymarketReady,
     refetchInterval: 15000,
     retry: false,
   })
@@ -897,7 +910,7 @@ function App() {
   const { data: headerTradingBalance } = useQuery({
     queryKey: ['trading-balance'],
     queryFn: getTradingBalance,
-    enabled: isLiveAccountSelected && selectedLivePlatform === 'polymarket' && !!headerTradingStatus?.initialized,
+    enabled: isLiveAccountSelected && selectedLivePlatform === 'polymarket' && headerPolymarketReady,
     refetchInterval: 15000,
     retry: false,
   })
@@ -2544,7 +2557,7 @@ function App() {
             {activeTab === 'trading' && (
               <div className="flex-1 overflow-hidden flex flex-col section-enter">
                 <div className="flex-1 overflow-hidden px-6 py-4 min-h-0">
-                  <TradingPanel />
+                  <TradingPanel isConnected={isConnected} />
                 </div>
               </div>
             )}

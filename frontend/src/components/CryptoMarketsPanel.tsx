@@ -69,6 +69,17 @@ function toUnixSeconds(value: number): number {
   return Math.floor(value)
 }
 
+function livelineSeriesEqual(previous: LivelinePoint[], next: LivelinePoint[]): boolean {
+  if (previous.length !== next.length) return false
+  for (let i = 0; i < previous.length; i += 1) {
+    const prev = previous[i]
+    const curr = next[i]
+    if (prev.time !== curr.time) return false
+    if (Math.abs(prev.value - curr.value) > 1e-9) return false
+  }
+  return true
+}
+
 function clampProbability(value: number): number {
   return Math.min(1, Math.max(0, value))
 }
@@ -337,6 +348,7 @@ function CryptoMarketCard({
   onCloseModal?: () => void
 }) {
   const chartRef = useRef<HTMLDivElement>(null)
+  const lastLivelineDataRef = useRef<LivelinePoint[]>([])
   const [chartWidth, setChartWidth] = useState(300)
   const [modalOpen, setModalOpen] = useState(false)
   const closeModal = () => setModalOpen(false)
@@ -416,39 +428,66 @@ function CryptoMarketCard({
       .filter((point): point is LivelinePoint => point !== null)
       .sort((a, b) => a.time - b.time)
 
-    const current = toFiniteNumber(market.oracle_price)
-    const now = Math.floor(Date.now() / 1000)
-    if (rawPoints.length === 0) {
-      if (current === null) return []
-      return [
-        { time: now - 1, value: current },
-        { time: now, value: current },
-      ]
-    }
-
     const normalized: LivelinePoint[] = []
     for (const point of rawPoints) {
       const previous = normalized[normalized.length - 1]
-      const safeTime = previous ? Math.max(point.time, previous.time + 1) : point.time
-      normalized.push({ time: safeTime, value: point.value })
+      if (previous && previous.time === point.time) {
+        normalized[normalized.length - 1] = point
+      } else {
+        normalized.push(point)
+      }
+    }
+
+    const current = toFiniteNumber(market.oracle_price)
+    const currentRawTime = toFiniteNumber(market.oracle_updated_at_ms)
+    const currentTime = currentRawTime !== null ? toUnixSeconds(currentRawTime) : null
+
+    if (normalized.length === 0) {
+      if (current === null) {
+        const previous = lastLivelineDataRef.current
+        return previous.length === 0 ? previous : []
+      }
+      const fallbackTime = currentTime ?? Math.floor(Date.now() / 1000)
+      const seeded = [
+        { time: Math.max(0, fallbackTime - 1), value: current },
+        { time: Math.max(1, fallbackTime), value: current },
+      ]
+      const previous = lastLivelineDataRef.current
+      if (livelineSeriesEqual(previous, seeded)) return previous
+      lastLivelineDataRef.current = seeded
+      return seeded
     }
 
     if (current !== null) {
       const last = normalized[normalized.length - 1]
-      const shouldAppendCurrent = Math.abs(last.value - current) > 1e-9 || now > last.time
-      if (shouldAppendCurrent) {
+      if (currentTime !== null && currentTime > last.time) {
         normalized.push({
-          time: Math.max(now, last.time + 1),
+          time: currentTime,
           value: current,
         })
+      } else if (currentTime !== null && currentTime === last.time && Math.abs(last.value - current) > 1e-9) {
+        normalized[normalized.length - 1] = {
+          time: last.time,
+          value: current,
+        }
+      } else if (currentTime === null && Math.abs(last.value - current) > 1e-9) {
+        normalized[normalized.length - 1] = {
+          time: last.time,
+          value: current,
+        }
       }
     }
 
     const MAX_POINTS = 600
-    return normalized.length > MAX_POINTS
+    const candidate = normalized.length > MAX_POINTS
       ? normalized.slice(normalized.length - MAX_POINTS)
       : normalized
-  }, [market.oracle_history, market.oracle_price])
+
+    const previous = lastLivelineDataRef.current
+    if (livelineSeriesEqual(previous, candidate)) return previous
+    lastLivelineDataRef.current = candidate
+    return candidate
+  }, [market.oracle_history, market.oracle_price, market.oracle_updated_at_ms])
 
   const livelineValue = (
     toFiniteNumber(market.oracle_price)

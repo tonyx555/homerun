@@ -13,9 +13,11 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 
+from sqlalchemy import select
+
 from utils.utcnow import utcnow
 from config import settings
-from models.database import AsyncSessionLocal
+from models.database import AsyncSessionLocal, Trader
 from services.chainlink_feed import get_chainlink_feed
 from services.crypto_service import get_crypto_service
 from services.data_events import DataEvent
@@ -38,6 +40,7 @@ logger = logging.getLogger("crypto_worker")
 
 # Keep short in-memory oracle history per asset for chart sparkline payloads.
 _MAX_ORACLE_HISTORY_POINTS = 180
+_ORACLE_HISTORY_PAYLOAD_POINTS = 80
 _oracle_history_by_asset: dict[str, deque[tuple[int, float]]] = {}
 _IDLE_INTERVAL_SECONDS = 15
 _MIN_LOOP_SLEEP_SECONDS = 0.1
@@ -72,12 +75,7 @@ def _oracle_history_payload(asset: str) -> list[dict]:
     history = _oracle_history_by_asset.get(asset)
     if not history:
         return []
-    points = list(history)
-    if len(points) > 80:
-        step = max(1, len(points) // 80)
-        points = points[::step]
-    if points and points[-1] != history[-1]:
-        points.append(history[-1])
+    points = list(history)[-_ORACLE_HISTORY_PAYLOAD_POINTS:]
     return [{"t": t, "p": round(p, 2)} for t, p in points]
 
 
@@ -309,14 +307,45 @@ async def _dispatch_crypto_opportunities(
 
 
 async def _is_autotrader_active(session) -> bool:
-    """Whether trader orchestrator is actively running strategies."""
+    """Whether live/paper trader demand is active for crypto fast mode."""
     try:
         from services.trader_orchestrator_state import read_orchestrator_control
 
         control = await read_orchestrator_control(session)
-        return bool(control.get("is_enabled", False)) and not bool(control.get("is_paused", True))
+        if bool(control.get("is_enabled", False)) and not bool(control.get("is_paused", True)):
+            return True
+    except Exception:
+        pass
+
+    try:
+        rows = list(
+            (
+                await session.execute(
+                    select(
+                        Trader.source_configs_json,
+                        Trader.sources_json,
+                    ).where(
+                        Trader.is_enabled.is_(True),
+                        Trader.is_paused.is_(False),
+                    )
+                )
+            ).all()
+        )
     except Exception:
         return False
+
+    for source_configs, sources in rows:
+        if isinstance(source_configs, list):
+            for item in source_configs:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("source_key") or "").strip().lower() == "crypto":
+                    return True
+        if isinstance(sources, list):
+            for source in sources:
+                if str(source or "").strip().lower() == "crypto":
+                    return True
+    return False
 
 
 def _is_recent_request(requested_run_at, window_seconds: int = _VIEWER_HEARTBEAT_SECONDS) -> bool:

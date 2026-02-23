@@ -75,6 +75,11 @@ interface LiveVenueSnapshot {
   unrealizedPnl: number
 }
 
+function toFiniteNumber(value: unknown): number {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
 function formatUsd(value: number): string {
   return `$${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
@@ -112,11 +117,12 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
     refetchInterval: 10000,
     retry: false,
   })
+  const polymarketReady = Boolean(tradingStatus?.authenticated || tradingStatus?.initialized)
 
   const { data: tradingPositions = [] } = useQuery({
     queryKey: ['live-positions'],
     queryFn: getTradingPositions,
-    enabled: !!tradingStatus?.initialized,
+    enabled: polymarketReady,
     refetchInterval: 15000,
     retry: false,
   })
@@ -124,7 +130,7 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
   const { data: tradingBalance } = useQuery({
     queryKey: ['trading-balance'],
     queryFn: getTradingBalance,
-    enabled: !!tradingStatus?.initialized,
+    enabled: polymarketReady,
     refetchInterval: 15000,
     retry: false,
   })
@@ -256,25 +262,26 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
   }, [sandboxAccounts, autotraderOverlay])
 
   const polymarketSnapshot = useMemo<LiveVenueSnapshot>(() => {
-    const exposure = tradingPositions.reduce((sum, pos) => sum + pos.size * pos.current_price, 0)
-    const unrealizedPnl = tradingPositions.reduce((sum, pos) => sum + pos.unrealized_pnl, 0)
-    const connected = Boolean(tradingStatus?.authenticated ?? tradingStatus?.initialized)
+    const exposure = tradingPositions.reduce(
+      (sum, pos) => sum + toFiniteNumber(pos.size) * toFiniteNumber(pos.current_price),
+      0
+    )
+    const unrealizedPnl = tradingPositions.reduce((sum, pos) => sum + toFiniteNumber(pos.unrealized_pnl), 0)
     return {
       id: 'polymarket',
       label: 'Polymarket',
-      connected,
+      connected: polymarketReady,
       accountLabel: tradingStatus?.wallet_address
         ? `${tradingStatus.wallet_address.slice(0, 8)}...${tradingStatus.wallet_address.slice(-6)}`
         : 'No wallet',
-      balance: tradingBalance?.balance ?? 0,
-      available: tradingBalance?.available ?? 0,
+      balance: toFiniteNumber(tradingBalance?.balance),
+      available: toFiniteNumber(tradingBalance?.available),
       exposure,
-      openPositions: tradingPositions.length,
+      openPositions: tradingPositions.filter((position) => toFiniteNumber(position.size) > 0).length,
       unrealizedPnl,
     }
   }, [
-    tradingStatus?.authenticated,
-    tradingStatus?.initialized,
+    polymarketReady,
     tradingStatus?.wallet_address,
     tradingBalance?.balance,
     tradingBalance?.available,
@@ -282,17 +289,20 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
   ])
 
   const kalshiSnapshot = useMemo<LiveVenueSnapshot>(() => {
-    const exposure = kalshiPositions.reduce((sum, pos) => sum + pos.size * pos.current_price, 0)
-    const unrealizedPnl = kalshiPositions.reduce((sum, pos) => sum + pos.unrealized_pnl, 0)
+    const exposure = kalshiPositions.reduce(
+      (sum, pos) => sum + toFiniteNumber(pos.size) * toFiniteNumber(pos.current_price),
+      0
+    )
+    const unrealizedPnl = kalshiPositions.reduce((sum, pos) => sum + toFiniteNumber(pos.unrealized_pnl), 0)
     return {
       id: 'kalshi',
       label: 'Kalshi',
       connected: Boolean(kalshiStatus?.authenticated),
       accountLabel: kalshiStatus?.email || (kalshiStatus?.member_id ? `Member ${kalshiStatus.member_id}` : 'No account'),
-      balance: kalshiBalance?.balance ?? kalshiStatus?.balance?.balance ?? 0,
-      available: kalshiBalance?.available ?? kalshiStatus?.balance?.available ?? 0,
+      balance: toFiniteNumber(kalshiBalance?.balance ?? kalshiStatus?.balance?.balance),
+      available: toFiniteNumber(kalshiBalance?.available ?? kalshiStatus?.balance?.available),
       exposure,
-      openPositions: kalshiPositions.length,
+      openPositions: kalshiPositions.filter((position) => toFiniteNumber(position.size) > 0).length,
       unrealizedPnl,
     }
   }, [kalshiStatus, kalshiBalance?.balance, kalshiBalance?.available, kalshiPositions])

@@ -1382,10 +1382,56 @@ class PolymarketClient:
     # ==================== DATA API ====================
 
     async def get_wallet_positions(self, address: str) -> list[dict]:
-        """Get open positions for a wallet"""
-        response = await self._rate_limited_get(f"{self.data_url}/positions", params={"user": address})
-        response.raise_for_status()
-        return response.json()
+        """Get open positions for a wallet, paging through all results."""
+        normalized_address = str(address or "").strip()
+        if not normalized_address:
+            return []
+
+        page_size = 500
+        offset = 0
+        all_rows: list[dict] = []
+        seen_position_keys: set[tuple[str, str, str]] = set()
+
+        for _ in range(20):
+            response = await self._rate_limited_get(
+                f"{self.data_url}/positions",
+                params={
+                    "user": normalized_address,
+                    "limit": page_size,
+                    "offset": offset,
+                },
+            )
+            response.raise_for_status()
+
+            payload = response.json()
+            page_rows = self._extract_list_payload(
+                payload,
+                preferred_keys=("data", "items", "positions"),
+            )
+            if not page_rows:
+                break
+
+            unique_page_rows: list[dict] = []
+            for row in page_rows:
+                key = (
+                    str(row.get("asset") or row.get("asset_id") or row.get("token_id") or "").strip(),
+                    str(row.get("conditionId") or row.get("condition_id") or row.get("market") or "").strip(),
+                    str(row.get("outcomeIndex") or row.get("outcome") or "").strip().lower(),
+                )
+                if key in seen_position_keys:
+                    continue
+                seen_position_keys.add(key)
+                unique_page_rows.append(row)
+
+            if unique_page_rows:
+                all_rows.extend(unique_page_rows)
+
+            if len(page_rows) < page_size:
+                break
+
+            offset += len(page_rows)
+
+        return all_rows
 
     async def get_wallet_positions_with_prices(self, address: str) -> list[dict]:
         """

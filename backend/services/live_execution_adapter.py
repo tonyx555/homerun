@@ -49,6 +49,7 @@ async def execute_live_order(
     opportunity_id: str | None = None,
     time_in_force: str = "GTC",
     post_only: bool = False,
+    resolve_live_price: bool = True,
 ) -> LiveOrderExecution:
     normalized_token_id = str(token_id or "").strip()
     normalized_side = _normalize_side(side)
@@ -93,24 +94,33 @@ async def execute_live_order(
         )
 
     resolved_price = fallback
-    try:
-        if normalized_side == OrderSide.BUY:
-            resolved_price = safe_float(
-                await polymarket_client.get_price(normalized_token_id, side="BUY"), resolved_price
-            )
-        else:
-            resolved_price = safe_float(
-                await polymarket_client.get_price(normalized_token_id, side="SELL"), resolved_price
-            )
-    except Exception:
-        pass
+    if resolve_live_price:
+        try:
+            live_quote = None
+            if normalized_side == OrderSide.BUY:
+                live_quote = safe_float(
+                    await polymarket_client.get_price(normalized_token_id, side="BUY")
+                )
+            else:
+                live_quote = safe_float(
+                    await polymarket_client.get_price(normalized_token_id, side="SELL")
+                )
+            if live_quote is not None and live_quote > 0:
+                resolved_price = live_quote
+        except Exception:
+            pass
 
     if resolved_price is None or resolved_price <= 0:
         return LiveOrderExecution(
             status="failed",
             effective_price=None,
             error_message="Could not resolve a valid live price.",
-            payload={**base_payload, "submission": "rejected", "resolved_price": resolved_price},
+            payload={
+                **base_payload,
+                "submission": "rejected",
+                "resolved_price": resolved_price,
+                "price_resolution": "live_quote" if resolve_live_price else "explicit_limit",
+            },
         )
 
     try:
@@ -157,6 +167,7 @@ async def execute_live_order(
             **base_payload,
             "submission": "live",
             "resolved_price": resolved_price,
+            "price_resolution": "live_quote" if resolve_live_price else "explicit_limit",
             "order_id": order_id,
             "clob_order_id": clob_order_id,
             "trading_status": str(getattr(getattr(order, "status", None), "value", getattr(order, "status", "")) or ""),

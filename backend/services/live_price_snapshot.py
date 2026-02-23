@@ -5,11 +5,13 @@ from datetime import datetime, timezone
 import time
 from typing import Iterable
 
+from config import settings
 from services.polymarket import polymarket_client
 
 # Keep HTTP load bounded while still feeling "live" in the UI.
-DEFAULT_PRICE_TTL_SECONDS = 8.0
+DEFAULT_PRICE_TTL_SECONDS = 0.25
 _MAX_CACHE_ENTRIES = 6000
+_STALE_PRICE_GRACE_SECONDS = max(2.0, min(60.0, float(getattr(settings, "WS_PRICE_STALE_SECONDS", 30.0) or 30.0)))
 
 # Keep chart behavior consistent between initial snapshot and live updates.
 DEFAULT_HISTORY_WINDOW_SECONDS = 2 * 60 * 60
@@ -281,6 +283,7 @@ async def get_live_mid_prices(
 
     now_monotonic = time.monotonic()
     cached_prices: dict[str, float] = {}
+    stale_cached_prices: dict[str, float] = {}
     missing_tokens: list[str] = []
 
     async with _price_cache_lock:
@@ -291,6 +294,8 @@ async def get_live_mid_prices(
                 continue
             cached_price, expires_at = cached
             if expires_at <= now_monotonic:
+                if cached_price is not None:
+                    stale_cached_prices[token_id] = cached_price
                 missing_tokens.append(token_id)
                 continue
             if cached_price is not None:
@@ -301,12 +306,13 @@ async def get_live_mid_prices(
 
     fetched_prices: dict[str, float] = {}
     try:
-        payload = await polymarket_client.get_prices_batch(missing_tokens)
-    except Exception:
-        payload = {}
+        from services.redis_price_cache import redis_price_cache
 
-    if isinstance(payload, dict):
-        for raw_token_id, raw_row in payload.items():
+        redis_rows = await redis_price_cache.read_prices(missing_tokens)
+    except Exception:
+        redis_rows = {}
+    if isinstance(redis_rows, dict):
+        for raw_token_id, raw_row in redis_rows.items():
             token_id = _normalize_token_id(raw_token_id)
             if not token_id:
                 continue
@@ -315,11 +321,46 @@ async def get_live_mid_prices(
             if price is not None:
                 fetched_prices[token_id] = price
 
+    provider_missing = [token_id for token_id in missing_tokens if token_id not in fetched_prices]
+    if provider_missing:
+        try:
+            payload = await polymarket_client.get_prices_batch(provider_missing)
+        except Exception:
+            payload = {}
+
+        if isinstance(payload, dict):
+            for raw_token_id, raw_row in payload.items():
+                token_id = _normalize_token_id(raw_token_id)
+                if not token_id:
+                    continue
+                row = raw_row if isinstance(raw_row, dict) else {}
+                price = _coerce_mid_price(row.get("mid"))
+                if price is not None:
+                    fetched_prices[token_id] = price
+
     expiry = now_monotonic + max(1.0, float(ttl_seconds))
+    stale_grace_expiry = now_monotonic + _STALE_PRICE_GRACE_SECONDS
     async with _price_cache_lock:
         for token_id in missing_tokens:
-            _price_cache[token_id] = (fetched_prices.get(token_id), expiry)
+            fetched = fetched_prices.get(token_id)
+            if fetched is not None:
+                _price_cache[token_id] = (fetched, expiry)
+                continue
+
+            stale_value = stale_cached_prices.get(token_id)
+            if stale_value is not None:
+                _price_cache[token_id] = (stale_value, stale_grace_expiry)
+                continue
+
+            existing = _price_cache.get(token_id)
+            if existing is not None and existing[0] is not None:
+                _price_cache[token_id] = (existing[0], stale_grace_expiry)
+            else:
+                _price_cache[token_id] = (None, expiry)
         _prune_cache(now_monotonic)
 
     cached_prices.update(fetched_prices)
+    for token_id, stale_price in stale_cached_prices.items():
+        if token_id not in cached_prices:
+            cached_prices[token_id] = stale_price
     return cached_prices

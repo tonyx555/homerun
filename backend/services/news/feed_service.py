@@ -265,6 +265,7 @@ class NewsFeedService:
             if str(run_result.get("status") or "").strip().lower() != "success":
                 return []
 
+        async with AsyncSessionLocal() as session:
             records = (
                 (
                     await session.execute(

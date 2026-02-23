@@ -13,12 +13,15 @@ different parameter configurations and find optimal settings.
 
 import itertools
 import math
+import hashlib
+import json
 import uuid
 import asyncio
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
 from utils.utcnow import utcnow
 from enum import Enum
+from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
@@ -28,6 +31,22 @@ from models.database import AsyncSessionLocal, OpportunityHistory, ParameterSet
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _stable_hash(payload: Any) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _module_code_sha() -> str:
+    source_path = Path(__file__)
+    try:
+        return hashlib.sha256(source_path.read_bytes()).hexdigest()
+    except Exception:
+        return hashlib.sha256(str(source_path).encode("utf-8")).hexdigest()
+
+
+_MODULE_CODE_SHA = _module_code_sha()
 
 
 # ---------------------------------------------------------------------------
@@ -1060,7 +1079,38 @@ class ParameterOptimizer:
         trading_params = TradingParameters.from_dict(params) if params else self._current_params
         opportunities = await self._load_opportunity_history()
         result = _replay_opportunities(opportunities, trading_params)
-        return result.to_dict()
+        requested_seed = str((params or {}).get("run_seed") or "").strip() if isinstance(params, dict) else ""
+        run_seed = requested_seed or _stable_hash(
+            {
+                "mode": "param_optimizer_backtest",
+                "params": trading_params.to_dict(),
+                "opportunity_count": len(opportunities),
+            }
+        )[:16]
+        dataset_hash = _stable_hash(
+            [
+                {
+                    "id": str(opp.get("id") or ""),
+                    "stable_id": str(opp.get("stable_id") or ""),
+                    "strategy_type": str(opp.get("strategy_type") or ""),
+                    "detected_at": str(opp.get("detected_at") or ""),
+                    "expected_roi": opp.get("expected_roi"),
+                    "actual_roi": opp.get("actual_roi"),
+                    "was_profitable": opp.get("was_profitable"),
+                    "total_cost": opp.get("total_cost"),
+                }
+                for opp in opportunities
+            ]
+        )
+        config_hash = _stable_hash(trading_params.to_dict())
+        serialized = result.to_dict()
+        serialized["run_manifest"] = {
+            "run_seed": run_seed,
+            "dataset_hash": dataset_hash,
+            "config_hash": config_hash,
+            "code_sha": _MODULE_CODE_SHA,
+        }
+        return serialized
 
 
 # ---------------------------------------------------------------------------

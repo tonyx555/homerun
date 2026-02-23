@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -58,6 +59,26 @@ class _FakeClient:
                 return _FakeResponse({"price": str(self._price_by_token_side[key])})
             return _FakeResponse({"price": None}, status_code=404)
         return _FakeResponse({}, status_code=404)
+
+
+class _FakePriceToBeatClient:
+    def __init__(self, *, response_data: dict, status_code: int = 200):
+        self._response_data = response_data
+        self._status_code = status_code
+        self.calls: list[tuple[str, dict]] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def close(self):
+        return None
+
+    def get(self, url: str, params: dict) -> _FakeResponse:
+        self.calls.append((url, dict(params)))
+        return _FakeResponse(self._response_data, status_code=self._status_code)
 
 
 def _event(slug: str, end_date: str) -> dict:
@@ -137,3 +158,69 @@ def test_fetch_all_overlays_live_clob_prices_on_current_market(monkeypatch):
     assert market.down_price == 0.02
     assert market.best_bid == 0.97
     assert market.best_ask == 0.99
+
+
+def test_update_price_to_beat_uses_crypto_price_api_for_cold_start(monkeypatch):
+    start_time = (datetime.now(timezone.utc) - timedelta(minutes=2)).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )
+    market = crypto_service.CryptoMarket(
+        slug="btc-updown-15m-test",
+        asset="BTC",
+        timeframe="15min",
+        start_time=start_time,
+    )
+
+    class _Feed:
+        @staticmethod
+        def get_price_at_time(asset: str, timestamp_s: float):
+            return None
+
+        @staticmethod
+        def get_price(asset: str):
+            return None
+
+    fake_client = _FakePriceToBeatClient(response_data={"openPrice": 71234.56})
+    monkeypatch.setattr(crypto_service.httpx, "Client", lambda timeout=2.0: fake_client)
+    monkeypatch.setattr("services.chainlink_feed.get_chainlink_feed", lambda: _Feed())
+
+    svc = crypto_service.CryptoService()
+    svc._update_price_to_beat([market])
+
+    assert svc._price_to_beat["btc-updown-15m-test"] == 71234.56
+    assert fake_client.calls, "expected crypto-price API call"
+    url, params = fake_client.calls[0]
+    assert url == "https://polymarket.com/api/crypto/crypto-price"
+    assert params["symbol"] == "BTC"
+    assert params["variant"] == "fifteen"
+    assert params["eventStartTime"] == start_time
+
+
+def test_update_price_to_beat_falls_back_to_chainlink_history_when_api_missing(monkeypatch):
+    start_time = (datetime.now(timezone.utc) - timedelta(minutes=3)).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )
+    market = crypto_service.CryptoMarket(
+        slug="eth-updown-15m-test",
+        asset="ETH",
+        timeframe="15min",
+        start_time=start_time,
+    )
+
+    class _Feed:
+        @staticmethod
+        def get_price_at_time(asset: str, timestamp_s: float):
+            return 1999.25
+
+        @staticmethod
+        def get_price(asset: str):
+            return None
+
+    fake_client = _FakePriceToBeatClient(response_data={"openPrice": None}, status_code=500)
+    monkeypatch.setattr(crypto_service.httpx, "Client", lambda timeout=2.0: fake_client)
+    monkeypatch.setattr("services.chainlink_feed.get_chainlink_feed", lambda: _Feed())
+
+    svc = crypto_service.CryptoService()
+    svc._update_price_to_beat([market])
+
+    assert svc._price_to_beat["eth-updown-15m-test"] == 1999.25

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy.exc import InterfaceError
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
@@ -138,4 +139,75 @@ async def test_worker_runs_once_when_manual_request_is_set(monkeypatch):
         await news_worker._run_loop()
 
     run_cycle_mock.assert_awaited_once()
+    clear_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_worker_retries_cycle_after_db_disconnect(monkeypatch):
+    fake_ai = SimpleNamespace(initialize_ai=AsyncMock(return_value=SimpleNamespace(is_available=lambda: False)))
+    fake_feed_service = SimpleNamespace(load_from_db=AsyncMock())
+    monkeypatch.setitem(sys.modules, "services.ai", fake_ai)
+    monkeypatch.setitem(
+        sys.modules,
+        "services.news.feed_service",
+        SimpleNamespace(news_feed_service=fake_feed_service),
+    )
+
+    monkeypatch.setattr(news_worker, "AsyncSessionLocal", lambda: _DummySession())
+    monkeypatch.setattr(news_worker.shared_state, "write_news_snapshot", AsyncMock())
+    monkeypatch.setattr(news_worker, "write_worker_snapshot", AsyncMock())
+    monkeypatch.setattr(
+        news_worker.shared_state,
+        "read_news_control",
+        AsyncMock(
+            return_value={
+                "is_enabled": True,
+                "is_paused": True,
+                "requested_scan_at": datetime.now(timezone.utc),
+                "scan_interval_seconds": 120,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        news_worker.shared_state,
+        "get_news_settings",
+        AsyncMock(
+            return_value={
+                "enabled": True,
+                "auto_run": True,
+                "scan_interval_seconds": 120,
+                "orchestrator_max_age_minutes": 120,
+            }
+        ),
+    )
+    monkeypatch.setattr(news_worker.shared_state, "expire_stale_news_intents", AsyncMock(return_value=0))
+    monkeypatch.setattr(news_worker.shared_state, "count_pending_news_intents", AsyncMock(return_value=0))
+    monkeypatch.setattr(news_worker.shared_state, "list_news_intents", AsyncMock(return_value=[]))
+    monkeypatch.setattr(news_worker.shared_state, "list_news_findings", AsyncMock(return_value=[]))
+    monkeypatch.setattr(news_worker, "emit_news_intent_signals", AsyncMock(return_value=0))
+    run_cycle_mock = AsyncMock(
+        side_effect=[
+            InterfaceError("SELECT 1", None, Exception("connection is closed")),
+            {"status": "completed", "findings": 1, "intents": 1, "stats": {}},
+        ]
+    )
+    monkeypatch.setattr(news_worker.workflow_orchestrator, "run_cycle", run_cycle_mock)
+    monkeypatch.setattr(news_worker.shared_state, "try_acquire_news_lease", AsyncMock(return_value=True))
+    monkeypatch.setattr(news_worker.shared_state, "release_news_lease", AsyncMock())
+    clear_mock = AsyncMock()
+    monkeypatch.setattr(news_worker.shared_state, "clear_news_scan_request", clear_mock)
+    recover_pool_mock = AsyncMock()
+    monkeypatch.setattr(news_worker, "recover_pool", recover_pool_mock)
+    monkeypatch.setattr(news_worker, "_last_pool_recovery_at_monotonic", 0.0)
+    monkeypatch.setattr(
+        news_worker.asyncio,
+        "sleep",
+        AsyncMock(side_effect=[None, asyncio.CancelledError()]),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await news_worker._run_loop()
+
+    assert run_cycle_mock.await_count == 2
+    recover_pool_mock.assert_awaited_once()
     clear_mock.assert_awaited_once()

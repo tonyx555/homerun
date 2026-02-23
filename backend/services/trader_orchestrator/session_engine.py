@@ -7,8 +7,11 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.database import ExecutionSessionLeg
+from models.database import ExecutionSessionLeg, TraderOrder
+from services.event_bus import event_bus
+from services.live_execution_adapter import execute_live_order
 from services.signal_bus import set_trade_signal_status
+from services.strategy_sdk import StrategySDK
 from services.trader_orchestrator.execution_policies import (
     allocate_leg_notionals,
     execution_waves,
@@ -23,6 +26,9 @@ from services.trader_orchestrator.order_manager import (
     submit_execution_wave,
 )
 from services.trader_orchestrator_state import (
+    _extract_live_fill_metrics,
+    _serialize_order,
+    _sync_order_runtime_payload,
     create_execution_session,
     create_execution_session_event,
     create_execution_session_order,
@@ -344,18 +350,103 @@ class ExecutionSessionEngine:
                 order_payload["strategy_context"] = (
                     getattr(signal, "strategy_context_json", None) or getattr(signal, "strategy_context", None) or {}
                 )
-                exit_keys = {
-                    "take_profit_pct",
-                    "stop_loss_pct",
-                    "trailing_stop_pct",
-                    "max_hold_minutes",
-                    "min_hold_minutes",
-                    "resolve_only",
-                    "close_on_inactive_market",
+                params = dict(strategy_params or {})
+                exit_config: dict[str, Any] = {}
+                exit_key_aliases = {
+                    "take_profit_pct": ("live_take_profit_pct", "take_profit_pct"),
+                    "stop_loss_pct": ("live_stop_loss_pct", "stop_loss_pct"),
+                    "stop_loss_policy": ("live_stop_loss_policy", "stop_loss_policy", "stop_loss_mode"),
+                    "stop_loss_activation_seconds": (
+                        "live_stop_loss_activation_seconds",
+                        "stop_loss_activation_seconds",
+                        "live_stop_loss_near_close_seconds",
+                        "stop_loss_near_close_seconds",
+                    ),
+                    "trailing_stop_pct": ("live_trailing_stop_pct", "trailing_stop_pct"),
+                    "max_hold_minutes": ("live_max_hold_minutes", "max_hold_minutes"),
+                    "min_hold_minutes": ("live_min_hold_minutes", "min_hold_minutes"),
+                    "resolve_only": ("live_resolve_only", "resolve_only"),
+                    "close_on_inactive_market": ("live_close_on_inactive_market", "close_on_inactive_market"),
                 }
-                order_payload["strategy_exit_config"] = {
-                    key: value for key, value in (strategy_params or {}).items() if key in exit_keys
-                }
+                for target_key, aliases in exit_key_aliases.items():
+                    selected_value = None
+                    for alias_key in aliases:
+                        if alias_key in params:
+                            selected_value = params.get(alias_key)
+                            break
+                    if selected_value is not None:
+                        exit_config[target_key] = selected_value
+
+                preplace_take_profit_exit = StrategySDK.should_preplace_take_profit_exit(
+                    strategy_key,
+                    params,
+                )
+                take_profit_pct = safe_float(exit_config.get("take_profit_pct"), None)
+                entry_side = str(leg_payload.get("side") or "buy").strip().lower()
+                if (
+                    mode == "live"
+                    and normalized_status == "executed"
+                    and entry_side == "buy"
+                    and preplace_take_profit_exit
+                    and take_profit_pct is not None
+                    and take_profit_pct > 0.0
+                ):
+                    execution_payload = dict(result.payload or {})
+                    entry_fill_price = safe_float(result.effective_price, None)
+                    if entry_fill_price is None or entry_fill_price <= 0.0:
+                        entry_fill_price = safe_float(execution_payload.get("average_fill_price"), None)
+                    exit_size = safe_float(execution_payload.get("filled_size"), None)
+                    if exit_size is None or exit_size <= 0.0:
+                        exit_size = safe_float(result.shares, None)
+                    token_id = str(
+                        execution_payload.get("token_id")
+                        or (execution_payload.get("leg") or {}).get("token_id")
+                        or leg_payload.get("token_id")
+                        or ""
+                    ).strip()
+                    if token_id and entry_fill_price is not None and entry_fill_price > 0.0 and exit_size is not None and exit_size > 0.0:
+                        target_price = min(0.999, max(0.001, entry_fill_price * (1.0 + (take_profit_pct / 100.0))))
+                        tp_submit = await execute_live_order(
+                            token_id=token_id,
+                            side="SELL",
+                            size=float(exit_size),
+                            fallback_price=target_price,
+                            market_question=str(leg_payload.get("market_question") or getattr(signal, "market_question", "") or ""),
+                            opportunity_id=str(getattr(signal, "id", "") or ""),
+                            time_in_force="GTC",
+                            post_only=False,
+                            resolve_live_price=False,
+                        )
+                        bracket_timestamp = utcnow().isoformat() + "Z"
+                        pending_exit: dict[str, Any] = {
+                            "kind": "take_profit_limit",
+                            "triggered_at": bracket_timestamp,
+                            "last_attempt_at": bracket_timestamp,
+                            "close_trigger": "take_profit_limit",
+                            "close_price": float(target_price),
+                            "price_source": "entry_bracket_limit",
+                            "target_take_profit_pct": float(take_profit_pct),
+                            "entry_fill_price": float(entry_fill_price),
+                            "market_tradable": True,
+                            "exit_size": float(exit_size),
+                            "retry_count": 0,
+                            "reason": "entry_bracket_take_profit",
+                        }
+                        if tp_submit.status in {"executed", "open", "submitted"}:
+                            pending_exit["status"] = "submitted"
+                            pending_exit["exit_order_id"] = str(tp_submit.order_id or "")
+                            pending_exit["provider_clob_order_id"] = str(tp_submit.payload.get("clob_order_id") or "")
+                            pending_exit["provider_status"] = str(tp_submit.payload.get("trading_status") or "")
+                        else:
+                            pending_exit["status"] = "failed"
+                            pending_exit["retry_count"] = 1
+                            pending_exit["last_error"] = str(tp_submit.error_message or "failed_to_place_take_profit_exit")
+                        order_payload["pending_live_exit"] = pending_exit
+
+                order_payload["strategy_exit_config"] = exit_config
+                persisted_order_status = (
+                    "open" if mode == "live" and normalized_status == "executed" else normalized_status
+                )
 
                 trader_order = await create_trader_order(
                     self.db,
@@ -363,7 +454,7 @@ class ExecutionSessionEngine:
                     signal=signal,
                     decision_id=decision_id,
                     mode=mode,
-                    status=normalized_status,
+                    status=persisted_order_status,
                     notional_usd=safe_float(result.notional_usd, 0.0),
                     effective_price=safe_float(result.effective_price, None),
                     reason=reason,
@@ -452,12 +543,19 @@ class ExecutionSessionEngine:
             effective_price=self._effective_price_from_leg_results(leg_execution_records),
             commit=False,
         )
+        event_type = "session_completed"
+        event_severity = "info" if final_status == "completed" else "warn"
+        event_message = f"Execution session ended with status={final_status}"
+        if final_status in {"working", "hedging"}:
+            event_type = "session_progress"
+            event_severity = "info"
+            event_message = f"Execution session remains {final_status}; awaiting leg completion"
         await create_execution_session_event(
             self.db,
             session_id=session_row.id,
-            event_type="session_completed",
-            severity="info" if final_status == "completed" else "warn",
-            message=f"Execution session ended with status={final_status}",
+            event_type=event_type,
+            severity=event_severity,
+            message=event_message,
             payload={
                 "failed_legs": failed_legs,
                 "completed_legs": completed_legs,
@@ -501,20 +599,10 @@ class ExecutionSessionEngine:
             if status_key == "paused":
                 continue
             if row.expires_at is not None and now > row.expires_at:
-                await update_execution_session_status(
-                    self.db,
+                await self.cancel_session(
                     session_id=row.id,
-                    status="expired",
-                    error_message="Session timed out before all legs completed.",
-                    commit=False,
-                )
-                await create_execution_session_event(
-                    self.db,
-                    session_id=row.id,
-                    event_type="session_expired",
-                    severity="warn",
-                    message="Execution session expired by timeout policy",
-                    commit=False,
+                    reason="Session timed out before all legs completed.",
+                    terminal_status="expired",
                 )
                 expired += 1
                 continue
@@ -556,14 +644,20 @@ class ExecutionSessionEngine:
         *,
         session_id: str,
         reason: str,
+        terminal_status: str = "cancelled",
     ) -> bool:
         detail = await get_execution_session_detail(self.db, session_id)
         if detail is None:
             return False
         session_view = detail["session"]
+        terminal_key = str(terminal_status or "cancelled").strip().lower()
+        if terminal_key not in {"cancelled", "expired"}:
+            terminal_key = "cancelled"
         if str(session_view.get("status") or "").strip().lower() in {"cancelled", "completed", "failed", "expired"}:
             return True
 
+        now = utcnow()
+        updated_trader_orders: list[TraderOrder] = []
         for order in detail.get("orders", []):
             status_key = str(order.get("status") or "").strip().lower()
             if status_key not in {"open", "submitted"}:
@@ -575,9 +669,55 @@ class ExecutionSessionEngine:
                 cancel_targets.append(provider_clob_order_id)
             if provider_order_id and provider_order_id not in cancel_targets:
                 cancel_targets.append(provider_order_id)
+            cancel_success = False
             for target in cancel_targets:
                 if await cancel_live_provider_order(target):
+                    cancel_success = True
                     break
+
+            trader_order_id = str(order.get("trader_order_id") or "").strip()
+            if trader_order_id:
+                trader_order = await self.db.get(TraderOrder, trader_order_id)
+                if trader_order is not None:
+                    payload = dict(trader_order.payload_json or {})
+                    filled_notional_usd, _, _ = _extract_live_fill_metrics(payload)
+                    has_fill = filled_notional_usd > 0.0
+                    if has_fill:
+                        next_status = "executed"
+                        next_notional = max(0.0, filled_notional_usd)
+                        if next_notional <= 0.0:
+                            next_notional = max(0.0, abs(safe_float(trader_order.notional_usd, 0.0) or 0.0))
+                        trader_order.status = next_status
+                        trader_order.notional_usd = float(next_notional)
+                        if trader_order.executed_at is None and next_notional > 0.0:
+                            trader_order.executed_at = now
+                    else:
+                        next_status = "cancelled"
+                        trader_order.status = next_status
+                        trader_order.notional_usd = 0.0
+
+                    payload["session_cancel"] = {
+                        "cancelled_at": now.isoformat() + "Z",
+                        "session_id": session_id,
+                        "terminal_status": terminal_key,
+                        "reason": reason,
+                        "provider_cancel_targets": cancel_targets,
+                        "provider_cancel_success": bool(cancel_success),
+                    }
+                    trader_order.payload_json = _sync_order_runtime_payload(
+                        payload=payload,
+                        status=next_status,
+                        now=now,
+                        provider_snapshot_status=next_status if next_status == "cancelled" else None,
+                        mapped_status="cancelled" if next_status == "cancelled" else "executed",
+                    )
+                    trader_order.updated_at = now
+                    if reason:
+                        if trader_order.reason:
+                            trader_order.reason = f"{trader_order.reason} | session:{terminal_key}:{reason}"
+                        else:
+                            trader_order.reason = f"session:{terminal_key}:{reason}"
+                    updated_trader_orders.append(trader_order)
 
         for leg in detail.get("legs", []):
             leg_status = str(leg.get("status") or "").strip().lower()
@@ -594,7 +734,7 @@ class ExecutionSessionEngine:
         await update_execution_session_status(
             self.db,
             session_id=session_id,
-            status="cancelled",
+            status=terminal_key,
             error_message=reason,
             commit=False,
         )
@@ -609,12 +749,17 @@ class ExecutionSessionEngine:
         await create_execution_session_event(
             self.db,
             session_id=session_id,
-            event_type="session_cancelled",
+            event_type="session_expired" if terminal_key == "expired" else "session_cancelled",
             severity="warn",
             message=reason,
             commit=False,
         )
         await self.db.commit()
+        for row in updated_trader_orders:
+            try:
+                await event_bus.publish("trader_order", _serialize_order(row))
+            except Exception:
+                continue
         return True
 
     async def pause_session(self, *, session_id: str) -> bool:

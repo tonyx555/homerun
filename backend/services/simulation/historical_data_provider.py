@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,18 @@ def _normalize_ts_ms(ts: int | None) -> int | None:
     return parsed
 
 
+def _normalize_price(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except Exception:
+        return None
+    if parsed < 0.0:
+        return 0.0
+    if parsed > 1.0:
+        return 1.0
+    return parsed
+
+
 class HistoricalDataProvider:
     """Historical market data fetcher with local cache for reruns."""
 
@@ -78,28 +91,40 @@ class HistoricalDataProvider:
             return
 
     @staticmethod
-    def _points_to_ohlc(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        candles: list[dict[str, Any]] = []
+    def _points_to_candles(points: list[dict[str, Any]], *, timeframe_seconds: int) -> list[dict[str, Any]]:
+        if timeframe_seconds <= 0:
+            return []
+        bucket_ms = int(timeframe_seconds * 1000)
+        grouped: dict[int, list[dict[str, float]]] = defaultdict(list)
         for point in points:
-            price = float(point.get("p", 0.0))
             t_ms = _normalize_ts_ms(_as_int(point.get("t"), 0))
-            if t_ms is None:
+            price = _normalize_price(point.get("p"))
+            if t_ms is None or price is None:
                 continue
-            price = max(0.0001, min(0.9999, price))
-            candles.append(
+            grouped[(t_ms // bucket_ms) * bucket_ms].append(
                 {
-                    "t": int(t_ms),
-                    "open": price,
-                    "high": price,
-                    "low": price,
-                    "close": price,
-                    "volume": float(point.get("v") or 0.0),
+                    "t": float(t_ms),
+                    "p": float(max(0.0001, min(0.9999, price))),
+                    "v": float(point.get("v") or 0.0),
                 }
             )
-        candles.sort(key=lambda row: row["t"])
+        candles: list[dict[str, Any]] = []
+        for bucket_start in sorted(grouped.keys()):
+            rows = sorted(grouped[bucket_start], key=lambda row: row["t"])
+            prices = [float(row["p"]) for row in rows]
+            candles.append(
+                {
+                    "t": int(bucket_start),
+                    "open": prices[0],
+                    "high": max(prices),
+                    "low": min(prices),
+                    "close": prices[-1],
+                    "volume": sum(float(row["v"]) for row in rows),
+                }
+            )
         return candles
 
-    async def get_polymarket_candles(
+    async def get_polymarket_points(
         self,
         *,
         token_id: str,
@@ -109,11 +134,13 @@ class HistoricalDataProvider:
         outcome: str = "yes",
     ) -> list[dict[str, Any]]:
         tf_seconds = _timeframe_to_seconds(timeframe)
-        key = f"poly:{token_id}:{start_ts}:{end_ts}:{tf_seconds}:{outcome}"
+        key = f"poly_points:{token_id}:{start_ts}:{end_ts}:{tf_seconds}:{outcome}"
         cached = self._read_cache(key)
         if cached is not None:
             return cached
 
+        start_ms = _normalize_ts_ms(start_ts)
+        end_ms = _normalize_ts_ms(end_ts)
         history = await polymarket_client.get_prices_history(
             token_id=str(token_id),
             fidelity=tf_seconds,
@@ -126,15 +153,24 @@ class HistoricalDataProvider:
         for item in history:
             if not isinstance(item, dict):
                 continue
-            p = float(item.get("p") or 0.0)
-            price = p if use_yes else (1.0 - p)
-            points.append({"t": item.get("t"), "p": price})
+            t_ms = _normalize_ts_ms(_as_int(item.get("t"), 0))
+            if t_ms is None:
+                continue
+            if start_ms is not None and t_ms < start_ms:
+                continue
+            if end_ms is not None and t_ms > end_ms:
+                continue
+            raw_price = _normalize_price(item.get("p"))
+            if raw_price is None:
+                continue
+            selected_price = raw_price if use_yes else max(0.0, min(1.0, 1.0 - raw_price))
+            points.append({"t": int(t_ms), "p": float(selected_price), "v": float(item.get("v") or 0.0)})
 
-        candles = self._points_to_ohlc(points)
-        self._write_cache(key, candles)
-        return candles
+        points.sort(key=lambda row: int(row["t"]))
+        self._write_cache(key, points)
+        return points
 
-    async def get_kalshi_candles(
+    async def get_kalshi_points(
         self,
         *,
         market_ticker: str,
@@ -144,11 +180,13 @@ class HistoricalDataProvider:
         outcome: str = "yes",
     ) -> list[dict[str, Any]]:
         tf_seconds = _timeframe_to_seconds(timeframe)
-        key = f"kalshi:{market_ticker}:{start_ts}:{end_ts}:{tf_seconds}:{outcome}"
+        key = f"kalshi_points:{market_ticker}:{start_ts}:{end_ts}:{tf_seconds}:{outcome}"
         cached = self._read_cache(key)
         if cached is not None:
             return cached
 
+        start_ms = _normalize_ts_ms(start_ts)
+        end_ms = _normalize_ts_ms(end_ts)
         points_by_market = await kalshi_client.get_market_candlesticks_batch(
             [str(market_ticker)],
             start_ts=_normalize_ts_seconds(start_ts),
@@ -163,10 +201,77 @@ class HistoricalDataProvider:
         for row in raw_points:
             if not isinstance(row, dict):
                 continue
-            yes = float(row.get("yes") or 0.0)
-            no = float(row.get("no") or max(0.0, 1.0 - yes))
-            points.append({"t": row.get("t"), "p": yes if use_yes else no})
+            t_ms = _normalize_ts_ms(_as_int(row.get("t"), 0))
+            if t_ms is None:
+                continue
+            if start_ms is not None and t_ms < start_ms:
+                continue
+            if end_ms is not None and t_ms > end_ms:
+                continue
+            yes = _normalize_price(row.get("yes"))
+            if yes is None:
+                continue
+            no = max(0.0, min(1.0, 1.0 - yes))
+            points.append(
+                {
+                    "t": int(t_ms),
+                    "p": float(yes if use_yes else no),
+                    "v": float(row.get("volume") or row.get("v") or 0.0),
+                }
+            )
 
-        candles = self._points_to_ohlc(points)
+        points.sort(key=lambda point: int(point["t"]))
+        self._write_cache(key, points)
+        return points
+
+    async def get_polymarket_candles(
+        self,
+        *,
+        token_id: str,
+        start_ts: int | None,
+        end_ts: int | None,
+        timeframe: str | int | None,
+        outcome: str = "yes",
+    ) -> list[dict[str, Any]]:
+        tf_seconds = _timeframe_to_seconds(timeframe)
+        key = f"poly_candles:{token_id}:{start_ts}:{end_ts}:{tf_seconds}:{outcome}"
+        cached = self._read_cache(key)
+        if cached is not None:
+            return cached
+
+        points = await self.get_polymarket_points(
+            token_id=token_id,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            timeframe=tf_seconds,
+            outcome=outcome,
+        )
+        candles = self._points_to_candles(points, timeframe_seconds=tf_seconds)
+        self._write_cache(key, candles)
+        return candles
+
+    async def get_kalshi_candles(
+        self,
+        *,
+        market_ticker: str,
+        start_ts: int | None,
+        end_ts: int | None,
+        timeframe: str | int | None,
+        outcome: str = "yes",
+    ) -> list[dict[str, Any]]:
+        tf_seconds = _timeframe_to_seconds(timeframe)
+        key = f"kalshi_candles:{market_ticker}:{start_ts}:{end_ts}:{tf_seconds}:{outcome}"
+        cached = self._read_cache(key)
+        if cached is not None:
+            return cached
+
+        points = await self.get_kalshi_points(
+            market_ticker=market_ticker,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            timeframe=tf_seconds,
+            outcome=outcome,
+        )
+        candles = self._points_to_candles(points, timeframe_seconds=tf_seconds)
         self._write_cache(key, candles)
         return candles

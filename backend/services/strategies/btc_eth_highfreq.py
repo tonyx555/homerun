@@ -121,6 +121,25 @@ def _normalize_timeframe(value: Any) -> str:
     return tf
 
 
+_TIMEFRAME_PARAM_SUFFIXES: dict[str, tuple[str, ...]] = {
+    "5m": ("5m", "5min"),
+    "15m": ("15m", "15min"),
+    "1h": ("1h", "1hr", "60m"),
+    "4h": ("4h", "4hr", "240m"),
+}
+
+
+def _timeframe_override(params: dict[str, Any], base_key: str, timeframe: str) -> Any:
+    normalized_tf = _normalize_timeframe(timeframe)
+    if not normalized_tf:
+        return None
+    for suffix in _TIMEFRAME_PARAM_SUFFIXES.get(normalized_tf, (normalized_tf,)):
+        key = f"{base_key}_{suffix}"
+        if key in params:
+            return params.get(key)
+    return None
+
+
 def _as_list(value: Any) -> list[Any]:
     if isinstance(value, (list, tuple, set)):
         return list(value)
@@ -156,6 +175,32 @@ def _first_present(*values: Any) -> Any:
         if value is not None:
             return value
     return None
+
+
+def _parse_datetime_utc(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, (int, float)):
+        ts = float(value)
+        if ts <= 0:
+            return None
+        if ts > 1_000_000_000_000:
+            ts /= 1000.0
+        try:
+            return datetime.fromtimestamp(ts, tz=timezone.utc)
+        except Exception:
+            return None
+    text = str(value or "").strip()
+    if not text:
+        return None
+    numeric = to_float(text)
+    if numeric is not None and numeric > 0:
+        return _parse_datetime_utc(numeric)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def _get_component_edge(payload: dict[str, Any], direction: str, mode: str) -> float:
@@ -831,7 +876,27 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         "max_risk_score": 0.80,
         "base_size_usd": 20.0,
         "max_size_usd": 150.0,
+        "min_liquidity_usd": 250.0,
+        "max_spread_pct": 0.08,
+        "max_signal_age_seconds": 35.0,
+        "max_live_context_age_seconds": 5.0,
+        "max_oracle_age_seconds": 20.0,
+        "require_oracle_for_directional": True,
+        "min_seconds_left_for_entry_5m": 35.0,
+        "min_seconds_left_for_entry_15m": 90.0,
+        "min_seconds_left_for_entry_1h": 240.0,
+        "min_seconds_left_for_entry_4h": 600.0,
         "take_profit_pct": 8.0,
+        "stop_loss_pct": 5.0,
+        "stop_loss_policy": "near_close_only",
+        "stop_loss_activation_seconds": 90,
+        "stop_loss_activation_seconds_5m": 45.0,
+        "stop_loss_activation_seconds_15m": 120.0,
+        "stop_loss_activation_seconds_1h": 300.0,
+        "stop_loss_activation_seconds_4h": 900.0,
+        "preplace_take_profit_exit": True,
+        "enforce_min_exit_notional": False,
+        "live_window_required": True,
     }
 
     def __init__(self) -> None:
@@ -1923,6 +1988,11 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         """
         params = context.get("params") or {}
         payload = signal_payload(signal)
+        live_market = context.get("live_market")
+        if not isinstance(live_market, dict):
+            live_market = payload.get("live_market")
+        if not isinstance(live_market, dict):
+            live_market = {}
 
         # --- Core thresholds ---
         min_edge = to_float(params.get("min_edge_percent", 3.0), 3.0)
@@ -1950,9 +2020,25 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         regime = _normalize_regime(payload.get("regime"))
 
         # --- Asset / timeframe extraction ---
-        signal_asset = _normalize_asset(payload.get("asset") or payload.get("coin") or payload.get("symbol"))
+        signal_asset = _normalize_asset(
+            _first_present(
+                live_market.get("asset"),
+                live_market.get("coin"),
+                live_market.get("symbol"),
+                payload.get("asset"),
+                payload.get("coin"),
+                payload.get("symbol"),
+            )
+        )
         signal_timeframe = _normalize_timeframe(
-            payload.get("timeframe") or payload.get("cadence") or payload.get("interval")
+            _first_present(
+                live_market.get("timeframe"),
+                live_market.get("cadence"),
+                live_market.get("interval"),
+                payload.get("timeframe"),
+                payload.get("cadence"),
+                payload.get("interval"),
+            )
         )
 
         # --- Asset/timeframe include+exclude filtering ---
@@ -2001,11 +2087,155 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             payload.get("strategy_origin") or ""
         ).strip().lower() == "crypto_worker" or signal_type.startswith("crypto_worker")
 
+        live_window_required = to_bool(params.get("live_window_required"), True)
+        signal_is_live_raw = _first_present(live_market.get("is_live"), payload.get("is_live"))
+        signal_is_live = signal_is_live_raw if isinstance(signal_is_live_raw, bool) else None
+        signal_is_current_raw = _first_present(live_market.get("is_current"), payload.get("is_current"))
+        signal_is_current = signal_is_current_raw if isinstance(signal_is_current_raw, bool) else None
+        signal_seconds_left = to_float(
+            _first_present(
+                live_market.get("seconds_left"),
+                payload.get("seconds_left"),
+            ),
+            -1.0,
+        )
+        signal_end_time = str(
+            _first_present(
+                live_market.get("market_end_time"),
+                live_market.get("end_time"),
+                payload.get("end_time"),
+            )
+            or ""
+        ).strip()
+        if signal_is_live is None and signal_end_time:
+            try:
+                parsed_end = datetime.fromisoformat(signal_end_time.replace("Z", "+00:00"))
+                signal_is_live = parsed_end.timestamp() > time.time()
+            except Exception:
+                signal_is_live = None
+        if signal_is_live is None and signal_seconds_left >= 0:
+            signal_is_live = signal_seconds_left > 0
+        if signal_is_current is None:
+            signal_is_current = signal_is_live
+        live_window_ok = (not live_window_required) or bool(signal_is_live and signal_is_current)
+
+        max_live_context_age_seconds = max(
+            0.1,
+            to_float(params.get("max_live_context_age_seconds", 5.0), 5.0),
+        )
+        live_context_fetched_at = _parse_datetime_utc(
+            _first_present(
+                live_market.get("fetched_at"),
+                payload.get("live_market_fetched_at"),
+            )
+        )
+        live_context_age_seconds: Optional[float] = None
+        if live_context_fetched_at is not None:
+            live_context_age_seconds = max(
+                0.0,
+                (datetime.now(timezone.utc) - live_context_fetched_at.astimezone(timezone.utc)).total_seconds(),
+            )
+        live_context_fresh_ok = (
+            live_context_age_seconds is None
+            or live_context_age_seconds <= max_live_context_age_seconds
+        )
+
+        signal_created_at = getattr(signal, "created_at", None)
+        signal_age_seconds: Optional[float] = None
+        if isinstance(signal_created_at, datetime):
+            signal_created_utc = signal_created_at if signal_created_at.tzinfo else signal_created_at.replace(tzinfo=timezone.utc)
+            signal_age_seconds = max(0.0, (datetime.now(timezone.utc) - signal_created_utc.astimezone(timezone.utc)).total_seconds())
+        max_signal_age_seconds = max(1.0, to_float(params.get("max_signal_age_seconds", 35.0), 35.0))
+        signal_fresh_ok = signal_age_seconds is None or signal_age_seconds <= max_signal_age_seconds
+
+        default_min_seconds_by_timeframe: dict[str, float] = {
+            "5m": 35.0,
+            "15m": 90.0,
+            "1h": 240.0,
+            "4h": 600.0,
+        }
+        timeframe_specific_floor = self._float(
+            _timeframe_override(params, "min_seconds_left_for_entry", signal_timeframe)
+        )
+        global_min_seconds = self._float(params.get("min_seconds_left_for_entry"))
+        min_seconds_left_for_entry = (
+            max(0.0, timeframe_specific_floor)
+            if timeframe_specific_floor is not None
+            else (
+                max(0.0, global_min_seconds)
+                if global_min_seconds is not None
+                else default_min_seconds_by_timeframe.get(signal_timeframe, 0.0)
+            )
+        )
+        entry_window_ok = (
+            signal_seconds_left < 0
+            or signal_seconds_left >= float(min_seconds_left_for_entry)
+        )
+
+        if signal_seconds_left >= 0 and signal_timeframe:
+            regime = self._crypto_regime(signal_seconds_left, self._timeframe_seconds(signal_timeframe))
+
+        live_window_detail = (
+            f"required={live_window_required} "
+            f"is_live={signal_is_live if signal_is_live is not None else 'unknown'} "
+            f"is_current={signal_is_current if signal_is_current is not None else 'unknown'} "
+            f"seconds_left={signal_seconds_left if signal_seconds_left >= 0 else 'unknown'}"
+        )
+        signal_freshness_detail = (
+            f"age={signal_age_seconds:.1f}s max={max_signal_age_seconds:.1f}s"
+            if signal_age_seconds is not None
+            else "signal timestamp unavailable"
+        )
+        entry_window_detail = (
+            f"seconds_left={signal_seconds_left:.1f} required>={min_seconds_left_for_entry:.1f}"
+            if signal_seconds_left >= 0
+            else "seconds_left unavailable"
+        )
+        live_context_freshness_detail = (
+            f"age={live_context_age_seconds:.1f}s max={max_live_context_age_seconds:.1f}s"
+            if live_context_age_seconds is not None
+            else "live context timestamp unavailable"
+        )
+
         # --- Edge / confidence ---
         edge = max(0.0, to_float(getattr(signal, "edge_percent", 0.0), 0.0))
         confidence = to_confidence(getattr(signal, "confidence", 0.0), 0.0)
         mode_edge = _get_component_edge(payload, direction, active_mode)
         net_edge = _get_net_edge(payload, direction, edge)
+
+        signal_liquidity_usd = self._float(
+            _first_present(
+                live_market.get("liquidity_usd"),
+                live_market.get("liquidity"),
+                payload.get("liquidity_usd"),
+                payload.get("liquidity"),
+                getattr(signal, "liquidity", None),
+            )
+        )
+        min_liquidity_usd = max(0.0, to_float(params.get("min_liquidity_usd", 250.0), 250.0))
+        liquidity_ok = signal_liquidity_usd is None or signal_liquidity_usd >= min_liquidity_usd
+        liquidity_detail = (
+            f"liquidity={signal_liquidity_usd:.0f} min={min_liquidity_usd:.0f}"
+            if signal_liquidity_usd is not None
+            else "liquidity unavailable"
+        )
+
+        signal_spread = self._float(
+            _first_present(
+                live_market.get("spread"),
+                payload.get("spread"),
+                payload.get("market_spread"),
+            )
+        )
+        if signal_spread is not None:
+            signal_spread = max(0.0, min(1.0, signal_spread))
+        max_spread_pct = max(0.0, min(1.0, to_float(params.get("max_spread_pct", 0.08), 0.08)))
+        spread_ok = signal_spread is None or signal_spread <= max_spread_pct
+        spread_detail = (
+            f"spread={signal_spread:.4f} max={max_spread_pct:.4f}"
+            if signal_spread is not None
+            else "spread unavailable"
+        )
 
         # --- Oracle / guardrail data ---
         model_prob_yes = max(0.0, min(1.0, to_float(payload.get("model_prob_yes"), 0.5)))
@@ -2013,6 +2243,46 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         up_price = max(0.0, min(1.0, to_float(payload.get("up_price"), 0.5)))
         down_price = max(0.0, min(1.0, to_float(payload.get("down_price"), 0.5)))
         oracle_available = bool(payload.get("oracle_available")) or payload.get("oracle_delta_pct") is not None
+        oracle_age_seconds = self._float(
+            _first_present(
+                live_market.get("oracle_age_seconds"),
+                payload.get("oracle_age_seconds"),
+            )
+        )
+        if oracle_age_seconds is None:
+            oracle_updated_at_ms = self._float(
+                _first_present(
+                    live_market.get("oracle_updated_at_ms"),
+                    payload.get("oracle_updated_at_ms"),
+                )
+            )
+            if oracle_updated_at_ms is not None and oracle_updated_at_ms > 0:
+                if oracle_updated_at_ms > 1_000_000_000_000:
+                    oracle_updated_at_ms /= 1000.0
+                oracle_age_seconds = max(0.0, time.time() - oracle_updated_at_ms)
+        max_oracle_age_seconds = max(1.0, to_float(params.get("max_oracle_age_seconds", 20.0), 20.0))
+        require_oracle_for_directional = to_bool(params.get("require_oracle_for_directional"), True)
+        oracle_required = require_oracle_for_directional and active_mode in {"directional", "rebalance"}
+        if oracle_required:
+            oracle_fresh_ok = (
+                oracle_available
+                and oracle_age_seconds is not None
+                and oracle_age_seconds <= max_oracle_age_seconds
+            )
+        else:
+            oracle_fresh_ok = (
+                not oracle_available
+                or oracle_age_seconds is None
+                or oracle_age_seconds <= max_oracle_age_seconds
+            )
+        oracle_freshness_detail = (
+            (
+                f"available={oracle_available} age={oracle_age_seconds:.1f}s "
+                f"max={max_oracle_age_seconds:.1f}s required={oracle_required}"
+            )
+            if oracle_age_seconds is not None
+            else f"available={oracle_available} age=unknown required={oracle_required}"
+        )
 
         # --- Regime-aware required thresholds ---
         required_edge = min_edge * _EDGE_MODE_FACTORS.get(regime, {}).get(active_mode, 1.0)
@@ -2056,6 +2326,33 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 detail="Legacy scanner crypto opportunities are unsupported.",
             ),
             DecisionCheck(
+                "live_window",
+                "Current live window only",
+                live_window_ok,
+                detail=live_window_detail,
+            ),
+            DecisionCheck(
+                "live_context_freshness",
+                "Live context freshness",
+                live_context_fresh_ok,
+                score=live_context_age_seconds,
+                detail=live_context_freshness_detail,
+            ),
+            DecisionCheck(
+                "signal_freshness",
+                "Signal freshness",
+                signal_fresh_ok,
+                score=signal_age_seconds,
+                detail=signal_freshness_detail,
+            ),
+            DecisionCheck(
+                "entry_window",
+                "Minimum seconds-left entry window",
+                entry_window_ok,
+                score=signal_seconds_left if signal_seconds_left >= 0 else None,
+                detail=entry_window_detail,
+            ),
+            DecisionCheck(
                 "asset_scope",
                 "Asset include/exclude scope",
                 asset_scope_ok,
@@ -2074,6 +2371,27 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                     f"include={','.join(include_timeframes) or 'all'} "
                     f"exclude={','.join(exclude_timeframes) or 'none'}"
                 ),
+            ),
+            DecisionCheck(
+                "liquidity",
+                "Minimum liquidity",
+                liquidity_ok,
+                score=signal_liquidity_usd,
+                detail=liquidity_detail,
+            ),
+            DecisionCheck(
+                "spread",
+                "Maximum spread",
+                spread_ok,
+                score=signal_spread,
+                detail=spread_detail,
+            ),
+            DecisionCheck(
+                "oracle_freshness",
+                "Oracle freshness",
+                oracle_fresh_ok,
+                score=oracle_age_seconds,
+                detail=oracle_freshness_detail,
             ),
             DecisionCheck(
                 "strategy_timeframe",
@@ -2135,6 +2453,23 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             "required_confidence": required_conf,
             "asset": signal_asset,
             "timeframe": signal_timeframe,
+            "live_window_required": live_window_required,
+            "is_live": signal_is_live,
+            "is_current": signal_is_current,
+            "seconds_left": signal_seconds_left if signal_seconds_left >= 0 else None,
+            "end_time": signal_end_time or None,
+            "live_context_age_seconds": live_context_age_seconds,
+            "max_live_context_age_seconds": float(max_live_context_age_seconds),
+            "min_seconds_left_for_entry": float(min_seconds_left_for_entry),
+            "signal_age_seconds": signal_age_seconds,
+            "max_signal_age_seconds": float(max_signal_age_seconds),
+            "liquidity_usd": signal_liquidity_usd,
+            "min_liquidity_usd": float(min_liquidity_usd),
+            "spread": signal_spread,
+            "max_spread_pct": float(max_spread_pct),
+            "oracle_age_seconds": oracle_age_seconds,
+            "max_oracle_age_seconds": float(max_oracle_age_seconds),
+            "require_oracle_for_directional": bool(require_oracle_for_directional),
             "direction_guardrail": {
                 "enabled": guardrail_enabled,
                 "blocked": guardrail_blocked,
@@ -2152,6 +2487,15 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             "exclude_assets": exclude_assets,
             "include_timeframes": include_timeframes,
             "exclude_timeframes": exclude_timeframes,
+            "live_market_context": {
+                "available": bool(live_market.get("available")),
+                "fetched_at": live_market.get("fetched_at"),
+                "selected_token_id": live_market.get("selected_token_id"),
+                "market_end_time": live_market.get("market_end_time"),
+                "seconds_left": live_market.get("seconds_left"),
+                "is_live": live_market.get("is_live"),
+                "is_current": live_market.get("is_current"),
+            },
         }
 
         score = (edge_for_gate * 0.7) + (confidence * 30.0)
@@ -2192,10 +2536,56 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             return self.default_exit_check(position, market_state)
         config = getattr(position, "config", None) or {}
         config = dict(config)
+        strategy_context = getattr(position, "strategy_context", None)
+        context_payload = strategy_context if isinstance(strategy_context, dict) else {}
+        timeframe = _normalize_timeframe(
+            context_payload.get("timeframe")
+            or context_payload.get("cadence")
+            or context_payload.get("interval")
+        )
+        default_stop_loss_activation_by_timeframe = {
+            "5m": 45.0,
+            "15m": 120.0,
+            "1h": 300.0,
+            "4h": 900.0,
+        }
+        default_min_hold_by_timeframe = {
+            "5m": 0.25,
+            "15m": 0.5,
+            "1h": 1.0,
+            "4h": 2.0,
+        }
+        default_max_hold_by_timeframe = {
+            "5m": 15.0,
+            "15m": 45.0,
+            "1h": 120.0,
+            "4h": 360.0,
+        }
         config.setdefault("take_profit_pct", 8.0)
         config.setdefault("stop_loss_pct", 5.0)
+        config.setdefault("stop_loss_policy", "near_close_only")
+        config.setdefault(
+            "stop_loss_activation_seconds",
+            default_stop_loss_activation_by_timeframe.get(timeframe, 90.0),
+        )
         config.setdefault("trailing_stop_pct", 3.0)
-        config.setdefault("max_hold_minutes", 60)
+        config.setdefault("min_hold_minutes", default_min_hold_by_timeframe.get(timeframe, 1.0))
+        config.setdefault("max_hold_minutes", default_max_hold_by_timeframe.get(timeframe, 60.0))
+        if timeframe:
+            for key in (
+                "take_profit_pct",
+                "stop_loss_pct",
+                "stop_loss_policy",
+                "stop_loss_activation_seconds",
+                "trailing_stop_pct",
+                "min_hold_minutes",
+                "max_hold_minutes",
+            ):
+                override = _timeframe_override(config, key, timeframe)
+                if override is not None:
+                    config[key] = override
+        if timeframe:
+            config["timeframe"] = timeframe
         position.config = config
         return self.default_exit_check(position, market_state)
 
@@ -2301,6 +2691,14 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                         seconds_left = float(timeframe_seconds)
                 else:
                     seconds_left = float(timeframe_seconds)
+            is_live = bool(market.get("is_live")) if isinstance(market.get("is_live"), bool) else (seconds_left > 0.0)
+            is_current = (
+                bool(market.get("is_current"))
+                if isinstance(market.get("is_current"), bool)
+                else is_live
+            )
+            start_time = str(market.get("start_time") or "").strip() or None
+            end_time = str(market.get("end_time") or "").strip() or None
 
             regime = self._crypto_regime(seconds_left, timeframe_seconds)
 
@@ -2420,8 +2818,20 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                             "asset": asset,
                             "timeframe": timeframe,
                             "regime": regime,
+                            "start_time": start_time,
+                            "end_time": end_time,
+                            "seconds_left": float(seconds_left),
+                            "is_live": is_live,
+                            "is_current": is_current,
                             "oracle_available": has_oracle,
+                            "oracle_age_seconds": self._float(market.get("oracle_age_seconds")),
+                            "oracle_updated_at_ms": self._float(market.get("oracle_updated_at_ms")),
                             "dominant_strategy": dominant_strategy,
+                            "spread": spread,
+                            "liquidity": liquidity,
+                            "volume": self._float(market.get("volume")) or 0.0,
+                            "price_to_beat": price_to_beat,
+                            "oracle_price": oracle_price,
                             "execution_penalty_percent": round(execution_penalty, 6),
                         },
                     }
@@ -2446,9 +2856,21 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                     "asset": asset,
                     "timeframe": timeframe,
                     "regime": regime,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "seconds_left": float(seconds_left),
+                    "is_live": is_live,
+                    "is_current": is_current,
                     "selected_direction": direction,
                     "oracle_available": has_oracle,
+                    "oracle_age_seconds": self._float(market.get("oracle_age_seconds")),
+                    "oracle_updated_at_ms": self._float(market.get("oracle_updated_at_ms")),
                     "dominant_strategy": dominant_strategy,
+                    "spread": spread,
+                    "liquidity": liquidity,
+                    "volume": self._float(market.get("volume")) or 0.0,
+                    "price_to_beat": price_to_beat,
+                    "oracle_price": oracle_price,
                     "execution_penalty_percent": round(execution_penalty, 6),
                 }
                 opportunities.append(opp)

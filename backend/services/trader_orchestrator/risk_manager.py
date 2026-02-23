@@ -55,6 +55,7 @@ def evaluate_risk(
     size_usd: float,
     gross_exposure_usd: float,
     trader_open_positions: int,
+    trader_open_orders: int,
     market_exposure_usd: float,
     global_limits: dict[str, Any] | None,
     trader_limits: dict[str, Any] | None,
@@ -203,15 +204,27 @@ def evaluate_risk(
         )
     )
 
-    max_trader_orders = safe_int(
-        trader_limits.get("max_open_positions", trader_limits.get("max_open_orders")),
-        10,
+    max_trader_positions = safe_int(
+        trader_limits.get("max_open_positions"),
+        safe_int(trader_limits.get("max_open_orders"), 10),
+    )
+    max_trader_open_orders = safe_int(
+        trader_limits.get("max_open_orders"),
+        max_trader_positions,
+    )
+    checks.append(
+        RiskCheck(
+            key="trader_open_orders",
+            passed=(trader_open_orders + 1) <= max_trader_open_orders,
+            detail=f"next={trader_open_orders + 1} max={max_trader_open_orders}",
+            score=float(trader_open_orders + 1),
+        )
     )
     checks.append(
         RiskCheck(
             key="trader_open_positions",
-            passed=(trader_open_positions + 1) <= max_trader_orders,
-            detail=f"next={trader_open_positions + 1} max={max_trader_orders}",
+            passed=(trader_open_positions + 1) <= max_trader_positions,
+            detail=f"next={trader_open_positions + 1} max={max_trader_positions}",
             score=float(trader_open_positions + 1),
         )
     )

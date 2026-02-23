@@ -2296,6 +2296,10 @@ class ExecutionSimRun(Base):
     strategy_key = Column(String, nullable=False, index=True)
     source_key = Column(String, nullable=False, index=True)
     status = Column(String, nullable=False, default="queued")
+    run_seed = Column(String, nullable=True)
+    dataset_hash = Column(String, nullable=True)
+    config_hash = Column(String, nullable=True)
+    code_sha = Column(String, nullable=True)
     market_scope_json = Column(JSON, default=dict)
     params_json = Column(JSON, default=dict)
     requested_start_at = Column(DateTime, nullable=True)
@@ -2528,12 +2532,7 @@ class TraderOrder(Base):
     __tablename__ = "trader_orders"
 
     id = Column(String, primary_key=True)
-    trader_id = Column(
-        String,
-        ForeignKey("traders.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
+    trader_id = Column(String, nullable=False, index=True)
     signal_id = Column(String, ForeignKey("trade_signals.id"), nullable=True, index=True)
     decision_id = Column(
         String,
@@ -2925,6 +2924,7 @@ _engine_kw["connect_args"] = {
     "timeout": float(max(1.0, float(settings.DATABASE_CONNECT_TIMEOUT_SECONDS))),
     "command_timeout": float(max(5.0, float(settings.DATABASE_POOL_TIMEOUT_SECONDS))),
     "server_settings": {
+        "timezone": "UTC",
         "statement_timeout": str(max(1000, int(settings.DATABASE_STATEMENT_TIMEOUT_MS))),
         "idle_in_transaction_session_timeout": str(max(1000, int(settings.DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS))),
     },

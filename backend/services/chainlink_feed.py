@@ -201,7 +201,7 @@ class ChainlinkFeed:
                             "subscriptions": [
                                 {
                                     "topic": CHAINLINK_TOPIC,
-                                    "type": "*",
+                                    "type": "update",
                                     "filters": "",
                                 },
                                 {
@@ -251,80 +251,107 @@ class ChainlinkFeed:
                 payload = json.loads(payload)
             except json.JSONDecodeError:
                 return
-        if not isinstance(payload, dict):
+        payload_rows: list[dict] = []
+        if isinstance(payload, dict):
+            data_points = payload.get("data")
+            if isinstance(data_points, list):
+                base_symbol = payload.get("symbol") or payload.get("pair") or payload.get("ticker")
+                for row in data_points:
+                    if not isinstance(row, dict):
+                        continue
+                    if (
+                        base_symbol
+                        and row.get("symbol") is None
+                        and row.get("pair") is None
+                        and row.get("ticker") is None
+                    ):
+                        normalized_row = dict(row)
+                        normalized_row["symbol"] = base_symbol
+                        payload_rows.append(normalized_row)
+                    else:
+                        payload_rows.append(row)
+            else:
+                payload_rows.append(payload)
+        elif isinstance(payload, list):
+            payload_rows.extend([row for row in payload if isinstance(row, dict)])
+        else:
             return
 
-        # Extract symbol
-        symbol = str(payload.get("symbol") or payload.get("pair") or payload.get("ticker") or "").lower()
-
-        # Map to canonical asset -- try exact match first, then substring
-        asset = _SYMBOL_MAP.get(symbol)
-        if not asset:
-            for keyword, canonical in _SYMBOL_MAP.items():
-                if keyword in symbol:
-                    asset = canonical
-                    break
-        if not asset:
+        if not payload_rows:
             return
-
-        # Extract price (field is "value" per RTDS docs)
-        price_val = payload.get("value") or payload.get("price") or payload.get("current")
-        try:
-            price = float(price_val)
-        except (TypeError, ValueError):
-            return
-        if not (price > 0):
-            return
-
-        # Extract timestamp
-        ts_val = payload.get("timestamp") or payload.get("updatedAt")
-        updated_at_ms = None
-        if ts_val is not None:
-            try:
-                ts_float = float(ts_val)
-                updated_at_ms = int(ts_float * 1000) if ts_float < 1e12 else int(ts_float)
-            except (TypeError, ValueError):
-                pass
-        if updated_at_ms is None:
-            updated_at_ms = int(time.time() * 1000)
 
         # Determine source priority: Chainlink is authoritative (resolution source)
         is_chainlink = topic == CHAINLINK_TOPIC
         source = "chainlink" if is_chainlink else "binance"
 
-        # Update latest price (Chainlink takes priority over Binance)
-        oracle = OraclePrice(
-            asset=asset,
-            price=price,
-            updated_at_ms=updated_at_ms,
-        )
-        oracle.source = source
+        for row in payload_rows:
+            # Extract symbol
+            symbol = str(row.get("symbol") or row.get("pair") or row.get("ticker") or "").lower()
 
-        if asset not in self._prices_by_source:
-            self._prices_by_source[asset] = {}
-        self._prices_by_source[asset][source] = oracle
+            # Map to canonical asset -- try exact match first, then substring
+            asset = _SYMBOL_MAP.get(symbol)
+            if not asset:
+                for keyword, canonical in _SYMBOL_MAP.items():
+                    if keyword in symbol:
+                        asset = canonical
+                        break
+            if not asset:
+                continue
 
-        existing = self._prices.get(asset)
-        if existing is None or is_chainlink or source == existing.source:
-            self._prices[asset] = oracle
+            # Extract price (field is "value" per RTDS docs)
+            price_val = row.get("value") or row.get("price") or row.get("current")
+            try:
+                price = float(price_val)
+            except (TypeError, ValueError):
+                continue
+            if not (price > 0):
+                continue
 
-            if self._on_update:
+            # Extract timestamp
+            ts_val = row.get("timestamp") or row.get("updatedAt")
+            updated_at_ms = None
+            if ts_val is not None:
                 try:
-                    self._on_update(oracle)
-                except Exception:
+                    ts_float = float(ts_val)
+                    updated_at_ms = int(ts_float * 1000) if ts_float < 1e12 else int(ts_float)
+                except (TypeError, ValueError):
                     pass
+            if updated_at_ms is None:
+                updated_at_ms = int(time.time() * 1000)
 
-        # Always store in history (for price-to-beat lookups)
-        # Only store Chainlink prices in history since that's the resolution source
-        if is_chainlink:
-            if asset not in self._history:
-                self._history[asset] = deque(maxlen=HISTORY_MAX_ENTRIES)
-            self._history[asset].append((updated_at_ms, price))
+            # Update latest price (Chainlink takes priority over Binance)
+            oracle = OraclePrice(
+                asset=asset,
+                price=price,
+                updated_at_ms=updated_at_ms,
+            )
+            oracle.source = source
 
-            # Prune old entries
-            cutoff = int(time.time() * 1000) - HISTORY_MAX_AGE_MS
-            while self._history[asset] and self._history[asset][0][0] < cutoff:
-                self._history[asset].popleft()
+            if asset not in self._prices_by_source:
+                self._prices_by_source[asset] = {}
+            self._prices_by_source[asset][source] = oracle
+
+            existing = self._prices.get(asset)
+            if existing is None or is_chainlink or source == existing.source:
+                self._prices[asset] = oracle
+
+                if self._on_update:
+                    try:
+                        self._on_update(oracle)
+                    except Exception:
+                        pass
+
+            # Always store in history (for price-to-beat lookups)
+            # Only store Chainlink prices in history since that's the resolution source
+            if is_chainlink:
+                if asset not in self._history:
+                    self._history[asset] = deque(maxlen=HISTORY_MAX_ENTRIES)
+                self._history[asset].append((updated_at_ms, price))
+
+                # Prune old entries
+                cutoff = int(time.time() * 1000) - HISTORY_MAX_AGE_MS
+                while self._history[asset] and self._history[asset][0][0] < cutoff:
+                    self._history[asset].popleft()
 
 
 # ---------------------------------------------------------------------------

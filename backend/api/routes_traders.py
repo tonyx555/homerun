@@ -57,6 +57,7 @@ class TraderSourceConfigRequest(BaseModel):
 class TraderRequest(BaseModel):
     name: str
     description: Optional[str] = None
+    copy_from_trader_id: Optional[str] = None
     source_configs: list[TraderSourceConfigRequest] = Field(default_factory=list)
     interval_seconds: int = Field(default=60, ge=1, le=86400)
     risk_limits: dict[str, Any] = Field(default_factory=dict)
@@ -166,7 +167,7 @@ async def create_trader_route(
     request: TraderRequest,
     session: AsyncSession = Depends(get_db_session),
 ):
-    payload = request.model_dump(exclude={"requested_by", "reason"})
+    payload = request.model_dump(exclude_unset=True, exclude={"requested_by", "reason"})
     try:
         trader = await create_trader(session, payload)
     except ValueError as exc:
@@ -182,16 +183,38 @@ async def create_trader_route(
         trader_before={},
         trader_after=trader,
     )
+    copy_from_trader_id = str(request.copy_from_trader_id or "").strip() or None
+    event_payload: dict[str, Any] = {"trader": trader}
+    event_message = "Trader created"
+    if copy_from_trader_id:
+        event_payload["copy_from_trader_id"] = copy_from_trader_id
+        event_message = "Trader created from existing trader settings"
     await create_trader_event(
         session,
         trader_id=trader["id"],
         event_type="trader_created",
         source="operator",
         operator=request.requested_by,
-        message="Trader created",
-        payload={"trader": trader},
+        message=event_message,
+        payload=event_payload,
     )
     return trader
+
+
+@router.get("/orders/all")
+async def get_all_trader_orders(
+    status: Optional[str] = Query(default=None),
+    limit: int = Query(default=1000, ge=1, le=5000),
+    session: AsyncSession = Depends(get_db_session),
+):
+    return {
+        "orders": await list_serialized_trader_orders(
+            session,
+            trader_id=None,
+            status=status,
+            limit=limit,
+        )
+    }
 
 
 @router.get("/{trader_id}")
@@ -310,7 +333,10 @@ async def delete_trader_route(
             status_code=409,
             detail={
                 "code": "open_live_exposure",
-                "message": "Trader has live exposure. Disable trader and flatten live positions/orders before deletion.",
+                "message": (
+                    "Trader has live exposure. Choose disable to pause safely, "
+                    "or action=force_delete to permanently delete now."
+                ),
                 "trader_id": trader_id,
                 "open_live_positions": open_live_positions,
                 "open_paper_positions": open_paper_positions,
@@ -318,7 +344,8 @@ async def delete_trader_route(
                 "open_live_orders": open_live_orders,
                 "open_paper_orders": open_paper_orders,
                 "open_other_orders": open_other_orders,
-                "suggested_action": TraderDeleteAction.disable.value,
+                "suggested_action": TraderDeleteAction.force_delete.value,
+                "safe_action": TraderDeleteAction.disable.value,
             },
         )
 
@@ -540,6 +567,22 @@ async def run_once(trader_id: str, session: AsyncSession = Depends(get_db_sessio
     return trader
 
 
+@router.get("/orders")
+async def get_all_trader_orders(
+    status: Optional[str] = Query(default=None),
+    limit: int = Query(default=2000, ge=1, le=5000),
+    session: AsyncSession = Depends(get_db_session),
+):
+    return {
+        "orders": await list_serialized_trader_orders(
+            session,
+            trader_id=None,
+            status=status,
+            limit=limit,
+        )
+    }
+
+
 @router.get("/{trader_id}/decisions")
 async def get_trader_decisions(
     trader_id: str,
@@ -561,7 +604,7 @@ async def get_trader_decisions(
 async def get_trader_orders(
     trader_id: str,
     status: Optional[str] = Query(default=None),
-    limit: int = Query(default=200, ge=1, le=1000),
+    limit: int = Query(default=200, ge=1, le=5000),
     session: AsyncSession = Depends(get_db_session),
 ):
     return {

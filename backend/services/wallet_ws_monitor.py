@@ -276,6 +276,12 @@ class WalletWebSocketMonitor:
             "fallback_polls": 0,
             "errors": 0,
             "mempool_txns_seen": 0,
+            "last_block_seen_at": "",
+            "last_block_seen_number": 0,
+            "last_block_processed_at": "",
+            "last_block_processed_number": 0,
+            "last_event_detected_at": "",
+            "last_fallback_poll_at": "",
         }
 
     # ==================== WALLET MANAGEMENT ====================
@@ -566,6 +572,10 @@ class WalletWebSocketMonitor:
             block_number: The block number to process.
             block_timestamp_hex: Hex-encoded block timestamp.
         """
+        seen_at = utcnow()
+        self._stats["last_block_seen_at"] = seen_at.isoformat().replace("+00:00", "Z")
+        self._stats["last_block_seen_number"] = int(block_number)
+
         if not self._tracked_sources:
             return
 
@@ -624,6 +634,8 @@ class WalletWebSocketMonitor:
             # blocks can be retried by fallback polling.
             self._last_processed_block = block_number
             self._stats["blocks_processed"] += 1
+            self._stats["last_block_processed_at"] = utcnow().isoformat().replace("+00:00", "Z")
+            self._stats["last_block_processed_number"] = int(block_number)
 
         except Exception as e:
             logger.warning(
@@ -861,6 +873,7 @@ class WalletWebSocketMonitor:
         )
 
         self._stats["events_detected"] += 1
+        self._stats["last_event_detected_at"] = detected_at.isoformat().replace("+00:00", "Z")
 
         logger.debug(
             "Trade detected via WS",
@@ -950,6 +963,7 @@ class WalletWebSocketMonitor:
 
         while self._running:
             try:
+                self._stats["last_fallback_poll_at"] = utcnow().isoformat().replace("+00:00", "Z")
                 self._stats["fallback_polls"] += 1
                 latest_block = await self._get_latest_block_number()
 

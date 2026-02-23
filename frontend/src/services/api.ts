@@ -1541,6 +1541,16 @@ export interface TraderOrchestratorOverview {
     updated_at: string | null
     stats: Record<string, any>
   }
+  reconciliation_worker?: {
+    running: boolean
+    enabled: boolean
+    current_activity: string | null
+    interval_seconds: number
+    last_run_at: string | null
+    last_error: string | null
+    updated_at: string | null
+    stats: Record<string, any>
+  }
   config: TraderOrchestratorConfig
   metrics: {
     traders_total: number
@@ -1621,13 +1631,18 @@ const mapOverviewToStatus = (overview: TraderOrchestratorOverview): TraderOrches
   const worker = overview.worker || ({} as TraderOrchestratorOverview['worker'])
   const metrics = overview.metrics || ({} as TraderOrchestratorOverview['metrics'])
   const tradingActive = Boolean(control.is_enabled) && !Boolean(control.is_paused) && !Boolean(control.kill_switch)
+  const workerRunning = Boolean(worker.running)
+  const workerActivity = worker.current_activity || null
+  const workerLastRunAt = worker.last_run_at || null
+  const workerLastError = worker.last_error || null
+  const workerUpdatedAt = worker.updated_at || null
   const totalTrades = Number(metrics.orders_count || 0)
 
   return {
     mode: control.mode || 'paper',
-    running: tradingActive,
+    running: tradingActive && workerRunning,
     trading_active: tradingActive,
-    worker_running: Boolean(worker.running),
+    worker_running: workerRunning,
     control: {
       is_enabled: Boolean(control.is_enabled),
       is_paused: Boolean(control.is_paused),
@@ -1637,13 +1652,13 @@ const mapOverviewToStatus = (overview: TraderOrchestratorOverview): TraderOrches
       updated_at: control.updated_at || null,
     },
     snapshot: {
-      running: Boolean(worker.running),
+      running: workerRunning,
       enabled: Boolean(worker.enabled),
-      current_activity: worker.current_activity || null,
+      current_activity: workerActivity,
       interval_seconds: Number(worker.interval_seconds || 2),
-      last_run_at: worker.last_run_at || null,
-      last_error: worker.last_error || null,
-      updated_at: worker.updated_at || null,
+      last_run_at: workerLastRunAt,
+      last_error: workerLastError,
+      updated_at: workerUpdatedAt,
       signals_seen: Number(worker.signals_seen || 0),
       signals_selected: Number(worker.signals_selected || 0),
       trades_count: Number(worker.trades_count || 0),
@@ -1662,7 +1677,7 @@ const mapOverviewToStatus = (overview: TraderOrchestratorOverview): TraderOrches
       daily_profit: Number(metrics.daily_pnl || 0),
       consecutive_losses: 0,
       circuit_breaker_active: Boolean(control.kill_switch),
-      last_trade_at: worker.last_run_at || null,
+      last_trade_at: workerLastRunAt,
       opportunities_seen: Number(metrics.decisions_count || 0),
       opportunities_executed: Number(metrics.orders_count || 0),
       opportunities_skipped: Math.max(0, Number(metrics.decisions_count || 0) - Number(metrics.orders_count || 0)),
@@ -1845,6 +1860,16 @@ export interface TraderOrder {
   notional_usd: number | null
   entry_price: number | null
   effective_price: number | null
+  provider_order_id: string
+  provider_clob_order_id: string
+  provider_snapshot_status: string
+  filled_shares: number | null
+  filled_notional_usd: number | null
+  average_fill_price: number | null
+  current_price: number | null
+  mark_source: string
+  mark_updated_at: string
+  unrealized_pnl: number | null
   edge_percent: number | null
   confidence: number | null
   actual_profit: number | null
@@ -2054,16 +2079,6 @@ export const deleteTrader = async (
   return unwrapApiData(data)
 }
 
-export const startTrader = async (traderId: string): Promise<Trader> => {
-  const { data } = await api.post(`/traders/${traderId}/start`)
-  return unwrapApiData(data)
-}
-
-export const pauseTrader = async (traderId: string): Promise<Trader> => {
-  const { data } = await api.post(`/traders/${traderId}/pause`)
-  return unwrapApiData(data)
-}
-
 export const runTraderOnce = async (traderId: string): Promise<Trader> => {
   const { data } = await api.post(`/traders/${traderId}/run-once`)
   return unwrapApiData(data)
@@ -2090,18 +2105,11 @@ export const getTraderOrders = async (
   return data.orders || []
 }
 
-export const getAllTraderOrders = async (limitPerTrader = 150): Promise<TraderOrder[]> => {
-  const traders = await getTraders()
-  const rows = await Promise.all(
-    traders.map((trader) => getTraderOrders(trader.id, { limit: limitPerTrader }))
-  )
-  return rows
-    .flat()
-    .sort((a, b) => {
-      const left = new Date(a.created_at || 0).getTime()
-      const right = new Date(b.created_at || 0).getTime()
-      return right - left
-    })
+export const getAllTraderOrders = async (limit = 2000): Promise<TraderOrder[]> => {
+  const { data } = await api.get('/traders/orders/all', {
+    params: { limit: Math.max(1, Math.trunc(Number(limit) || 2000)) },
+  })
+  return data.orders || []
 }
 
 export const getTraderEvents = async (
@@ -2804,7 +2812,7 @@ export interface ValidationOverview {
 
 export interface ValidationJob {
   id: string
-  job_type: 'backtest' | 'optimize' | 'execution_simulation' | string
+  job_type: 'backtest' | 'optimize' | 'execution_simulation' | 'live_truth_monitor' | string
   status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | string
   payload?: Record<string, unknown>
   result?: Record<string, unknown>
@@ -2814,6 +2822,48 @@ export interface ValidationJob {
   created_at?: string | null
   started_at?: string | null
   finished_at?: string | null
+}
+
+export interface LiveTruthMonitorJobRequest {
+  trader_id?: string
+  trader_name?: string
+  duration_seconds?: number
+  poll_seconds?: number
+  run_llm_analysis?: boolean
+  llm_model?: string
+  include_strategy_source?: boolean
+  max_alerts_for_llm?: number
+}
+
+export interface LiveTruthMonitorReportPayload {
+  path: string
+  line_count: number
+  alert_count: number
+  heartbeat_count: number
+  transition_count: number
+  alerts_by_rule: Record<string, number>
+  alert_samples: Array<Record<string, unknown>>
+}
+
+export interface LiveTruthMonitorRawResponse {
+  job_id: string
+  job_status: ValidationJob['status']
+  payload: Record<string, unknown>
+  monitor: {
+    summary: Record<string, unknown>
+    summary_path: string
+    report_path: string
+    stdout_events: Array<Record<string, unknown>>
+    report: LiveTruthMonitorReportPayload
+  }
+  llm_analysis: Record<string, unknown>
+}
+
+export type LiveTruthMonitorArtifact = 'summary_json' | 'report_jsonl' | 'llm_analysis_json' | 'bundle_json'
+
+export interface ValidationJobEnqueueResponse {
+  status: string
+  job_id: string
 }
 
 export interface ValidationGuardrailConfig {
@@ -2844,6 +2894,60 @@ export interface ValidationStrategyHealth {
 export const getValidationOverview = async (): Promise<ValidationOverview> => {
   const { data } = await api.get('/validation/overview')
   return unwrapApiData(data)
+}
+
+export const enqueueLiveTruthMonitorJob = async (
+  payload: LiveTruthMonitorJobRequest
+): Promise<ValidationJobEnqueueResponse> => {
+  const { data } = await api.post('/validation/jobs/live-truth-monitor', payload)
+  return unwrapApiData(data)
+}
+
+export const getValidationJob = async (jobId: string): Promise<ValidationJob> => {
+  const { data } = await api.get(`/validation/jobs/${jobId}`)
+  return unwrapApiData(data)
+}
+
+export const getLiveTruthMonitorRaw = async (
+  jobId: string,
+  params?: { max_alerts?: number }
+): Promise<LiveTruthMonitorRawResponse> => {
+  const { data } = await api.get(`/validation/jobs/${jobId}/live-truth-monitor/raw`, { params })
+  return unwrapApiData(data)
+}
+
+function resolveExportFilename(contentDisposition: unknown, fallback: string): string {
+  const header = String(contentDisposition || '').trim()
+  if (!header) return fallback
+  const utf8Match = header.match(/filename\*=UTF-8''([^;]+)/i)
+  if (utf8Match && utf8Match[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1].trim().replace(/^"|"$/g, '')) || fallback
+    } catch {
+      return utf8Match[1].trim().replace(/^"|"$/g, '') || fallback
+    }
+  }
+  const plainMatch = header.match(/filename=([^;]+)/i)
+  if (!plainMatch || !plainMatch[1]) return fallback
+  return plainMatch[1].trim().replace(/^"|"$/g, '') || fallback
+}
+
+export const exportLiveTruthMonitorArtifact = async (
+  jobId: string,
+  artifact: LiveTruthMonitorArtifact
+): Promise<{ filename: string; mediaType: string; blob: Blob }> => {
+  const response = await api.get(`/validation/jobs/${jobId}/live-truth-monitor/export`, {
+    params: { artifact },
+    responseType: 'blob',
+  })
+  const mediaType = String(response.headers['content-type'] || 'application/octet-stream')
+  const fallback = `live_truth_monitor_${jobId.slice(0, 8)}_${artifact}.json`
+  const filename = resolveExportFilename(response.headers['content-disposition'], fallback)
+  return {
+    filename,
+    mediaType,
+    blob: response.data as Blob,
+  }
 }
 
 export const overrideValidationStrategy = async (

@@ -135,6 +135,72 @@ async def test_create_trader_normalizes_legacy_default_strategy_key(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_create_trader_copies_settings_from_existing_trader(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    try:
+        async with session_factory() as session:
+            source = await create_trader(
+                session,
+                {
+                    "name": "Source Trader",
+                    "description": "Copy source",
+                    "source_configs": [
+                        {
+                            "source_key": "crypto",
+                            "strategy_key": "btc_eth_highfreq",
+                            "strategy_params": {"strategy_mode": "pure_arb"},
+                        }
+                    ],
+                    "interval_seconds": 9,
+                    "risk_limits": {"max_orders_per_cycle": 3},
+                    "metadata": {"notes": "copied metadata"},
+                    "is_enabled": False,
+                    "is_paused": True,
+                },
+            )
+
+            copied = await create_trader(
+                session,
+                {
+                    "name": "Copied Trader",
+                    "copy_from_trader_id": source["id"],
+                },
+            )
+
+        assert copied["id"] != source["id"]
+        assert copied["name"] == "Copied Trader"
+        assert copied["description"] == source["description"]
+        assert copied["source_configs"] == source["source_configs"]
+        assert copied["interval_seconds"] == source["interval_seconds"]
+        assert copied["risk_limits"] == source["risk_limits"]
+        assert copied["metadata"] == source["metadata"]
+        assert copied["is_enabled"] == source["is_enabled"]
+        assert copied["is_paused"] == source["is_paused"]
+        assert copied["requested_run_at"] is None
+        assert copied["last_run_at"] is None
+        assert copied["next_run_at"] is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_create_trader_copy_rejects_unknown_source(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    try:
+        async with session_factory() as session:
+            with pytest.raises(ValueError, match="Source trader not found"):
+                await create_trader(
+                    session,
+                    {
+                        "name": "Copied Trader",
+                        "copy_from_trader_id": "missing-source",
+                    },
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_update_trader_rejects_unknown_strategy_key(tmp_path):
     engine, session_factory = await _build_session_factory(tmp_path)
     try:

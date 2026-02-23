@@ -24,6 +24,7 @@ logger = get_logger(__name__)
 _SNAPSHOT_FRESH_MAX_AGE_SECONDS = 10.0
 _SNAPSHOT_WARM_MAX_AGE_SECONDS = 120.0
 _SNAPSHOT_NEAREST_EXPIRY_MAX_SECONDS = 6 * 60 * 60
+_ORACLE_HISTORY_PAYLOAD_POINTS = 80
 
 
 def _to_float(value: object) -> Optional[float]:
@@ -141,6 +142,28 @@ def _snapshot_has_reasonable_nearest_expiry(markets: list[dict]) -> bool:
     return nearest_seconds <= _SNAPSHOT_NEAREST_EXPIRY_MAX_SECONDS
 
 
+def _snapshot_has_oracle_payload(markets: list[dict]) -> bool:
+    if not markets:
+        return False
+
+    for row in markets:
+        if not isinstance(row, dict):
+            continue
+        if _to_float(row.get("oracle_price")) is not None:
+            return True
+
+        by_source = row.get("oracle_prices_by_source")
+        if not isinstance(by_source, dict):
+            continue
+        for source_row in by_source.values():
+            if not isinstance(source_row, dict):
+                continue
+            if _to_float(source_row.get("price")) is not None:
+                return True
+
+    return False
+
+
 def _is_snapshot_fresh(snapshot: dict) -> bool:
     age = _snapshot_age_seconds(snapshot)
     return age is not None and age <= _SNAPSHOT_FRESH_MAX_AGE_SECONDS
@@ -172,13 +195,7 @@ def _oracle_history_payload(feed, asset: str) -> list[dict]:
     history = feed._history.get(asset) if hasattr(feed, "_history") else None
     if not history:
         return []
-    points = list(history)
-    if len(points) > 80:
-        step = max(1, len(points) // 80)
-        points = points[::step]
-    last = history[-1]
-    if points and points[-1] != last:
-        points.append(last)
+    points = list(history)[-_ORACLE_HISTORY_PAYLOAD_POINTS:]
     return [{"t": int(t), "p": round(float(p), 2)} for t, p in points]
 
 
@@ -282,6 +299,7 @@ async def get_crypto_markets(
         and _is_snapshot_fresh(snapshot)
         and expected_timeframes.issubset(snapshot_timeframes)
         and _snapshot_has_reasonable_nearest_expiry(markets)
+        and _snapshot_has_oracle_payload(markets)
     ):
         return markets
 
@@ -293,6 +311,7 @@ async def get_crypto_markets(
         and _is_snapshot_warm(snapshot)
         and expected_timeframes.issubset(snapshot_timeframes)
         and _snapshot_has_reasonable_nearest_expiry(markets)
+        and _snapshot_has_oracle_payload(markets)
     ):
         return markets
 

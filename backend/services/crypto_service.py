@@ -30,6 +30,8 @@ logger = get_logger(__name__)
 _GAMMA_FETCH_TIMEOUT_SECONDS = 4.0
 _CLOB_FETCH_TIMEOUT_SECONDS = 2.0
 _CRYPTO_FETCH_MAX_WORKERS = 4
+_CRYPTO_PRICE_TO_BEAT_API_URL = "https://polymarket.com/api/crypto/crypto-price"
+_CRYPTO_PRICE_TO_BEAT_TIMEOUT_SECONDS = 2.0
 
 # ---------------------------------------------------------------------------
 # Types
@@ -190,6 +192,21 @@ def _coerce_probability(val) -> Optional[float]:
     if parsed > 1.0:
         return 1.0
     return parsed
+
+
+def _timeframe_to_crypto_price_variant(timeframe: object) -> Optional[str]:
+    raw = str(timeframe or "").strip().lower()
+    if not raw:
+        return None
+    if "4hr" in raw or "4h" in raw or "four" in raw:
+        return "fourhour"
+    if "1hr" in raw or "1h" in raw or "hour" in raw:
+        return "hourly"
+    if "15" in raw:
+        return "fifteen"
+    if "5" in raw:
+        return "fiveminute"
+    return None
 
 
 def _resolve_binary_outcome_indexes(outcomes: list[object]) -> tuple[int, int]:
@@ -634,61 +651,135 @@ class CryptoService:
     def stop_fast_scan(self) -> None:
         self._fast_scan_running = False
 
-    def _update_price_to_beat(self, markets: list[CryptoMarket]) -> None:
-        """Look up the price-to-beat for each market from the Chainlink history.
+    def _fetch_price_to_beat_from_crypto_api(
+        self,
+        client: httpx.Client,
+        market: CryptoMarket,
+        *,
+        event_start_time: str,
+    ) -> Optional[float]:
+        symbol = str(market.asset or "").strip().upper()
+        variant = _timeframe_to_crypto_price_variant(market.timeframe)
+        if not symbol or not variant or not event_start_time:
+            return None
 
-        The Chainlink feed maintains a rolling 25-minute price history.
-        For each market, we look up the Chainlink price at the exact
-        ``eventStartTime`` from this history.  This works even if the app
-        started mid-window, because the history buffer has past prices.
+        try:
+            resp = client.get(
+                _CRYPTO_PRICE_TO_BEAT_API_URL,
+                params={
+                    "symbol": symbol,
+                    "variant": variant,
+                    "eventStartTime": event_start_time,
+                },
+            )
+        except Exception:
+            return None
+
+        if resp.status_code != 200:
+            return None
+
+        try:
+            payload = resp.json()
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+
+        open_price = _parse_float(payload.get("openPrice"))
+        if open_price is None or open_price <= 0:
+            return None
+        return open_price
+
+    def _update_price_to_beat(self, markets: list[CryptoMarket]) -> None:
+        """Look up the price-to-beat for each market.
+
+        Priority:
+        1) Polymarket crypto-price API (openPrice at eventStartTime) for
+           cold-start accuracy even after extended downtime.
+        2) Chainlink rolling history lookup.
+        3) Live oracle fallback within 10s of event start.
         """
+        feed = None
         try:
             from services.chainlink_feed import get_chainlink_feed
 
             feed = get_chainlink_feed()
         except Exception:
-            return
+            pass
 
-        for m in markets:
-            slug = m.slug
-            if not slug:
-                continue
-            # Already found for this slug?
-            if slug in self._price_to_beat and self._price_to_beat[slug] is not None:
-                continue
+        api_client = None
+        try:
+            api_client = httpx.Client(timeout=_CRYPTO_PRICE_TO_BEAT_TIMEOUT_SECONDS)
+        except Exception:
+            api_client = None
 
-            if not m.start_time:
-                continue
-            try:
-                start_ts = datetime.fromisoformat(str(m.start_time).replace("Z", "+00:00")).timestamp()
-            except (ValueError, AttributeError):
-                continue
+        try:
+            for m in markets:
+                slug = m.slug
+                if not slug:
+                    continue
+                # Already found for this slug?
+                if slug in self._price_to_beat and self._price_to_beat[slug] is not None:
+                    continue
 
-            now = time.time()
-            # Only look up if the market has started
-            if now < start_ts:
-                continue
+                if not m.start_time:
+                    continue
 
-            # Look up the Chainlink price at eventStartTime from history
-            ptb = feed.get_price_at_time(m.asset, start_ts)
-            if ptb is not None:
-                self._price_to_beat[slug] = ptb
+                try:
+                    start_dt = datetime.fromisoformat(str(m.start_time).replace("Z", "+00:00"))
+                    if start_dt.tzinfo is None:
+                        start_dt = start_dt.replace(tzinfo=timezone.utc)
+                except (ValueError, AttributeError):
+                    continue
+
+                start_ts = start_dt.timestamp()
+                start_iso = start_dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+                now = time.time()
+                # Only look up if the market has started
+                if now < start_ts:
+                    continue
+
                 elapsed = now - start_ts
-                logger.info(
-                    f"CryptoService: price to beat for {m.asset} ({slug}): "
-                    f"${ptb:,.2f} (from history, {elapsed:.0f}s after start)"
-                )
-            else:
-                # No history available -- try current price if within 10s of start
-                elapsed = now - start_ts
-                if elapsed <= 10:
-                    oracle = feed.get_price(m.asset)
-                    if oracle and oracle.price:
-                        self._price_to_beat[slug] = oracle.price
+
+                if api_client is not None:
+                    ptb_api = self._fetch_price_to_beat_from_crypto_api(
+                        api_client,
+                        m,
+                        event_start_time=start_iso,
+                    )
+                    if ptb_api is not None:
+                        self._price_to_beat[slug] = ptb_api
                         logger.info(
                             f"CryptoService: price to beat for {m.asset} ({slug}): "
-                            f"${oracle.price:,.2f} (live, {elapsed:.1f}s after start)"
+                            f"${ptb_api:,.2f} (api, {elapsed:.0f}s after start)"
                         )
+                        continue
+
+                if feed is None:
+                    continue
+
+                # Look up the Chainlink price at eventStartTime from history
+                ptb = feed.get_price_at_time(m.asset, start_ts)
+                if ptb is not None:
+                    self._price_to_beat[slug] = ptb
+                    logger.info(
+                        f"CryptoService: price to beat for {m.asset} ({slug}): "
+                        f"${ptb:,.2f} (from history, {elapsed:.0f}s after start)"
+                    )
+                else:
+                    # No history available -- try current price if within 10s of start
+                    if elapsed <= 10:
+                        oracle = feed.get_price(m.asset)
+                        if oracle and oracle.price:
+                            self._price_to_beat[slug] = oracle.price
+                            logger.info(
+                                f"CryptoService: price to beat for {m.asset} ({slug}): "
+                                f"${oracle.price:,.2f} (live, {elapsed:.1f}s after start)"
+                            )
+        finally:
+            if api_client is not None:
+                api_client.close()
 
         # Clean up old entries
         active_slugs = {m.slug for m in markets}

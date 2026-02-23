@@ -1,4 +1,5 @@
 import sys
+from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -91,3 +92,23 @@ def test_overlay_ws_prices_on_market_row_derives_missing_opposite_leg():
     assert row["up_price"] == 0.82
     assert row["down_price"] == pytest.approx(0.18)
     assert row["combined"] == 1.0
+
+
+def test_oracle_history_payload_uses_stable_tail_window(monkeypatch):
+    asset = "BTC"
+    history = deque(
+        ((idx, float(idx)) for idx in range(1, 181)),
+        maxlen=crypto_worker._MAX_ORACLE_HISTORY_POINTS,
+    )
+    monkeypatch.setattr(crypto_worker, "_oracle_history_by_asset", {asset: history})
+
+    first_payload = crypto_worker._oracle_history_payload(asset)
+    assert len(first_payload) == crypto_worker._ORACLE_HISTORY_PAYLOAD_POINTS
+    assert first_payload[0] == {"t": 101, "p": 101.0}
+    assert first_payload[-1] == {"t": 180, "p": 180.0}
+
+    history.append((181, 181.0))
+    second_payload = crypto_worker._oracle_history_payload(asset)
+    assert len(second_payload) == crypto_worker._ORACLE_HISTORY_PAYLOAD_POINTS
+    assert second_payload[0] == {"t": 102, "p": 102.0}
+    assert second_payload[-1] == {"t": 181, "p": 181.0}

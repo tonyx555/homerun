@@ -6,4 +6,5 @@
 #   python -m workers.crypto_worker
 #   python -m workers.tracked_traders_worker
 #   python -m workers.trader_orchestrator_worker
+#   python -m workers.trader_reconciliation_worker
 #   python -m workers.events_worker

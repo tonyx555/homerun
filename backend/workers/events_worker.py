@@ -465,23 +465,25 @@ async def _run_event_data_sources_once() -> tuple[
                 if row is None or not bool(row.enabled):
                     continue
                 run_result = await run_data_source(session, row, max_records=max_records, commit=True)
-                records = (
-                    (
-                        await session.execute(
-                            select(DataSourceRecord)
-                            .where(DataSourceRecord.source_slug == slug)
-                            .where(DataSourceRecord.ingested_at >= run_start)
-                            .order_by(
-                                desc(DataSourceRecord.observed_at),
-                                desc(DataSourceRecord.ingested_at),
+            if str(run_result.get("status") or "").strip().lower() == "success":
+                async with AsyncSessionLocal() as session:
+                    records = (
+                        (
+                            await session.execute(
+                                select(DataSourceRecord)
+                                .where(DataSourceRecord.source_slug == slug)
+                                .where(DataSourceRecord.ingested_at >= run_start)
+                                .order_by(
+                                    desc(DataSourceRecord.observed_at),
+                                    desc(DataSourceRecord.ingested_at),
+                                )
+                                .limit(max_records)
                             )
-                            .limit(max_records)
                         )
+                        .scalars()
+                        .all()
                     )
-                    .scalars()
-                    .all()
-                )
-                source_signals = [_record_to_signal(record) for record in records]
+                    source_signals = [_record_to_signal(record) for record in records]
         except Exception as exc:
             run_result = {
                 "status": "error",

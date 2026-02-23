@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from services.opportunity_recorder import opportunity_recorder
@@ -49,6 +50,7 @@ class GuardrailConfigPatch(BaseModel):
 class ExecutionSimulationRequest(BaseModel):
     strategy_key: str = Field(min_length=2, max_length=128)
     source_key: str = Field(min_length=2, max_length=64)
+    run_seed: Optional[str] = Field(default=None, min_length=4, max_length=128)
     market_provider: str = Field(default="polymarket")
     market_ref: Optional[str] = None
     market_id: Optional[str] = None
@@ -60,6 +62,27 @@ class ExecutionSimulationRequest(BaseModel):
     default_notional_usd: float = Field(default=50.0, gt=0.0, le=1_000_000.0)
     slippage_bps: float = Field(default=5.0, ge=0.0, le=5000.0)
     fee_bps: float = Field(default=200.0, ge=0.0, le=10000.0)
+
+
+class LiveTruthMonitorRequest(BaseModel):
+    trader_id: Optional[str] = Field(default=None, min_length=2, max_length=128)
+    trader_name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    duration_seconds: int = Field(
+        default=300,
+        ge=10,
+        le=7200,
+        description="How long to run the monitor script for this job.",
+    )
+    poll_seconds: float = Field(
+        default=1.0,
+        ge=0.2,
+        le=10.0,
+        description="Polling cadence passed to the monitor script.",
+    )
+    run_llm_analysis: bool = Field(default=True)
+    llm_model: Optional[str] = Field(default=None, min_length=2, max_length=200)
+    include_strategy_source: bool = Field(default=True)
+    max_alerts_for_llm: int = Field(default=80, ge=1, le=400)
 
 
 class CodeBacktestRequest(BaseModel):
@@ -84,6 +107,14 @@ def _get_combinatorial_validation_stats() -> dict[str, Any]:
                 logger.warning("Failed to get combinatorial validation stats")
                 return {}
     return {}
+
+
+_LIVE_TRUTH_EXPORT_ARTIFACTS = {
+    "summary_json",
+    "report_jsonl",
+    "llm_analysis_json",
+    "bundle_json",
+}
 
 
 @router.get("/overview")
@@ -173,6 +204,58 @@ async def get_job(job_id: str):
     if not item:
         raise HTTPException(status_code=404, detail="Job not found")
     return item
+
+
+@router.post("/jobs/live-truth-monitor")
+async def enqueue_live_truth_monitor(request: LiveTruthMonitorRequest):
+    try:
+        payload = request.model_dump(exclude_none=True)
+        job_id = await validation_service.enqueue_job("live_truth_monitor", payload=payload)
+        return {"status": "queued", "job_id": job_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/jobs/{job_id}/live-truth-monitor/raw")
+async def get_live_truth_monitor_raw(
+    job_id: str,
+    max_alerts: int = Query(default=2000, ge=1, le=10000),
+):
+    item = await validation_service.get_job(job_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if str(item.get("job_type") or "").strip().lower() != "live_truth_monitor":
+        raise HTTPException(status_code=400, detail="Job is not a live truth monitor job")
+    payload = await validation_service.get_live_truth_monitor_raw(job_id, max_alerts=max_alerts)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Live truth monitor payload unavailable")
+    return payload
+
+
+@router.get("/jobs/{job_id}/live-truth-monitor/export")
+async def export_live_truth_monitor_artifact(
+    job_id: str,
+    artifact: str = Query(default="bundle_json"),
+):
+    normalized_artifact = str(artifact or "").strip().lower()
+    if normalized_artifact not in _LIVE_TRUTH_EXPORT_ARTIFACTS:
+        raise HTTPException(status_code=400, detail=f"Unsupported artifact '{artifact}'")
+
+    item = await validation_service.get_job(job_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if str(item.get("job_type") or "").strip().lower() != "live_truth_monitor":
+        raise HTTPException(status_code=400, detail="Job is not a live truth monitor job")
+
+    exported = await validation_service.export_live_truth_monitor_artifact(job_id, artifact=normalized_artifact)
+    if exported is None:
+        raise HTTPException(status_code=404, detail="Requested artifact is unavailable")
+    filename, media_type, body = exported
+    return Response(
+        content=body,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/jobs/{job_id}/cancel")

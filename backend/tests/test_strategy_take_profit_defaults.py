@@ -47,6 +47,20 @@ def _make_position(config: dict | None = None) -> _Position:
     return position
 
 
+def _make_loss_position(config: dict | None = None) -> _Position:
+    position = _Position()
+    position.entry_price = 0.50
+    position.current_price = 0.45
+    position.highest_price = 0.50
+    position.lowest_price = 0.45
+    position.age_minutes = 3.0
+    position.pnl_percent = -10.0
+    position.strategy_context = {}
+    position.config = dict(config or {})
+    position.outcome_idx = 0
+    return position
+
+
 MARKET_STATE = {
     "current_price": 0.56,
     "market_tradable": True,
@@ -115,3 +129,70 @@ def test_should_exit_preserves_configured_take_profit(strategy_cls):
 
     assert decision.action == "hold"
     assert position.config["take_profit_pct"] == 15.0
+
+
+def test_btc_highfreq_stop_loss_waits_for_near_close_window():
+    strategy = BtcEthHighFreqStrategy()
+    position = _make_loss_position()
+
+    decision = strategy.should_exit(
+        position,
+        {
+            "current_price": 0.45,
+            "market_tradable": True,
+            "is_resolved": False,
+            "winning_outcome": None,
+            "seconds_left": 240,
+        },
+    )
+
+    assert decision.action == "hold"
+    assert "Stop loss deferred" in decision.reason
+    assert position.config["stop_loss_policy"] == "near_close_only"
+    assert position.config["stop_loss_activation_seconds"] == 90
+
+
+def test_btc_highfreq_stop_loss_arms_inside_near_close_window():
+    strategy = BtcEthHighFreqStrategy()
+    position = _make_loss_position()
+
+    decision = strategy.should_exit(
+        position,
+        {
+            "current_price": 0.45,
+            "market_tradable": True,
+            "is_resolved": False,
+            "winning_outcome": None,
+            "seconds_left": 30,
+        },
+    )
+
+    assert decision.action == "close"
+    assert "Stop loss hit" in decision.reason
+
+
+def test_btc_highfreq_stop_loss_timeframe_override_is_applied():
+    strategy = BtcEthHighFreqStrategy()
+    position = _make_loss_position(
+        {
+            "stop_loss_policy_5m": "near_close_only",
+            "stop_loss_activation_seconds_5m": 20,
+        }
+    )
+    position.strategy_context = {"timeframe": "5m"}
+
+    decision = strategy.should_exit(
+        position,
+        {
+            "current_price": 0.45,
+            "market_tradable": True,
+            "is_resolved": False,
+            "winning_outcome": None,
+            "seconds_left": 30,
+        },
+    )
+
+    assert decision.action == "hold"
+    assert "Stop loss deferred" in decision.reason
+    assert position.config["stop_loss_policy"] == "near_close_only"
+    assert position.config["stop_loss_activation_seconds"] == 20

@@ -7,6 +7,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
+from config import settings
 from services.trader_orchestrator.decision_gates import apply_platform_decision_gates
 
 
@@ -108,3 +109,181 @@ def test_portfolio_allocator_blocks_signal_when_allocation_not_allowed():
     assert any(g["gate"] == "risk" and g["status"] == "skipped" for g in result["platform_gates"])
     portfolio_check = next(check for check in result["checks_payload"] if check["check_key"] == "portfolio_allocator")
     assert portfolio_check["passed"] is False
+
+
+def test_min_exit_notional_guard_blocks_under_min_feasible_size(monkeypatch):
+    monkeypatch.setattr(settings, "MIN_ORDER_SIZE_USD", 1.0)
+    result = apply_platform_decision_gates(
+        decision_obj=_decision(2.0),
+        runtime_signal=SimpleNamespace(market_id="market-1", entry_price=0.4, payload_json={}),
+        strategy=None,
+        checks_payload=[],
+        trading_schedule_ok=True,
+        trading_schedule_config={},
+        global_limits={"max_gross_exposure_usd": 5000.0},
+        effective_risk_limits={"max_trade_notional_usd": 1000.0},
+        allow_averaging=True,
+        open_market_ids=set(),
+        portfolio_allocator=None,
+        risk_evaluator=_risk_evaluator,
+        invoke_hooks=False,
+        strategy_params={"exit_price_ratio_floor": 0.25},
+    )
+
+    assert result["final_decision"] == "blocked"
+    assert "Min-exit-notional guard blocked" in result["final_reason"]
+    assert any(g["gate"] == "min_exit_notional" and g["status"] == "blocked" for g in result["platform_gates"])
+    min_exit_check = next(check for check in result["checks_payload"] if check["check_key"] == "min_exit_notional_guard")
+    assert min_exit_check["passed"] is False
+    assert min_exit_check["payload"]["conservative_exit_source"] == "configured_ratio_floor"
+    assert float(min_exit_check["payload"]["required_size_usd"]) >= 4.0
+
+
+def test_min_exit_notional_guard_respects_strategy_override_ratio(monkeypatch):
+    monkeypatch.setattr(settings, "MIN_ORDER_SIZE_USD", 1.0)
+    result = apply_platform_decision_gates(
+        decision_obj=_decision(2.2),
+        runtime_signal=SimpleNamespace(market_id="market-1", entry_price=0.4, payload_json={}),
+        strategy=None,
+        checks_payload=[],
+        trading_schedule_ok=True,
+        trading_schedule_config={},
+        global_limits={"max_gross_exposure_usd": 5000.0},
+        effective_risk_limits={"max_trade_notional_usd": 1000.0},
+        allow_averaging=True,
+        open_market_ids=set(),
+        portfolio_allocator=None,
+        risk_evaluator=_risk_evaluator,
+        invoke_hooks=False,
+        strategy_params={"exit_price_ratio_floor": 0.5},
+    )
+
+    assert result["final_decision"] == "selected"
+    assert any(g["gate"] == "min_exit_notional" and g["status"] == "passed" for g in result["platform_gates"])
+    min_exit_check = next(check for check in result["checks_payload"] if check["check_key"] == "min_exit_notional_guard")
+    assert min_exit_check["passed"] is True
+
+
+def test_min_exit_notional_guard_can_be_disabled_by_strategy_config(monkeypatch):
+    monkeypatch.setattr(settings, "MIN_ORDER_SIZE_USD", 1.0)
+    result = apply_platform_decision_gates(
+        decision_obj=_decision(2.0),
+        runtime_signal=SimpleNamespace(market_id="market-1", entry_price=0.4, payload_json={}),
+        strategy=None,
+        checks_payload=[],
+        trading_schedule_ok=True,
+        trading_schedule_config={},
+        global_limits={"max_gross_exposure_usd": 5000.0},
+        effective_risk_limits={"max_trade_notional_usd": 1000.0},
+        allow_averaging=True,
+        open_market_ids=set(),
+        portfolio_allocator=None,
+        risk_evaluator=_risk_evaluator,
+        invoke_hooks=False,
+        strategy_params={
+            "exit_price_ratio_floor": 0.25,
+            "enforce_min_exit_notional": False,
+        },
+    )
+
+    assert result["final_decision"] == "selected"
+    assert any(g["gate"] == "min_exit_notional" and g["status"] == "skipped" for g in result["platform_gates"])
+    min_exit_check = next(check for check in result["checks_payload"] if check["check_key"] == "min_exit_notional_guard")
+    assert min_exit_check["passed"] is True
+    assert min_exit_check["payload"]["enabled"] is False
+    assert min_exit_check["payload"]["conservative_exit_source"] == "guard_disabled"
+
+
+def test_min_exit_notional_guard_prefers_stop_loss_price_when_available(monkeypatch):
+    monkeypatch.setattr(settings, "MIN_ORDER_SIZE_USD", 1.0)
+    result = apply_platform_decision_gates(
+        decision_obj=_decision(3.0),
+        runtime_signal=SimpleNamespace(market_id="market-1", entry_price=0.345, payload_json={}),
+        strategy=None,
+        checks_payload=[],
+        trading_schedule_ok=True,
+        trading_schedule_config={},
+        global_limits={"max_gross_exposure_usd": 5000.0},
+        effective_risk_limits={"max_trade_notional_usd": 1000.0},
+        allow_averaging=True,
+        open_market_ids=set(),
+        portfolio_allocator=None,
+        risk_evaluator=_risk_evaluator,
+        invoke_hooks=False,
+        strategy_params={"stop_loss_pct": 5.0, "exit_price_ratio_floor": 0.25},
+    )
+
+    assert result["final_decision"] == "selected"
+    min_exit_check = next(check for check in result["checks_payload"] if check["check_key"] == "min_exit_notional_guard")
+    assert min_exit_check["passed"] is True
+    assert min_exit_check["payload"]["conservative_exit_source"] == "stop_loss_pct"
+
+
+def test_min_exit_notional_guard_uses_ratio_floor_when_stop_loss_is_near_close_only(monkeypatch):
+    monkeypatch.setattr(settings, "MIN_ORDER_SIZE_USD", 1.0)
+    result = apply_platform_decision_gates(
+        decision_obj=_decision(3.0),
+        runtime_signal=SimpleNamespace(
+            market_id="market-1",
+            entry_price=0.345,
+            payload_json={"strategy_context": {"seconds_left": 240}},
+        ),
+        strategy=None,
+        checks_payload=[],
+        trading_schedule_ok=True,
+        trading_schedule_config={},
+        global_limits={"max_gross_exposure_usd": 5000.0},
+        effective_risk_limits={"max_trade_notional_usd": 1000.0},
+        allow_averaging=True,
+        open_market_ids=set(),
+        portfolio_allocator=None,
+        risk_evaluator=_risk_evaluator,
+        invoke_hooks=False,
+        strategy_params={
+            "stop_loss_pct": 5.0,
+            "stop_loss_policy": "near_close_only",
+            "stop_loss_activation_seconds": 60,
+            "exit_price_ratio_floor": 0.25,
+        },
+    )
+
+    assert result["final_decision"] == "blocked"
+    min_exit_check = next(check for check in result["checks_payload"] if check["check_key"] == "min_exit_notional_guard")
+    assert min_exit_check["passed"] is False
+    assert min_exit_check["payload"]["stop_loss_armed"] is False
+    assert min_exit_check["payload"]["conservative_exit_source"] == "configured_ratio_floor"
+
+
+def test_min_exit_notional_guard_arms_stop_loss_when_inside_close_window(monkeypatch):
+    monkeypatch.setattr(settings, "MIN_ORDER_SIZE_USD", 1.0)
+    result = apply_platform_decision_gates(
+        decision_obj=_decision(3.0),
+        runtime_signal=SimpleNamespace(
+            market_id="market-1",
+            entry_price=0.345,
+            payload_json={"strategy_context": {"seconds_left": 30}},
+        ),
+        strategy=None,
+        checks_payload=[],
+        trading_schedule_ok=True,
+        trading_schedule_config={},
+        global_limits={"max_gross_exposure_usd": 5000.0},
+        effective_risk_limits={"max_trade_notional_usd": 1000.0},
+        allow_averaging=True,
+        open_market_ids=set(),
+        portfolio_allocator=None,
+        risk_evaluator=_risk_evaluator,
+        invoke_hooks=False,
+        strategy_params={
+            "stop_loss_pct": 5.0,
+            "stop_loss_policy": "near_close_only",
+            "stop_loss_activation_seconds": 60,
+            "exit_price_ratio_floor": 0.25,
+        },
+    )
+
+    assert result["final_decision"] == "selected"
+    min_exit_check = next(check for check in result["checks_payload"] if check["check_key"] == "min_exit_notional_guard")
+    assert min_exit_check["passed"] is True
+    assert min_exit_check["payload"]["stop_loss_armed"] is True
+    assert min_exit_check["payload"]["conservative_exit_source"] == "stop_loss_pct"

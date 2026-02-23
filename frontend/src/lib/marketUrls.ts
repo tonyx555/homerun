@@ -224,3 +224,97 @@ export function getOpportunityPlatformLinks(opportunity: OpportunityForLinks | n
 
   return { polymarketUrl, kalshiUrl, marketLinks }
 }
+
+type TraderOrderLinkInput = {
+  source?: NullableString
+  marketId?: NullableString
+  marketQuestion?: NullableString
+  payload?: Record<string, unknown> | null | undefined
+}
+
+function toRecord(value: unknown): Record<string, unknown> {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, unknown>
+  }
+  return {}
+}
+
+function normalizeSourcePlatform(source: NullableString): MarketPlatform | null {
+  const key = cleanSegment(source).toLowerCase()
+  if (!key) return null
+  if (key.includes('kalshi')) return 'kalshi'
+  if (key.includes('poly') || key.includes('crypto')) return 'polymarket'
+  return null
+}
+
+function buildPolymarketSearchUrl(query: NullableString): string | null {
+  const text = cleanSegment(query).replace(/[-_]+/g, ' ').trim()
+  if (!text) return null
+  return `${POLYMARKET_BASE_URL}/search?query=${encodeURIComponent(text)}`
+}
+
+function buildKalshiSearchUrl(query: NullableString): string | null {
+  const text = cleanSegment(query).replace(/[-_]+/g, ' ').trim()
+  if (!text) return null
+  return `${KALSHI_BASE_URL}/markets?search=${encodeURIComponent(text)}`
+}
+
+// Shared resolver for trader/order rows where payloads are often sparse and
+// direct API URLs may be stale. Canonical builders are preferred first.
+export function getTraderOrderPlatformLinks(input: TraderOrderLinkInput): OpportunityPlatformLinks {
+  const payload = toRecord(input.payload)
+  const marketId = cleanSegment(input.marketId)
+  const marketQuestion = cleanSegment(input.marketQuestion)
+  const payloadPlatform = cleanSegment(
+    String(
+      payload.platform
+      || payload.exchange
+      || payload.execution_platform
+      || payload.market_platform
+      || payload.source_platform
+      || ''
+    )
+  ).toLowerCase()
+  const sourcePlatform = normalizeSourcePlatform(input.source)
+  const inferredPlatform = payloadPlatform === 'kalshi' || payloadPlatform === 'polymarket'
+    ? (payloadPlatform as MarketPlatform)
+    : inferMarketPlatform({
+        platform: sourcePlatform || payloadPlatform || undefined,
+        marketId,
+        marketSlug: String(payload.market_slug || payload.slug || ''),
+        conditionId: String(payload.condition_id || payload.conditionId || (isConditionId(marketId) ? marketId : '') || ''),
+        eventTicker: String(payload.event_ticker || payload.eventTicker || ''),
+      })
+
+  const eventSlug = String(payload.event_slug || '').trim() || null
+  const marketSlug = String(payload.market_slug || payload.slug || '').trim() || null
+  const conditionId = String(payload.condition_id || payload.conditionId || (isConditionId(marketId) ? marketId : '') || '').trim() || null
+  const marketTicker = String(payload.market_ticker || payload.kalshi_ticker || payload.ticker || '').trim() || null
+  const eventTicker = String(payload.event_ticker || payload.eventTicker || '').trim() || null
+  const seriesTicker = String(payload.series_ticker || payload.seriesTicker || '').trim() || null
+
+  let polymarketUrl = buildPolymarketMarketUrl({
+    eventSlug,
+    marketSlug,
+    marketId,
+    conditionId,
+  })
+  let kalshiUrl = buildKalshiMarketUrl({
+    marketTicker,
+    eventTicker,
+    eventSlug,
+    seriesTicker,
+  })
+
+  if (!polymarketUrl && inferredPlatform !== 'kalshi') {
+    polymarketUrl = buildPolymarketSearchUrl(marketQuestion || marketSlug || eventSlug)
+  }
+  if (!kalshiUrl && inferredPlatform === 'kalshi') {
+    kalshiUrl = buildKalshiSearchUrl(marketQuestion || marketTicker || eventTicker)
+  }
+
+  const marketLinks: OpportunityLinkEntry[] = []
+  if (polymarketUrl) marketLinks.push({ platform: 'polymarket', url: polymarketUrl })
+  if (kalshiUrl) marketLinks.push({ platform: 'kalshi', url: kalshiUrl })
+  return { polymarketUrl, kalshiUrl, marketLinks }
+}

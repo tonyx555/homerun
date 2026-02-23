@@ -14,6 +14,7 @@ from utils.converters import safe_float
 
 
 _MIN_EXECUTION_PRICE = 0.001
+_MIN_LIVE_SHARES = 5.0
 _NUMERIC_TOKEN_ID_RE = re.compile(r"^\d{18,}$")
 _HEX_TOKEN_ID_RE = re.compile(r"^(?:0x)?[0-9a-f]{40,}$")
 _CONDITION_ID_RE = re.compile(r"^0x[0-9a-f]{64}$")
@@ -548,17 +549,21 @@ async def submit_execution_leg(
             notional_usd=paper_result.notional_usd,
         )
 
-    shares = notional / price
-    if shares <= 0:
+    requested_shares = notional / price
+    if requested_shares <= 0:
         return LegSubmitResult(
             leg_id=leg_id,
             status="failed",
             effective_price=price,
             error_message="Computed leg size is zero.",
             payload={"mode": mode_key, "leg": dict(leg), "reason": "invalid_size"},
-            shares=shares,
+            shares=requested_shares,
             notional_usd=notional,
         )
+    shares = requested_shares
+    if shares < _MIN_LIVE_SHARES:
+        shares = _MIN_LIVE_SHARES
+    effective_notional = shares * price
 
     token_id, token_source, token_attempts = _resolve_token_id_for_leg(
         leg=leg,
@@ -604,6 +609,38 @@ async def submit_execution_leg(
         post_only=post_only,
     )
 
+    execution_error_text = str(execution.error_message or "").lower()
+    if (
+        execution.status == "failed"
+        and "orderbook" in execution_error_text
+        and "does not exist" in execution_error_text
+    ):
+        market_id_for_lookup = str(leg.get("market_id") or "").strip()
+        outcome_for_lookup = str(leg.get("outcome") or "").strip()
+        if market_id_for_lookup and outcome_for_lookup:
+            fallback_token_id = await _fetch_token_id_from_market(market_id_for_lookup, outcome_for_lookup)
+            if fallback_token_id and fallback_token_id != token_id:
+                retry_execution = await execute_live_order(
+                    token_id=fallback_token_id,
+                    side=order_side,
+                    size=shares,
+                    fallback_price=price,
+                    market_question=str(leg.get("market_question") or getattr(signal, "market_question", "") or ""),
+                    opportunity_id=str(getattr(signal, "id", "") or ""),
+                    time_in_force=time_in_force,
+                    post_only=post_only,
+                )
+                if retry_execution.status != "failed":
+                    execution = retry_execution
+                    token_id = fallback_token_id
+                    token_source = "polymarket_api_retry"
+                else:
+                    retry_error_text = str(retry_execution.error_message or "")
+                    execution = retry_execution
+                    execution.error_message = (
+                        f"{str(execution.error_message or '')} | retry_token={fallback_token_id} failed: {retry_error_text}"
+                    ).strip(" |")
+
     return LegSubmitResult(
         leg_id=leg_id,
         status=execution.status,
@@ -615,12 +652,15 @@ async def submit_execution_leg(
             "leg": dict(leg),
             "token_id_source": token_source,
             "shares": shares,
+            "requested_shares": requested_shares,
+            "min_live_shares": _MIN_LIVE_SHARES,
             "requested_notional_usd": notional,
+            "effective_notional_usd": effective_notional,
         },
         provider_order_id=execution.order_id,
         provider_clob_order_id=str(execution.payload.get("clob_order_id") or "").strip() or None,
         shares=shares,
-        notional_usd=notional,
+        notional_usd=effective_notional,
     )
 
 

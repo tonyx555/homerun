@@ -59,3 +59,60 @@ def test_crypto_highfreq_scope_schema_contains_include_exclude_fields():
     assert "exclude_assets" in keys
     assert "include_timeframes" in keys
     assert "exclude_timeframes" in keys
+    assert "live_window_required" in keys
+    assert "min_liquidity_usd" in keys
+    assert "max_spread_pct" in keys
+    assert "max_signal_age_seconds" in keys
+    assert "max_live_context_age_seconds" in keys
+    assert "max_oracle_age_seconds" in keys
+    assert "require_oracle_for_directional" in keys
+    assert "min_seconds_left_for_entry_5m" in keys
+    assert "take_profit_pct" in keys
+    assert "stop_loss_pct" in keys
+    assert "stop_loss_policy" in keys
+    assert "stop_loss_activation_seconds" in keys
+    assert "stop_loss_activation_seconds_5m" in keys
+    assert "trailing_stop_pct" in keys
+    assert "min_hold_minutes" in keys
+    assert "max_hold_minutes" in keys
+    assert "resolve_only" in keys
+    assert "close_on_inactive_market" in keys
+    assert "preplace_take_profit_exit" in keys
+    assert "enforce_min_exit_notional" in keys
+
+
+def test_crypto_highfreq_scope_defaults_include_stop_loss_policy():
+    defaults = StrategySDK.crypto_highfreq_scope_defaults()
+    assert defaults["stop_loss_policy"] == "near_close_only"
+    assert defaults["stop_loss_activation_seconds"] == 90
+    assert defaults["min_liquidity_usd"] == 250.0
+    assert defaults["max_spread_pct"] == 0.08
+    assert defaults["max_signal_age_seconds"] == 35.0
+    assert defaults["max_live_context_age_seconds"] == 5.0
+    assert defaults["max_oracle_age_seconds"] == 20.0
+    assert defaults["require_oracle_for_directional"] is True
+    assert defaults["min_seconds_left_for_entry_5m"] == 35.0
+    assert defaults["enforce_min_exit_notional"] is False
+
+
+def test_strategy_entry_take_profit_exit_allowlist_and_param_resolution():
+    assert StrategySDK.strategy_supports_entry_take_profit_exit("btc_eth_highfreq") is True
+    assert StrategySDK.strategy_supports_entry_take_profit_exit("news_edge") is False
+
+    assert StrategySDK.should_preplace_take_profit_exit("btc_eth_highfreq", {"preplace_take_profit_exit": True}) is True
+    assert StrategySDK.should_preplace_take_profit_exit("btc_eth_highfreq", {"preplace_take_profit_exit": False}) is False
+    assert (
+        StrategySDK.should_preplace_take_profit_exit(
+            "btc_eth_highfreq",
+            {"preplace_take_profit_exit": True, "live_preplace_take_profit_exit": False},
+        )
+        is False
+    )
+    assert (
+        StrategySDK.should_preplace_take_profit_exit(
+            "btc_eth_highfreq",
+            {"preplace_take_profit_exit": False, "live_preplace_take_profit_exit": True},
+        )
+        is True
+    )
+    assert StrategySDK.should_preplace_take_profit_exit("news_edge", {"preplace_take_profit_exit": True}) is False

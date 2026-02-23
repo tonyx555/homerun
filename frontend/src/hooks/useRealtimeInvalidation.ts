@@ -102,6 +102,36 @@ export function useRealtimeInvalidation(
         }
       })
     }
+    const upsertTraderOrderCache = (incomingOrder: any) => {
+      if (!incomingOrder || typeof incomingOrder !== 'object') return
+      const incomingId = String(incomingOrder.id || '').trim()
+      if (!incomingId) return
+      const upsertRows = (old: any) => {
+        if (!Array.isArray(old)) return old
+        const previousRows = old
+        let found = false
+        const nextRows = previousRows.map((row: any) => {
+          const rowId = String(row?.id || '').trim()
+          if (rowId !== incomingId) return row
+          found = true
+          return {
+            ...row,
+            ...incomingOrder,
+            payload: incomingOrder.payload ?? row?.payload ?? {},
+          }
+        })
+        if (!found) {
+          nextRows.unshift(incomingOrder)
+        }
+        return nextRows
+      }
+
+      queryClient.setQueryData(['trader-orders-all'], upsertRows)
+      const traderId = String(incomingOrder.trader_id || '').trim()
+      if (traderId) {
+        queryClient.setQueryData(['trader-orders', traderId], upsertRows)
+      }
+    }
 
     const activeTab = String(context.activeTab || '')
     const opportunitiesView = String(context.opportunitiesView || '')
@@ -359,15 +389,24 @@ export function useRealtimeInvalidation(
       ])
     }
     if (messageType === 'trader_order') {
+      upsertTraderOrderCache(lastMessage.data)
       queueInvalidations([
         ['trader-orchestrator-overview'],
         ...(viewingTrading
           ? ([
-              ['traders-orders'],
-              ['traders-decisions'],
               ['trader-orders-all'],
-              ['trader-decisions-all'],
-              ['trader-events-all'],
+              ['trader-orders'],
+            ] as QueryKey[])
+          : []),
+      ])
+    }
+    if (messageType === 'execution_order') {
+      queueInvalidations([
+        ['trader-orchestrator-overview'],
+        ...(viewingTrading
+          ? ([
+              ['trader-orders-all'],
+              ['trader-orders'],
             ] as QueryKey[])
           : []),
       ])

@@ -25,6 +25,7 @@ from utils.utcnow import utcnow
 from typing import Any, Dict, Optional, Tuple
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
@@ -37,6 +38,31 @@ logger = logging.getLogger(__name__)
 # Single-thread executor for CPU-bound embedding/index work.
 _EMBED_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="news_wf")
 _MAX_WORKFLOW_CYCLE_SECONDS = 90.0
+_DB_DISCONNECT_MARKERS = (
+    "connection is closed",
+    "underlying connection is closed",
+    "connection has been closed",
+    "closed the connection unexpectedly",
+    "terminating connection",
+    "connection reset by peer",
+    "broken pipe",
+    "connection was closed",
+    "connectiondoesnotexist",
+    "closed in the middle of operation",
+    "transaction.rollback(): the underlying connection is closed",
+    "another operation",
+    "cannot switch to state",
+)
+
+
+def _is_db_disconnect_error(exc: Exception) -> bool:
+    exc_module = type(exc).__module__ or ""
+    is_db_exc = isinstance(exc, (DBAPIError, InterfaceError, OperationalError)) or exc_module.startswith("asyncpg")
+    if not is_db_exc:
+        return False
+    orig_msg = str(getattr(exc, "orig", "") or "").lower()
+    full_msg = str(exc).lower()
+    return any(marker in orig_msg or marker in full_msg for marker in _DB_DISCONNECT_MARKERS)
 
 
 @dataclass
@@ -956,6 +982,8 @@ class WorkflowOrchestrator:
             }
 
         except Exception as exc:
+            if _is_db_disconnect_error(exc):
+                raise
             logger.error("News workflow cycle failed: %s", exc, exc_info=True)
             return {
                 "status": "error",

@@ -874,6 +874,7 @@ async def run_evaluate_backtest(
                         size_usd=size_for_eval,
                         gross_exposure_usd=0.0,
                         trader_open_positions=0,
+                        trader_open_orders=0,
                         market_exposure_usd=0.0,
                         global_limits=platform_global_risk,
                         trader_limits=platform_risk_limits,
@@ -899,6 +900,7 @@ async def run_evaluate_backtest(
                         "cooldown_active": False,
                         "cooldown_remaining_seconds": 0,
                         "trader_open_positions": 0,
+                        "trader_open_orders": 0,
                     }
 
                 gate_result = apply_platform_decision_gates(
@@ -915,6 +917,7 @@ async def run_evaluate_backtest(
                     portfolio_allocator=None,
                     risk_evaluator=_backtest_risk_evaluator,
                     invoke_hooks=False,
+                    strategy_params={},
                 )
 
                 decision_str = str(gate_result["final_decision"])

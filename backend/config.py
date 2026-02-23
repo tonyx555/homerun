@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     DATABASE_POOL_RECYCLE_SECONDS: int = 300
     DATABASE_CONNECT_TIMEOUT_SECONDS: float = 8.0
     DATABASE_STATEMENT_TIMEOUT_MS: int = 45000
-    DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS: int = 15000
+    DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS: int = 120000
 
     # Redis (worker/event IPC)
     REDIS_HOST: str = "127.0.0.1"
@@ -142,6 +142,7 @@ class Settings(BaseSettings):
     POLYGON_WS_URL: str = "wss://polygon-bor-rpc.publicnode.com"
     CHAIN_ID: int = 137  # Polygon mainnet
     POLYMARKET_SIGNATURE_TYPE: int = 1  # 0=EOA, 1=POLY_PROXY, 2=POLY_GNOSIS_SAFE
+    POLYMARKET_FUNDER: Optional[str] = None  # Proxy wallet that holds funds for signature types 1/2
 
     # Depth Analysis
     MIN_DEPTH_USD: float = 200.0  # Minimum order book depth to allow trade

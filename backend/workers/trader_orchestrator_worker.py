@@ -1077,11 +1077,12 @@ async def _run_trader_once(
             # workers.trader_reconciliation_worker so this loop stays focused
             # on strategy selection and execution.
             pass
-        await sync_trader_position_inventory(
-            session,
-            trader_id=trader_id,
-            mode=run_mode,
-        )
+        if run_mode != "live":
+            await sync_trader_position_inventory(
+                session,
+                trader_id=trader_id,
+                mode=run_mode,
+            )
         session_engine = ExecutionSessionEngine(session)
         if hasattr(session, "execute"):
             reconcile_result = await session_engine.reconcile_active_sessions(
@@ -1771,6 +1772,7 @@ async def _run_trader_once(
                         "cooldown_active": cooldown_active,
                         "cooldown_remaining_seconds": cooldown_remaining_seconds,
                         "trader_open_positions": effective_open_positions,
+                        "trader_open_orders": open_order_count,
                         "trading_schedule_ok": trading_schedule_ok,
                     }
 
@@ -1795,6 +1797,7 @@ async def _run_trader_once(
                             "cooldown_active": cooldown_active,
                             "cooldown_remaining_seconds": cooldown_remaining_seconds,
                             "trader_open_positions": effective_open_positions,
+                            "trader_open_orders": open_order_count,
                         }
 
                         def _evaluate_runtime_risk(size_for_eval: float):
@@ -1802,6 +1805,7 @@ async def _run_trader_once(
                                 size_usd=size_for_eval,
                                 gross_exposure_usd=gross_exposure,
                                 trader_open_positions=effective_open_positions,
+                                trader_open_orders=open_order_count,
                                 market_exposure_usd=market_exposure,
                                 global_limits=global_limits,
                                 trader_limits=effective_risk_limits,
@@ -1866,6 +1870,7 @@ async def _run_trader_once(
                         portfolio_allocator=portfolio_allocator,
                         risk_evaluator=risk_evaluator,
                         invoke_hooks=True,
+                        strategy_params=strategy_params,
                     )
                     final_decision = gate_result["final_decision"]
                     final_reason = gate_result["final_reason"]
@@ -1916,6 +1921,7 @@ async def _run_trader_once(
                                 "cooldown_active": risk_runtime_payload["cooldown_active"],
                                 "cooldown_remaining_seconds": risk_runtime_payload["cooldown_remaining_seconds"],
                                 "trader_open_positions": risk_runtime_payload["trader_open_positions"],
+                                "trader_open_orders": risk_runtime_payload["trader_open_orders"],
                                 "trading_schedule_ok": risk_runtime_payload["trading_schedule_ok"],
                             },
                             "portfolio_runtime": portfolio_runtime_payload,

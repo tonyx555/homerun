@@ -27,13 +27,14 @@ from models.database import (
     TradeSignalEmission,
     TradeSignalSnapshot,
 )
+from services.event_bus import event_bus
 from models.opportunity import Opportunity
 from services.market_tradability import get_market_tradability_map
 
 
 SIGNAL_TERMINAL_STATUSES = {"executed", "skipped", "expired", "failed"}
 SIGNAL_ACTIVE_STATUSES = {"pending", "selected", "submitted"}
-SIGNAL_REACTIVATABLE_STATUSES = {"skipped", "expired", "failed"}
+SIGNAL_REACTIVATABLE_STATUSES = {"selected", "submitted", "executed", "skipped", "expired", "failed"}
 
 
 def _utc_now() -> datetime:
@@ -53,8 +54,7 @@ def _safe_json(value: Any) -> Any:
     if value is None:
         return None
     try:
-        json.dumps(value, default=str)
-        return value
+        return json.loads(json.dumps(value, default=str))
     except Exception:
         return {"raw": str(value)}
 
@@ -326,6 +326,54 @@ async def _record_signal_emission(
     )
 
 
+async def _publish_trade_signal_emission(
+    *,
+    row: TradeSignal,
+    event_type: str,
+    reason: str | None = None,
+) -> None:
+    try:
+        await event_bus.publish(
+            "trade_signal_emission",
+            {
+                "signal_id": str(row.id or ""),
+                "source": str(row.source or ""),
+                "status": str(row.status or ""),
+                "event_type": str(event_type),
+                "reason": reason,
+                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            },
+        )
+    except Exception:
+        pass
+
+
+async def _publish_trade_signal_batch(
+    *,
+    event_type: str,
+    signal_ids: list[str],
+    source: str | None = None,
+    reason: str | None = None,
+) -> None:
+    if not signal_ids:
+        return
+    try:
+        await event_bus.publish(
+            "trade_signal_batch",
+            {
+                "event_type": str(event_type),
+                "source": str(source or ""),
+                "reason": reason,
+                "signal_count": int(len(signal_ids)),
+                "signal_ids": signal_ids[:500],
+                "emitted_at": _utc_now().isoformat(),
+                "trigger": "signal_bus",
+            },
+        )
+    except Exception:
+        pass
+
+
 def make_dedupe_key(*parts: Any) -> str:
     packed = "|".join(str(p or "") for p in parts)
     return hashlib.sha256(packed.encode("utf-8")).hexdigest()[:32]
@@ -355,6 +403,8 @@ async def upsert_trade_signal(
 ) -> TradeSignal:
     """Idempotently upsert a normalized trade signal by ``(source, dedupe_key)``."""
     row: Optional[TradeSignal] = None
+    emission_event_type = "upsert_insert"
+    emission_reason: str | None = None
 
     # Prefer pending in-session rows first so we can avoid query-invoked
     # autoflush while still preserving same-transaction dedupe behavior.
@@ -440,6 +490,8 @@ async def upsert_trade_signal(
                 reason=emission_reason,
             )
         else:
+            emission_event_type = "upsert_ignored_terminal"
+            emission_reason = f"terminal_status:{previous_status}"
             await _record_signal_emission(
                 session,
                 row,
@@ -450,6 +502,11 @@ async def upsert_trade_signal(
     if commit:
         await session.commit()
         await refresh_trade_signal_snapshots(session)
+        await _publish_trade_signal_emission(
+            row=row,
+            event_type=emission_event_type,
+            reason=emission_reason,
+        )
     return row
 
 
@@ -478,6 +535,11 @@ async def set_trade_signal_status(
     if commit:
         await session.commit()
         await refresh_trade_signal_snapshots(session)
+        await _publish_trade_signal_emission(
+            row=row,
+            event_type="status_update",
+            reason=f"status:{status}",
+        )
     return True
 
 
@@ -493,6 +555,7 @@ async def expire_stale_signals(session: AsyncSession, *, commit: bool = True) ->
         )
     )
     rows = list(result.scalars().all())
+    expired_signal_ids: list[str] = []
     for row in rows:
         expire_reason = None
         expires_at = row.expires_at
@@ -510,6 +573,7 @@ async def expire_stale_signals(session: AsyncSession, *, commit: bool = True) ->
             continue
         row.status = "expired"
         row.updated_at = now_naive
+        expired_signal_ids.append(str(row.id))
         await _record_signal_emission(
             session,
             row,
@@ -519,9 +583,14 @@ async def expire_stale_signals(session: AsyncSession, *, commit: bool = True) ->
     if rows and commit:
         await session.commit()
         await refresh_trade_signal_snapshots(session)
+        await _publish_trade_signal_batch(
+            event_type="status_expired",
+            signal_ids=expired_signal_ids,
+            reason="expire_stale_signals",
+        )
     elif commit:
         await session.commit()
-    return len(rows)
+    return len(expired_signal_ids)
 
 
 async def expire_source_signals_except(
@@ -550,10 +619,12 @@ async def expire_source_signals_except(
         query = query.where(~TradeSignal.dedupe_key.in_(list(keep)))
 
     rows = list((await session.execute(query)).scalars().all())
+    expired_signal_ids: list[str] = []
     for row in rows:
         row.status = "expired"
         row.expires_at = now
         row.updated_at = now
+        expired_signal_ids.append(str(row.id))
         await _record_signal_emission(
             session,
             row,
@@ -564,6 +635,12 @@ async def expire_source_signals_except(
     if rows and commit:
         await session.commit()
         await refresh_trade_signal_snapshots(session)
+        await _publish_trade_signal_batch(
+            event_type="status_expired",
+            signal_ids=expired_signal_ids,
+            source=str(source),
+            reason="source_sweep",
+        )
     elif commit:
         await session.commit()
 
@@ -597,7 +674,7 @@ async def list_pending_trade_signals(
     sources: Optional[list[str]] = None,
     limit: int = 500,
 ) -> list[TradeSignal]:
-    now = _utc_now()
+    now = _to_utc_naive(_utc_now())
     query = (
         select(TradeSignal)
         .where(TradeSignal.status == "pending")

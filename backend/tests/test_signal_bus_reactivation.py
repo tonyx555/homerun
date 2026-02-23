@@ -1,6 +1,6 @@
 import sys
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -402,5 +402,66 @@ async def test_bridge_refreshes_prices_before_upsert(monkeypatch, tmp_path):
             assert markets[0].get("yes_price") == pytest.approx(0.61)
             assert markets[0].get("is_price_fresh") is True
             assert markets[0].get("price_updated_at") == "2026-02-21T00:00:00Z"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_bridge_serializes_datetime_strategy_context(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    try:
+        async with session_factory() as session:
+            observed_at = datetime.now(timezone.utc).replace(microsecond=0)
+            opportunity = Opportunity(
+                strategy="traders_confluence",
+                title="Datetime strategy context",
+                description="Bridge should serialize non-JSON-native context values.",
+                total_cost=0.42,
+                expected_payout=1.0,
+                gross_profit=0.58,
+                fee=0.0,
+                net_profit=0.58,
+                roi_percent=138.0,
+                risk_score=0.2,
+                confidence=0.77,
+                markets=[
+                    {
+                        "id": "market_datetime_ctx",
+                        "question": "Will this serialize?",
+                        "clob_token_ids": ["yes_token", "no_token"],
+                        "yes_price": 0.42,
+                        "no_price": 0.58,
+                    }
+                ],
+                positions_to_take=[
+                    {
+                        "market_id": "market_datetime_ctx",
+                        "action": "BUY",
+                        "outcome": "YES",
+                        "price": 0.42,
+                    }
+                ],
+                strategy_context={
+                    "observed_at": observed_at,
+                    "nested": {"expires_at": observed_at + timedelta(minutes=5)},
+                },
+            )
+
+            emitted = await bridge_opportunities_to_signals(
+                session,
+                [opportunity],
+                source="traders",
+                sweep_missing=True,
+                refresh_prices=False,
+            )
+            assert emitted == 1
+
+            rows = (
+                (await session.execute(select(TradeSignal).where(TradeSignal.source == "traders"))).scalars().all()
+            )
+            assert len(rows) == 1
+            context = dict(rows[0].strategy_context_json or {})
+            assert isinstance(context.get("observed_at"), str)
+            assert isinstance((context.get("nested") or {}).get("expires_at"), str)
     finally:
         await engine.dispose()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from services.polymarket import polymarket_client
@@ -12,6 +13,106 @@ from utils.utcnow import utcnow
 _POLYMARKET_CONDITION_ID_RE = re.compile(r"^0x[0-9a-f]{64}$")
 _POLYMARKET_NUMERIC_TOKEN_ID_RE = re.compile(r"^\d{18,}$")
 _POLYMARKET_HEX_TOKEN_ID_RE = re.compile(r"^(?:0x)?[0-9a-f]{40,}$")
+
+
+def _coerce_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if value in (None, ""):
+        return None
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return None
+
+
+def _parse_market_datetime(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if isinstance(value, (int, float)):
+        ts = float(value)
+        if ts > 1_000_000_000_000:
+            ts /= 1000.0
+        if ts <= 0:
+            return None
+        try:
+            return datetime.fromtimestamp(ts, tz=timezone.utc)
+        except Exception:
+            return None
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        numeric = safe_float(raw)
+        if numeric is not None:
+            return _parse_market_datetime(numeric)
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except Exception:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    return None
+
+
+def _extract_market_timing(market_info: dict[str, Any]) -> dict[str, Any]:
+    end_dt: Optional[datetime] = None
+    for key in (
+        "end_time",
+        "endTime",
+        "end_date_iso",
+        "endDateIso",
+        "end_date",
+        "endDate",
+        "closes_at",
+        "closesAt",
+        "accepting_orders_until",
+        "acceptingOrdersUntil",
+    ):
+        end_dt = _parse_market_datetime(market_info.get(key))
+        if end_dt is not None:
+            break
+
+    seconds_left = safe_float(
+        market_info.get("seconds_left")
+        or market_info.get("secondsLeft")
+        or market_info.get("seconds_until_close")
+        or market_info.get("secondsUntilClose")
+    )
+    if seconds_left is not None:
+        seconds_left = max(0.0, float(seconds_left))
+    if end_dt is not None:
+        computed = max(0.0, (end_dt - utcnow()).total_seconds())
+        seconds_left = computed if seconds_left is None else min(seconds_left, computed)
+
+    closed_hint = _coerce_bool(market_info.get("closed"))
+    resolved_hint = _coerce_bool(market_info.get("resolved"))
+    active_hint = _coerce_bool(market_info.get("active"))
+    is_live = _coerce_bool(market_info.get("is_live"))
+    if is_live is None:
+        if closed_hint is True or resolved_hint is True:
+            is_live = False
+        elif seconds_left is not None:
+            is_live = seconds_left > 0.0
+        elif active_hint is not None:
+            is_live = active_hint
+    is_current = _coerce_bool(market_info.get("is_current"))
+    if is_current is None:
+        is_current = is_live
+
+    return {
+        "end_time": end_dt.isoformat().replace("+00:00", "Z") if end_dt is not None else None,
+        "seconds_left": seconds_left,
+        "is_live": is_live,
+        "is_current": is_current,
+        "closed": closed_hint,
+        "resolved": resolved_hint,
+    }
 
 
 def _normalize_identifier(value: Any) -> str:
@@ -394,6 +495,7 @@ async def build_live_signal_contexts(
         if model_probability is not None and selected_live is not None:
             live_edge = (model_probability - selected_live) * 100.0
 
+        timing = _extract_market_timing(market_info)
         contexts[signal_id] = {
             "available": bool(selected_live is not None),
             "fetched_at": fetched_at_iso,
@@ -415,8 +517,19 @@ async def build_live_signal_contexts(
             "entry_price_delta": entry_delta,
             "entry_price_delta_pct": entry_delta_pct,
             "adverse_price_move": adverse_move,
+            "liquidity_usd": safe_float(market_info.get("liquidity")),
+            "volume_usd": safe_float(market_info.get("volume")),
+            "spread": safe_float(market_info.get("spread")),
             "model_probability": model_probability,
             "live_edge_percent": live_edge,
+            "oracle_age_seconds": safe_float(market_info.get("oracle_age_seconds")),
+            "oracle_updated_at_ms": safe_float(market_info.get("oracle_updated_at_ms")),
+            "market_end_time": timing.get("end_time"),
+            "seconds_left": timing.get("seconds_left"),
+            "is_live": timing.get("is_live"),
+            "is_current": timing.get("is_current"),
+            "market_closed": timing.get("closed"),
+            "market_resolved": timing.get("resolved"),
             "history_summary": _build_history_summary(selected_history),
             "history_tail": (selected_history[-max(1, int(history_tail_points)) :] if selected_history else []),
         }

@@ -618,6 +618,7 @@ async def lifespan(app: FastAPI):
             "workers.weather_worker",
             "workers.tracked_traders_worker",
             "workers.trader_orchestrator_worker",
+            "workers.trader_reconciliation_worker",
             "workers.events_worker",
             "workers.discovery_worker",
         )

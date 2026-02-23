@@ -13,6 +13,7 @@ from typing import Optional, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.opportunity import Opportunity
+from services.event_bus import event_bus
 from services.signal_bus import (
     build_signal_contract_from_opportunity,
     expire_source_signals_except,
@@ -69,6 +70,7 @@ async def bridge_opportunities_to_signals(
             pass
     emitted = 0
     keep_dedupe_keys: set[str] = set()
+    signal_ids: list[str] = []
 
     for opp in opportunities:
         market_id, direction, entry_price, market_question, payload_json, strategy_context_json = (
@@ -101,7 +103,7 @@ async def bridge_opportunities_to_signals(
                 opp_quality_passed = True
                 opp_rejection_reasons = None
 
-        await upsert_trade_signal(
+        signal_row = await upsert_trade_signal(
             session,
             source=source,
             source_item_id=opp.stable_id,
@@ -123,6 +125,7 @@ async def bridge_opportunities_to_signals(
             commit=False,
         )
         emitted += 1
+        signal_ids.append(str(signal_row.id))
 
     if sweep_missing:
         await expire_source_signals_except(
@@ -134,4 +137,18 @@ async def bridge_opportunities_to_signals(
         )
     await _commit_with_retry(session)
     await refresh_trade_signal_snapshots(session)
+    if signal_ids:
+        try:
+            await event_bus.publish(
+                "trade_signal_batch",
+                {
+                    "source": str(source),
+                    "signal_count": int(len(signal_ids)),
+                    "signal_ids": signal_ids[:500],
+                    "emitted_at": now.isoformat(),
+                    "trigger": "strategy_signal_bridge",
+                },
+            )
+        except Exception:
+            pass
     return emitted

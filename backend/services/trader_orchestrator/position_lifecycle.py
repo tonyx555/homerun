@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import settings
 from models.database import TradeSignal, TraderOrder
 from services.polymarket import polymarket_client
 from services.simulation import simulation_service
+from services.trading import trading_service
 from utils.utcnow import utcnow
 from utils.converters import safe_float
 
@@ -20,6 +22,52 @@ PAPER_ACTIVE_STATUSES = {"submitted", "executed", "open"}
 LIVE_ACTIVE_STATUSES = {"submitted", "executed", "open"}
 _FAILED_EXIT_MAX_RETRIES = 5
 _FAILED_EXIT_MIN_RETRY_INTERVAL_SECONDS = 15
+_WALLET_SIZE_EPSILON = 1e-9
+_MARK_TOUCH_INTERVAL_SECONDS = 0.5
+
+
+def _mark_touch_interval_seconds(params: dict[str, Any], *, mode: str) -> float:
+    mode_key = str(mode or "").strip().lower()
+    aliases: tuple[str, ...]
+    if mode_key == "paper":
+        aliases = ("paper_mark_touch_interval_seconds", "mark_touch_interval_seconds")
+    else:
+        aliases = ("live_mark_touch_interval_seconds", "mark_touch_interval_seconds")
+    for key in aliases:
+        parsed = safe_float(params.get(key))
+        if parsed is None:
+            continue
+        return max(0.05, min(5.0, float(parsed)))
+    return _MARK_TOUCH_INTERVAL_SECONDS
+
+
+async def _publish_trader_order_updates(rows: list[TraderOrder]) -> None:
+    if not rows:
+        return
+    from services.event_bus import event_bus
+    from services.trader_orchestrator_state import _serialize_order
+
+    seen: set[str] = set()
+    for row in rows:
+        row_id = str(getattr(row, "id", "") or "").strip()
+        if not row_id or row_id in seen:
+            continue
+        seen.add(row_id)
+        try:
+            await event_bus.publish("trader_order", _serialize_order(row))
+        except Exception:
+            continue
+
+
+def _failed_exit_retry_delay_seconds(last_error: Any) -> int:
+    error_text = str(last_error or "").strip().lower()
+    if "not enough balance / allowance" in error_text or "allowance" in error_text:
+        return 90
+    if "below minimum" in error_text or "exit_notional_below_min" in error_text:
+        return 20
+    if "missing token_id or fill_size" in error_text:
+        return 30
+    return _FAILED_EXIT_MIN_RETRY_INTERVAL_SECONDS
 
 
 def _safe_bool(value: Any, default: bool = False) -> bool:
@@ -256,6 +304,391 @@ def _extract_live_fill_metrics(payload: dict[str, Any]) -> tuple[float, float, O
     return filled_notional, filled_size, average_fill_price
 
 
+def _extract_live_token_id(payload: dict[str, Any]) -> str:
+    token_id = str(payload.get("token_id") or payload.get("selected_token_id") or "").strip()
+    if token_id:
+        return token_id
+    provider_reconciliation = payload.get("provider_reconciliation")
+    if isinstance(provider_reconciliation, dict):
+        snapshot = provider_reconciliation.get("snapshot")
+        if isinstance(snapshot, dict):
+            token_id = str(
+                snapshot.get("asset_id")
+                or snapshot.get("asset")
+                or snapshot.get("token_id")
+                or ""
+            ).strip()
+            if token_id:
+                return token_id
+    return ""
+
+
+def _extract_wallet_settlement_price(wallet_position: Optional[dict[str, Any]]) -> Optional[float]:
+    if not isinstance(wallet_position, dict):
+        return None
+    if not _safe_bool(wallet_position.get("redeemable"), False):
+        return None
+    mark = safe_float(wallet_position.get("curPrice"))
+    if mark is None:
+        mark = safe_float(wallet_position.get("currentPrice"))
+    if mark is None:
+        return None
+    if mark <= 0.001:
+        return 0.0
+    if mark >= 0.999:
+        return 1.0
+    return None
+
+
+def _extract_wallet_position_size(wallet_position: Optional[dict[str, Any]]) -> float:
+    if not isinstance(wallet_position, dict):
+        return 0.0
+    size = safe_float(wallet_position.get("size"))
+    if size is None:
+        size = safe_float(wallet_position.get("positionSize"))
+    if size is None:
+        size = safe_float(wallet_position.get("shares"))
+    return max(0.0, float(size or 0.0))
+
+
+def _extract_wallet_mark_price(wallet_position: Optional[dict[str, Any]]) -> Optional[float]:
+    if not isinstance(wallet_position, dict):
+        return None
+    mark = safe_float(wallet_position.get("curPrice"))
+    if mark is None:
+        mark = safe_float(wallet_position.get("currentPrice"))
+    if mark is None:
+        mark = safe_float(wallet_position.get("markPrice"))
+    if mark is None:
+        mark = safe_float(wallet_position.get("price"))
+    if mark is None or mark < 0:
+        return None
+    return float(mark)
+
+
+def _pending_exit_fill_threshold(pending_exit: dict[str, Any]) -> float:
+    parsed = safe_float(
+        pending_exit.get("fill_ratio_threshold")
+        if pending_exit.get("fill_ratio_threshold") is not None
+        else pending_exit.get("fill_threshold_ratio")
+    )
+    if parsed is None:
+        return 0.995
+    return max(0.5, min(1.0, float(parsed)))
+
+
+def _pending_exit_provider_clob_id(pending_exit: dict[str, Any]) -> str:
+    direct = str(
+        pending_exit.get("provider_clob_order_id")
+        or pending_exit.get("exit_order_clob_id")
+        or ""
+    ).strip()
+    if direct:
+        return direct
+    fallback = str(pending_exit.get("exit_order_id") or "").strip()
+    if not fallback:
+        return ""
+    if fallback.startswith("0x") or fallback.isdigit():
+        return fallback
+    try:
+        cached = trading_service.get_order(fallback)
+    except Exception:
+        cached = None
+    if cached is None:
+        return ""
+    return str(getattr(cached, "clob_order_id", "") or "").strip()
+
+
+def _extract_wallet_trade_token_id(trade: dict[str, Any]) -> str:
+    return str(
+        trade.get("asset_id")
+        or trade.get("asset")
+        or trade.get("token_id")
+        or trade.get("tokenId")
+        or ""
+    ).strip()
+
+
+def _extract_wallet_trade_side(trade: dict[str, Any]) -> str:
+    return str(
+        trade.get("side")
+        or trade.get("trade_side")
+        or trade.get("type")
+        or ""
+    ).strip().lower()
+
+
+def _extract_wallet_trade_size(trade: dict[str, Any]) -> float:
+    size = safe_float(trade.get("size"))
+    if size is None:
+        size = safe_float(trade.get("amount"))
+    if size is None:
+        size = safe_float(trade.get("shares"))
+    if size is None:
+        size = safe_float(trade.get("matched_size"))
+    return max(0.0, float(size or 0.0))
+
+
+def _extract_wallet_trade_price(trade: dict[str, Any]) -> Optional[float]:
+    price = safe_float(trade.get("price"))
+    if price is None:
+        price = safe_float(trade.get("avg_price"))
+    if price is None:
+        price = safe_float(trade.get("limit_price"))
+    if price is None or price < 0:
+        return None
+    return float(price)
+
+
+def _parse_iso_utc_naive(value: Any) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1]
+    try:
+        parsed = datetime.fromisoformat(text)
+    except Exception:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _parse_wallet_trade_time(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            ts = float(value)
+            if ts > 1e12:
+                ts = ts / 1000.0
+            return datetime.fromtimestamp(ts, tz=timezone.utc).replace(tzinfo=None)
+        except Exception:
+            return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return _parse_iso_utc_naive(text)
+
+
+def _parse_market_end_time_naive(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    if isinstance(value, (int, float)):
+        try:
+            ts = float(value)
+            if ts > 1e12:
+                ts = ts / 1000.0
+            return datetime.fromtimestamp(ts, tz=timezone.utc).replace(tzinfo=None)
+        except Exception:
+            return None
+    return _parse_iso_utc_naive(value)
+
+
+def _extract_market_end_time_naive(market_info: Any) -> Optional[datetime]:
+    if not isinstance(market_info, dict):
+        return None
+    for key in (
+        "end_time",
+        "endTime",
+        "end_date",
+        "endDate",
+        "market_end_time",
+        "expiration_time",
+    ):
+        parsed = _parse_market_end_time_naive(market_info.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _market_seconds_left(market_info: Any, now: datetime) -> Optional[float]:
+    if not isinstance(market_info, dict):
+        return None
+    for key in ("seconds_left", "secondsLeft", "seconds_until_close", "secondsUntilClose"):
+        parsed = safe_float(market_info.get(key), None)
+        if parsed is not None and parsed >= 0.0:
+            return float(parsed)
+    end_time = _extract_market_end_time_naive(market_info)
+    if end_time is None:
+        return None
+    now_naive = now.astimezone(timezone.utc).replace(tzinfo=None) if now.tzinfo is not None else now
+    return max(0.0, (end_time - now_naive).total_seconds())
+
+
+def _market_end_time_iso(market_info: Any) -> Optional[str]:
+    end_time = _extract_market_end_time_naive(market_info)
+    if end_time is None:
+        return None
+    return end_time.isoformat() + "Z"
+
+
+async def _resolve_execution_wallet_address() -> str:
+    wallet = ""
+    try:
+        await trading_service.ensure_initialized()
+    except Exception:
+        pass
+    try:
+        wallet = str(trading_service.get_execution_wallet_address() or "").strip()
+    except Exception:
+        wallet = ""
+    if wallet:
+        return wallet
+    try:
+        runtime_signature_type = getattr(trading_service, "_balance_signature_type", None)
+        signature_type = (
+            int(runtime_signature_type)
+            if isinstance(runtime_signature_type, int)
+            else int(getattr(settings, "POLYMARKET_SIGNATURE_TYPE", 1))
+        )
+    except Exception:
+        signature_type = 1
+    try:
+        wallet = str(trading_service._funder_for_signature_type(signature_type) or "").strip()
+    except Exception:
+        wallet = ""
+    if not wallet:
+        wallet = str(trading_service._get_wallet_address() or "").strip()
+    return wallet
+
+
+async def _load_execution_wallet_positions_by_token() -> dict[str, dict[str, Any]]:
+    wallet = await _resolve_execution_wallet_address()
+    if not wallet:
+        return {}
+
+    try:
+        positions = await polymarket_client.get_wallet_positions(wallet)
+    except Exception:
+        return {}
+
+    by_token: dict[str, dict[str, Any]] = {}
+    for position in positions:
+        if not isinstance(position, dict):
+            continue
+        token_id = str(
+            position.get("asset")
+            or position.get("asset_id")
+            or position.get("token_id")
+            or ""
+        ).strip()
+        if not token_id:
+            continue
+        by_token[token_id] = position
+    return by_token
+
+
+async def _load_execution_wallet_recent_sell_trades_by_token() -> dict[str, dict[str, Any]]:
+    wallet = await _resolve_execution_wallet_address()
+    if not wallet:
+        return {}
+    try:
+        trades = await polymarket_client.get_wallet_trades(wallet, limit=250)
+    except Exception:
+        return {}
+    if not isinstance(trades, list):
+        return {}
+
+    latest_by_token: dict[str, dict[str, Any]] = {}
+    market_cache_by_condition: dict[str, Optional[dict[str, Any]]] = {}
+
+    async def _infer_trade_token_id(trade: dict[str, Any]) -> str:
+        condition_id = str(
+            trade.get("conditionId")
+            or trade.get("condition_id")
+            or trade.get("market")
+            or ""
+        ).strip()
+        if not condition_id:
+            return ""
+
+        if condition_id not in market_cache_by_condition:
+            market_cache_by_condition[condition_id] = await polymarket_client.get_market_by_condition_id(
+                condition_id
+            )
+        market_info = market_cache_by_condition.get(condition_id)
+        if not isinstance(market_info, dict):
+            return ""
+
+        token_ids_raw = market_info.get("token_ids")
+        if not isinstance(token_ids_raw, list):
+            token_ids_raw = market_info.get("tokenIds")
+        if not isinstance(token_ids_raw, list):
+            return ""
+        token_ids = [str(token_id or "").strip() for token_id in token_ids_raw]
+        if not token_ids:
+            return ""
+
+        outcomes_raw = market_info.get("outcomes")
+        outcomes: list[str] = []
+        if isinstance(outcomes_raw, list):
+            outcomes = [str(outcome or "").strip().lower() for outcome in outcomes_raw]
+
+        outcome_idx = safe_float(
+            trade.get("outcomeIndex")
+            if trade.get("outcomeIndex") is not None
+            else trade.get("outcome_index")
+        )
+        if outcome_idx is not None:
+            idx = int(outcome_idx)
+            if 0 <= idx < len(token_ids):
+                return token_ids[idx]
+
+        outcome_text = str(
+            trade.get("outcome")
+            or trade.get("token_outcome")
+            or ""
+        ).strip().lower()
+        if outcome_text and outcomes:
+            for idx, outcome_label in enumerate(outcomes):
+                if outcome_label == outcome_text and idx < len(token_ids):
+                    return token_ids[idx]
+
+        return ""
+
+    for trade in trades:
+        if not isinstance(trade, dict):
+            continue
+        token_id = _extract_wallet_trade_token_id(trade)
+        if not token_id:
+            token_id = await _infer_trade_token_id(trade)
+        if not token_id:
+            continue
+        if _extract_wallet_trade_side(trade) != "sell":
+            continue
+        size = _extract_wallet_trade_size(trade)
+        if size <= 0.0:
+            continue
+        price = _extract_wallet_trade_price(trade)
+        timestamp = _parse_wallet_trade_time(
+            trade.get("timestamp")
+            or trade.get("created_at")
+            or trade.get("createdAt")
+            or trade.get("time")
+        )
+        record = {
+            "trade_id": str(trade.get("id") or trade.get("order_id") or trade.get("orderId") or "").strip(),
+            "token_id": token_id,
+            "size": size,
+            "price": price,
+            "timestamp": timestamp,
+        }
+        existing = latest_by_token.get(token_id)
+        if existing is None:
+            latest_by_token[token_id] = record
+            continue
+        existing_ts = existing.get("timestamp")
+        if timestamp is not None and (
+            existing_ts is None or (isinstance(existing_ts, datetime) and timestamp > existing_ts)
+        ):
+            latest_by_token[token_id] = record
+    return latest_by_token
+
+
 async def load_market_info_for_orders(orders: list[TraderOrder]) -> dict[str, Optional[dict[str, Any]]]:
     market_ids = sorted({str(order.market_id or "").strip() for order in orders if str(order.market_id or "").strip()})
     if not market_ids:
@@ -370,6 +803,8 @@ async def reconcile_paper_positions(
         signal_payload = signal_payloads.get(str(row.signal_id), {})
         market_info = market_info_by_id.get(str(row.market_id or ""))
         market_tradable = polymarket_client.is_market_tradable(market_info, now=now)
+        market_seconds_left = _market_seconds_left(market_info, now)
+        market_end_time = _market_end_time_iso(market_info)
         winning_idx = _extract_winning_outcome_index(market_info)
         winning_idx_inferred = False
         if winning_idx is None and resolution_infer_from_prices:
@@ -478,6 +913,8 @@ async def reconcile_paper_positions(
                             "market_tradable": market_tradable,
                             "is_resolved": False,
                             "winning_outcome": None,
+                            "seconds_left": market_seconds_left,
+                            "end_time": market_end_time,
                         }
 
                         exit_decision = _exit_instance.should_exit(pos_view, market_state_dict)
@@ -674,6 +1111,7 @@ async def reconcile_paper_positions(
 
     if not dry_run and (closed > 0 or state_updates > 0):
         await session.commit()
+        await _publish_trader_order_updates([row for row in candidates if row.updated_at == now])
 
     return {
         "trader_id": trader_id,
@@ -721,6 +1159,7 @@ async def reconcile_live_positions(
         1.0,
         max(0.5, safe_float(params.get("live_resolution_settle_floor")) or 0.98),
     )
+    mark_touch_interval_seconds = _mark_touch_interval_seconds(params, mode="live")
 
     candidates = list(
         (
@@ -745,6 +1184,98 @@ async def reconcile_live_positions(
             and (row.executed_at or row.updated_at or row.created_at) <= cutoff
         ]
 
+    now = utcnow()
+    now_naive = now.astimezone(timezone.utc).replace(tzinfo=None) if now.tzinfo is not None else now
+    would_close = 0
+    closed = 0
+    held = 0
+    skipped = 0
+    total_realized_pnl = 0.0
+    by_status: dict[str, int] = {"resolved_win": 0, "resolved_loss": 0, "closed_win": 0, "closed_loss": 0}
+    skipped_reasons: dict[str, int] = {}
+    details: list[dict[str, Any]] = []
+    state_updates = 0
+
+    candidate_ids = {str(row.id) for row in candidates}
+    terminal_rows = list(
+        (
+            await session.execute(
+                select(TraderOrder).where(
+                    TraderOrder.trader_id == trader_id,
+                    func.lower(func.coalesce(TraderOrder.mode, "")) == "live",
+                    func.lower(func.coalesce(TraderOrder.status, "")).in_(("closed_win", "closed_loss")),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if max_age_hours is not None:
+        cutoff = now - timedelta(hours=max(1, int(max_age_hours)))
+        terminal_rows = [
+            row
+            for row in terminal_rows
+            if (row.executed_at or row.updated_at or row.created_at) is not None
+            and (row.executed_at or row.updated_at or row.created_at) <= cutoff
+        ]
+
+    for row in terminal_rows:
+        row_id = str(row.id)
+        if row_id in candidate_ids:
+            continue
+        payload = dict(row.payload_json or {})
+        pending_exit = payload.get("pending_live_exit")
+        if not isinstance(pending_exit, dict):
+            continue
+        pending_status = str(pending_exit.get("status") or "").strip().lower()
+        if pending_status != "filled":
+            continue
+        close_trigger = str(pending_exit.get("close_trigger") or "").strip().lower()
+        if "resolution" in close_trigger:
+            continue
+        required_exit_size = max(0.0, safe_float(pending_exit.get("exit_size"), 0.0) or 0.0)
+        if required_exit_size <= 0.0:
+            continue
+        filled_exit_size = max(0.0, safe_float(pending_exit.get("filled_size"), 0.0) or 0.0)
+        fill_ratio = safe_float(pending_exit.get("fill_ratio"))
+        if fill_ratio is None:
+            fill_ratio = (filled_exit_size / required_exit_size) if required_exit_size > 0.0 else 0.0
+        threshold_ratio = _pending_exit_fill_threshold(pending_exit)
+        if fill_ratio + 1e-9 >= threshold_ratio:
+            continue
+        if not dry_run:
+            row.status = "open"
+            row.actual_profit = None
+            row.updated_at = now
+            pending_exit["status"] = (
+                "submitted"
+                if str(pending_exit.get("exit_order_id") or "").strip()
+                or str(pending_exit.get("provider_clob_order_id") or "").strip()
+                else "pending"
+            )
+            pending_exit["reopened_at"] = now.isoformat() + "Z"
+            pending_exit["reopen_reason"] = "partial_exit_fill_below_threshold"
+            pending_exit["fill_ratio"] = float(fill_ratio)
+            payload["pending_live_exit"] = pending_exit
+            payload.pop("position_close", None)
+            row.payload_json = payload
+            state_updates += 1
+        details.append(
+            {
+                "order_id": row.id,
+                "market_id": row.market_id,
+                "close_trigger": str(pending_exit.get("close_trigger") or "live_exit_fill"),
+                "filled_size": filled_exit_size,
+                "required_exit_size": required_exit_size,
+                "fill_ratio": float(fill_ratio),
+                "fill_ratio_threshold": threshold_ratio,
+                "next_status": "open",
+                "note": "reopened_partial_exit_fill_below_threshold",
+            }
+        )
+        candidates.append(row)
+        candidate_ids.add(row_id)
+
     signal_ids = [str(row.signal_id) for row in candidates if row.signal_id]
     signal_payloads: dict[str, dict[str, Any]] = {}
     if signal_ids:
@@ -756,96 +1287,733 @@ async def reconcile_live_positions(
         signal_payloads = {str(row.id): dict(row.payload_json or {}) for row in signal_rows}
 
     market_info_by_id = await load_market_info_for_orders(candidates)
+    wallet_positions_by_token = await _load_execution_wallet_positions_by_token()
+    wallet_sell_trades_by_token = await _load_execution_wallet_recent_sell_trades_by_token()
+    redis_mid_prices: dict[str, float] = {}
+    clob_mid_prices: dict[str, float] = {}
+    token_ids_for_prices = sorted(
+        {
+            token_id
+            for token_id in (
+                _extract_live_token_id(dict(row.payload_json or {}))
+                for row in candidates
+            )
+            if token_id
+        }
+    )
+    if token_ids_for_prices:
+        try:
+            from services.redis_price_cache import redis_price_cache
 
-    now = utcnow()
-    would_close = 0
-    closed = 0
-    held = 0
-    skipped = 0
-    total_realized_pnl = 0.0
-    by_status: dict[str, int] = {"resolved_win": 0, "resolved_loss": 0, "closed_win": 0, "closed_loss": 0}
-    skipped_reasons: dict[str, int] = {}
-    details: list[dict[str, Any]] = []
-    state_updates = 0
+            redis_rows = await redis_price_cache.read_prices(token_ids_for_prices)
+            for token_id, price_row in redis_rows.items():
+                mid = safe_float((price_row or {}).get("mid")) if isinstance(price_row, dict) else None
+                if mid is not None and mid >= 0:
+                    redis_mid_prices[str(token_id).strip()] = float(mid)
+        except Exception:
+            redis_mid_prices = {}
+        unresolved_token_ids = [token_id for token_id in token_ids_for_prices if token_id not in redis_mid_prices]
+        if unresolved_token_ids:
+            async def _fetch_clob_midpoint(token_id: str) -> tuple[str, Optional[float]]:
+                try:
+                    midpoint = await asyncio.wait_for(
+                        polymarket_client.get_midpoint(token_id),
+                        timeout=1.5,
+                    )
+                except Exception:
+                    return token_id, None
+                parsed_midpoint = safe_float(midpoint)
+                if parsed_midpoint is None or parsed_midpoint < 0:
+                    return token_id, None
+                return token_id, float(parsed_midpoint)
+
+            midpoint_pairs = await asyncio.gather(
+                *[_fetch_clob_midpoint(token_id) for token_id in unresolved_token_ids],
+                return_exceptions=True,
+            )
+            for item in midpoint_pairs:
+                if isinstance(item, Exception):
+                    continue
+                token_id, midpoint = item
+                if midpoint is not None:
+                    clob_mid_prices[str(token_id).strip()] = midpoint
+
+    pending_exit_provider_ids = sorted(
+        {
+            _pending_exit_provider_clob_id(pending_exit)
+            for pending_exit in (
+                (dict((row.payload_json or {})).get("pending_live_exit"))
+                for row in candidates
+            )
+            if isinstance(pending_exit, dict)
+            and str(pending_exit.get("status") or "").strip().lower() in {"submitted", "pending"}
+            and _pending_exit_provider_clob_id(pending_exit)
+        }
+    )
+    pending_exit_snapshots: dict[str, dict[str, Any]] = {}
+    if pending_exit_provider_ids:
+        try:
+            pending_exit_snapshots = await trading_service.get_order_snapshots_by_clob_ids(
+                pending_exit_provider_ids
+            )
+        except Exception:
+            pending_exit_snapshots = {}
 
     for row in candidates:
         payload = dict(row.payload_json or {})
+        token_id = _extract_live_token_id(payload)
+        wallet_position = wallet_positions_by_token.get(token_id) if token_id else None
+        wallet_position_size = _extract_wallet_position_size(wallet_position)
+        wallet_mark_price = _extract_wallet_mark_price(wallet_position)
+        wallet_settlement_price = _extract_wallet_settlement_price(wallet_position)
+        latest_wallet_sell_trade = wallet_sell_trades_by_token.get(token_id) if token_id else None
+        entry_fill_notional, entry_fill_size, entry_fill_price = _extract_live_fill_metrics(payload)
+        if entry_fill_price is None or entry_fill_price <= 0.0:
+            entry_fill_price = safe_float(row.effective_price)
+        if entry_fill_price is None or entry_fill_price <= 0.0:
+            entry_fill_price = safe_float(row.entry_price)
+        if entry_fill_notional <= 0.0:
+            entry_fill_notional = max(0.0, safe_float(row.notional_usd) or 0.0)
+        if entry_fill_size <= 0.0 and entry_fill_notional > 0.0 and entry_fill_price and entry_fill_price > 0.0:
+            entry_fill_size = entry_fill_notional / entry_fill_price
+        pending_outcome_idx = _direction_outcome_index(row.direction)
+        pending_market_info = market_info_by_id.get(str(row.market_id or ""))
+        pending_market_tradable = polymarket_client.is_market_tradable(pending_market_info, now=now)
+        pending_winning_idx = _extract_winning_outcome_index(pending_market_info)
+        pending_winning_idx_inferred = False
+        if pending_winning_idx is None and resolution_infer_from_prices:
+            inferred_pending_idx = _extract_winning_outcome_index_from_prices(
+                pending_market_info,
+                market_tradable=pending_market_tradable,
+                settle_floor=resolution_settle_floor,
+            )
+            if inferred_pending_idx is not None:
+                pending_winning_idx = inferred_pending_idx
+                pending_winning_idx_inferred = True
 
-        # ── Failed exit retry logic ────────────────────────────────────
-        # If a previous cycle recorded a pending_live_exit that failed,
-        # retry submitting the sell order (with cooldown & max retries).
-        pending_exit = payload.get("pending_live_exit")
-        if isinstance(pending_exit, dict) and pending_exit.get("status") == "failed":
-            retry_count = int(pending_exit.get("retry_count", 0) or 0)
-            last_attempt_iso = pending_exit.get("last_attempt_at") or pending_exit.get("triggered_at")
-            last_attempt_dt = None
-            if isinstance(last_attempt_iso, str):
-                try:
-                    last_attempt_dt = datetime.fromisoformat(last_attempt_iso.replace("Z", "+00:00")).replace(tzinfo=None)
-                except Exception:
-                    pass
-            seconds_since_attempt = (
-                (now - last_attempt_dt).total_seconds() if last_attempt_dt is not None else float("inf")
+        pending_signal_payload = signal_payloads.get(str(row.signal_id), {})
+        pending_market_side_price = (
+            _extract_market_side_price(pending_market_info, pending_outcome_idx)
+            if pending_outcome_idx is not None
+            else None
+        )
+        pending_snapshot_side_price = (
+            _extract_signal_side_price(pending_signal_payload, pending_outcome_idx)
+            if pending_outcome_idx is not None
+            else None
+        )
+        pending_redis_side_price = redis_mid_prices.get(token_id) if token_id else None
+        pending_clob_side_price = clob_mid_prices.get(token_id) if token_id else None
+        pending_current_price = (
+            pending_redis_side_price
+            if pending_redis_side_price is not None
+            else (
+                pending_clob_side_price
+                if pending_clob_side_price is not None
+                else (
+                    pending_market_side_price
+                    if pending_market_side_price is not None
+                    else (
+                        pending_snapshot_side_price
+                        if pending_snapshot_side_price is not None
+                        else wallet_mark_price
+                    )
+                )
+            )
+        )
+        pending_current_price = _state_price_floor(pending_current_price)
+        pending_current_price_source = (
+            "redis_mid"
+            if pending_redis_side_price is not None
+            else (
+                "clob_midpoint"
+                if pending_clob_side_price is not None
+                else (
+                    "market_mark"
+                    if pending_market_side_price is not None
+                    else (
+                        "signal_snapshot_mark"
+                        if pending_snapshot_side_price is not None
+                        else ("wallet_mark" if wallet_mark_price is not None else None)
+                    )
+                )
+            )
+        )
+        pending_position_state = _extract_position_state(payload)
+        pending_prev_high = safe_float(pending_position_state.get("highest_price"))
+        pending_prev_low = safe_float(pending_position_state.get("lowest_price"))
+        pending_prev_last_mark = safe_float(pending_position_state.get("last_mark_price"))
+        pending_prev_mark_source = str(pending_position_state.get("last_mark_source") or "")
+        pending_prev_marked_at = _parse_iso_utc_naive(pending_position_state.get("last_marked_at"))
+        pending_highest_price = pending_prev_high
+        pending_lowest_price = pending_prev_low
+        if pending_current_price is not None:
+            if pending_highest_price is None:
+                pending_highest_price = pending_current_price
+            else:
+                pending_highest_price = max(pending_highest_price, pending_current_price)
+            if pending_lowest_price is None:
+                pending_lowest_price = pending_current_price
+            else:
+                pending_lowest_price = min(pending_lowest_price, pending_current_price)
+        pending_next_state = {
+            "highest_price": _state_price_floor(pending_highest_price),
+            "lowest_price": _state_price_floor(pending_lowest_price),
+            "last_mark_price": pending_current_price,
+            "last_mark_source": pending_current_price_source,
+            "last_marked_at": now.isoformat() + "Z",
+        }
+        pending_state_changed = False
+        if pending_current_price is not None:
+            pending_mark_stale = (
+                pending_prev_marked_at is None
+                or (now_naive - pending_prev_marked_at).total_seconds() >= mark_touch_interval_seconds
+            )
+            pending_state_changed = (
+                pending_prev_last_mark is None
+                or abs(pending_prev_last_mark - pending_current_price) > 1e-9
+                or pending_prev_high is None
+                or pending_prev_low is None
+                or abs((pending_prev_high or 0.0) - (pending_highest_price or 0.0)) > 1e-9
+                or abs((pending_prev_low or 0.0) - (pending_lowest_price or 0.0)) > 1e-9
+                or pending_prev_mark_source != str(pending_current_price_source or "")
+                or pending_mark_stale
             )
 
-            if retry_count >= _FAILED_EXIT_MAX_RETRIES:
-                # Retries exhausted — terminal close at mark price.
-                current_mark = safe_float(
-                    (payload.get("position_state") or {}).get("last_mark_price")
-                )
+        # External/manual flatten convergence:
+        # if wallet inventory is flat and we have concrete wallet SELL evidence
+        # for this token after entry, treat the position as externally closed.
+        if (
+            token_id
+            and entry_fill_size > 0.0
+            and wallet_position_size <= _WALLET_SIZE_EPSILON
+            and pending_winning_idx is None
+            and wallet_settlement_price is None
+            and isinstance(latest_wallet_sell_trade, dict)
+        ):
+            trade_ts = latest_wallet_sell_trade.get("timestamp")
+            row_created = row.created_at
+            trade_after_entry = True
+            if isinstance(trade_ts, datetime) and isinstance(row_created, datetime):
+                entry_anchor = row_created
+                if entry_anchor.tzinfo is not None:
+                    entry_anchor = entry_anchor.astimezone(timezone.utc).replace(tzinfo=None)
+                trade_after_entry = trade_ts >= entry_anchor
+            if trade_after_entry:
+                close_price = safe_float(latest_wallet_sell_trade.get("price"))
+                if close_price is None or close_price <= 0.0:
+                    close_price = wallet_mark_price if wallet_mark_price is not None and wallet_mark_price > 0.0 else entry_fill_price
+                if close_price is not None and close_price > 0.0:
+                    close_qty = entry_fill_size
+                    close_notional = close_qty * close_price
+                    close_trigger = "external_wallet_flatten"
+                    pnl = close_notional - entry_fill_notional
+                    next_status = _status_for_close(pnl=pnl, close_trigger=close_trigger)
+                    details.append(
+                        {
+                            "order_id": row.id,
+                            "market_id": row.market_id,
+                            "close_trigger": close_trigger,
+                            "close_price": close_price,
+                            "realized_pnl": pnl,
+                            "next_status": next_status,
+                            "wallet_trade_id": latest_wallet_sell_trade.get("trade_id"),
+                        }
+                    )
+                    would_close += 1
+                    total_realized_pnl += pnl
+                    by_status[next_status] = int(by_status.get(next_status, 0)) + 1
+                    if not dry_run:
+                        pending_exit_local = payload.get("pending_live_exit")
+                        if isinstance(pending_exit_local, dict):
+                            pending_exit_local["status"] = "superseded_external"
+                            pending_exit_local["resolved_at"] = now.isoformat() + "Z"
+                            payload["pending_live_exit"] = pending_exit_local
+                        row.status = next_status
+                        row.actual_profit = pnl
+                        row.updated_at = now
+                        payload["position_close"] = {
+                            "close_price": close_price,
+                            "price_source": "wallet_trade",
+                            "close_trigger": close_trigger,
+                            "realized_pnl": pnl,
+                            "filled_size": close_qty,
+                            "closed_at": now.isoformat() + "Z",
+                            "reason": reason,
+                            "wallet_trade_id": str(latest_wallet_sell_trade.get("trade_id") or ""),
+                            "wallet_trade_timestamp": (
+                                latest_wallet_sell_trade.get("timestamp").isoformat() + "Z"
+                                if isinstance(latest_wallet_sell_trade.get("timestamp"), datetime)
+                                else None
+                            ),
+                        }
+                        row.payload_json = payload
+                        closed += 1
+                    continue
+
+        pending_exit = payload.get("pending_live_exit")
+        pending_exit_status = (
+            str(pending_exit.get("status") or "").strip().lower()
+            if isinstance(pending_exit, dict)
+            else ""
+        )
+        pending_exit_kind = (
+            str(pending_exit.get("kind") or "").strip().lower()
+            if isinstance(pending_exit, dict)
+            else ""
+        )
+        def _attach_pending_state(target_payload: dict[str, Any]) -> None:
+            if pending_state_changed:
+                target_payload["position_state"] = pending_next_state
+
+        # ── Submitted/pending exit reconciliation ──────────────────────
+        # For live exits we trust provider fill truth; a terminal local close
+        # only happens once provider fill size reaches the required threshold.
+        if isinstance(pending_exit, dict) and pending_exit_status in {"submitted", "pending"}:
+            if pending_winning_idx is not None and pending_outcome_idx is not None:
                 _fill_not, _fill_sz, _fill_px = _extract_live_fill_metrics(payload)
                 _ep = _fill_px if _fill_px and _fill_px > 0 else safe_float(row.effective_price)
                 if _ep is None or _ep <= 0:
                     _ep = safe_float(row.entry_price)
                 _not = _fill_not if _fill_not > 0 else (safe_float(row.notional_usd) or 0.0)
                 _qty = _fill_sz if _fill_sz > 0 else (_not / _ep if _ep and _ep > 0 else 0.0)
-                cp = current_mark if current_mark is not None else (_ep or 0.0)
+                cp = 1.0 if pending_winning_idx == pending_outcome_idx else 0.0
+                close_trigger = "resolution_inferred" if pending_winning_idx_inferred else "resolution"
                 _pnl = (_qty * cp) - _not if _qty > 0 and _not > 0 else 0.0
-                ns = _status_for_close(pnl=_pnl, close_trigger="failed_exit_exhausted")
+                ns = _status_for_close(pnl=_pnl, close_trigger=close_trigger)
                 if not dry_run:
                     row.status = ns
                     row.actual_profit = _pnl
                     row.updated_at = now
-                    pending_exit["status"] = "exhausted"
-                    pending_exit["exhausted_at"] = now.isoformat() + "Z"
+                    pending_exit["status"] = "superseded_resolution"
+                    pending_exit["resolved_at"] = now.isoformat() + "Z"
                     payload["pending_live_exit"] = pending_exit
                     payload["position_close"] = {
                         "close_price": cp,
-                        "price_source": "mark_on_exhaustion",
-                        "close_trigger": "failed_exit_exhausted",
+                        "price_source": "resolved_settlement",
+                        "close_trigger": close_trigger,
                         "realized_pnl": _pnl,
                         "closed_at": now.isoformat() + "Z",
                         "reason": reason,
-                        "retry_count": retry_count,
                     }
                     row.payload_json = payload
                     closed += 1
                 total_realized_pnl += _pnl
                 by_status[ns] = int(by_status.get(ns, 0)) + 1
                 would_close += 1
-                details.append({
-                    "order_id": row.id,
-                    "market_id": row.market_id,
-                    "close_trigger": "failed_exit_exhausted",
-                    "close_price": cp,
-                    "realized_pnl": _pnl,
-                    "next_status": ns,
-                    "retry_count": retry_count,
-                })
+                details.append(
+                    {
+                        "order_id": row.id,
+                        "market_id": row.market_id,
+                        "close_trigger": close_trigger,
+                        "close_price": cp,
+                        "realized_pnl": _pnl,
+                        "next_status": ns,
+                    }
+                )
                 continue
 
-            if seconds_since_attempt < _FAILED_EXIT_MIN_RETRY_INTERVAL_SECONDS:
+            if wallet_settlement_price is not None:
+                _fill_not, _fill_sz, _fill_px = _extract_live_fill_metrics(payload)
+                _ep = _fill_px if _fill_px and _fill_px > 0 else safe_float(row.effective_price)
+                if _ep is None or _ep <= 0:
+                    _ep = safe_float(row.entry_price)
+                _not = _fill_not if _fill_not > 0 else (safe_float(row.notional_usd) or 0.0)
+                _qty = _fill_sz if _fill_sz > 0 else (_not / _ep if _ep and _ep > 0 else 0.0)
+                cp = wallet_settlement_price
+                _pnl = (_qty * cp) - _not if _qty > 0 and _not > 0 else 0.0
+                ns = _status_for_close(pnl=_pnl, close_trigger="resolution")
+                if not dry_run:
+                    row.status = ns
+                    row.actual_profit = _pnl
+                    row.updated_at = now
+                    pending_exit["status"] = "superseded_resolution"
+                    pending_exit["resolved_at"] = now.isoformat() + "Z"
+                    payload["pending_live_exit"] = pending_exit
+                    payload["position_close"] = {
+                        "close_price": cp,
+                        "price_source": "wallet_redeemable_mark",
+                        "close_trigger": "resolution",
+                        "realized_pnl": _pnl,
+                        "closed_at": now.isoformat() + "Z",
+                        "reason": reason,
+                    }
+                    row.payload_json = payload
+                    closed += 1
+                total_realized_pnl += _pnl
+                by_status[ns] = int(by_status.get(ns, 0)) + 1
+                would_close += 1
+                details.append(
+                    {
+                        "order_id": row.id,
+                        "market_id": row.market_id,
+                        "close_trigger": "resolution",
+                        "close_price": cp,
+                        "realized_pnl": _pnl,
+                        "next_status": ns,
+                    }
+                )
+                continue
+
+            provider_clob_order_id = _pending_exit_provider_clob_id(pending_exit)
+            if provider_clob_order_id:
+                pending_exit["provider_clob_order_id"] = provider_clob_order_id
+            snapshot = (
+                pending_exit_snapshots.get(provider_clob_order_id)
+                if provider_clob_order_id
+                else None
+            )
+            snapshot_status = str((snapshot or {}).get("normalized_status") or "").strip().lower()
+            snapshot_filled_size = max(0.0, safe_float((snapshot or {}).get("filled_size"), 0.0) or 0.0)
+            snapshot_fill_price = safe_float((snapshot or {}).get("average_fill_price"))
+            if snapshot_fill_price is None or snapshot_fill_price <= 0:
+                snapshot_fill_price = safe_float((snapshot or {}).get("limit_price"))
+            wallet_exit_size_cap = (
+                wallet_position_size
+                if wallet_position_size > _WALLET_SIZE_EPSILON
+                else 0.0
+            )
+            required_exit_size = max(0.0, safe_float(pending_exit.get("exit_size"), 0.0) or 0.0)
+            if (
+                wallet_exit_size_cap > 0.0
+                and required_exit_size > (wallet_exit_size_cap + _WALLET_SIZE_EPSILON)
+            ):
+                required_exit_size = wallet_exit_size_cap
+                pending_exit["exit_size"] = float(required_exit_size)
+            if required_exit_size <= 0.0:
+                _fill_not, _fill_sz, _fill_px = _extract_live_fill_metrics(payload)
+                _ep = _fill_px if _fill_px and _fill_px > 0 else safe_float(row.effective_price)
+                if _ep is None or _ep <= 0:
+                    _ep = safe_float(row.entry_price)
+                _not = _fill_not if _fill_not > 0 else (safe_float(row.notional_usd) or 0.0)
+                required_exit_size = _fill_sz if _fill_sz > 0 else (_not / _ep if _ep and _ep > 0 else 0.0)
+                if wallet_exit_size_cap > 0.0 and required_exit_size > 0.0:
+                    required_exit_size = min(required_exit_size, wallet_exit_size_cap)
+                if required_exit_size > 0.0:
+                    pending_exit["exit_size"] = float(required_exit_size)
+
+            threshold_ratio = _pending_exit_fill_threshold(pending_exit)
+            fill_ratio = (
+                (snapshot_filled_size / required_exit_size)
+                if required_exit_size > 0.0
+                else (1.0 if snapshot_status == "filled" and snapshot_filled_size > 0.0 else 0.0)
+            )
+            pending_exit["provider_status"] = snapshot_status or pending_exit.get("provider_status")
+            if snapshot_filled_size > 0.0:
+                pending_exit["filled_size"] = float(snapshot_filled_size)
+            if snapshot_fill_price is not None and snapshot_fill_price > 0.0:
+                pending_exit["average_fill_price"] = float(snapshot_fill_price)
+            if fill_ratio > 0.0:
+                pending_exit["fill_ratio"] = float(fill_ratio)
+            if snapshot is not None:
+                pending_exit["last_snapshot_at"] = now.isoformat() + "Z"
+
+            close_fill_threshold_met = (
+                required_exit_size > 0.0
+                and snapshot_filled_size >= (required_exit_size * threshold_ratio)
+            )
+            close_fill_unknown_but_wallet_flat = (
+                required_exit_size <= 0.0
+                and snapshot_status == "filled"
+                and wallet_position_size <= _WALLET_SIZE_EPSILON
+            )
+            if close_fill_threshold_met or close_fill_unknown_but_wallet_flat:
+                _fill_not, _fill_sz, _fill_px = _extract_live_fill_metrics(payload)
+                _ep = _fill_px if _fill_px and _fill_px > 0 else safe_float(row.effective_price)
+                if _ep is None or _ep <= 0:
+                    _ep = safe_float(row.entry_price)
+                _not = _fill_not if _fill_not > 0 else (safe_float(row.notional_usd) or 0.0)
+                base_qty = _fill_sz if _fill_sz > 0 else (_not / _ep if _ep and _ep > 0 else 0.0)
+                close_qty = snapshot_filled_size if snapshot_filled_size > 0 else required_exit_size
+                if close_qty <= 0.0:
+                    close_qty = base_qty
+                if base_qty <= 0.0 or _not <= 0.0:
+                    held += 1
+                    if not dry_run:
+                        payload["pending_live_exit"] = pending_exit
+                        _attach_pending_state(payload)
+                        row.payload_json = payload
+                        row.updated_at = now
+                        state_updates += 1
+                    continue
+                close_qty = min(base_qty, close_qty if close_qty > 0.0 else base_qty)
+                cost_basis = _not * (close_qty / base_qty) if base_qty > 0 else _not
+                cp = snapshot_fill_price
+                if cp is None or cp <= 0.0:
+                    cp = safe_float(pending_exit.get("close_price")) or _ep
+                close_trigger = str(pending_exit.get("close_trigger") or "live_exit_fill")
+                _pnl = (close_qty * cp) - cost_basis
+                ns = _status_for_close(pnl=_pnl, close_trigger=close_trigger)
+                if not dry_run:
+                    row.status = ns
+                    row.actual_profit = _pnl
+                    row.updated_at = now
+                    pending_exit["status"] = "filled"
+                    pending_exit["filled_at"] = now.isoformat() + "Z"
+                    payload["pending_live_exit"] = pending_exit
+                    payload["position_close"] = {
+                        "close_price": cp,
+                        "price_source": "provider_exit_fill",
+                        "close_trigger": close_trigger,
+                        "realized_pnl": _pnl,
+                        "cost_basis_usd": cost_basis,
+                        "settlement_proceeds_usd": close_qty * cp,
+                        "filled_size": close_qty,
+                        "closed_at": now.isoformat() + "Z",
+                        "reason": reason,
+                    }
+                    row.payload_json = payload
+                    closed += 1
+                total_realized_pnl += _pnl
+                by_status[ns] = int(by_status.get(ns, 0)) + 1
+                would_close += 1
+                details.append(
+                    {
+                        "order_id": row.id,
+                        "market_id": row.market_id,
+                        "close_trigger": close_trigger,
+                        "close_price": cp,
+                        "realized_pnl": _pnl,
+                        "next_status": ns,
+                    }
+                )
+                continue
+
+            if snapshot_status in {"cancelled", "expired", "failed"}:
+                if not dry_run:
+                    pending_exit["status"] = "failed"
+                    pending_exit["retry_count"] = int(pending_exit.get("retry_count", 0) or 0) + 1
+                    pending_exit["last_attempt_at"] = now.isoformat() + "Z"
+                    pending_exit["last_error"] = f"provider_exit_status:{snapshot_status}"
+                    pending_exit["next_retry_at"] = (
+                        now + timedelta(seconds=_failed_exit_retry_delay_seconds(pending_exit["last_error"]))
+                    ).isoformat() + "Z"
+                    payload["pending_live_exit"] = pending_exit
+                    _attach_pending_state(payload)
+                    row.payload_json = payload
+                    row.updated_at = now
+                    state_updates += 1
+                held += 1
+                continue
+
+            if not dry_run and snapshot is not None:
+                payload["pending_live_exit"] = pending_exit
+                _attach_pending_state(payload)
+                row.payload_json = payload
+                row.updated_at = now
+                state_updates += 1
+
+            if pending_exit_kind != "take_profit_limit":
+                if not dry_run and snapshot is None and pending_state_changed:
+                    payload["position_state"] = pending_next_state
+                    row.payload_json = payload
+                    row.updated_at = now
+                    state_updates += 1
+                held += 1
+                continue
+
+        # ── Failed exit retry logic ────────────────────────────────────
+        # If a previous cycle recorded a pending_live_exit that failed,
+        # retry submitting the sell order (with cooldown & max retries).
+        if isinstance(pending_exit, dict) and pending_exit.get("status") == "failed":
+            if pending_exit_kind == "take_profit_limit":
+                if not dry_run:
+                    pending_exit["status"] = "cancelled"
+                    pending_exit["cancelled_at"] = now.isoformat() + "Z"
+                    pending_exit["cancel_reason"] = str(
+                        pending_exit.get("last_error") or "take_profit_limit_inactive"
+                    )
+                    payload["pending_live_exit"] = pending_exit
+                    _attach_pending_state(payload)
+                    row.payload_json = payload
+                    row.updated_at = now
+                    state_updates += 1
+                held += 1
+                continue
+
+            if pending_winning_idx is not None and pending_outcome_idx is not None:
+                _fill_not, _fill_sz, _fill_px = _extract_live_fill_metrics(payload)
+                _ep = _fill_px if _fill_px and _fill_px > 0 else safe_float(row.effective_price)
+                if _ep is None or _ep <= 0:
+                    _ep = safe_float(row.entry_price)
+                _not = _fill_not if _fill_not > 0 else (safe_float(row.notional_usd) or 0.0)
+                _qty = _fill_sz if _fill_sz > 0 else (_not / _ep if _ep and _ep > 0 else 0.0)
+                cp = 1.0 if pending_winning_idx == pending_outcome_idx else 0.0
+                close_trigger = "resolution_inferred" if pending_winning_idx_inferred else "resolution"
+                _pnl = (_qty * cp) - _not if _qty > 0 and _not > 0 else 0.0
+                ns = _status_for_close(pnl=_pnl, close_trigger=close_trigger)
+                if not dry_run:
+                    row.status = ns
+                    row.actual_profit = _pnl
+                    row.updated_at = now
+                    pending_exit["status"] = "superseded_resolution"
+                    pending_exit["resolved_at"] = now.isoformat() + "Z"
+                    payload["pending_live_exit"] = pending_exit
+                    payload["position_close"] = {
+                        "close_price": cp,
+                        "price_source": "resolved_settlement",
+                        "close_trigger": close_trigger,
+                        "realized_pnl": _pnl,
+                        "closed_at": now.isoformat() + "Z",
+                        "reason": reason,
+                    }
+                    row.payload_json = payload
+                    closed += 1
+                total_realized_pnl += _pnl
+                by_status[ns] = int(by_status.get(ns, 0)) + 1
+                would_close += 1
+                details.append(
+                    {
+                        "order_id": row.id,
+                        "market_id": row.market_id,
+                        "close_trigger": close_trigger,
+                        "close_price": cp,
+                        "realized_pnl": _pnl,
+                        "next_status": ns,
+                    }
+                )
+                continue
+
+            if wallet_settlement_price is not None:
+                _fill_not, _fill_sz, _fill_px = _extract_live_fill_metrics(payload)
+                _ep = _fill_px if _fill_px and _fill_px > 0 else safe_float(row.effective_price)
+                if _ep is None or _ep <= 0:
+                    _ep = safe_float(row.entry_price)
+                _not = _fill_not if _fill_not > 0 else (safe_float(row.notional_usd) or 0.0)
+                _qty = _fill_sz if _fill_sz > 0 else (_not / _ep if _ep and _ep > 0 else 0.0)
+                cp = wallet_settlement_price
+                _pnl = (_qty * cp) - _not if _qty > 0 and _not > 0 else 0.0
+                ns = _status_for_close(pnl=_pnl, close_trigger="resolution")
+                if not dry_run:
+                    row.status = ns
+                    row.actual_profit = _pnl
+                    row.updated_at = now
+                    pending_exit["status"] = "superseded_resolution"
+                    pending_exit["resolved_at"] = now.isoformat() + "Z"
+                    payload["pending_live_exit"] = pending_exit
+                    payload["position_close"] = {
+                        "close_price": cp,
+                        "price_source": "wallet_redeemable_mark",
+                        "close_trigger": "resolution",
+                        "realized_pnl": _pnl,
+                        "closed_at": now.isoformat() + "Z",
+                        "reason": reason,
+                    }
+                    row.payload_json = payload
+                    closed += 1
+                total_realized_pnl += _pnl
+                by_status[ns] = int(by_status.get(ns, 0)) + 1
+                would_close += 1
+                details.append(
+                    {
+                        "order_id": row.id,
+                        "market_id": row.market_id,
+                        "close_trigger": "resolution",
+                        "close_price": cp,
+                        "realized_pnl": _pnl,
+                        "next_status": ns,
+                    }
+                )
+                continue
+
+            retry_count = int(pending_exit.get("retry_count", 0) or 0)
+            last_attempt_iso = pending_exit.get("last_attempt_at") or pending_exit.get("triggered_at")
+            last_attempt_dt = _parse_iso_utc_naive(last_attempt_iso)
+            next_retry_iso = pending_exit.get("next_retry_at")
+            next_retry_dt = _parse_iso_utc_naive(next_retry_iso)
+            min_retry_seconds = max(
+                _FAILED_EXIT_MIN_RETRY_INTERVAL_SECONDS,
+                _failed_exit_retry_delay_seconds(pending_exit.get("last_error")),
+            )
+            now_naive = now.astimezone(timezone.utc).replace(tzinfo=None)
+            seconds_since_attempt = (
+                (now_naive - last_attempt_dt).total_seconds()
+                if last_attempt_dt is not None
+                else float("inf")
+            )
+
+            if retry_count >= _FAILED_EXIT_MAX_RETRIES:
+                if not dry_run:
+                    pending_exit["status"] = "failed"
+                    pending_exit["exhausted_at"] = now.isoformat() + "Z"
+                    pending_exit["retry_count"] = 0
+                    pending_exit["last_attempt_at"] = now.isoformat() + "Z"
+                    pending_exit["last_error"] = str(
+                        pending_exit.get("last_error") or "exit_retry_exhausted_backoff"
+                    )
+                    pending_exit["next_retry_at"] = (
+                        now
+                        + timedelta(
+                            seconds=max(
+                                2 * _FAILED_EXIT_MIN_RETRY_INTERVAL_SECONDS,
+                                _failed_exit_retry_delay_seconds(pending_exit["last_error"]),
+                            )
+                        )
+                    ).isoformat() + "Z"
+                    payload["pending_live_exit"] = pending_exit
+                    _attach_pending_state(payload)
+                    row.payload_json = payload
+                    row.updated_at = now
+                    state_updates += 1
+                held += 1
+                continue
+
+            if next_retry_dt is not None and now_naive < next_retry_dt:
+                if not dry_run and pending_state_changed:
+                    payload["position_state"] = pending_next_state
+                    row.payload_json = payload
+                    row.updated_at = now
+                    state_updates += 1
+                held += 1
+                continue
+
+            if seconds_since_attempt < min_retry_seconds:
                 # Cooldown not elapsed — hold, don't spam.
+                if not dry_run and pending_state_changed:
+                    payload["position_state"] = pending_next_state
+                    row.payload_json = payload
+                    row.updated_at = now
+                    state_updates += 1
                 held += 1
                 continue
 
             # Retry: refresh allowance and re-place exit order
-            token_id = str(getattr(row, "token_id", None) or "").strip()
             _fill_not_r, _fill_sz_r, _ = _extract_live_fill_metrics(payload)
             exit_size = _fill_sz_r if _fill_sz_r > 0 else 0.0
+            wallet_exit_size_cap = (
+                wallet_position_size
+                if wallet_position_size > _WALLET_SIZE_EPSILON
+                else 0.0
+            )
+            if wallet_exit_size_cap > 0.0:
+                if exit_size <= 0.0:
+                    exit_size = wallet_exit_size_cap
+                else:
+                    exit_size = min(exit_size, wallet_exit_size_cap)
+                pending_exit["exit_size"] = float(exit_size)
             exit_price = safe_float(pending_exit.get("close_price")) or 0.01
+            min_order_size_usd = max(0.01, safe_float(getattr(settings, "MIN_ORDER_SIZE_USD", 1.0), 1.0))
 
             if token_id and exit_size > 0:
+                exit_notional_estimate = float(exit_size) * float(max(exit_price, 0.0))
+                if exit_notional_estimate + 1e-9 < min_order_size_usd:
+                    if not dry_run:
+                        pending_exit["status"] = "failed"
+                        pending_exit["retry_count"] = retry_count + 1
+                        pending_exit["last_attempt_at"] = now.isoformat() + "Z"
+                        pending_exit["last_error"] = (
+                            f"exit_notional_below_min:{exit_notional_estimate:.4f}<{min_order_size_usd:.4f}"
+                        )
+                        pending_exit["next_retry_at"] = (
+                            now + timedelta(seconds=_failed_exit_retry_delay_seconds(pending_exit["last_error"]))
+                        ).isoformat() + "Z"
+                        payload["pending_live_exit"] = pending_exit
+                        _attach_pending_state(payload)
+                        row.payload_json = payload
+                        row.updated_at = now
+                        state_updates += 1
+                    held += 1
+                    continue
                 try:
                     from services.live_execution_adapter import execute_live_order
 
@@ -854,9 +2022,9 @@ async def reconcile_live_positions(
                         side="SELL",
                         size=exit_size,
                         fallback_price=exit_price,
-                        time_in_force="FOK",
+                        time_in_force="GTC",
                     )
-                    if exec_result.status in {"filled", "placed", "live"}:
+                    if exec_result.status in {"executed", "open", "submitted"}:
                         logger.info(
                             "Exit retry succeeded for order=%s attempt=%d status=%s",
                             row.id, retry_count + 1, exec_result.status,
@@ -865,8 +2033,13 @@ async def reconcile_live_positions(
                             pending_exit["status"] = "submitted"
                             pending_exit["retry_count"] = retry_count + 1
                             pending_exit["last_attempt_at"] = now.isoformat() + "Z"
+                            pending_exit["next_retry_at"] = None
                             pending_exit["exit_order_id"] = exec_result.order_id
+                            pending_exit["provider_clob_order_id"] = str(
+                                (exec_result.payload or {}).get("clob_order_id") or ""
+                            )
                             payload["pending_live_exit"] = pending_exit
+                            _attach_pending_state(payload)
                             row.payload_json = payload
                             row.updated_at = now
                             state_updates += 1
@@ -882,7 +2055,11 @@ async def reconcile_live_positions(
                             pending_exit["retry_count"] = retry_count + 1
                             pending_exit["last_attempt_at"] = now.isoformat() + "Z"
                             pending_exit["last_error"] = str(exec_result.error_message or "unknown")
+                            pending_exit["next_retry_at"] = (
+                                now + timedelta(seconds=_failed_exit_retry_delay_seconds(pending_exit["last_error"]))
+                            ).isoformat() + "Z"
                             payload["pending_live_exit"] = pending_exit
+                            _attach_pending_state(payload)
                             row.payload_json = payload
                             row.updated_at = now
                             state_updates += 1
@@ -898,7 +2075,11 @@ async def reconcile_live_positions(
                         pending_exit["retry_count"] = retry_count + 1
                         pending_exit["last_attempt_at"] = now.isoformat() + "Z"
                         pending_exit["last_error"] = str(exc)
+                        pending_exit["next_retry_at"] = (
+                            now + timedelta(seconds=_failed_exit_retry_delay_seconds(pending_exit["last_error"]))
+                        ).isoformat() + "Z"
                         payload["pending_live_exit"] = pending_exit
+                        _attach_pending_state(payload)
                         row.payload_json = payload
                         row.updated_at = now
                         state_updates += 1
@@ -907,10 +2088,16 @@ async def reconcile_live_positions(
             else:
                 # No token_id or size — can't retry, mark exhausted
                 if not dry_run:
-                    pending_exit["status"] = "exhausted"
+                    pending_exit["status"] = "failed"
                     pending_exit["exhausted_at"] = now.isoformat() + "Z"
+                    pending_exit["retry_count"] = retry_count + 1
+                    pending_exit["last_attempt_at"] = now.isoformat() + "Z"
                     pending_exit["last_error"] = "missing token_id or fill_size"
+                    pending_exit["next_retry_at"] = (
+                        now + timedelta(seconds=_failed_exit_retry_delay_seconds(pending_exit["last_error"]))
+                    ).isoformat() + "Z"
                     payload["pending_live_exit"] = pending_exit
+                    _attach_pending_state(payload)
                     row.payload_json = payload
                     row.updated_at = now
                     state_updates += 1
@@ -918,7 +2105,16 @@ async def reconcile_live_positions(
                 continue
 
         # If pending_live_exit is in-flight (submitted), skip normal processing
-        if isinstance(pending_exit, dict) and pending_exit.get("status") in {"submitted", "pending"}:
+        if (
+            isinstance(pending_exit, dict)
+            and pending_exit.get("status") in {"submitted", "pending"}
+            and str(pending_exit.get("kind") or "").strip().lower() != "take_profit_limit"
+        ):
+            if not dry_run and pending_state_changed:
+                payload["position_state"] = pending_next_state
+                row.payload_json = payload
+                row.updated_at = now
+                state_updates += 1
             held += 1
             continue
 
@@ -941,6 +2137,8 @@ async def reconcile_live_positions(
         signal_payload = signal_payloads.get(str(row.signal_id), {})
         market_info = market_info_by_id.get(str(row.market_id or ""))
         market_tradable = polymarket_client.is_market_tradable(market_info, now=now)
+        market_seconds_left = _market_seconds_left(market_info, now)
+        market_end_time = _market_end_time_iso(market_info)
         winning_idx = _extract_winning_outcome_index(market_info)
         winning_idx_inferred = False
         if winning_idx is None and resolution_infer_from_prices:
@@ -954,18 +2152,48 @@ async def reconcile_live_positions(
                 winning_idx_inferred = True
         market_side_price = _extract_market_side_price(market_info, outcome_idx)
         snapshot_side_price = _extract_signal_side_price(signal_payload, outcome_idx)
+        redis_side_price = redis_mid_prices.get(token_id) if token_id else None
+        clob_side_price = clob_mid_prices.get(token_id) if token_id else None
 
         close_price: Optional[float] = None
         close_trigger: Optional[str] = None
         price_source: Optional[str] = None
         trailing_trigger_price: Optional[float] = None
 
-        current_price = market_side_price if market_side_price is not None else snapshot_side_price
+        current_price = (
+            redis_side_price
+            if redis_side_price is not None
+            else (
+                clob_side_price
+                if clob_side_price is not None
+                else (
+                    market_side_price
+                    if market_side_price is not None
+                    else (
+                        snapshot_side_price
+                        if snapshot_side_price is not None
+                        else wallet_mark_price
+                    )
+                )
+            )
+        )
         current_price = _state_price_floor(current_price)
         current_price_source = (
-            "market_mark"
-            if market_side_price is not None
-            else ("signal_snapshot_mark" if snapshot_side_price is not None else None)
+            "redis_mid"
+            if redis_side_price is not None
+            else (
+                "clob_midpoint"
+                if clob_side_price is not None
+                else (
+                    "market_mark"
+                    if market_side_price is not None
+                    else (
+                        "signal_snapshot_mark"
+                        if snapshot_side_price is not None
+                        else ("wallet_mark" if wallet_mark_price is not None else None)
+                    )
+                )
+            )
         )
 
         age_anchor = row.executed_at or row.updated_at or row.created_at
@@ -979,6 +2207,7 @@ async def reconcile_live_positions(
         prev_low = safe_float(position_state.get("lowest_price"))
         prev_last_mark = safe_float(position_state.get("last_mark_price"))
         prev_mark_source = str(position_state.get("last_mark_source") or "")
+        prev_marked_at = _parse_iso_utc_naive(position_state.get("last_marked_at"))
         highest_price = prev_high
         lowest_price = prev_low
         if current_price is not None:
@@ -998,20 +2227,35 @@ async def reconcile_live_positions(
             "last_mark_source": current_price_source,
             "last_marked_at": now.isoformat() + "Z",
         }
+        exit_eval_price = (
+            current_price
+            if current_price is not None
+            else _state_price_floor(prev_last_mark if prev_last_mark is not None else entry_price)
+        )
+        exit_eval_price_source = current_price_source
+        if current_price is None and exit_eval_price is not None:
+            if prev_last_mark is not None:
+                exit_eval_price_source = "position_state_mark"
+            elif entry_price is not None and entry_price > 0:
+                exit_eval_price_source = "entry_price_fallback"
 
         if winning_idx is not None:
             close_price = 1.0 if winning_idx == outcome_idx else 0.0
             close_trigger = "resolution_inferred" if winning_idx_inferred else "resolution"
             price_source = "resolved_settlement"
+        elif wallet_settlement_price is not None:
+            close_price = wallet_settlement_price
+            close_trigger = "resolution"
+            price_source = "wallet_redeemable_mark"
         else:
             pnl_pct = None
-            if current_price is not None and entry_price > 0:
-                pnl_pct = ((current_price - entry_price) / entry_price) * 100.0
+            if exit_eval_price is not None and entry_price > 0:
+                pnl_pct = ((exit_eval_price - entry_price) / entry_price) * 100.0
 
-            if force_mark_to_market and current_price is not None:
-                close_price = current_price
+            if force_mark_to_market and exit_eval_price is not None:
+                close_price = exit_eval_price
                 close_trigger = "manual_mark_to_market"
-                price_source = current_price_source
+                price_source = exit_eval_price_source
             else:
                 # ── Strategy-based exit check ──────────────────────────
                 # If the strategy that opened this position has a
@@ -1031,7 +2275,7 @@ async def reconcile_live_positions(
 
                             pos_view = _LivePositionView()
                             pos_view.entry_price = entry_price
-                            pos_view.current_price = current_price
+                            pos_view.current_price = exit_eval_price
                             pos_view.highest_price = highest_price
                             pos_view.lowest_price = lowest_price
                             pos_view.age_minutes = age_minutes
@@ -1041,10 +2285,12 @@ async def reconcile_live_positions(
                             pos_view.outcome_idx = outcome_idx
 
                             market_state_dict = {
-                                "current_price": current_price,
+                                "current_price": exit_eval_price,
                                 "market_tradable": market_tradable,
                                 "is_resolved": False,
                                 "winning_outcome": None,
+                                "seconds_left": market_seconds_left,
+                                "end_time": market_end_time,
                             }
 
                             exit_decision = loaded.instance.should_exit(pos_view, market_state_dict)
@@ -1057,20 +2303,30 @@ async def reconcile_live_positions(
                                 exc,
                             )
 
+                active_take_profit_limit = (
+                    isinstance(pending_exit, dict)
+                    and str(pending_exit.get("kind") or "").strip().lower() == "take_profit_limit"
+                    and str(pending_exit.get("status") or "").strip().lower() in {"submitted", "pending"}
+                )
                 if strategy_exit is not None:
-                    close_price = strategy_exit.close_price if strategy_exit.close_price is not None else current_price
+                    close_price = (
+                        strategy_exit.close_price
+                        if strategy_exit.close_price is not None
+                        else exit_eval_price
+                    )
                     close_trigger = f"strategy:{strategy_exit.reason}"
-                    price_source = current_price_source
+                    price_source = exit_eval_price_source
                 elif (
                     not resolve_only
                     and take_profit_pct is not None
                     and pnl_pct is not None
                     and min_hold_passed
+                    and not active_take_profit_limit
                     and pnl_pct >= take_profit_pct
                 ):
-                    close_price = current_price
+                    close_price = exit_eval_price
                     close_trigger = "take_profit"
-                    price_source = current_price_source
+                    price_source = exit_eval_price_source
                 elif (
                     not resolve_only
                     and stop_loss_pct is not None
@@ -1078,48 +2334,52 @@ async def reconcile_live_positions(
                     and min_hold_passed
                     and pnl_pct <= -abs(stop_loss_pct)
                 ):
-                    close_price = current_price
+                    close_price = exit_eval_price
                     close_trigger = "stop_loss"
-                    price_source = current_price_source
+                    price_source = exit_eval_price_source
                 elif (
                     not resolve_only
                     and trailing_stop_pct is not None
                     and trailing_stop_pct > 0
-                    and current_price is not None
+                    and exit_eval_price is not None
                     and highest_price is not None
                     and min_hold_passed
                 ):
                     trailing_trigger_price = highest_price * (1.0 - (trailing_stop_pct / 100.0))
-                    if highest_price > entry_price and current_price <= trailing_trigger_price:
-                        close_price = current_price
+                    if highest_price > entry_price and exit_eval_price <= trailing_trigger_price:
+                        close_price = exit_eval_price
                         close_trigger = "trailing_stop"
-                        price_source = current_price_source
+                        price_source = exit_eval_price_source
                 elif (
                     not resolve_only
                     and max_hold_minutes is not None
                     and age_minutes is not None
                     and age_minutes >= max_hold_minutes
                 ):
-                    if current_price is not None:
-                        close_price = current_price
+                    if exit_eval_price is not None:
+                        close_price = exit_eval_price
                         close_trigger = "max_hold"
-                        price_source = current_price_source
+                        price_source = exit_eval_price_source
                 elif (
                     not resolve_only
                     and close_on_inactive_market
                     and not market_tradable
-                    and current_price is not None
+                    and exit_eval_price is not None
                     and min_hold_passed
                 ):
-                    close_price = current_price
+                    close_price = exit_eval_price
                     close_trigger = "market_inactive"
-                    price_source = current_price_source
+                    price_source = exit_eval_price_source
 
         close_is_resolution = close_trigger in {"resolution", "resolution_inferred"}
 
         if close_price is None:
             state_changed = False
             if current_price is not None:
+                mark_stale = (
+                    prev_marked_at is None
+                    or (now_naive - prev_marked_at).total_seconds() >= mark_touch_interval_seconds
+                )
                 state_changed = (
                     prev_last_mark is None
                     or abs(prev_last_mark - current_price) > 1e-9
@@ -1128,6 +2388,7 @@ async def reconcile_live_positions(
                     or abs((prev_high or 0.0) - (highest_price or 0.0)) > 1e-9
                     or abs((prev_low or 0.0) - (lowest_price or 0.0)) > 1e-9
                     or prev_mark_source != str(current_price_source or "")
+                    or mark_stale
                 )
             if not dry_run and state_changed:
                 payload["position_state"] = next_state
@@ -1178,6 +2439,30 @@ async def reconcile_live_positions(
 
             if not dry_run:
                 payload["position_state"] = next_state
+                existing_tp_limit = (
+                    pending_exit
+                    if isinstance(pending_exit, dict)
+                    and str(pending_exit.get("kind") or "").strip().lower() == "take_profit_limit"
+                    and str(pending_exit.get("status") or "").strip().lower() in {"submitted", "pending"}
+                    else None
+                )
+                if existing_tp_limit is not None:
+                    cancel_target = _pending_exit_provider_clob_id(existing_tp_limit)
+                    if not cancel_target:
+                        cancel_target = str(existing_tp_limit.get("exit_order_id") or "").strip()
+                    cancel_success = False
+                    if cancel_target:
+                        try:
+                            cancel_success = bool(await trading_service.cancel_order(cancel_target))
+                        except Exception:
+                            cancel_success = False
+                    existing_tp_limit["cancelled_for_override_at"] = now.isoformat() + "Z"
+                    existing_tp_limit["override_cancel_target"] = cancel_target
+                    existing_tp_limit["override_cancel_success"] = cancel_success
+                    if cancel_success:
+                        existing_tp_limit["status"] = "cancelled"
+                    payload["superseded_take_profit_exit"] = existing_tp_limit
+
                 exit_record: dict[str, Any] = {
                     "triggered_at": now.isoformat() + "Z",
                     "close_trigger": close_trigger,
@@ -1192,9 +2477,38 @@ async def reconcile_live_positions(
                 }
 
                 # Immediately attempt to place the sell order
-                token_id = str(getattr(row, "token_id", None) or "").strip()
+                token_id = _extract_live_token_id(payload)
                 exit_size = filled_size if filled_size > 0.0 else quantity
+                wallet_exit_size_cap = (
+                    wallet_position_size
+                    if wallet_position_size > _WALLET_SIZE_EPSILON
+                    else 0.0
+                )
+                if wallet_exit_size_cap > 0.0:
+                    if exit_size <= 0.0:
+                        exit_size = wallet_exit_size_cap
+                    else:
+                        exit_size = min(exit_size, wallet_exit_size_cap)
+                    exit_record["exit_size"] = float(exit_size)
+                min_order_size_usd = max(0.01, safe_float(getattr(settings, "MIN_ORDER_SIZE_USD", 1.0), 1.0))
                 if token_id and exit_size > 0:
+                    exit_notional_estimate = float(exit_size) * float(max(close_price, 0.0))
+                    if exit_notional_estimate + 1e-9 < min_order_size_usd:
+                        exit_record["status"] = "failed"
+                        exit_record["retry_count"] = 1
+                        exit_record["last_error"] = (
+                            f"exit_notional_below_min:{exit_notional_estimate:.4f}<{min_order_size_usd:.4f}"
+                        )
+                        exit_record["last_attempt_at"] = now.isoformat() + "Z"
+                        exit_record["next_retry_at"] = (
+                            now + timedelta(seconds=_failed_exit_retry_delay_seconds(exit_record["last_error"]))
+                        ).isoformat() + "Z"
+                        payload["pending_live_exit"] = exit_record
+                        row.payload_json = payload
+                        row.updated_at = now
+                        state_updates += 1
+                        held += 1
+                        continue
                     try:
                         from services.live_execution_adapter import execute_live_order
 
@@ -1203,11 +2517,14 @@ async def reconcile_live_positions(
                             side="SELL",
                             size=exit_size,
                             fallback_price=close_price,
-                            time_in_force="FOK",
+                            time_in_force="GTC",
                         )
-                        if exec_result.status in {"filled", "placed", "live"}:
+                        if exec_result.status in {"executed", "open", "submitted"}:
                             exit_record["status"] = "submitted"
                             exit_record["exit_order_id"] = exec_result.order_id
+                            exit_record["provider_clob_order_id"] = str(
+                                (exec_result.payload or {}).get("clob_order_id") or ""
+                            )
                             exit_record["last_attempt_at"] = now.isoformat() + "Z"
                             logger.info(
                                 "Exit order placed for order=%s trigger=%s status=%s",
@@ -1218,6 +2535,9 @@ async def reconcile_live_positions(
                             exit_record["last_error"] = str(exec_result.error_message or "unknown")
                             exit_record["last_attempt_at"] = now.isoformat() + "Z"
                             exit_record["retry_count"] = 1
+                            exit_record["next_retry_at"] = (
+                                now + timedelta(seconds=_failed_exit_retry_delay_seconds(exit_record["last_error"]))
+                            ).isoformat() + "Z"
                             logger.warning(
                                 "Exit order failed for order=%s trigger=%s error=%s",
                                 row.id, close_trigger, exec_result.error_message,
@@ -1227,6 +2547,9 @@ async def reconcile_live_positions(
                         exit_record["last_error"] = str(exc)
                         exit_record["last_attempt_at"] = now.isoformat() + "Z"
                         exit_record["retry_count"] = 1
+                        exit_record["next_retry_at"] = (
+                            now + timedelta(seconds=_failed_exit_retry_delay_seconds(exit_record["last_error"]))
+                        ).isoformat() + "Z"
                         logger.warning(
                             "Exit order exception for order=%s trigger=%s: %s",
                             row.id, close_trigger, exc,
@@ -1235,6 +2558,9 @@ async def reconcile_live_positions(
                     exit_record["status"] = "failed"
                     exit_record["last_error"] = "missing token_id or fill_size"
                     exit_record["retry_count"] = 1
+                    exit_record["next_retry_at"] = (
+                        now + timedelta(seconds=_failed_exit_retry_delay_seconds(exit_record["last_error"]))
+                    ).isoformat() + "Z"
 
                 payload["pending_live_exit"] = exit_record
                 row.payload_json = payload
@@ -1282,6 +2608,7 @@ async def reconcile_live_positions(
 
     if not dry_run and (closed > 0 or state_updates > 0):
         await session.commit()
+        await _publish_trader_order_updates([row for row in candidates if row.updated_at == now])
 
     return {
         "trader_id": trader_id,

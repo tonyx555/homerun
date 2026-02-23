@@ -498,7 +498,34 @@ class StrategySDK:
         "exclude_assets": [],
         "include_timeframes": ["5m", "15m", "1h", "4h"],
         "exclude_timeframes": [],
+        "live_window_required": True,
+        "min_liquidity_usd": 250.0,
+        "max_spread_pct": 0.08,
+        "max_signal_age_seconds": 35.0,
+        "max_live_context_age_seconds": 5.0,
+        "max_oracle_age_seconds": 20.0,
+        "require_oracle_for_directional": True,
+        "min_seconds_left_for_entry_5m": 35.0,
+        "min_seconds_left_for_entry_15m": 90.0,
+        "min_seconds_left_for_entry_1h": 240.0,
+        "min_seconds_left_for_entry_4h": 600.0,
+        "take_profit_pct": 8.0,
+        "stop_loss_pct": 5.0,
+        "stop_loss_policy": "near_close_only",
+        "stop_loss_activation_seconds": 90,
+        "stop_loss_activation_seconds_5m": 45.0,
+        "stop_loss_activation_seconds_15m": 120.0,
+        "stop_loss_activation_seconds_1h": 300.0,
+        "stop_loss_activation_seconds_4h": 900.0,
+        "trailing_stop_pct": 3.0,
+        "min_hold_minutes": 1.0,
+        "max_hold_minutes": 60,
+        "resolve_only": False,
+        "close_on_inactive_market": False,
+        "preplace_take_profit_exit": True,
+        "enforce_min_exit_notional": False,
     }
+    ENTRY_TAKE_PROFIT_EXIT_ALLOWLIST: set[str] = {"btc_eth_highfreq"}
     CRYPTO_HF_SCOPE_CONFIG_SCHEMA: dict[str, Any] = {
         "param_fields": [
             {
@@ -525,6 +552,127 @@ class StrategySDK:
                 "type": "list",
                 "options": ["5m", "15m", "1h", "4h"],
             },
+            {"key": "live_window_required", "label": "Live Window Required", "type": "boolean"},
+            {
+                "key": "min_liquidity_usd",
+                "label": "Min Liquidity (USD)",
+                "type": "number",
+                "min": 0,
+                "max": 1000000,
+            },
+            {
+                "key": "max_spread_pct",
+                "label": "Max Spread (0-1)",
+                "type": "number",
+                "min": 0,
+                "max": 1,
+            },
+            {
+                "key": "max_signal_age_seconds",
+                "label": "Max Signal Age (sec)",
+                "type": "number",
+                "min": 1,
+                "max": 3600,
+            },
+            {
+                "key": "max_live_context_age_seconds",
+                "label": "Max Live Context Age (sec)",
+                "type": "number",
+                "min": 0.1,
+                "max": 60,
+            },
+            {
+                "key": "max_oracle_age_seconds",
+                "label": "Max Oracle Age (sec)",
+                "type": "number",
+                "min": 1,
+                "max": 3600,
+            },
+            {"key": "require_oracle_for_directional", "label": "Require Oracle For Directional", "type": "boolean"},
+            {
+                "key": "min_seconds_left_for_entry_5m",
+                "label": "Min Seconds Left (5m)",
+                "type": "number",
+                "min": 0,
+                "max": 300,
+            },
+            {
+                "key": "min_seconds_left_for_entry_15m",
+                "label": "Min Seconds Left (15m)",
+                "type": "number",
+                "min": 0,
+                "max": 900,
+            },
+            {
+                "key": "min_seconds_left_for_entry_1h",
+                "label": "Min Seconds Left (1h)",
+                "type": "number",
+                "min": 0,
+                "max": 3600,
+            },
+            {
+                "key": "min_seconds_left_for_entry_4h",
+                "label": "Min Seconds Left (4h)",
+                "type": "number",
+                "min": 0,
+                "max": 14400,
+            },
+            {"key": "take_profit_pct", "label": "Take Profit (%)", "type": "number", "min": 0, "max": 100},
+            {"key": "stop_loss_pct", "label": "Stop Loss (%)", "type": "number", "min": 0, "max": 100},
+            {
+                "key": "stop_loss_policy",
+                "label": "Stop Loss Policy",
+                "type": "enum",
+                "options": ["always", "near_close_only"],
+            },
+            {
+                "key": "stop_loss_activation_seconds",
+                "label": "Stop Loss Arm Window (sec)",
+                "type": "integer",
+                "min": 0,
+                "max": 86400,
+            },
+            {
+                "key": "stop_loss_activation_seconds_5m",
+                "label": "Stop Loss Arm (5m sec)",
+                "type": "number",
+                "min": 0,
+                "max": 300,
+            },
+            {
+                "key": "stop_loss_activation_seconds_15m",
+                "label": "Stop Loss Arm (15m sec)",
+                "type": "number",
+                "min": 0,
+                "max": 900,
+            },
+            {
+                "key": "stop_loss_activation_seconds_1h",
+                "label": "Stop Loss Arm (1h sec)",
+                "type": "number",
+                "min": 0,
+                "max": 3600,
+            },
+            {
+                "key": "stop_loss_activation_seconds_4h",
+                "label": "Stop Loss Arm (4h sec)",
+                "type": "number",
+                "min": 0,
+                "max": 14400,
+            },
+            {
+                "key": "trailing_stop_pct",
+                "label": "Trailing Stop (%)",
+                "type": "number",
+                "min": 0,
+                "max": 100,
+            },
+            {"key": "min_hold_minutes", "label": "Min Hold (Minutes)", "type": "number", "min": 0, "max": 1440},
+            {"key": "max_hold_minutes", "label": "Max Hold (Minutes)", "type": "number", "min": 1, "max": 1440},
+            {"key": "resolve_only", "label": "Resolve Only Exit", "type": "boolean"},
+            {"key": "close_on_inactive_market", "label": "Close On Inactive Market", "type": "boolean"},
+            {"key": "preplace_take_profit_exit", "label": "Pre-Place Take Profit Exit", "type": "boolean"},
+            {"key": "enforce_min_exit_notional", "label": "Enforce Min Exit Notional", "type": "boolean"},
         ]
     }
     STRATEGY_RETENTION_CONFIG_SCHEMA: dict[str, Any] = {
@@ -1040,6 +1188,23 @@ class StrategySDK:
     @staticmethod
     def crypto_highfreq_scope_config_schema() -> dict[str, Any]:
         return dict(StrategySDK.CRYPTO_HF_SCOPE_CONFIG_SCHEMA)
+
+    @staticmethod
+    def strategy_supports_entry_take_profit_exit(strategy_type: Any) -> bool:
+        strategy_key = str(strategy_type or "").strip().lower()
+        return strategy_key in StrategySDK.ENTRY_TAKE_PROFIT_EXIT_ALLOWLIST
+
+    @staticmethod
+    def should_preplace_take_profit_exit(strategy_type: Any, params: Any) -> bool:
+        if not StrategySDK.strategy_supports_entry_take_profit_exit(strategy_type):
+            return False
+        cfg = params if isinstance(params, dict) else {}
+        raw = (
+            cfg.get("live_preplace_take_profit_exit")
+            if "live_preplace_take_profit_exit" in cfg
+            else cfg.get("preplace_take_profit_exit")
+        )
+        return StrategySDK._coerce_bool(raw, False)
 
     @staticmethod
     def strategy_retention_config_schema() -> dict[str, Any]:

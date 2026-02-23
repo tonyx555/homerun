@@ -123,6 +123,9 @@ class TradingStatusResponse(BaseModel):
     authenticated: bool
     credentials_configured: bool
     wallet_address: Optional[str]
+    execution_wallet_address: Optional[str]
+    eoa_wallet_address: Optional[str]
+    proxy_funder_wallet: Optional[str]
     auth_error: Optional[str]
     stats: dict
     limits: dict
@@ -140,7 +143,10 @@ async def get_trading_status():
     authenticated = initialized
     credentials_configured = False
     auth_error: Optional[str] = None
-    wallet_address = trading_service._get_wallet_address()
+    execution_wallet_address = str(trading_service.get_execution_wallet_address() or "").strip() or None
+    eoa_wallet_address = str(getattr(trading_service, "_eoa_address", "") or "").strip() or None
+    proxy_funder_wallet = str(getattr(trading_service, "_proxy_funder_address", "") or "").strip() or None
+    wallet_address = execution_wallet_address or trading_service._get_wallet_address()
 
     private_key, api_key, api_secret, api_passphrase, _ = await trading_service._resolve_polymarket_credentials()
     credentials_configured = bool(private_key and api_key and api_secret and api_passphrase)
@@ -150,6 +156,8 @@ async def get_trading_status():
             from eth_account import Account
 
             wallet_address = Account.from_key(private_key).address
+            if not eoa_wallet_address:
+                eoa_wallet_address = wallet_address
         except Exception:
             wallet_address = None
 
@@ -178,6 +186,9 @@ async def get_trading_status():
         authenticated=authenticated,
         credentials_configured=credentials_configured,
         wallet_address=wallet_address,
+        execution_wallet_address=execution_wallet_address or wallet_address,
+        eoa_wallet_address=eoa_wallet_address,
+        proxy_funder_wallet=proxy_funder_wallet,
         auth_error=auth_error,
         stats={
             "total_trades": stats.total_trades,

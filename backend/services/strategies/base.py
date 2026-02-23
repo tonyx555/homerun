@@ -847,12 +847,80 @@ class BaseStrategy(ABC):
         """
         return self.default_exit_check(position, market_state)
 
+    @staticmethod
+    def _coerce_seconds_left(value: Any) -> float | None:
+        parsed = to_float(value, None)
+        if parsed is None:
+            return None
+        if parsed < 0:
+            return None
+        return float(parsed)
+
+    @staticmethod
+    def _seconds_until_end_time(value: Any) -> float | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except Exception:
+            return None
+        end_time = make_aware(parsed)
+        if end_time is None:
+            return None
+        return max(0.0, (end_time - utcnow()).total_seconds())
+
+    @classmethod
+    def _seconds_left_for_position(cls, position: Any, market_state: dict) -> float | None:
+        for key in ("seconds_left", "market_seconds_left"):
+            parsed = cls._coerce_seconds_left(market_state.get(key))
+            if parsed is not None:
+                return parsed
+
+        strategy_context = getattr(position, "strategy_context", None)
+        if isinstance(strategy_context, dict):
+            parsed = cls._coerce_seconds_left(strategy_context.get("seconds_left"))
+            if parsed is not None:
+                return parsed
+
+        for key in ("end_time", "market_end_time"):
+            parsed = cls._seconds_until_end_time(market_state.get(key))
+            if parsed is not None:
+                return parsed
+
+        if isinstance(strategy_context, dict):
+            parsed = cls._seconds_until_end_time(strategy_context.get("end_time"))
+            if parsed is not None:
+                return parsed
+        return None
+
+    @staticmethod
+    def _stop_loss_policy(config: dict[str, Any]) -> str:
+        raw_policy = config.get("stop_loss_policy")
+        if raw_policy is None:
+            raw_policy = config.get("stop_loss_mode")
+        policy = str(raw_policy or "always").strip().lower()
+        if policy in {"near_close", "near_close_only", "close_window"}:
+            return "near_close_only"
+        return "always"
+
+    @staticmethod
+    def _stop_loss_activation_seconds(config: dict[str, Any]) -> float:
+        value = config.get("stop_loss_activation_seconds")
+        if value is None:
+            value = config.get("stop_loss_near_close_seconds")
+        parsed = to_float(value, 120.0)
+        if parsed is None:
+            parsed = 120.0
+        return max(0.0, float(parsed))
+
     def default_exit_check(self, position: Any, market_state: dict) -> ExitDecision:
         """Standard TP/SL/trailing/max-hold exit logic.
 
         Strategies can call this as a fallback after their custom checks.
         Uses config params: take_profit_pct, stop_loss_pct, trailing_stop_pct,
-        max_hold_minutes, min_hold_minutes, resolve_only.
+        max_hold_minutes, min_hold_minutes, resolve_only, stop_loss_policy,
+        stop_loss_activation_seconds.
         """
         config = getattr(position, "config", None) or {}
         current_price = market_state.get("current_price")
@@ -888,8 +956,25 @@ class BaseStrategy(ABC):
 
         # Stop loss
         sl = config.get("stop_loss_pct")
-        if sl is not None and pnl_pct <= -abs(float(sl)):
-            return ExitDecision("close", f"Stop loss hit ({pnl_pct:.1f}% <= -{sl}%)", close_price=current_price)
+        stop_loss_deferred_reason = None
+        if sl is not None:
+            stop_loss_policy = self._stop_loss_policy(config)
+            activation_seconds = self._stop_loss_activation_seconds(config)
+            seconds_left = self._seconds_left_for_position(position, market_state)
+            stop_loss_armed = True
+            if stop_loss_policy == "near_close_only":
+                stop_loss_armed = seconds_left is not None and seconds_left <= activation_seconds
+
+            if pnl_pct <= -abs(float(sl)):
+                if stop_loss_armed:
+                    return ExitDecision("close", f"Stop loss hit ({pnl_pct:.1f}% <= -{sl}%)", close_price=current_price)
+                if stop_loss_policy == "near_close_only":
+                    if seconds_left is None:
+                        stop_loss_deferred_reason = "Stop loss deferred until near close (timing unavailable)"
+                    else:
+                        stop_loss_deferred_reason = (
+                            f"Stop loss deferred ({seconds_left:.0f}s left > {activation_seconds:.0f}s arm window)"
+                        )
 
         # Trailing stop
         trailing = config.get("trailing_stop_pct")
@@ -911,6 +996,9 @@ class BaseStrategy(ABC):
         # Market inactive
         if not market_state.get("market_tradable", True) and config.get("close_on_inactive_market", False):
             return ExitDecision("close", "Market inactive", close_price=current_price)
+
+        if stop_loss_deferred_reason is not None:
+            return ExitDecision("hold", stop_loss_deferred_reason)
 
         return ExitDecision("hold", "No exit condition met")
 

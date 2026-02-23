@@ -35,6 +35,7 @@ ALLOWED_WORKERS = {
     "crypto",
     "tracked_traders",
     "trader_orchestrator",
+    "trader_reconciliation",
     "discovery",
     "events",
 }
@@ -46,9 +47,10 @@ WORKER_DISPLAY_ORDER = (
     "crypto",
     "tracked_traders",
     "trader_orchestrator",
+    "trader_reconciliation",
     "events",
 )
-GENERIC_WORKERS = ("crypto", "tracked_traders", "events")
+GENERIC_WORKERS = ("crypto", "tracked_traders", "trader_reconciliation", "events")
 
 
 def _normalize_worker_name(raw: str) -> str:

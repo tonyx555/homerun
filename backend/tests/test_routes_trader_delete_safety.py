@@ -73,3 +73,43 @@ async def test_delete_route_blocks_live_exposure_without_force(monkeypatch):
     assert excinfo.value.status_code == 409
     assert excinfo.value.detail["code"] == "open_live_exposure"
     delete_trader_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_delete_route_force_delete_allows_live_exposure(monkeypatch):
+    trader_id = "trader-route-force-delete"
+    session_obj = object()
+    monkeypatch.setattr(
+        routes_traders,
+        "get_trader",
+        AsyncMock(return_value={"id": trader_id, "name": "Force Live Trader"}),
+    )
+    monkeypatch.setattr(routes_traders, "sync_trader_position_inventory", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        routes_traders,
+        "get_open_position_summary_for_trader",
+        AsyncMock(return_value={"live": 2, "paper": 0, "other": 0, "total": 2}),
+    )
+    monkeypatch.setattr(
+        routes_traders,
+        "get_open_order_summary_for_trader",
+        AsyncMock(return_value={"live": 1, "paper": 0, "other": 0, "total": 1}),
+    )
+    delete_trader_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(routes_traders, "delete_trader", delete_trader_mock)
+    create_event = AsyncMock(return_value=None)
+    monkeypatch.setattr(routes_traders, "create_trader_event", create_event)
+
+    response = await routes_traders.delete_trader_route(
+        trader_id=trader_id,
+        action=routes_traders.TraderDeleteAction.force_delete,
+        session=session_obj,
+    )
+
+    assert response["status"] == "deleted"
+    assert response["action"] == "force_delete"
+    assert response["open_live_positions"] == 2
+    assert response["open_live_orders"] == 1
+    delete_trader_mock.assert_awaited_once_with(session_obj, trader_id, force=True)
+    kwargs = create_event.await_args.kwargs
+    assert kwargs["severity"] == "warn"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -12,7 +13,7 @@ from sqlalchemy import delete, desc, func, select
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.database import AsyncSessionLocal, DataSource, DataSourceRecord, DataSourceRun
+from models.database import AsyncSessionLocal, DataSource, DataSourceRecord, DataSourceRun, async_engine, recover_pool
 from services.data_source_catalog import default_data_source_retention_policy
 from services.data_source_loader import DataSourceValidationError, data_source_loader
 from utils.logger import get_logger
@@ -24,6 +25,16 @@ _RETENTION_BOUNDS: dict[str, tuple[int, int]] = {
     "max_age_days": (1, 3650),
 }
 _DB_DISCONNECT_RETRY_BASE_DELAY_SECONDS = 0.2
+_DB_DISCONNECT_POOL_RECOVERY_COOLDOWN_SECONDS = 2.0
+_db_recovery_lock: asyncio.Lock | None = None
+_db_last_recovery_at_monotonic = 0.0
+
+
+def _get_db_recovery_lock() -> asyncio.Lock:
+    global _db_recovery_lock
+    if _db_recovery_lock is None:
+        _db_recovery_lock = asyncio.Lock()
+    return _db_recovery_lock
 
 
 def _is_retryable_db_disconnect_error(exc: Exception) -> bool:
@@ -43,8 +54,8 @@ def _is_retryable_db_disconnect_error(exc: Exception) -> bool:
         "connection was closed",
         "connectiondoesnotexist",
         "closed in the middle of operation",
-        "another operation",  # asyncpg InternalClientError state confusion
-        "cannot switch to state",  # asyncpg InternalClientError
+        "another operation",          # asyncpg InternalClientError state confusion
+        "cannot switch to state",     # asyncpg InternalClientError
     )
     # Raw asyncpg exceptions (InternalClientError, etc.) are not SQLAlchemy
     # subclasses — check them by module name.
@@ -61,6 +72,47 @@ def _is_retryable_db_disconnect_error(exc: Exception) -> bool:
 
 def _db_disconnect_retry_delay(attempt: int) -> float:
     return min(_DB_DISCONNECT_RETRY_BASE_DELAY_SECONDS * (2**attempt), 1.5)
+
+
+async def _recover_pool_after_disconnect(source_slug: str) -> None:
+    global _db_last_recovery_at_monotonic
+
+    now = time.monotonic()
+    if now - _db_last_recovery_at_monotonic < _DB_DISCONNECT_POOL_RECOVERY_COOLDOWN_SECONDS:
+        return
+
+    lock = _get_db_recovery_lock()
+    async with lock:
+        now = time.monotonic()
+        if now - _db_last_recovery_at_monotonic < _DB_DISCONNECT_POOL_RECOVERY_COOLDOWN_SECONDS:
+            return
+        pool = getattr(async_engine.sync_engine, "pool", None)
+        checked_out = 0
+        if pool is not None and hasattr(pool, "checkedout"):
+            try:
+                checked_out = int(pool.checkedout())
+            except Exception:
+                checked_out = 0
+        if checked_out > 0:
+            logger.warning(
+                "Skipping DB pool recovery while connections are checked out",
+                source_slug=source_slug,
+                checked_out=checked_out,
+            )
+            return
+        try:
+            await recover_pool()
+            _db_last_recovery_at_monotonic = time.monotonic()
+            logger.warning(
+                "Recovered DB connection pool after disconnect",
+                source_slug=source_slug,
+            )
+        except Exception as exc:
+            logger.warning(
+                "DB pool recovery failed",
+                source_slug=source_slug,
+                error=str(exc),
+            )
 
 
 def _utcnow_naive() -> datetime:
@@ -511,37 +563,52 @@ async def run_data_source(
         source.status = "loaded"
         source.error_message = None
     except Exception as exc:
-        if _retry_on_disconnect and _is_retryable_db_disconnect_error(exc):
+        is_disconnect_error = _is_retryable_db_disconnect_error(exc)
+        if _retry_on_disconnect and is_disconnect_error:
             try:
                 await session.rollback()
             except Exception:
                 pass
+            await _recover_pool_after_disconnect(source_slug)
             logger.warning(
                 "Data source run hit transient DB disconnect; retrying once",
                 source_slug=source_slug,
                 error=str(exc),
             )
             await asyncio.sleep(_db_disconnect_retry_delay(0))
-            retry_source = source
             try:
-                reloaded_source = await session.get(DataSource, source_id)
-                if reloaded_source is not None:
-                    retry_source = reloaded_source
-            except Exception:
-                pass
-            return await run_data_source(
-                session,
-                retry_source,
-                max_records=max_records,
-                commit=commit,
-                _retry_on_disconnect=False,
-            )
+                async with AsyncSessionLocal() as retry_session:
+                    retry_source = await retry_session.get(DataSource, source_id)
+                    if retry_source is None:
+                        raise RuntimeError(f"Data source '{source_slug}' missing during retry")
+                    return await run_data_source(
+                        retry_session,
+                        retry_source,
+                        max_records=max_records,
+                        commit=commit,
+                        _retry_on_disconnect=False,
+                    )
+            except Exception as retry_exc:
+                if _is_retryable_db_disconnect_error(retry_exc):
+                    await _recover_pool_after_disconnect(source_slug)
+                logger.warning(
+                    "Data source retry with fresh session failed; falling back to normal error handling",
+                    source_slug=source_slug,
+                    error=str(retry_exc),
+                )
 
         if runtime is not None:
             runtime.error_count += 1
             runtime.last_error = str(exc)
         error_message = str(exc)
-        logger.error("Data source run failed", source_slug=source_slug, exc_info=exc)
+        if is_disconnect_error:
+            logger.warning(
+                "Data source run failed due transient DB disconnect",
+                source_slug=source_slug,
+                error=error_message,
+            )
+        else:
+            logger.error("Data source run failed", source_slug=source_slug, exc_info=exc)
 
         # Roll back tainted transaction.
         try:
@@ -584,15 +651,11 @@ async def run_data_source(
                 break
             except Exception as persist_exc:
                 if _attempt < _persist_attempts - 1 and _is_retryable_db_disconnect_error(persist_exc):
+                    await _recover_pool_after_disconnect(source_slug)
                     await asyncio.sleep(_db_disconnect_retry_delay(_attempt))
                     continue
                 if _is_retryable_db_disconnect_error(persist_exc):
-                    try:
-                        from models.database import recover_pool
-
-                        await recover_pool()
-                    except Exception:
-                        pass
+                    await _recover_pool_after_disconnect(source_slug)
                 logger.warning(
                     "Failed to persist error run row for %s: %s",
                     source_slug,

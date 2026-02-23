@@ -223,6 +223,8 @@ class TradingService:
         self._initialized = False
         self._client = None
         self._wallet_address: Optional[str] = None
+        self._eoa_address: Optional[str] = None
+        self._proxy_funder_address: Optional[str] = None
         self._orders: OrderedDict[str, Order] = OrderedDict()
         self._positions: dict[str, Position] = {}
         self._stats = TradingStats()
@@ -261,6 +263,95 @@ class TradingService:
         if self._persist_lock is None:
             self._persist_lock = asyncio.Lock()
         return self._persist_lock
+
+    def _normalize_evm_address(self, address: Any) -> Optional[str]:
+        text = str(address or "").strip()
+        if not text:
+            return None
+        try:
+            from web3 import Web3
+
+            return Web3.to_checksum_address(text)
+        except Exception:
+            return None
+
+    def _funder_for_signature_type(self, signature_type: int) -> Optional[str]:
+        if signature_type == 0:
+            return self._eoa_address or self._wallet_address
+        if signature_type in (1, 2):
+            return self._proxy_funder_address
+        return None
+
+    def _signature_type_supported(self, signature_type: int) -> bool:
+        return self._funder_for_signature_type(signature_type) is not None
+
+    def _apply_signature_type_to_client(self, signature_type: Optional[int]) -> None:
+        if not self.is_ready():
+            return
+        if not isinstance(signature_type, int):
+            return
+        if not (0 <= signature_type <= 2):
+            return
+        if self._client is None:
+            return
+
+        if getattr(self._client, "signature_type", None) != signature_type:
+            try:
+                self._client.signature_type = signature_type
+            except Exception:
+                pass
+
+        builder = getattr(self._client, "builder", None)
+        if builder is not None and getattr(builder, "sig_type", None) != signature_type:
+            try:
+                builder.sig_type = signature_type
+            except Exception:
+                pass
+        funder = self._funder_for_signature_type(signature_type)
+        if builder is not None and isinstance(funder, str) and getattr(builder, "funder", None) != funder:
+            try:
+                builder.funder = funder
+            except Exception:
+                pass
+
+    def _is_invalid_signature_error(self, error_text: Any) -> bool:
+        if error_text is None:
+            return False
+        text = str(error_text).lower()
+        return "invalid signature" in text
+
+    async def _refresh_signature_type(self, *, force: bool = False) -> bool:
+        if not self.is_ready():
+            return False
+
+        if not force and isinstance(self._balance_signature_type, int):
+            if not self._signature_type_supported(int(self._balance_signature_type)):
+                return False
+            self._apply_signature_type_to_client(self._balance_signature_type)
+            return True
+
+        if force:
+            self._balance_signature_type = None
+
+        balance = await self.get_balance()
+        if isinstance(balance, dict) and balance.get("error"):
+            logger.warning("Signature refresh failed from balance probe: %s", balance["error"])
+            return False
+
+        signature_type = self._balance_signature_type
+        if not isinstance(signature_type, int):
+            builder = getattr(self._client, "builder", None)
+            if builder is not None and isinstance(getattr(builder, "sig_type", None), int):
+                signature_type = int(builder.sig_type)
+
+        if not isinstance(signature_type, int):
+            return False
+        if not self._signature_type_supported(signature_type):
+            return False
+
+        self._balance_signature_type = signature_type
+        self._apply_signature_type_to_client(signature_type)
+        return True
 
     async def _load_db_polymarket_credentials(
         self,
@@ -305,6 +396,96 @@ class TradingService:
             return private_key, api_key, api_secret, api_passphrase, "mixed"
         return None, None, None, None, "missing"
 
+    def _derive_poly_proxy_funder(self, eoa_address: str) -> Optional[str]:
+        """Call CTFExchange.getPolyProxyWalletAddress(eoa) on-chain to get the
+        proxy wallet (funder) address for proxy signature wallets.
+
+        Returns the checksummed proxy address, or None if the call fails.
+        """
+        try:
+            from web3 import Web3
+            from py_clob_client.config import get_contract_config
+
+            _rpc_candidates = [
+                url for url in [
+                    settings.POLYGON_RPC_URL,
+                    "https://rpc-mainnet.matic.quiknode.pro",
+                    "https://polygon.gateway.tenderly.co",
+                ] if url
+            ]
+            w3 = None
+            for rpc_url in _rpc_candidates:
+                try:
+                    candidate = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 10}))
+                    candidate.eth.block_number
+                    w3 = candidate
+                    break
+                except Exception:
+                    continue
+            if w3 is None:
+                return None
+
+            contract_cfg = get_contract_config(settings.CHAIN_ID)
+            if contract_cfg is None:
+                return None
+
+            exchange_addr = Web3.to_checksum_address(contract_cfg.exchange)
+            # getPolyProxyWalletAddress(address) → address
+            _ABI = [{
+                "name": "getPolyProxyWalletAddress",
+                "type": "function",
+                "inputs": [{"name": "_addr", "type": "address"}],
+                "outputs": [{"name": "", "type": "address"}],
+                "stateMutability": "view",
+            }]
+            exchange = w3.eth.contract(address=exchange_addr, abi=_ABI)
+            proxy = exchange.functions.getPolyProxyWalletAddress(
+                Web3.to_checksum_address(eoa_address)
+            ).call()
+            return Web3.to_checksum_address(proxy)
+        except Exception as exc:
+            logger.warning("Failed to derive proxy funder address: %s", exc)
+            return None
+
+    def _lookup_data_api_proxy_funder(self, eoa_address: str) -> Optional[str]:
+        try:
+            import httpx
+
+            data_api_base = str(getattr(settings, "DATA_API_URL", "") or "").rstrip("/")
+            if not data_api_base:
+                return None
+            response = httpx.get(
+                f"{data_api_base}/profile",
+                params={"address": eoa_address},
+                timeout=8.0,
+            )
+            if response.status_code != 200:
+                return None
+            payload = response.json()
+            if not isinstance(payload, dict):
+                return None
+            for key in ("proxyWallet", "proxyAddress", "wallet"):
+                candidate = self._normalize_evm_address(payload.get(key))
+                if candidate and candidate.lower() != eoa_address.lower():
+                    return candidate
+        except Exception as exc:
+            logger.debug("Data API proxy funder lookup failed: %s", exc)
+        return None
+
+    def _resolve_polymarket_funder(self, eoa_address: str, signature_type: int) -> Optional[str]:
+        if signature_type == 0:
+            return eoa_address
+
+        configured = self._normalize_evm_address(getattr(settings, "POLYMARKET_FUNDER", None))
+        if configured:
+            return configured
+
+        profile_proxy = self._lookup_data_api_proxy_funder(eoa_address)
+        if profile_proxy:
+            return profile_proxy
+
+        return self._derive_poly_proxy_funder(eoa_address)
+
     async def _sync_trading_transport(self) -> bool:
         await load_proxy_config()
         return patch_clob_client_proxy()
@@ -321,98 +502,107 @@ class TradingService:
         if not self.is_ready():
             return
 
+        configured_signature_type = int(getattr(settings, "POLYMARKET_SIGNATURE_TYPE", 1))
+        active_signature_type = (
+            int(self._balance_signature_type)
+            if isinstance(self._balance_signature_type, int)
+            else configured_signature_type
+        )
+
         # --- Step 1: on-chain ERC-20 approve via web3 ---
-        try:
-            from web3 import Web3
-            from py_clob_client.config import get_contract_config
-            from eth_account import Account
+        if active_signature_type == 0:
+            try:
+                from web3 import Web3
+                from py_clob_client.config import get_contract_config
+                from eth_account import Account
 
-            _ERC20_ABI = [
-                {
-                    "name": "approve",
-                    "type": "function",
-                    "inputs": [
-                        {"name": "spender", "type": "address"},
-                        {"name": "amount", "type": "uint256"},
-                    ],
-                    "outputs": [{"name": "", "type": "bool"}],
-                    "stateMutability": "nonpayable",
-                },
-                {
-                    "name": "allowance",
-                    "type": "function",
-                    "inputs": [
-                        {"name": "owner", "type": "address"},
-                        {"name": "spender", "type": "address"},
-                    ],
-                    "outputs": [{"name": "", "type": "uint256"}],
-                    "stateMutability": "view",
-                },
-            ]
-            _MAX_UINT256 = 2**256 - 1
-            # Require at least $500k USDC (6 decimals) before re-approving
-            _MIN_ALLOWANCE = 500_000 * 10**6
-
-            def _do_on_chain_approve(private_key: str, chain_id: int) -> str:
-                # Try configured RPC first, then fall back to known-working public nodes.
-                # polygon-rpc.com returns 401; quiknode and tenderly are reliable free nodes.
-                _rpc_candidates = [
-                    url
-                    for url in [
-                        settings.POLYGON_RPC_URL,
-                        "https://rpc-mainnet.matic.quiknode.pro",
-                        "https://polygon.gateway.tenderly.co",
-                    ]
-                    if url
-                ]
-                w3 = None
-                last_err = None
-                for rpc_url in _rpc_candidates:
-                    try:
-                        candidate = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 10}))
-                        candidate.eth.block_number  # quick connectivity check
-                        w3 = candidate
-                        break
-                    except Exception as e:
-                        last_err = e
-                if w3 is None:
-                    raise RuntimeError(f"All Polygon RPCs failed; last error: {last_err}")
-                contract_cfg = get_contract_config(chain_id)
-                if contract_cfg is None:
-                    return "no contract config"
-                usdc_addr = Web3.to_checksum_address(contract_cfg.collateral)
-                exchange_addr = Web3.to_checksum_address(contract_cfg.exchange)
-                account = Account.from_key(private_key)
-                owner_addr = account.address
-                usdc = w3.eth.contract(address=usdc_addr, abi=_ERC20_ABI)
-                current_allowance = usdc.functions.allowance(owner_addr, exchange_addr).call()
-                if current_allowance >= _MIN_ALLOWANCE:
-                    return f"sufficient (current={current_allowance // 10**6} USDC)"
-                nonce = w3.eth.get_transaction_count(owner_addr)
-                tx = usdc.functions.approve(exchange_addr, _MAX_UINT256).build_transaction(
+                _ERC20_ABI = [
                     {
-                        "from": owner_addr,
-                        "nonce": nonce,
-                        "gas": 100_000,
-                        "gasPrice": w3.eth.gas_price,
-                        "chainId": chain_id,
-                    }
-                )
-                signed = w3.eth.account.sign_transaction(tx, private_key)
-                tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-                receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
-                return f"tx={tx_hash.hex()} status={receipt.status}"
+                        "name": "approve",
+                        "type": "function",
+                        "inputs": [
+                            {"name": "spender", "type": "address"},
+                            {"name": "amount", "type": "uint256"},
+                        ],
+                        "outputs": [{"name": "", "type": "bool"}],
+                        "stateMutability": "nonpayable",
+                    },
+                    {
+                        "name": "allowance",
+                        "type": "function",
+                        "inputs": [
+                            {"name": "owner", "type": "address"},
+                            {"name": "spender", "type": "address"},
+                        ],
+                        "outputs": [{"name": "", "type": "uint256"}],
+                        "stateMutability": "view",
+                    },
+                ]
+                _MAX_UINT256 = 2**256 - 1
+                # Require at least $500k USDC (6 decimals) before re-approving
+                _MIN_ALLOWANCE = 500_000 * 10**6
 
-            # Resolve private key for web3 signing
-            private_key, _, _, _, _ = await self._resolve_polymarket_credentials()
-            if private_key:
-                result = await asyncio.to_thread(_do_on_chain_approve, private_key, settings.CHAIN_ID)
-                logger.info("USDC on-chain allowance check/approve: %s", result)
-            else:
-                logger.warning("No private key available for on-chain USDC approve")
+                def _do_on_chain_approve(private_key: str, chain_id: int) -> str:
+                    _rpc_candidates = [
+                        url for url in [
+                            settings.POLYGON_RPC_URL,
+                            "https://rpc-mainnet.matic.quiknode.pro",
+                            "https://polygon.gateway.tenderly.co",
+                        ] if url
+                    ]
+                    w3 = None
+                    last_err = None
+                    for rpc_url in _rpc_candidates:
+                        try:
+                            candidate = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 10}))
+                            candidate.eth.block_number
+                            w3 = candidate
+                            break
+                        except Exception as e:
+                            last_err = e
+                    if w3 is None:
+                        raise RuntimeError(f"All Polygon RPCs failed; last error: {last_err}")
+                    contract_cfg = get_contract_config(chain_id)
+                    if contract_cfg is None:
+                        return "no contract config"
+                    usdc_addr = Web3.to_checksum_address(contract_cfg.collateral)
+                    exchange_addr = Web3.to_checksum_address(contract_cfg.exchange)
+                    account = Account.from_key(private_key)
+                    owner_addr = account.address
+                    usdc = w3.eth.contract(address=usdc_addr, abi=_ERC20_ABI)
+                    current_allowance = usdc.functions.allowance(owner_addr, exchange_addr).call()
+                    if current_allowance >= _MIN_ALLOWANCE:
+                        return f"sufficient (current={current_allowance // 10**6} USDC)"
+                    nonce = w3.eth.get_transaction_count(owner_addr)
+                    tx = usdc.functions.approve(exchange_addr, _MAX_UINT256).build_transaction(
+                        {
+                            "from": owner_addr,
+                            "nonce": nonce,
+                            "gas": 100_000,
+                            "gasPrice": w3.eth.gas_price,
+                            "chainId": chain_id,
+                        }
+                    )
+                    signed = w3.eth.account.sign_transaction(tx, private_key)
+                    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+                    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+                    return f"tx={tx_hash.hex()} status={receipt.status}"
 
-        except Exception as exc:
-            logger.warning("On-chain USDC allowance approval failed (non-fatal): %s", exc)
+                private_key, _, _, _, _ = await self._resolve_polymarket_credentials()
+                if private_key:
+                    result = await asyncio.to_thread(
+                        _do_on_chain_approve, private_key, settings.CHAIN_ID
+                    )
+                    logger.info("USDC on-chain allowance check/approve: %s", result)
+                else:
+                    logger.warning("No private key available for on-chain USDC approve")
+            except Exception as exc:
+                logger.warning("On-chain USDC allowance approval failed (non-fatal): %s", exc)
+        else:
+            logger.info(
+                "Skipping on-chain USDC allowance transaction for proxy signature type=%s",
+                active_signature_type,
+            )
 
         # --- Step 2: refresh CLOB server's cached view of balance/allowance ---
         try:
@@ -425,6 +615,8 @@ class TradingService:
                 )
 
             for sig_type in POLYMARKET_SIGNATURE_TYPES:
+                if not self._signature_type_supported(sig_type):
+                    continue
                 try:
                     params = build_params(sig_type)
                     await asyncio.to_thread(self._client.update_balance_allowance, params)
@@ -436,6 +628,50 @@ class TradingService:
                     )
         except Exception as exc:
             logger.warning("CLOB balance-allowance cache refresh failed (non-fatal): %s", exc)
+
+    async def refresh_conditional_balance_allowance(self, token_id: str) -> bool:
+        token_key = str(token_id or "").strip()
+        if not token_key:
+            return False
+        if not self.is_ready() and not await self.ensure_initialized():
+            return False
+        if not self.is_ready():
+            return False
+
+        try:
+            await self._refresh_signature_type()
+        except Exception:
+            pass
+
+        signature_type: Optional[int] = None
+        if isinstance(self._balance_signature_type, int):
+            signature_type = int(self._balance_signature_type)
+        else:
+            builder = getattr(self._client, "builder", None)
+            if builder is not None and isinstance(getattr(builder, "sig_type", None), int):
+                signature_type = int(builder.sig_type)
+
+        if not isinstance(signature_type, int) or not self._signature_type_supported(signature_type):
+            return False
+
+        try:
+            from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.CONDITIONAL,
+                token_id=token_key,
+                signature_type=signature_type,
+            )
+            await asyncio.to_thread(self._client.update_balance_allowance, params)
+            return True
+        except Exception as exc:
+            logger.warning(
+                "Conditional balance-allowance refresh failed",
+                token_id=token_key,
+                signature_type=signature_type,
+                exc_info=exc,
+            )
+            return False
 
     async def ensure_initialized(self) -> bool:
         if self.is_ready():
@@ -451,16 +687,13 @@ class TradingService:
         """
         init_lock = self._get_init_lock()
         async with init_lock:
-            (
-                private_key,
-                api_key,
-                api_secret,
-                api_passphrase,
-                credential_source,
-            ) = await self._resolve_polymarket_credentials()
+            private_key, api_key, api_secret, api_passphrase, credential_source = await self._resolve_polymarket_credentials()
             if not all([private_key, api_key, api_secret, api_passphrase]):
                 logger.error("Missing Polymarket API credentials. Cannot initialize trading.")
                 return False
+
+            self._eoa_address = None
+            self._proxy_funder_address = None
 
             try:
                 # Import py-clob-client
@@ -475,17 +708,44 @@ class TradingService:
                     api_passphrase=api_passphrase,
                 )
 
-                # Initialize client with configured signature type (default POLY_PROXY=1).
-                # This ensures the builder signs orders correctly even if the DB
-                # restore and balance probe both fail during init.
+                sig_type = int(getattr(settings, "POLYMARKET_SIGNATURE_TYPE", 1))
+                eoa_address = Account.from_key(private_key).address
+                self._eoa_address = eoa_address
+                funder = await asyncio.to_thread(
+                    self._resolve_polymarket_funder,
+                    eoa_address,
+                    sig_type,
+                )
+                if sig_type in (1, 2):
+                    self._proxy_funder_address = funder
+                    if funder:
+                        logger.info(
+                            "Resolved proxy funder=%s for EOA=%s signature_type=%s",
+                            funder,
+                            eoa_address,
+                            sig_type,
+                        )
+                    else:
+                        logger.error(
+                            "Missing proxy funder for signature_type=%s. Set POLYMARKET_FUNDER or switch to signature_type=0.",
+                            sig_type,
+                        )
+                        self._initialized = False
+                        self._client = None
+                        self._wallet_address = None
+                        self._eoa_address = None
+                        self._proxy_funder_address = None
+                        return False
+
                 self._client = ClobClient(
                     host=settings.CLOB_API_URL,
                     key=private_key,
                     chain_id=settings.CHAIN_ID,
                     creds=creds,
-                    signature_type=int(getattr(settings, "POLYMARKET_SIGNATURE_TYPE", 1)),
+                    signature_type=sig_type,
+                    funder=funder,
                 )
-                self._wallet_address = Account.from_key(private_key).address
+                self._wallet_address = eoa_address
                 self._initialized = True
 
                 proxy_cfg = await load_proxy_config()
@@ -500,15 +760,16 @@ class TradingService:
                 await self._restore_runtime_state()
                 # Apply restored sig_type to builder immediately so that even if
                 # the get_balance() probe below fails, orders are signed correctly.
+                self._apply_signature_type_to_client(self._balance_signature_type)
                 if isinstance(self._balance_signature_type, int):
-                    builder = getattr(self._client, "builder", None)
-                    if builder is not None and getattr(builder, "sig_type", None) != self._balance_signature_type:
-                        builder.sig_type = self._balance_signature_type
-                        logger.info("Restored builder sig_type=%s from runtime state", self._balance_signature_type)
+                    logger.info(
+                        "Restored signature type=%s from runtime state",
+                        self._balance_signature_type,
+                    )
                 await self._approve_clob_allowance()
                 # Probe all signature types to find which one has balance/allowance.
-                # This sets self._balance_signature_type and builder.sig_type so that
-                # orders are signed with the correct type (POLY_PROXY=1 for most wallets).
+                # This sets self._balance_signature_type and client signature settings
+                # so orders are signed with the correct type (POLY_PROXY=1 for most wallets).
                 try:
                     balance_info = await self.get_balance()
                     if "error" not in balance_info:
@@ -527,12 +788,16 @@ class TradingService:
                 self._initialized = False
                 self._client = None
                 self._wallet_address = None
+                self._eoa_address = None
+                self._proxy_funder_address = None
                 return False
             except Exception as e:
                 logger.error(f"Failed to initialize trading client: {e}")
                 self._initialized = False
                 self._client = None
                 self._wallet_address = None
+                self._eoa_address = None
+                self._proxy_funder_address = None
                 return False
 
     def is_ready(self) -> bool:
@@ -571,8 +836,30 @@ class TradingService:
     def _runtime_state_id(self, wallet_address: str) -> str:
         return f"wallet:{wallet_address.lower()}"
 
+    def _resolved_signature_type(self) -> int:
+        if isinstance(self._balance_signature_type, int):
+            return int(self._balance_signature_type)
+        builder = getattr(self._client, "builder", None)
+        if builder is not None and isinstance(getattr(builder, "sig_type", None), int):
+            return int(builder.sig_type)
+        return int(getattr(settings, "POLYMARKET_SIGNATURE_TYPE", 1))
+
+    def _execution_wallet_address(self) -> Optional[str]:
+        signature_type = self._resolved_signature_type()
+        funder = str(self._funder_for_signature_type(signature_type) or "").strip()
+        if funder:
+            return funder
+        if self._wallet_address:
+            return str(self._wallet_address).strip()
+        if self._eoa_address:
+            return str(self._eoa_address).strip()
+        return self._get_wallet_address()
+
+    def get_execution_wallet_address(self) -> Optional[str]:
+        return self._execution_wallet_address()
+
     def _wallet_for_persistence(self) -> Optional[str]:
-        wallet = str(self._wallet_address or "").strip()
+        wallet = str(self._execution_wallet_address() or "").strip()
         if wallet:
             return wallet.lower()
         derived = self._get_wallet_address()
@@ -700,7 +987,10 @@ class TradingService:
         runtime_id = self._runtime_state_id(wallet)
         last_trade_at = _normalize_utc_datetime(self._stats.last_trade_at)
         daily_reset_at = datetime.combine(self._daily_volume_reset, datetime.min.time(), tzinfo=timezone.utc)
-        market_positions_json = {str(token_id): str(exposure) for token_id, exposure in self._market_positions.items()}
+        market_positions_json = {
+            str(token_id): str(exposure)
+            for token_id, exposure in self._market_positions.items()
+        }
 
         persist_lock = self._get_persist_lock()
         async with persist_lock:
@@ -919,6 +1209,10 @@ class TradingService:
                 items = response.get(key)
                 if isinstance(items, list):
                     return [item for item in items if isinstance(item, dict)]
+            for key in ("order", "result"):
+                item = response.get(key)
+                if isinstance(item, dict):
+                    return [item]
             if "id" in response or "orderID" in response or "order_id" in response:
                 return [response]
         return []
@@ -975,7 +1269,11 @@ class TradingService:
 
     def _parse_provider_order_snapshot(self, server_order: dict[str, Any]) -> Optional[dict[str, Any]]:
         clob_order_id = str(
-            server_order.get("id") or server_order.get("orderID") or server_order.get("order_id") or ""
+            server_order.get("id")
+            or server_order.get("orderID")
+            or server_order.get("orderId")
+            or server_order.get("order_id")
+            or ""
         ).strip()
         if not clob_order_id:
             return None
@@ -992,6 +1290,8 @@ class TradingService:
             "size_matched",
             "sizeMatched",
             "matched_size",
+            "filledAmount",
+            "filledSize",
             "filled_size",
             "executed_size",
             "filled",
@@ -1013,6 +1313,7 @@ class TradingService:
         average_fill_price = _first_float(
             server_order,
             "avg_price",
+            "avgPrice",
             "average_price",
             "average_fill_price",
             "avgFillPrice",
@@ -1074,20 +1375,25 @@ class TradingService:
         if not requested:
             return {}
 
-        snapshots: dict[str, dict[str, Any]] = {}
+        cached_fallback: dict[str, dict[str, Any]] = {}
         for order in self._orders.values():
             cached_snapshot = self._snapshot_from_cached_order(order)
             if cached_snapshot is None:
                 continue
             clob_id = str(cached_snapshot["clob_order_id"])
             if clob_id in requested:
-                snapshots[clob_id] = cached_snapshot
+                cached_fallback[clob_id] = cached_snapshot
 
         if not self.is_ready():
-            return snapshots
+            return cached_fallback
+
+        snapshots: dict[str, dict[str, Any]] = {}
+        provider_fetch_ok = False
+        per_order_not_found: set[str] = set()
 
         try:
             response = self._client.get_orders()
+            provider_fetch_ok = True
             for server_order in self._extract_server_orders(response):
                 snapshot = self._parse_provider_order_snapshot(server_order)
                 if snapshot is None:
@@ -1104,15 +1410,71 @@ class TradingService:
                 try:
                     single_response = self._client.get_order(clob_id)
                 except Exception as exc:
+                    error_text = str(exc).lower()
+                    if "not found" in error_text or "does not exist" in error_text:
+                        per_order_not_found.add(clob_id)
                     logger.debug("Provider single-order lookup failed", clob_order_id=clob_id, exc_info=exc)
                     continue
+                parsed_exact = False
                 for server_order in self._extract_server_orders(single_response):
                     snapshot = self._parse_provider_order_snapshot(server_order)
                     if snapshot is None:
                         continue
                     if str(snapshot["clob_order_id"]) == clob_id:
                         snapshots[clob_id] = snapshot
+                        parsed_exact = True
                         break
+                if not parsed_exact and isinstance(single_response, dict):
+                    error_text = str(
+                        single_response.get("error")
+                        or single_response.get("errorMsg")
+                        or single_response.get("message")
+                        or ""
+                    ).lower()
+                    if "not found" in error_text or "does not exist" in error_text:
+                        per_order_not_found.add(clob_id)
+
+        order_by_clob: dict[str, Order] = {}
+        for order in self._orders.values():
+            clob_id = str(order.clob_order_id or "").strip()
+            if clob_id:
+                order_by_clob[clob_id] = order
+
+        token_positions: dict[str, Position] = {}
+        if provider_fetch_ok and per_order_not_found:
+            try:
+                await self.sync_positions()
+                token_positions = dict(self._positions)
+            except Exception as exc:
+                logger.debug("Position sync for snapshot reconciliation failed", exc_info=exc)
+
+        unresolved = requested.difference(snapshots.keys())
+        for clob_id in sorted(unresolved):
+            cached_snapshot = cached_fallback.get(clob_id)
+            if provider_fetch_ok and clob_id in per_order_not_found:
+                synthesized = dict(cached_snapshot or {"clob_order_id": clob_id})
+                prior_filled_size = safe_float(synthesized.get("filled_size"), 0.0) or 0.0
+                if prior_filled_size <= 0.0:
+                    local_order = order_by_clob.get(clob_id)
+                    if local_order is not None:
+                        position = token_positions.get(str(local_order.token_id or ""))
+                        if position is not None and float(position.size or 0.0) > 0:
+                            inferred_filled_size = float(position.size)
+                            inferred_avg_price = safe_float(position.average_cost)
+                            if inferred_avg_price is None or inferred_avg_price <= 0:
+                                inferred_avg_price = safe_float(synthesized.get("limit_price"))
+                            synthesized["filled_size"] = inferred_filled_size
+                            if inferred_avg_price is not None and inferred_avg_price > 0:
+                                synthesized["average_fill_price"] = float(inferred_avg_price)
+                                synthesized["filled_notional_usd"] = float(inferred_filled_size * inferred_avg_price)
+                            prior_filled_size = inferred_filled_size
+                synthesized["normalized_status"] = "filled" if prior_filled_size > 0 else "cancelled"
+                synthesized["raw_status"] = "not_found"
+                synthesized["raw"] = {"status": "not_found"}
+                snapshots[clob_id] = synthesized
+                continue
+            if cached_snapshot is not None:
+                snapshots[clob_id] = cached_snapshot
 
         updated_orders: list[Order] = []
         for order in self._orders.values():
@@ -1142,17 +1504,34 @@ class TradingService:
 
         provider_orders = self._extract_server_orders(provider_response)
         updated_orders: list[Order] = []
+        provider_clob_ids: set[str] = set()
+        existing_by_clob: dict[str, list[Order]] = {}
+        for cached in self._orders.values():
+            cached_clob = str(cached.clob_order_id or "").strip()
+            if not cached_clob:
+                continue
+            existing_by_clob.setdefault(cached_clob, []).append(cached)
+
+        active_statuses = {
+            OrderStatus.PENDING,
+            OrderStatus.OPEN,
+            OrderStatus.PARTIALLY_FILLED,
+        }
         for server_order in provider_orders:
             snapshot = self._parse_provider_order_snapshot(server_order)
             if snapshot is None:
                 continue
 
             clob_order_id = str(snapshot["clob_order_id"])
+            provider_clob_ids.add(clob_order_id)
+            candidates = existing_by_clob.get(clob_order_id, [])
             local_order: Optional[Order] = None
-            for cached in self._orders.values():
-                if str(cached.clob_order_id or "").strip() == clob_order_id:
-                    local_order = cached
+            for candidate in candidates:
+                if not str(candidate.id or "").startswith("clob:"):
+                    local_order = candidate
                     break
+            if local_order is None and candidates:
+                local_order = max(candidates, key=lambda order: order.updated_at)
 
             if local_order is None:
                 order_id = f"clob:{clob_order_id}"
@@ -1165,34 +1544,28 @@ class TradingService:
                 ).strip()
                 if not token_id:
                     token_id = clob_order_id
-                side_raw = (
-                    str(
-                        server_order.get("side")
-                        or server_order.get("order_side")
-                        or server_order.get("direction")
-                        or "BUY"
-                    )
-                    .strip()
-                    .upper()
-                )
+                side_raw = str(
+                    server_order.get("side")
+                    or server_order.get("order_side")
+                    or server_order.get("direction")
+                    or "BUY"
+                ).strip().upper()
                 side = OrderSide.SELL if side_raw == OrderSide.SELL.value else OrderSide.BUY
-                order_type_raw = (
-                    str(
-                        server_order.get("order_type")
-                        or server_order.get("orderType")
-                        or server_order.get("type")
-                        or "GTC"
-                    )
-                    .strip()
-                    .upper()
-                )
+                order_type_raw = str(
+                    server_order.get("order_type")
+                    or server_order.get("orderType")
+                    or server_order.get("type")
+                    or "GTC"
+                ).strip().upper()
                 try:
                     order_type = OrderType(order_type_raw)
                 except ValueError:
                     order_type = OrderType.GTC
 
                 created_at = _parse_provider_datetime(
-                    server_order.get("created_at") or server_order.get("createdAt") or server_order.get("timestamp")
+                    server_order.get("created_at")
+                    or server_order.get("createdAt")
+                    or server_order.get("timestamp")
                 )
                 local_order = Order(
                     id=order_id,
@@ -1214,17 +1587,16 @@ class TradingService:
                     or None,
                 )
                 self._remember_order(local_order)
+                candidates = [local_order]
+                existing_by_clob[clob_order_id] = candidates
 
             if not local_order.market_question:
-                local_order.market_question = (
-                    str(
-                        server_order.get("market_question")
-                        or server_order.get("question")
-                        or server_order.get("title")
-                        or ""
-                    )
-                    or None
-                )
+                local_order.market_question = str(
+                    server_order.get("market_question")
+                    or server_order.get("question")
+                    or server_order.get("title")
+                    or ""
+                ) or None
             if local_order.size <= 0:
                 local_order.size = float(snapshot.get("size") or snapshot.get("filled_size") or 0.0)
             if local_order.price <= 0:
@@ -1232,15 +1604,51 @@ class TradingService:
 
             self._apply_snapshot_to_order(local_order, snapshot)
             updated_orders.append(local_order)
+            for duplicate in candidates:
+                if duplicate.id == local_order.id:
+                    continue
+                duplicate.status = (
+                    OrderStatus.FILLED if float(duplicate.filled_size or 0.0) > 0 else OrderStatus.CANCELLED
+                )
+                duplicate.updated_at = utcnow()
+                updated_orders.append(duplicate)
+
+        for cached in self._orders.values():
+            clob_order_id = str(cached.clob_order_id or "").strip()
+            if not clob_order_id:
+                continue
+            if clob_order_id in provider_clob_ids:
+                continue
+            if cached.status not in active_statuses:
+                continue
+            if not str(cached.id or "").startswith("clob:"):
+                continue
+            cached.status = OrderStatus.FILLED if float(cached.filled_size or 0.0) > 0 else OrderStatus.CANCELLED
+            cached.updated_at = utcnow()
+            updated_orders.append(cached)
 
         if updated_orders:
             await self._persist_orders(updated_orders)
 
-        return [
-            order
-            for order in self._orders.values()
-            if order.status in {OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED, OrderStatus.PENDING}
-        ]
+        open_by_key: dict[str, Order] = {}
+        for order in self._orders.values():
+            if order.status not in active_statuses:
+                continue
+            clob_order_id = str(order.clob_order_id or "").strip()
+            key = clob_order_id if clob_order_id else f"id:{order.id}"
+            existing = open_by_key.get(key)
+            if existing is None:
+                open_by_key[key] = order
+                continue
+            existing_is_synthetic = str(existing.id or "").startswith("clob:")
+            order_is_synthetic = str(order.id or "").startswith("clob:")
+            if existing_is_synthetic and not order_is_synthetic:
+                open_by_key[key] = order
+                continue
+            if existing.updated_at < order.updated_at:
+                open_by_key[key] = order
+
+        return sorted(open_by_key.values(), key=lambda order: order.created_at, reverse=True)
 
     async def get_recent_orders(
         self,
@@ -1255,6 +1663,18 @@ class TradingService:
         if status is not None:
             orders = [order for order in orders if order.status == status]
         return orders[: max(1, int(limit))]
+
+    def _active_open_position_count(self) -> int:
+        count = 0
+        for position in self._positions.values():
+            size = safe_float(position.size, 0.0) or 0.0
+            if size <= 0.0:
+                continue
+            mark = safe_float(position.current_price)
+            if mark is not None and (mark <= 0.0 or mark >= 1.0):
+                continue
+            count += 1
+        return count
 
     def _validate_order(
         self,
@@ -1295,7 +1715,8 @@ class TradingService:
                 f"Would exceed daily volume limit (${float(projected_daily_volume):.2f} > ${settings.MAX_DAILY_TRADE_VOLUME:.2f})",
             )
 
-        if len(self._positions) >= settings.MAX_OPEN_POSITIONS:
+        active_open_positions = self._active_open_position_count()
+        if active_open_positions >= settings.MAX_OPEN_POSITIONS:
             return (
                 False,
                 f"Maximum open positions ({settings.MAX_OPEN_POSITIONS}) reached",
@@ -1433,14 +1854,10 @@ class TradingService:
 
         try:
             await self._sync_trading_transport()
-
-            # Ensure builder.sig_type matches the detected balance signature type
-            # before signing. Without this, a stale sig_type=0 (EOA) causes
-            # "invalid signature" on POLY_PROXY wallets.
-            if isinstance(self._balance_signature_type, int):
-                builder = getattr(self._client, "builder", None)
-                if builder is not None and getattr(builder, "sig_type", None) != self._balance_signature_type:
-                    builder.sig_type = self._balance_signature_type
+            await self._refresh_signature_type()
+            sell_allowance_retry_used = False
+            if side == OrderSide.SELL:
+                await self.refresh_conditional_balance_allowance(token_id)
 
             # Build and sign order using py-clob-client
             from py_clob_client.clob_types import OrderArgs
@@ -1453,24 +1870,112 @@ class TradingService:
                 token_id=token_id,
             )
 
-            # Create and sign the order
-            signed_order = self._client.create_order(order_args)
+            max_attempts = 3 if side == OrderSide.SELL else 2
+            for attempt in range(max_attempts):
+                try:
+                    # Create and sign the order
+                    signed_order = self._client.create_order(order_args)
+                    # Post order to CLOB
+                    response = self._client.post_order(
+                        signed_order,
+                        order_type.value,
+                        post_only=post_only,
+                    )
+                except Exception as exc:
+                    error_text = str(exc).lower()
+                    if attempt == 0 and self._is_invalid_signature_error(str(exc)):
+                        if await self._refresh_signature_type(force=True):
+                            logger.warning(
+                                "Order creation failed with invalid signature; refreshing and retrying",
+                                attempt=attempt + 1,
+                                token_id=token_id,
+                                side=side.value,
+                            )
+                            await asyncio.sleep(0)
+                            continue
+                    if (
+                        side == OrderSide.SELL
+                        and not sell_allowance_retry_used
+                        and "not enough balance / allowance" in error_text
+                    ):
+                        sell_allowance_retry_used = True
+                        if await self.refresh_conditional_balance_allowance(token_id):
+                            logger.warning(
+                                "Sell order creation failed with stale balance/allowance cache; refreshed and retrying",
+                                attempt=attempt + 1,
+                                token_id=token_id,
+                            )
+                            await asyncio.sleep(0)
+                            continue
+                    raise
 
-            # Post order to CLOB
-            response = self._client.post_order(signed_order, order_type.value, post_only=post_only)
+                if response.get("success"):
+                    order.status = OrderStatus.OPEN
+                    order.clob_order_id = response.get("orderID")
+                    immediate_snapshot = self._parse_provider_order_snapshot(response)
+                    if immediate_snapshot is not None:
+                        self._apply_snapshot_to_order(order, immediate_snapshot)
+                    if (
+                        order.status in {OrderStatus.OPEN, OrderStatus.PENDING}
+                        and order.clob_order_id
+                        and hasattr(self._client, "get_order")
+                    ):
+                        try:
+                            single_response = self._client.get_order(str(order.clob_order_id))
+                            for server_order in self._extract_server_orders(single_response):
+                                snapshot = self._parse_provider_order_snapshot(server_order)
+                                if snapshot is None:
+                                    continue
+                                self._apply_snapshot_to_order(order, snapshot)
+                                break
+                        except Exception as exc:
+                            logger.debug(
+                                "Post-order snapshot lookup failed",
+                                order_id=order.id,
+                                clob_order_id=order.clob_order_id,
+                                exc_info=exc,
+                            )
+                    stats_lock = self._get_stats_lock()
+                    async with stats_lock:
+                        self._stats.total_trades += 1
+                        self._stats.last_trade_at = utcnow()
+                    await self._persist_runtime_state()
+                    logger.info(f"Order placed successfully: {order.clob_order_id}")
+                    break
 
-            if response.get("success"):
-                order.status = OrderStatus.OPEN
-                order.clob_order_id = response.get("orderID")
-                stats_lock = self._get_stats_lock()
-                async with stats_lock:
-                    self._stats.total_trades += 1
-                    self._stats.last_trade_at = utcnow()
-                await self._persist_runtime_state()
-                logger.info(f"Order placed successfully: {order.clob_order_id}")
-            else:
+                error_message = str(
+                    response.get("errorMsg", response.get("error", "Unknown error"))
+                )
+                if (
+                    attempt == 0
+                    and self._is_invalid_signature_error(error_message)
+                    and await self._refresh_signature_type(force=True)
+                ):
+                    logger.warning(
+                        "Order rejected with invalid signature; refreshing and retrying",
+                        attempt=attempt + 1,
+                        token_id=token_id,
+                        side=side.value,
+                    )
+                    await asyncio.sleep(0)
+                    continue
+                if (
+                    side == OrderSide.SELL
+                    and not sell_allowance_retry_used
+                    and "not enough balance / allowance" in error_message.lower()
+                ):
+                    sell_allowance_retry_used = True
+                    if await self.refresh_conditional_balance_allowance(token_id):
+                        logger.warning(
+                            "Sell order rejected with stale balance/allowance cache; refreshed and retrying",
+                            attempt=attempt + 1,
+                            token_id=token_id,
+                        )
+                        await asyncio.sleep(0)
+                        continue
+
                 order.status = OrderStatus.FAILED
-                order.error_message = response.get("errorMsg", "Unknown error")
+                order.error_message = error_message
                 await self._release_reservation(
                     size_usd=size_usd,
                     side=side,
@@ -1478,6 +1983,7 @@ class TradingService:
                 )
                 reserved = False
                 logger.error(f"Order failed: {order.error_message}")
+                break
 
         except Exception as e:
             order.status = OrderStatus.FAILED
@@ -1701,7 +2207,10 @@ class TradingService:
             message = f"Cancelled {cancelled_count} order(s)."
         elif cancelled_count > 0:
             status = "partial_failure"
-            message = f"Cancelled {cancelled_count} of {len(targets)} order(s); {failed_count} cancellation(s) failed."
+            message = (
+                f"Cancelled {cancelled_count} of {len(targets)} order(s); "
+                f"{failed_count} cancellation(s) failed."
+            )
         else:
             status = "failed"
             message = f"Failed to cancel {failed_count} order(s)."
@@ -1724,10 +2233,10 @@ class TradingService:
 
     async def get_open_orders(self) -> list[Order]:
         """Get all open orders"""
-        await self._sync_provider_open_orders()
+        open_orders = await self._sync_provider_open_orders()
         clob_ids = [
             str(order.clob_order_id).strip()
-            for order in self._orders.values()
+            for order in open_orders
             if str(order.clob_order_id or "").strip()
         ]
         if clob_ids:
@@ -1737,14 +2246,15 @@ class TradingService:
                 logger.error("Get orders error", exc_info=exc)
 
         return [
-            o
-            for o in self._orders.values()
-            if o.status in {OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED, OrderStatus.PENDING}
+            self._orders.get(order.id, order)
+            for order in open_orders
+            if self._orders.get(order.id, order).status
+            in {OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED, OrderStatus.PENDING}
         ]
 
     async def sync_positions(self) -> list[Position]:
         """Sync positions from Polymarket"""
-        if not self.is_ready():
+        if not self.is_ready() and not await self.ensure_initialized():
             return list(self._positions.values())
 
         try:
@@ -1752,33 +2262,113 @@ class TradingService:
             # Note: This uses the data API, not CLOB
             from services.polymarket import polymarket_client
 
-            address = self._get_wallet_address()
+            address = self._execution_wallet_address()
             if not address:
                 return list(self._positions.values())
 
-            positions_data = await polymarket_client.get_wallet_positions(address)
+            positions_data = await polymarket_client.get_wallet_positions_with_prices(address)
 
-            self._positions.clear()
+            def _read_float(data: dict[str, Any], *keys: str) -> Optional[float]:
+                for key in keys:
+                    value = safe_float(data.get(key))
+                    if value is not None:
+                        return float(value)
+                return None
+
+            def _read_text(data: dict[str, Any], *keys: str) -> str:
+                for key in keys:
+                    value = str(data.get(key) or "").strip()
+                    if value:
+                        return value
+                return ""
+
+            next_positions: dict[str, Position] = {}
             for pos in positions_data:
-                token_id = pos.get("asset")
-                position = Position(
-                    token_id=token_id,
-                    market_id=pos.get("market", ""),
-                    market_question=pos.get("title", "Unknown"),
-                    outcome=pos.get("outcome", ""),
-                    size=float(pos.get("size", 0)),
-                    average_cost=float(pos.get("avgCost", 0)),
-                    current_price=float(pos.get("currentPrice", 0)),
+                token_id = _read_text(pos, "asset", "asset_id", "assetId", "token_id", "tokenId")
+                if not token_id:
+                    continue
+
+                market_id = _read_text(
+                    pos,
+                    "market",
+                    "conditionId",
+                    "condition_id",
+                    "market_id",
+                    "marketId",
+                ) or token_id
+                market_question = _read_text(pos, "title", "market_question", "marketQuestion", "question") or "Unknown"
+                outcome = _read_text(pos, "outcome", "position_side", "side") or "UNKNOWN"
+
+                size = _read_float(pos, "size", "amount", "shares", "position_size")
+                average_cost = _read_float(
+                    pos,
+                    "avgCost",
+                    "avg_cost",
+                    "avgPrice",
+                    "avg_price",
+                    "average_cost",
                 )
-                position.unrealized_pnl = (position.current_price - position.average_cost) * position.size
-                self._positions[token_id] = position
+                current_price = _read_float(
+                    pos,
+                    "currentPrice",
+                    "current_price",
+                    "curPrice",
+                    "cur_price",
+                    "price",
+                    "markPrice",
+                    "mark_price",
+                )
+                current_value = _read_float(pos, "currentValue", "current_value")
+                initial_value = _read_float(pos, "initialValue", "initial_value")
+                unrealized_pnl = _read_float(
+                    pos,
+                    "unrealized_pnl",
+                    "unrealizedPnl",
+                    "cashPnl",
+                    "cash_pnl",
+                )
+
+                if (size is None or size <= 0.0) and current_value is not None and current_value > 0.0:
+                    if current_price is not None and current_price > 0.0:
+                        size = current_value / current_price
+
+                if size is None or size <= 0.0:
+                    continue
+
+                if (average_cost is None or average_cost <= 0.0) and initial_value is not None and initial_value > 0.0:
+                    average_cost = initial_value / size
+
+                if average_cost is None:
+                    average_cost = 0.0
+
+                if (current_price is None or current_price <= 0.0) and current_value is not None and current_value > 0.0:
+                    current_price = current_value / size
+
+                if current_price is None:
+                    current_price = 0.0
+
+                if unrealized_pnl is None:
+                    unrealized_pnl = (current_price - average_cost) * size
+
+                next_positions[token_id] = Position(
+                    token_id=token_id,
+                    market_id=market_id,
+                    market_question=market_question,
+                    outcome=outcome,
+                    size=float(size),
+                    average_cost=float(average_cost),
+                    current_price=float(current_price),
+                    unrealized_pnl=float(unrealized_pnl),
+                )
+
+            self._positions = next_positions
 
             self._stats.open_positions = len(self._positions)
             await self._persist_positions()
             await self._persist_runtime_state()
 
         except Exception as e:
-            logger.error(f"Sync positions error: {e}")
+            logger.error("Sync positions error", exc_info=e)
 
         return list(self._positions.values())
 
@@ -1951,7 +2541,7 @@ class TradingService:
             return {"error": "Polymarket credentials not configured"}
 
         try:
-            address = self._get_wallet_address()
+            address = self._execution_wallet_address()
             if not address:
                 return {"error": "Could not derive wallet address"}
 
@@ -2038,19 +2628,27 @@ class TradingService:
                 if isinstance(self._balance_signature_type, int)
                 else builder_signature_type
             )
+            if not self._signature_type_supported(int(primary_signature_type)):
+                primary_signature_type = 0
 
             primary_snapshot, primary_error = await fetch_balance_snapshot(primary_signature_type)
             if primary_error:
                 primary_snapshot = None
 
             best_snapshot = primary_snapshot
-            needs_probe = primary_snapshot is None or (
-                primary_snapshot["balance"] <= 0.0 and primary_snapshot["available"] <= 0.0
+            needs_probe = (
+                primary_snapshot is None
+                or (
+                    primary_snapshot["balance"] <= 0.0
+                    and primary_snapshot["available"] <= 0.0
+                )
             )
 
             if needs_probe:
                 for signature_type in POLYMARKET_SIGNATURE_TYPES:
                     if signature_type == primary_signature_type:
+                        continue
+                    if not self._signature_type_supported(signature_type):
                         continue
                     candidate_snapshot, candidate_error = await fetch_balance_snapshot(signature_type)
                     if candidate_error:
@@ -2074,8 +2672,7 @@ class TradingService:
 
             selected_signature_type = int(best_snapshot["signature_type"])
             self._balance_signature_type = selected_signature_type
-            if builder is not None and getattr(builder, "sig_type", None) != selected_signature_type:
-                builder.sig_type = selected_signature_type
+            self._apply_signature_type_to_client(selected_signature_type)
 
             return {
                 "address": address,

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Any, Callable
 
+from config import settings
 from services.data_events import BlockReason
 from utils.converters import safe_float
 
@@ -50,6 +51,73 @@ def _parse_datetime_utc(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _parse_nonnegative_seconds(value: Any) -> float | None:
+    parsed = safe_float(value, None)
+    if parsed is None:
+        return None
+    if parsed < 0:
+        return None
+    return float(parsed)
+
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _seconds_until_utc(end_time_value: Any) -> float | None:
+    end_time = _parse_datetime_utc(end_time_value)
+    if end_time is None:
+        return None
+    now = datetime.now(timezone.utc)
+    return max(0.0, (end_time - now).total_seconds())
+
+
+def _runtime_signal_seconds_left(runtime_payload: Any) -> float | None:
+    payload = runtime_payload if isinstance(runtime_payload, dict) else {}
+    for key in ("seconds_left",):
+        parsed = _parse_nonnegative_seconds(payload.get(key))
+        if parsed is not None:
+            return parsed
+
+    strategy_context = payload.get("strategy_context")
+    if isinstance(strategy_context, dict):
+        parsed = _parse_nonnegative_seconds(strategy_context.get("seconds_left"))
+        if parsed is not None:
+            return parsed
+
+    live_market_payload = payload.get("live_market")
+    if isinstance(live_market_payload, dict):
+        parsed = _parse_nonnegative_seconds(live_market_payload.get("seconds_left"))
+        if parsed is not None:
+            return parsed
+
+    for key in ("end_time",):
+        parsed = _seconds_until_utc(payload.get(key))
+        if parsed is not None:
+            return parsed
+
+    if isinstance(strategy_context, dict):
+        parsed = _seconds_until_utc(strategy_context.get("end_time"))
+        if parsed is not None:
+            return parsed
+
+    if isinstance(live_market_payload, dict):
+        parsed = _seconds_until_utc(live_market_payload.get("end_time"))
+        if parsed is not None:
+            return parsed
+
+    return None
 
 
 def _normalize_schedule_days(value: Any) -> list[str]:
@@ -153,6 +221,7 @@ _RISK_CHECK_KEY_TO_BLOCK_REASON: dict[str, str] = {
     "trader_cooldown": BlockReason.RISK_CONSECUTIVE_LOSS,
     "trader_trade_notional": BlockReason.RISK_TRADE_NOTIONAL,
     "trader_orders_per_cycle": BlockReason.RISK_OPEN_POSITIONS,
+    "trader_open_orders": BlockReason.RISK_OPEN_POSITIONS,
     "trader_open_positions": BlockReason.RISK_OPEN_POSITIONS,
     "trader_market_exposure": BlockReason.RISK_MARKET_EXPOSURE,
 }
@@ -195,6 +264,7 @@ def apply_platform_decision_gates(
     portfolio_allocator: Callable[[float], dict[str, Any]] | None,
     risk_evaluator: Callable[[float], tuple[Any, dict[str, Any]]] | None,
     invoke_hooks: bool,
+    strategy_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     final_decision = str(getattr(decision_obj, "decision", "failed") or "failed")
     final_reason = str(getattr(decision_obj, "reason", "") or "")
@@ -277,6 +347,178 @@ def apply_platform_decision_gates(
         platform_gates.append(
             {
                 "gate": "size_cap",
+                "status": "skipped",
+                "detail": f"Skipped because decision is '{final_decision}'",
+            }
+        )
+
+    if final_decision == "selected":
+        min_order_size_usd = max(0.01, safe_float(getattr(settings, "MIN_ORDER_SIZE_USD", 1.0), 1.0))
+        entry_price = safe_float(getattr(runtime_signal, "entry_price", None), None)
+        runtime_payload = getattr(runtime_signal, "payload_json", None)
+        if (entry_price is None or entry_price <= 0.0) and isinstance(runtime_payload, dict):
+            live_market_payload = runtime_payload.get("live_market")
+            if isinstance(live_market_payload, dict):
+                entry_price = safe_float(live_market_payload.get("live_selected_price"), None)
+                if entry_price is None or entry_price <= 0.0:
+                    entry_price = safe_float(live_market_payload.get("signal_entry_price"), None)
+            if entry_price is None or entry_price <= 0.0:
+                entry_price = safe_float(runtime_payload.get("entry_price"), None)
+
+        params = dict(strategy_params or {})
+        min_exit_guard_enabled = _coerce_bool(params.get("enforce_min_exit_notional"), True)
+        stop_loss_pct = safe_float(params.get("live_stop_loss_pct"), None)
+        if stop_loss_pct is None:
+            stop_loss_pct = safe_float(params.get("stop_loss_pct"), None)
+        stop_loss_policy_raw = params.get("live_stop_loss_policy")
+        if stop_loss_policy_raw is None:
+            stop_loss_policy_raw = params.get("stop_loss_policy")
+        if stop_loss_policy_raw is None:
+            stop_loss_policy_raw = params.get("stop_loss_mode")
+        stop_loss_policy = str(stop_loss_policy_raw or "always").strip().lower()
+        stop_loss_near_close_only = stop_loss_policy in {"near_close", "near_close_only", "close_window"}
+        stop_loss_activation_seconds = safe_float(params.get("live_stop_loss_activation_seconds"), None)
+        if stop_loss_activation_seconds is None:
+            stop_loss_activation_seconds = safe_float(params.get("stop_loss_activation_seconds"), None)
+        if stop_loss_activation_seconds is None:
+            stop_loss_activation_seconds = safe_float(params.get("live_stop_loss_near_close_seconds"), None)
+        if stop_loss_activation_seconds is None:
+            stop_loss_activation_seconds = safe_float(params.get("stop_loss_near_close_seconds"), None)
+        if stop_loss_activation_seconds is None:
+            stop_loss_activation_seconds = 120.0
+        stop_loss_activation_seconds = max(0.0, float(stop_loss_activation_seconds))
+        signal_seconds_left = _runtime_signal_seconds_left(runtime_payload)
+        stop_loss_armed = (
+            (not stop_loss_near_close_only)
+            or (signal_seconds_left is not None and signal_seconds_left <= stop_loss_activation_seconds)
+        )
+        configured_exit_price_ratio = safe_float(params.get("live_exit_price_ratio_floor"), None)
+        if configured_exit_price_ratio is None:
+            configured_exit_price_ratio = safe_float(params.get("exit_price_ratio_floor"), None)
+        if (
+            configured_exit_price_ratio is not None
+            and (configured_exit_price_ratio <= 0.0 or configured_exit_price_ratio >= 1.0)
+        ):
+            configured_exit_price_ratio = None
+        fallback_exit_price_ratio = 0.5
+        exit_price_floor = safe_float(params.get("live_exit_price_floor"), None)
+        if exit_price_floor is None:
+            exit_price_floor = safe_float(params.get("exit_price_floor"), None)
+        if exit_price_floor is None or exit_price_floor <= 0.0:
+            exit_price_floor = 0.01
+
+        required_size_usd = min_order_size_usd
+        conservative_exit_price = None
+        conservative_exit_price_ratio = None
+        conservative_exit_source = ""
+        min_exit_notional_passed = True
+        if min_exit_guard_enabled:
+            if entry_price is not None and entry_price > 0.0:
+                if stop_loss_pct is not None and 0.0 < stop_loss_pct < 100.0 and stop_loss_armed:
+                    stop_loss_price = entry_price * (1.0 - (stop_loss_pct / 100.0))
+                    conservative_exit_price = max(exit_price_floor, stop_loss_price)
+                    conservative_exit_source = "stop_loss_pct"
+                else:
+                    ratio_to_use = configured_exit_price_ratio
+                    conservative_exit_source = "configured_ratio_floor"
+                    if ratio_to_use is None:
+                        ratio_to_use = fallback_exit_price_ratio
+                        conservative_exit_source = "default_ratio_floor"
+                    conservative_exit_price = max(exit_price_floor, entry_price * ratio_to_use)
+                conservative_exit_ratio = conservative_exit_price / entry_price if entry_price > 0.0 else 0.0
+                conservative_exit_price_ratio = conservative_exit_ratio if conservative_exit_ratio > 0.0 else None
+                if conservative_exit_ratio > 0.0:
+                    required_size_usd = max(required_size_usd, min_order_size_usd / conservative_exit_ratio)
+
+            min_exit_notional_passed = size_usd + 1e-9 >= required_size_usd
+        else:
+            conservative_exit_source = "guard_disabled"
+        checks_payload.append(
+            {
+                "check_key": "min_exit_notional_guard",
+                "check_label": "Minimum exit notional feasibility",
+                "passed": min_exit_notional_passed,
+                "score": size_usd,
+                "detail": (
+                    "Guard disabled by strategy config"
+                    if not min_exit_guard_enabled
+                    else (
+                        f"size {size_usd:.2f} supports min exit notional at conservative_exit_price={conservative_exit_price:.4f}"
+                        if min_exit_notional_passed and conservative_exit_price is not None
+                        else (
+                            f"size {size_usd:.2f} meets min_order_size_usd={min_order_size_usd:.2f} (entry price unavailable)"
+                            if min_exit_notional_passed
+                            else (
+                                f"size {size_usd:.2f} is below required min feasible size {required_size_usd:.2f}"
+                            )
+                        )
+                    )
+                ),
+                "payload": {
+                    "enabled": min_exit_guard_enabled,
+                    "entry_price": entry_price,
+                    "stop_loss_pct": stop_loss_pct,
+                    "stop_loss_policy": stop_loss_policy,
+                    "stop_loss_activation_seconds": stop_loss_activation_seconds,
+                    "signal_seconds_left": signal_seconds_left,
+                    "stop_loss_armed": stop_loss_armed,
+                    "min_order_size_usd": min_order_size_usd,
+                    "required_size_usd": required_size_usd,
+                    "conservative_exit_price": conservative_exit_price,
+                    "conservative_exit_price_ratio": conservative_exit_price_ratio,
+                    "conservative_exit_source": conservative_exit_source,
+                    "exit_price_floor": exit_price_floor,
+                },
+            }
+        )
+
+        if min_exit_guard_enabled and not min_exit_notional_passed:
+            final_decision = "blocked"
+            final_reason = (
+                f"Min-exit-notional guard blocked: required size >= {required_size_usd:.2f} "
+                f"for min exit ${min_order_size_usd:.2f}"
+            )
+            platform_gates.append(
+                {
+                    "gate": "min_exit_notional",
+                    "status": "blocked",
+                    "detail": final_reason,
+                }
+            )
+            if invoke_hooks and strategy is not None:
+                if hasattr(strategy, "on_blocked"):
+                    strategy.on_blocked(
+                        runtime_signal,
+                        BlockReason.RISK_TRADE_NOTIONAL,
+                        {
+                            "required_size_usd": required_size_usd,
+                            "min_order_size_usd": min_order_size_usd,
+                            "entry_price": entry_price,
+                            "conservative_exit_price": conservative_exit_price,
+                        },
+                    )
+        elif min_exit_guard_enabled:
+            platform_gates.append(
+                {
+                    "gate": "min_exit_notional",
+                    "status": "passed",
+                    "detail": (
+                        f"Size supports min exit notional with required_size_usd={required_size_usd:.2f}"
+                    ),
+                }
+            )
+        else:
+            platform_gates.append(
+                {
+                    "gate": "min_exit_notional",
+                    "status": "skipped",
+                    "detail": "Skipped because enforce_min_exit_notional=false",
+                }
+            )
+    else:
+        platform_gates.append(
+            {
+                "gate": "min_exit_notional",
                 "status": "skipped",
                 "detail": f"Skipped because decision is '{final_decision}'",
             }

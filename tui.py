@@ -129,6 +129,7 @@ WORKER_STATUS_ORDER: list[tuple[str, str]] = [
     ("crypto", "CRYPTO"),
     ("tracked_traders", "TRACKED"),
     ("trader_orchestrator", "ORCHESTRATOR"),
+    ("trader_reconciliation", "RECONCILIATION"),
     ("events", "EVENTS"),
 ]
 
@@ -140,6 +141,7 @@ WORKER_TAG_TO_NAME: dict[str, str] = {
     "CRYPTO": "crypto",
     "TRACKED": "tracked_traders",
     "ORCHESTRATOR": "trader_orchestrator",
+    "RECONCILIATION": "trader_reconciliation",
     "EVENTS": "events",
 }
 
@@ -153,6 +155,7 @@ WORKER_BACKEND_HINTS: tuple[tuple[str, str], ...] = (
     ("crypto_worker", "crypto"),
     ("tracked_traders", "tracked_traders"),
     ("orchestrator", "trader_orchestrator"),
+    ("reconciliation", "trader_reconciliation"),
     ("events_worker", "events"),
 )
 
@@ -1878,6 +1881,8 @@ class HomerunApp(App):
             running = bool(services.get("news_workflow", {}).get("running", False))
         elif worker_name == "trader_orchestrator":
             running = bool(services.get("trader_orchestrator", {}).get("running", False))
+        elif worker_name == "trader_reconciliation":
+            running = bool(services.get("trader_reconciliation", {}).get("running", False))
         else:
             # crypto, weather, tracked_traders, events — no dedicated
             # services key; they report via worker_snapshots which the main
@@ -1957,7 +1962,17 @@ class HomerunApp(App):
     def _resolve_worker_state(self, snapshot: dict) -> tuple[str, str]:
         if not snapshot:
             return ("OFFLINE", "status-off")
-        if bool(snapshot.get("running", False)):
+        activity = str(snapshot.get("current_activity") or "").strip().lower()
+        active_hint = (
+            bool(activity)
+            and not activity.startswith("idle")
+            and not activity.startswith("paused")
+            and not activity.startswith("disabled")
+            and not activity.startswith("stopped")
+            and not activity.startswith("waiting")
+            and not activity.startswith("blocked")
+        )
+        if bool(snapshot.get("running", False)) or (bool(snapshot.get("enabled", True)) and active_hint):
             return ("RUNNING", "status-on")
         enabled = snapshot.get("enabled")
         if enabled is False:

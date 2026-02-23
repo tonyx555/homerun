@@ -98,7 +98,7 @@ class FillMonitor:
             from services.wallet_ws_monitor import wallet_ws_monitor
 
             if trading_service.is_ready():
-                wallet_addr = getattr(trading_service, "_wallet_address", None)
+                wallet_addr = trading_service.get_execution_wallet_address()
                 if wallet_addr:
                     wallet_ws_monitor.add_wallet(wallet_addr)
                     wallet_ws_monitor.add_callback(self._on_ws_fill)
