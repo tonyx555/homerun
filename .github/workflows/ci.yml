@@ -48,6 +48,7 @@ jobs:
   backend-test:
     name: Backend Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     services:
       postgres:
         image: postgres:16-alpine
@@ -76,13 +77,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-asyncio
+          pip install pytest pytest-asyncio pytest-timeout
           pip install -r requirements.txt
 
       - name: Run tests
         env:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/homerun
-        run: python -m pytest tests/ -v --tb=short
+        run: python -m pytest tests/ -v --tb=short --timeout=60
 
   frontend-lint:
     name: Frontend Lint & Type Check
