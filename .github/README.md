@@ -221,39 +221,6 @@ External APIs / RSS / Python Sources
                               Paper / Live execution paths
 ```
 
-
-## Quick Start
-
-### Prereqs
-
-- Python 3
-- Node.js
-- Docker or `redis-server` (setup script can bootstrap Redis runtime prerequisites)
-
-### Local dev (frontend + backend)
-
-```bash
-git clone <your-repo-url>
-cd homerun
-make setup
-make dev
-```
-
-App endpoints:
-
-- Frontend: `http://localhost:3000`
-- Backend API: `http://localhost:8000`
-- FastAPI docs: `http://localhost:8000/docs`
-- WebSocket: `ws://localhost:8000/ws`
-
-### Terminal mode (TUI)
-
-```bash
-make run
-```
-
-`make run` launches the Textual/Rich TUI (`tui.py`) and ensures Redis is up.
-
 ## Key API Surface
 
 | Endpoint | Purpose |
