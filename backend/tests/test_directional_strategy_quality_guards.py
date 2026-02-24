@@ -10,7 +10,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from models.market import Market, Event, Token
+from models.market import Market, Token
 from services.strategies.temporal_decay import TemporalDecayStrategy
 from services.strategies.market_making import MarketMakingStrategy
 from utils.utcnow import utcnow

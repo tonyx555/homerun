@@ -9,8 +9,6 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from utils.fifo_pnl import (
-    TradeLot,
-    FIFOResult,
     compute_fifo_pnl,
     compute_fifo_pnl_multi_market,
     _parse_ts,

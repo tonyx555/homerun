@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone, timedelta
 from pathlib import Path
-
-import pytest
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
@@ -14,7 +11,6 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from services.strategies.base import (
     BaseStrategy,
-    ExitDecision,
     ScaleOutConfig,
     ScaleOutTarget,
 )
