@@ -310,6 +310,11 @@ class CopiedTrade(Base):
     realized_pnl = Column(Float, nullable=True)
 
     __table_args__ = (
+        UniqueConstraint(
+            "config_id",
+            "source_trade_id",
+            name="uq_copied_trades_config_source_trade",
+        ),
         Index("idx_copied_config", "config_id"),
         Index("idx_copied_source_trade", "source_trade_id"),
         Index("idx_copied_source_wallet", "source_wallet"),
@@ -946,6 +951,10 @@ class AppSettings(Base):
     auto_cleanup_enabled = Column(Boolean, default=False)
     cleanup_interval_hours = Column(Integer, default=24)
     cleanup_resolved_trade_days = Column(Integer, default=30)
+    cleanup_trade_signal_emission_days = Column(Integer, default=21)
+    cleanup_trade_signal_update_days = Column(Integer, default=3)
+    cleanup_wallet_activity_rollup_days = Column(Integer, default=60)
+    cleanup_wallet_activity_dedupe_enabled = Column(Boolean, default=True)
     llm_usage_retention_days = Column(Integer, default=30)
     market_cache_hygiene_enabled = Column(Boolean, default=True)
     market_cache_hygiene_interval_hours = Column(Integer, default=6)

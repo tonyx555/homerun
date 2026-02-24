@@ -2524,6 +2524,10 @@ export interface MaintenanceSettings {
   auto_cleanup_enabled: boolean
   cleanup_interval_hours: number
   cleanup_resolved_trade_days: number
+  cleanup_trade_signal_emission_days: number
+  cleanup_trade_signal_update_days: number
+  cleanup_wallet_activity_rollup_days: number
+  cleanup_wallet_activity_dedupe_enabled: boolean
   llm_usage_retention_days: number
   market_cache_hygiene_enabled: boolean
   market_cache_hygiene_interval_hours: number

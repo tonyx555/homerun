@@ -5,6 +5,7 @@ from datetime import datetime
 from utils.utcnow import utcnow, utcfromtimestamp
 from typing import Optional
 from sqlalchemy import select, and_, or_
+from sqlalchemy.exc import IntegrityError
 
 from models.database import (
     CopyTradingConfig,
@@ -373,6 +374,48 @@ class CopyTradingService:
         self._realtime_dedup_cache[dedup_key] = utcnow()
         return False
 
+    async def _claim_realtime_trade(
+        self,
+        config: CopyTradingConfig,
+        trade: dict,
+        event,
+    ) -> bool:
+        """Atomically reserve a realtime trade row before execution.
+
+        Returns True when this worker owns the claim and should proceed.
+        Returns False when the trade was already recorded for this config.
+        """
+        source_trade_id = str(trade.get("id") or "").strip()
+        if not source_trade_id:
+            return False
+
+        source_wallet = str(config.source_wallet or event.wallet_address or "").strip().lower()
+        async with AsyncSessionLocal() as session:
+            session.add(
+                CopiedTrade(
+                    id=str(uuid.uuid4()),
+                    config_id=config.id,
+                    source_trade_id=source_trade_id,
+                    source_wallet=source_wallet,
+                    market_id=str(trade.get("market", trade.get("condition_id", "")) or ""),
+                    market_question=str(trade.get("title", trade.get("question", "")) or ""),
+                    token_id=str(event.token_id or ""),
+                    side=str(event.side or "").upper() or "UNKNOWN",
+                    outcome=str(trade.get("outcome", "") or ""),
+                    source_price=float(trade.get("price", 0) or 0.0),
+                    source_size=float(trade.get("size", 0) or trade.get("amount", 0) or 0.0),
+                    status="pending",
+                    execution_mode="simulation",
+                    source_timestamp=event.timestamp,
+                )
+            )
+            try:
+                await session.commit()
+                return True
+            except IntegrityError:
+                await session.rollback()
+                return False
+
     # ==================== REAL-TIME EVENT PROCESSING ====================
 
     async def _process_realtime_event(self, event, config: CopyTradingConfig):
@@ -416,6 +459,14 @@ class CopyTradingService:
             )
             return
 
+        if not await self._claim_realtime_trade(config, trade, event):
+            logger.debug(
+                "Realtime dedup: already persisted",
+                tx_hash=event.tx_hash,
+                config_id=config.id,
+            )
+            return
+
         # Check if we should copy this trade
         should_copy, reason = self._should_copy_trade(trade, config)
         if not should_copy:
@@ -425,8 +476,27 @@ class CopyTradingService:
                 tx_hash=event.tx_hash,
             )
             # Record as skipped for audit trail (fire-and-forget to DB)
-            asyncio.create_task(
-                self._record_copied_trade(
+            await self._record_copied_trade(
+                config,
+                source_trade_id=trade["id"],
+                market_id="",
+                market_question="",
+                token_id=event.token_id,
+                side=event.side,
+                outcome="",
+                source_price=event.price,
+                source_size=event.size,
+                source_timestamp=event.timestamp,
+                status="skipped",
+                error=reason,
+            )
+            return
+
+        # In ARB_ONLY mode, check for matching opportunity
+        if config.copy_mode == CopyTradingMode.ARB_ONLY:
+            opp = await self._check_arb_match(trade)
+            if not opp:
+                await self._record_copied_trade(
                     config,
                     source_trade_id=trade["id"],
                     market_id="",
@@ -438,17 +508,24 @@ class CopyTradingService:
                     source_size=event.size,
                     source_timestamp=event.timestamp,
                     status="skipped",
-                    error=reason,
+                    error="No matching arbitrage opportunity",
                 )
-            )
-            return
-
-        # In ARB_ONLY mode, check for matching opportunity
-        if config.copy_mode == CopyTradingMode.ARB_ONLY:
-            opp = await self._check_arb_match(trade)
-            if not opp:
                 return
             if opp.roi_percent < config.min_roi_threshold:
+                await self._record_copied_trade(
+                    config,
+                    source_trade_id=trade["id"],
+                    market_id="",
+                    market_question="",
+                    token_id=event.token_id,
+                    side=event.side,
+                    outcome="",
+                    source_price=event.price,
+                    source_size=event.size,
+                    source_timestamp=event.timestamp,
+                    status="skipped",
+                    error=f"ROI {opp.roi_percent:.1f}% below threshold {config.min_roi_threshold}%",
+                )
                 return
 
         # Execute the copy — NO intentional delay for real-time events
@@ -459,6 +536,20 @@ class CopyTradingService:
         elif side == "SELL":
             result = await self._execute_copy_sell(trade, config)
         else:
+            await self._record_copied_trade(
+                config,
+                source_trade_id=trade["id"],
+                market_id="",
+                market_question="",
+                token_id=event.token_id,
+                side=event.side,
+                outcome="",
+                source_price=event.price,
+                source_size=event.size,
+                source_timestamp=event.timestamp,
+                status="skipped",
+                error=f"Unsupported side '{side}'",
+            )
             return
 
         # Calculate total pipeline latency
@@ -518,8 +609,45 @@ class CopyTradingService:
         # Filter out noise trades below minimum whale size
         if source_size < MIN_WHALE_SHARES:
             logger.debug(f"Realtime: skipping small trade: {source_size} shares < {MIN_WHALE_SHARES}")
-            asyncio.create_task(
-                self._record_copied_trade(
+            await self._record_copied_trade(
+                config,
+                trade_id,
+                "",
+                "",
+                token_id,
+                "BUY",
+                "",
+                source_price,
+                source_size,
+                event.timestamp,
+                status="skipped",
+                error=f"Below minimum whale size ({source_size} < {MIN_WHALE_SHARES})",
+            )
+            return None
+
+        # Get account to check capital
+        async with AsyncSessionLocal() as session:
+            account = await session.get(SimulationAccount, config.account_id)
+            if not account:
+                await self._record_copied_trade(
+                    config,
+                    trade_id,
+                    "",
+                    "",
+                    token_id,
+                    "BUY",
+                    "",
+                    source_price,
+                    source_size,
+                    event.timestamp,
+                    status="failed",
+                    error="Account not found",
+                )
+                return None
+
+            copy_size = self._calculate_copy_size(trade, config, account.current_capital)
+            if copy_size <= 0:
+                await self._record_copied_trade(
                     config,
                     trade_id,
                     "",
@@ -531,19 +659,8 @@ class CopyTradingService:
                     source_size,
                     event.timestamp,
                     status="skipped",
-                    error=f"Below minimum whale size ({source_size} < {MIN_WHALE_SHARES})",
+                    error="Insufficient capital or zero size",
                 )
-            )
-            return None
-
-        # Get account to check capital
-        async with AsyncSessionLocal() as session:
-            account = await session.get(SimulationAccount, config.account_id)
-            if not account:
-                return None
-
-            copy_size = self._calculate_copy_size(trade, config, account.current_capital)
-            if copy_size <= 0:
                 return None
 
             # Probabilistic sub-minimum execution
@@ -554,12 +671,40 @@ class CopyTradingService:
                 if random.random() < prob:
                     copy_size = MIN_CASH_VALUE / source_price
                 else:
+                    await self._record_copied_trade(
+                        config,
+                        trade_id,
+                        "",
+                        "",
+                        token_id,
+                        "BUY",
+                        "",
+                        source_price,
+                        source_size,
+                        event.timestamp,
+                        status="skipped",
+                        error=f"Probabilistic skip (p={prob:.2f})",
+                    )
                     return None
 
         # Per-token circuit breaker
         if token_id:
             is_tripped, trip_reason = token_circuit_breaker.is_tripped(token_id)
             if is_tripped:
+                await self._record_copied_trade(
+                    config,
+                    trade_id,
+                    "",
+                    "",
+                    token_id,
+                    "BUY",
+                    "",
+                    source_price,
+                    source_size,
+                    event.timestamp,
+                    status="skipped",
+                    error=f"Token tripped: {trip_reason}",
+                )
                 return None
 
         # Depth check
@@ -577,6 +722,20 @@ class CopyTradingService:
                         token_id,
                         "insufficient_depth_realtime",
                         {"available": depth_result.available_depth_usd},
+                    )
+                    await self._record_copied_trade(
+                        config,
+                        trade_id,
+                        "",
+                        "",
+                        token_id,
+                        "BUY",
+                        "",
+                        source_price,
+                        source_size,
+                        event.timestamp,
+                        status="skipped",
+                        error=f"Insufficient depth: ${depth_result.available_depth_usd:.0f}",
                     )
                     return None
             except Exception as e:
@@ -600,21 +759,19 @@ class CopyTradingService:
         if current_price > 0 and source_price > 0:
             slippage_pct = abs(current_price - source_price) / source_price * 100
             if slippage_pct > config.slippage_tolerance:
-                asyncio.create_task(
-                    self._record_copied_trade(
-                        config,
-                        trade_id,
-                        "",
-                        "",
-                        token_id,
-                        "BUY",
-                        "",
-                        source_price,
-                        source_size,
-                        event.timestamp,
-                        status="skipped",
-                        error=f"Slippage {slippage_pct:.1f}% exceeds tolerance {config.slippage_tolerance}%",
-                    )
+                await self._record_copied_trade(
+                    config,
+                    trade_id,
+                    "",
+                    "",
+                    token_id,
+                    "BUY",
+                    "",
+                    source_price,
+                    source_size,
+                    event.timestamp,
+                    status="skipped",
+                    error=f"Slippage {slippage_pct:.1f}% exceeds tolerance {config.slippage_tolerance}%",
                 )
                 return None
 
@@ -669,6 +826,20 @@ class CopyTradingService:
                     db_config.total_copied += 1
                     db_config.failed_copies += 1
                     await session.commit()
+            await self._record_copied_trade(
+                config,
+                trade_id,
+                "",
+                "",
+                token_id,
+                "BUY",
+                "",
+                source_price,
+                source_size,
+                event.timestamp,
+                status="failed",
+                error=str(e),
+            )
             return None
 
     # ==================== TRADE DETECTION ====================
@@ -1457,29 +1628,73 @@ class CopyTradingService:
     ) -> CopiedTrade:
         """Record a copied trade for deduplication and tracking."""
         async with AsyncSessionLocal() as session:
-            copied = CopiedTrade(
-                id=str(uuid.uuid4()),
-                config_id=config.id,
-                source_trade_id=source_trade_id,
-                source_wallet=config.source_wallet,
-                market_id=market_id,
-                market_question=market_question,
-                token_id=token_id,
-                side=side,
-                outcome=outcome,
-                source_price=source_price,
-                source_size=source_size,
-                executed_price=executed_price,
-                executed_size=executed_size,
-                status=status,
-                execution_mode="simulation",
-                simulation_trade_id=simulation_trade_id,
-                error_message=error,
-                source_timestamp=source_timestamp,
-                executed_at=utcnow() if status == "executed" else None,
-                realized_pnl=realized_pnl,
+            source_trade_key = str(source_trade_id or "").strip()
+            existing_result = await session.execute(
+                select(CopiedTrade).where(
+                    and_(
+                        CopiedTrade.config_id == config.id,
+                        CopiedTrade.source_trade_id == source_trade_key,
+                    )
+                )
             )
-            session.add(copied)
+            copied = existing_result.scalar_one_or_none()
+            if copied is None:
+                copied = CopiedTrade(
+                    id=str(uuid.uuid4()),
+                    config_id=config.id,
+                    source_trade_id=source_trade_key,
+                    source_wallet=str(config.source_wallet or ""),
+                    market_id=market_id,
+                    market_question=market_question,
+                    token_id=token_id,
+                    side=side,
+                    outcome=outcome,
+                    source_price=source_price,
+                    source_size=source_size,
+                    executed_price=executed_price,
+                    executed_size=executed_size,
+                    status=status,
+                    execution_mode="simulation",
+                    simulation_trade_id=simulation_trade_id,
+                    error_message=error,
+                    source_timestamp=source_timestamp,
+                    executed_at=utcnow() if status == "executed" else None,
+                    realized_pnl=realized_pnl,
+                )
+                session.add(copied)
+                try:
+                    await session.commit()
+                    await session.refresh(copied)
+                    return copied
+                except IntegrityError:
+                    await session.rollback()
+                    existing_result = await session.execute(
+                        select(CopiedTrade).where(
+                            and_(
+                                CopiedTrade.config_id == config.id,
+                                CopiedTrade.source_trade_id == source_trade_key,
+                            )
+                        )
+                    )
+                    copied = existing_result.scalar_one()
+
+            copied.source_wallet = str(copied.source_wallet or config.source_wallet or "")
+            copied.market_id = market_id
+            copied.market_question = market_question
+            copied.token_id = token_id
+            copied.side = side
+            copied.outcome = outcome
+            copied.source_price = source_price
+            copied.source_size = source_size
+            copied.status = status
+            copied.execution_mode = "simulation"
+            copied.simulation_trade_id = simulation_trade_id
+            copied.error_message = error
+            copied.source_timestamp = source_timestamp
+            copied.executed_price = executed_price
+            copied.executed_size = executed_size
+            copied.realized_pnl = realized_pnl
+            copied.executed_at = utcnow() if status == "executed" else copied.executed_at
             await session.commit()
             await session.refresh(copied)
             return copied

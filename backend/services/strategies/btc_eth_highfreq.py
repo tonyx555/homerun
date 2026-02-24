@@ -2600,9 +2600,16 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         if force_disable_reentry_cooldown:
             reentry_cooldown_seconds = 0.0
         else:
+            default_reentry_cooldown_seconds = max(
+                0.0,
+                to_float(getattr(self, "config", {}).get("reentry_cooldown_seconds_per_market"), 0.0),
+            )
             reentry_cooldown_seconds = max(
                 0.0,
-                to_float(params.get("reentry_cooldown_seconds_per_market", 75.0), 75.0),
+                to_float(
+                    params.get("reentry_cooldown_seconds_per_market", default_reentry_cooldown_seconds),
+                    default_reentry_cooldown_seconds,
+                ),
             )
         reentry_cooldown_ms = int(reentry_cooldown_seconds * 1000.0)
         reentry_cooldown_elapsed_ms: Optional[int] = None
@@ -2639,7 +2646,11 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         if max_trade_notional_hint is not None and max_trade_notional_hint > 0.0:
             estimated_size_for_checks = min(estimated_size_for_checks, max_trade_notional_hint)
 
-        min_order_size_usd = max(0.01, to_float(getattr(_cfg, "MIN_ORDER_SIZE_USD", 1.0), 1.0))
+        min_order_size_usd = StrategySDK.resolve_min_order_size_usd(
+            params,
+            mode=context.get("mode"),
+            fallback=1.0,
+        )
         default_exit_ratio_floor_by_timeframe = {
             "5m": 0.38,
             "15m": 0.34,

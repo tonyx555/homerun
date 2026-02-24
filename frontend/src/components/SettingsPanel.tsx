@@ -213,6 +213,10 @@ export default function SettingsPanel({
     auto_cleanup_enabled: false,
     cleanup_interval_hours: 24,
     cleanup_resolved_trade_days: 30,
+    cleanup_trade_signal_emission_days: 21,
+    cleanup_trade_signal_update_days: 3,
+    cleanup_wallet_activity_rollup_days: 60,
+    cleanup_wallet_activity_dedupe_enabled: true,
     llm_usage_retention_days: 30,
     market_cache_hygiene_enabled: true,
     market_cache_hygiene_interval_hours: 6,
@@ -297,6 +301,10 @@ export default function SettingsPanel({
         auto_cleanup_enabled: settings.maintenance?.auto_cleanup_enabled ?? false,
         cleanup_interval_hours: settings.maintenance?.cleanup_interval_hours ?? 24,
         cleanup_resolved_trade_days: settings.maintenance?.cleanup_resolved_trade_days ?? 30,
+        cleanup_trade_signal_emission_days: settings.maintenance?.cleanup_trade_signal_emission_days ?? 21,
+        cleanup_trade_signal_update_days: settings.maintenance?.cleanup_trade_signal_update_days ?? 3,
+        cleanup_wallet_activity_rollup_days: settings.maintenance?.cleanup_wallet_activity_rollup_days ?? 60,
+        cleanup_wallet_activity_dedupe_enabled: settings.maintenance?.cleanup_wallet_activity_dedupe_enabled ?? true,
         llm_usage_retention_days: settings.maintenance?.llm_usage_retention_days ?? 30,
         market_cache_hygiene_enabled: settings.maintenance?.market_cache_hygiene_enabled ?? true,
         market_cache_hygiene_interval_hours: settings.maintenance?.market_cache_hygiene_interval_hours ?? 6,
@@ -1575,6 +1583,62 @@ export default function SettingsPanel({
                             />
                           </div>
                         </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                          <div>
+                            <Label className="text-xs text-muted-foreground">Trade Signal Retention (days)</Label>
+                            <Input
+                              type="number"
+                              value={maintenanceForm.cleanup_trade_signal_emission_days}
+                              onChange={(e) => setMaintenanceForm(p => ({ ...p, cleanup_trade_signal_emission_days: parseInt(e.target.value) || 21 }))}
+                              min={1}
+                              max={3650}
+                              className="mt-1 text-sm"
+                            />
+                          </div>
+
+                          <div>
+                            <Label className="text-xs text-muted-foreground">Trade Signal Update Retention (days)</Label>
+                            <Input
+                              type="number"
+                              value={maintenanceForm.cleanup_trade_signal_update_days}
+                              onChange={(e) => {
+                                const value = Number.parseInt(e.target.value, 10)
+                                setMaintenanceForm(p => ({ ...p, cleanup_trade_signal_update_days: Number.isNaN(value) ? 3 : value }))
+                              }}
+                              min={0}
+                              max={3650}
+                              className="mt-1 text-sm"
+                            />
+                          </div>
+
+                          <div>
+                            <Label className="text-xs text-muted-foreground">Wallet Activity Retention (days)</Label>
+                            <Input
+                              type="number"
+                              value={maintenanceForm.cleanup_wallet_activity_rollup_days}
+                              onChange={(e) => setMaintenanceForm(p => ({ ...p, cleanup_wallet_activity_rollup_days: parseInt(e.target.value) || 60 }))}
+                              min={45}
+                              max={3650}
+                              className="mt-1 text-sm"
+                            />
+                          </div>
+                        </div>
+
+                        <Card className="bg-muted">
+                          <CardContent className="flex items-center justify-between p-3">
+                            <div>
+                              <p className="font-medium text-sm">Wallet Activity Duplicate Cleanup</p>
+                              <p className="text-xs text-muted-foreground">
+                                Remove duplicate rollups during scheduled maintenance
+                              </p>
+                            </div>
+                            <Switch
+                              checked={maintenanceForm.cleanup_wallet_activity_dedupe_enabled}
+                              onCheckedChange={(checked) => setMaintenanceForm(p => ({ ...p, cleanup_wallet_activity_dedupe_enabled: checked }))}
+                            />
+                          </CardContent>
+                        </Card>
 
                         <Card className="bg-muted">
                           <CardContent className="flex items-center justify-between p-3">

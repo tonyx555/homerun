@@ -411,6 +411,28 @@ class MaintenanceSettings(BaseModel):
     cleanup_resolved_trade_days: int = Field(
         default=30, ge=1, le=365, description="Delete resolved trades older than X days"
     )
+    cleanup_trade_signal_emission_days: int = Field(
+        default=21,
+        ge=1,
+        le=3650,
+        description="Delete trade signal emission rows older than this many days",
+    )
+    cleanup_trade_signal_update_days: int = Field(
+        default=3,
+        ge=0,
+        le=3650,
+        description="Delete upsert-update emission rows older than this many days (0 disables)",
+    )
+    cleanup_wallet_activity_rollup_days: int = Field(
+        default=60,
+        ge=45,
+        le=3650,
+        description="Delete wallet activity rollup rows older than this many days",
+    )
+    cleanup_wallet_activity_dedupe_enabled: bool = Field(
+        default=True,
+        description="Run duplicate cleanup pass for wallet activity rollups during maintenance",
+    )
     llm_usage_retention_days: int = Field(
         default=30,
         ge=0,

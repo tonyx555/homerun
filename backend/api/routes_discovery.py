@@ -692,6 +692,7 @@ async def _attach_activity_history_fallback(
     if not requested_ids:
         return
 
+    cutoff = utcnow() - timedelta(days=45)
     result = await session.execute(
         select(
             WalletActivityRollup.market_id,
@@ -699,7 +700,10 @@ async def _attach_activity_history_fallback(
             WalletActivityRollup.side,
             WalletActivityRollup.price,
         )
-        .where(func.lower(WalletActivityRollup.market_id).in_(list(requested_ids)))
+        .where(
+            func.lower(WalletActivityRollup.market_id).in_(list(requested_ids)),
+            WalletActivityRollup.traded_at >= cutoff,
+        )
         .order_by(WalletActivityRollup.traded_at.asc())
     )
     raw_rows = result.all()

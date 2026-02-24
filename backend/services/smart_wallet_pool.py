@@ -9,9 +9,9 @@ activity events for confluence detection windows.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import math
 import re
-import uuid
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from utils.utcnow import utcnow, utcfromtimestamp
@@ -1370,6 +1370,37 @@ class SmartWalletPoolService:
 
             await session.commit()
 
+    @staticmethod
+    def _format_rollup_identity_number(value: Any) -> str:
+        try:
+            parsed = float(value)
+        except Exception:
+            return ""
+        if not math.isfinite(parsed):
+            return ""
+        return f"{round(parsed, 6):.6f}"
+
+    @classmethod
+    def _build_wallet_activity_rollup_id(cls, event: dict[str, Any]) -> str:
+        wallet = str(event.get("wallet_address") or "").strip().lower()
+        market = str(event.get("market_id") or "").strip().lower()
+        side = str(event.get("side") or "").strip().upper()
+        traded_at = event.get("traded_at")
+        if not wallet or not market or not isinstance(traded_at, datetime):
+            return ""
+
+        tx_hash = str(event.get("tx_hash") or "").strip().lower()
+        if tx_hash:
+            canonical = f"tx|{wallet}|{market}|{side}|{tx_hash}"
+        else:
+            traded_second = int(traded_at.timestamp())
+            price = cls._format_rollup_identity_number(event.get("price"))
+            size = cls._format_rollup_identity_number(event.get("size"))
+            notional = cls._format_rollup_identity_number(event.get("notional"))
+            canonical = f"event|{wallet}|{market}|{side}|{traded_second}|{price}|{size}|{notional}"
+
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
     async def _persist_activity_events(self, events: list[dict]) -> int:
         if not events:
             return 0
@@ -1379,14 +1410,13 @@ class SmartWalletPoolService:
 
         inserts: list[dict] = []
         for event in events:
-            key = (
-                f"{event['wallet_address']}|{event['market_id']}|{event.get('side')}"
-                f"|{int(event['traded_at'].timestamp())}|{event.get('tx_hash') or ''}"
-            )
-            if key in self._activity_cache:
+            rollup_id = self._build_wallet_activity_rollup_id(event)
+            if not rollup_id:
                 continue
-            self._activity_cache[key] = now
-            inserts.append(event)
+            if rollup_id in self._activity_cache:
+                continue
+            self._activity_cache[rollup_id] = now
+            inserts.append({"_rollup_id": rollup_id, **event})
 
         if not inserts:
             return 0
@@ -1394,7 +1424,7 @@ class SmartWalletPoolService:
         async with AsyncSessionLocal() as session:
             rows = [
                 {
-                    "id": str(uuid.uuid4()),
+                    "id": event["_rollup_id"],
                     "wallet_address": event["wallet_address"],
                     "market_id": event["market_id"],
                     "side": event.get("side"),
@@ -1408,18 +1438,16 @@ class SmartWalletPoolService:
                 for event in inserts
             ]
             inserted_total = 0
-            unknown_rowcount = False
             for row_chunk in _iter_chunks(rows, chunk_size=ACTIVITY_INSERT_CHUNK_SIZE):
-                stmt = pg_insert(WalletActivityRollup).values(row_chunk).on_conflict_do_nothing(index_elements=["id"])
+                stmt = (
+                    pg_insert(WalletActivityRollup)
+                    .values(row_chunk)
+                    .on_conflict_do_nothing(index_elements=["id"])
+                    .returning(WalletActivityRollup.id)
+                )
                 result = await session.execute(stmt)
-                if result is None or result.rowcount is None or int(result.rowcount) < 0:
-                    unknown_rowcount = True
-                    continue
-                inserted_total += int(result.rowcount)
+                inserted_total += len(result.scalars().all())
             await session.commit()
-            if unknown_rowcount:
-                # Conservative fallback if driver does not report rowcount.
-                return len(inserts)
             return inserted_total
 
     def _trim_activity_cache(self, now: datetime):

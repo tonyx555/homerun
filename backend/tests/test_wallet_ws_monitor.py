@@ -28,6 +28,18 @@ def test_build_rpc_candidates_deduplicates_and_orders_urls():
     assert len(urls) == len(set(urls))
 
 
+def test_build_rpc_candidates_normalizes_ws_primary_to_https():
+    urls = _build_rpc_candidates("wss://polygon-bor-rpc.publicnode.com")
+    assert urls[0] == "https://polygon-bor-rpc.publicnode.com"
+    assert all(url.startswith(("http://", "https://")) for url in urls)
+
+
+def test_build_rpc_candidates_ignores_invalid_scheme():
+    urls = _build_rpc_candidates("ftp://polygon-rpc.com")
+    assert "ftp://polygon-rpc.com" not in urls
+    assert "https://polygon-rpc.com" in urls
+
+
 @pytest.mark.asyncio
 async def test_handle_block_does_not_advance_cursor_on_rpc_failure(monkeypatch):
     monitor = WalletWebSocketMonitor()

@@ -103,6 +103,32 @@ def _opposite_direction(direction: Any) -> str:
     return StrategySDK.opposite_direction(direction, default="")
 
 
+def _resolve_position_min_order_size_usd(
+    *,
+    trader_params: dict[str, Any],
+    payload: dict[str, Any],
+    mode: str,
+) -> float:
+    merged_params: dict[str, Any] = {}
+    merged_params.update(dict(trader_params or {}))
+
+    strategy_exit_config = payload.get("strategy_exit_config")
+    if isinstance(strategy_exit_config, dict):
+        merged_params.update(strategy_exit_config)
+
+    strategy_context = payload.get("strategy_context")
+    if isinstance(strategy_context, dict):
+        strategy_context_params = strategy_context.get("params")
+        if isinstance(strategy_context_params, dict):
+            merged_params.update(strategy_context_params)
+
+    payload_strategy_params = payload.get("strategy_params")
+    if isinstance(payload_strategy_params, dict):
+        merged_params.update(payload_strategy_params)
+
+    return StrategySDK.resolve_min_order_size_usd(merged_params, mode=mode, fallback=1.0)
+
+
 def _extract_market_token_ids(market_info: Optional[dict[str, Any]]) -> list[str]:
     if not isinstance(market_info, dict):
         return []
@@ -1312,9 +1338,10 @@ async def reconcile_paper_positions(
                         pos_view.outcome_idx = outcome_idx
 
                         token_id = _extract_live_token_id(payload)
-                        min_order_size_usd = max(
-                            0.01,
-                            safe_float(getattr(settings, "MIN_ORDER_SIZE_USD", 1.0), 1.0),
+                        min_order_size_usd = _resolve_position_min_order_size_usd(
+                            trader_params=params,
+                            payload=payload,
+                            mode="paper",
                         )
                         market_state_dict = {
                             "current_price": current_price,
@@ -2513,7 +2540,11 @@ async def reconcile_live_positions(
             if exit_size > 0.0:
                 pending_exit["remaining_size"] = float(exit_size)
             exit_price = safe_float(pending_exit.get("close_price")) or 0.01
-            min_order_size_usd = max(0.01, safe_float(getattr(settings, "MIN_ORDER_SIZE_USD", 1.0), 1.0))
+            min_order_size_usd = _resolve_position_min_order_size_usd(
+                trader_params=params,
+                payload=payload,
+                mode="live",
+            )
 
             if token_id and exit_size > 0:
                 exit_notional_estimate = float(exit_size) * float(max(exit_price, 0.0))
@@ -2547,6 +2578,7 @@ async def reconcile_live_positions(
                         side="SELL",
                         size=exit_size,
                         fallback_price=exit_price,
+                        min_order_size_usd=min_order_size_usd,
                         time_in_force="GTC",
                         resolve_live_price=False,
                     )
@@ -2826,9 +2858,10 @@ async def reconcile_live_positions(
                             pos_view.config = payload.get("strategy_exit_config", {})
                             pos_view.outcome_idx = outcome_idx
 
-                            min_order_size_usd = max(
-                                0.01,
-                                safe_float(getattr(settings, "MIN_ORDER_SIZE_USD", 1.0), 1.0),
+                            min_order_size_usd = _resolve_position_min_order_size_usd(
+                                trader_params=params,
+                                payload=payload,
+                                mode="live",
                             )
                             market_state_dict = {
                                 "current_price": exit_eval_price,
@@ -3063,7 +3096,11 @@ async def reconcile_live_positions(
                     else:
                         exit_size = min(exit_size, wallet_exit_size_cap)
                     exit_record["exit_size"] = float(exit_size)
-                min_order_size_usd = max(0.01, safe_float(getattr(settings, "MIN_ORDER_SIZE_USD", 1.0), 1.0))
+                min_order_size_usd = _resolve_position_min_order_size_usd(
+                    trader_params=params,
+                    payload=payload,
+                    mode="live",
+                )
                 if token_id and exit_size > 0:
                     exit_size = _remaining_exit_size(
                         required_exit_size=exit_size,
@@ -3101,6 +3138,7 @@ async def reconcile_live_positions(
                             side="SELL",
                             size=exit_size,
                             fallback_price=close_price,
+                            min_order_size_usd=min_order_size_usd,
                             time_in_force="GTC",
                             resolve_live_price=False,
                         )

@@ -471,6 +471,23 @@ def test_is_market_tradable_false_for_uma_resolution_proposed():
         )
         is False
     )
+
+
+def test_filter_by_time_period_handles_mixed_timezone_timestamps():
+    client = PolymarketClient()
+    now = datetime.now(timezone.utc)
+    trades = [
+        {"timestamp": (now - timedelta(hours=2)).isoformat().replace("+00:00", "Z"), "id": "recent"},
+        {"timestamp": (now - timedelta(days=2)).replace(tzinfo=None).isoformat(), "id": "stale"},
+    ]
+
+    filtered = client._filter_by_time_period(trades, "DAY")
+
+    assert [trade["id"] for trade in filtered] == ["recent"]
+
+
+def test_is_market_tradable_false_for_dispute_status():
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     assert (
         PolymarketClient.is_market_tradable(
             {

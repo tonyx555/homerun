@@ -230,7 +230,7 @@ class ExecutionSimulator:
         source_key = str(payload.get("source_key") or run_row.source_key or "").strip().lower()
         provider = self._normalize_provider(payload.get("market_provider"))
         timeframe = str(payload.get("timeframe") or "15m").strip().lower()
-        strategy_params = dict(payload.get("strategy_params") or {})
+        input_strategy_params = dict(payload.get("strategy_params") or {})
         market_ref_override = str(payload.get("market_ref") or "").strip()
         market_id_filter = str(payload.get("market_id") or "").strip()
         requested_seed = str(payload.get("run_seed") or getattr(run_row, "run_seed", "") or "").strip()
@@ -255,7 +255,7 @@ class ExecutionSimulator:
             "timeframe": timeframe,
             "start_ms": start_ms,
             "end_ms": end_ms,
-            "strategy_params": strategy_params,
+            "strategy_params": input_strategy_params,
             "market_scope": dict(payload.get("market_scope") or {}),
             "default_notional_usd": default_notional,
             "slippage_bps": self._to_float(payload.get("slippage_bps"), 5.0),
@@ -319,6 +319,16 @@ class ExecutionSimulator:
             await session.flush()
             return dict(run_row.summary_json)
         run_row.code_sha = code_sha or None
+
+        strategy_defaults: dict[str, Any] = {}
+        loaded_strategy_config = getattr(strategy, "config", None)
+        if isinstance(loaded_strategy_config, dict):
+            strategy_defaults = dict(loaded_strategy_config)
+        else:
+            loaded_default_config = getattr(strategy, "default_config", None)
+            if isinstance(loaded_default_config, dict):
+                strategy_defaults = dict(loaded_default_config)
+        strategy_params = {**strategy_defaults, **input_strategy_params}
 
         query = select(TradeSignalEmission).where(TradeSignalEmission.source == source_key)
         if start_dt is not None:
@@ -655,6 +665,8 @@ class ExecutionSimulator:
         run_row.code_sha = code_sha or None
         run_row.params_json = {
             **dict(payload),
+            "strategy_params": input_strategy_params,
+            "effective_strategy_params": strategy_params,
             "run_manifest": run_manifest,
         }
         run_row.error_message = None

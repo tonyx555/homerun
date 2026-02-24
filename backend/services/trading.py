@@ -32,6 +32,7 @@ from config import settings
 from services.pause_state import global_pause_state
 from services.price_chaser import price_chaser
 from services.execution_tiers import execution_tier_service
+from services.strategy_sdk import StrategySDK
 from services.trading_proxy import (
     patch_clob_client_proxy,
     pre_trade_vpn_check,
@@ -1865,6 +1866,7 @@ class TradingService:
         size_usd: Decimal,
         side: OrderSide,
         token_id: Optional[str] = None,
+        min_order_size_usd: Optional[float] = None,
     ) -> tuple[bool, str]:
         """Validate order against safety limits."""
         self._check_daily_reset()
@@ -1875,7 +1877,11 @@ class TradingService:
         if not self.is_ready():
             return False, "Trading service not initialized"
 
-        min_order_size = _to_decimal(settings.MIN_ORDER_SIZE_USD)
+        min_order_floor = StrategySDK.resolve_min_order_size_usd(
+            {"min_order_size_usd": min_order_size_usd} if min_order_size_usd is not None else {},
+            fallback=float(settings.MIN_ORDER_SIZE_USD),
+        )
+        min_order_size = _to_decimal(min_order_floor)
         max_trade_size = _to_decimal(settings.MAX_TRADE_SIZE_USD)
         max_daily_volume = _to_decimal(settings.MAX_DAILY_TRADE_VOLUME)
         max_per_market = _to_decimal(self.MAX_PER_MARKET_USD)
@@ -1883,7 +1889,7 @@ class TradingService:
         if size_usd < min_order_size:
             return (
                 False,
-                f"Order size ${float(size_usd):.2f} below minimum ${settings.MIN_ORDER_SIZE_USD:.2f}",
+                f"Order size ${float(size_usd):.2f} below minimum ${float(min_order_floor):.2f}",
             )
 
         if size_usd > max_trade_size:
@@ -1923,6 +1929,7 @@ class TradingService:
         size_usd: Decimal,
         side: OrderSide,
         token_id: Optional[str],
+        min_order_size_usd: Optional[float] = None,
     ) -> tuple[bool, str]:
         # Force refresh from shared DB controls so pause-all propagates quickly
         # across API and worker containers.
@@ -1935,6 +1942,7 @@ class TradingService:
                 size_usd=size_usd,
                 side=side,
                 token_id=token_id,
+                min_order_size_usd=min_order_size_usd,
             )
             if not is_valid:
                 return False, error
@@ -1975,6 +1983,7 @@ class TradingService:
         size: float,
         order_type: OrderType = OrderType.GTC,
         post_only: bool = False,
+        min_order_size_usd: Optional[float] = None,
         market_question: Optional[str] = None,
         opportunity_id: Optional[str] = None,
     ) -> Order:
@@ -2026,6 +2035,7 @@ class TradingService:
             size_usd=size_usd,
             side=side,
             token_id=token_id,
+            min_order_size_usd=min_order_size_usd,
         )
         if not is_valid:
             order.status = OrderStatus.FAILED

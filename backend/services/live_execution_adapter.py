@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from config import settings
 from services.polymarket import polymarket_client
+from services.strategy_sdk import StrategySDK
 from services.trading import OrderSide, OrderType, trading_service
 from utils.converters import safe_float
 from utils.logger import get_logger
@@ -49,6 +49,7 @@ async def execute_live_order(
     side: Any,
     size: float,
     fallback_price: float | None = None,
+    min_order_size_usd: float | None = None,
     market_question: str | None = None,
     opportunity_id: str | None = None,
     time_in_force: str = "GTC",
@@ -59,7 +60,10 @@ async def execute_live_order(
     normalized_side = _normalize_side(side)
     requested_size = max(0.0, safe_float(size, 0.0) or 0.0)
     fallback = safe_float(fallback_price)
-    min_order_size_usd = max(0.01, safe_float(getattr(settings, "MIN_ORDER_SIZE_USD", 1.0), 1.0) or 1.0)
+    min_order_size = StrategySDK.resolve_min_order_size_usd(
+        {"min_order_size_usd": min_order_size_usd} if min_order_size_usd is not None else {},
+        fallback=1.0,
+    )
 
     base_payload = {
         "adapter": "live_execution_adapter_v1",
@@ -116,10 +120,10 @@ async def execute_live_order(
                 live_notional = float(live_quote) * requested_size
                 fallback_notional = (float(fallback) * requested_size) if fallback is not None and fallback > 0 else 0.0
                 if (
-                    live_notional + 1e-9 < min_order_size_usd
+                    live_notional + 1e-9 < min_order_size
                     and fallback is not None
                     and fallback > 0
-                    and fallback_notional + 1e-9 >= min_order_size_usd
+                    and fallback_notional + 1e-9 >= min_order_size
                 ):
                     resolved_price = fallback
                     price_resolution = "fallback_min_notional_guard"
@@ -161,6 +165,7 @@ async def execute_live_order(
             size=requested_size,
             order_type=order_type,
             post_only=post_only,
+            min_order_size_usd=min_order_size,
             market_question=market_question,
             opportunity_id=opportunity_id,
         )

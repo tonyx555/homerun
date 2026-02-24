@@ -253,13 +253,8 @@ class PolymarketClient:
                 )
                 if updated_at_raw:
                     try:
-                        if isinstance(updated_at_raw, str):
-                            updated_at = datetime.fromisoformat(updated_at_raw.replace("Z", "+00:00")).replace(
-                                tzinfo=None
-                            )
-                        else:
-                            updated_at = utcfromtimestamp(float(updated_at_raw))
-                        if updated_at < cutoff:
+                        updated_at = PolymarketClient._coerce_datetime(updated_at_raw)
+                        if updated_at is not None and updated_at < cutoff:
                             break
                     except (ValueError, TypeError, OSError):
                         pass
@@ -837,9 +832,7 @@ class PolymarketClient:
         if value is None:
             return None
         if isinstance(value, datetime):
-            if value.tzinfo is not None:
-                return value.astimezone(timezone.utc).replace(tzinfo=None)
-            return value
+            return value.astimezone(timezone.utc) if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
         if isinstance(value, (int, float)):
             ts = float(value)
             if ts > 10_000_000_000:
@@ -861,9 +854,9 @@ class PolymarketClient:
                 pass
             try:
                 parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-                if parsed.tzinfo is not None:
-                    return parsed.astimezone(timezone.utc).replace(tzinfo=None)
-                return parsed
+                return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else parsed.replace(
+                    tzinfo=timezone.utc
+                )
             except ValueError:
                 return None
         return None
@@ -912,6 +905,10 @@ class PolymarketClient:
             return True
 
         ref_now = now or utcnow()
+        if ref_now.tzinfo is None:
+            ref_now = ref_now.replace(tzinfo=timezone.utc)
+        else:
+            ref_now = ref_now.astimezone(timezone.utc)
 
         closed = PolymarketClient._coerce_bool(market_info.get("closed"))
         if closed is True:
@@ -957,10 +954,6 @@ class PolymarketClient:
             market_info.get("end_date") if market_info.get("end_date") is not None else market_info.get("endDate")
         )
         if end_dt:
-            if end_dt.tzinfo is None:
-                end_dt = end_dt.replace(tzinfo=timezone.utc)
-            if ref_now.tzinfo is None:
-                ref_now = ref_now.replace(tzinfo=timezone.utc)
             if end_dt <= ref_now:
                 return False
 
@@ -1563,11 +1556,11 @@ class PolymarketClient:
 
         # Try fetching from the Polymarket website profile page
         try:
-            client = await self._get_client()
-            response = await client.get(
+            response = await self._rate_limited_get(
                 f"https://polymarket.com/profile/{address}",
                 headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
                 follow_redirects=True,
+                timeout=20.0,
             )
             if response.status_code == 200:
                 html = response.text
@@ -1587,6 +1580,13 @@ class PolymarketClient:
                     if username and "polymarket" not in username.lower():
                         return {"username": username, "address": address}
 
+        except httpx.TransportError as e:
+            _logger.debug(
+                "Profile fetch transport error",
+                address=address,
+                error=str(e),
+                error_type=type(e).__name__,
+            )
         except Exception as e:
             _logger.warning(
                 "Error fetching profile",
@@ -1883,9 +1883,11 @@ class PolymarketClient:
                 filtered.append(trade)  # Keep trades without timestamps
                 continue
             try:
-                if isinstance(ts, str):
-                    ts = datetime.fromisoformat(ts.replace("Z", "+00:00")).replace(tzinfo=None)
-                if ts >= cutoff:
+                parsed_ts = self._coerce_datetime(ts)
+                if parsed_ts is None:
+                    filtered.append(trade)
+                    continue
+                if parsed_ts >= cutoff:
                     filtered.append(trade)
             except (ValueError, TypeError):
                 filtered.append(trade)  # Keep if we can't parse

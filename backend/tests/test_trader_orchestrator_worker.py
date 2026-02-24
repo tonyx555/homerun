@@ -21,6 +21,63 @@ def test_supports_live_market_context_excludes_crypto_source():
     assert trader_orchestrator_worker._supports_live_market_context(SimpleNamespace(source="weather")) is True
 
 
+def test_merged_strategy_params_use_loaded_strategy_config_defaults(monkeypatch):
+    strategy = SimpleNamespace(
+        config={
+            "opening_directional_buy_yes_enabled": True,
+            "max_signal_age_seconds": 30.0,
+        }
+    )
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "_strategy_instance_for_source_config",
+        lambda source_config: strategy,
+    )
+
+    merged = trader_orchestrator_worker._merged_strategy_params_for_source_config(
+        {
+            "source_key": "crypto",
+            "strategy_key": "btc_eth_highfreq",
+            "strategy_params": {
+                "max_signal_age_seconds": 7.5,
+            },
+        }
+    )
+
+    assert merged["opening_directional_buy_yes_enabled"] is True
+    assert merged["max_signal_age_seconds"] == 7.5
+
+
+def test_normalize_source_configs_merges_strategy_defaults(monkeypatch):
+    strategy = SimpleNamespace(
+        config={
+            "opening_directional_buy_yes_enabled": True,
+            "reentry_cooldown_seconds_per_market": 15.0,
+        }
+    )
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "_strategy_instance_for_source_config",
+        lambda source_config: strategy,
+    )
+
+    normalized = trader_orchestrator_worker._normalize_source_configs(
+        {
+            "source_configs": [
+                {
+                    "source_key": "crypto",
+                    "strategy_key": "btc_eth_highfreq",
+                    "strategy_params": {"reentry_cooldown_seconds_per_market": 8.0},
+                }
+            ]
+        }
+    )
+
+    crypto = normalized["crypto"]["strategy_params"]
+    assert crypto["opening_directional_buy_yes_enabled"] is True
+    assert crypto["reentry_cooldown_seconds_per_market"] == 8.0
+
+
 def test_strategy_registry_supports_legacy_default_alias():
     from services.strategies.btc_eth_highfreq import BtcEthHighFreqStrategy
 
@@ -1120,6 +1177,128 @@ async def test_run_trader_once_blocks_stacking_when_allow_averaging_false(monkey
     assert "allow_averaging=false" in decisions[0]["reason"]
     stacking_check = next(check for check in decision_checks[0] if check["check_key"] == "stacking_guard")
     assert stacking_check["passed"] is False
+
+
+@pytest.mark.asyncio
+async def test_run_trader_once_handles_aware_loss_cooldown_without_datetime_type_error(monkeypatch):
+    signal = _base_signal()
+    decisions: list[dict] = []
+    risk_calls: list[dict] = []
+    submit_calls = {"count": 0}
+    list_calls = {"count": 0}
+
+    async def _list_unconsumed(*args, **kwargs):
+        list_calls["count"] += 1
+        return [signal] if list_calls["count"] == 1 else []
+
+    async def _create_decision(session, **kwargs):
+        decisions.append(kwargs)
+        return SimpleNamespace(id="decision-cooldown")
+
+    def _evaluate_risk(**kwargs):
+        risk_calls.append(kwargs)
+        if kwargs.get("cooldown_active"):
+            return SimpleNamespace(allowed=False, reason="cooldown active", checks=[])
+        return SimpleNamespace(allowed=True, reason="ok", checks=[])
+
+    async def _execute_signal(self, **kwargs):
+        submit_calls["count"] += 1
+        return SimpleNamespace(
+            session_id="session-cooldown",
+            status="completed",
+            effective_price=0.4,
+            error_message=None,
+            orders_written=1,
+            payload={},
+        )
+
+    async def _reconcile_active_sessions(self, *, mode, trader_id=None):
+        return {"active_seen": 0, "expired": 0, "completed": 0, "failed": 0}
+
+    monkeypatch.setattr(trader_orchestrator_worker, "AsyncSessionLocal", lambda: _DummySessionContext())
+    monkeypatch.setattr(trader_orchestrator_worker, "_query_sources_for_configs", lambda *_: ["crypto"])
+    monkeypatch.setattr(
+        trader_orchestrator_worker.strategy_db_loader,
+        "get_availability",
+        lambda strategy_key: SimpleNamespace(
+            available=True,
+            strategy_key=strategy_key,
+            resolved_key=strategy_key,
+            reason=None,
+        ),
+    )
+    monkeypatch.setattr(
+        trader_orchestrator_worker.strategy_db_loader,
+        "get_strategy",
+        lambda *_: _SelectedStrategy(),
+    )
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "RuntimeTradeSignalView",
+        lambda sig, live_context=None: SimpleNamespace(**sig.__dict__, live_context=(live_context or {})),
+    )
+    monkeypatch.setattr(trader_orchestrator_worker, "evaluate_risk", _evaluate_risk)
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "_enforce_source_open_order_timeouts",
+        AsyncMock(return_value={"configured": 0, "updated": 0, "suppressed": 0, "errors": []}),
+    )
+    monkeypatch.setattr(trader_orchestrator_worker, "get_open_position_count_for_trader", AsyncMock(return_value=0))
+    monkeypatch.setattr(trader_orchestrator_worker, "get_open_order_count_for_trader", AsyncMock(return_value=0))
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "get_pending_live_exit_summary_for_trader",
+        AsyncMock(return_value={"count": 0, "order_ids": [], "market_ids": [], "statuses": {}}),
+    )
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "get_open_market_ids_for_trader",
+        AsyncMock(return_value=set()),
+    )
+    monkeypatch.setattr(trader_orchestrator_worker, "get_daily_realized_pnl", AsyncMock(return_value=0.0))
+    monkeypatch.setattr(trader_orchestrator_worker, "get_consecutive_loss_count", AsyncMock(return_value=1))
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "get_last_resolved_loss_at",
+        AsyncMock(return_value=datetime.now(timezone.utc) - timedelta(seconds=20)),
+    )
+    monkeypatch.setattr(trader_orchestrator_worker, "get_trader_signal_cursor", AsyncMock(return_value=(None, None)))
+    monkeypatch.setattr(trader_orchestrator_worker, "list_unconsumed_trade_signals", _list_unconsumed)
+    monkeypatch.setattr(trader_orchestrator_worker, "get_gross_exposure", AsyncMock(return_value=0.0))
+    monkeypatch.setattr(trader_orchestrator_worker, "get_market_exposure", AsyncMock(return_value=0.0))
+    monkeypatch.setattr(trader_orchestrator_worker, "create_trader_decision", _create_decision)
+    monkeypatch.setattr(trader_orchestrator_worker, "create_trader_decision_checks", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        trader_orchestrator_worker.ExecutionSessionEngine,
+        "execute_signal",
+        _execute_signal,
+    )
+    monkeypatch.setattr(
+        trader_orchestrator_worker.ExecutionSessionEngine,
+        "reconcile_active_sessions",
+        _reconcile_active_sessions,
+    )
+    monkeypatch.setattr(trader_orchestrator_worker, "set_trade_signal_status", AsyncMock(return_value=True))
+    monkeypatch.setattr(trader_orchestrator_worker, "create_trader_order", AsyncMock(return_value=None))
+    monkeypatch.setattr(trader_orchestrator_worker, "record_signal_consumption", AsyncMock(return_value=None))
+    monkeypatch.setattr(trader_orchestrator_worker, "create_trader_event", AsyncMock(return_value=None))
+    monkeypatch.setattr(trader_orchestrator_worker, "upsert_trader_signal_cursor", AsyncMock(return_value=None))
+
+    trader_payload = _base_trader_payload(allow_averaging=True)
+    trader_payload["risk_limits"]["cooldown_seconds"] = 120
+
+    decisions_written, orders_written, _processed_signals = await trader_orchestrator_worker._run_trader_once(
+        trader_payload,
+        _base_control_payload(),
+    )
+
+    assert decisions_written == 1
+    assert orders_written == 0
+    assert submit_calls["count"] == 0
+    assert risk_calls
+    assert risk_calls[0]["cooldown_active"] is True
+    assert decisions[0]["decision"] == "blocked"
+    assert "cooldown active" in str(decisions[0]["reason"]).lower()
 
 
 @pytest.mark.asyncio

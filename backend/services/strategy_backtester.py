@@ -1125,7 +1125,15 @@ async def run_evaluate_backtest(
         merged_config = dict(config or {})
         platform_overrides = merged_config.pop("__platform__", {})
         platform_overrides = platform_overrides if isinstance(platform_overrides, dict) else {}
-        params = dict(merged_config)
+        strategy_defaults: dict[str, Any] = {}
+        loaded_config = getattr(strategy, "config", None)
+        if isinstance(loaded_config, dict):
+            strategy_defaults = dict(loaded_config)
+        else:
+            loaded_default_config = getattr(strategy, "default_config", None)
+            if isinstance(loaded_default_config, dict):
+                strategy_defaults = dict(loaded_default_config)
+        params = {**strategy_defaults, **merged_config}
         platform_global_risk = (
             dict(platform_overrides.get("global_risk", {}))
             if isinstance(platform_overrides.get("global_risk", {}), dict)
@@ -1216,7 +1224,7 @@ async def run_evaluate_backtest(
                     portfolio_allocator=None,
                     risk_evaluator=_backtest_risk_evaluator,
                     invoke_hooks=False,
-                    strategy_params={},
+                    strategy_params=params,
                 )
 
                 decision_str = str(gate_result["final_decision"])

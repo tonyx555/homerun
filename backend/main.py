@@ -546,6 +546,10 @@ async def lifespan(app: FastAPI):
             "open_trade_expiry_days": int(settings.CLEANUP_OPEN_TRADE_EXPIRY_DAYS),
             "wallet_trade_days": int(settings.CLEANUP_WALLET_TRADE_DAYS),
             "anomaly_days": int(settings.CLEANUP_ANOMALY_DAYS),
+            "trade_signal_emission_days": int(settings.CLEANUP_TRADE_SIGNAL_EMISSION_DAYS),
+            "trade_signal_update_days": int(settings.CLEANUP_TRADE_SIGNAL_UPDATE_DAYS),
+            "wallet_activity_rollup_days": int(settings.CLEANUP_WALLET_ACTIVITY_ROLLUP_DAYS),
+            "wallet_activity_dedupe_enabled": bool(settings.CLEANUP_WALLET_ACTIVITY_DEDUPE_ENABLED),
         }
         try:
             async with AsyncSessionLocal() as session:
@@ -558,6 +562,22 @@ async def lifespan(app: FastAPI):
                     cleanup_interval_hours = int(row.cleanup_interval_hours or cleanup_interval_hours)
                     cleanup_config["resolved_trade_days"] = int(
                         row.cleanup_resolved_trade_days or cleanup_config["resolved_trade_days"]
+                    )
+                    cleanup_config["trade_signal_emission_days"] = int(
+                        row.cleanup_trade_signal_emission_days or cleanup_config["trade_signal_emission_days"]
+                    )
+                    cleanup_config["trade_signal_update_days"] = int(
+                        row.cleanup_trade_signal_update_days
+                        if row.cleanup_trade_signal_update_days is not None
+                        else cleanup_config["trade_signal_update_days"]
+                    )
+                    cleanup_config["wallet_activity_rollup_days"] = int(
+                        row.cleanup_wallet_activity_rollup_days or cleanup_config["wallet_activity_rollup_days"]
+                    )
+                    cleanup_config["wallet_activity_dedupe_enabled"] = bool(
+                        row.cleanup_wallet_activity_dedupe_enabled
+                        if row.cleanup_wallet_activity_dedupe_enabled is not None
+                        else cleanup_config["wallet_activity_dedupe_enabled"]
                     )
         except Exception as e:
             logger.warning("Failed to load DB maintenance settings; using env defaults", exc_info=e)
@@ -621,6 +641,7 @@ async def lifespan(app: FastAPI):
             "workers.tracked_traders_worker",
             "workers.trader_orchestrator_worker",
             "workers.trader_reconciliation_worker",
+            "workers.redeemer_worker",
             "workers.events_worker",
             "workers.discovery_worker",
         )

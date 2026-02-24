@@ -8,15 +8,17 @@ import asyncio
 from datetime import timedelta
 from typing import Optional
 from utils.utcnow import utcnow
-from sqlalchemy import select, delete, func, and_
+from sqlalchemy import select, delete, func, and_, text
 
 from models.database import (
     SimulationTrade,
     SimulationPosition,
     WalletTrade,
+    WalletActivityRollup,
     OpportunityHistory,
     DetectedAnomaly,
     LLMUsageLog,
+    TradeSignalEmission,
     TradeStatus,
     AsyncSessionLocal,
     AppSettings,
@@ -37,6 +39,9 @@ class MaintenanceService:
     DEFAULT_WALLET_TRADE_AGE = 60  # Delete wallet trades older than 60 days
     DEFAULT_ANOMALY_AGE = 30  # Delete resolved anomalies older than 30 days
     DEFAULT_LLM_USAGE_RETENTION_DAYS = 30  # Delete raw LLM usage logs older than 30 days
+    DEFAULT_TRADE_SIGNAL_EMISSION_AGE = 21  # Delete trade signal emission rows older than 21 days
+    DEFAULT_TRADE_SIGNAL_UPDATE_AGE = 3  # Delete upsert_update emissions older than 3 days
+    DEFAULT_WALLET_ACTIVITY_ROLLUP_AGE = 60  # Delete wallet activity rollups older than 60 days
 
     async def _market_cache_hygiene_settings(self) -> dict:
         config = {
@@ -79,6 +84,32 @@ class MaintenanceService:
             logger.warning("Failed to read LLM usage retention setting", error=str(e))
         return retention_days
 
+    async def _high_volume_cleanup_settings(self) -> dict:
+        config = {
+            "trade_signal_emission_days": self.DEFAULT_TRADE_SIGNAL_EMISSION_AGE,
+            "trade_signal_update_days": self.DEFAULT_TRADE_SIGNAL_UPDATE_AGE,
+            "wallet_activity_rollup_days": self.DEFAULT_WALLET_ACTIVITY_ROLLUP_AGE,
+            "wallet_activity_dedupe_enabled": True,
+        }
+        try:
+            async with AsyncSessionLocal() as session:
+                row = (
+                    await session.execute(select(AppSettings).where(AppSettings.id == "default"))
+                ).scalar_one_or_none()
+                if row is None:
+                    return config
+                if row.cleanup_trade_signal_emission_days is not None:
+                    config["trade_signal_emission_days"] = max(1, int(row.cleanup_trade_signal_emission_days))
+                if row.cleanup_trade_signal_update_days is not None:
+                    config["trade_signal_update_days"] = max(0, int(row.cleanup_trade_signal_update_days))
+                if row.cleanup_wallet_activity_rollup_days is not None:
+                    config["wallet_activity_rollup_days"] = max(45, int(row.cleanup_wallet_activity_rollup_days))
+                if row.cleanup_wallet_activity_dedupe_enabled is not None:
+                    config["wallet_activity_dedupe_enabled"] = bool(row.cleanup_wallet_activity_dedupe_enabled)
+        except Exception as e:
+            logger.warning("Failed to read high-volume cleanup settings", error=str(e))
+        return config
+
     async def cleanup_database_backups(self, older_than_days: int = DEFAULT_DATABASE_BACKUP_RETENTION_DAYS) -> dict:
         """
         Delete backup files older than the configured retention window.
@@ -118,6 +149,8 @@ class MaintenanceService:
 
             # Count wallet trades
             wallet_trades = await session.execute(select(func.count(WalletTrade.id)))
+            wallet_activity_rollups = await session.execute(select(func.count(WalletActivityRollup.id)))
+            trade_signal_emissions = await session.execute(select(func.count(TradeSignalEmission.id)))
 
             # Count opportunity history
             opportunities = await session.execute(select(func.count(OpportunityHistory.id)))
@@ -142,6 +175,8 @@ class MaintenanceService:
                     "open": open_positions.scalar() or 0,
                 },
                 "wallet_trades": wallet_trades.scalar() or 0,
+                "wallet_activity_rollups": wallet_activity_rollups.scalar() or 0,
+                "trade_signal_emissions": trade_signal_emissions.scalar() or 0,
                 "opportunity_history": opportunities.scalar() or 0,
                 "anomalies": {
                     "total": anomalies.scalar() or 0,
@@ -403,6 +438,274 @@ class MaintenanceService:
                 "preserve_current_month": bool(preserve_current_month),
             }
 
+    async def cleanup_trade_signal_emissions(
+        self,
+        older_than_days: int = DEFAULT_TRADE_SIGNAL_EMISSION_AGE,
+        source: Optional[str] = None,
+        event_type: Optional[str] = None,
+    ) -> dict:
+        """
+        Delete old trade signal emission rows.
+
+        Args:
+            older_than_days: Delete emission rows older than this many days.
+                `0` disables cleanup.
+            source: Optional source filter (scanner/news/weather/crypto/traders/events).
+            event_type: Optional event type filter (upsert_insert/upsert_update/status_transition).
+
+        Returns:
+            Dict with deletion count and retention metadata.
+        """
+        if older_than_days <= 0:
+            return {
+                "status": "disabled",
+                "trade_signal_emissions_deleted": 0,
+                "older_than_days": int(older_than_days),
+                "source": source,
+                "event_type": event_type,
+            }
+
+        cutoff_date = utcnow() - timedelta(days=older_than_days)
+        conditions = [TradeSignalEmission.created_at < cutoff_date]
+        if source:
+            conditions.append(TradeSignalEmission.source == source)
+        if event_type:
+            conditions.append(TradeSignalEmission.event_type == event_type)
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(delete(TradeSignalEmission).where(and_(*conditions)))
+            await session.commit()
+
+        deleted_count = int(result.rowcount or 0)
+        logger.info(
+            "Cleaned up trade signal emissions",
+            deleted_count=deleted_count,
+            older_than_days=older_than_days,
+            source=source,
+            event_type=event_type,
+        )
+        return {
+            "status": "success",
+            "trade_signal_emissions_deleted": deleted_count,
+            "cutoff_date": cutoff_date.isoformat(),
+            "older_than_days": int(older_than_days),
+            "source": source,
+            "event_type": event_type,
+        }
+
+    async def cleanup_trade_signal_update_emissions(
+        self,
+        older_than_days: int = DEFAULT_TRADE_SIGNAL_UPDATE_AGE,
+        source: Optional[str] = None,
+    ) -> dict:
+        """
+        Delete noisy upsert_update emissions older than the configured window.
+
+        Args:
+            older_than_days: Delete upsert_update rows older than this many days.
+                `0` disables cleanup.
+            source: Optional source filter.
+
+        Returns:
+            Dict with deletion count and retention metadata.
+        """
+        if older_than_days <= 0:
+            return {
+                "status": "disabled",
+                "trade_signal_updates_deleted": 0,
+                "older_than_days": int(older_than_days),
+                "source": source,
+            }
+
+        cutoff_date = utcnow() - timedelta(days=older_than_days)
+        conditions = [
+            TradeSignalEmission.event_type == "upsert_update",
+            TradeSignalEmission.created_at < cutoff_date,
+        ]
+        if source:
+            conditions.append(TradeSignalEmission.source == source)
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(delete(TradeSignalEmission).where(and_(*conditions)))
+            await session.commit()
+
+        deleted_count = int(result.rowcount or 0)
+        logger.info(
+            "Cleaned up trade signal update emissions",
+            deleted_count=deleted_count,
+            older_than_days=older_than_days,
+            source=source,
+        )
+        return {
+            "status": "success",
+            "trade_signal_updates_deleted": deleted_count,
+            "cutoff_date": cutoff_date.isoformat(),
+            "older_than_days": int(older_than_days),
+            "source": source,
+        }
+
+    async def cleanup_wallet_activity_rollups(
+        self,
+        older_than_days: int = DEFAULT_WALLET_ACTIVITY_ROLLUP_AGE,
+        source: Optional[str] = None,
+        wallet_address: Optional[str] = None,
+    ) -> dict:
+        """
+        Delete old wallet activity rollup rows.
+
+        Args:
+            older_than_days: Delete rollups older than this many days.
+            source: Optional source filter.
+            wallet_address: Optional wallet filter.
+
+        Returns:
+            Dict with deletion count and retention metadata.
+        """
+        if older_than_days <= 0:
+            return {
+                "status": "disabled",
+                "wallet_activity_rollups_deleted": 0,
+                "older_than_days": int(older_than_days),
+                "source": source,
+                "wallet_address": wallet_address,
+            }
+
+        cutoff_date = utcnow() - timedelta(days=older_than_days)
+        conditions = [WalletActivityRollup.traded_at < cutoff_date]
+        if source:
+            conditions.append(WalletActivityRollup.source == source)
+        if wallet_address:
+            conditions.append(WalletActivityRollup.wallet_address == wallet_address.lower())
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(delete(WalletActivityRollup).where(and_(*conditions)))
+            await session.commit()
+
+        deleted_count = int(result.rowcount or 0)
+        logger.info(
+            "Cleaned up wallet activity rollups",
+            deleted_count=deleted_count,
+            older_than_days=older_than_days,
+            source=source,
+            wallet_address=wallet_address,
+        )
+        return {
+            "status": "success",
+            "wallet_activity_rollups_deleted": deleted_count,
+            "cutoff_date": cutoff_date.isoformat(),
+            "older_than_days": int(older_than_days),
+            "source": source,
+            "wallet_address": wallet_address,
+        }
+
+    async def cleanup_wallet_activity_rollup_duplicates(
+        self,
+        source: Optional[str] = None,
+        older_than_minutes: int = 10,
+        batch_limit: int = 100000,
+        max_batches: int = 50,
+    ) -> dict:
+        """
+        Delete duplicate wallet activity rollups while retaining one canonical row.
+
+        Duplicate identity:
+        - wallet_address (case-insensitive)
+        - market_id (case-insensitive)
+        - side (normalized uppercase)
+        - tx_hash (case-insensitive)
+        - traded_at second bucket
+        - rounded price/size/notional (6 decimals)
+
+        Args:
+            source: Optional source filter.
+            older_than_minutes: Skip very recent rows to avoid racing active ingestion.
+            batch_limit: Maximum duplicates to delete per SQL statement.
+            max_batches: Cap number of deletion batches in one maintenance run.
+
+        Returns:
+            Dict with duplicate deletion totals.
+        """
+        safe_batch_limit = max(1, min(1_000_000, int(batch_limit or 100000)))
+        safe_max_batches = max(1, min(1000, int(max_batches or 50)))
+        safe_minutes = max(0, int(older_than_minutes or 0))
+        cutoff = utcnow() - timedelta(minutes=safe_minutes)
+
+        source_clause = ""
+        params: dict[str, object] = {
+            "cutoff": cutoff,
+            "batch_limit": safe_batch_limit,
+        }
+        if source:
+            source_clause = "AND source = :source"
+            params["source"] = source
+
+        statement = text(
+            f"""
+WITH ranked AS (
+    SELECT
+        id,
+        ROW_NUMBER() OVER (
+            PARTITION BY
+                lower(wallet_address),
+                lower(market_id),
+                upper(COALESCE(side, '')),
+                COALESCE(NULLIF(lower(tx_hash), ''), ''),
+                EXTRACT(EPOCH FROM date_trunc('second', traded_at))::bigint,
+                COALESCE(round(price::numeric, 6), -1::numeric),
+                COALESCE(round(size::numeric, 6), -1::numeric),
+                COALESCE(round(notional::numeric, 6), -1::numeric)
+            ORDER BY created_at DESC, id DESC
+        ) AS row_num
+    FROM wallet_activity_rollups
+    WHERE traded_at <= :cutoff
+    {source_clause}
+),
+to_delete AS (
+    SELECT id
+    FROM ranked
+    WHERE row_num > 1
+    LIMIT :batch_limit
+)
+DELETE FROM wallet_activity_rollups target
+USING to_delete d
+WHERE target.id = d.id
+RETURNING target.id
+"""
+        )
+
+        deleted_total = 0
+        batches = 0
+        async with AsyncSessionLocal() as session:
+            while batches < safe_max_batches:
+                result = await session.execute(statement, params)
+                await session.commit()
+                deleted = len(result.scalars().all())
+                if deleted <= 0:
+                    break
+                deleted_total += deleted
+                batches += 1
+                if deleted < safe_batch_limit:
+                    break
+
+        logger.info(
+            "Cleaned duplicate wallet activity rollups",
+            deleted_total=deleted_total,
+            batches=batches,
+            source=source,
+            older_than_minutes=safe_minutes,
+            batch_limit=safe_batch_limit,
+        )
+        return {
+            "status": "success",
+            "wallet_activity_rollup_duplicates_deleted": int(deleted_total),
+            "batches": int(batches),
+            "source": source,
+            "older_than_minutes": safe_minutes,
+            "batch_limit": safe_batch_limit,
+            "max_batches": safe_max_batches,
+            "cutoff_date": cutoff.isoformat(),
+        }
+
     async def delete_all_trades(self, account_id: Optional[str] = None, confirm: bool = False) -> dict:
         """
         Delete ALL trades (nuclear option).
@@ -509,6 +812,10 @@ class MaintenanceService:
         wallet_trade_days: int = DEFAULT_WALLET_TRADE_AGE,
         anomaly_days: int = DEFAULT_ANOMALY_AGE,
         llm_usage_retention_days: Optional[int] = None,
+        trade_signal_emission_days: Optional[int] = None,
+        trade_signal_update_days: Optional[int] = None,
+        wallet_activity_rollup_days: Optional[int] = None,
+        wallet_activity_dedupe_enabled: Optional[bool] = None,
     ) -> dict:
         """
         Run full database cleanup with all maintenance tasks.
@@ -520,6 +827,14 @@ class MaintenanceService:
             anomaly_days: Delete resolved anomalies older than this
             llm_usage_retention_days: Delete LLM usage logs older than this.
                 `None` reads from AppSettings.
+            trade_signal_emission_days: Delete trade signal emissions older than this.
+                `None` reads from AppSettings.
+            trade_signal_update_days: Delete upsert_update emissions older than this.
+                `None` reads from AppSettings.
+            wallet_activity_rollup_days: Delete wallet activity rollups older than this.
+                `None` reads from AppSettings.
+            wallet_activity_dedupe_enabled: Run rollup duplicate cleanup pass.
+                `None` reads from AppSettings.
 
         Returns:
             Dict with all cleanup results
@@ -527,6 +842,7 @@ class MaintenanceService:
         logger.info("Starting full database cleanup")
 
         results = {}
+        high_volume_cfg = await self._high_volume_cleanup_settings()
 
         # 1. Expire old open trades first
         results["expired_trades"] = await self.expire_old_open_trades(older_than_days=open_trade_expiry_days)
@@ -553,7 +869,56 @@ class MaintenanceService:
             logger.warning("LLM usage log cleanup failed during full maintenance run", error=str(e))
             results["llm_usage_logs"] = {"status": "error", "error": str(e)}
 
-        # 6. Prune old database backups
+        # 6. Prune noisy upsert updates while preserving meaningful transitions.
+        try:
+            update_retention_days = trade_signal_update_days
+            if update_retention_days is None:
+                update_retention_days = int(high_volume_cfg["trade_signal_update_days"])
+            results["trade_signal_updates"] = await self.cleanup_trade_signal_update_emissions(
+                older_than_days=int(update_retention_days),
+            )
+        except Exception as e:
+            logger.warning("Trade signal update cleanup failed during full maintenance run", error=str(e))
+            results["trade_signal_updates"] = {"status": "error", "error": str(e)}
+
+        # 7. Prune old trade signal emission history.
+        try:
+            emission_retention_days = trade_signal_emission_days
+            if emission_retention_days is None:
+                emission_retention_days = int(high_volume_cfg["trade_signal_emission_days"])
+            results["trade_signal_emissions"] = await self.cleanup_trade_signal_emissions(
+                older_than_days=int(emission_retention_days),
+            )
+        except Exception as e:
+            logger.warning("Trade signal emission cleanup failed during full maintenance run", error=str(e))
+            results["trade_signal_emissions"] = {"status": "error", "error": str(e)}
+
+        # 8. Remove duplicate wallet activity rollups.
+        try:
+            dedupe_enabled = wallet_activity_dedupe_enabled
+            if dedupe_enabled is None:
+                dedupe_enabled = bool(high_volume_cfg["wallet_activity_dedupe_enabled"])
+            if dedupe_enabled:
+                results["wallet_activity_rollup_duplicates"] = await self.cleanup_wallet_activity_rollup_duplicates()
+            else:
+                results["wallet_activity_rollup_duplicates"] = {"status": "disabled"}
+        except Exception as e:
+            logger.warning("Wallet activity duplicate cleanup failed during full maintenance run", error=str(e))
+            results["wallet_activity_rollup_duplicates"] = {"status": "error", "error": str(e)}
+
+        # 9. Prune aged wallet activity rollups.
+        try:
+            rollup_retention_days = wallet_activity_rollup_days
+            if rollup_retention_days is None:
+                rollup_retention_days = int(high_volume_cfg["wallet_activity_rollup_days"])
+            results["wallet_activity_rollups"] = await self.cleanup_wallet_activity_rollups(
+                older_than_days=max(45, int(rollup_retention_days)),
+            )
+        except Exception as e:
+            logger.warning("Wallet activity rollup cleanup failed during full maintenance run", error=str(e))
+            results["wallet_activity_rollups"] = {"status": "error", "error": str(e)}
+
+        # 10. Prune old database backups
         try:
             results["db_backups"] = await self.cleanup_database_backups(
                 older_than_days=self.DEFAULT_DATABASE_BACKUP_RETENTION_DAYS
@@ -562,7 +927,7 @@ class MaintenanceService:
             logger.warning("Database backup cleanup failed during full maintenance run", error=str(e))
             results["db_backups"] = {"status": "error", "error": str(e)}
 
-        # 7. Prune stale/mismatched market metadata cache entries
+        # 11. Prune stale/mismatched market metadata cache entries
         try:
             market_cache_cfg = await self._market_cache_hygiene_settings()
             if market_cache_cfg["enabled"]:
@@ -614,6 +979,14 @@ class MaintenanceService:
                     wallet_trade_days=config.get("wallet_trade_days", self.DEFAULT_WALLET_TRADE_AGE),
                     anomaly_days=config.get("anomaly_days", self.DEFAULT_ANOMALY_AGE),
                     llm_usage_retention_days=config.get("llm_usage_retention_days"),
+                    trade_signal_emission_days=config.get(
+                        "trade_signal_emission_days", self.DEFAULT_TRADE_SIGNAL_EMISSION_AGE
+                    ),
+                    trade_signal_update_days=config.get("trade_signal_update_days", self.DEFAULT_TRADE_SIGNAL_UPDATE_AGE),
+                    wallet_activity_rollup_days=config.get(
+                        "wallet_activity_rollup_days", self.DEFAULT_WALLET_ACTIVITY_ROLLUP_AGE
+                    ),
+                    wallet_activity_dedupe_enabled=config.get("wallet_activity_dedupe_enabled", True),
                 )
 
             except asyncio.CancelledError:

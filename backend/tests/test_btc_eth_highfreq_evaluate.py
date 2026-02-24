@@ -273,8 +273,8 @@ def test_evaluate_enforces_reentry_cooldown_by_default():
 
     cooldown = _check_by_key(decision, "reentry_cooldown")
     assert cooldown.passed is True
-    assert "required_ms=75000" in str(cooldown.detail)
-    assert decision.payload["reentry_cooldown_seconds_per_market"] == 75.0
+    assert "required_ms=15000" in str(cooldown.detail)
+    assert decision.payload["reentry_cooldown_seconds_per_market"] == 15.0
     assert decision.payload["force_disable_reentry_cooldown"] is False
 
 

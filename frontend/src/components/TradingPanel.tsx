@@ -1845,7 +1845,10 @@ function withConfiguredParams(
   strategyKey: string,
   strategyDetail: StrategyOptionDetail | null
 ): Record<string, unknown> {
-  const next: Record<string, unknown> = { ...raw }
+  const strategyDefaults = isRecord(strategyDetail?.defaultParams)
+    ? (strategyDetail.defaultParams as Record<string, unknown>)
+    : {}
+  const next: Record<string, unknown> = { ...strategyDefaults, ...raw }
 
   if (normalizeSourceKey(sourceKey) !== 'crypto') {
     for (const key of CRYPTO_MODE_PARAM_KEYS) delete next[key]

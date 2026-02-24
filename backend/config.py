@@ -387,6 +387,10 @@ class Settings(BaseSettings):
     CLEANUP_OPEN_TRADE_EXPIRY_DAYS: int = 90  # Expire open trades after X days
     CLEANUP_WALLET_TRADE_DAYS: int = 60  # Delete wallet trades older than X days
     CLEANUP_ANOMALY_DAYS: int = 30  # Delete resolved anomalies older than X days
+    CLEANUP_TRADE_SIGNAL_EMISSION_DAYS: int = 21  # Delete trade signal emission rows older than X days
+    CLEANUP_TRADE_SIGNAL_UPDATE_DAYS: int = 3  # Delete noisy upsert_update emissions older than X days
+    CLEANUP_WALLET_ACTIVITY_ROLLUP_DAYS: int = 60  # Delete wallet activity rollups older than X days
+    CLEANUP_WALLET_ACTIVITY_DEDUPE_ENABLED: bool = True  # Remove duplicate rollups during maintenance
 
     @field_validator(
         "GAMMA_API_URL",

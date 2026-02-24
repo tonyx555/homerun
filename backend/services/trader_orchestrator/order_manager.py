@@ -171,6 +171,32 @@ def _resolve_leg_price(leg: dict[str, Any], signal: Any, live_context: dict[str,
     return None
 
 
+def _resolve_condition_id_for_leg(
+    *,
+    leg: dict[str, Any],
+    payload: dict[str, Any],
+    live_context: dict[str, Any],
+) -> str | None:
+    metadata = leg.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    strategy_context = payload.get("strategy_context")
+    strategy_context = strategy_context if isinstance(strategy_context, dict) else {}
+
+    candidates = (
+        leg.get("condition_id"),
+        metadata.get("condition_id"),
+        live_context.get("condition_id"),
+        strategy_context.get("condition_id"),
+        payload.get("condition_id"),
+        leg.get("market_id"),
+    )
+    for raw in candidates:
+        normalized = _normalize_id(raw)
+        if normalized and _CONDITION_ID_RE.fullmatch(normalized):
+            return normalized
+    return None
+
+
 def _hash_ratio(*parts: Any) -> float:
     packed = "|".join(str(part) for part in parts)
     digest = hashlib.sha256(packed.encode("utf-8")).hexdigest()
@@ -537,9 +563,112 @@ async def submit_execution_leg(
     notional = float(max(0.0, notional_usd))
     payload = _safe_signal_payload(signal)
     live_context = _safe_live_context(signal, payload)
-    price = _resolve_leg_price(leg, signal, live_context)
+    metadata = leg.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
     side_key = str(leg.get("side") or "buy").strip().lower()
+    ctf_action = str(metadata.get("ctf_action") or side_key).strip().lower()
     order_side = "SELL" if side_key == "sell" else "BUY"
+
+    if ctf_action in {"split", "merge", "redeem"}:
+        condition_id = _resolve_condition_id_for_leg(leg=leg, payload=payload, live_context=live_context)
+        if not condition_id:
+            return LegSubmitResult(
+                leg_id=leg_id,
+                status="failed",
+                effective_price=None,
+                error_message="Missing condition_id for CTF execution leg.",
+                payload={"mode": mode_key, "leg": dict(leg), "reason": "missing_condition_id", "ctf_action": ctf_action},
+                shares=None,
+                notional_usd=notional,
+            )
+
+        if mode_key != "live":
+            return LegSubmitResult(
+                leg_id=leg_id,
+                status="executed",
+                effective_price=None,
+                error_message=None,
+                payload={
+                    "mode": mode_key,
+                    "submission": "paper_ctf_simulated",
+                    "ctf_action": ctf_action,
+                    "condition_id": condition_id,
+                    "requested_notional_usd": notional,
+                    "leg": dict(leg),
+                },
+                shares=None,
+                notional_usd=notional,
+            )
+
+        from services.ctf_execution import ctf_execution_service
+
+        if ctf_action == "split":
+            amount_usd = max(
+                0.0,
+                safe_float(
+                    metadata.get("amount_usd", leg.get("amount_usd")),
+                    notional,
+                )
+                or 0.0,
+            )
+            ctf_result = await ctf_execution_service.split_position(
+                condition_id=condition_id,
+                amount_usd=amount_usd,
+            )
+            result_notional = amount_usd
+        elif ctf_action == "merge":
+            shares_per_side = max(
+                0.0,
+                safe_float(
+                    metadata.get("shares_per_side", leg.get("shares_per_side")),
+                    notional,
+                )
+                or 0.0,
+            )
+            ctf_result = await ctf_execution_service.merge_positions(
+                condition_id=condition_id,
+                shares_per_side=shares_per_side,
+            )
+            result_notional = shares_per_side
+        else:
+            raw_index_sets = metadata.get("index_sets", leg.get("index_sets"))
+            index_sets: list[int] = []
+            if isinstance(raw_index_sets, list):
+                for value in raw_index_sets:
+                    parsed = safe_float(value, None)
+                    if parsed is None:
+                        continue
+                    as_int = int(parsed)
+                    if as_int > 0:
+                        index_sets.append(as_int)
+            ctf_result = await ctf_execution_service.redeem_positions(
+                condition_id=condition_id,
+                index_sets=index_sets or None,
+            )
+            result_notional = notional
+
+        normalized_status = "executed" if ctf_result.status == "executed" else "failed"
+        return LegSubmitResult(
+            leg_id=leg_id,
+            status=normalized_status,
+            effective_price=None,
+            error_message=ctf_result.error_message,
+            payload={
+                "mode": mode_key,
+                "submission": "ctf_execution",
+                "ctf_action": ctf_action,
+                "condition_id": condition_id,
+                "tx_hash": ctf_result.tx_hash,
+                "payload": dict(ctf_result.payload or {}),
+                "leg": dict(leg),
+            },
+            provider_order_id=ctf_result.tx_hash,
+            provider_clob_order_id=None,
+            shares=None,
+            notional_usd=result_notional,
+        )
+
+    price = _resolve_leg_price(leg, signal, live_context)
 
     if price is None or price <= 0:
         return LegSubmitResult(

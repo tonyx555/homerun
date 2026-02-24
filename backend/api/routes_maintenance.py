@@ -78,6 +78,28 @@ class CleanupRequest(BaseModel):
         le=365,
         description="Delete resolved anomalies older than this many days",
     )
+    trade_signal_emission_days: int = Field(
+        default=21,
+        ge=1,
+        le=3650,
+        description="Delete trade signal emission rows older than this many days",
+    )
+    trade_signal_update_days: int = Field(
+        default=3,
+        ge=0,
+        le=3650,
+        description="Delete upsert_update emission rows older than this many days (0 disables)",
+    )
+    wallet_activity_rollup_days: int = Field(
+        default=60,
+        ge=45,
+        le=3650,
+        description="Delete wallet activity rollup rows older than this many days",
+    )
+    wallet_activity_dedupe_enabled: bool = Field(
+        default=True,
+        description="Run duplicate cleanup pass for wallet activity rollups",
+    )
 
 
 class DeleteTradesRequest(BaseModel):
@@ -279,7 +301,9 @@ async def run_cleanup(request: CleanupRequest = CleanupRequest()):
     3. Delete old wallet trades
     4. Delete resolved anomalies
     5. Delete stale LLM usage logs (from settings retention policy)
-    6. Run market metadata hygiene when enabled
+    6. Prune noisy + aged trade signal emissions
+    7. Dedupe and age-prune wallet activity rollups
+    8. Run market metadata hygiene when enabled
 
     Defaults:
     - resolved_trade_days: 30
@@ -293,6 +317,10 @@ async def run_cleanup(request: CleanupRequest = CleanupRequest()):
             open_trade_expiry_days=request.open_trade_expiry_days,
             wallet_trade_days=request.wallet_trade_days,
             anomaly_days=request.anomaly_days,
+            trade_signal_emission_days=request.trade_signal_emission_days,
+            trade_signal_update_days=request.trade_signal_update_days,
+            wallet_activity_rollup_days=request.wallet_activity_rollup_days,
+            wallet_activity_dedupe_enabled=request.wallet_activity_dedupe_enabled,
         )
         return {
             "status": "success",
@@ -457,6 +485,147 @@ async def delete_wallet_trades(
         }
     except Exception as e:
         logger.error("Failed to delete wallet trades", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/trade-signal-emissions")
+async def delete_trade_signal_emissions(
+    older_than_days: int = Query(
+        default=21,
+        ge=1,
+        le=3650,
+        description="Delete trade signal emission rows older than this many days",
+    ),
+    source: Optional[str] = Query(
+        default=None,
+        description="Optional source filter (scanner/news/weather/crypto/traders/events)",
+    ),
+    event_type: Optional[str] = Query(
+        default=None,
+        description="Optional event type filter (upsert_insert/upsert_update/status_transition)",
+    ),
+):
+    """
+    Delete old trade signal emission rows.
+
+    Supports optional source/event-type scoped cleanup for selective retention.
+    """
+    try:
+        result = await maintenance_service.cleanup_trade_signal_emissions(
+            older_than_days=older_than_days,
+            source=source,
+            event_type=event_type,
+        )
+        return {
+            "status": "success",
+            "timestamp": utcnow().isoformat(),
+            **result,
+        }
+    except Exception as e:
+        logger.error("Failed to delete trade signal emissions", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/trade-signal-emissions/updates")
+async def delete_trade_signal_update_emissions(
+    older_than_days: int = Query(
+        default=3,
+        ge=0,
+        le=3650,
+        description="Delete upsert_update trade signal emissions older than this many days (0 disables)",
+    ),
+    source: Optional[str] = Query(
+        default=None,
+        description="Optional source filter (scanner/news/weather/crypto/traders/events)",
+    ),
+):
+    """
+    Delete noisy upsert_update emission rows while retaining inserts/transitions.
+    """
+    try:
+        result = await maintenance_service.cleanup_trade_signal_update_emissions(
+            older_than_days=older_than_days,
+            source=source,
+        )
+        return {
+            "status": "success",
+            "timestamp": utcnow().isoformat(),
+            **result,
+        }
+    except Exception as e:
+        logger.error("Failed to delete trade signal update emissions", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/wallet-activity-rollups")
+async def delete_wallet_activity_rollups(
+    older_than_days: int = Query(
+        default=60,
+        ge=45,
+        le=3650,
+        description="Delete wallet activity rollup rows older than this many days",
+    ),
+    source: Optional[str] = Query(default=None, description="Optional source filter"),
+    wallet_address: Optional[str] = Query(default=None, description="Optional wallet filter"),
+):
+    """
+    Delete old wallet activity rollup rows.
+    """
+    try:
+        result = await maintenance_service.cleanup_wallet_activity_rollups(
+            older_than_days=older_than_days,
+            source=source,
+            wallet_address=wallet_address,
+        )
+        return {
+            "status": "success",
+            "timestamp": utcnow().isoformat(),
+            **result,
+        }
+    except Exception as e:
+        logger.error("Failed to delete wallet activity rollups", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/wallet-activity-rollups/dedupe")
+async def dedupe_wallet_activity_rollups(
+    source: Optional[str] = Query(default=None, description="Optional source filter"),
+    older_than_minutes: int = Query(
+        default=10,
+        ge=0,
+        le=1440,
+        description="Skip rows newer than this many minutes to avoid racing ingestion",
+    ),
+    batch_limit: int = Query(
+        default=100000,
+        ge=1,
+        le=1000000,
+        description="Maximum duplicate rows to delete per batch",
+    ),
+    max_batches: int = Query(
+        default=50,
+        ge=1,
+        le=1000,
+        description="Maximum batches per dedupe operation",
+    ),
+):
+    """
+    Delete duplicate wallet activity rollups while retaining one canonical row.
+    """
+    try:
+        result = await maintenance_service.cleanup_wallet_activity_rollup_duplicates(
+            source=source,
+            older_than_minutes=older_than_minutes,
+            batch_limit=batch_limit,
+            max_batches=max_batches,
+        )
+        return {
+            "status": "success",
+            "timestamp": utcnow().isoformat(),
+            **result,
+        }
+    except Exception as e:
+        logger.error("Failed to dedupe wallet activity rollups", error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 

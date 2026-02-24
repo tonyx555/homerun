@@ -52,9 +52,11 @@ DEFAULT_HTTP_RPC_URL = settings.POLYGON_RPC_URL
 FALLBACK_HTTP_RPC_URLS = (
     "https://polygon-rpc.com",
     "https://polygon-bor-rpc.publicnode.com",
+    "https://rpc.ankr.com/polygon",
 )
 
-DEFAULT_HTTP_TIMEOUT = httpx.Timeout(connect=5.0, read=8.0, write=8.0, pool=8.0)
+DEFAULT_HTTP_TIMEOUT = httpx.Timeout(connect=7.5, read=12.0, write=10.0, pool=12.0)
+RPC_ATTEMPTS_PER_ENDPOINT = 2
 
 
 # ==================== DATA MODEL ====================
@@ -119,10 +121,26 @@ def _build_rpc_candidates(primary_url: str) -> list[str]:
     """Build de-duplicated RPC endpoints in failover order."""
     urls: list[str] = []
     for raw_url in (primary_url, *FALLBACK_HTTP_RPC_URLS):
-        url = (raw_url or "").strip()
+        url = _normalize_rpc_http_url(raw_url)
         if url and url not in urls:
             urls.append(url)
     return urls
+
+
+def _normalize_rpc_http_url(raw_url: object) -> str:
+    text = str(raw_url or "").strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    if lowered.startswith("wss://"):
+        return "https://" + text[6:]
+    if lowered.startswith("ws://"):
+        return "http://" + text[5:]
+    if lowered.startswith("https://") or lowered.startswith("http://"):
+        return text
+    if "://" not in text:
+        return "https://" + text
+    return ""
 
 
 def _decode_address_from_topic(topic_hex: str) -> str:
@@ -250,7 +268,7 @@ class WalletWebSocketMonitor:
         self._tracked_sources: dict[str, set[str]] = {}
         self._callbacks: list[Callable] = []
         self._ws_url: str = DEFAULT_WS_URL
-        self._http_rpc_url: str = DEFAULT_HTTP_RPC_URL or "https://polygon-rpc.com"
+        self._http_rpc_url: str = _normalize_rpc_http_url(DEFAULT_HTTP_RPC_URL) or "https://polygon-rpc.com"
         self._rpc_urls: list[str] = _build_rpc_candidates(self._http_rpc_url)
         self._reconnect_delay: int = 5
         self._max_reconnect_delay: int = 60
@@ -704,80 +722,100 @@ class WalletWebSocketMonitor:
     ) -> Optional[dict]:
         """Send an HTTP JSON-RPC request with endpoint failover."""
         last_error: Optional[Exception] = None
-        for endpoint in self._rpc_urls:
-            try:
-                async with httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT) as client:
-                    response = await client.post(endpoint, json=payload)
-                    response.raise_for_status()
-                    result = response.json()
+        if not self._rpc_urls:
+            self._rpc_urls = _build_rpc_candidates(self._http_rpc_url)
+        if not self._rpc_urls:
+            return None
 
-                if not isinstance(result, dict):
-                    last_error = RuntimeError(f"Unexpected RPC payload type: {type(result).__name__}")
-                    logger.warning(
-                        "Unexpected RPC response payload",
-                        method=method,
-                        endpoint=endpoint,
-                        response_type=type(result).__name__,
-                    )
-                    continue
+        limits = httpx.Limits(max_connections=max(6, len(self._rpc_urls) * 2), max_keepalive_connections=len(self._rpc_urls))
+        async with httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT, limits=limits) as client:
+            for endpoint in self._rpc_urls:
+                endpoint_error: Optional[Exception] = None
+                for endpoint_attempt in range(RPC_ATTEMPTS_PER_ENDPOINT):
+                    try:
+                        response = await client.post(endpoint, json=payload)
+                        response.raise_for_status()
+                        result = response.json()
 
-                rpc_error = result.get("error")
-                if rpc_error is not None:
-                    last_error = RuntimeError(f"RPC error from endpoint {endpoint}: {rpc_error}")
-                    now = time.monotonic()
-                    if (
-                        now - self._rpc_last_endpoint_failure_log_at
-                    ) >= self._rpc_endpoint_failure_log_interval_seconds:
-                        self._rpc_last_endpoint_failure_log_at = now
-                        logger.warning(
-                            "RPC endpoint returned error",
-                            method=method,
-                            endpoint=endpoint,
-                            block=block_hex or None,
-                            error=rpc_error,
-                        )
-                    else:
-                        logger.debug(
-                            "RPC endpoint returned error (suppressed)",
-                            method=method,
-                            endpoint=endpoint,
-                            block=block_hex or None,
-                        )
-                    continue
+                        if not isinstance(result, dict):
+                            endpoint_error = RuntimeError(f"Unexpected RPC payload type: {type(result).__name__}")
+                            if endpoint_attempt < RPC_ATTEMPTS_PER_ENDPOINT - 1:
+                                await asyncio.sleep(0.15 * (endpoint_attempt + 1))
+                                continue
+                            logger.warning(
+                                "Unexpected RPC response payload",
+                                method=method,
+                                endpoint=endpoint,
+                                response_type=type(result).__name__,
+                            )
+                            break
 
-                if endpoint != self._http_rpc_url:
-                    logger.warning(
-                        "Wallet monitor RPC failover",
-                        previous_endpoint=self._http_rpc_url,
-                        active_endpoint=endpoint,
-                    )
-                    self._http_rpc_url = endpoint
-                    self._rpc_urls = _build_rpc_candidates(self._http_rpc_url)
+                        rpc_error = result.get("error")
+                        if rpc_error is not None:
+                            endpoint_error = RuntimeError(f"RPC error from endpoint {endpoint}: {rpc_error}")
+                            if endpoint_attempt < RPC_ATTEMPTS_PER_ENDPOINT - 1:
+                                await asyncio.sleep(0.15 * (endpoint_attempt + 1))
+                                continue
+                            now = time.monotonic()
+                            if (
+                                now - self._rpc_last_endpoint_failure_log_at
+                            ) >= self._rpc_endpoint_failure_log_interval_seconds:
+                                self._rpc_last_endpoint_failure_log_at = now
+                                logger.warning(
+                                    "RPC endpoint returned error",
+                                    method=method,
+                                    endpoint=endpoint,
+                                    block=block_hex or None,
+                                    error=rpc_error,
+                                )
+                            else:
+                                logger.debug(
+                                    "RPC endpoint returned error (suppressed)",
+                                    method=method,
+                                    endpoint=endpoint,
+                                    block=block_hex or None,
+                                )
+                            break
 
-                self._rpc_failure_streak = 0
-                self._rpc_backoff_until = 0.0
-                return result
-            except Exception as e:
-                last_error = e
-                now = time.monotonic()
-                if (now - self._rpc_last_endpoint_failure_log_at) >= self._rpc_endpoint_failure_log_interval_seconds:
-                    self._rpc_last_endpoint_failure_log_at = now
-                    logger.warning(
-                        "Wallet monitor RPC request failed",
-                        method=method,
-                        endpoint=endpoint,
-                        block=block_hex or None,
-                        error_type=type(e).__name__,
-                        error=_exception_text(e),
-                    )
-                else:
-                    logger.debug(
-                        "Wallet monitor RPC request failed (suppressed)",
-                        method=method,
-                        endpoint=endpoint,
-                        block=block_hex or None,
-                        error_type=type(e).__name__,
-                    )
+                        if endpoint != self._http_rpc_url:
+                            logger.warning(
+                                "Wallet monitor RPC failover",
+                                previous_endpoint=self._http_rpc_url,
+                                active_endpoint=endpoint,
+                            )
+                            self._http_rpc_url = endpoint
+                            self._rpc_urls = _build_rpc_candidates(self._http_rpc_url)
+
+                        self._rpc_failure_streak = 0
+                        self._rpc_backoff_until = 0.0
+                        return result
+                    except Exception as e:
+                        endpoint_error = e
+                        if endpoint_attempt < RPC_ATTEMPTS_PER_ENDPOINT - 1:
+                            await asyncio.sleep(0.2 * (endpoint_attempt + 1))
+                            continue
+                        now = time.monotonic()
+                        if (now - self._rpc_last_endpoint_failure_log_at) >= self._rpc_endpoint_failure_log_interval_seconds:
+                            self._rpc_last_endpoint_failure_log_at = now
+                            logger.warning(
+                                "Wallet monitor RPC request failed",
+                                method=method,
+                                endpoint=endpoint,
+                                block=block_hex or None,
+                                error_type=type(e).__name__,
+                                error=_exception_text(e),
+                            )
+                        else:
+                            logger.debug(
+                                "Wallet monitor RPC request failed (suppressed)",
+                                method=method,
+                                endpoint=endpoint,
+                                block=block_hex or None,
+                                error_type=type(e).__name__,
+                            )
+                        break
+                if endpoint_error is not None:
+                    last_error = endpoint_error
 
         if last_error is not None:
             self._rpc_failure_streak += 1

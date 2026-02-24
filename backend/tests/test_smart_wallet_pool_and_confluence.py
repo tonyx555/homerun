@@ -53,6 +53,52 @@ def _wallet(
     )
 
 
+class TestWalletActivityRollupIdentity:
+    def test_rollup_identity_dedupes_same_tx_across_sources(self):
+        svc = SmartWalletPoolService()
+        traded_at = utcnow()
+
+        first = {
+            "wallet_address": "0xabc",
+            "market_id": "market-1",
+            "side": "BUY",
+            "price": 0.44,
+            "size": 10.0,
+            "notional": 4.4,
+            "tx_hash": "0xdeadbeef",
+            "source": "wallet_trades_api",
+            "traded_at": traded_at,
+        }
+        second = {
+            **first,
+            "price": 0.441,
+            "size": 10.5,
+            "source": "activity_api",
+            "tx_hash": "0xDEADBEEF",
+        }
+
+        assert svc._build_wallet_activity_rollup_id(first) == svc._build_wallet_activity_rollup_id(second)
+
+    def test_rollup_identity_without_tx_hash_uses_time_and_size_signature(self):
+        svc = SmartWalletPoolService()
+        traded_at = utcnow().replace(microsecond=123000)
+
+        first = {
+            "wallet_address": "0xabc",
+            "market_id": "market-1",
+            "side": "BUY",
+            "price": 0.44,
+            "size": 10.0,
+            "notional": 4.4,
+            "tx_hash": None,
+            "source": "wallet_trades_api",
+            "traded_at": traded_at,
+        }
+        second = {**first, "size": 11.0}
+
+        assert svc._build_wallet_activity_rollup_id(first) != svc._build_wallet_activity_rollup_id(second)
+
+
 class TestSmartWalletPoolScoring:
     def test_quality_score_monotonic_for_better_wallet(self):
         svc = SmartWalletPoolService()

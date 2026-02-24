@@ -596,6 +596,41 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
             ]
         },
     ),
+    SystemOpportunityStrategySeed(
+        slug="crypto_micro_sniper",
+        source_key="crypto",
+        import_module="services.strategies.crypto_micro_sniper",
+        sort_order=192,
+        config_schema={
+            "param_fields": [
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
+                {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
+                {"key": "entry_price_min", "label": "Entry Price Min", "type": "number", "min": 0, "max": 1},
+                {"key": "entry_price_max", "label": "Entry Price Max", "type": "number", "min": 0, "max": 1},
+                {"key": "max_spread_bps", "label": "Max Spread (bps)", "type": "number", "min": 0, "max": 5000},
+                {"key": "min_liquidity_usd", "label": "Min Liquidity (USD)", "type": "number", "min": 0},
+                {"key": "min_order_size_usd", "label": "Min Order Size (USD)", "type": "number", "min": 0.01},
+                {
+                    "key": "sizing_policy",
+                    "label": "Sizing Policy",
+                    "type": "enum",
+                    "options": ["fixed", "linear", "adaptive", "kelly"],
+                },
+                {
+                    "key": "kelly_fractional_scale",
+                    "label": "Kelly Fractional Scale",
+                    "type": "number",
+                    "min": 0.05,
+                    "max": 1,
+                },
+                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
+                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
+                {"key": "take_profit_pct", "label": "Take Profit (%)", "type": "number", "min": 0, "max": 100},
+                {"key": "stop_loss_pct", "label": "Stop Loss (%)", "type": "number", "min": 0, "max": 100},
+                {"key": "max_hold_minutes", "label": "Max Hold (minutes)", "type": "number", "min": 0},
+            ]
+        },
+    ),
     # ── Weather strategies ───────────────────────────────────
     SystemOpportunityStrategySeed(
         slug="weather_ensemble_edge",

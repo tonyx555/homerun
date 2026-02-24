@@ -353,10 +353,75 @@ cleanup_started_postgres() {
     fi
 }
 
+docker_postgres_listener_on_requested_port() {
+    if ! command -v docker >/dev/null 2>&1; then
+        return 1
+    fi
+    if ! docker container inspect "$POSTGRES_CONTAINER_NAME" >/dev/null 2>&1; then
+        return 1
+    fi
+    local running
+    running="$(docker inspect -f '{{.State.Running}}' "$POSTGRES_CONTAINER_NAME" 2>/dev/null || true)"
+    if [ "$running" != "true" ]; then
+        return 1
+    fi
+    local host_port
+    host_port="$(docker inspect -f '{{with index .NetworkSettings.Ports "5432/tcp"}}{{(index . 0).HostPort}}{{end}}' "$POSTGRES_CONTAINER_NAME" 2>/dev/null || true)"
+    [ "$host_port" = "$POSTGRES_PORT" ]
+}
+
+local_postgres_listener_on_requested_port() {
+    local pid_file="$POSTGRES_DATA_DIR/postmaster.pid"
+    if [ ! -f "$pid_file" ]; then
+        return 1
+    fi
+
+    local pid
+    local port
+    pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
+    port="$(sed -n '4p' "$pid_file" 2>/dev/null || true)"
+    if [ -z "$pid" ] || [ -z "$port" ]; then
+        return 1
+    fi
+    if ! kill -0 "$pid" >/dev/null 2>&1; then
+        return 1
+    fi
+    [ "$port" = "$POSTGRES_PORT" ]
+}
+
+postgres_listener_owned_by_launcher() {
+    docker_postgres_listener_on_requested_port || local_postgres_listener_on_requested_port
+}
+
+find_available_postgres_port() {
+    local start_port="$1"
+    local max_port=$((start_port + 32))
+    local port
+    for port in $(seq "$start_port" "$max_port"); do
+        if ! tcp_ping "$POSTGRES_HOST" "$port"; then
+            echo "$port"
+            return 0
+        fi
+    done
+    return 1
+}
+
 ensure_postgres() {
     if postgres_ping; then
-        echo -e "${GREEN}Postgres already running on ${POSTGRES_HOST}:${POSTGRES_PORT}${NC}"
-        return 0
+        if postgres_listener_owned_by_launcher; then
+            echo -e "${GREEN}Postgres already running on ${POSTGRES_HOST}:${POSTGRES_PORT}${NC}"
+            return 0
+        fi
+        local requested_port="$POSTGRES_PORT"
+        local discovered_port
+        discovered_port="$(find_available_postgres_port "$((POSTGRES_PORT + 1))" 2>/dev/null || true)"
+        if [ -z "$discovered_port" ]; then
+            echo -e "${YELLOW}Port ${POSTGRES_PORT} is occupied by a non-launcher service and no alternate Postgres port was found.${NC}"
+            echo "Set DATABASE_URL manually or free up a local port, then rerun."
+            exit 1
+        fi
+        POSTGRES_PORT="$discovered_port"
+        echo -e "${YELLOW}Port ${requested_port} is in use by a non-launcher service. Launching project Postgres on ${POSTGRES_PORT} instead.${NC}"
     fi
 
     bootstrap_postgres_runtime
@@ -468,10 +533,11 @@ fi
 trap cleanup_started_services EXIT
 
 ensure_redis
-ensure_postgres
 
-# Ensure backend uses launcher-managed Postgres if DATABASE_URL wasn't provided.
-if [ -z "${DATABASE_URL:-}" ]; then
+if [ -n "${DATABASE_URL:-}" ]; then
+    echo -e "${CYAN}Using provided DATABASE_URL; skipping launcher-managed Postgres startup.${NC}"
+else
+    ensure_postgres
     export DATABASE_URL="postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}"
 fi
 

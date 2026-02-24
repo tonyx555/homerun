@@ -271,13 +271,38 @@ def _strategy_instance_for_source_config(source_config: dict[str, Any] | None) -
     return loaded
 
 
+def _merged_strategy_params_for_source_config(source_config: dict[str, Any]) -> dict[str, Any]:
+    source_key = normalize_source_key(source_config.get("source_key"))
+    explicit_params = dict(source_config.get("strategy_params") or {})
+    strategy_defaults: dict[str, Any] = {}
+
+    strategy_instance = _strategy_instance_for_source_config(source_config)
+    if strategy_instance is not None:
+        configured_defaults = getattr(strategy_instance, "config", None)
+        if isinstance(configured_defaults, dict):
+            strategy_defaults = dict(configured_defaults)
+        else:
+            declared_defaults = getattr(strategy_instance, "default_config", None)
+            if isinstance(declared_defaults, dict):
+                strategy_defaults = dict(declared_defaults)
+
+    merged = {**strategy_defaults, **explicit_params}
+
+    if source_key == "traders":
+        merged = StrategySDK.validate_trader_filter_config(merged)
+    elif source_key == "news":
+        merged = StrategySDK.validate_news_filter_config(merged)
+
+    return StrategySDK.normalize_strategy_retention_config(merged)
+
+
 def _accepted_signal_strategy_types(source_config: dict[str, Any]) -> set[str]:
     strategy_key = str(source_config.get("strategy_key") or "").strip().lower()
     if not strategy_key:
         return set()
 
     allowed = {strategy_key}
-    strategy_params = dict(source_config.get("strategy_params") or {})
+    strategy_params = _merged_strategy_params_for_source_config(source_config)
     allowed.update(_normalize_strategy_type_values(strategy_params.get("accepted_signal_strategy_types")))
 
     strategy_instance = _strategy_instance_for_source_config(source_config)
@@ -298,7 +323,7 @@ def _supports_live_market_context(
     if not isinstance(source_config, dict):
         return False
 
-    strategy_params = dict(source_config.get("strategy_params") or {})
+    strategy_params = _merged_strategy_params_for_source_config(source_config)
     explicit = _coerce_optional_bool(strategy_params.get("enable_live_market_context"))
     if explicit is None:
         explicit = _coerce_optional_bool(strategy_params.get("requires_live_market_context"))
@@ -407,9 +432,12 @@ def _normalize_source_configs(trader: dict[str, Any]) -> dict[str, dict[str, Any
         strategy_key = str(raw.get("strategy_key") or "").strip().lower()
         if not source_key or not strategy_key:
             continue
-        strategy_params = dict(raw.get("strategy_params") or {})
-        if source_key == "traders":
-            strategy_params = StrategySDK.validate_trader_filter_config(strategy_params)
+        source_config = {
+            "source_key": source_key,
+            "strategy_key": strategy_key,
+            "strategy_params": dict(raw.get("strategy_params") or {}),
+        }
+        strategy_params = _merged_strategy_params_for_source_config(source_config)
         normalized[source_key] = {
             "source_key": source_key,
             "strategy_key": strategy_key,
@@ -1855,11 +1883,14 @@ async def _run_trader_once(
         cooldown_active = False
         cooldown_remaining_seconds = 0
         if cooldown_seconds > 0 and last_loss_at is not None and trader_loss_streak > 0:
-            cooldown_until = last_loss_at + timedelta(seconds=cooldown_seconds)
-            now_naive = now_utc.replace(tzinfo=None)
-            if cooldown_until > now_naive:
+            if last_loss_at.tzinfo is None:
+                loss_anchor = last_loss_at.replace(tzinfo=timezone.utc)
+            else:
+                loss_anchor = last_loss_at.astimezone(timezone.utc)
+            cooldown_until = loss_anchor + timedelta(seconds=cooldown_seconds)
+            if cooldown_until > now_utc:
                 cooldown_active = True
-                cooldown_remaining_seconds = int((cooldown_until - now_naive).total_seconds())
+                cooldown_remaining_seconds = int((cooldown_until - now_utc).total_seconds())
 
         # Circuit breaker: auto-pause trader and trigger safe exit of open positions
         halt_on_losses = bool(effective_risk_limits.get("halt_on_consecutive_losses", False))

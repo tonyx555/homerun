@@ -32,6 +32,7 @@ DEFAULT_WORKER_INTERVALS: dict[str, int] = {
     "tracked_traders": 60,
     "trader_orchestrator": 5,
     "trader_reconciliation": 1,
+    "redeemer": 120,
     "discovery": 3600,
     "events": 300,
 }

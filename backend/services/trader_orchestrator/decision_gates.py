@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 from config import settings
 from services.data_events import BlockReason
+from services.strategy_sdk import StrategySDK
 from utils.converters import safe_float
 
 
@@ -414,8 +415,9 @@ def apply_platform_decision_gates(
     final_decision = str(getattr(decision_obj, "decision", "failed") or "failed")
     final_reason = str(getattr(decision_obj, "reason", "") or "")
     score = getattr(decision_obj, "score", None)
-    size_usd = float(max(1.0, safe_float(getattr(decision_obj, "size_usd", None), 10.0)))
     params = dict(strategy_params or {})
+    min_order_floor = StrategySDK.resolve_min_order_size_usd(params, fallback=0.01)
+    size_usd = float(max(min_order_floor, safe_float(getattr(decision_obj, "size_usd", None), 10.0)))
     pending_exit_count = max(0, int(pending_live_exit_count or 0))
     pending_exit_summary = dict(pending_live_exit_summary or {})
     risk_snapshot: dict[str, Any] = {}
@@ -734,7 +736,7 @@ def apply_platform_decision_gates(
         )
 
     if final_decision == "selected":
-        min_order_size_usd = max(0.01, safe_float(getattr(settings, "MIN_ORDER_SIZE_USD", 1.0), 1.0))
+        min_order_size_usd = StrategySDK.resolve_min_order_size_usd(params, fallback=1.0)
         entry_price = safe_float(getattr(runtime_signal, "entry_price", None), None)
         runtime_payload = getattr(runtime_signal, "payload_json", None)
         if (entry_price is None or entry_price <= 0.0) and isinstance(runtime_payload, dict):

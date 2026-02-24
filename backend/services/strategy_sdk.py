@@ -47,6 +47,9 @@ class StrategySDK:
         "min_tier": "low",
         "min_wallet_count": 2,
         "max_entry_price": 0.85,
+        "min_order_size_usd": 1.0,
+        "paper_min_order_size_usd": 1.0,
+        "live_min_order_size_usd": 1.0,
         "firehose_require_active_signal": True,
         "firehose_require_tradable_market": True,
         "firehose_exclude_crypto_markets": False,
@@ -66,6 +69,9 @@ class StrategySDK:
             },
             {"key": "min_wallet_count", "label": "Min Wallet Count", "type": "integer", "min": 1},
             {"key": "max_entry_price", "label": "Max Entry Price", "type": "number", "min": 0, "max": 1},
+            {"key": "min_order_size_usd", "label": "Min Order Size (USD)", "type": "number", "min": 0.01},
+            {"key": "paper_min_order_size_usd", "label": "Paper Min Order Size (USD)", "type": "number", "min": 0.01},
+            {"key": "live_min_order_size_usd", "label": "Live Min Order Size (USD)", "type": "number", "min": 0.01},
             {"key": "firehose_require_active_signal", "label": "Require Active Signal", "type": "boolean"},
             {"key": "firehose_require_tradable_market", "label": "Require Tradable Market", "type": "boolean"},
             {"key": "firehose_exclude_crypto_markets", "label": "Exclude Crypto Markets", "type": "boolean"},
@@ -546,7 +552,7 @@ class StrategySDK:
         "max_recent_move_zscore_for_entry": 2.25,
         "max_spread_widening_bps": 28.0,
         "max_orderbook_imbalance": 0.92,
-        "reentry_cooldown_seconds_per_market": 75,
+        "reentry_cooldown_seconds_per_market": 15,
         "min_seconds_left_for_entry_5m": 60.0,
         "min_seconds_left_for_entry_15m": 180.0,
         "min_seconds_left_for_entry_1h": 360.0,
@@ -2194,6 +2200,7 @@ class StrategySDK:
         direction: Any,
     ) -> tuple[bool, str]:
         cfg = params if isinstance(params, dict) else {}
+        defaults = StrategySDK.crypto_highfreq_scope_defaults()
         normalized_regime = str(regime or "").strip().lower()
         mode = str(active_mode or "").strip().lower()
         normalized_direction = str(direction or "").strip().lower()
@@ -2204,11 +2211,23 @@ class StrategySDK:
             return True, "direction_not_supported"
 
         if mode == "directional":
-            yes_enabled = StrategySDK._coerce_bool(cfg.get("opening_directional_buy_yes_enabled"), False)
-            no_enabled = StrategySDK._coerce_bool(cfg.get("opening_directional_buy_no_enabled"), True)
+            yes_enabled = StrategySDK._coerce_bool(
+                cfg.get("opening_directional_buy_yes_enabled"),
+                StrategySDK._coerce_bool(defaults.get("opening_directional_buy_yes_enabled"), False),
+            )
+            no_enabled = StrategySDK._coerce_bool(
+                cfg.get("opening_directional_buy_no_enabled"),
+                StrategySDK._coerce_bool(defaults.get("opening_directional_buy_no_enabled"), True),
+            )
         elif mode == "rebalance":
-            yes_enabled = StrategySDK._coerce_bool(cfg.get("opening_rebalance_buy_yes_enabled"), True)
-            no_enabled = StrategySDK._coerce_bool(cfg.get("opening_rebalance_buy_no_enabled"), True)
+            yes_enabled = StrategySDK._coerce_bool(
+                cfg.get("opening_rebalance_buy_yes_enabled"),
+                StrategySDK._coerce_bool(defaults.get("opening_rebalance_buy_yes_enabled"), True),
+            )
+            no_enabled = StrategySDK._coerce_bool(
+                cfg.get("opening_rebalance_buy_no_enabled"),
+                StrategySDK._coerce_bool(defaults.get("opening_rebalance_buy_no_enabled"), True),
+            )
         else:
             return True, "mode_not_gated"
 
@@ -2328,6 +2347,49 @@ class StrategySDK:
         return max(lower, min(float(parsed), upper))
 
     @staticmethod
+    def resolve_min_order_size_usd(
+        params: Any,
+        *,
+        mode: Any = None,
+        fallback: float = 1.0,
+        min_value: float = 0.01,
+        max_value: float = 10_000_000.0,
+    ) -> float:
+        cfg = params if isinstance(params, dict) else {}
+        mode_key = str(mode or "").strip().lower()
+
+        candidate_keys: list[str] = []
+        if mode_key:
+            candidate_keys.extend(
+                (
+                    f"{mode_key}_min_order_size_usd",
+                    f"{mode_key}_min_order_notional_usd",
+                )
+            )
+        candidate_keys.extend(
+            (
+                "min_order_size_usd",
+                "min_order_notional_usd",
+                "entry_exitability_min_order_size_usd",
+                "global_min_order_size_usd",
+            )
+        )
+
+        for key in candidate_keys:
+            if key not in cfg:
+                continue
+            return float(StrategySDK._coerce_float(cfg.get(key), fallback, min_value, max_value))
+
+        portfolio_cfg = cfg.get("portfolio")
+        if isinstance(portfolio_cfg, dict):
+            for key in ("min_order_size_usd", "min_order_notional_usd"):
+                if key not in portfolio_cfg:
+                    continue
+                return float(StrategySDK._coerce_float(portfolio_cfg.get(key), fallback, min_value, max_value))
+
+        return float(StrategySDK._coerce_float(fallback, fallback, min_value, max_value))
+
+    @staticmethod
     def strategy_retention_config_schema() -> dict[str, Any]:
         return dict(StrategySDK.STRATEGY_RETENTION_CONFIG_SCHEMA)
 
@@ -2412,6 +2474,19 @@ class StrategySDK:
         cfg["min_tier"] = StrategySDK.normalize_trader_tier(cfg.get("min_tier"), default="low")
         cfg["min_wallet_count"] = StrategySDK._coerce_int(cfg.get("min_wallet_count"), 2, 1, 1000)
         cfg["max_entry_price"] = StrategySDK._coerce_float(cfg.get("max_entry_price"), 0.85, 0.0, 1.0)
+        cfg["min_order_size_usd"] = StrategySDK._coerce_float(cfg.get("min_order_size_usd"), 1.0, 0.01, 10_000_000.0)
+        cfg["paper_min_order_size_usd"] = StrategySDK._coerce_float(
+            cfg.get("paper_min_order_size_usd"),
+            cfg["min_order_size_usd"],
+            0.01,
+            10_000_000.0,
+        )
+        cfg["live_min_order_size_usd"] = StrategySDK._coerce_float(
+            cfg.get("live_min_order_size_usd"),
+            cfg["min_order_size_usd"],
+            0.01,
+            10_000_000.0,
+        )
         cfg["firehose_require_active_signal"] = StrategySDK._coerce_bool(
             cfg.get("firehose_require_active_signal"),
             True,

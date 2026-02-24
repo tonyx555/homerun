@@ -445,6 +445,87 @@ host all all ::1/128 trust
     }
 }
 
+function Test-PostgresDockerListenerOwned {
+    param(
+        [string]$ContainerName,
+        [int]$Port
+    )
+
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        return $false
+    }
+
+    try {
+        docker container inspect $ContainerName *> $null
+        if ($LASTEXITCODE -ne 0) { return $false }
+    } catch {
+        return $false
+    }
+
+    try {
+        $running = docker inspect -f "{{.State.Running}}" $ContainerName 2>$null
+        if (($running | Out-String).Trim().ToLowerInvariant() -ne "true") {
+            return $false
+        }
+        $hostPort = docker inspect -f "{{with index .NetworkSettings.Ports \"5432/tcp\"}}{{(index . 0).HostPort}}{{end}}" $ContainerName 2>$null
+        return ((($hostPort | Out-String).Trim()) -eq "$Port")
+    } catch {
+        return $false
+    }
+}
+
+function Test-LocalPostgresListenerOwned {
+    param(
+        [string]$DataDir,
+        [int]$Port
+    )
+
+    $pidPath = Join-Path $DataDir "postmaster.pid"
+    if (-not (Test-Path $pidPath)) {
+        return $false
+    }
+
+    try {
+        $lines = Get-Content -Path $pidPath -ErrorAction Stop
+        if ($lines.Count -lt 4) { return $false }
+        $pidValue = ($lines[0] | Out-String).Trim()
+        $portValue = ($lines[3] | Out-String).Trim()
+        if (-not $pidValue -or -not $portValue) { return $false }
+        $proc = Get-Process -Id ([int]$pidValue) -ErrorAction SilentlyContinue
+        if (-not $proc) { return $false }
+        return ($portValue -eq "$Port")
+    } catch {
+        return $false
+    }
+}
+
+function Test-LauncherPostgresListenerOwned {
+    param(
+        [string]$ContainerName,
+        [string]$DataDir,
+        [int]$Port
+    )
+
+    if (Test-PostgresDockerListenerOwned -ContainerName $ContainerName -Port $Port) {
+        return $true
+    }
+    return (Test-LocalPostgresListenerOwned -DataDir $DataDir -Port $Port)
+}
+
+function Get-AvailablePostgresPort {
+    param(
+        [string]$Host,
+        [int]$StartPort
+    )
+
+    for ($port = $StartPort; $port -le ($StartPort + 32); $port++) {
+        if (-not (Test-TcpPort -Host $Host -Port $port)) {
+            return $port
+        }
+    }
+    return $null
+}
+
 function Ensure-Postgres {
     param(
         [string]$Host,
@@ -458,8 +539,21 @@ function Ensure-Postgres {
     )
 
     if (Test-TcpPort -Host $Host -Port $Port) {
-        Write-Host "Postgres already running on ${Host}:${Port}" -ForegroundColor Green
-        return
+        if (Test-LauncherPostgresListenerOwned -ContainerName $ContainerName -DataDir $DataDir -Port $Port) {
+            Write-Host "Postgres already running on ${Host}:${Port}" -ForegroundColor Green
+            return
+        }
+
+        $alternatePort = Get-AvailablePostgresPort -Host $Host -StartPort ($Port + 1)
+        if (-not $alternatePort) {
+            Write-Host "Port ${Port} is occupied by a non-launcher service and no alternate Postgres port is available." -ForegroundColor Red
+            Write-Host "Set DATABASE_URL manually or free a local port, then rerun." -ForegroundColor Yellow
+            exit 1
+        }
+
+        Write-Host "Port ${Port} is in use by a non-launcher service. Launching project Postgres on ${alternatePort} instead." -ForegroundColor Yellow
+        $Port = [int]$alternatePort
+        $script:postgresPort = [int]$alternatePort
     }
 
     if (-not (Ensure-PostgresRuntime)) {
@@ -570,11 +664,11 @@ if (Test-NeedsSetup) {
 
 try {
     Ensure-Redis -RedisHost $redisHost -RedisPort $redisPort -ContainerName $redisContainerName -Image $redisImage
-    Ensure-Postgres -Host $postgresHost -Port $postgresPort -Db $postgresDb -User $postgresUser -Password $postgresPassword -ContainerName $postgresContainerName -Image $postgresImage -DataDir $postgresDataDir
-
-    # Ensure backend uses launcher-managed Postgres if DATABASE_URL wasn't provided.
-    if (-not $env:DATABASE_URL) {
-        $env:DATABASE_URL = "postgresql+asyncpg://${postgresUser}:${postgresPassword}@${postgresHost}:${postgresPort}/${postgresDb}"
+    if ($env:DATABASE_URL) {
+        Write-Host "Using provided DATABASE_URL; skipping launcher-managed Postgres startup." -ForegroundColor Cyan
+    } else {
+        Ensure-Postgres -Host $postgresHost -Port $postgresPort -Db $postgresDb -User $postgresUser -Password $postgresPassword -ContainerName $postgresContainerName -Image $postgresImage -DataDir $postgresDataDir
+        $env:DATABASE_URL = "postgresql+asyncpg://${postgresUser}:${postgresPassword}@${postgresHost}:${script:postgresPort}/${postgresDb}"
     }
 
     & backend\venv\Scripts\python.exe .\scripts\ensure_postgres_ready.py --database-url $env:DATABASE_URL
