@@ -81,6 +81,9 @@ async def test_worker_loop_does_not_seed_default_traders(tmp_path, monkeypatch):
     try:
         monkeypatch.setattr(trader_orchestrator_worker, "AsyncSessionLocal", session_factory)
         monkeypatch.setattr(trader_orchestrator_worker, "expire_stale_signals", AsyncMock())
+        monkeypatch.setattr(trader_orchestrator_worker, "ensure_all_strategies_seeded", AsyncMock())
+        monkeypatch.setattr(trader_orchestrator_worker, "refresh_strategy_runtime_if_needed", AsyncMock())
+        monkeypatch.setattr(trader_orchestrator_worker, "compute_orchestrator_metrics", AsyncMock(return_value={}))
         monkeypatch.setattr(
             trader_orchestrator_worker,
             "read_orchestrator_control",
@@ -93,11 +96,21 @@ async def test_worker_loop_does_not_seed_default_traders(tmp_path, monkeypatch):
             ),
         )
         monkeypatch.setattr(trader_orchestrator_worker, "write_orchestrator_snapshot", AsyncMock())
+        monkeypatch.setattr(
+            trader_orchestrator_worker,
+            "_ensure_orchestrator_cycle_lock_owner",
+            AsyncMock(return_value=True),
+        )
 
-        async def _cancel_sleep(_interval: float):
+        from services.event_bus import event_bus
+
+        monkeypatch.setattr(event_bus, "start", AsyncMock())
+        monkeypatch.setattr(event_bus, "subscribe", lambda *a, **kw: None)
+
+        async def _cancel_wait(_queue, _timeout):
             raise asyncio.CancelledError()
 
-        monkeypatch.setattr(trader_orchestrator_worker, "_worker_sleep", _cancel_sleep)
+        monkeypatch.setattr(trader_orchestrator_worker, "_wait_for_runtime_trigger", _cancel_wait)
 
         with pytest.raises(asyncio.CancelledError):
             await trader_orchestrator_worker.run_worker_loop()

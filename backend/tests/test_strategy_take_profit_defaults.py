@@ -206,7 +206,7 @@ def test_btc_highfreq_rapid_window_stall_exits_at_breakeven():
             "market_tradable": True,
             "is_resolved": False,
             "winning_outcome": None,
-            "seconds_left": 180,
+            "seconds_left": 300,
         },
     )
 
@@ -237,7 +237,7 @@ def test_btc_highfreq_rapid_window_stall_not_flagged_when_price_increased():
             "market_tradable": True,
             "is_resolved": False,
             "winning_outcome": None,
-            "seconds_left": 180,
+            "seconds_left": 300,
         },
     )
 
@@ -265,7 +265,7 @@ def test_btc_highfreq_trailing_stop_waits_for_activation_profit():
             "market_tradable": True,
             "is_resolved": False,
             "winning_outcome": None,
-            "seconds_left": 180,
+            "seconds_left": 300,
         },
     )
 
@@ -289,7 +289,7 @@ def test_btc_highfreq_trailing_stop_arms_after_activation_profit():
             "market_tradable": True,
             "is_resolved": False,
             "winning_outcome": None,
-            "seconds_left": 180,
+            "seconds_left": 300,
         },
     )
 
@@ -532,4 +532,4 @@ def test_btc_highfreq_near_expiry_flatten_guard_closes_small_pnl_position():
     )
 
     assert decision.action == "close"
-    assert "Near-expiry flatten guard" in decision.reason
+    assert "Resolution-risk flatten" in decision.reason

@@ -105,7 +105,8 @@ async def test_upsert_reactivates_expired_signal(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_upsert_keeps_executed_signal_immutable(tmp_path):
+async def test_upsert_reactivates_executed_signal(tmp_path):
+    """Executed signals are in SIGNAL_REACTIVATABLE_STATUSES and get reactivated on upsert."""
     engine, session_factory = await _build_session_factory(tmp_path)
     signal_id = uuid.uuid4().hex
     try:
@@ -158,10 +159,11 @@ async def test_upsert_keeps_executed_signal_immutable(tmp_path):
 
             refreshed = await session.get(TradeSignal, signal_id)
             assert refreshed is not None
-            assert refreshed.status == "executed"
-            assert refreshed.source_item_id == "custom_old"
-            assert refreshed.direction == "buy_yes"
-            assert refreshed.entry_price == pytest.approx(0.55)
+            assert refreshed.status == "pending"
+            assert refreshed.source_item_id == "custom_new"
+            assert refreshed.direction == "buy_no"
+            assert refreshed.entry_price == pytest.approx(0.22)
+            assert refreshed.effective_price is None
 
             emissions = (
                 (
@@ -175,8 +177,8 @@ async def test_upsert_keeps_executed_signal_immutable(tmp_path):
                 .all()
             )
             assert emissions
-            assert emissions[-1].event_type == "upsert_ignored_terminal"
-            assert emissions[-1].reason == "terminal_status:executed"
+            assert emissions[-1].event_type == "upsert_reactivated"
+            assert emissions[-1].reason == "reactivated_from:executed"
     finally:
         await engine.dispose()
 

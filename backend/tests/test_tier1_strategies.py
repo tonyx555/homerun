@@ -139,7 +139,7 @@ class TestBasicArbStrategy:
     def test_detect_opportunity_when_sum_below_one(self):
         """YES + NO < 1.0 with profit above threshold should find opportunity."""
         # total = 0.45 + 0.45 = 0.90
-        # gross = 0.10, fee = 0.02, net = 0.08, roi = 8.89%
+        # gross = 0.10, fee = 0.005 (gas), net = 0.095, roi = 10.56%
         market = make_market(yes_price=0.45, no_price=0.45)
         opps = self.strategy.detect(events=[], markets=[market], prices={})
         assert len(opps) == 1
@@ -147,8 +147,8 @@ class TestBasicArbStrategy:
         assert opp.strategy == "basic"
         assert opp.total_cost == pytest.approx(0.90)
         assert opp.expected_payout == 1.0
-        assert opp.net_profit == pytest.approx(0.08)
-        assert opp.roi_percent == pytest.approx(8.888888888888889)
+        assert opp.net_profit == pytest.approx(0.095)
+        assert opp.roi_percent == pytest.approx(10.555555555555555)
 
     def test_no_opportunity_when_sum_equals_one(self):
         """YES + NO == 1.0 should NOT produce an opportunity."""
@@ -164,27 +164,27 @@ class TestBasicArbStrategy:
 
     def test_no_opportunity_when_profit_below_threshold_after_fees(self):
         """
-        YES + NO < 1.0 but profit after 2% fee is below 2.5% threshold.
+        YES + NO < 1.0 but profit after fees is below 2.5% threshold.
 
-        total = 0.96, gross = 0.04, fee = 0.02, net = 0.02
-        roi = 0.02 / 0.96 = 2.08% < 2.5%
+        total = 0.98, gross = 0.02, fee = 0.005 (gas), net = 0.015
+        roi = 0.015 / 0.98 = 1.53% < 2.5%
         """
-        market = make_market(yes_price=0.48, no_price=0.48)
+        market = make_market(yes_price=0.49, no_price=0.49)
         opps = self.strategy.detect(events=[], markets=[market], prices={})
         assert len(opps) == 0
 
     def test_borderline_above_threshold(self):
         """
-        Barely above the 2.5% threshold should create opportunity.
+        Above the 2.5% threshold should create opportunity.
 
-        total = 0.95, gross = 0.05, fee = 0.02, net = 0.03
-        roi = 0.03 / 0.95 = 3.16% > 2.5%
+        total = 0.95, gross = 0.05, fee = 0.005 (gas), net = 0.045
+        roi = 0.045 / 0.95 = 4.74% > 2.5%
         """
         market = make_market(yes_price=0.47, no_price=0.48)
         opps = self.strategy.detect(events=[], markets=[market], prices={})
         assert len(opps) == 1
         opp = opps[0]
-        assert opp.roi_percent == pytest.approx(3.157894736842105)
+        assert opp.roi_percent == pytest.approx(4.736842105263158)
 
     # --- Edge cases ---
 
@@ -280,7 +280,7 @@ class TestBasicArbStrategy:
         assert len(opps) == 1
         opp = opps[0]
         total = 0.80
-        fee = 1.0 * 0.02
+        fee = 0.005  # Gas cost: $0.005 per tx (maker mode, 1 leg)
         net = 1.0 - total - fee
         expected_roi = (net / total) * 100
         assert opp.roi_percent == pytest.approx(expected_roi)
@@ -288,12 +288,12 @@ class TestBasicArbStrategy:
         assert opp.net_profit == pytest.approx(net)
         assert opp.gross_profit == pytest.approx(1.0 - total)
 
-    def test_fee_is_two_percent_of_payout(self):
-        """Fee should be 2% of expected payout ($1), i.e., always $0.02."""
+    def test_fee_is_gas_cost(self):
+        """Fee should be gas cost ($0.005 per tx) in maker mode with 1 leg."""
         market = make_market(yes_price=0.45, no_price=0.45)
         opps = self.strategy.detect(events=[], markets=[market], prices={})
         assert len(opps) == 1
-        assert opps[0].fee == pytest.approx(0.02)
+        assert opps[0].fee == pytest.approx(0.005)
 
     # --- Max position size ---
 
@@ -593,9 +593,10 @@ class TestNegRiskStrategy:
 
     def test_negrisk_below_profit_threshold_no_opportunity(self):
         """NegRisk where total is close to 1.0 and profit below threshold after fees."""
-        # total = 0.96, roi = (0.98 - 0.96)/0.96 = 2.08% < 2.5%
-        m1 = make_single_outcome_market(market_id="nr1", question="A?", yes_price=0.48)
-        m2 = make_single_outcome_market(market_id="nr2", question="B?", yes_price=0.48)
+        # total = 0.98, fee = gas(0.01) + slippage(0.98*0.003=0.00294) = 0.01294
+        # net = 0.02 - 0.01294 = 0.00706, roi = 0.72% < 2.5%
+        m1 = make_single_outcome_market(market_id="nr1", question="A?", yes_price=0.49)
+        m2 = make_single_outcome_market(market_id="nr2", question="B?", yes_price=0.49)
         event = make_event(markets=[m1, m2], neg_risk=True)
         opps = self.strategy.detect(events=[event], markets=[], prices={})
         assert len(opps) == 0
@@ -744,12 +745,12 @@ class TestBaseStrategyCreateOpportunity:
 
     def test_returns_none_when_roi_below_threshold(self):
         """create_opportunity should return None if ROI < 2.5%."""
-        market = make_market(yes_price=0.48, no_price=0.48, liquidity=10000.0)
-        # total = 0.96, roi = 2.08%
+        market = make_market(yes_price=0.49, no_price=0.49, liquidity=10000.0)
+        # total = 0.98, fee = 0.005, net = 0.015, roi = 1.53% < 2.5%
         result = self.strategy.create_opportunity(
             title="Test",
             description="Test opp",
-            total_cost=0.96,
+            total_cost=0.98,
             markets=[market],
             positions=[],
         )
@@ -770,9 +771,9 @@ class TestBaseStrategyCreateOpportunity:
         assert result.total_cost == pytest.approx(0.80)
         assert result.expected_payout == pytest.approx(1.0)
         assert result.gross_profit == pytest.approx(0.20)
-        assert result.fee == pytest.approx(0.02)
-        assert result.net_profit == pytest.approx(0.18)
-        assert result.roi_percent == pytest.approx(22.5)
+        assert result.fee == pytest.approx(0.005)
+        assert result.net_profit == pytest.approx(0.195)
+        assert result.roi_percent == pytest.approx(24.375)
         assert result.max_position_size == pytest.approx(1000.0)
 
     def test_directional_roi_cap_blocks_lottery_style_false_positive(self):
