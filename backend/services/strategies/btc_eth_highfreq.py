@@ -141,6 +141,137 @@ def _timeframe_override(params: dict[str, Any], base_key: str, timeframe: str) -
     return None
 
 
+def _coerce_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _coerce_float(value: Any, default: float, lo: float, hi: float) -> float:
+    try:
+        parsed = float(value)
+    except Exception:
+        parsed = default
+    if parsed != parsed or parsed in (float("inf"), float("-inf")):
+        parsed = default
+    return max(lo, min(hi, parsed))
+
+
+def _crypto_hf_param_value(config: dict[str, Any], base_key: str, timeframe: Any) -> Any:
+    timeframe_value = _normalize_timeframe(timeframe)
+    tf_value = _timeframe_override(config, base_key, timeframe_value)
+    if tf_value is not None:
+        return tf_value
+    return config.get(base_key)
+
+
+def crypto_highfreq_scope_defaults() -> dict[str, Any]:
+    return dict(StrategySDK.crypto_highfreq_scope_defaults())
+
+
+def crypto_highfreq_direction_allowed(
+    params: Any,
+    *,
+    regime: Any,
+    active_mode: Any,
+    direction: Any,
+) -> tuple[bool, str]:
+    cfg = params if isinstance(params, dict) else {}
+    defaults = crypto_highfreq_scope_defaults()
+    normalized_regime = str(regime or "").strip().lower()
+    mode = str(active_mode or "").strip().lower()
+    normalized_direction = str(direction or "").strip().lower()
+
+    if normalized_regime != "opening":
+        return True, "regime_not_opening"
+    if normalized_direction not in {"buy_yes", "buy_no"}:
+        return True, "direction_not_supported"
+
+    if mode == "directional":
+        yes_enabled = _coerce_bool(
+            cfg.get("opening_directional_buy_yes_enabled"),
+            _coerce_bool(defaults.get("opening_directional_buy_yes_enabled"), False),
+        )
+        no_enabled = _coerce_bool(
+            cfg.get("opening_directional_buy_no_enabled"),
+            _coerce_bool(defaults.get("opening_directional_buy_no_enabled"), True),
+        )
+    elif mode == "rebalance":
+        yes_enabled = _coerce_bool(
+            cfg.get("opening_rebalance_buy_yes_enabled"),
+            _coerce_bool(defaults.get("opening_rebalance_buy_yes_enabled"), True),
+        )
+        no_enabled = _coerce_bool(
+            cfg.get("opening_rebalance_buy_no_enabled"),
+            _coerce_bool(defaults.get("opening_rebalance_buy_no_enabled"), True),
+        )
+    else:
+        return True, "mode_not_gated"
+
+    if normalized_direction == "buy_yes":
+        return bool(yes_enabled), f"opening_{mode}_buy_yes_enabled={yes_enabled}"
+    return bool(no_enabled), f"opening_{mode}_buy_no_enabled={no_enabled}"
+
+
+def crypto_highfreq_should_flatten_resolution_risk(
+    params: Any,
+    *,
+    timeframe: Any = None,
+    seconds_left: Optional[float] = None,
+    pnl_percent: Optional[float] = None,
+    exit_headroom_ratio: Optional[float] = None,
+    take_profit_armed: bool = False,
+) -> tuple[bool, str]:
+    cfg = params if isinstance(params, dict) else {}
+    enabled = _coerce_bool(cfg.get("resolution_risk_flatten_enabled"), True)
+    if not enabled:
+        return False, "disabled"
+
+    if take_profit_armed and _coerce_bool(cfg.get("resolution_risk_disable_when_take_profit_armed"), True):
+        return False, "take_profit_armed"
+
+    if seconds_left is None or seconds_left < 0.0:
+        return False, "seconds_left_unavailable"
+
+    seconds_budget_raw = _crypto_hf_param_value(cfg, "resolution_risk_seconds_left", timeframe)
+    if seconds_budget_raw is None:
+        seconds_budget_raw = _crypto_hf_param_value(cfg, "force_flatten_seconds_left", timeframe)
+    seconds_budget = _coerce_float(seconds_budget_raw, 120.0, 0.0, 86_400.0)
+    if seconds_left > seconds_budget:
+        return False, f"seconds_left={seconds_left:.1f} > budget={seconds_budget:.1f}"
+
+    max_profit_raw = _crypto_hf_param_value(cfg, "resolution_risk_max_profit_pct", timeframe)
+    max_profit_pct = _coerce_float(max_profit_raw, 6.0, 0.0, 100.0)
+    min_loss_raw = _crypto_hf_param_value(cfg, "resolution_risk_min_loss_pct", timeframe)
+    min_loss_pct = _coerce_float(min_loss_raw, 2.0, 0.0, 100.0)
+    min_headroom_raw = _crypto_hf_param_value(cfg, "resolution_risk_min_headroom_ratio", timeframe)
+    min_headroom_ratio = _coerce_float(min_headroom_raw, 0.0, 0.0, 100.0)
+
+    if pnl_percent is not None:
+        if pnl_percent > max_profit_pct:
+            return False, f"pnl={pnl_percent:.2f}% > max_profit={max_profit_pct:.2f}%"
+        if pnl_percent < -abs(min_loss_pct):
+            return False, f"pnl={pnl_percent:.2f}% < -max_loss={min_loss_pct:.2f}%"
+
+    if exit_headroom_ratio is not None and exit_headroom_ratio < min_headroom_ratio:
+        return False, f"headroom={exit_headroom_ratio:.2f}x < min={min_headroom_ratio:.2f}x"
+
+    pnl_text = f"{pnl_percent:.2f}%" if pnl_percent is not None else "unknown"
+    headroom_text = f"{exit_headroom_ratio:.2f}x" if exit_headroom_ratio is not None else "unknown"
+    detail = (
+        f"seconds_left={seconds_left:.1f}s <= {seconds_budget:.1f}s, "
+        f"pnl={pnl_text}, headroom={headroom_text}"
+    )
+    return True, detail
+
+
 def _as_list(value: Any) -> list[Any]:
     if isinstance(value, (list, tuple, set)):
         return list(value)
@@ -880,7 +1011,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         max_resolution_months=0.1,
     )
 
-    default_config = dict(StrategySDK.crypto_highfreq_scope_defaults())
+    default_config = crypto_highfreq_scope_defaults()
 
     def __init__(self) -> None:
         super().__init__()
@@ -2314,28 +2445,8 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 getattr(signal, "volume", None),
             )
         )
-        min_volume_usd = max(
-            0.0,
-            StrategySDK.crypto_highfreq_min_volume_usd(
-                params,
-                timeframe=signal_timeframe,
-                regime=regime,
-                active_mode=active_mode,
-            ),
-        )
-        if min_volume_usd <= 0.0:
-            volume_ok = True
-        elif signal_volume_usd is None:
-            volume_ok = False
-        else:
-            volume_ok = signal_volume_usd >= min_volume_usd
-        volume_detail = (
-            f"volume={signal_volume_usd:.0f} min={min_volume_usd:.0f}"
-            if signal_volume_usd is not None
-            else f"volume unavailable min={min_volume_usd:.0f}"
-        )
 
-        direction_policy_ok, direction_policy_detail = StrategySDK.crypto_highfreq_direction_allowed(
+        direction_policy_ok, direction_policy_detail = crypto_highfreq_direction_allowed(
             params,
             regime=regime,
             active_mode=active_mode,
@@ -2822,13 +2933,6 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 detail=liquidity_detail,
             ),
             DecisionCheck(
-                "volume",
-                "Minimum volume",
-                volume_ok,
-                score=signal_volume_usd,
-                detail=volume_detail,
-            ),
-            DecisionCheck(
                 "spread",
                 "Maximum spread",
                 spread_ok,
@@ -2984,7 +3088,6 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             "liquidity_usd": signal_liquidity_usd,
             "min_liquidity_usd": float(min_liquidity_usd),
             "volume_usd": signal_volume_usd,
-            "min_volume_usd": float(min_volume_usd),
             "spread": signal_spread,
             "max_spread_pct": float(max_spread_pct),
             "spread_widening_bps": spread_widening_bps,
@@ -3086,7 +3189,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         state = market_state if isinstance(market_state, dict) else {}
         base_config = getattr(position, "config", None)
         config = dict(base_config) if isinstance(base_config, dict) else {}
-        defaults = StrategySDK.crypto_highfreq_scope_defaults()
+        defaults = crypto_highfreq_scope_defaults()
 
         strategy_context = getattr(position, "strategy_context", None)
         if isinstance(strategy_context, dict):
@@ -3566,7 +3669,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 rapid_state["armed_peak_price"] = peak_price
 
             should_flatten_resolution_risk, resolution_risk_detail = (
-                StrategySDK.crypto_highfreq_should_flatten_resolution_risk(
+                crypto_highfreq_should_flatten_resolution_risk(
                     config,
                     timeframe=timeframe,
                     seconds_left=seconds_left,

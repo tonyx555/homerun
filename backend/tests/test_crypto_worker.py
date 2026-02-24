@@ -13,15 +13,25 @@ from workers import crypto_worker
 
 
 class _FakePriceCache:
-    def __init__(self, mids: dict[str, float], fresh: set[str]):
+    def __init__(
+        self,
+        mids: dict[str, float],
+        fresh: set[str],
+        trade_totals: dict[str, float] | None = None,
+    ):
         self._mids = dict(mids)
         self._fresh = set(fresh)
+        self._trade_totals = dict(trade_totals or {})
 
     def is_fresh(self, token_id: str) -> bool:
         return token_id in self._fresh
 
     def get_mid(self, token_id: str):
         return self._mids.get(token_id)
+
+    def get_trade_volume(self, token_id: str, lookback_seconds: float = 300.0):
+        total = float(self._trade_totals.get(token_id, 0.0) or 0.0)
+        return {"buy_volume": total, "sell_volume": 0.0, "total": total, "trade_count": 1 if total > 0 else 0}
 
 
 def test_collect_ws_prices_for_markets_uses_only_fresh_valid_tokens():
@@ -92,6 +102,58 @@ def test_overlay_ws_prices_on_market_row_derives_missing_opposite_leg():
     assert row["up_price"] == 0.82
     assert row["down_price"] == pytest.approx(0.18)
     assert row["combined"] == 1.0
+
+
+def test_overlay_ws_trade_volume_on_market_row_uses_ws_cache_notional():
+    up_token = "up_token_123456789012345678901234"
+    down_token = "down_token_1234567890123456789012"
+    market = SimpleNamespace(
+        clob_token_ids=[up_token, down_token],
+        up_token_index=0,
+        down_token_index=1,
+        timeframe="15m",
+    )
+    row = {"volume": 0.0}
+    feed_manager = SimpleNamespace(
+        _started=True,
+        cache=_FakePriceCache(
+            mids={},
+            fresh=set(),
+            trade_totals={up_token: 1250.5, down_token: 980.25},
+        ),
+    )
+
+    crypto_worker._overlay_ws_trade_volume_on_market_row(row, market, feed_manager)
+
+    assert row["volume_usd"] == pytest.approx(2230.75)
+    assert row["volume_usd_source"] == "ws_trade_cache"
+    assert row["volume_usd_lookback_seconds"] == 900.0
+
+
+def test_overlay_ws_trade_volume_on_market_row_keeps_higher_existing_volume_usd():
+    up_token = "up_token_123456789012345678901234"
+    down_token = "down_token_1234567890123456789012"
+    market = SimpleNamespace(
+        clob_token_ids=[up_token, down_token],
+        up_token_index=0,
+        down_token_index=1,
+        timeframe="5m",
+    )
+    row = {"volume_usd": 9000.0}
+    feed_manager = SimpleNamespace(
+        _started=True,
+        cache=_FakePriceCache(
+            mids={},
+            fresh=set(),
+            trade_totals={up_token: 1200.0, down_token: 800.0},
+        ),
+    )
+
+    crypto_worker._overlay_ws_trade_volume_on_market_row(row, market, feed_manager)
+
+    assert row["volume_usd"] == 9000.0
+    assert "volume_usd_source" not in row
+    assert "volume_usd_lookback_seconds" not in row
 
 
 def test_oracle_history_payload_uses_stable_tail_window(monkeypatch):

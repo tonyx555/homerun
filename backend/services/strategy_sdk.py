@@ -527,10 +527,6 @@ class StrategySDK:
         "live_window_required": True,
         "min_liquidity_usd": 250.0,
         "min_liquidity_usd_opening": 4000.0,
-        "min_volume_usd": 1000.0,
-        "min_volume_usd_opening": 5000.0,
-        "min_volume_usd_opening_5m": 5000.0,
-        "min_volume_usd_opening_15m": 5000.0,
         "max_spread_pct": 0.08,
         "max_signal_age_seconds": 35.0,
         "max_open_order_seconds": 14.0,
@@ -710,34 +706,6 @@ class StrategySDK:
                 "type": "number",
                 "min": 0,
                 "max": 1000000,
-            },
-            {
-                "key": "min_volume_usd",
-                "label": "Min Volume (USD)",
-                "type": "number",
-                "min": 0,
-                "max": 50000000,
-            },
-            {
-                "key": "min_volume_usd_opening",
-                "label": "Min Volume Opening (USD)",
-                "type": "number",
-                "min": 0,
-                "max": 50000000,
-            },
-            {
-                "key": "min_volume_usd_opening_5m",
-                "label": "Min Volume Opening 5m (USD)",
-                "type": "number",
-                "min": 0,
-                "max": 50000000,
-            },
-            {
-                "key": "min_volume_usd_opening_15m",
-                "label": "Min Volume Opening 15m (USD)",
-                "type": "number",
-                "min": 0,
-                "max": 50000000,
             },
             {
                 "key": "max_spread_pct",
@@ -2231,144 +2199,6 @@ class StrategySDK:
     @staticmethod
     def crypto_highfreq_scope_config_schema() -> dict[str, Any]:
         return dict(StrategySDK.CRYPTO_HF_SCOPE_CONFIG_SCHEMA)
-
-    @staticmethod
-    def _crypto_hf_timeframe_key(base_key: str, timeframe: Any) -> Optional[str]:
-        tf = str(timeframe or "").strip().lower()
-        if tf not in {"5m", "15m", "1h", "4h"}:
-            return None
-        return f"{base_key}_{tf}"
-
-    @staticmethod
-    def _crypto_hf_param_value(config: dict[str, Any], base_key: str, timeframe: Any) -> Any:
-        tf_key = StrategySDK._crypto_hf_timeframe_key(base_key, timeframe)
-        if tf_key and tf_key in config:
-            return config.get(tf_key)
-        return config.get(base_key)
-
-    @staticmethod
-    def crypto_highfreq_min_volume_usd(
-        params: Any,
-        *,
-        timeframe: Any = None,
-        regime: Any = None,
-        active_mode: Any = None,
-    ) -> float:
-        cfg = params if isinstance(params, dict) else {}
-        mode = str(active_mode or "").strip().lower()
-        normalized_regime = str(regime or "").strip().lower()
-        candidate_keys: list[str] = []
-        if mode and normalized_regime:
-            candidate_keys.append(f"min_volume_usd_{mode}_{normalized_regime}")
-        if normalized_regime:
-            regime_tf = StrategySDK._crypto_hf_timeframe_key(f"min_volume_usd_{normalized_regime}", timeframe)
-            if regime_tf:
-                candidate_keys.append(regime_tf)
-            candidate_keys.append(f"min_volume_usd_{normalized_regime}")
-        tf_key = StrategySDK._crypto_hf_timeframe_key("min_volume_usd", timeframe)
-        if tf_key:
-            candidate_keys.append(tf_key)
-        candidate_keys.append("min_volume_usd")
-
-        for key in candidate_keys:
-            if key in cfg:
-                return StrategySDK._coerce_float(cfg.get(key), 0.0, 0.0, 1_000_000_000.0)
-        return 0.0
-
-    @staticmethod
-    def crypto_highfreq_direction_allowed(
-        params: Any,
-        *,
-        regime: Any,
-        active_mode: Any,
-        direction: Any,
-    ) -> tuple[bool, str]:
-        cfg = params if isinstance(params, dict) else {}
-        defaults = StrategySDK.crypto_highfreq_scope_defaults()
-        normalized_regime = str(regime or "").strip().lower()
-        mode = str(active_mode or "").strip().lower()
-        normalized_direction = str(direction or "").strip().lower()
-
-        if normalized_regime != "opening":
-            return True, "regime_not_opening"
-        if normalized_direction not in {"buy_yes", "buy_no"}:
-            return True, "direction_not_supported"
-
-        if mode == "directional":
-            yes_enabled = StrategySDK._coerce_bool(
-                cfg.get("opening_directional_buy_yes_enabled"),
-                StrategySDK._coerce_bool(defaults.get("opening_directional_buy_yes_enabled"), False),
-            )
-            no_enabled = StrategySDK._coerce_bool(
-                cfg.get("opening_directional_buy_no_enabled"),
-                StrategySDK._coerce_bool(defaults.get("opening_directional_buy_no_enabled"), True),
-            )
-        elif mode == "rebalance":
-            yes_enabled = StrategySDK._coerce_bool(
-                cfg.get("opening_rebalance_buy_yes_enabled"),
-                StrategySDK._coerce_bool(defaults.get("opening_rebalance_buy_yes_enabled"), True),
-            )
-            no_enabled = StrategySDK._coerce_bool(
-                cfg.get("opening_rebalance_buy_no_enabled"),
-                StrategySDK._coerce_bool(defaults.get("opening_rebalance_buy_no_enabled"), True),
-            )
-        else:
-            return True, "mode_not_gated"
-
-        if normalized_direction == "buy_yes":
-            return bool(yes_enabled), f"opening_{mode}_buy_yes_enabled={yes_enabled}"
-        return bool(no_enabled), f"opening_{mode}_buy_no_enabled={no_enabled}"
-
-    @staticmethod
-    def crypto_highfreq_should_flatten_resolution_risk(
-        params: Any,
-        *,
-        timeframe: Any = None,
-        seconds_left: Optional[float] = None,
-        pnl_percent: Optional[float] = None,
-        exit_headroom_ratio: Optional[float] = None,
-        take_profit_armed: bool = False,
-    ) -> tuple[bool, str]:
-        cfg = params if isinstance(params, dict) else {}
-        enabled = StrategySDK._coerce_bool(cfg.get("resolution_risk_flatten_enabled"), True)
-        if not enabled:
-            return False, "disabled"
-
-        if take_profit_armed and StrategySDK._coerce_bool(
-            cfg.get("resolution_risk_disable_when_take_profit_armed"), True
-        ):
-            return False, "take_profit_armed"
-
-        if seconds_left is None or seconds_left < 0.0:
-            return False, "seconds_left_unavailable"
-
-        seconds_budget_raw = StrategySDK._crypto_hf_param_value(cfg, "resolution_risk_seconds_left", timeframe)
-        if seconds_budget_raw is None:
-            seconds_budget_raw = StrategySDK._crypto_hf_param_value(cfg, "force_flatten_seconds_left", timeframe)
-        seconds_budget = StrategySDK._coerce_float(seconds_budget_raw, 120.0, 0.0, 86_400.0)
-        if seconds_left > seconds_budget:
-            return False, f"seconds_left={seconds_left:.1f} > budget={seconds_budget:.1f}"
-
-        max_profit_raw = StrategySDK._crypto_hf_param_value(cfg, "resolution_risk_max_profit_pct", timeframe)
-        max_profit_pct = StrategySDK._coerce_float(max_profit_raw, 6.0, 0.0, 100.0)
-        min_loss_raw = StrategySDK._crypto_hf_param_value(cfg, "resolution_risk_min_loss_pct", timeframe)
-        min_loss_pct = StrategySDK._coerce_float(min_loss_raw, 2.0, 0.0, 100.0)
-        min_headroom_raw = StrategySDK._crypto_hf_param_value(cfg, "resolution_risk_min_headroom_ratio", timeframe)
-        min_headroom_ratio = StrategySDK._coerce_float(min_headroom_raw, 0.0, 0.0, 100.0)
-
-        if pnl_percent is not None:
-            if pnl_percent > max_profit_pct:
-                return False, f"pnl={pnl_percent:.2f}% > max_profit={max_profit_pct:.2f}%"
-            if pnl_percent < -abs(min_loss_pct):
-                return False, f"pnl={pnl_percent:.2f}% < -max_loss={min_loss_pct:.2f}%"
-
-        if exit_headroom_ratio is not None and exit_headroom_ratio < min_headroom_ratio:
-            return False, f"headroom={exit_headroom_ratio:.2f}x < min={min_headroom_ratio:.2f}x"
-
-        pnl_text = f"{pnl_percent:.2f}%" if pnl_percent is not None else "unknown"
-        headroom_text = f"{exit_headroom_ratio:.2f}x" if exit_headroom_ratio is not None else "unknown"
-        detail = f"seconds_left={seconds_left:.1f}s <= {seconds_budget:.1f}s, pnl={pnl_text}, headroom={headroom_text}"
-        return True, detail
 
     @staticmethod
     def should_preplace_take_profit_exit(
