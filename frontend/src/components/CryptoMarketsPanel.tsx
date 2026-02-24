@@ -18,7 +18,7 @@ import { buildPolymarketMarketUrl } from '../lib/marketUrls'
 import { getCryptoMarkets, CryptoMarket } from '../services/api'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { Liveline } from 'liveline'
-import type { LivelinePoint } from 'liveline'
+import type { LivelinePoint, CandlePoint } from 'liveline'
 import { Card } from './ui/card'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
@@ -78,6 +78,42 @@ function livelineSeriesEqual(previous: LivelinePoint[], next: LivelinePoint[]): 
     if (Math.abs(prev.value - curr.value) > 1e-9) return false
   }
   return true
+}
+
+function aggregateCandles(points: LivelinePoint[], intervalSecs: number): CandlePoint[] {
+  if (points.length === 0) return []
+  const candles: CandlePoint[] = []
+  let bucketStart = Math.floor(points[0].time / intervalSecs) * intervalSecs
+  let open = points[0].value
+  let high = open
+  let low = open
+  let close = open
+
+  for (const pt of points) {
+    const bucket = Math.floor(pt.time / intervalSecs) * intervalSecs
+    if (bucket !== bucketStart) {
+      candles.push({ time: bucketStart, open, high, low, close })
+      bucketStart = bucket
+      open = pt.value
+      high = pt.value
+      low = pt.value
+    }
+    if (pt.value > high) high = pt.value
+    if (pt.value < low) low = pt.value
+    close = pt.value
+  }
+  candles.push({ time: bucketStart, open, high, low, close })
+  return candles
+}
+
+function candleInterval(timeframe: string): number {
+  switch (normalizeTimeframe(timeframe)) {
+    case '5m': return 30
+    case '15m': return 60
+    case '1h': return 300
+    case '4h': return 900
+    default: return 60
+  }
 }
 
 function clampProbability(value: number): number {
@@ -336,7 +372,7 @@ function OraclePriceDisplay({
 
 // ─── Market Card ─────────────────────────────────────────
 
-function CryptoMarketCard({
+export function CryptoMarketCard({
   market,
   themeMode,
   isModalView = false,
@@ -351,6 +387,7 @@ function CryptoMarketCard({
   const lastLivelineDataRef = useRef<LivelinePoint[]>([])
   const [chartWidth, setChartWidth] = useState(300)
   const [modalOpen, setModalOpen] = useState(false)
+  const [chartMode, setChartMode] = useState<'line' | 'candle'>('line')
   const closeModal = () => setModalOpen(false)
 
   useEffect(() => {
@@ -512,6 +549,18 @@ function CryptoMarketCard({
       : (isDarkTheme ? '#60a5fa' : '#2563eb')
   )
 
+  const candleIntervalSecs = useMemo(() => candleInterval(market.timeframe), [market.timeframe])
+
+  const candleData = useMemo<CandlePoint[]>(() => {
+    if (livelineData.length < 2) return []
+    return aggregateCandles(livelineData, candleIntervalSecs)
+  }, [livelineData, candleIntervalSecs])
+
+  const liveCandle = useMemo<CandlePoint | undefined>(() => {
+    if (candleData.length === 0) return undefined
+    return candleData[candleData.length - 1]
+  }, [candleData])
+
   // Parse time window from title (e.g. "Bitcoin Up or Down - February 10, 10:45AM-11:00AM ET")
   const timeWindow = market.event_title?.match(/(\d{1,2}:\d{2}[AP]M)-(\d{1,2}:\d{2}[AP]M)\s*ET/)?.[0] || ''
 
@@ -520,7 +569,7 @@ function CryptoMarketCard({
     <Card className={cn(
       "overflow-hidden relative group transition-all duration-200",
       !isModalView && "hover:shadow-lg hover:shadow-black/20 hover:border-border/80",
-      isModalView && "w-[min(1100px,calc(100vw-2rem))] max-h-[90vh] overflow-y-auto rounded-2xl border-border/70 bg-background shadow-[0_40px_120px_rgba(0,0,0,0.55)] [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden",
+      isModalView && "w-[min(1100px,calc(100vw-2rem))] max-h-[90vh] overflow-hidden rounded-2xl border-border/70 bg-background shadow-[0_40px_120px_rgba(0,0,0,0.55)]",
       market.is_live && 'ring-1 ring-green-500/10',
     )}>
       {/* Asset color accent bar */}
@@ -596,7 +645,7 @@ function CryptoMarketCard({
         {/* Oracle price sparkline chart */}
         {isModalView ? (
           <div className={cn(
-            "relative h-56 w-full rounded-lg overflow-hidden border",
+            "relative h-56 w-full rounded-lg overflow-hidden border flex flex-col",
             isDarkTheme
               ? "border-slate-700/40 bg-gradient-to-b from-slate-900/75 via-slate-950/80 to-black/90"
               : "border-slate-200/90 bg-gradient-to-b from-white via-slate-50 to-slate-100/70",
@@ -617,10 +666,16 @@ function CryptoMarketCard({
                 fill
                 window={livelineWindow}
                 lerpSpeed={0.1}
-                padding={{ top: 16, right: 84, bottom: 30, left: 14 }}
+                padding={{ top: 8, right: 10, bottom: 24, left: 14 }}
                 tooltipOutline={isDarkTheme}
                 formatValue={(value) => formatPrice(value, 2)}
                 referenceLine={market.price_to_beat !== null ? { value: market.price_to_beat, label: 'Price to beat' } : undefined}
+                mode={chartMode}
+                candles={candleData}
+                candleWidth={candleIntervalSecs}
+                liveCandle={liveCandle}
+                onModeChange={setChartMode}
+                style={{ flex: 1, height: 'auto', minHeight: 0 }}
               />
             ) : (
               <div className="flex items-center justify-center h-full text-[10px] text-muted-foreground/40">

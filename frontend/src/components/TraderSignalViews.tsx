@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
+import { useAtomValue } from 'jotai'
+import { useQuery } from '@tanstack/react-query'
 import {
   CheckCircle2,
   ChevronDown,
@@ -25,8 +27,11 @@ import {
 } from '../lib/priceHistory'
 import { Badge } from './ui/badge'
 import Sparkline from './Sparkline'
+import { CryptoMarketCard } from './CryptoMarketsPanel'
+import { themeAtom } from '../store/atoms'
 import type { TrackedTraderOpportunity } from '../services/discoveryApi'
-import type { Opportunity } from '../services/api'
+import type { Opportunity, CryptoMarket } from '../services/api'
+import { getCryptoMarkets } from '../services/api'
 
 // ─── Unified Type ──────────────────────────────────────────
 
@@ -1255,10 +1260,40 @@ interface TableProps {
 }
 
 export function TraderSignalTable({ signals, onNavigateToWallet, onOpenCopilot }: TableProps) {
+  const themeMode = useAtomValue(themeAtom)
+  const [modalMarket, setModalMarket] = useState<CryptoMarket | null>(null)
+  const closeModal = () => setModalMarket(null)
+
+  const { data: cryptoMarkets } = useQuery({
+    queryKey: ['crypto-markets-signals'],
+    queryFn: () => getCryptoMarkets(),
+    refetchInterval: 5000,
+    staleTime: 3000,
+  })
+
+  const cryptoMarketsMap = useMemo(() => {
+    const map = new Map<string, CryptoMarket>()
+    if (cryptoMarkets) {
+      for (const m of cryptoMarkets) map.set(m.id, m)
+    }
+    return map
+  }, [cryptoMarkets])
+
+  // Body scroll lock + escape key
+  useEffect(() => {
+    if (!modalMarket) return
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') closeModal() }
+    window.addEventListener('keydown', onKey)
+    return () => { document.body.style.overflow = prev; window.removeEventListener('keydown', onKey) }
+  }, [modalMarket])
+
   return (
+    <>
     <div className="border border-border/50 rounded-lg overflow-hidden">
       {/* Header */}
-      <div className="grid grid-cols-[44px_36px_minmax(0,1fr)_60px_60px_56px_64px_72px_52px] gap-0 bg-muted/50 border-b border-border/50 text-[9px] text-muted-foreground uppercase tracking-wider font-medium">
+      <div className="grid grid-cols-[44px_36px_minmax(0,1fr)_60px_60px_56px_64px_72px_52px_28px] gap-0 bg-muted/50 border-b border-border/50 text-[9px] text-muted-foreground uppercase tracking-wider font-medium">
         <div className="px-2 py-2">Type</div>
         <div className="px-2 py-2">Tier</div>
         <div className="px-2 py-2">Market</div>
@@ -1268,6 +1303,7 @@ export function TraderSignalTable({ signals, onNavigateToWallet, onOpenCopilot }
         <div className="px-2 py-2 text-right">Edge/Net</div>
         <div className="px-2 py-2 text-center">Score</div>
         <div className="px-2 py-2 text-right">Age</div>
+        <div className="px-1 py-2" />
       </div>
 
       {/* Body */}
@@ -1278,10 +1314,55 @@ export function TraderSignalTable({ signals, onNavigateToWallet, onOpenCopilot }
             signal={signal}
             onNavigateToWallet={onNavigateToWallet}
             onOpenCopilot={onOpenCopilot}
+            cryptoMarket={cryptoMarketsMap.get(signal.market_id)}
+            onOpenMarketModal={setModalMarket}
           />
         ))}
       </div>
     </div>
+
+    {/* Market modal portal */}
+    {typeof document !== 'undefined' && createPortal(
+      <AnimatePresence>
+        {modalMarket && (
+          <motion.div
+            key={`signal-market-modal-${modalMarket.id}`}
+            className="fixed inset-0 z-[120] flex items-center justify-center p-4 sm:p-6"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+          >
+            <motion.div
+              className="absolute inset-0 bg-black/70 backdrop-blur-[2px]"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.2 }}
+              onClick={closeModal}
+              aria-hidden
+            />
+            <motion.div
+              className="relative z-10"
+              role="dialog"
+              aria-modal="true"
+              initial={{ scale: 0.94, opacity: 0, y: 22 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.97, opacity: 0, y: 14 }}
+              transition={{ type: 'spring', stiffness: 260, damping: 28, mass: 0.9 }}
+            >
+              <CryptoMarketCard
+                market={modalMarket}
+                themeMode={themeMode}
+                isModalView
+                onCloseModal={closeModal}
+              />
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>,
+      document.body
+    )}
+    </>
   )
 }
 
@@ -1289,10 +1370,14 @@ function TraderSignalTableRow({
   signal,
   onNavigateToWallet,
   onOpenCopilot,
+  cryptoMarket,
+  onOpenMarketModal,
 }: {
   signal: UnifiedTraderSignal
   onNavigateToWallet?: (address: string) => void
   onOpenCopilot?: (signal: UnifiedTraderSignal) => void
+  cryptoMarket?: CryptoMarket
+  onOpenMarketModal?: (market: CryptoMarket) => void
 }) {
   const [expanded, setExpanded] = useState(false)
   const isBuy = signal.direction === 'BUY'
@@ -1318,7 +1403,7 @@ function TraderSignalTableRow({
     <>
       <div
         className={cn(
-          'grid grid-cols-[44px_36px_minmax(0,1fr)_60px_60px_56px_64px_72px_52px] gap-0 cursor-pointer transition-colors',
+          'grid grid-cols-[44px_36px_minmax(0,1fr)_60px_60px_56px_64px_72px_52px_28px] gap-0 cursor-pointer transition-colors',
           expanded ? 'bg-muted/30' : 'hover:bg-muted/20',
         )}
         onClick={() => setExpanded(!expanded)}
@@ -1420,6 +1505,19 @@ function TraderSignalTableRow({
         {/* Age */}
         <div className="px-2 py-2.5 text-right text-[10px] text-muted-foreground/70 font-data">
           {timeAgo(signal.last_seen_at || signal.detected_at)}
+        </div>
+
+        {/* Expand market */}
+        <div className="px-1 py-2.5 flex items-center justify-center">
+          {cryptoMarket && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onOpenMarketModal?.(cryptoMarket) }}
+              className="inline-flex h-5 w-5 items-center justify-center rounded border border-border/40 text-muted-foreground/60 hover:text-foreground hover:border-border transition-colors"
+              title="View live market"
+            >
+              <Maximize2 className="w-2.5 h-2.5" />
+            </button>
+          )}
         </div>
       </div>
 

@@ -39,7 +39,7 @@ $script:postgresDockerCreatedByScript = $false
 
 function Test-TcpPort {
     param(
-        [string]$Host,
+        [string]$TargetHost,
         [int]$Port
     )
 
@@ -48,7 +48,7 @@ function Test-TcpPort {
         $client = [System.Net.Sockets.TcpClient]::new()
         $client.ReceiveTimeout = 500
         $client.SendTimeout = 500
-        $client.Connect($Host, $Port)
+        $client.Connect($TargetHost, $Port)
         return $true
     } catch {
         return $false
@@ -59,12 +59,12 @@ function Test-TcpPort {
 
 function Wait-ForService {
     param(
-        [string]$Host,
+        [string]$TargetHost,
         [int]$Port
     )
 
     for ($i = 0; $i -lt 40; $i++) {
-        if (Test-TcpPort -Host $Host -Port $Port) {
+        if (Test-TcpPort -TargetHost $TargetHost -Port $Port) {
             return $true
         }
         Start-Sleep -Milliseconds 250
@@ -125,10 +125,12 @@ function Find-PostgresBinDir {
 function Test-RedisRuntimeAvailable {
     if (Get-Command docker -ErrorAction SilentlyContinue) { return $true }
     if (Find-RedisServer) { return $true }
-    try {
-        $svc = Get-Service -Name "Memurai" -ErrorAction SilentlyContinue
-        if ($svc) { return $true }
-    } catch {
+    foreach ($svcName in @("Redis", "Memurai")) {
+        try {
+            $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+            if ($svc) { return $true }
+        } catch {
+        }
     }
     return $false
 }
@@ -246,21 +248,23 @@ function Start-RedisLocal {
     $redisServerPath = Find-RedisServer
     if ($redisServerPath) {
         try {
-            Start-Process -FilePath $redisServerPath -ArgumentList @("--bind", $RedisHost, "--port", "$RedisPort", "--save", "", "--appendonly", "no") -WindowStyle Hidden | Out-Null
+            Start-Process -FilePath $redisServerPath -ArgumentList "--bind $RedisHost --port $RedisPort --save `"`" --appendonly no" -WindowStyle Hidden | Out-Null
             return $true
         } catch {
         }
     }
 
-    try {
-        $memuraiService = Get-Service -Name "Memurai" -ErrorAction SilentlyContinue
-        if ($memuraiService) {
-            if ($memuraiService.Status -ne "Running") {
-                Start-Service -Name "Memurai"
+    foreach ($svcName in @("Redis", "Memurai")) {
+        try {
+            $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+            if ($svc) {
+                if ($svc.Status -ne "Running") {
+                    Start-Service -Name $svcName
+                }
+                return $true
             }
-            return $true
+        } catch {
         }
-    } catch {
     }
 
     return $false
@@ -287,7 +291,7 @@ function Ensure-Redis {
 
     Write-Host "Starting Redis..." -ForegroundColor Cyan
     $dockerStarted = Start-RedisDocker -RedisHost $RedisHost -RedisPort $RedisPort -ContainerName $ContainerName -Image $Image
-    if ($dockerStarted -and (Wait-ForService -Host $RedisHost -Port $RedisPort)) {
+    if ($dockerStarted -and (Wait-ForService -TargetHost $RedisHost -Port $RedisPort)) {
         $script:redisStartedByScript = $true
         $script:redisStartMode = "docker"
         Write-Host "Redis started via Docker on ${RedisHost}:${RedisPort}" -ForegroundColor Green
@@ -295,7 +299,7 @@ function Ensure-Redis {
     }
 
     $localStarted = Start-RedisLocal -RedisHost $RedisHost -RedisPort $RedisPort
-    if ($localStarted -and (Wait-ForService -Host $RedisHost -Port $RedisPort)) {
+    if ($localStarted -and (Wait-ForService -TargetHost $RedisHost -Port $RedisPort)) {
         $script:redisStartedByScript = $true
         $script:redisStartMode = "local"
         Write-Host "Redis started via redis-server on ${RedisHost}:${RedisPort}" -ForegroundColor Green
@@ -323,6 +327,17 @@ function Cleanup-StartedRedis {
     }
 
     if ($script:redisStartMode -eq "local") {
+        # If we started via a Windows service, stop it gracefully
+        foreach ($svcName in @("Redis", "Memurai")) {
+            try {
+                $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+                if ($svc -and $svc.Status -eq "Running") {
+                    Stop-Service -Name $svcName -Force -ErrorAction SilentlyContinue
+                    return
+                }
+            } catch {}
+        }
+        # Otherwise send raw SHUTDOWN to the redis-server process
         if (Test-RedisPing -RedisHost $redisHost -RedisPort $redisPort) {
             Send-RedisShutdown -RedisHost $redisHost -RedisPort $redisPort
         }
@@ -350,7 +365,7 @@ function Ensure-PostgresRuntime {
 
 function Start-PostgresDocker {
     param(
-        [string]$Host,
+        [string]$PgHost,
         [int]$Port,
         [string]$Db,
         [string]$User,
@@ -382,7 +397,7 @@ function Start-PostgresDocker {
 
     try {
         New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
-        docker run --name $ContainerName --detach --publish "${Host}:${Port}:5432" --env "POSTGRES_DB=$Db" --env "POSTGRES_USER=$User" --env "POSTGRES_PASSWORD=$Password" --volume "${DataDir}:/var/lib/postgresql/data" $Image *> $null
+        docker run --name $ContainerName --detach --publish "${PgHost}:${Port}:5432" --env "POSTGRES_DB=$Db" --env "POSTGRES_USER=$User" --env "POSTGRES_PASSWORD=$Password" --volume "${DataDir}:/var/lib/postgresql/data" $Image *> $null
         if ($LASTEXITCODE -eq 0) {
             $script:postgresDockerCreatedByScript = $true
             return $true
@@ -395,7 +410,7 @@ function Start-PostgresDocker {
 
 function Start-PostgresLocal {
     param(
-        [string]$Host,
+        [string]$PgHost,
         [int]$Port,
         [string]$User,
         [string]$DataDir
@@ -421,7 +436,7 @@ function Start-PostgresLocal {
     $pgVersionPath = Join-Path $DataDir "PG_VERSION"
     if (-not (Test-Path $pgVersionPath)) {
         try {
-            & $initdbPath -D $DataDir -U $User *> $null
+            & $initdbPath -D $DataDir -U $User --encoding=UTF8 --locale=C *> $null
             if ($LASTEXITCODE -ne 0) { return $false }
 
             @"
@@ -430,19 +445,34 @@ host all all 127.0.0.1/32 trust
 host all all ::1/128 trust
 "@ | Set-Content -Path (Join-Path $DataDir "pg_hba.conf") -Encoding UTF8
 
-            Add-Content -Path (Join-Path $DataDir "postgresql.conf") -Value "listen_addresses = '$Host'"
+            Add-Content -Path (Join-Path $DataDir "postgresql.conf") -Value "listen_addresses = '$PgHost'"
             Add-Content -Path (Join-Path $DataDir "postgresql.conf") -Value "port = $Port"
         } catch {
             return $false
         }
     }
 
-    try {
-        & $pgctlPath -D $DataDir -o "-h $Host -p $Port" -w start *> $null
-        return ($LASTEXITCODE -eq 0)
-    } catch {
-        return $false
+    # Start via Start-Process so pg_ctl doesn't block the PowerShell pipeline.
+    # The caller's Wait-ForService handles readiness polling.
+    # On Windows a hard-killed Postgres can leave stale shared-memory
+    # that causes the first start to fail immediately; we retry once.
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        try {
+            $proc = Start-Process -FilePath $pgctlPath -ArgumentList "-D `"$DataDir`" -o `"-h $PgHost -p $Port`" start" -WindowStyle Hidden -Wait:$false -PassThru
+            Start-Sleep -Milliseconds 500
+            if (-not $proc.HasExited -or $proc.ExitCode -eq 0) { return $true }
+        } catch {}
+
+        if ($attempt -eq 1) {
+            # Stale shared-memory from a crashed process is the most common
+            # reason for failure.  Remove the PID file and pause to let the
+            # OS reclaim the segment before the second attempt.
+            $stalePid = Join-Path $DataDir "postmaster.pid"
+            Remove-Item -Path $stalePid -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+        }
     }
+    return $false
 }
 
 function Test-PostgresDockerListenerOwned {
@@ -514,21 +544,49 @@ function Test-LauncherPostgresListenerOwned {
 
 function Get-AvailablePostgresPort {
     param(
-        [string]$Host,
+        [string]$PgHost,
         [int]$StartPort
     )
 
     for ($port = $StartPort; $port -le ($StartPort + 32); $port++) {
-        if (-not (Test-TcpPort -Host $Host -Port $port)) {
+        if (-not (Test-TcpPort -TargetHost $PgHost -Port $port)) {
             return $port
         }
     }
     return $null
 }
 
+function Get-RunningLocalPostgresPort {
+    param(
+        [string]$DataDir
+    )
+
+    $pidPath = Join-Path $DataDir "postmaster.pid"
+    if (-not (Test-Path $pidPath)) {
+        return $null
+    }
+
+    try {
+        $lines = Get-Content -Path $pidPath -ErrorAction Stop
+        if ($lines.Count -lt 4) { return $null }
+        $pidValue = ($lines[0] | Out-String).Trim()
+        $portValue = ($lines[3] | Out-String).Trim()
+        if (-not $pidValue -or -not $portValue) { return $null }
+        $proc = Get-Process -Id ([int]$pidValue) -ErrorAction SilentlyContinue
+        if (-not $proc) {
+            # Stale postmaster.pid from crashed process - clean it up
+            Remove-Item -Path $pidPath -Force -ErrorAction SilentlyContinue
+            return $null
+        }
+        return [int]$portValue
+    } catch {
+        return $null
+    }
+}
+
 function Ensure-Postgres {
     param(
-        [string]$Host,
+        [string]$PgHost,
         [int]$Port,
         [string]$Db,
         [string]$User,
@@ -538,13 +596,22 @@ function Ensure-Postgres {
         [string]$DataDir
     )
 
-    if (Test-TcpPort -Host $Host -Port $Port) {
-        if (Test-LauncherPostgresListenerOwned -ContainerName $ContainerName -DataDir $DataDir -Port $Port) {
-            Write-Host "Postgres already running on ${Host}:${Port}" -ForegroundColor Green
+    # Check if our local Postgres is already running (on any port)
+    $runningPort = Get-RunningLocalPostgresPort -DataDir $DataDir
+    if ($runningPort) {
+        $script:postgresPort = [int]$runningPort
+        Write-Host "Postgres already running on ${PgHost}:${runningPort}" -ForegroundColor Green
+        return
+    }
+
+    # Check if our Docker container is already running on the requested port
+    if (Test-TcpPort -TargetHost $PgHost -Port $Port) {
+        if (Test-PostgresDockerListenerOwned -ContainerName $ContainerName -Port $Port) {
+            Write-Host "Postgres already running on ${PgHost}:${Port}" -ForegroundColor Green
             return
         }
 
-        $alternatePort = Get-AvailablePostgresPort -Host $Host -StartPort ($Port + 1)
+        $alternatePort = Get-AvailablePostgresPort -PgHost $PgHost -StartPort ($Port + 1)
         if (-not $alternatePort) {
             Write-Host "Port ${Port} is occupied by a non-launcher service and no alternate Postgres port is available." -ForegroundColor Red
             Write-Host "Set DATABASE_URL manually or free a local port, then rerun." -ForegroundColor Yellow
@@ -563,19 +630,19 @@ function Ensure-Postgres {
     }
 
     Write-Host "Starting Postgres..." -ForegroundColor Cyan
-    $dockerStarted = Start-PostgresDocker -Host $Host -Port $Port -Db $Db -User $User -Password $Password -ContainerName $ContainerName -Image $Image -DataDir $DataDir
-    if ($dockerStarted -and (Wait-ForService -Host $Host -Port $Port)) {
+    $dockerStarted = Start-PostgresDocker -PgHost $PgHost -Port $Port -Db $Db -User $User -Password $Password -ContainerName $ContainerName -Image $Image -DataDir $DataDir
+    if ($dockerStarted -and (Wait-ForService -TargetHost $PgHost -Port $Port)) {
         $script:postgresStartedByScript = $true
         $script:postgresStartMode = "docker"
-        Write-Host "Postgres started via Docker on ${Host}:${Port}" -ForegroundColor Green
+        Write-Host "Postgres started via Docker on ${PgHost}:${Port}" -ForegroundColor Green
         return
     }
 
-    $localStarted = Start-PostgresLocal -Host $Host -Port $Port -User $User -DataDir $DataDir
-    if ($localStarted -and (Wait-ForService -Host $Host -Port $Port)) {
+    $localStarted = Start-PostgresLocal -PgHost $PgHost -Port $Port -User $User -DataDir $DataDir
+    if ($localStarted -and (Wait-ForService -TargetHost $PgHost -Port $Port)) {
         $script:postgresStartedByScript = $true
         $script:postgresStartMode = "local"
-        Write-Host "Postgres started via local postgres on ${Host}:${Port}" -ForegroundColor Green
+        Write-Host "Postgres started via local postgres on ${PgHost}:${Port}" -ForegroundColor Green
         return
     }
 
@@ -614,7 +681,6 @@ function Test-NeedsSetup {
     if (-not (Test-Path "backend\venv")) { return $true }
     if (-not (Test-Path "backend\venv\Scripts\python.exe")) { return $true }
     if (-not (Test-Path "frontend\node_modules")) { return $true }
-    if (-not (Test-Path "scripts\tooling\node_modules")) { return $true }
     if (-not (Test-Path ".setup-stamp.json")) { return $true }
 
     $venvPython = "backend\venv\Scripts\python.exe"
@@ -667,7 +733,7 @@ try {
     if ($env:DATABASE_URL) {
         Write-Host "Using provided DATABASE_URL; skipping launcher-managed Postgres startup." -ForegroundColor Cyan
     } else {
-        Ensure-Postgres -Host $postgresHost -Port $postgresPort -Db $postgresDb -User $postgresUser -Password $postgresPassword -ContainerName $postgresContainerName -Image $postgresImage -DataDir $postgresDataDir
+        Ensure-Postgres -PgHost $postgresHost -Port $postgresPort -Db $postgresDb -User $postgresUser -Password $postgresPassword -ContainerName $postgresContainerName -Image $postgresImage -DataDir $postgresDataDir
         $env:DATABASE_URL = "postgresql+asyncpg://${postgresUser}:${postgresPassword}@${postgresHost}:${script:postgresPort}/${postgresDb}"
     }
 

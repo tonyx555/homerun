@@ -1,4 +1,6 @@
-import { type ReactNode, useMemo, useState } from 'react'
+import { type ReactNode, useEffect, useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { AnimatePresence, motion } from 'framer-motion'
 import { useAtomValue } from 'jotai'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -12,6 +14,7 @@ import {
   ExternalLink,
   Gauge,
   Layers,
+  Maximize2,
   RefreshCw,
   Search,
   Shield,
@@ -22,14 +25,16 @@ import {
 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { buildKalshiMarketUrl, buildPolymarketMarketUrl } from '../lib/marketUrls'
-import { selectedAccountIdAtom } from '../store/atoms'
+import { selectedAccountIdAtom, themeAtom } from '../store/atoms'
 import {
   getAccountPositions,
   getAllTraderOrders,
+  getCryptoMarkets,
   getKalshiPositions,
   getKalshiStatus,
   getSimulationAccounts,
   getTradingPositions,
+  type CryptoMarket,
   type KalshiAccountStatus,
   type KalshiPosition,
   type SimulationAccount,
@@ -37,6 +42,7 @@ import {
   type TraderOrder,
   type TradingPosition,
 } from '../services/api'
+import { CryptoMarketCard } from './CryptoMarketsPanel'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
@@ -242,6 +248,34 @@ export default function PositionsPanel() {
   const [exposureFloor, setExposureFloor] = useState<ExposureFloor>('all')
   const [sortField, setSortField] = useState<SortField>('exposure')
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc')
+  const [modalMarket, setModalMarket] = useState<CryptoMarket | null>(null)
+  const closeMarketModal = () => setModalMarket(null)
+  const themeMode = useAtomValue(themeAtom)
+
+  const { data: cryptoMarkets } = useQuery({
+    queryKey: ['crypto-markets-positions'],
+    queryFn: () => getCryptoMarkets(),
+    refetchInterval: 5000,
+    staleTime: 3000,
+  })
+
+  const cryptoMarketsMap = useMemo(() => {
+    const map = new Map<string, CryptoMarket>()
+    if (cryptoMarkets) {
+      for (const m of cryptoMarkets) map.set(m.id, m)
+    }
+    return map
+  }, [cryptoMarkets])
+
+  // Market modal: body scroll lock + escape key
+  useEffect(() => {
+    if (!modalMarket) return
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') closeMarketModal() }
+    window.addEventListener('keydown', onKey)
+    return () => { document.body.style.overflow = prev; window.removeEventListener('keydown', onKey) }
+  }, [modalMarket])
 
   const shouldShowSandbox = viewMode === 'sandbox' || viewMode === 'all'
   const shouldShowLive = viewMode === 'live' || viewMode === 'all'
@@ -1011,6 +1045,7 @@ export default function PositionsPanel() {
                     <TableHead className="text-right w-[120px]">Unrealized</TableHead>
                     <TableHead className="text-right w-[120px]">Updated</TableHead>
                     <TableHead className="text-right w-[42px]" />
+                    <TableHead className="w-[32px]" />
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -1101,6 +1136,18 @@ export default function PositionsPanel() {
                             </a>
                           ) : null}
                         </TableCell>
+
+                        <TableCell className="px-1 py-1.5">
+                          {cryptoMarketsMap.has(row.marketId) && (
+                            <button
+                              onClick={() => setModalMarket(cryptoMarketsMap.get(row.marketId)!)}
+                              className="inline-flex h-5 w-5 items-center justify-center rounded border border-border/40 text-muted-foreground/60 hover:text-foreground hover:border-border transition-colors"
+                              title="View live market"
+                            >
+                              <Maximize2 className="w-2.5 h-2.5" />
+                            </button>
+                          )}
+                        </TableCell>
                       </TableRow>
                     )
                   })}
@@ -1118,7 +1165,7 @@ export default function PositionsPanel() {
                         {formatSignedUsd(metrics.totalUnrealizedPnl)}
                       </span>
                     </TableCell>
-                    <TableCell colSpan={2} className="px-2 py-1.5 text-right text-xs text-muted-foreground">
+                    <TableCell colSpan={3} className="px-2 py-1.5 text-right text-xs text-muted-foreground">
                       {metrics.markCoverage.toFixed(0)}% marked
                     </TableCell>
                   </TableRow>
@@ -1190,6 +1237,48 @@ export default function PositionsPanel() {
         <div className="shrink-0 rounded-md border border-indigo-500/30 bg-indigo-500/10 px-3 py-2 text-xs text-indigo-100">
           Kalshi not authenticated — live positions unavailable.
         </div>
+      )}
+
+      {/* Market modal portal */}
+      {typeof document !== 'undefined' && createPortal(
+        <AnimatePresence>
+          {modalMarket && (
+            <motion.div
+              key={`position-market-modal-${modalMarket.id}`}
+              className="fixed inset-0 z-[120] flex items-center justify-center p-4 sm:p-6"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+            >
+              <motion.div
+                className="absolute inset-0 bg-black/70 backdrop-blur-[2px]"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.2 }}
+                onClick={closeMarketModal}
+                aria-hidden
+              />
+              <motion.div
+                className="relative z-10"
+                role="dialog"
+                aria-modal="true"
+                initial={{ scale: 0.94, opacity: 0, y: 22 }}
+                animate={{ scale: 1, opacity: 1, y: 0 }}
+                exit={{ scale: 0.97, opacity: 0, y: 14 }}
+                transition={{ type: 'spring', stiffness: 260, damping: 28, mass: 0.9 }}
+              >
+                <CryptoMarketCard
+                  market={modalMarket}
+                  themeMode={themeMode}
+                  isModalView
+                  onCloseModal={closeMarketModal}
+                />
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>,
+        document.body
       )}
     </div>
   )

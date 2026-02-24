@@ -1,6 +1,8 @@
 import { type ReactNode, useEffect, useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { AnimatePresence, motion } from 'framer-motion'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useAtom } from 'jotai'
+import { useAtom, useAtomValue } from 'jotai'
 import {
   AlertTriangle,
   CheckCircle2,
@@ -11,6 +13,7 @@ import {
   ExternalLink,
   Filter,
   Loader2,
+  Maximize2,
   Play,
   Plus,
   Settings,
@@ -24,6 +27,8 @@ import {
   createTrader,
   deleteTrader,
   getAllTraderOrders,
+  getCryptoMarkets,
+  type CryptoMarket,
   getTraderOrders,
   getTraderDecisionDetail,
   getTraderDecisions,
@@ -68,7 +73,7 @@ import {
 import { discoveryApi } from '../services/discoveryApi'
 import { cn } from '../lib/utils'
 import { getOpportunityPlatformLinks, getTraderOrderPlatformLinks } from '../lib/marketUrls'
-import { selectedAccountIdAtom } from '../store/atoms'
+import { selectedAccountIdAtom, themeAtom } from '../store/atoms'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { Card } from './ui/card'
@@ -84,6 +89,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs'
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip'
 import { FlashNumber } from './AnimatedNumber'
 import StrategyConfigForm from './StrategyConfigForm'
+import { CryptoMarketCard } from './CryptoMarketsPanel'
 
 type FeedFilter = 'all' | 'decision' | 'order' | 'event'
 type TradeStatusFilter = 'all' | 'open' | 'resolved' | 'failed'
@@ -2422,6 +2428,29 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     queryFn: () => discoveryApi.getTraderGroups(false, 200),
     staleTime: 30000,
   })
+
+  const cryptoMarketsQuery = useQuery({
+    queryKey: ['crypto-markets'],
+    queryFn: () => getCryptoMarkets(),
+    refetchInterval: 5000,
+  })
+  const cryptoMarketById = useMemo(() => {
+    const map = new Map<string, CryptoMarket>()
+    for (const m of (cryptoMarketsQuery.data ?? []) as CryptoMarket[]) {
+      if (m.id) map.set(m.id, m)
+    }
+    return map
+  }, [cryptoMarketsQuery.data])
+  const [allBotsModalMarket, setAllBotsModalMarket] = useState<CryptoMarket | null>(null)
+  const themeMode = useAtomValue(themeAtom)
+
+  useEffect(() => {
+    if (!allBotsModalMarket) return
+    document.body.style.overflow = 'hidden'
+    const handleEscape = (e: KeyboardEvent) => { if (e.key === 'Escape') setAllBotsModalMarket(null) }
+    window.addEventListener('keydown', handleEscape)
+    return () => { document.body.style.overflow = ''; window.removeEventListener('keydown', handleEscape) }
+  }, [allBotsModalMarket])
 
   const traderConfigSchema: TraderConfigSchema | null = traderConfigSchemaQuery.data ?? null
   const activeCopyMode = activeCopyModeQuery.data ?? null
@@ -4886,22 +4915,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
           {showingAllBotsDashboard ? (
             <div className="flex-1 min-h-0 overflow-hidden rounded-lg border border-cyan-500/25 bg-card">
               <div className="h-full min-h-0 flex flex-col">
-                <div className="shrink-0 border-b border-cyan-500/20 px-3 py-2">
-                  <div className="flex flex-wrap items-center justify-end gap-1.5">
-                    <div className="flex items-center gap-1.5">
-                      <Badge className="h-5 px-1.5 text-[10px]" variant={orchestratorRunning ? 'default' : 'secondary'}>
-                        Engine {orchestratorStatusLabel}
-                      </Badge>
-                      <Badge className="h-5 px-1.5 text-[10px]" variant={globalMode === 'live' ? 'destructive' : 'outline'}>
-                        {globalMode.toUpperCase()}
-                      </Badge>
-                      <Badge className="h-5 px-1.5 text-[10px]" variant={killSwitchOn ? 'destructive' : 'outline'}>
-                        {killSwitchOn ? 'BLOCKED' : 'OPEN'}
-                      </Badge>
-                    </div>
-                  </div>
-                </div>
-
                 <div className="shrink-0 px-2 py-1.5">
                   <div className="grid gap-1.5 sm:grid-cols-2 xl:grid-cols-4">
                     <div className="rounded-md border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-1.5">
@@ -5175,6 +5188,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                   <TableHead className="text-[11px]">Mode</TableHead>
                                   <TableHead className="text-[11px]">Created</TableHead>
                                   <TableHead className="text-[11px]">Updated</TableHead>
+                                  <TableHead className="w-[28px]" />
                                 </TableRow>
                               </TableHeader>
                               <TableBody>
@@ -5378,6 +5392,21 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                       <TableCell className="py-1 uppercase text-[10px]">{String(order.mode || '').toUpperCase()}</TableCell>
                                       <TableCell className="py-1 text-[10px] text-muted-foreground">{formatShortDate(order.created_at)}</TableCell>
                                       <TableCell className="py-1 text-[10px] text-muted-foreground" title={formatTimestamp(updatedAt)}>{formatRelativeAge(updatedAt)}</TableCell>
+                                      <TableCell className="py-1 w-[28px]">
+                                        {(() => {
+                                          const cm = cryptoMarketById.get(String(order.market_id || ''))
+                                          return cm ? (
+                                            <button
+                                              type="button"
+                                              onClick={(e) => { e.stopPropagation(); setAllBotsModalMarket(cm) }}
+                                              className="inline-flex h-5 w-5 items-center justify-center rounded border border-border/70 text-muted-foreground transition-colors hover:text-foreground hover:bg-muted/60"
+                                              title="Expand market"
+                                            >
+                                              <Maximize2 className="h-3 w-3" />
+                                            </button>
+                                          ) : null
+                                        })()}
+                                      </TableCell>
                                     </TableRow>
                                   )
                                 })}
@@ -5497,6 +5526,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                   <TableHead className="text-[11px] text-right">Orders</TableHead>
                                   <TableHead className="text-[11px] text-right">Mode</TableHead>
                                   <TableHead className="text-[11px]">Updated</TableHead>
+                                  <TableHead className="w-[28px]" />
                                 </TableRow>
                               </TableHeader>
                               <TableBody>
@@ -5568,6 +5598,21 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                     <TableCell className="text-right font-mono py-1">{row.orderCount}</TableCell>
                                     <TableCell className="text-right font-mono py-1">{row.liveOrderCount}L/{row.paperOrderCount}P</TableCell>
                                     <TableCell className="py-1 text-[10px] text-muted-foreground">{formatShortDate(row.lastUpdated || row.markUpdatedAt)}</TableCell>
+                                    <TableCell className="py-1 w-[28px]">
+                                      {(() => {
+                                        const cm = cryptoMarketById.get(row.marketId)
+                                        return cm ? (
+                                          <button
+                                            type="button"
+                                            onClick={(e) => { e.stopPropagation(); setAllBotsModalMarket(cm) }}
+                                            className="inline-flex h-5 w-5 items-center justify-center rounded border border-border/70 text-muted-foreground transition-colors hover:text-foreground hover:bg-muted/60"
+                                            title="Expand market"
+                                          >
+                                            <Maximize2 className="h-3 w-3" />
+                                          </button>
+                                        ) : null
+                                      })()}
+                                    </TableCell>
                                   </TableRow>
                                 ))}
                               </TableBody>
@@ -5579,6 +5624,39 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                   </TabsContent>
                 </Tabs>
               </div>
+              {/* Market modal portal for All Bots dashboard */}
+              {createPortal(
+                <AnimatePresence>
+                  {allBotsModalMarket && (
+                    <motion.div
+                      key="allbots-market-modal"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: 0.18 }}
+                      className="fixed inset-0 z-[120] flex items-center justify-center"
+                      onClick={() => setAllBotsModalMarket(null)}
+                    >
+                      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+                      <motion.div
+                        initial={{ scale: 0.94, y: 22, opacity: 0 }}
+                        animate={{ scale: 1, y: 0, opacity: 1 }}
+                        exit={{ scale: 0.94, y: 22, opacity: 0 }}
+                        transition={{ type: 'spring', damping: 28, stiffness: 340, mass: 0.85 }}
+                        className="relative w-[94vw] max-w-5xl max-h-[88vh]"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <CryptoMarketCard
+                          market={allBotsModalMarket}
+                          isModalView
+                          themeMode={themeMode}
+                        />
+                      </motion.div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>,
+                document.body
+              )}
             </div>
           ) : (
             <>

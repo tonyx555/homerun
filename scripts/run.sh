@@ -301,7 +301,7 @@ try_start_postgres_local() {
     mkdir -p "$POSTGRES_DATA_DIR"
 
     if [ ! -f "$POSTGRES_DATA_DIR/PG_VERSION" ]; then
-        "$initdb_bin" -D "$POSTGRES_DATA_DIR" -U "$POSTGRES_USER" >/dev/null 2>&1 || return 1
+        "$initdb_bin" -D "$POSTGRES_DATA_DIR" -U "$POSTGRES_USER" --encoding=UTF8 --locale=C >/dev/null 2>&1 || return 1
         cat > "$POSTGRES_DATA_DIR/pg_hba.conf" <<HBA
 local all all trust
 host all all 127.0.0.1/32 trust
@@ -313,7 +313,18 @@ HBA
         } >> "$POSTGRES_DATA_DIR/postgresql.conf"
     fi
 
-    "$pg_ctl_bin" -D "$POSTGRES_DATA_DIR" -o "-h ${POSTGRES_HOST} -p ${POSTGRES_PORT}" -w start >/dev/null 2>&1 || return 1
+    # Start without -w (don't let pg_ctl block waiting).
+    # The caller's wait_for_service handles readiness polling.
+    # On some platforms a hard-killed Postgres can leave stale shared-memory;
+    # if the first attempt fails we wait briefly and retry once.
+    if "$pg_ctl_bin" -D "$POSTGRES_DATA_DIR" -o "-h ${POSTGRES_HOST} -p ${POSTGRES_PORT}" start >/dev/null 2>&1; then
+        return 0
+    fi
+
+    # Stale shared-memory – remove PID file, pause, retry.
+    rm -f "$POSTGRES_DATA_DIR/postmaster.pid"
+    sleep 3
+    "$pg_ctl_bin" -D "$POSTGRES_DATA_DIR" -o "-h ${POSTGRES_HOST} -p ${POSTGRES_PORT}" start >/dev/null 2>&1 || return 1
     return 0
 }
 
@@ -459,9 +470,6 @@ needs_setup() {
         return 0
     fi
     if [ ! -d "frontend/node_modules" ]; then
-        return 0
-    fi
-    if [ ! -d "scripts/tooling/node_modules" ]; then
         return 0
     fi
     if [ ! -f ".setup-stamp.json" ]; then
