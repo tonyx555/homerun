@@ -12,7 +12,9 @@ All methods are designed to be safe and handle missing data gracefully.
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+import json
 import logging
+from pathlib import Path
 import re
 from typing import Any, Optional
 
@@ -514,153 +516,6 @@ class StrategySDK:
             },
         ]
     }
-    CRYPTO_HF_SCOPE_DEFAULTS: dict[str, Any] = {
-        "min_edge_percent": 2.0,
-        "min_confidence": 0.40,
-        "max_risk_score": 0.80,
-        "base_size_usd": 20.0,
-        "max_size_usd": 150.0,
-        "include_assets": ["BTC", "ETH", "SOL", "XRP"],
-        "exclude_assets": [],
-        "include_timeframes": ["5m", "15m", "1h", "4h"],
-        "exclude_timeframes": [],
-        "live_window_required": True,
-        "min_liquidity_usd": 250.0,
-        "min_liquidity_usd_opening": 4000.0,
-        "max_spread_pct": 0.08,
-        "max_signal_age_seconds": 35.0,
-        "max_open_order_seconds": 14.0,
-        "max_signal_age_seconds_5m": 1.25,
-        "max_signal_age_seconds_15m": 2.5,
-        "max_signal_age_seconds_1h": 4.0,
-        "max_signal_age_seconds_4h": 6.0,
-        "max_market_data_age_ms": 1200,
-        "max_market_data_age_ms_5m": 700,
-        "max_market_data_age_ms_15m": 900,
-        "max_market_data_age_ms_1h": 1200,
-        "max_market_data_age_ms_4h": 1500,
-        "enforce_market_data_freshness": True,
-        "require_market_data_age_for_sources": ["crypto"],
-        "max_live_context_age_seconds": 3.0,
-        "max_oracle_age_seconds": 20.0,
-        "require_oracle_for_directional": True,
-        "min_edge_persistence_ms": 1400,
-        "max_recent_move_zscore_for_entry": 2.25,
-        "max_spread_widening_bps": 28.0,
-        "max_orderbook_imbalance": 0.92,
-        "reentry_cooldown_seconds_per_market": 15,
-        "min_seconds_left_for_entry_5m": 60.0,
-        "min_seconds_left_for_entry_15m": 180.0,
-        "min_seconds_left_for_entry_1h": 360.0,
-        "min_seconds_left_for_entry_4h": 600.0,
-        "opening_directional_buy_yes_enabled": False,
-        "opening_directional_buy_no_enabled": True,
-        "opening_rebalance_buy_yes_enabled": True,
-        "opening_rebalance_buy_no_enabled": True,
-        "entry_executable_exit_ratio_floor": 0.28,
-        "entry_executable_exit_ratio_floor_closing": 0.24,
-        "directional_min_entry_price_floor": 0.10,
-        "rebalance_min_entry_price_floor": 0.16,
-        "directional_max_entry_price_ceiling": 0.75,
-        "rebalance_max_entry_price_ceiling": 0.70,
-        "enforce_hard_timeframe_allowlist": True,
-        "hard_allowed_timeframes": ["5m", "15m", "1h"],
-        "rapid_take_profit_pct": 10.0,
-        "rapid_take_profit_pct_5m": 10.0,
-        "rapid_take_profit_pct_15m": 10.0,
-        "rapid_take_profit_pct_1h": 12.0,
-        "rapid_take_profit_pct_4h": 15.0,
-        "rapid_exit_window_minutes": 2.0,
-        "rapid_exit_window_minutes_5m": 1.0,
-        "rapid_exit_window_minutes_15m": 2.0,
-        "rapid_exit_window_minutes_1h": 6.0,
-        "rapid_exit_window_minutes_4h": 15.0,
-        "rapid_exit_min_increase_pct": 0.0,
-        "rapid_exit_breakeven_buffer_pct": 0.0,
-        "reverse_on_adverse_velocity_enabled": False,
-        "reverse_min_loss_pct": 2.0,
-        "reverse_min_adverse_velocity_score": 0.55,
-        "reverse_flow_imbalance_threshold": -0.2,
-        "reverse_momentum_short_pct_threshold": -0.25,
-        "reverse_min_seconds_left": 90.0,
-        "reverse_min_price_headroom": 0.18,
-        "reverse_min_edge_percent": 0.8,
-        "reverse_confidence": 0.62,
-        "reverse_size_multiplier": 1.0,
-        "reverse_signal_ttl_seconds": 45.0,
-        "reverse_cooldown_seconds": 20.0,
-        "reverse_max_reentries_per_position": 1,
-        "underwater_rebound_exit_enabled": True,
-        "underwater_dwell_minutes": 2.5,
-        "underwater_dwell_minutes_5m": 0.75,
-        "underwater_dwell_minutes_15m": 2.0,
-        "underwater_dwell_minutes_1h": 6.0,
-        "underwater_dwell_minutes_4h": 18.0,
-        "underwater_recovery_ratio_min": 0.35,
-        "underwater_recovery_ratio_min_5m": 0.30,
-        "underwater_recovery_ratio_min_15m": 0.35,
-        "underwater_recovery_ratio_min_1h": 0.40,
-        "underwater_recovery_ratio_min_4h": 0.45,
-        "underwater_rebound_pct_min": 1.2,
-        "underwater_rebound_pct_min_5m": 0.8,
-        "underwater_rebound_pct_min_15m": 1.2,
-        "underwater_rebound_pct_min_1h": 1.8,
-        "underwater_rebound_pct_min_4h": 2.4,
-        "underwater_exit_fade_pct": 0.45,
-        "underwater_exit_fade_pct_5m": 0.35,
-        "underwater_exit_fade_pct_15m": 0.45,
-        "underwater_exit_fade_pct_1h": 0.6,
-        "underwater_exit_fade_pct_4h": 0.8,
-        "underwater_timeout_minutes": 10.0,
-        "underwater_timeout_minutes_5m": 2.0,
-        "underwater_timeout_minutes_15m": 6.0,
-        "underwater_timeout_minutes_1h": 18.0,
-        "underwater_timeout_minutes_4h": 45.0,
-        "underwater_timeout_loss_pct": 8.0,
-        "take_profit_pct": 8.0,
-        "stop_loss_pct": 5.0,
-        "stop_loss_policy": "near_close_only",
-        "stop_loss_policy_5m": "near_close_only",
-        "stop_loss_policy_15m": "near_close_only",
-        "stop_loss_policy_1h": "near_close_only",
-        "stop_loss_policy_4h": "near_close_only",
-        "stop_loss_activation_seconds": 90,
-        "stop_loss_activation_seconds_5m": 45.0,
-        "stop_loss_activation_seconds_15m": 120.0,
-        "stop_loss_activation_seconds_1h": 300.0,
-        "stop_loss_activation_seconds_4h": 900.0,
-        "trailing_stop_pct": 3.0,
-        "trailing_stop_activation_profit_pct": 4.0,
-        "trailing_stop_activation_profit_pct_5m": 4.0,
-        "trailing_stop_activation_profit_pct_15m": 6.0,
-        "trailing_stop_activation_profit_pct_1h": 8.0,
-        "trailing_stop_activation_profit_pct_4h": 10.0,
-        "min_hold_minutes": 1.0,
-        "max_hold_minutes": 60,
-        "force_flatten_seconds_left": 120.0,
-        "force_flatten_seconds_left_5m": 90.0,
-        "force_flatten_seconds_left_15m": 210.0,
-        "force_flatten_seconds_left_1h": 480.0,
-        "force_flatten_seconds_left_4h": 900.0,
-        "force_flatten_max_profit_pct": 3.0,
-        "force_flatten_headroom_floor": 1.0,
-        "force_flatten_min_loss_pct": 2.0,
-        "resolution_risk_flatten_enabled": True,
-        "resolution_risk_seconds_left": 180.0,
-        "resolution_risk_seconds_left_5m": 105.0,
-        "resolution_risk_seconds_left_15m": 240.0,
-        "resolution_risk_seconds_left_1h": 540.0,
-        "resolution_risk_seconds_left_4h": 1200.0,
-        "resolution_risk_max_profit_pct": 6.0,
-        "resolution_risk_max_profit_pct_5m": 4.0,
-        "resolution_risk_min_loss_pct": 2.0,
-        "resolution_risk_min_headroom_ratio": 0.9,
-        "resolution_risk_disable_when_take_profit_armed": True,
-        "resolve_only": False,
-        "close_on_inactive_market": False,
-        "preplace_take_profit_exit": True,
-        "enforce_min_exit_notional": True,
-    }
     CRYPTO_HF_SCOPE_CONFIG_SCHEMA: dict[str, Any] = {
         "param_fields": [
             {
@@ -686,6 +541,12 @@ class StrategySDK:
                 "label": "Exclude Timeframes",
                 "type": "list",
                 "options": ["5m", "15m", "1h", "4h"],
+            },
+            {
+                "key": "enabled_sub_strategies",
+                "label": "Enabled Sub-Strategies",
+                "type": "array[string]",
+                "options": ["pure_arb", "dump_hedge", "pre_placed_limits", "directional_edge"],
             },
             {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
             {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
@@ -807,7 +668,41 @@ class StrategySDK:
                 "min": 1,
                 "max": 3600,
             },
+            {
+                "key": "max_oracle_age_ms",
+                "label": "Max Oracle Age (ms)",
+                "type": "number",
+                "min": 100,
+                "max": 3_600_000,
+            },
             {"key": "require_oracle_for_directional", "label": "Require Oracle For Directional", "type": "boolean"},
+            {
+                "key": "oracle_source_policy",
+                "label": "Oracle Source Policy",
+                "type": "enum",
+                "options": ["degrade", "hard_skip", "allow_fallback"],
+            },
+            {
+                "key": "oracle_fallback_degrade_edge_multiplier",
+                "label": "Oracle Fallback Edge Multiplier",
+                "type": "number",
+                "min": 1.0,
+                "max": 3.0,
+            },
+            {
+                "key": "oracle_fallback_degrade_confidence_multiplier",
+                "label": "Oracle Fallback Confidence Multiplier",
+                "type": "number",
+                "min": 1.0,
+                "max": 2.0,
+            },
+            {
+                "key": "oracle_fallback_degrade_size_multiplier",
+                "label": "Oracle Fallback Size Multiplier",
+                "type": "number",
+                "min": 0.05,
+                "max": 1.0,
+            },
             {
                 "key": "min_edge_persistence_ms",
                 "label": "Min Edge Persistence (ms)",
@@ -877,6 +772,41 @@ class StrategySDK:
                 "type": "boolean",
             },
             {
+                "key": "opening_directional_buy_yes_block_elapsed_pct",
+                "label": "Opening Buy-Yes Block Window Default (Elapsed %)",
+                "type": "number",
+                "min": 0.0,
+                "max": 1.0,
+            },
+            {
+                "key": "opening_directional_buy_yes_block_elapsed_pct_5m",
+                "label": "Opening Buy-Yes Block Window 5m (Elapsed %)",
+                "type": "number",
+                "min": 0.0,
+                "max": 1.0,
+            },
+            {
+                "key": "opening_directional_buy_yes_block_elapsed_pct_15m",
+                "label": "Opening Buy-Yes Block Window 15m (Elapsed %)",
+                "type": "number",
+                "min": 0.0,
+                "max": 1.0,
+            },
+            {
+                "key": "opening_directional_buy_yes_block_elapsed_pct_1h",
+                "label": "Opening Buy-Yes Block Window 1h (Elapsed %)",
+                "type": "number",
+                "min": 0.0,
+                "max": 1.0,
+            },
+            {
+                "key": "opening_directional_buy_yes_block_elapsed_pct_4h",
+                "label": "Opening Buy-Yes Block Window 4h (Elapsed %)",
+                "type": "number",
+                "min": 0.0,
+                "max": 1.0,
+            },
+            {
                 "key": "opening_directional_buy_no_enabled",
                 "label": "Opening Directional Buy-No Enabled",
                 "type": "boolean",
@@ -932,17 +862,6 @@ class StrategySDK:
                 "type": "number",
                 "min": 0.01,
                 "max": 1.0,
-            },
-            {
-                "key": "enforce_hard_timeframe_allowlist",
-                "label": "Enforce Timeframe Allowlist",
-                "type": "boolean",
-            },
-            {
-                "key": "hard_allowed_timeframes",
-                "label": "Allowed Timeframes",
-                "type": "list",
-                "options": ["5m", "15m", "1h", "4h"],
             },
             {"key": "rapid_take_profit_pct", "label": "Rapid Take Profit (%)", "type": "number", "min": 0, "max": 100},
             {
@@ -1553,6 +1472,28 @@ class StrategySDK:
         "week": 10080,
         "weeks": 10080,
     }
+
+    @staticmethod
+    def load_json_from_disk(path: str, default: Any = None) -> Any:
+        target = Path(path)
+        if not target.exists():
+            return default
+        try:
+            return json.loads(target.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("StrategySDK.load_json_from_disk failed for %s", path, exc_info=exc)
+            return default
+
+    @staticmethod
+    def save_json_to_disk(path: str, payload: Any) -> bool:
+        target = Path(path)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(payload), encoding="utf-8")
+            return True
+        except Exception as exc:
+            logger.warning("StrategySDK.save_json_to_disk failed for %s", path, exc_info=exc)
+            return False
 
     @staticmethod
     def _coerce_bool(value: Any, default: bool) -> bool:
@@ -2194,7 +2135,15 @@ class StrategySDK:
 
     @staticmethod
     def crypto_highfreq_scope_defaults() -> dict[str, Any]:
-        return dict(StrategySDK.CRYPTO_HF_SCOPE_DEFAULTS)
+        try:
+            from services.strategies.btc_eth_highfreq import crypto_highfreq_scope_defaults as _strategy_defaults
+
+            defaults = _strategy_defaults()
+            if isinstance(defaults, dict):
+                return dict(defaults)
+        except Exception:
+            pass
+        return {}
 
     @staticmethod
     def crypto_highfreq_scope_config_schema() -> dict[str, Any]:

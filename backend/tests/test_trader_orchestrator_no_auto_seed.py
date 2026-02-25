@@ -17,6 +17,7 @@ from services.trader_orchestrator_state import (
     delete_trader,
     enforce_manual_start_on_startup,
     get_orchestrator_overview,
+    list_traders,
     read_orchestrator_snapshot,
     update_orchestrator_control,
     update_trader,
@@ -159,6 +160,7 @@ async def test_create_trader_copies_settings_from_existing_trader(postgres_sessi
             {
                 "name": "Source Trader",
                 "description": "Copy source",
+                "mode": "live",
                 "source_configs": [
                     {
                         "source_key": "crypto",
@@ -185,6 +187,7 @@ async def test_create_trader_copies_settings_from_existing_trader(postgres_sessi
     assert copied["id"] != source["id"]
     assert copied["name"] == "Copied Trader"
     assert copied["description"] == source["description"]
+    assert copied["mode"] == source["mode"]
     assert copied["source_configs"] == source["source_configs"]
     assert copied["interval_seconds"] == source["interval_seconds"]
     assert copied["risk_limits"] == source["risk_limits"]
@@ -205,6 +208,66 @@ async def test_create_trader_copy_rejects_unknown_source(postgres_session_factor
                 {
                     "name": "Copied Trader",
                     "copy_from_trader_id": "missing-source",
+                },
+            )
+
+
+@pytest.mark.asyncio
+async def test_create_trader_scopes_by_mode_and_list_filter(postgres_session_factory):
+    async with postgres_session_factory() as session:
+        paper = await create_trader(
+            session,
+            {
+                "name": "Paper Scoped Trader",
+                "mode": "paper",
+                "source_configs": [
+                    {
+                        "source_key": "crypto",
+                        "strategy_key": "btc_eth_highfreq",
+                        "strategy_params": {},
+                    }
+                ],
+            },
+        )
+        live = await create_trader(
+            session,
+            {
+                "name": "Live Scoped Trader",
+                "mode": "live",
+                "source_configs": [
+                    {
+                        "source_key": "crypto",
+                        "strategy_key": "btc_eth_highfreq",
+                        "strategy_params": {},
+                    }
+                ],
+            },
+        )
+        paper_rows = await list_traders(session, mode="paper")
+        live_rows = await list_traders(session, mode="live")
+
+    assert paper["mode"] == "paper"
+    assert live["mode"] == "live"
+    assert {row["id"] for row in paper_rows} == {paper["id"]}
+    assert {row["id"] for row in live_rows} == {live["id"]}
+
+
+@pytest.mark.asyncio
+async def test_create_trader_rejects_invalid_mode(postgres_session_factory):
+    async with postgres_session_factory() as session:
+        with pytest.raises(ValueError, match="mode must be 'paper' or 'live'"):
+            await create_trader(
+                session,
+                {
+                    "name": "Invalid Mode Trader",
+                    "mode": "both",
+                    "source_configs": [
+                        {
+                            "source_key": "crypto",
+                            "strategy_key": "btc_eth_highfreq",
+                            "strategy_params": {},
+                        }
+                    ],
                 },
             )
 

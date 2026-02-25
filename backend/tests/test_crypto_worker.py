@@ -1,7 +1,10 @@
 import sys
+import asyncio
 from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -202,3 +205,68 @@ def test_build_crypto_market_payload_includes_fetched_at(monkeypatch):
     fetched_at = payload[0].get("fetched_at")
     assert isinstance(fetched_at, str)
     assert fetched_at.endswith("Z")
+
+
+def test_chainlink_feed_staleness_reports_stale_when_age_exceeds_threshold():
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    stale_price = SimpleNamespace(updated_at_ms=now_ms - 70_000)
+    fake_feed = SimpleNamespace(get_all_prices=lambda: {"BTC": stale_price})
+
+    stale, age_seconds, samples = crypto_worker._chainlink_feed_staleness(fake_feed, max_age_seconds=45.0)
+
+    assert stale is True
+    assert age_seconds is not None
+    assert age_seconds >= 70.0
+    assert samples == 1
+
+
+def test_chainlink_feed_staleness_reports_fresh_when_age_is_within_threshold():
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    fresh_price = SimpleNamespace(updated_at_ms=now_ms - 5_000)
+    fake_feed = SimpleNamespace(get_all_prices=lambda: {"BTC": fresh_price})
+
+    stale, age_seconds, samples = crypto_worker._chainlink_feed_staleness(fake_feed, max_age_seconds=45.0)
+
+    assert stale is False
+    assert age_seconds is not None
+    assert age_seconds < 45.0
+    assert samples == 1
+
+
+class _DispatchSession:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("trigger", "expected_sweep_missing"),
+    [
+        ("crypto_ws", False),
+        ("periodic_scan", True),
+    ],
+)
+async def test_dispatch_crypto_opportunities_scopes_sweep_to_periodic_scan(
+    monkeypatch,
+    trigger: str,
+    expected_sweep_missing: bool,
+):
+    bridge_mock = AsyncMock(return_value=3)
+    monkeypatch.setattr(crypto_worker.event_dispatcher, "dispatch", AsyncMock(return_value=[]))
+    monkeypatch.setattr(crypto_worker, "AsyncSessionLocal", lambda: _DispatchSession())
+    monkeypatch.setattr(crypto_worker, "bridge_opportunities_to_signals", bridge_mock)
+    monkeypatch.setattr(crypto_worker.event_bus, "publish", AsyncMock())
+
+    emitted, elapsed = await crypto_worker._dispatch_crypto_opportunities(
+        [{"id": "m1"}],
+        trigger=trigger,
+        run_at=datetime.now(timezone.utc),
+        emit_lock=asyncio.Lock(),
+    )
+
+    assert emitted == 3
+    assert elapsed >= 0.0
+    assert bridge_mock.await_args.kwargs["sweep_missing"] is expected_sweep_missing

@@ -56,6 +56,9 @@ _WS_TRADE_VOLUME_LOOKBACK_BY_TIMEFRAME_SECONDS = {
     "1h": 3600.0,
     "4h": 14400.0,
 }
+_CHAINLINK_STALE_RESTART_AGE_SECONDS = 45.0
+_CHAINLINK_STALE_RESTART_COOLDOWN_SECONDS = 20.0
+_CHAINLINK_WARMUP_SECONDS = 20.0
 
 
 def _to_float(value: object) -> float | None:
@@ -64,6 +67,28 @@ def _to_float(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if math.isfinite(parsed) else None
+
+
+def _chainlink_feed_staleness(feed, *, max_age_seconds: float) -> tuple[bool, float | None, int]:
+    if feed is None:
+        return True, None, 0
+    now_ms = int(utcnow().timestamp() * 1000)
+    latest_ms = 0
+    samples = 0
+    try:
+        all_prices = feed.get_all_prices()
+    except Exception:
+        all_prices = {}
+    for oracle in (all_prices or {}).values():
+        updated_at = int(getattr(oracle, "updated_at_ms", 0) or 0)
+        if updated_at <= 0:
+            continue
+        latest_ms = max(latest_ms, updated_at)
+        samples += 1
+    if latest_ms <= 0:
+        return True, None, samples
+    age_seconds = max(0.0, float(now_ms - latest_ms) / 1000.0)
+    return age_seconds > max(0.0, float(max_age_seconds)), age_seconds, samples
 
 
 def _record_oracle_point(asset: str, timestamp_ms: int, price: float) -> None:
@@ -354,6 +379,7 @@ async def _dispatch_crypto_opportunities(
 
     try:
         async with emit_lock:
+            full_source_sweep = str(trigger or "").strip().lower() == "periodic_scan"
             crypto_event = DataEvent(
                 event_type="crypto_update",
                 source="crypto_worker",
@@ -366,7 +392,7 @@ async def _dispatch_crypto_opportunities(
                     session,
                     opportunities,
                     source="crypto",
-                    sweep_missing=True,
+                    sweep_missing=full_source_sweep,
                 )
             try:
                 await event_bus.publish("crypto_markets_update", {"markets": markets_payload, "trigger": trigger})
@@ -574,6 +600,8 @@ async def _run_loop() -> None:
         await chainlink_feed.start()
     except Exception as exc:
         logger.warning("Chainlink feed start failed (continuing): %s", exc)
+    chainlink_feed_started_mono = time.monotonic()
+    chainlink_restart_allowed_after = 0.0
 
     feed_manager = None
     ws_feeds_running = False
@@ -587,6 +615,39 @@ async def _run_loop() -> None:
     ws_reactive_enabled = True
     ws_reactive_callback_registered = False
     emit_lock = asyncio.Lock()
+
+    async def _ensure_chainlink_feed_healthy() -> dict[str, object]:
+        nonlocal chainlink_feed_started_mono
+        nonlocal chainlink_restart_allowed_after
+        feed_started = bool(getattr(chainlink_feed, "started", False))
+        stale, age_seconds, samples = _chainlink_feed_staleness(
+            chainlink_feed,
+            max_age_seconds=_CHAINLINK_STALE_RESTART_AGE_SECONDS,
+        )
+        now_mono = time.monotonic()
+        warm = (now_mono - chainlink_feed_started_mono) < _CHAINLINK_WARMUP_SECONDS
+        should_restart = (
+            (not feed_started) or (stale and not warm)
+        ) and now_mono >= chainlink_restart_allowed_after
+        restarted = False
+        if should_restart:
+            chainlink_restart_allowed_after = now_mono + _CHAINLINK_STALE_RESTART_COOLDOWN_SECONDS
+            try:
+                if feed_started:
+                    await chainlink_feed.stop()
+                await chainlink_feed.start()
+                chainlink_feed_started_mono = time.monotonic()
+                restarted = True
+            except Exception as exc:
+                logger.warning("Chainlink feed health restart failed (continuing): %s", exc)
+            feed_started = bool(getattr(chainlink_feed, "started", False))
+        return {
+            "started": feed_started,
+            "stale": bool(stale and not warm),
+            "age_seconds": age_seconds,
+            "samples": int(samples),
+            "restarted": restarted,
+        }
 
     async def _ensure_ws_feeds_running() -> None:
         nonlocal feed_manager
@@ -644,6 +705,7 @@ async def _run_loop() -> None:
             return {"healthy": False, "started": bool(ws_feeds_running), "enabled": True}
 
     startup_stats["ws_feeds"] = _snapshot_ws_feed_status()
+    startup_stats["chainlink_feed"] = await _ensure_chainlink_feed_healthy()
 
     def _on_ws_price_update(token_id: str, mid: float, bid: float, ask: float) -> None:
         nonlocal ws_reactive_task
@@ -713,6 +775,7 @@ async def _run_loop() -> None:
         fast_mode = bool(viewer_active or autotrader_active)
         ws_reactive_enabled = bool(enabled and not paused)
         interval = configured_interval if fast_mode else max(configured_interval, _IDLE_INTERVAL_SECONDS)
+        chainlink_feed_status = await _ensure_chainlink_feed_healthy()
 
         if (not enabled or paused) and not viewer_active:
             async with AsyncSessionLocal() as session:
@@ -729,6 +792,7 @@ async def _run_loop() -> None:
                         "signals_emitted_last_run": 0,
                         "markets": [],
                         "ws_feeds": _snapshot_ws_feed_status(),
+                        "chainlink_feed": chainlink_feed_status,
                     },
                 )
             ws_reactive_enabled = False
@@ -797,6 +861,7 @@ async def _run_loop() -> None:
                         "ws_token_prices": len(ws_prices),
                         "markets": markets_payload,
                         "ws_feeds": _snapshot_ws_feed_status(),
+                        "chainlink_feed": chainlink_feed_status,
                     },
                 )
 
@@ -833,6 +898,7 @@ async def _run_loop() -> None:
                         "ws_token_prices": len(ws_prices),
                         "markets": markets_payload,
                         "ws_feeds": _snapshot_ws_feed_status(),
+                        "chainlink_feed": chainlink_feed_status,
                     },
                 )
 
