@@ -49,18 +49,26 @@ import {
   runTraderOnce,
   runTraderOrchestratorLivePreflight,
   setTraderOrchestratorLiveKillSwitch,
+  setStrategyExperimentStatus,
   startTraderOrchestrator,
   startTraderOrchestratorLive,
   stopTraderOrchestrator,
   stopTraderOrchestratorLive,
   enqueueLiveTruthMonitorJob,
   exportLiveTruthMonitorArtifact,
+  createStrategyExperiment,
+  listStrategyExperiments,
+  listStrategyExperimentAssignments,
+  promoteStrategyExperiment,
+  runTraderMonitorIteration,
   type Trader,
   type TraderConfigSchema,
   type TraderEvent,
   type TraderOrder,
   type TraderSourceConfig,
   type TraderSource,
+  type StrategyExperimentAssignment,
+  type TraderMonitorAgentResponse,
   type ValidationJob,
   type LiveTruthMonitorArtifact,
   type LiveTruthMonitorRawResponse,
@@ -504,6 +512,9 @@ type StrategyOptionDetail = {
   label: string
   defaultParams: Record<string, unknown>
   paramFields: Array<Record<string, unknown>>
+  version: number | null
+  latestVersion: number | null
+  versions: number[]
 }
 
 
@@ -2060,6 +2071,32 @@ function normalizeStrategyKeyForSource(sourceKey: string, value: unknown): strin
   return key || DEFAULT_STRATEGY_BY_SOURCE[normalizedSource] || DEFAULT_STRATEGY_KEY
 }
 
+function normalizeStrategyVersion(value: unknown): number | null {
+  if (value === null || value === undefined) return null
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return Math.trunc(value)
+  }
+  const raw = String(value || '').trim().toLowerCase()
+  if (!raw || raw === 'latest') return null
+  const parsed = Number(raw.startsWith('v') ? raw.slice(1) : raw)
+  if (!Number.isFinite(parsed) || parsed <= 0) return null
+  return Math.trunc(parsed)
+}
+
+function normalizeVersionList(value: unknown): number[] {
+  const raw = Array.isArray(value) ? value : []
+  const seen = new Set<number>()
+  const out: number[] = []
+  for (const item of raw) {
+    const normalized = normalizeStrategyVersion(item)
+    if (normalized == null || seen.has(normalized)) continue
+    seen.add(normalized)
+    out.push(normalized)
+  }
+  out.sort((left, right) => right - left)
+  return out
+}
+
 function normalizeTradingScheduleDay(value: unknown): TradingScheduleDay | null {
   const token = String(value || '').trim().toLowerCase()
   if (token.startsWith('mon')) return 'mon'
@@ -2227,6 +2264,12 @@ function sourceStrategyDetails(source: TraderSource): StrategyOptionDetail[] {
     .filter((item) => item && typeof item === 'object')
     .map((item) => {
       const key = String(item.key || '').trim().toLowerCase()
+      const version = normalizeStrategyVersion(item.version)
+      const latestVersion = normalizeStrategyVersion(item.latest_version) ?? version
+      const versions = normalizeVersionList(item.versions)
+      if (latestVersion != null && !versions.includes(latestVersion)) {
+        versions.unshift(latestVersion)
+      }
       return {
         key,
         label: String(item.label || strategyLabelForKey(key)),
@@ -2234,6 +2277,9 @@ function sourceStrategyDetails(source: TraderSource): StrategyOptionDetail[] {
         paramFields: Array.isArray(item.param_fields)
           ? item.param_fields.filter((field): field is Record<string, unknown> => isRecord(field))
           : [],
+        version,
+        latestVersion,
+        versions,
       }
     })
     .filter((item) => item.key)
@@ -2243,7 +2289,15 @@ function sourceStrategyDetails(source: TraderSource): StrategyOptionDetail[] {
     DEFAULT_STRATEGY_BY_SOURCE[normalizeSourceKey(source.key)]
   if (fallback) {
     const normalizedFallback = normalizeStrategyKeyForSource(source.key, fallback)
-    return [{ key: normalizedFallback, label: strategyLabelForKey(normalizedFallback, [source]), defaultParams: {}, paramFields: [] }]
+    return [{
+      key: normalizedFallback,
+      label: strategyLabelForKey(normalizedFallback, [source]),
+      defaultParams: {},
+      paramFields: [],
+      version: 1,
+      latestVersion: 1,
+      versions: [1],
+    }]
   }
   return []
 }
@@ -3427,6 +3481,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const [draftDescription, setDraftDescription] = useState('')
   const [, setDraftStrategyKey] = useState(DEFAULT_STRATEGY_KEY)
   const [draftSourceStrategies, setDraftSourceStrategies] = useState<Record<string, string>>({})
+  const [draftSourceStrategyVersions, setDraftSourceStrategyVersions] = useState<Record<string, number | null>>({})
   const [draftInterval, setDraftInterval] = useState('60')
   const [draftSources, setDraftSources] = useState('')
   const [draftParams, setDraftParams] = useState('{}')
@@ -3449,6 +3504,22 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const [liveTruthMaxAlertsForLlm, setLiveTruthMaxAlertsForLlm] = useState('80')
   const [liveTruthJobId, setLiveTruthJobId] = useState<string | null>(null)
   const [liveTruthError, setLiveTruthError] = useState<string | null>(null)
+  const [monitorIteratePrompt, setMonitorIteratePrompt] = useState('')
+  const [monitorIterateModel, setMonitorIterateModel] = useState('')
+  const [monitorIterateMaxIterations, setMonitorIterateMaxIterations] = useState('12')
+  const [monitorIterateMonitorJobId, setMonitorIterateMonitorJobId] = useState('')
+  const [monitorIterateError, setMonitorIterateError] = useState<string | null>(null)
+  const [monitorIterateResponse, setMonitorIterateResponse] = useState<TraderMonitorAgentResponse | null>(null)
+  const [experimentFilterStatus, setExperimentFilterStatus] = useState('all')
+  const [experimentDraftSourceKey, setExperimentDraftSourceKey] = useState('')
+  const [experimentDraftStrategyKey, setExperimentDraftStrategyKey] = useState('')
+  const [experimentDraftControlVersion, setExperimentDraftControlVersion] = useState('')
+  const [experimentDraftCandidateVersion, setExperimentDraftCandidateVersion] = useState('')
+  const [experimentDraftAllocationPct, setExperimentDraftAllocationPct] = useState('50')
+  const [experimentDraftName, setExperimentDraftName] = useState('')
+  const [experimentDraftNotes, setExperimentDraftNotes] = useState('')
+  const [selectedExperimentId, setSelectedExperimentId] = useState('')
+  const [experimentActionError, setExperimentActionError] = useState<string | null>(null)
 
   const overviewQuery = useQuery({
     queryKey: ['trader-orchestrator-overview'],
@@ -3657,6 +3728,10 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     () => traders.find((trader) => trader.id === selectedTraderId) || null,
     [traders, selectedTraderId]
   )
+  const selectedTraderSourceConfigs = useMemo(
+    () => (Array.isArray(selectedTrader?.source_configs) ? selectedTrader.source_configs : []),
+    [selectedTrader]
+  )
 
   useEffect(() => {
     setSelectedTraderId((current) => {
@@ -3788,6 +3863,30 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     }
     return out
   }, [draftSourceStrategies, effectiveDraftSources, sourceCards, sourceStrategyOptionsByKey])
+  const effectiveSourceStrategyVersions = useMemo(() => {
+    const out: Record<string, number | null> = {}
+    for (const sourceKey of effectiveDraftSources) {
+      const strategyKey = effectiveSourceStrategies[sourceKey]
+      const detail = sourceStrategyDetailsLookup[sourceKey]?.[strategyKey] || null
+      const configured = normalizeStrategyVersion(draftSourceStrategyVersions[sourceKey])
+      if (!detail) {
+        out[sourceKey] = configured
+        continue
+      }
+      const knownVersions = detail.versions
+      if (configured == null) {
+        out[sourceKey] = null
+        continue
+      }
+      out[sourceKey] = knownVersions.includes(configured) ? configured : null
+    }
+    return out
+  }, [
+    draftSourceStrategyVersions,
+    effectiveDraftSources,
+    effectiveSourceStrategies,
+    sourceStrategyDetailsLookup,
+  ])
 
   const cryptoStrategyKeyDraft = useMemo(
     () => effectiveSourceStrategies.crypto || DEFAULT_STRATEGY_KEY,
@@ -4013,9 +4112,22 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       ...current,
       [normalizedSource]: normalizedStrategy,
     }))
+    setDraftSourceStrategyVersions((current) => ({
+      ...current,
+      [normalizedSource]: null,
+    }))
     if (normalizedSource === 'crypto') {
       setDraftStrategyKey(normalizedStrategy)
     }
+  }
+
+  const setSourceStrategyVersion = (sourceKey: string, versionValue: string) => {
+    const normalizedSource = normalizeSourceKey(sourceKey)
+    const parsedVersion = normalizeStrategyVersion(versionValue)
+    setDraftSourceStrategyVersions((current) => ({
+      ...current,
+      [normalizedSource]: parsedVersion,
+    }))
   }
 
   const toggleDraftSource = (sourceKey: string) => {
@@ -4036,25 +4148,35 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         delete next[normalizedTarget]
         return next
       })
+      setDraftSourceStrategyVersions((current) => {
+        const next = { ...current }
+        delete next[normalizedTarget]
+        return next
+      })
     } else {
       const defaultStrategy = defaultStrategyForSource(normalizedTarget, sourceCards)
       setDraftSourceStrategies((current) => ({ ...current, [normalizedTarget]: defaultStrategy }))
+      setDraftSourceStrategyVersions((current) => ({ ...current, [normalizedTarget]: null }))
     }
   }
 
   const enableAllSourceCards = () => {
     setDraftSources(uniqueSourceList(sourceCards.map((source) => source.key)).join(', '))
     const next: Record<string, string> = {}
+    const nextVersions: Record<string, number | null> = {}
     for (const source of sourceCards) {
       const sourceKey = normalizeSourceKey(source.key)
       next[sourceKey] = defaultStrategyForSource(sourceKey, sourceCards)
+      nextVersions[sourceKey] = null
     }
     setDraftSourceStrategies(next)
+    setDraftSourceStrategyVersions(nextVersions)
   }
 
   const disableAllSourceCards = () => {
     setDraftSources('')
     setDraftSourceStrategies({})
+    setDraftSourceStrategyVersions({})
   }
 
   useEffect(() => {
@@ -4116,6 +4238,217 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const liveTruthLlmStrategyChanges = Array.isArray(liveTruthLlmAnalysis?.strategy_changes)
     ? liveTruthLlmAnalysis.strategy_changes.filter((item): item is Record<string, unknown> => isRecord(item))
     : []
+  const strategyExperimentsQuery = useQuery({
+    queryKey: ['strategy-experiments', selectedTraderId],
+    enabled: Boolean(selectedTraderId),
+    refetchInterval: selectedTraderId ? 5000 : false,
+    queryFn: () => listStrategyExperiments({ limit: 250 }),
+  })
+  const selectedTraderSourceKeySet = useMemo(() => {
+    const out = new Set<string>()
+    for (const config of selectedTraderSourceConfigs) {
+      const sourceKey = normalizeSourceKey(String(config.source_key || ''))
+      if (!sourceKey) continue
+      out.add(sourceKey)
+    }
+    return out
+  }, [selectedTraderSourceConfigs])
+  const filteredStrategyExperiments = useMemo(() => {
+    const rows = Array.isArray(strategyExperimentsQuery.data) ? strategyExperimentsQuery.data : []
+    let out = rows
+    if (selectedTraderSourceKeySet.size > 0) {
+      out = out.filter((row) => selectedTraderSourceKeySet.has(normalizeSourceKey(row.source_key)))
+    }
+    if (experimentFilterStatus !== 'all') {
+      out = out.filter((row) => String(row.status || '').trim().toLowerCase() === experimentFilterStatus)
+    }
+    return out
+  }, [strategyExperimentsQuery.data, selectedTraderSourceKeySet, experimentFilterStatus])
+  const selectedStrategyExperiment = useMemo(
+    () => filteredStrategyExperiments.find((row) => row.id === selectedExperimentId) || null,
+    [filteredStrategyExperiments, selectedExperimentId]
+  )
+  const experimentAssignmentsQuery = useQuery({
+    queryKey: ['strategy-experiment-assignments', selectedExperimentId],
+    enabled: Boolean(selectedExperimentId),
+    refetchInterval: selectedExperimentId ? 5000 : false,
+    queryFn: () => listStrategyExperimentAssignments(String(selectedExperimentId), { limit: 200 }),
+  })
+  const selectedExperimentAssignments = useMemo<StrategyExperimentAssignment[]>(
+    () => (Array.isArray(experimentAssignmentsQuery.data) ? experimentAssignmentsQuery.data : []),
+    [experimentAssignmentsQuery.data]
+  )
+  const experimentSourceChoices = useMemo(() => {
+    const out: string[] = []
+    const seen = new Set<string>()
+    for (const config of selectedTraderSourceConfigs) {
+      const sourceKey = normalizeSourceKey(String(config.source_key || ''))
+      if (!sourceKey || seen.has(sourceKey)) continue
+      seen.add(sourceKey)
+      out.push(sourceKey)
+    }
+    return out
+  }, [selectedTraderSourceConfigs])
+  const experimentStrategyChoices = useMemo(() => {
+    const sourceKey = normalizeSourceKey(experimentDraftSourceKey)
+    if (!sourceKey) return [] as StrategyOption[]
+    const fromCatalog = sourceStrategyOptionsByKey[sourceKey] || []
+    if (fromCatalog.length > 0) return fromCatalog
+    const seen = new Set<string>()
+    const out: StrategyOption[] = []
+    for (const config of selectedTraderSourceConfigs) {
+      if (normalizeSourceKey(String(config.source_key || '')) !== sourceKey) continue
+      const strategyKey = normalizeStrategyKeyForSource(sourceKey, config.strategy_key)
+      if (!strategyKey || seen.has(strategyKey)) continue
+      seen.add(strategyKey)
+      out.push({ key: strategyKey, label: strategyLabelForKey(strategyKey, sourceCards) })
+    }
+    return out
+  }, [experimentDraftSourceKey, selectedTraderSourceConfigs, sourceCards, sourceStrategyOptionsByKey])
+  const experimentStrategyDetail = useMemo(() => {
+    const sourceKey = normalizeSourceKey(experimentDraftSourceKey)
+    const strategyKey = String(experimentDraftStrategyKey || '').trim().toLowerCase()
+    if (!sourceKey || !strategyKey) return null
+    return sourceStrategyDetailsLookup[sourceKey]?.[strategyKey] || null
+  }, [experimentDraftSourceKey, experimentDraftStrategyKey, sourceStrategyDetailsLookup])
+  const experimentVersionChoices = useMemo(() => {
+    const rows = normalizeVersionList(experimentStrategyDetail?.versions || [])
+    const latestVersion = normalizeStrategyVersion(experimentStrategyDetail?.latestVersion)
+    if (latestVersion != null && !rows.includes(latestVersion)) {
+      rows.unshift(latestVersion)
+    }
+    const configuredVersions = selectedTraderSourceConfigs
+      .filter((item) => {
+        const sourceMatches = normalizeSourceKey(String(item.source_key || '')) === normalizeSourceKey(experimentDraftSourceKey)
+        const selectedStrategyKey = String(experimentDraftStrategyKey || '').trim().toLowerCase()
+        const strategyMatches =
+          selectedStrategyKey
+          && normalizeStrategyKeyForSource(String(item.source_key || ''), item.strategy_key) === selectedStrategyKey
+        return sourceMatches && strategyMatches
+      })
+      .map((item) => normalizeStrategyVersion(item.strategy_version))
+      .filter((value): value is number => value != null)
+    for (const configured of configuredVersions) {
+      if (!rows.includes(configured)) rows.unshift(configured)
+    }
+    const controlVersion = normalizeStrategyVersion(experimentDraftControlVersion)
+    if (controlVersion != null && !rows.includes(controlVersion)) rows.unshift(controlVersion)
+    const candidateVersion = normalizeStrategyVersion(experimentDraftCandidateVersion)
+    if (candidateVersion != null && !rows.includes(candidateVersion)) rows.unshift(candidateVersion)
+    rows.sort((left, right) => right - left)
+    return rows
+  }, [
+    experimentDraftCandidateVersion,
+    experimentDraftControlVersion,
+    experimentDraftSourceKey,
+    experimentDraftStrategyKey,
+    experimentStrategyDetail,
+    selectedTraderSourceConfigs,
+  ])
+  const monitorIterateParsed = useMemo(
+    () => (isRecord(monitorIterateResponse?.parsed) ? monitorIterateResponse?.parsed : null),
+    [monitorIterateResponse]
+  )
+  const monitorIterateActions = useMemo(() => {
+    if (!monitorIterateParsed) return [] as string[]
+    const raw = monitorIterateParsed.actions_taken
+    if (!Array.isArray(raw)) return [] as string[]
+    return raw.map((item) => String(item || '').trim()).filter(Boolean)
+  }, [monitorIterateParsed])
+  const monitorIterateNextSteps = useMemo(() => {
+    if (!monitorIterateParsed) return [] as string[]
+    const raw = monitorIterateParsed.suggested_next_steps
+    if (!Array.isArray(raw)) return [] as string[]
+    return raw.map((item) => String(item || '').trim()).filter(Boolean)
+  }, [monitorIterateParsed])
+  const selectedExperimentAssignmentSummary = useMemo(() => {
+    let control = 0
+    let candidate = 0
+    let other = 0
+    for (const row of selectedExperimentAssignments) {
+      const group = String(row.assignment_group || '').trim().toLowerCase()
+      if (group === 'control') {
+        control += 1
+      } else if (group === 'candidate') {
+        candidate += 1
+      } else {
+        other += 1
+      }
+    }
+    return { control, candidate, other, total: selectedExperimentAssignments.length }
+  }, [selectedExperimentAssignments])
+
+  useEffect(() => {
+    if (!liveTruthJobId) return
+    if (monitorIterateMonitorJobId.trim()) return
+    setMonitorIterateMonitorJobId(String(liveTruthJobId))
+  }, [liveTruthJobId, monitorIterateMonitorJobId])
+
+  useEffect(() => {
+    if (!selectedTrader) {
+      setExperimentDraftSourceKey('')
+      return
+    }
+    if (experimentSourceChoices.length === 0) {
+      setExperimentDraftSourceKey('')
+      return
+    }
+    const normalizedCurrent = normalizeSourceKey(experimentDraftSourceKey)
+    if (!normalizedCurrent || !experimentSourceChoices.includes(normalizedCurrent)) {
+      setExperimentDraftSourceKey(experimentSourceChoices[0])
+    }
+  }, [selectedTrader, experimentDraftSourceKey, experimentSourceChoices])
+
+  useEffect(() => {
+    if (!experimentDraftSourceKey) {
+      setExperimentDraftStrategyKey('')
+      return
+    }
+    if (experimentStrategyChoices.length === 0) {
+      setExperimentDraftStrategyKey('')
+      return
+    }
+    const normalizedCurrent = String(experimentDraftStrategyKey || '').trim().toLowerCase()
+    if (!normalizedCurrent || !experimentStrategyChoices.some((option) => option.key === normalizedCurrent)) {
+      setExperimentDraftStrategyKey(experimentStrategyChoices[0].key)
+    }
+  }, [experimentDraftSourceKey, experimentDraftStrategyKey, experimentStrategyChoices])
+
+  useEffect(() => {
+    if (experimentVersionChoices.length === 0) {
+      if (experimentDraftControlVersion) setExperimentDraftControlVersion('')
+      if (experimentDraftCandidateVersion) setExperimentDraftCandidateVersion('')
+      return
+    }
+    const controlVersion = normalizeStrategyVersion(experimentDraftControlVersion)
+    if (controlVersion == null || !experimentVersionChoices.includes(controlVersion)) {
+      setExperimentDraftControlVersion(String(experimentVersionChoices[0]))
+    }
+    const candidateVersion = normalizeStrategyVersion(experimentDraftCandidateVersion)
+    if (candidateVersion != null && experimentVersionChoices.includes(candidateVersion)) {
+      return
+    }
+    const fallbackCandidate = experimentVersionChoices.find((version) => version !== (controlVersion ?? experimentVersionChoices[0]))
+      || experimentVersionChoices[0]
+    setExperimentDraftCandidateVersion(String(fallbackCandidate))
+  }, [
+    experimentDraftCandidateVersion,
+    experimentDraftControlVersion,
+    experimentVersionChoices,
+  ])
+
+  useEffect(() => {
+    if (filteredStrategyExperiments.length === 0) {
+      if (selectedExperimentId) {
+        setSelectedExperimentId('')
+      }
+      return
+    }
+    if (filteredStrategyExperiments.some((row) => row.id === selectedExperimentId)) {
+      return
+    }
+    setSelectedExperimentId(filteredStrategyExperiments[0].id)
+  }, [filteredStrategyExperiments, selectedExperimentId])
 
   const refreshAll = () => {
     queryClient.invalidateQueries({ queryKey: ['trader-orchestrator-overview'] })
@@ -4127,6 +4460,12 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     queryClient.invalidateQueries({ queryKey: ['trader-decision-detail'] })
     queryClient.invalidateQueries({ queryKey: ['copy-trading-active-mode'] })
     queryClient.invalidateQueries({ queryKey: ['settings-discovery'] })
+    queryClient.invalidateQueries({ queryKey: ['strategy-experiments'] })
+    queryClient.invalidateQueries({ queryKey: ['strategy-experiment-assignments'] })
+    queryClient.invalidateQueries({ queryKey: ['trader-config-schema'] })
+    queryClient.invalidateQueries({ queryKey: ['trader-sources'] })
+    queryClient.invalidateQueries({ queryKey: ['unified-strategies'] })
+    queryClient.invalidateQueries({ queryKey: ['unified-strategy-versions'] })
   }
 
   const applyTraderDraftSettings = (
@@ -4138,6 +4477,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       traderSourceConfigs.map((config) => normalizeSourceKey(String(config.source_key || '')))
     )
     const sourceStrategyMap: Record<string, string> = {}
+    const sourceVersionMap: Record<string, number | null> = {}
     for (const config of traderSourceConfigs) {
       const sourceKey = normalizeSourceKey(String(config.source_key || ''))
       if (!sourceKey) continue
@@ -4145,6 +4485,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         sourceKey,
         config.strategy_key || defaultStrategyForSource(sourceKey, sourceCards)
       )
+      sourceVersionMap[sourceKey] = normalizeStrategyVersion(config.strategy_version)
     }
     const primaryParams = (traderSourceConfigs[0]?.strategy_params || {}) as Record<string, unknown>
     const tradersScope = traderSourceConfigs.find((config) => normalizeSourceKey(String(config.source_key || '')) === 'traders')
@@ -4163,6 +4504,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     }
     setDraftStrategyKey(normalizeStrategyKey(sourceStrategyMap.crypto || DEFAULT_STRATEGY_KEY))
     setDraftSourceStrategies(sourceStrategyMap)
+    setDraftSourceStrategyVersions(sourceVersionMap)
     setDraftInterval(String(trader.interval_seconds || 60))
     setDraftSources(normalizedSourceKeys.join(', ') || defaultSourceCsv)
     const risk = trader.risk_limits || {}
@@ -4198,11 +4540,15 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     const defaultStrategies = Object.fromEntries(
       defaultSources.map((sourceKey) => [sourceKey, defaultStrategyForSource(sourceKey, sourceCards)])
     ) as Record<string, string>
+    const defaultStrategyVersions = Object.fromEntries(
+      defaultSources.map((sourceKey) => [sourceKey, null])
+    ) as Record<string, number | null>
     setTraderFlyoutMode('create')
     setDraftName('')
     setDraftDescription('')
     setDraftStrategyKey(normalizeStrategyKey(defaultStrategies.crypto || DEFAULT_STRATEGY_KEY))
     setDraftSourceStrategies(defaultStrategies)
+    setDraftSourceStrategyVersions(defaultStrategyVersions)
     setDraftInterval('5')
     setDraftSources(defaultSources.join(', '))
     setDraftParams('{}')
@@ -4223,6 +4569,24 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     setLiveTruthIncludeStrategySource(true)
     setLiveTruthModel('')
     setLiveTruthMaxAlertsForLlm('80')
+    setMonitorIteratePrompt(
+      'Review recent trades and decisions, tune parameters for risk-adjusted PnL improvement, and propose an A/B test between current and candidate strategy versions.'
+    )
+    setMonitorIterateModel('')
+    setMonitorIterateMaxIterations('12')
+    setMonitorIterateMonitorJobId('')
+    setMonitorIterateError(null)
+    setMonitorIterateResponse(null)
+    setExperimentFilterStatus('all')
+    setExperimentDraftSourceKey(defaultSources[0] || '')
+    setExperimentDraftStrategyKey(defaultStrategies[defaultSources[0] || ''] || '')
+    setExperimentDraftControlVersion('')
+    setExperimentDraftCandidateVersion('')
+    setExperimentDraftAllocationPct('50')
+    setExperimentDraftName('')
+    setExperimentDraftNotes('')
+    setSelectedExperimentId('')
+    setExperimentActionError(null)
     const resolvedCopy = activeCopyMode && activeCopyMode.mode !== 'disabled'
       ? copyTradingFromActiveMode(activeCopyMode)
       : copyTradingDefaults
@@ -4256,6 +4620,24 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     setLiveTruthIncludeStrategySource(true)
     setLiveTruthModel('')
     setLiveTruthMaxAlertsForLlm('80')
+    setMonitorIteratePrompt(
+      'Analyze this trader performance, tune strategy parameters or source code where justified, and create an A/B experiment for measurable improvement.'
+    )
+    setMonitorIterateModel('')
+    setMonitorIterateMaxIterations('12')
+    setMonitorIterateMonitorJobId('')
+    setMonitorIterateError(null)
+    setMonitorIterateResponse(null)
+    setExperimentFilterStatus('all')
+    setExperimentDraftSourceKey('')
+    setExperimentDraftStrategyKey('')
+    setExperimentDraftControlVersion('')
+    setExperimentDraftCandidateVersion('')
+    setExperimentDraftAllocationPct('50')
+    setExperimentDraftName('')
+    setExperimentDraftNotes('')
+    setSelectedExperimentId('')
+    setExperimentActionError(null)
     const resolvedCopy = activeCopyMode && activeCopyMode.mode !== 'disabled'
       ? copyTradingFromActiveMode(activeCopyMode)
       : copyTradingDefaults
@@ -4363,9 +4745,11 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         )
       )
       const strategyDetail = sourceStrategyDetailsLookup[sourceKey]?.[strategyKey] || null
+      const strategyVersion = normalizeStrategyVersion(effectiveSourceStrategyVersions[sourceKey])
       const nextConfig: TraderSourceConfig = {
         source_key: sourceKey,
         strategy_key: strategyKey,
+        strategy_version: strategyVersion,
         strategy_params: buildSourceStrategyParams(rawStrategyParams, sourceKey, strategyDetail),
       }
       configs.push(nextConfig)
@@ -4730,6 +5114,126 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     },
     onError: (error: unknown) => {
       setLiveTruthError(errorMessage(error, 'Failed to export monitor artifact'))
+    },
+  })
+
+  const runMonitorIterateMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedTrader) {
+        throw new Error('Select a bot before running monitor iterate.')
+      }
+      const prompt = monitorIteratePrompt.trim()
+      if (!prompt) {
+        throw new Error('Enter an iterate prompt.')
+      }
+      const maxIterations = Math.max(1, Math.min(24, Math.trunc(toNumber(monitorIterateMaxIterations || 12))))
+      const monitorJobId = monitorIterateMonitorJobId.trim() || (liveTruthJobCompleted ? String(liveTruthJobId || '') : '')
+      return runTraderMonitorIteration(selectedTrader.id, {
+        prompt,
+        max_iterations: maxIterations,
+        ...(monitorIterateModel.trim() ? { model: monitorIterateModel.trim() } : {}),
+        ...(monitorJobId ? { monitor_job_id: monitorJobId } : {}),
+      })
+    },
+    onMutate: () => {
+      setMonitorIterateError(null)
+      setExperimentActionError(null)
+    },
+    onSuccess: (result) => {
+      setMonitorIterateError(null)
+      setMonitorIterateResponse(result)
+      refreshAll()
+    },
+    onError: (error: unknown) => {
+      setMonitorIterateError(errorMessage(error, 'Failed to run monitor iterate'))
+    },
+  })
+
+  const createStrategyExperimentMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedTrader) {
+        throw new Error('Select a bot before creating an experiment.')
+      }
+      const sourceKey = normalizeSourceKey(experimentDraftSourceKey)
+      const strategyKey = String(experimentDraftStrategyKey || '').trim().toLowerCase()
+      const controlVersion = normalizeStrategyVersion(experimentDraftControlVersion)
+      const candidateVersion = normalizeStrategyVersion(experimentDraftCandidateVersion)
+      if (!sourceKey) throw new Error('Select a source for the experiment.')
+      if (!strategyKey) throw new Error('Select a strategy for the experiment.')
+      if (controlVersion == null || candidateVersion == null) {
+        throw new Error('Select both control and candidate versions.')
+      }
+      if (controlVersion === candidateVersion) {
+        throw new Error('Control and candidate versions must be different.')
+      }
+      const allocationPct = Math.max(0.1, Math.min(99.9, toNumber(experimentDraftAllocationPct || 50)))
+      const autoName = `${strategyLabelForKey(strategyKey, sourceCards)} v${controlVersion} vs v${candidateVersion}`
+      return createStrategyExperiment({
+        name: experimentDraftName.trim() || autoName,
+        source_key: sourceKey,
+        strategy_key: strategyKey,
+        control_version: controlVersion,
+        candidate_version: candidateVersion,
+        candidate_allocation_pct: allocationPct,
+        scope: {
+          trader_id: selectedTrader.id,
+          trader_mode: selectedTrader.mode,
+        },
+        notes: experimentDraftNotes.trim() || undefined,
+        created_by: 'trading_panel',
+      })
+    },
+    onMutate: () => {
+      setExperimentActionError(null)
+    },
+    onSuccess: (result) => {
+      setExperimentActionError(null)
+      setSelectedExperimentId(result.id)
+      setExperimentDraftName('')
+      queryClient.invalidateQueries({ queryKey: ['strategy-experiments'] })
+      refreshAll()
+    },
+    onError: (error: unknown) => {
+      setExperimentActionError(errorMessage(error, 'Failed to create A/B experiment'))
+    },
+  })
+
+  const setExperimentStatusMutation = useMutation({
+    mutationFn: async ({ experimentId, status }: { experimentId: string; status: string }) => {
+      return setStrategyExperimentStatus(experimentId, status)
+    },
+    onMutate: () => {
+      setExperimentActionError(null)
+    },
+    onSuccess: (result) => {
+      setExperimentActionError(null)
+      setSelectedExperimentId(result.id)
+      queryClient.invalidateQueries({ queryKey: ['strategy-experiments'] })
+      refreshAll()
+    },
+    onError: (error: unknown) => {
+      setExperimentActionError(errorMessage(error, 'Failed to update experiment status'))
+    },
+  })
+
+  const promoteStrategyExperimentMutation = useMutation({
+    mutationFn: async ({ experimentId, promotedVersion }: { experimentId: string; promotedVersion?: number }) => {
+      return promoteStrategyExperiment(
+        experimentId,
+        promotedVersion != null ? { promoted_version: promotedVersion } : undefined
+      )
+    },
+    onMutate: () => {
+      setExperimentActionError(null)
+    },
+    onSuccess: (result) => {
+      setExperimentActionError(null)
+      setSelectedExperimentId(result.id)
+      queryClient.invalidateQueries({ queryKey: ['strategy-experiments'] })
+      refreshAll()
+    },
+    onError: (error: unknown) => {
+      setExperimentActionError(errorMessage(error, 'Failed to promote experiment'))
     },
   })
 
@@ -8049,6 +8553,398 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                             </Button>
                           </div>
                         ) : null}
+
+                        <div className="rounded-md border border-cyan-500/30 bg-cyan-500/5 p-2.5 space-y-2">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <p className="text-[11px] font-medium">Iterate Agent</p>
+                            <Badge variant="outline" className="h-4 px-1.5 text-[9px] font-mono">
+                              {monitorIterateResponse?.session_id ? shortId(monitorIterateResponse.session_id) : 'idle'}
+                            </Badge>
+                            {runMonitorIterateMutation.isPending ? (
+                              <span className="rounded px-1.5 py-0.5 text-[9px] font-semibold bg-amber-500/15 text-amber-500">
+                                RUNNING
+                              </span>
+                            ) : null}
+                          </div>
+                          <p className="text-[10px] text-muted-foreground/80">
+                            Tool-based LLM loop with direct access to trader decisions, strategy versions, parameter tuning, source edits, and A/B experiment creation.
+                          </p>
+                          <textarea
+                            value={monitorIteratePrompt}
+                            onChange={(event) => setMonitorIteratePrompt(event.target.value)}
+                            className="w-full min-h-[96px] rounded-md border border-border/60 bg-background px-2 py-1.5 text-xs leading-relaxed"
+                            placeholder="Describe what should be improved, what to optimize, and any constraints..."
+                          />
+                          <div className="grid gap-2 md:grid-cols-3">
+                            <div>
+                              <Label className="text-[11px] text-muted-foreground">Model Override</Label>
+                              <Input
+                                value={monitorIterateModel}
+                                onChange={(event) => setMonitorIterateModel(event.target.value)}
+                                placeholder="app default"
+                                className="mt-1 h-8 text-xs font-mono"
+                              />
+                            </div>
+                            <div>
+                              <Label className="text-[11px] text-muted-foreground">Max Iterations</Label>
+                              <Input
+                                type="number"
+                                min={1}
+                                max={24}
+                                value={monitorIterateMaxIterations}
+                                onChange={(event) => setMonitorIterateMaxIterations(event.target.value)}
+                                className="mt-1 h-8 text-xs font-mono"
+                              />
+                            </div>
+                            <div>
+                              <Label className="text-[11px] text-muted-foreground">Monitor Job Context</Label>
+                              <Input
+                                value={monitorIterateMonitorJobId}
+                                onChange={(event) => setMonitorIterateMonitorJobId(event.target.value)}
+                                placeholder={liveTruthJobId || 'optional job id'}
+                                className="mt-1 h-8 text-xs font-mono"
+                              />
+                            </div>
+                          </div>
+                          <Button
+                            size="sm"
+                            className="h-8 text-xs"
+                            onClick={() => runMonitorIterateMutation.mutate()}
+                            disabled={runMonitorIterateMutation.isPending || !selectedTrader}
+                          >
+                            {runMonitorIterateMutation.isPending ? (
+                              <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                            ) : (
+                              <Sparkles className="w-3.5 h-3.5 mr-1.5" />
+                            )}
+                            {runMonitorIterateMutation.isPending ? 'Iterating...' : 'Run Iterate'}
+                          </Button>
+                          {monitorIterateError ? (
+                            <p className="text-[10px] text-red-500">{monitorIterateError}</p>
+                          ) : null}
+                          {monitorIterateResponse ? (
+                            <div className="rounded-md border border-border/60 bg-background/70 p-2 space-y-1.5">
+                              {monitorIterateParsed && typeof monitorIterateParsed.summary === 'string' ? (
+                                <p className="text-[10px] text-muted-foreground/90">
+                                  {String(monitorIterateParsed.summary)}
+                                </p>
+                              ) : null}
+                              {monitorIterateActions.length > 0 ? (
+                                <div className="space-y-0.5">
+                                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Actions Taken</p>
+                                  {monitorIterateActions.slice(0, 8).map((action, index) => (
+                                    <p key={`${index}-${action}`} className="text-[10px] text-foreground/90">
+                                      {index + 1}. {action}
+                                    </p>
+                                  ))}
+                                </div>
+                              ) : null}
+                              {monitorIterateNextSteps.length > 0 ? (
+                                <div className="space-y-0.5">
+                                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Suggested Next</p>
+                                  {monitorIterateNextSteps.slice(0, 8).map((step, index) => (
+                                    <p key={`${index}-${step}`} className="text-[10px] text-muted-foreground/90">
+                                      {index + 1}. {step}
+                                    </p>
+                                  ))}
+                                </div>
+                              ) : null}
+                              <details className="rounded border border-border/50 bg-background/50 px-2 py-1">
+                                <summary className="cursor-pointer text-[10px] text-muted-foreground">Raw agent response</summary>
+                                <pre className="mt-1 whitespace-pre-wrap break-words text-[10px] font-mono text-muted-foreground/90">
+                                  {monitorIterateResponse.answer || JSON.stringify(monitorIterateResponse.raw, null, 2)}
+                                </pre>
+                              </details>
+                            </div>
+                          ) : null}
+                        </div>
+
+                        <div className="rounded-md border border-violet-500/30 bg-violet-500/5 p-2.5 space-y-2">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex items-center gap-1.5">
+                              <p className="text-[11px] font-medium">A/B Version Lab</p>
+                              <Badge variant="outline" className="h-4 px-1.5 text-[9px] font-mono">
+                                {filteredStrategyExperiments.length} experiments
+                              </Badge>
+                            </div>
+                            <Select value={experimentFilterStatus} onValueChange={setExperimentFilterStatus}>
+                              <SelectTrigger className="h-7 w-[130px] text-[10px]">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="all">All Statuses</SelectItem>
+                                <SelectItem value="active">Active</SelectItem>
+                                <SelectItem value="paused">Paused</SelectItem>
+                                <SelectItem value="completed">Completed</SelectItem>
+                                <SelectItem value="archived">Archived</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+
+                          <div className="grid gap-2 md:grid-cols-2">
+                            <div>
+                              <Label className="text-[11px] text-muted-foreground">Source</Label>
+                              <Select value={experimentDraftSourceKey || '__none__'} onValueChange={(value) => setExperimentDraftSourceKey(value === '__none__' ? '' : value)}>
+                                <SelectTrigger className="mt-1 h-8 text-xs">
+                                  <SelectValue placeholder="Select source" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="__none__">Select source</SelectItem>
+                                  {experimentSourceChoices.map((sourceKey) => (
+                                    <SelectItem key={`exp-source-${sourceKey}`} value={sourceKey}>
+                                      {sourceCards.find((source) => normalizeSourceKey(source.key) === sourceKey)?.label || sourceKey}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </div>
+                            <div>
+                              <Label className="text-[11px] text-muted-foreground">Strategy</Label>
+                              <Select value={experimentDraftStrategyKey || '__none__'} onValueChange={(value) => setExperimentDraftStrategyKey(value === '__none__' ? '' : value)}>
+                                <SelectTrigger className="mt-1 h-8 text-xs">
+                                  <SelectValue placeholder="Select strategy" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="__none__">Select strategy</SelectItem>
+                                  {experimentStrategyChoices.map((option) => (
+                                    <SelectItem key={`exp-strategy-${option.key}`} value={option.key}>
+                                      {option.label}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </div>
+                          </div>
+
+                          <div className="grid gap-2 md:grid-cols-3">
+                            <div>
+                              <Label className="text-[11px] text-muted-foreground">Control Version</Label>
+                              <Select value={experimentDraftControlVersion || '__none__'} onValueChange={(value) => setExperimentDraftControlVersion(value === '__none__' ? '' : value)}>
+                                <SelectTrigger className="mt-1 h-8 text-xs font-mono">
+                                  <SelectValue placeholder="v?" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="__none__">Select</SelectItem>
+                                  {experimentVersionChoices.map((version) => (
+                                    <SelectItem key={`exp-control-v${version}`} value={String(version)}>
+                                      {`v${version}`}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </div>
+                            <div>
+                              <Label className="text-[11px] text-muted-foreground">Candidate Version</Label>
+                              <Select value={experimentDraftCandidateVersion || '__none__'} onValueChange={(value) => setExperimentDraftCandidateVersion(value === '__none__' ? '' : value)}>
+                                <SelectTrigger className="mt-1 h-8 text-xs font-mono">
+                                  <SelectValue placeholder="v?" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="__none__">Select</SelectItem>
+                                  {experimentVersionChoices.map((version) => (
+                                    <SelectItem key={`exp-candidate-v${version}`} value={String(version)}>
+                                      {`v${version}`}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </div>
+                            <div>
+                              <Label className="text-[11px] text-muted-foreground">Candidate %</Label>
+                              <Input
+                                type="number"
+                                min={0.1}
+                                max={99.9}
+                                step={0.1}
+                                value={experimentDraftAllocationPct}
+                                onChange={(event) => setExperimentDraftAllocationPct(event.target.value)}
+                                className="mt-1 h-8 text-xs font-mono"
+                              />
+                            </div>
+                          </div>
+
+                          <div className="grid gap-2 md:grid-cols-2">
+                            <div>
+                              <Label className="text-[11px] text-muted-foreground">Experiment Name</Label>
+                              <Input
+                                value={experimentDraftName}
+                                onChange={(event) => setExperimentDraftName(event.target.value)}
+                                placeholder="auto-generated if blank"
+                                className="mt-1 h-8 text-xs"
+                              />
+                            </div>
+                            <div>
+                              <Label className="text-[11px] text-muted-foreground">Notes</Label>
+                              <Input
+                                value={experimentDraftNotes}
+                                onChange={(event) => setExperimentDraftNotes(event.target.value)}
+                                placeholder="optional"
+                                className="mt-1 h-8 text-xs"
+                              />
+                            </div>
+                          </div>
+
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-8 text-xs"
+                            onClick={() => createStrategyExperimentMutation.mutate()}
+                            disabled={!selectedTrader || createStrategyExperimentMutation.isPending}
+                          >
+                            {createStrategyExperimentMutation.isPending ? (
+                              <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                            ) : (
+                              <Plus className="w-3.5 h-3.5 mr-1.5" />
+                            )}
+                            Create Experiment
+                          </Button>
+
+                          {experimentActionError ? (
+                            <p className="text-[10px] text-red-500">{experimentActionError}</p>
+                          ) : null}
+
+                          {strategyExperimentsQuery.isPending ? (
+                            <p className="text-[10px] text-muted-foreground/80">Loading experiments...</p>
+                          ) : null}
+                          {strategyExperimentsQuery.error ? (
+                            <p className="text-[10px] text-red-500">
+                              {errorMessage(strategyExperimentsQuery.error, 'Failed to load experiments')}
+                            </p>
+                          ) : null}
+
+                          <div className="space-y-1">
+                            {filteredStrategyExperiments.length === 0 ? (
+                              <p className="text-[10px] text-muted-foreground/80">No experiments for this bot sources yet.</p>
+                            ) : (
+                              filteredStrategyExperiments.slice(0, 12).map((row) => {
+                                const status = String(row.status || '').trim().toLowerCase()
+                                const isSelected = row.id === selectedExperimentId
+                                return (
+                                  <div
+                                    key={row.id}
+                                    className={cn(
+                                      'rounded border px-2 py-1.5',
+                                      isSelected ? 'border-cyan-500/45 bg-cyan-500/10' : 'border-border/60 bg-background/60'
+                                    )}
+                                  >
+                                    <div className="flex flex-wrap items-center justify-between gap-1">
+                                      <div className="min-w-0">
+                                        <p className="truncate text-[10px] font-medium">
+                                          {row.name}
+                                        </p>
+                                        <p className="text-[10px] text-muted-foreground/85 font-mono">
+                                          {`${row.source_key}:${row.strategy_key} • v${row.control_version} vs v${row.candidate_version} • ${row.candidate_allocation_pct.toFixed(1)}%`}
+                                        </p>
+                                      </div>
+                                      <Badge
+                                        variant="outline"
+                                        className={cn(
+                                          'h-4 px-1.5 text-[9px]',
+                                          status === 'active'
+                                            ? 'border-emerald-500/35 text-emerald-300 bg-emerald-500/10'
+                                            : status === 'paused'
+                                              ? 'border-amber-500/35 text-amber-300 bg-amber-500/10'
+                                              : 'border-border/60 text-muted-foreground bg-background/70'
+                                        )}
+                                      >
+                                        {status || 'unknown'}
+                                      </Badge>
+                                    </div>
+                                    <div className="mt-1 flex flex-wrap gap-1">
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="outline"
+                                        className="h-5 px-1.5 text-[9px]"
+                                        onClick={() => setSelectedExperimentId(row.id)}
+                                      >
+                                        Inspect
+                                      </Button>
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="outline"
+                                        className="h-5 px-1.5 text-[9px]"
+                                        disabled={setExperimentStatusMutation.isPending}
+                                        onClick={() =>
+                                          setExperimentStatusMutation.mutate({
+                                            experimentId: row.id,
+                                            status: status === 'active' ? 'paused' : 'active',
+                                          })
+                                        }
+                                      >
+                                        {status === 'active' ? 'Pause' : 'Activate'}
+                                      </Button>
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="outline"
+                                        className="h-5 px-1.5 text-[9px]"
+                                        disabled={setExperimentStatusMutation.isPending || status === 'completed' || status === 'archived'}
+                                        onClick={() =>
+                                          setExperimentStatusMutation.mutate({
+                                            experimentId: row.id,
+                                            status: 'completed',
+                                          })
+                                        }
+                                      >
+                                        Complete
+                                      </Button>
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="outline"
+                                        className="h-5 px-1.5 text-[9px]"
+                                        disabled={promoteStrategyExperimentMutation.isPending}
+                                        onClick={() =>
+                                          promoteStrategyExperimentMutation.mutate({
+                                            experimentId: row.id,
+                                          })
+                                        }
+                                      >
+                                        Promote Candidate
+                                      </Button>
+                                    </div>
+                                  </div>
+                                )
+                              })
+                            )}
+                          </div>
+
+                          {selectedStrategyExperiment ? (
+                            <div className="rounded border border-border/60 bg-background/70 p-2 space-y-1">
+                              <p className="text-[10px] font-medium">
+                                Assignments: {selectedStrategyExperiment.name}
+                              </p>
+                              <p className="text-[10px] text-muted-foreground/85 font-mono">
+                                control:{selectedExperimentAssignmentSummary.control}
+                                {' • '}
+                                candidate:{selectedExperimentAssignmentSummary.candidate}
+                                {selectedExperimentAssignmentSummary.other > 0
+                                  ? ` • other:${selectedExperimentAssignmentSummary.other}`
+                                  : ''}
+                                {' • '}
+                                total:{selectedExperimentAssignmentSummary.total}
+                              </p>
+                              {experimentAssignmentsQuery.isPending ? (
+                                <p className="text-[10px] text-muted-foreground/80">Loading assignments...</p>
+                              ) : null}
+                              {experimentAssignmentsQuery.error ? (
+                                <p className="text-[10px] text-red-500">
+                                  {errorMessage(experimentAssignmentsQuery.error, 'Failed to load assignments')}
+                                </p>
+                              ) : null}
+                              {selectedExperimentAssignments.slice(0, 10).map((assignment) => (
+                                <div key={assignment.id} className="rounded border border-border/50 bg-background/80 px-1.5 py-1 text-[10px] font-mono">
+                                  {`${assignment.assignment_group} • v${assignment.strategy_version} • trader:${shortId(assignment.trader_id)} • signal:${shortId(assignment.signal_id)}`}
+                                </div>
+                              ))}
+                              {selectedExperimentAssignments.length === 0 && !experimentAssignmentsQuery.isPending ? (
+                                <p className="text-[10px] text-muted-foreground/80">No assignments yet.</p>
+                              ) : null}
+                            </div>
+                          ) : null}
+                        </div>
                       </div>
                     </ScrollArea>
                   </div>
@@ -8940,6 +9836,20 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                       const isEnabled = selectedSourceKeySet.has(sourceKey)
                       const strategyOptions = sourceStrategyOptionsByKey[sourceKey] || []
                       const selectedStrategy = effectiveSourceStrategies[sourceKey] || defaultStrategyForSource(sourceKey, sourceCards)
+                      const strategyDetail = sourceStrategyDetailsLookup[sourceKey]?.[selectedStrategy] || null
+                      const latestVersion = strategyDetail?.latestVersion ?? strategyDetail?.version ?? null
+                      const selectedVersion = effectiveSourceStrategyVersions[sourceKey]
+                      const selectedVersionToken = selectedVersion == null ? 'latest' : `v${selectedVersion}`
+                      const availableVersions = (() => {
+                        const rows = normalizeVersionList(strategyDetail?.versions || [])
+                        if (latestVersion != null && !rows.includes(latestVersion)) {
+                          rows.unshift(latestVersion)
+                        }
+                        if (selectedVersion != null && !rows.includes(selectedVersion)) {
+                          rows.unshift(selectedVersion)
+                        }
+                        return rows
+                      })()
                       return (
                         <div
                           key={source.key}
@@ -8988,6 +9898,32 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                   ))}
                                 </SelectContent>
                               </Select>
+                              <div className="mt-1.5 flex items-center justify-between gap-1.5">
+                                <Badge
+                                  variant="outline"
+                                  className="h-4 px-1.5 text-[9px] font-mono border-emerald-500/30 text-emerald-300 bg-emerald-500/10"
+                                >
+                                  {latestVersion != null ? `Latest v${latestVersion}` : 'Latest'}
+                                </Badge>
+                                <Select
+                                  value={selectedVersionToken}
+                                  onValueChange={(value) => setSourceStrategyVersion(sourceKey, value)}
+                                >
+                                  <SelectTrigger className="h-7 w-[142px] text-[10px] font-mono">
+                                    <SelectValue />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    <SelectItem value="latest">
+                                      {latestVersion != null ? `latest (v${latestVersion})` : 'latest'}
+                                    </SelectItem>
+                                    {availableVersions.map((version) => (
+                                      <SelectItem key={`${sourceKey}-${selectedStrategy}-v${version}`} value={`v${version}`}>
+                                        {`v${version}`}
+                                      </SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                              </div>
                             </div>
                           ) : null}
                         </div>

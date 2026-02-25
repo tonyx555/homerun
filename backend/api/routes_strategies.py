@@ -27,11 +27,27 @@ from services.opportunity_strategy_catalog import (
     build_system_opportunity_strategy_rows,
     ensure_system_opportunity_strategies_seeded,
 )
+from services.strategy_experiments import (
+    create_strategy_experiment,
+    list_strategy_experiment_assignments,
+    list_strategy_experiments,
+    promote_strategy_experiment,
+    set_strategy_experiment_status,
+    serialize_strategy_experiment,
+)
 from services.strategy_loader import (
     STRATEGY_TEMPLATE,
     StrategyValidationError,
     strategy_loader,
     validate_strategy_source,
+)
+from services.strategy_versioning import (
+    create_strategy_version_snapshot,
+    ensure_strategy_version_seeded,
+    list_strategy_versions,
+    normalize_strategy_version,
+    restore_strategy_from_snapshot,
+    serialize_strategy_version,
 )
 from services.strategy_sdk import StrategySDK
 from services.strategy_runtime import bump_strategy_runtime_revisions
@@ -146,6 +162,32 @@ class UnifiedStrategyUpdateRequest(BaseModel):
 class UnifiedValidateRequest(BaseModel):
     source_code: str = Field(..., min_length=10)
     class_name: Optional[str] = None
+
+
+class StrategyVersionRestoreRequest(BaseModel):
+    reason: Optional[str] = Field(default="manual_restore", max_length=300)
+    created_by: Optional[str] = Field(default=None, max_length=120)
+
+
+class StrategyExperimentCreateRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=200)
+    source_key: str = Field(..., min_length=2, max_length=64)
+    strategy_key: str = Field(..., min_length=2, max_length=128)
+    control_version: int = Field(..., ge=1, le=10000)
+    candidate_version: int = Field(..., ge=1, le=10000)
+    candidate_allocation_pct: float = Field(default=50.0, ge=0.1, le=99.9)
+    scope: dict = Field(default_factory=dict)
+    notes: Optional[str] = Field(default=None, max_length=2000)
+    created_by: Optional[str] = Field(default=None, max_length=120)
+
+
+class StrategyExperimentStatusRequest(BaseModel):
+    status: str = Field(..., min_length=3, max_length=32)
+
+
+class StrategyExperimentPromoteRequest(BaseModel):
+    promoted_version: Optional[int] = Field(default=None, ge=1, le=10000)
+    notes: Optional[str] = Field(default=None, max_length=2000)
 
 
 # ---------------------------------------------------------------------------
@@ -1593,6 +1635,102 @@ async def list_strategies(
     return {"items": items, "total": len(items)}
 
 
+@router.get("/experiments")
+async def get_strategy_experiments(
+    source_key: Optional[str] = Query(default=None),
+    strategy_key: Optional[str] = Query(default=None),
+    status: Optional[str] = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=1000),
+):
+    async with AsyncSessionLocal() as session:
+        rows = await list_strategy_experiments(
+            session,
+            source_key=source_key,
+            strategy_key=strategy_key,
+            status=status,
+            limit=limit,
+        )
+    items = [serialize_strategy_experiment(row) for row in rows]
+    return {"items": items, "total": len(items)}
+
+
+@router.post("/experiments")
+async def create_strategy_experiment_endpoint(request: StrategyExperimentCreateRequest):
+    async with AsyncSessionLocal() as session:
+        try:
+            row = await create_strategy_experiment(
+                session,
+                name=request.name,
+                source_key=request.source_key,
+                strategy_key=request.strategy_key,
+                control_version=request.control_version,
+                candidate_version=request.candidate_version,
+                candidate_allocation_pct=request.candidate_allocation_pct,
+                scope=request.scope,
+                notes=request.notes,
+                created_by=request.created_by,
+                commit=True,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+    return serialize_strategy_experiment(row)
+
+
+@router.post("/experiments/{experiment_id}/status")
+async def set_strategy_experiment_status_endpoint(
+    experiment_id: str,
+    request: StrategyExperimentStatusRequest,
+):
+    async with AsyncSessionLocal() as session:
+        try:
+            row = await set_strategy_experiment_status(
+                session,
+                experiment_id=experiment_id,
+                status=request.status,
+                commit=True,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+    if row is None:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+    return serialize_strategy_experiment(row)
+
+
+@router.post("/experiments/{experiment_id}/promote")
+async def promote_strategy_experiment_endpoint(
+    experiment_id: str,
+    request: StrategyExperimentPromoteRequest,
+):
+    async with AsyncSessionLocal() as session:
+        try:
+            row = await promote_strategy_experiment(
+                session,
+                experiment_id=experiment_id,
+                promoted_version=request.promoted_version,
+                notes=request.notes,
+                commit=True,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+    if row is None:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+    return serialize_strategy_experiment(row)
+
+
+@router.get("/experiments/{experiment_id}/assignments")
+async def get_strategy_experiment_assignments_endpoint(
+    experiment_id: str,
+    limit: int = Query(default=200, ge=1, le=2000),
+):
+    async with AsyncSessionLocal() as session:
+        rows = await list_strategy_experiment_assignments(
+            session,
+            experiment_id=experiment_id,
+            limit=limit,
+        )
+    return {"items": rows, "total": len(rows)}
+
+
 @router.get("/{strategy_id}")
 async def get_strategy(strategy_id: str, session: AsyncSession = Depends(get_db_session)):
     """Get a single strategy by ID."""
@@ -1603,6 +1741,129 @@ async def get_strategy(strategy_id: str, session: AsyncSession = Depends(get_db_
         raise HTTPException(status_code=404, detail="Strategy not found")
 
     return _strategy_to_dict(row)
+
+
+@router.get("/{strategy_id}/versions")
+async def get_strategy_versions_endpoint(
+    strategy_id: str,
+    limit: int = Query(default=200, ge=1, le=1000),
+    include_source: bool = Query(default=False),
+):
+    async with AsyncSessionLocal() as session:
+        row = await session.get(Strategy, strategy_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        await ensure_strategy_version_seeded(
+            session,
+            strategy=row,
+            reason="seed_on_versions_list",
+            created_by="strategy_manager",
+            commit=False,
+        )
+        version_rows = await list_strategy_versions(
+            session,
+            strategy_id=strategy_id,
+            limit=limit,
+        )
+    return {
+        "strategy_id": strategy_id,
+        "current_version": int(row.version or 1),
+        "items": [
+            serialize_strategy_version(version_row, include_source=include_source) for version_row in version_rows
+        ],
+        "total": len(version_rows),
+    }
+
+
+@router.get("/{strategy_id}/versions/{version}")
+async def get_strategy_version_endpoint(
+    strategy_id: str,
+    version: str,
+):
+    requested_version = normalize_strategy_version(version)
+    async with AsyncSessionLocal() as session:
+        row = await session.get(Strategy, strategy_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        await ensure_strategy_version_seeded(
+            session,
+            strategy=row,
+            reason="seed_on_version_read",
+            created_by="strategy_manager",
+            commit=False,
+        )
+        available = await list_strategy_versions(session, strategy_id=strategy_id, limit=2000)
+        if requested_version is None:
+            requested_version = int(row.version or 1)
+        match = next((item for item in available if int(item.version or 0) == int(requested_version or 0)), None)
+        if match is None:
+            raise HTTPException(status_code=404, detail=f"Version v{int(requested_version or 0)} not found")
+        return serialize_strategy_version(match, include_source=True)
+
+
+@router.post("/{strategy_id}/versions/{version}/restore")
+async def restore_strategy_version_endpoint(
+    strategy_id: str,
+    version: str,
+    request: StrategyVersionRestoreRequest | None = None,
+):
+    request_payload = request or StrategyVersionRestoreRequest()
+    requested_version = normalize_strategy_version(version)
+    if requested_version is None:
+        raise HTTPException(status_code=422, detail="Specify an explicit version number (e.g. '3' or 'v3').")
+
+    async with AsyncSessionLocal() as session:
+        row = await session.get(Strategy, strategy_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+
+        await ensure_strategy_version_seeded(
+            session,
+            strategy=row,
+            reason="seed_on_restore",
+            created_by="strategy_manager",
+            commit=False,
+        )
+        available = await list_strategy_versions(session, strategy_id=strategy_id, limit=2000)
+        snapshot = next((item for item in available if int(item.version or 0) == int(requested_version)), None)
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail=f"Version v{int(requested_version)} not found")
+
+        restored = await restore_strategy_from_snapshot(
+            session,
+            strategy=row,
+            snapshot=snapshot,
+            reason=str(request_payload.reason or "manual_restore").strip() or "manual_restore",
+            created_by=(str(request_payload.created_by or "").strip() or None),
+            commit=False,
+        )
+
+        if row.enabled:
+            try:
+                strategy_loader.load(row.slug, row.source_code, row.config or None)
+                row.status = "loaded"
+                row.error_message = None
+            except StrategyValidationError as exc:
+                row.status = "error"
+                row.error_message = str(exc)
+        else:
+            strategy_loader.unload(row.slug)
+            row.status = "unloaded"
+            row.error_message = None
+
+        await bump_strategy_runtime_revisions(
+            session,
+            source_keys=[str(row.source_key or "").strip().lower()],
+            commit=False,
+        )
+        await session.commit()
+        await session.refresh(row)
+        return {
+            "status": "restored",
+            "strategy": _strategy_to_dict(row),
+            "restored_snapshot": serialize_strategy_version(restored, include_source=False),
+            "source_snapshot": serialize_strategy_version(snapshot, include_source=False),
+        }
 
 
 @router.post("")
@@ -1664,6 +1925,16 @@ async def create_strategy(req: UnifiedStrategyCreateRequest):
             sort_order=0,
         )
         session.add(row)
+        await session.flush()
+        await create_strategy_version_snapshot(
+            session,
+            strategy=row,
+            reason="strategy_created",
+            created_by="strategy_manager",
+            forced_version=1,
+            parent_version=None,
+            commit=False,
+        )
         await bump_strategy_runtime_revisions(
             session,
             source_keys=[source_key],
@@ -1690,8 +1961,10 @@ async def update_strategy(strategy_id: str, req: UnifiedStrategyUpdateRequest):
             )
 
         original_slug = row.slug
-        code_changed = False
         slug_changed = False
+        snapshot_fields_changed: set[str] = set()
+        reload_required = False
+        prior_version = int(row.version or 1)
         next_source_key = str(req.source_key or row.source_key or "scanner").strip().lower()
 
         if req.slug is not None:
@@ -1707,6 +1980,8 @@ async def update_strategy(strategy_id: str, req: UnifiedStrategyUpdateRequest):
                     raise HTTPException(status_code=409, detail=f"Slug '{next_slug}' already exists.")
                 row.slug = next_slug
                 slug_changed = True
+                snapshot_fields_changed.add("slug")
+                reload_required = True
 
         if req.source_code is not None and req.source_code != row.source_code:
             validation = validate_strategy_source(req.source_code)
@@ -1721,38 +1996,56 @@ async def update_strategy(strategy_id: str, req: UnifiedStrategyUpdateRequest):
                 row.name = validation["strategy_name"]
             if req.description is None and validation["strategy_description"]:
                 row.description = validation["strategy_description"]
-            row.version = int(row.version or 1) + 1
-            code_changed = True
+            snapshot_fields_changed.add("source_code")
+            reload_required = True
 
         if req.config is not None:
-            row.config = _normalize_strategy_config_for_source(next_source_key, req.config)
-            code_changed = True
+            normalized_config = _normalize_strategy_config_for_source(next_source_key, req.config)
+            if normalized_config != (row.config or {}):
+                row.config = normalized_config
+                snapshot_fields_changed.add("config")
+                reload_required = True
         if req.config_schema is not None:
-            row.config_schema = _merge_config_schemas(
+            merged_schema = _merge_config_schemas(
                 req.config_schema,
                 StrategySDK.strategy_retention_config_schema(),
             )
+            if merged_schema != (row.config_schema or {}):
+                row.config_schema = merged_schema
+                snapshot_fields_changed.add("config_schema")
 
         if req.source_key is not None:
-            row.source_key = next_source_key
+            if next_source_key != str(row.source_key or "").strip().lower():
+                row.source_key = next_source_key
+                snapshot_fields_changed.add("source_key")
             if req.config is None:
                 normalized_existing_config = _normalize_strategy_config_for_source(next_source_key, row.config)
                 if normalized_existing_config != (row.config or {}):
                     row.config = normalized_existing_config
-                    code_changed = True
+                    snapshot_fields_changed.add("config")
+                    reload_required = True
             if not row.config_schema:
                 row.config_schema = _default_config_schema_for_source(next_source_key)
+                snapshot_fields_changed.add("config_schema")
         if req.name is not None:
-            row.name = req.name
+            next_name = str(req.name).strip()
+            if next_name != str(row.name or "").strip():
+                row.name = next_name
+                snapshot_fields_changed.add("name")
         if req.description is not None:
-            row.description = req.description
+            next_description = req.description
+            if next_description != row.description:
+                row.description = next_description
+                snapshot_fields_changed.add("description")
 
         enabled_changed = False
         if req.enabled is not None and req.enabled != row.enabled:
             row.enabled = req.enabled
             enabled_changed = True
+            snapshot_fields_changed.add("enabled")
+            reload_required = True
 
-        if enabled_changed or code_changed or slug_changed:
+        if reload_required or slug_changed:
             if slug_changed:
                 strategy_loader.unload(original_slug)
             if row.enabled:
@@ -1767,6 +2060,16 @@ async def update_strategy(strategy_id: str, req: UnifiedStrategyUpdateRequest):
                 strategy_loader.unload(row.slug)
                 row.status = "unloaded"
                 row.error_message = None
+
+        if snapshot_fields_changed:
+            await create_strategy_version_snapshot(
+                session,
+                strategy=row,
+                reason=f"strategy_updated:{','.join(sorted(snapshot_fields_changed))}",
+                created_by="strategy_manager",
+                parent_version=prior_version,
+                commit=False,
+            )
 
         await bump_strategy_runtime_revisions(
             session,

@@ -18,6 +18,7 @@ from services.opportunity_strategy_catalog import (
 )
 from services.strategy_loader import strategy_loader
 from services.strategy_sdk import StrategySDK
+from services.strategy_versioning import strategy_versions_by_slug
 from services.trader_orchestrator.templates import TRADER_TEMPLATES
 
 logger = logging.getLogger(__name__)
@@ -280,6 +281,7 @@ async def build_trader_config_schema(session: AsyncSession) -> dict[str, Any]:
 
     # Gather detection strategies (Strategy) that define evaluate().
     detection_strategies_by_source = await _list_detection_strategies_with_evaluate(session, adapter_keys)
+    version_map = await strategy_versions_by_slug(session)
 
     sources: list[dict[str, Any]] = []
     for adapter in adapters:
@@ -305,6 +307,8 @@ async def build_trader_config_schema(session: AsyncSession) -> dict[str, Any]:
                     "param_fields": _strategy_param_fields(row, default_params=default_params),
                     "status": str(_row_value(row, "status") or "unknown"),
                     "version": int(_row_value(row, "version") or 1),
+                    "latest_version": int(_row_value(row, "version") or 1),
+                    "versions": list(version_map.get(key) or [int(_row_value(row, "version") or 1)]),
                     "is_system": bool(_row_value(row, "is_system")),
                 }
             )
@@ -313,6 +317,10 @@ async def build_trader_config_schema(session: AsyncSession) -> dict[str, Any]:
         existing_keys = {opt["key"] for opt in strategy_options}
         for det_opt in detection_strategies_by_source.get(adapter.key, []):
             if det_opt["key"] not in existing_keys:
+                known_versions = list(version_map.get(str(det_opt["key"] or "").strip().lower()) or [])
+                det_version = int(det_opt.get("version") or 1)
+                det_opt["latest_version"] = det_version
+                det_opt["versions"] = known_versions or [det_version]
                 strategy_options.append(det_opt)
 
         default_strategy_key = strategy_options[0]["key"] if strategy_options else ""
@@ -320,6 +328,7 @@ async def build_trader_config_schema(session: AsyncSession) -> dict[str, Any]:
         default_config: dict[str, Any] = {
             "source_key": adapter.key,
             "strategy_key": default_strategy_key,
+            "strategy_version": None,
             "strategy_params": dict(template_default_params or default_strategy_defaults),
         }
 

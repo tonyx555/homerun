@@ -8,6 +8,7 @@ import os
 import socket
 import uuid
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Set, Optional, Any
 
@@ -38,9 +39,58 @@ _REDIS_FANOUT_EVENT_TYPES = frozenset(
     }
 )
 
-_REMOTE_BRIDGE_SOURCE_BY_EVENT: dict[str, str] = {
-    EventType.EVENTS_UPDATE: "events",
-    EventType.DATA_SOURCE_UPDATE: "data_source",
+_BRIDGE_OWNER_PUBLISHER = "publisher"
+_BRIDGE_OWNER_LISTENER = "listener"
+
+
+@dataclass(frozen=True)
+class EventBridgePolicy:
+    owner: str
+    signal_source: Optional[str] = None
+    sweep_missing: bool = False
+
+
+_EVENT_BRIDGE_POLICY_BY_EVENT: dict[str, EventBridgePolicy] = {
+    EventType.MARKET_DATA_REFRESH: EventBridgePolicy(
+        owner=_BRIDGE_OWNER_PUBLISHER,
+        signal_source="scanner",
+        sweep_missing=True,
+    ),
+    EventType.CRYPTO_UPDATE: EventBridgePolicy(
+        owner=_BRIDGE_OWNER_PUBLISHER,
+        signal_source="crypto",
+        sweep_missing=True,
+    ),
+    EventType.WEATHER_UPDATE: EventBridgePolicy(
+        owner=_BRIDGE_OWNER_PUBLISHER,
+        signal_source="weather",
+        sweep_missing=True,
+    ),
+    EventType.TRADER_ACTIVITY: EventBridgePolicy(
+        owner=_BRIDGE_OWNER_PUBLISHER,
+        signal_source="traders",
+        sweep_missing=True,
+    ),
+    EventType.NEWS_UPDATE: EventBridgePolicy(
+        owner=_BRIDGE_OWNER_PUBLISHER,
+        signal_source="news",
+        sweep_missing=True,
+    ),
+    EventType.NEWS_EVENT: EventBridgePolicy(
+        owner=_BRIDGE_OWNER_PUBLISHER,
+        signal_source="news",
+        sweep_missing=True,
+    ),
+    EventType.EVENTS_UPDATE: EventBridgePolicy(
+        owner=_BRIDGE_OWNER_PUBLISHER,
+        signal_source="events",
+        sweep_missing=True,
+    ),
+    EventType.DATA_SOURCE_UPDATE: EventBridgePolicy(
+        owner=_BRIDGE_OWNER_LISTENER,
+        signal_source="data_source",
+        sweep_missing=False,
+    ),
 }
 
 
@@ -87,6 +137,12 @@ class EventDispatcher:
                 float(getattr(settings, "EVENT_HANDLER_TIMEOUT_SECONDS", 60.0) or 60.0),
             )
         )
+        runtime_env = str(os.getenv("HOMERUN_ENV", os.getenv("APP_ENV", "development")) or "development").strip().lower()
+        strict_override = os.getenv("EVENT_DISPATCHER_FAIL_ON_UNOWNED_REMOTE_OPPS")
+        if strict_override is None:
+            self._fail_on_unowned_remote = runtime_env in {"production", "prod", "staging"}
+        else:
+            self._fail_on_unowned_remote = strict_override.strip().lower() in {"1", "true", "yes", "on"}
         self._timed_out_handler_tasks: set[asyncio.Task[Any]] = set()
 
     def subscribe(self, strategy_slug: str, event_type: str, handler: EventHandler) -> None:
@@ -204,6 +260,14 @@ class EventDispatcher:
                 continue
             if isinstance(result, list):
                 all_opportunities.extend(result)
+        logger.debug(
+            "DataEvent dispatched locally",
+            event_type=event.event_type,
+            source=event.source,
+            handlers=len(handlers),
+            opportunities=len(all_opportunities),
+            targeted=include_strategies is not None,
+        )
         return all_opportunities
 
     async def _safe_invoke(
@@ -302,6 +366,22 @@ class EventDispatcher:
             )
             return None
 
+    def _handle_unowned_remote_opportunities(self, *, event: DataEvent, opportunity_count: int) -> None:
+        error_message = (
+            f"Remote DataEvent produced {opportunity_count} opportunities with no bridge policy owner "
+            f"(event_type={event.event_type}, source={event.source})."
+        )
+        logger.error(
+            "Remote DataEvent opportunities dropped due missing bridge owner",
+            event_type=event.event_type,
+            source=event.source,
+            opportunities=opportunity_count,
+            bridge_owner="none",
+            fail_fast=self._fail_on_unowned_remote,
+        )
+        if self._fail_on_unowned_remote:
+            raise RuntimeError(error_message)
+
     async def _run_stream_listener(self) -> None:
         own_marker = f'"instance_id":"{self._instance_id}"'
         while self._running:
@@ -330,22 +410,56 @@ class EventDispatcher:
                 if event is None:
                     continue
                 opportunities = await self._dispatch_local(event)
-                bridge_source = _REMOTE_BRIDGE_SOURCE_BY_EVENT.get(event.event_type)
-                if bridge_source and opportunities:
-                    try:
-                        async with AsyncSessionLocal() as session:
-                            await bridge_opportunities_to_signals(
-                                session,
-                                opportunities,
-                                source=bridge_source,
-                            )
-                    except Exception as exc:
-                        logger.warning(
-                            "Remote DataEvent signal bridge failed",
-                            event_type=event.event_type,
+                if not opportunities:
+                    continue
+                bridge_policy = _EVENT_BRIDGE_POLICY_BY_EVENT.get(event.event_type)
+                if bridge_policy is None:
+                    self._handle_unowned_remote_opportunities(
+                        event=event,
+                        opportunity_count=len(opportunities),
+                    )
+                    continue
+                if bridge_policy.owner != _BRIDGE_OWNER_LISTENER:
+                    logger.debug(
+                        "Remote DataEvent opportunities skipped by bridge owner policy",
+                        event_type=event.event_type,
+                        source=event.source,
+                        opportunities=len(opportunities),
+                        bridge_owner=bridge_policy.owner,
+                    )
+                    continue
+                bridge_source = str(bridge_policy.signal_source or "").strip()
+                if not bridge_source:
+                    self._handle_unowned_remote_opportunities(
+                        event=event,
+                        opportunity_count=len(opportunities),
+                    )
+                    continue
+                try:
+                    async with AsyncSessionLocal() as session:
+                        emitted = await bridge_opportunities_to_signals(
+                            session,
+                            opportunities,
                             source=bridge_source,
-                            exc_info=exc,
+                            sweep_missing=bool(bridge_policy.sweep_missing),
                         )
+                    logger.info(
+                        "Remote DataEvent opportunities bridged",
+                        event_type=event.event_type,
+                        source=bridge_source,
+                        opportunities=len(opportunities),
+                        signals_bridged=int(emitted),
+                        bridge_owner=bridge_policy.owner,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Remote DataEvent signal bridge failed",
+                        event_type=event.event_type,
+                        source=bridge_source,
+                        opportunities=len(opportunities),
+                        bridge_owner=bridge_policy.owner,
+                        exc_info=exc,
+                    )
 
     @property
     def subscription_count(self) -> int:

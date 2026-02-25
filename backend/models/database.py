@@ -1126,6 +1126,45 @@ class Strategy(Base):
     )
 
 
+class StrategyVersion(Base):
+    """Immutable strategy snapshots for versioned rollbacks and pinning."""
+
+    __tablename__ = "strategy_versions"
+
+    id = Column(String, primary_key=True)
+    strategy_id = Column(
+        String,
+        ForeignKey("strategies.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    strategy_slug = Column(String, nullable=False, index=True)
+    source_key = Column(String, nullable=False, default="scanner")
+    version = Column(Integer, nullable=False)
+    is_latest = Column(Boolean, nullable=False, default=False)
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    source_code = Column(Text, nullable=False)
+    class_name = Column(String, nullable=True)
+    config = Column(JSON, default=dict)
+    config_schema = Column(JSON, default=dict)
+    aliases = Column(JSON, default=list)
+    enabled = Column(Boolean, default=True)
+    is_system = Column(Boolean, default=False, nullable=False)
+    sort_order = Column(Integer, default=0)
+    parent_version = Column(Integer, nullable=True)
+    created_by = Column(String, nullable=True)
+    reason = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("strategy_id", "version", name="uq_strategy_versions_strategy_version"),
+        Index("idx_strategy_versions_slug_version", "strategy_slug", "version"),
+        Index("idx_strategy_versions_strategy_created", "strategy_id", "created_at"),
+        Index("idx_strategy_versions_latest", "strategy_id", "is_latest"),
+    )
+
+
 class StrategyRuntimeRevision(Base):
     """Revision counters used by workers for strategy hot-reload polling."""
 
@@ -2499,6 +2538,7 @@ class TraderDecision(Base):
     )
     source = Column(String, nullable=False, index=True)
     strategy_key = Column(String, nullable=False, index=True)
+    strategy_version = Column(Integer, nullable=True, index=True)
     decision = Column(String, nullable=False)  # selected | skipped | blocked | failed
     reason = Column(Text, nullable=True)
     score = Column(Float, nullable=True)
@@ -2554,6 +2594,8 @@ class TraderOrder(Base):
         index=True,
     )
     source = Column(String, nullable=False, index=True)
+    strategy_key = Column(String, nullable=True, index=True)
+    strategy_version = Column(Integer, nullable=True, index=True)
     market_id = Column(String, nullable=False, index=True)
     market_question = Column(Text, nullable=True)
     direction = Column(String, nullable=True)
@@ -2607,6 +2649,7 @@ class ExecutionSession(Base):
     )
     source = Column(String, nullable=False, index=True)
     strategy_key = Column(String, nullable=True, index=True)
+    strategy_version = Column(Integer, nullable=True, index=True)
     mode = Column(String, nullable=False, default="paper")
     status = Column(String, nullable=False, default="pending")
     policy = Column(String, nullable=True)
@@ -2865,6 +2908,90 @@ class TraderConfigRevision(Base):
     trader_before_json = Column(JSON, default=dict)
     trader_after_json = Column(JSON, default=dict)
     created_at = Column(DateTime, default=_utcnow, nullable=False, index=True)
+
+
+class StrategyExperiment(Base):
+    """Strategy version A/B experiment configuration."""
+
+    __tablename__ = "strategy_experiments"
+
+    id = Column(String, primary_key=True)
+    name = Column(String, nullable=False)
+    source_key = Column(String, nullable=False, index=True)
+    strategy_key = Column(String, nullable=False, index=True)
+    control_version = Column(Integer, nullable=False)
+    candidate_version = Column(Integer, nullable=False)
+    candidate_allocation_pct = Column(Float, nullable=False, default=50.0)
+    scope_json = Column(JSON, default=dict)
+    status = Column(String, nullable=False, default="active")  # active | paused | completed | archived
+    created_by = Column(String, nullable=True)
+    notes = Column(Text, nullable=True)
+    metadata_json = Column(JSON, default=dict)
+    promoted_version = Column(Integer, nullable=True)
+    ended_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+    __table_args__ = (
+        Index("idx_strategy_experiments_strategy_status", "strategy_key", "status"),
+        Index("idx_strategy_experiments_source_status", "source_key", "status"),
+        Index("idx_strategy_experiments_created", "created_at"),
+    )
+
+
+class StrategyExperimentAssignment(Base):
+    """Signal-level deterministic assignment for active strategy experiments."""
+
+    __tablename__ = "strategy_experiment_assignments"
+
+    id = Column(String, primary_key=True)
+    experiment_id = Column(
+        String,
+        ForeignKey("strategy_experiments.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    trader_id = Column(
+        String,
+        ForeignKey("traders.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    signal_id = Column(
+        String,
+        ForeignKey("trade_signals.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    decision_id = Column(
+        String,
+        ForeignKey("trader_decisions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    order_id = Column(
+        String,
+        ForeignKey("trader_orders.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    source_key = Column(String, nullable=False, index=True)
+    strategy_key = Column(String, nullable=False, index=True)
+    strategy_version = Column(Integer, nullable=False, index=True)
+    assignment_group = Column(String, nullable=False)  # control | candidate
+    payload_json = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=_utcnow, nullable=False, index=True)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "experiment_id",
+            "trader_id",
+            "signal_id",
+            name="uq_strategy_experiment_assignment_signal",
+        ),
+        Index("idx_strategy_experiment_assignments_group", "experiment_id", "assignment_group"),
+    )
 
 
 # ==================== EVENTS ====================

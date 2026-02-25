@@ -65,6 +65,14 @@ class _InMemoryRedisStreams:
         return selected[:limit]
 
 
+class _NoopSessionContext:
+    async def __aenter__(self):
+        return object()
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
 @pytest.mark.asyncio
 async def test_event_bus_cross_instance_publish_reaches_subscriber(monkeypatch):
     fake_streams = _InMemoryRedisStreams()
@@ -178,3 +186,134 @@ async def test_event_dispatcher_cross_instance_fanout_includes_resolution_and_tr
     assert inbound.source == "ws_feed"
     assert inbound.market_id == "mkt-2"
     assert inbound.token_id == "tok-2"
+
+
+@pytest.mark.asyncio
+async def test_event_dispatcher_cross_instance_data_source_update_bridges_signals(monkeypatch):
+    fake_streams = _InMemoryRedisStreams()
+    monkeypatch.setattr(event_dispatcher_module, "redis_streams", fake_streams)
+    monkeypatch.setattr(event_dispatcher_module, "AsyncSessionLocal", lambda: _NoopSessionContext())
+
+    bridged: list[dict] = []
+    bridged_event = asyncio.Event()
+
+    async def _fake_bridge(session, opportunities, *, source, sweep_missing=False, **kwargs):
+        items = list(opportunities)
+        bridged.append(
+            {
+                "source": source,
+                "sweep_missing": sweep_missing,
+                "opportunities": len(items),
+            }
+        )
+        bridged_event.set()
+        return len(items)
+
+    monkeypatch.setattr(event_dispatcher_module, "bridge_opportunities_to_signals", _fake_bridge)
+
+    sender = event_dispatcher_module.EventDispatcher()
+    receiver = event_dispatcher_module.EventDispatcher()
+
+    async def _handler(event: DataEvent) -> list:
+        return [object()]
+
+    receiver.subscribe("strategy.data", EventType.DATA_SOURCE_UPDATE, _handler)
+    await sender.start()
+    await receiver.start()
+
+    outbound = DataEvent(
+        event_type=EventType.DATA_SOURCE_UPDATE,
+        source="data_source:unit_source",
+        timestamp=utcnow().astimezone(timezone.utc),
+        payload={"source_slug": "unit_source", "records_count": 4, "run_id": "run_1"},
+    )
+    try:
+        await sender.dispatch(outbound)
+        await asyncio.wait_for(bridged_event.wait(), timeout=1.5)
+    finally:
+        await sender.stop()
+        await receiver.stop()
+
+    assert bridged == [{"source": "data_source", "sweep_missing": False, "opportunities": 1}]
+
+
+@pytest.mark.asyncio
+async def test_event_dispatcher_cross_instance_events_update_skips_listener_bridge(monkeypatch):
+    fake_streams = _InMemoryRedisStreams()
+    monkeypatch.setattr(event_dispatcher_module, "redis_streams", fake_streams)
+    monkeypatch.setattr(event_dispatcher_module, "AsyncSessionLocal", lambda: _NoopSessionContext())
+
+    bridge_calls = 0
+
+    async def _fake_bridge(session, opportunities, *, source, sweep_missing=False, **kwargs):
+        nonlocal bridge_calls
+        bridge_calls += 1
+        return len(list(opportunities))
+
+    monkeypatch.setattr(event_dispatcher_module, "bridge_opportunities_to_signals", _fake_bridge)
+
+    sender = event_dispatcher_module.EventDispatcher()
+    receiver = event_dispatcher_module.EventDispatcher()
+
+    async def _handler(event: DataEvent) -> list:
+        return [object()]
+
+    receiver.subscribe("strategy.events", EventType.EVENTS_UPDATE, _handler)
+    await sender.start()
+    await receiver.start()
+
+    outbound = DataEvent(
+        event_type=EventType.EVENTS_UPDATE,
+        source="events_worker",
+        timestamp=utcnow().astimezone(timezone.utc),
+        payload={"signals": [], "summary": {"total": 0, "critical": 0, "by_type": {}}},
+    )
+    try:
+        await sender.dispatch(outbound)
+        await asyncio.sleep(0.2)
+    finally:
+        await sender.stop()
+        await receiver.stop()
+
+    assert bridge_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_event_dispatcher_unowned_remote_opportunities_fail_fast_in_production(monkeypatch):
+    fake_streams = _InMemoryRedisStreams()
+    monkeypatch.setattr(event_dispatcher_module, "redis_streams", fake_streams)
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.delenv("EVENT_DISPATCHER_FAIL_ON_UNOWNED_REMOTE_OPPS", raising=False)
+
+    sender = event_dispatcher_module.EventDispatcher()
+    receiver = event_dispatcher_module.EventDispatcher()
+
+    async def _handler(event: DataEvent) -> list:
+        return [object()]
+
+    receiver.subscribe("strategy.price", EventType.PRICE_CHANGE, _handler)
+    await sender.start()
+    await receiver.start()
+
+    outbound = DataEvent(
+        event_type=EventType.PRICE_CHANGE,
+        source="ws_feed",
+        timestamp=utcnow().astimezone(timezone.utc),
+        token_id="tok-fast-fail",
+        old_price=0.40,
+        new_price=0.45,
+    )
+    try:
+        await sender.dispatch(outbound)
+        for _ in range(20):
+            task = receiver._listener_task
+            if task is not None and task.done():
+                break
+            await asyncio.sleep(0.05)
+        task = receiver._listener_task
+        assert task is not None
+        assert task.done()
+        assert isinstance(task.exception(), RuntimeError)
+    finally:
+        await sender.stop()
+        await receiver.stop()

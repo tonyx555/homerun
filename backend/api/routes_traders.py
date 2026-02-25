@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models.database import MarketCatalog, ScannerSnapshot, TradeSignalEmission, get_db_session
 from services.live_price_snapshot import normalize_binary_price_history
 from services.pause_state import global_pause_state
+from services.strategy_monitor_agent import run_strategy_monitor_agent
 from services.trader_orchestrator.position_lifecycle import reconcile_live_positions, reconcile_paper_positions
 from services.trader_orchestrator.session_engine import ExecutionSessionEngine
 from services.trader_orchestrator_state import (
@@ -49,6 +50,7 @@ router = APIRouter(prefix="/traders", tags=["Traders"])
 class TraderSourceConfigRequest(BaseModel):
     source_key: str
     strategy_key: str
+    strategy_version: int | str | None = None
     strategy_params: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -116,6 +118,13 @@ class TraderPositionCleanupRequest(BaseModel):
 
 class TraderExecutionSessionControlRequest(BaseModel):
     reason: Optional[str] = None
+
+
+class TraderMonitorAgentRequest(BaseModel):
+    prompt: str = Field(..., min_length=3, max_length=12000)
+    model: Optional[str] = Field(default=None, max_length=200)
+    max_iterations: int = Field(default=12, ge=1, le=24)
+    monitor_job_id: Optional[str] = Field(default=None, max_length=120)
 
 
 def _collect_market_aliases(raw_market: Any) -> list[str]:
@@ -1059,3 +1068,29 @@ async def get_decision_detail(
     if detail is None:
         raise HTTPException(status_code=404, detail="Decision not found")
     return detail
+
+
+@router.post("/{trader_id}/monitor/iterate")
+async def run_trader_monitor_iteration(
+    trader_id: str,
+    request: TraderMonitorAgentRequest,
+    session: AsyncSession = Depends(get_db_session),
+):
+    trader = await get_trader(session, trader_id)
+    if trader is None:
+        raise HTTPException(status_code=404, detail="Trader not found")
+
+    try:
+        result = await run_strategy_monitor_agent(
+            trader_id=trader_id,
+            prompt=request.prompt,
+            model=request.model,
+            max_iterations=request.max_iterations,
+            monitor_job_id=request.monitor_job_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return result

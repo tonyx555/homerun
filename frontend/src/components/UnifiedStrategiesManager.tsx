@@ -40,10 +40,13 @@ import {
   validateUnifiedStrategy,
   reloadUnifiedStrategy,
   getUnifiedStrategyTemplate,
+  getUnifiedStrategyVersions,
   getValidationOverview,
   overrideValidationStrategy,
+  restoreUnifiedStrategyVersion,
   clearValidationStrategyOverride,
   UnifiedStrategy,
+  UnifiedStrategyVersion,
 } from '../services/api'
 import StrategyApiDocsFlyout from './StrategyApiDocsFlyout'
 import StrategyBacktestFlyout from './StrategyBacktestFlyout'
@@ -399,6 +402,7 @@ export default function UnifiedStrategiesManager({
   const [editorConfigJson, setEditorConfigJson] = useState('{}')
   const [editorSchemaJson, setEditorSchemaJson] = useState('{}')
   const [editorAliasesCsv, setEditorAliasesCsv] = useState('')
+  const [selectedVersionForRestore, setSelectedVersionForRestore] = useState<string>('')
   const [editorError, setEditorError] = useState<string | null>(null)
   const [validation, setValidation] = useState<{
     valid: boolean
@@ -427,6 +431,13 @@ export default function UnifiedStrategiesManager({
     queryFn: getValidationOverview,
     staleTime: 60000,
     refetchInterval: 60000,
+  })
+
+  const strategyVersionsQuery = useQuery({
+    queryKey: ['unified-strategy-versions', selectedStrategyId],
+    enabled: Boolean(selectedStrategyId),
+    queryFn: () => getUnifiedStrategyVersions(String(selectedStrategyId), { limit: 250 }),
+    staleTime: 10000,
   })
 
   const catalog = strategiesQuery.data || []
@@ -664,6 +675,16 @@ export default function UnifiedStrategiesManager({
     () => catalog.find((s) => s.id === selectedStrategyId) || null,
     [selectedStrategyId, catalog]
   )
+  const strategyVersions = useMemo<UnifiedStrategyVersion[]>(
+    () => (Array.isArray(strategyVersionsQuery.data) ? strategyVersionsQuery.data : []),
+    [strategyVersionsQuery.data]
+  )
+  const latestVersionRow = strategyVersions.length > 0 ? strategyVersions[0] : null
+  const selectedRestoreVersion = Number(selectedVersionForRestore || 0)
+  const selectedRestoreVersionValid = Number.isFinite(selectedRestoreVersion) && selectedRestoreVersion > 0
+  const restoreVersionIsCurrent = Boolean(
+    selectedStrategy && selectedRestoreVersionValid && selectedRestoreVersion === Number(selectedStrategy.version || 0)
+  )
 
   const selectedStrategyHealth = useMemo(() => {
     if (!selectedStrategy) return null
@@ -706,9 +727,22 @@ export default function UnifiedStrategiesManager({
     setEditorConfigJson(JSON.stringify(strategy.config || {}, null, 2))
     setEditorSchemaJson(JSON.stringify(strategy.config_schema || {}, null, 2))
     setEditorAliasesCsv((strategy.aliases || []).join(', '))
+    setSelectedVersionForRestore(String(strategy.version || ''))
     setEditorError(null)
     setValidation(null)
   }, [selectedStrategyId, catalog])
+
+  useEffect(() => {
+    if (!selectedStrategy) return
+    if (!selectedVersionForRestore) {
+      setSelectedVersionForRestore(String(selectedStrategy.version || ''))
+      return
+    }
+    const hasSelected = strategyVersions.some((versionRow) => String(versionRow.version) === selectedVersionForRestore)
+    if (!hasSelected) {
+      setSelectedVersionForRestore(String(selectedStrategy.version || ''))
+    }
+  }, [selectedStrategy, selectedVersionForRestore, strategyVersions])
 
   useEffect(() => {
     if (newStrategyTemplates.some((item) => item.key === newStrategyTemplateKey)) return
@@ -737,6 +771,8 @@ export default function UnifiedStrategiesManager({
 
   const refreshCatalog = () => {
     queryClient.invalidateQueries({ queryKey: ['unified-strategies'] })
+    queryClient.invalidateQueries({ queryKey: ['unified-strategy-versions'] })
+    queryClient.invalidateQueries({ queryKey: ['strategy-experiments'] })
     queryClient.invalidateQueries({ queryKey: ['strategies'] })
     queryClient.invalidateQueries({ queryKey: ['plugins'] })
     queryClient.invalidateQueries({ queryKey: ['trader-strategies-catalog'] })
@@ -823,6 +859,27 @@ export default function UnifiedStrategiesManager({
     },
   })
 
+  const restoreVersionMutation = useMutation({
+    mutationFn: async () => {
+      const selected = catalog.find((s) => s.id === selectedStrategyId)
+      if (!selected) throw new Error('Select a strategy to restore')
+      const version = Number(selectedVersionForRestore || 0)
+      if (!Number.isFinite(version) || version <= 0) {
+        throw new Error('Select a valid version to restore')
+      }
+      return restoreUnifiedStrategyVersion(selected.id, version, {
+        reason: 'manual_restore_from_ui',
+      })
+    },
+    onSuccess: () => {
+      setEditorError(null)
+      refreshCatalog()
+    },
+    onError: (error: unknown) => {
+      setEditorError(errorMessage(error, 'Failed to restore version'))
+    },
+  })
+
   const cloneMutation = useMutation({
     mutationFn: async () => {
       const selected = catalog.find((s) => s.id === selectedStrategyId)
@@ -901,6 +958,7 @@ export default function UnifiedStrategiesManager({
     saveMutation.isPending ||
     validateMutation.isPending ||
     reloadMutation.isPending ||
+    restoreVersionMutation.isPending ||
     cloneMutation.isPending ||
     deleteMutation.isPending ||
     healthBusy
@@ -1235,13 +1293,58 @@ export default function UnifiedStrategiesManager({
                   <Badge variant="secondary" className="text-[10px] shrink-0">System</Badge>
                 )}
                 {selectedStrategy && (
-                  <span className="text-[10px] font-mono text-muted-foreground shrink-0">
-                    v{selectedStrategy.version}
-                  </span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className="text-[10px] font-mono text-muted-foreground">v{selectedStrategy.version}</span>
+                    {latestVersionRow && latestVersionRow.version === selectedStrategy.version ? (
+                      <Badge variant="outline" className="h-4 px-1.5 text-[9px] border-emerald-500/30 text-emerald-300 bg-emerald-500/10">
+                        Latest
+                      </Badge>
+                    ) : null}
+                  </div>
                 )}
               </div>
 
               <div className="flex items-center gap-1.5 shrink-0">
+                {selectedStrategy && (
+                  <div className="flex items-center gap-1.5 mr-2 pr-2 border-r border-border/50">
+                    <span className="text-[10px] text-muted-foreground">Version</span>
+                    <Select
+                      value={selectedVersionForRestore || String(selectedStrategy.version || '')}
+                      onValueChange={setSelectedVersionForRestore}
+                      disabled={busy || strategyVersions.length === 0}
+                    >
+                      <SelectTrigger className="h-7 w-[138px] text-[10px] font-mono">
+                        <SelectValue placeholder="Select version" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {strategyVersions.map((versionRow) => (
+                          <SelectItem key={versionRow.id} value={String(versionRow.version)} className="font-mono">
+                            {`v${versionRow.version}${
+                              versionRow.is_latest ? ' • latest' : ''
+                            }${
+                              Number(versionRow.version) === Number(selectedStrategy.version || 0) ? ' • current' : ''
+                            }`}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-7 gap-1 px-2 text-[11px]"
+                      onClick={() => restoreVersionMutation.mutate()}
+                      disabled={busy || !selectedRestoreVersionValid || restoreVersionIsCurrent}
+                    >
+                      {restoreVersionMutation.isPending ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <RefreshCw className="w-3 h-3" />
+                      )}
+                      Restore
+                    </Button>
+                  </div>
+                )}
                 <div className="flex items-center gap-2 mr-2 pr-2 border-r border-border/50">
                   <span className="text-[10px] text-muted-foreground">Enabled</span>
                   <Switch

@@ -24,7 +24,12 @@ from models.database import (
     EventsSnapshot,
     recover_pool,
 )
+from services.data_events import DataEvent, EventType
 from services.data_source_runner import run_data_source
+from services.event_dispatcher import event_dispatcher
+from services.opportunity_strategy_catalog import ensure_all_strategies_seeded
+from services.strategy_runtime import refresh_strategy_runtime_if_needed
+from services.strategy_signal_bridge import bridge_opportunities_to_signals
 from services.worker_state import (
     _is_retryable_db_error,
     clear_worker_run_request,
@@ -528,6 +533,16 @@ async def _run_loop() -> None:
             await data_source_loader.refresh_all_from_db(session=session)
     except Exception as exc:
         logger.warning("Events data source seed/refresh failed: %s", exc)
+    try:
+        async with AsyncSessionLocal() as session:
+            await ensure_all_strategies_seeded(session)
+            await refresh_strategy_runtime_if_needed(
+                session,
+                source_keys=["events"],
+                force=True,
+            )
+    except Exception as exc:
+        logger.warning("Events worker strategy startup sync failed: %s", exc)
 
     next_scheduled_run_at: datetime | None = None
     consecutive_db_failures = 0
@@ -536,6 +551,13 @@ async def _run_loop() -> None:
         try:
             async with AsyncSessionLocal() as session:
                 control = await read_worker_control(session, "events")
+                try:
+                    await refresh_strategy_runtime_if_needed(
+                        session,
+                        source_keys=["events"],
+                    )
+                except Exception as exc:
+                    logger.warning("Events worker strategy refresh check failed: %s", exc)
 
             interval = int(
                 max(
@@ -614,13 +636,6 @@ async def _run_loop() -> None:
             persisted_signals = await _persist_signals(signals)
             summary = _build_signal_summary(signals)
 
-            emitted_signals = 0
-
-            await _broadcast_update(signals, summary)
-
-            completed_at = _utcnow()
-            next_scheduled_run_at = completed_at.replace(microsecond=0) + timedelta(seconds=interval)
-
             top_signals = [
                 {
                     "signal_id": str(signal.get("signal_id") or ""),
@@ -646,10 +661,49 @@ async def _run_loop() -> None:
                 for signal in signals[:200]
             ]
 
+            strategy_opportunities = 0
+            emitted_signals = 0
+            event_dispatch_seconds = 0.0
+            try:
+                dispatch_started = _utcnow()
+                events_event = DataEvent(
+                    event_type=EventType.EVENTS_UPDATE,
+                    source="events_worker",
+                    timestamp=dispatch_started,
+                    payload={
+                        "signals": top_signals,
+                        "summary": dict(summary),
+                        "signal_count": int(len(signals)),
+                        "signals_truncated": bool(len(signals) > len(top_signals)),
+                    },
+                )
+                opportunities = await event_dispatcher.dispatch(events_event)
+                strategy_opportunities = len(opportunities)
+                event_dispatch_seconds = round((_utcnow() - dispatch_started).total_seconds(), 3)
+                if bool(getattr(settings, "EVENTS_EMIT_TRADE_SIGNALS", False)):
+                    async with AsyncSessionLocal() as session:
+                        emitted_signals = await bridge_opportunities_to_signals(
+                            session,
+                            opportunities,
+                            source="events",
+                            sweep_missing=True,
+                        )
+            except Exception as exc:
+                logger.warning("Events DataEvent dispatch/bridge failed: %s", exc)
+
+            await _broadcast_update(signals, summary)
+
+            completed_at = _utcnow()
+            next_scheduled_run_at = completed_at.replace(microsecond=0) + timedelta(seconds=interval)
+
             stats = {
                 "total_signals": len(signals),
                 "persisted_signals": persisted_signals,
                 "emitted_trade_signals": int(emitted_signals),
+                "strategy_opportunities": int(strategy_opportunities),
+                "event_dispatch_seconds": float(event_dispatch_seconds),
+                "event_payload_signals": int(len(top_signals)),
+                "event_signals_truncated": bool(len(signals) > len(top_signals)),
                 "cycle_duration_seconds": round(cycle_duration, 2),
                 "critical_signals": int(summary.get("critical", 0) or 0),
                 "countries_tracked": int(summary.get("countries_tracked", 0) or 0),
@@ -692,9 +746,11 @@ async def _run_loop() -> None:
 
             consecutive_db_failures = 0
             logger.info(
-                "Events cycle complete: signals=%d persisted=%d duration=%.2fs sources=%d",
+                "Events cycle complete: signals=%d persisted=%d opportunities=%d bridged=%d duration=%.2fs sources=%d",
                 len(signals),
                 persisted_signals,
+                strategy_opportunities,
+                emitted_signals,
                 cycle_duration,
                 run_metrics.get("sources_total", 0),
             )

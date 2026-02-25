@@ -592,9 +592,9 @@ async def upsert_trade_signal(
         previous_status = str(row.status or "").strip().lower()
         can_update_row = previous_status in SIGNAL_ACTIVE_STATUSES or previous_status in SIGNAL_REACTIVATABLE_STATUSES
         if can_update_row:
-            should_reactivate = previous_status in SIGNAL_REACTIVATABLE_STATUSES
-            if previous_status == "skipped":
-                should_reactivate = _has_skipped_signal_material_change(
+            has_material_change = True
+            if previous_status in SIGNAL_ACTIVE_STATUSES or previous_status == "skipped":
+                has_material_change = _has_skipped_signal_material_change(
                     row,
                     source_item_id=source_item_id,
                     signal_type=signal_type,
@@ -611,41 +611,54 @@ async def upsert_trade_signal(
                     quality_passed=quality_passed,
                     quality_rejection_reasons=quality_rejection_reasons,
                 )
-            if previous_status == "skipped" and not should_reactivate:
-                emission_event_type = "upsert_skipped_unchanged"
-                emission_reason = "reactivation_suppressed:skipped_unchanged"
+                if not has_material_change:
+                    existing_expires_at = _to_utc_naive(row.expires_at)
+                    incoming_expires_at = _to_utc_naive(expires_at)
+                    if existing_expires_at != incoming_expires_at:
+                        has_material_change = True
+            if previous_status in SIGNAL_ACTIVE_STATUSES and not has_material_change:
+                emission_event_type = "upsert_active_unchanged"
+                emission_reason = "suppressed:active_unchanged"
                 publish_signal_emission = False
             else:
-                row.source_item_id = source_item_id
-                row.signal_type = signal_type
-                row.strategy_type = strategy_type
-                row.market_id = market_id
-                row.market_question = market_question
-                row.direction = direction
-                row.entry_price = entry_price
-                row.edge_percent = edge_percent
-                row.confidence = confidence
-                row.liquidity = liquidity
-                row.expires_at = _to_utc_naive(expires_at)
-                row.payload_json = _safe_json(payload_json)
-                row.strategy_context_json = _safe_json(strategy_context_json)
-                if quality_passed is not None:
-                    row.quality_passed = quality_passed
-                    row.quality_rejection_reasons = quality_rejection_reasons if quality_rejection_reasons else None
-                emission_event_type = "upsert_update"
-                emission_reason = None
-                if should_reactivate:
-                    row.status = "pending"
-                    row.effective_price = None
-                    emission_event_type = "upsert_reactivated"
-                    emission_reason = f"reactivated_from:{previous_status}"
-                row.updated_at = _utc_now()
-                await _record_signal_emission(
-                    session,
-                    row,
-                    event_type=emission_event_type,
-                    reason=emission_reason,
-                )
+                should_reactivate = previous_status in SIGNAL_REACTIVATABLE_STATUSES
+                if previous_status == "skipped":
+                    should_reactivate = has_material_change
+                if previous_status == "skipped" and not should_reactivate:
+                    emission_event_type = "upsert_skipped_unchanged"
+                    emission_reason = "reactivation_suppressed:skipped_unchanged"
+                    publish_signal_emission = False
+                else:
+                    row.source_item_id = source_item_id
+                    row.signal_type = signal_type
+                    row.strategy_type = strategy_type
+                    row.market_id = market_id
+                    row.market_question = market_question
+                    row.direction = direction
+                    row.entry_price = entry_price
+                    row.edge_percent = edge_percent
+                    row.confidence = confidence
+                    row.liquidity = liquidity
+                    row.expires_at = _to_utc_naive(expires_at)
+                    row.payload_json = _safe_json(payload_json)
+                    row.strategy_context_json = _safe_json(strategy_context_json)
+                    if quality_passed is not None:
+                        row.quality_passed = quality_passed
+                        row.quality_rejection_reasons = quality_rejection_reasons if quality_rejection_reasons else None
+                    emission_event_type = "upsert_update"
+                    emission_reason = None
+                    if should_reactivate:
+                        row.status = "pending"
+                        row.effective_price = None
+                        emission_event_type = "upsert_reactivated"
+                        emission_reason = f"reactivated_from:{previous_status}"
+                    row.updated_at = _utc_now()
+                    await _record_signal_emission(
+                        session,
+                        row,
+                        event_type=emission_event_type,
+                        reason=emission_reason,
+                    )
         else:
             emission_event_type = "upsert_ignored_terminal"
             emission_reason = f"terminal_status:{previous_status}"

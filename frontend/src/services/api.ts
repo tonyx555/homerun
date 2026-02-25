@@ -1836,6 +1836,7 @@ export type TraderSourceKey = 'scanner' | 'crypto' | 'news' | 'weather' | 'trade
 export interface TraderSourceConfig {
   source_key: TraderSourceKey | string
   strategy_key: string
+  strategy_version?: number | null
   strategy_params: Record<string, any>
 }
 
@@ -1879,6 +1880,7 @@ export interface TraderDecision {
   signal_id: string | null
   source: string
   strategy_key: string
+  strategy_version?: number | null
   decision: string
   reason: string | null
   score: number | null
@@ -1910,6 +1912,8 @@ export interface TraderOrder {
   signal_id: string | null
   decision_id: string | null
   source: string
+  strategy_key?: string | null
+  strategy_version?: number | null
   market_id: string
   market_question: string | null
   direction: string | null
@@ -1990,6 +1994,9 @@ export interface TraderSourceStrategyOption {
   description: string
   default_params: Record<string, any>
   param_fields: Array<Record<string, any>>
+  version?: number
+  latest_version?: number
+  versions?: number[]
 }
 
 export interface TraderConfigSchema {
@@ -2059,6 +2066,15 @@ function normalizeTraderStrategyKey(value: unknown): string {
   return key || DEFAULT_STRATEGY_KEY
 }
 
+function normalizeStrategyVersionValue(value: unknown): number | null {
+  if (value === null || value === undefined) return null
+  const raw = String(value || '').trim().toLowerCase()
+  if (!raw || raw === 'latest') return null
+  const parsed = Number(raw.startsWith('v') ? raw.slice(1) : raw)
+  if (!Number.isFinite(parsed) || parsed <= 0) return null
+  return Math.trunc(parsed)
+}
+
 function normalizeTraderMode(value: unknown): 'paper' | 'live' {
   const mode = String(value || '').trim().toLowerCase()
   return mode === 'live' ? 'live' : 'paper'
@@ -2082,6 +2098,7 @@ function normalizeTraderFields(raw: any): Trader {
       return {
         source_key: sourceKey,
         strategy_key: normalizeTraderStrategyKeyForSource(sourceKey, item.strategy_key),
+        strategy_version: normalizeStrategyVersionValue(item.strategy_version),
         strategy_params: item.strategy_params && typeof item.strategy_params === 'object' ? item.strategy_params : {},
       }
     })
@@ -3757,6 +3774,180 @@ export const getUnifiedStrategyDocs = async (): Promise<Record<string, any>> => 
     return {}
   }
   return payload
+}
+
+export interface UnifiedStrategyVersion {
+  id: string
+  strategy_id: string
+  strategy_slug: string
+  source_key: string
+  version: number
+  is_latest: boolean
+  name: string
+  description: string | null
+  source_code?: string
+  class_name: string | null
+  config: Record<string, unknown>
+  config_schema: Record<string, unknown>
+  aliases: string[]
+  enabled: boolean
+  is_system: boolean
+  sort_order: number
+  parent_version: number | null
+  created_by: string | null
+  reason: string | null
+  created_at: string | null
+}
+
+export const getUnifiedStrategyVersions = async (
+  strategyId: string,
+  params?: { limit?: number; include_source?: boolean }
+): Promise<UnifiedStrategyVersion[]> => {
+  const { data } = await api.get(`/strategy-manager/${strategyId}/versions`, { params })
+  const payload = unwrapApiData(data)
+  if (Array.isArray(payload)) return payload
+  if (payload && typeof payload === 'object' && Array.isArray((payload as any).items)) {
+    return (payload as any).items
+  }
+  return []
+}
+
+export const getUnifiedStrategyVersion = async (
+  strategyId: string,
+  version: number | string
+): Promise<UnifiedStrategyVersion> => {
+  const { data } = await api.get(`/strategy-manager/${strategyId}/versions/${version}`)
+  return unwrapApiData(data)
+}
+
+export const restoreUnifiedStrategyVersion = async (
+  strategyId: string,
+  version: number | string,
+  payload?: { reason?: string; created_by?: string }
+): Promise<{
+  status: string
+  strategy: UnifiedStrategy
+  restored_snapshot: UnifiedStrategyVersion
+  source_snapshot: UnifiedStrategyVersion
+}> => {
+  const { data } = await api.post(`/strategy-manager/${strategyId}/versions/${version}/restore`, payload || {})
+  return unwrapApiData(data)
+}
+
+export interface StrategyExperiment {
+  id: string
+  name: string
+  source_key: string
+  strategy_key: string
+  control_version: number
+  candidate_version: number
+  candidate_allocation_pct: number
+  scope: Record<string, unknown>
+  status: 'active' | 'paused' | 'completed' | 'archived' | string
+  created_by: string | null
+  notes: string | null
+  metadata: Record<string, unknown>
+  promoted_version: number | null
+  ended_at: string | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface StrategyExperimentAssignment {
+  id: string
+  experiment_id: string
+  trader_id: string | null
+  signal_id: string | null
+  decision_id: string | null
+  order_id: string | null
+  source_key: string
+  strategy_key: string
+  strategy_version: number
+  assignment_group: string
+  payload: Record<string, unknown>
+  created_at: string | null
+  updated_at: string | null
+}
+
+export const listStrategyExperiments = async (params?: {
+  source_key?: string
+  strategy_key?: string
+  status?: string
+  limit?: number
+}): Promise<StrategyExperiment[]> => {
+  const { data } = await api.get('/strategy-manager/experiments', { params })
+  const payload = unwrapApiData(data)
+  if (Array.isArray(payload)) return payload
+  if (payload && typeof payload === 'object' && Array.isArray((payload as any).items)) {
+    return (payload as any).items
+  }
+  return []
+}
+
+export const createStrategyExperiment = async (payload: {
+  name: string
+  source_key: string
+  strategy_key: string
+  control_version: number
+  candidate_version: number
+  candidate_allocation_pct?: number
+  scope?: Record<string, unknown>
+  notes?: string
+  created_by?: string
+}): Promise<StrategyExperiment> => {
+  const { data } = await api.post('/strategy-manager/experiments', payload)
+  return unwrapApiData(data)
+}
+
+export const setStrategyExperimentStatus = async (
+  experimentId: string,
+  status: string
+): Promise<StrategyExperiment> => {
+  const { data } = await api.post(`/strategy-manager/experiments/${experimentId}/status`, { status })
+  return unwrapApiData(data)
+}
+
+export const promoteStrategyExperiment = async (
+  experimentId: string,
+  payload?: { promoted_version?: number; notes?: string }
+): Promise<StrategyExperiment> => {
+  const { data } = await api.post(`/strategy-manager/experiments/${experimentId}/promote`, payload || {})
+  return unwrapApiData(data)
+}
+
+export const listStrategyExperimentAssignments = async (
+  experimentId: string,
+  params?: { limit?: number }
+): Promise<StrategyExperimentAssignment[]> => {
+  const { data } = await api.get(`/strategy-manager/experiments/${experimentId}/assignments`, { params })
+  const payload = unwrapApiData(data)
+  if (Array.isArray(payload)) return payload
+  if (payload && typeof payload === 'object' && Array.isArray((payload as any).items)) {
+    return (payload as any).items
+  }
+  return []
+}
+
+export interface TraderMonitorAgentRequest {
+  prompt: string
+  model?: string
+  max_iterations?: number
+  monitor_job_id?: string
+}
+
+export interface TraderMonitorAgentResponse {
+  session_id: string
+  answer: string
+  parsed: Record<string, unknown> | null
+  raw: Record<string, unknown>
+}
+
+export const runTraderMonitorIteration = async (
+  traderId: string,
+  payload: TraderMonitorAgentRequest
+): Promise<TraderMonitorAgentResponse> => {
+  const { data } = await api.post(`/traders/${traderId}/monitor/iterate`, payload, { timeout: 240_000 })
+  return unwrapApiData(data)
 }
 
 // ==================== UNIFIED DATA SOURCE API ====================

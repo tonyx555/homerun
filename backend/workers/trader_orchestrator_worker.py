@@ -45,9 +45,15 @@ from services.trader_orchestrator.strategies.registry import (
     get_strategy as resolve_strategy_instance,
 )
 from services.opportunity_strategy_catalog import ensure_all_strategies_seeded
-from services.strategy_loader import strategy_loader
+from services.strategy_experiments import (
+    get_active_strategy_experiment,
+    resolve_experiment_assignment,
+    upsert_strategy_experiment_assignment,
+)
+from services.strategy_loader import StrategyValidationError, strategy_loader
 from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.strategy_sdk import StrategySDK
+from services.strategy_versioning import normalize_strategy_version, resolve_strategy_version
 from services.event_bus import event_bus
 from services.trader_orchestrator_state import (
     DEFAULT_LIVE_MARKET_CONTEXT,
@@ -188,6 +194,7 @@ async def submit_order(
     signal: RuntimeTradeSignalView,
     decision_id: str,
     strategy_key: str,
+    strategy_version: int | None,
     strategy_params: dict[str, Any],
     risk_limits: dict[str, Any],
     mode: str,
@@ -199,6 +206,7 @@ async def submit_order(
         signal=signal,
         decision_id=decision_id,
         strategy_key=strategy_key,
+        strategy_version=strategy_version,
         strategy_params=strategy_params,
         risk_limits=risk_limits,
         mode=mode,
@@ -276,16 +284,18 @@ def _merged_strategy_params_for_source_config(source_config: dict[str, Any]) -> 
     source_key = normalize_source_key(source_config.get("source_key"))
     explicit_params = dict(source_config.get("strategy_params") or {})
     strategy_defaults: dict[str, Any] = {}
+    strategy_version = normalize_strategy_version(source_config.get("strategy_version"))
 
-    strategy_instance = _strategy_instance_for_source_config(source_config)
-    if strategy_instance is not None:
-        configured_defaults = getattr(strategy_instance, "config", None)
-        if isinstance(configured_defaults, dict):
-            strategy_defaults = dict(configured_defaults)
-        else:
-            declared_defaults = getattr(strategy_instance, "default_config", None)
-            if isinstance(declared_defaults, dict):
-                strategy_defaults = dict(declared_defaults)
+    if strategy_version is None:
+        strategy_instance = _strategy_instance_for_source_config(source_config)
+        if strategy_instance is not None:
+            configured_defaults = getattr(strategy_instance, "config", None)
+            if isinstance(configured_defaults, dict):
+                strategy_defaults = dict(configured_defaults)
+            else:
+                declared_defaults = getattr(strategy_instance, "default_config", None)
+                if isinstance(declared_defaults, dict):
+                    strategy_defaults = dict(declared_defaults)
 
     merged = {**strategy_defaults, **explicit_params}
 
@@ -433,17 +443,20 @@ def _normalize_source_configs(trader: dict[str, Any]) -> dict[str, dict[str, Any
             continue
         source_key = normalize_source_key(raw.get("source_key"))
         strategy_key = str(raw.get("strategy_key") or "").strip().lower()
+        strategy_version = normalize_strategy_version(raw.get("strategy_version"))
         if not source_key or not strategy_key:
             continue
         source_config = {
             "source_key": source_key,
             "strategy_key": strategy_key,
+            "strategy_version": strategy_version,
             "strategy_params": dict(raw.get("strategy_params") or {}),
         }
         strategy_params = _merged_strategy_params_for_source_config(source_config)
         normalized[source_key] = {
             "source_key": source_key,
             "strategy_key": strategy_key,
+            "strategy_version": strategy_version,
             "strategy_params": strategy_params,
         }
     return normalized
@@ -674,6 +687,37 @@ def _strategy_instance_from_loaded(candidate: Any) -> Any:
     if instance is not None:
         return instance
     return candidate
+
+
+def _versioned_strategy_alias(strategy_key: str, strategy_version: int) -> str:
+    return f"{str(strategy_key or '').strip().lower()}__v{int(strategy_version)}"
+
+
+def _load_versioned_strategy_instance(
+    *,
+    strategy_key: str,
+    strategy_version: int,
+    source_code: str,
+    config: dict[str, Any] | None,
+) -> tuple[Any | None, str | None]:
+    alias = _versioned_strategy_alias(strategy_key, strategy_version)
+    loaded = strategy_loader.get_strategy(alias)
+    if loaded is None:
+        try:
+            strategy_loader.load(alias, source_code, config or None)
+        except StrategyValidationError as exc:
+            return None, str(exc)
+        except Exception as exc:
+            return None, str(exc)
+        loaded = strategy_loader.get_strategy(alias)
+    instance = _strategy_instance_from_loaded(loaded)
+    if instance is None:
+        return None, "Strategy cache miss"
+    try:
+        instance.key = str(strategy_key or "").strip().lower()
+    except Exception:
+        pass
+    return instance, None
 
 
 async def _try_acquire_orchestrator_cycle_lock(session: Any) -> bool:
@@ -2212,6 +2256,12 @@ async def _run_trader_once(
                 source_config = source_configs.get(signal_source)
                 strategy_key = ""
                 resolved_strategy_key = ""
+                resolved_strategy_version: int | None = None
+                requested_strategy_version: int | None = None
+                experiment_row = None
+                assignment_group: str | None = None
+                assignment_sample_pct: float | None = None
+                assignment_source = "pinned_config"
 
                 try:
                     if source_config is None:
@@ -2238,42 +2288,189 @@ async def _run_trader_once(
 
                     strategy_key = str(source_config.get("strategy_key") or "").strip().lower()
                     strategy_params = dict(source_config.get("strategy_params") or {})
-                    strategy_status = strategy_loader.get_availability(strategy_key)
-                    resolved_strategy_key = strategy_status.resolved_key or strategy_key
+                    requested_strategy_version = normalize_strategy_version(source_config.get("strategy_version"))
                     live_context = live_contexts.get(signal_id, {})
                     runtime_signal = RuntimeTradeSignalView(signal, live_context=live_context)
                     runtime_signal.source = signal_source
                     traders_scope_payload: dict[str, Any] | None = None
+                    experiment_row = await get_active_strategy_experiment(
+                        session,
+                        source_key=signal_source,
+                        strategy_key=strategy_key,
+                    )
+                    assignment_source = "pinned_config"
+                    resolved_version_request = requested_strategy_version
+                    if experiment_row is not None:
+                        assignment_group, assigned_version, assignment_sample_pct = resolve_experiment_assignment(
+                            experiment=experiment_row,
+                            trader_id=trader_id,
+                            signal_id=signal_id,
+                        )
+                        resolved_version_request = int(assigned_version)
+                        assignment_source = "experiment"
 
-                    # ── Strategy resolution (unified loader) ─────────────
+                    # ── Strategy/version resolution (unified loader + immutable versions) ─────────────
+                    version_resolution = None
+                    try:
+                        version_resolution = await resolve_strategy_version(
+                            session,
+                            strategy_key=strategy_key,
+                            requested_version=resolved_version_request,
+                        )
+                    except ValueError as exc:
+                        blocked_reason = "strategy_version_unavailable"
+                        strategy_detail = str(exc)
+                        checks_payload = [
+                            {
+                                "check_key": "strategy_version_available",
+                                "check_label": "Strategy version available",
+                                "passed": False,
+                                "score": None,
+                                "detail": strategy_detail,
+                                "payload": {
+                                    "requested_strategy_key": strategy_key,
+                                    "requested_strategy_version": requested_strategy_version,
+                                    "resolved_strategy_version": resolved_version_request,
+                                },
+                            }
+                        ]
+                        decision_row = await create_trader_decision(
+                            session,
+                            trader_id=trader_id,
+                            signal=runtime_signal,
+                            strategy_key=strategy_key,
+                            strategy_version=resolved_version_request,
+                            decision="blocked",
+                            reason=blocked_reason,
+                            score=0.0,
+                            checks_summary={"count": len(checks_payload)},
+                            risk_snapshot={},
+                            payload={
+                                "source_key": signal_source,
+                                "source_config": source_config,
+                                "strategy_runtime_error": strategy_detail,
+                                "experiment": {
+                                    "id": str(experiment_row.id) if experiment_row is not None else None,
+                                    "assignment_group": assignment_group,
+                                    "assignment_source": assignment_source,
+                                    "assignment_sample_pct": assignment_sample_pct,
+                                },
+                            },
+                            commit=False,
+                        )
+                        decisions_written += 1
+                        await create_trader_decision_checks(
+                            session,
+                            decision_id=decision_row.id,
+                            checks=checks_payload,
+                            commit=False,
+                        )
+                        if experiment_row is not None:
+                            await upsert_strategy_experiment_assignment(
+                                session,
+                                experiment_id=str(experiment_row.id),
+                                trader_id=trader_id,
+                                signal_id=signal_id,
+                                source_key=signal_source,
+                                strategy_key=strategy_key,
+                                strategy_version=int(resolved_version_request or 1),
+                                assignment_group=str(assignment_group or "control"),
+                                decision_id=decision_row.id,
+                                payload={
+                                    "sample_pct": assignment_sample_pct,
+                                    "assignment_source": assignment_source,
+                                },
+                                commit=False,
+                            )
+                        await set_trade_signal_status(
+                            session,
+                            signal_id=signal_id,
+                            status="skipped",
+                            commit=False,
+                        )
+                        await record_signal_consumption(
+                            session,
+                            trader_id=trader_id,
+                            signal_id=signal_id,
+                            decision_id=decision_row.id,
+                            outcome="blocked",
+                            reason=blocked_reason,
+                            commit=False,
+                        )
+                        await create_trader_event(
+                            session,
+                            trader_id=trader_id,
+                            event_type="strategy_unavailable",
+                            severity="warn",
+                            source=signal_source,
+                            message=blocked_reason,
+                            payload={
+                                "decision_id": decision_row.id,
+                                "signal_id": signal.id,
+                                "requested_strategy_key": strategy_key,
+                                "requested_strategy_version": requested_strategy_version,
+                                "resolved_strategy_version": resolved_version_request,
+                                "error": strategy_detail,
+                            },
+                            commit=False,
+                        )
+                        await upsert_trader_signal_cursor(
+                            session,
+                            trader_id=trader_id,
+                            last_signal_created_at=_signal_cursor_timestamp(signal),
+                            last_signal_id=signal_id,
+                            commit=False,
+                        )
+                        await _commit_with_retry(session)
+                        cursor_created_at = _signal_cursor_timestamp(signal)
+                        cursor_signal_id = signal_id
+                        processed_signals += 1
+                        continue
+
+                    resolved_strategy_key = (
+                        str(version_resolution.strategy.slug or strategy_key).strip().lower() or strategy_key
+                    )
+                    resolved_strategy_version = int(
+                        version_resolution.version_row.version
+                        or version_resolution.latest_version
+                        or 1
+                    )
                     strategy = None
+                    strategy_detail: str | None = None
 
-                    # 1. Try the configured strategy_key
-                    if strategy_status.available:
-                        loaded = strategy_loader.get_strategy(resolved_strategy_key)
-                        strategy = _strategy_instance_from_loaded(loaded)
+                    if int(resolved_strategy_version) == int(version_resolution.latest_version):
+                        strategy_status = strategy_loader.get_availability(resolved_strategy_key)
+                        if strategy_status.available:
+                            loaded = strategy_loader.get_strategy(strategy_status.resolved_key or resolved_strategy_key)
+                            strategy = _strategy_instance_from_loaded(loaded)
 
-                    # 2. Fallback: try the signal's strategy_type slug
-                    if strategy is None and strategy_status.available:
-                        signal_strategy_type = str(getattr(signal, "strategy_type", "") or "").strip().lower()
-                        if signal_strategy_type:
-                            loaded = strategy_loader.get_strategy(signal_strategy_type)
+                        if strategy is None and strategy_status.available:
+                            signal_strategy_type = str(getattr(signal, "strategy_type", "") or "").strip().lower()
+                            if signal_strategy_type:
+                                loaded = strategy_loader.get_strategy(signal_strategy_type)
+                                candidate = _strategy_instance_from_loaded(loaded)
+                                if candidate is not None and hasattr(candidate, "evaluate"):
+                                    strategy = candidate
+
+                        if strategy is None and strategy_status.available:
+                            loaded = strategy_loader.get_strategy(signal_source)
                             candidate = _strategy_instance_from_loaded(loaded)
                             if candidate is not None and hasattr(candidate, "evaluate"):
                                 strategy = candidate
 
-                    # 3. Final fallback: try source key as slug
-                    if strategy is None and strategy_status.available:
-                        loaded = strategy_loader.get_strategy(signal_source)
-                        candidate = _strategy_instance_from_loaded(loaded)
-                        if candidate is not None and hasattr(candidate, "evaluate"):
-                            strategy = candidate
+                        if strategy is None:
+                            strategy_detail = str(strategy_status.reason or "Strategy cache miss")
+                    else:
+                        strategy, strategy_detail = _load_versioned_strategy_instance(
+                            strategy_key=resolved_strategy_key,
+                            strategy_version=resolved_strategy_version,
+                            source_code=str(version_resolution.version_row.source_code or ""),
+                            config=dict(version_resolution.version_row.config or {}),
+                        )
 
                     if strategy is None:
-                        blocked_reason = f"strategy_unavailable:{resolved_strategy_key}"
-                        strategy_detail = str(strategy_status.reason or blocked_reason)
-                        if strategy_status.available:
-                            strategy_detail = "Strategy cache miss"
+                        blocked_reason = f"strategy_unavailable:{resolved_strategy_key}:v{resolved_strategy_version}"
+                        strategy_detail = str(strategy_detail or blocked_reason)
                         checks_payload = [
                             {
                                 "check_key": "strategy_available",
@@ -2284,6 +2481,8 @@ async def _run_trader_once(
                                 "payload": {
                                     "requested_strategy_key": strategy_key,
                                     "resolved_strategy_key": resolved_strategy_key,
+                                    "requested_strategy_version": requested_strategy_version,
+                                    "resolved_strategy_version": resolved_strategy_version,
                                 },
                             }
                         ]
@@ -2292,6 +2491,7 @@ async def _run_trader_once(
                             trader_id=trader_id,
                             signal=runtime_signal,
                             strategy_key=resolved_strategy_key,
+                            strategy_version=resolved_strategy_version,
                             decision="blocked",
                             reason=blocked_reason,
                             score=0.0,
@@ -2301,10 +2501,33 @@ async def _run_trader_once(
                                 "source_key": signal_source,
                                 "source_config": source_config,
                                 "strategy_runtime_error": strategy_detail,
+                                "experiment": {
+                                    "id": str(experiment_row.id) if experiment_row is not None else None,
+                                    "assignment_group": assignment_group,
+                                    "assignment_source": assignment_source,
+                                    "assignment_sample_pct": assignment_sample_pct,
+                                },
                             },
                             commit=False,
                         )
                         decisions_written += 1
+                        if experiment_row is not None:
+                            await upsert_strategy_experiment_assignment(
+                                session,
+                                experiment_id=str(experiment_row.id),
+                                trader_id=trader_id,
+                                signal_id=signal_id,
+                                source_key=signal_source,
+                                strategy_key=resolved_strategy_key,
+                                strategy_version=resolved_strategy_version,
+                                assignment_group=str(assignment_group or "control"),
+                                decision_id=decision_row.id,
+                                payload={
+                                    "sample_pct": assignment_sample_pct,
+                                    "assignment_source": assignment_source,
+                                },
+                                commit=False,
+                            )
                         await create_trader_decision_checks(
                             session,
                             decision_id=decision_row.id,
@@ -2380,6 +2603,7 @@ async def _run_trader_once(
                                 trader_id=trader_id,
                                 signal=runtime_signal,
                                 strategy_key=resolved_strategy_key,
+                                strategy_version=resolved_strategy_version,
                                 decision="skipped",
                                 reason="Signal excluded by traders_scope",
                                 score=0.0,
@@ -2389,10 +2613,33 @@ async def _run_trader_once(
                                     "source_key": signal_source,
                                     "source_config": source_config,
                                     "traders_scope": scope_payload,
+                                    "experiment": {
+                                        "id": str(experiment_row.id) if experiment_row is not None else None,
+                                        "assignment_group": assignment_group,
+                                        "assignment_source": assignment_source,
+                                        "assignment_sample_pct": assignment_sample_pct,
+                                    },
                                 },
                                 commit=False,
                             )
                             decisions_written += 1
+                            if experiment_row is not None:
+                                await upsert_strategy_experiment_assignment(
+                                    session,
+                                    experiment_id=str(experiment_row.id),
+                                    trader_id=trader_id,
+                                    signal_id=signal_id,
+                                    source_key=signal_source,
+                                    strategy_key=resolved_strategy_key,
+                                    strategy_version=int(resolved_strategy_version or 1),
+                                    assignment_group=str(assignment_group or "control"),
+                                    decision_id=decision_row.id,
+                                    payload={
+                                        "sample_pct": assignment_sample_pct,
+                                        "assignment_source": assignment_source,
+                                    },
+                                    commit=False,
+                                )
                             await create_trader_decision_checks(
                                 session,
                                 decision_id=decision_row.id,
@@ -2631,6 +2878,7 @@ async def _run_trader_once(
                         trader_id=trader_id,
                         signal=runtime_signal,
                         strategy_key=resolved_strategy_key,
+                        strategy_version=resolved_strategy_version,
                         decision=final_decision,
                         reason=final_reason,
                         score=score,
@@ -2675,10 +2923,35 @@ async def _run_trader_once(
                                 "trading_schedule_ok": risk_runtime_payload["trading_schedule_ok"],
                             },
                             "portfolio_runtime": portfolio_runtime_payload,
+                            "experiment": {
+                                "id": str(experiment_row.id) if experiment_row is not None else None,
+                                "assignment_group": assignment_group,
+                                "assignment_source": assignment_source,
+                                "assignment_sample_pct": assignment_sample_pct,
+                                "resolved_strategy_version": resolved_strategy_version,
+                            },
                         },
                         commit=False,
                     )
                     decisions_written += 1
+                    if experiment_row is not None:
+                        await upsert_strategy_experiment_assignment(
+                            session,
+                            experiment_id=str(experiment_row.id),
+                            trader_id=trader_id,
+                            signal_id=signal_id,
+                            source_key=signal_source,
+                            strategy_key=resolved_strategy_key,
+                            strategy_version=int(resolved_strategy_version or 1),
+                            assignment_group=str(assignment_group or "control"),
+                            decision_id=decision_row.id,
+                            payload={
+                                "sample_pct": assignment_sample_pct,
+                                "assignment_source": assignment_source,
+                                "decision": final_decision,
+                            },
+                            commit=False,
+                        )
 
                     await create_trader_decision_checks(
                         session,
@@ -2701,6 +2974,7 @@ async def _run_trader_once(
                             signal=runtime_signal,
                             decision_id=decision_row.id,
                             strategy_key=resolved_strategy_key,
+                            strategy_version=resolved_strategy_version,
                             strategy_params=strategy_params,
                             risk_limits=effective_risk_limits,
                             mode=str(control.get("mode", "paper")),
@@ -2830,12 +3104,14 @@ async def _run_trader_once(
                     error_type = exc.__class__.__name__
                     error_message = str(exc or "").strip() or error_type
                     strategy_for_error = resolved_strategy_key or strategy_key or "unknown_strategy"
+                    strategy_version_for_error = resolved_strategy_version
                     failure_reason = f"Signal processing failed ({error_type})"
                     decision_row = await create_trader_decision(
                         session,
                         trader_id=trader_id,
                         signal=signal,
                         strategy_key=strategy_for_error,
+                        strategy_version=strategy_version_for_error,
                         decision="failed",
                         reason=failure_reason,
                         score=0.0,
@@ -2850,6 +3126,24 @@ async def _run_trader_once(
                         commit=False,
                     )
                     decisions_written += 1
+                    if experiment_row is not None:
+                        await upsert_strategy_experiment_assignment(
+                            session,
+                            experiment_id=str(experiment_row.id),
+                            trader_id=trader_id,
+                            signal_id=signal_id,
+                            source_key=signal_source,
+                            strategy_key=strategy_for_error,
+                            strategy_version=int(strategy_version_for_error or experiment_row.control_version or 1),
+                            assignment_group=str(assignment_group or "control"),
+                            decision_id=decision_row.id,
+                            payload={
+                                "sample_pct": assignment_sample_pct,
+                                "assignment_source": assignment_source,
+                                "error_type": error_type,
+                            },
+                            commit=False,
+                        )
                     await set_trade_signal_status(
                         session,
                         signal_id=signal_id,

@@ -50,6 +50,7 @@ from services.opportunity_strategy_catalog import (
     build_system_opportunity_strategy_rows,
     list_system_strategy_keys,
 )
+from services.strategy_versioning import normalize_strategy_version, resolve_strategy_version
 from services.strategy_sdk import StrategySDK
 from services.trader_orchestrator.templates import (
     DEFAULT_GLOBAL_RISK,
@@ -1029,10 +1030,12 @@ def _normalize_source_config(raw: Any) -> dict[str, Any]:
         source_key,
         _normalize_strategy_key(item.get("strategy_key")),
     )
+    strategy_version = normalize_strategy_version(item.get("strategy_version"))
     strategy_params = _normalize_strategy_params(item.get("strategy_params"), source_key)
     normalized: dict[str, Any] = {
         "source_key": source_key,
         "strategy_key": strategy_key,
+        "strategy_version": strategy_version,
         "strategy_params": strategy_params,
     }
     return normalized
@@ -1058,6 +1061,7 @@ async def _validate_source_strategy_pair(
     session: AsyncSession,
     source_key: str,
     strategy_key: str,
+    strategy_version: int | None = None,
 ) -> None:
     _, by_source = await _fetch_enabled_strategy_catalog(session)
     valid_strategies = by_source.get(source_key)
@@ -1070,6 +1074,15 @@ async def _validate_source_strategy_pair(
         raise ValueError(
             f"Invalid strategy_key '{strategy_key}' for source_key '{source_key}'. Allowed strategies: {allowed}"
         )
+    if strategy_version is not None:
+        try:
+            await resolve_strategy_version(
+                session,
+                strategy_key=strategy_key,
+                requested_version=int(strategy_version),
+            )
+        except ValueError as exc:
+            raise ValueError(str(exc))
 
 
 async def _validate_source_configs(
@@ -1081,7 +1094,13 @@ async def _validate_source_configs(
     for source_config in source_configs:
         source_key = str(source_config.get("source_key") or "").strip().lower()
         strategy_key = _normalize_strategy_key(source_config.get("strategy_key"))
-        await _validate_source_strategy_pair(session, source_key, strategy_key)
+        strategy_version = normalize_strategy_version(source_config.get("strategy_version"))
+        await _validate_source_strategy_pair(
+            session,
+            source_key,
+            strategy_key,
+            strategy_version=strategy_version,
+        )
         if source_key == "traders":
             strategy_params = dict(source_config.get("strategy_params") or {})
             _validate_traders_scope(StrategySDK.validate_trader_scope_config(strategy_params.get("traders_scope")))
@@ -1107,6 +1126,16 @@ def _derive_fields_from_source_configs(
     sources = [str(item.get("source_key") or "").strip().lower() for item in source_configs if item.get("source_key")]
     params = dict(first.get("strategy_params") or {})
     return strategy_key, sources, params
+
+
+def _legacy_strategy_version_from_source_configs(source_configs: list[dict[str, Any]]) -> str:
+    if not source_configs:
+        return "latest"
+    first = source_configs[0]
+    version = normalize_strategy_version(first.get("strategy_version"))
+    if version is None:
+        return "latest"
+    return f"v{int(version)}"
 
 
 def _default_control_settings() -> dict[str, Any]:
@@ -1174,12 +1203,15 @@ def _serialize_trader(row: Trader) -> dict[str, Any]:
         fallback_sources=row.sources_json,
         fallback_params=row.params_json,
     )
+    legacy_strategy_version = str(row.strategy_version or "").strip() or _legacy_strategy_version_from_source_configs(
+        source_configs
+    )
     return {
         "id": row.id,
         "name": row.name,
         "description": row.description,
         "mode": _normalize_trader_mode(row.mode),
-        "strategy_version": row.strategy_version,
+        "strategy_version": legacy_strategy_version,
         "source_configs": source_configs,
         "risk_limits": row.risk_limits_json or {},
         "metadata": metadata,
@@ -1201,6 +1233,7 @@ def _serialize_decision(row: TraderDecision) -> dict[str, Any]:
         "signal_id": row.signal_id,
         "source": row.source,
         "strategy_key": row.strategy_key,
+        "strategy_version": int(row.strategy_version) if row.strategy_version is not None else None,
         "decision": row.decision,
         "reason": row.reason,
         "score": row.score,
@@ -1459,6 +1492,8 @@ def _serialize_order(
         "signal_id": row.signal_id,
         "decision_id": row.decision_id,
         "source": row.source,
+        "strategy_key": row.strategy_key,
+        "strategy_version": int(row.strategy_version) if row.strategy_version is not None else None,
         "market_id": row.market_id,
         "market_question": row.market_question,
         "direction": row.direction,
@@ -1505,6 +1540,7 @@ def _serialize_execution_session(row: ExecutionSession) -> dict[str, Any]:
         "decision_id": row.decision_id,
         "source": row.source,
         "strategy_key": row.strategy_key,
+        "strategy_version": int(row.strategy_version) if row.strategy_version is not None else None,
         "mode": row.mode,
         "status": row.status,
         "policy": row.policy,
@@ -1846,7 +1882,7 @@ async def seed_default_traders(session: AsyncSession) -> None:
                 name=template["name"],
                 description=template.get("description"),
                 strategy_key=strategy_key,
-                strategy_version="v1",
+                strategy_version=_legacy_strategy_version_from_source_configs(source_configs),
                 sources_json=sources,
                 params_json=params,
                 source_configs_json=source_configs,
@@ -1873,6 +1909,7 @@ async def create_trader(session: AsyncSession, payload: dict[str, Any]) -> dict[
         source_trader = _serialize_trader(source_row)
         copied_payload: dict[str, Any] = {
             "description": source_trader.get("description"),
+            "mode": source_trader.get("mode", "paper"),
             "source_configs": copy.deepcopy(source_trader.get("source_configs", [])),
             "interval_seconds": int(source_trader.get("interval_seconds", 60) or 60),
             "risk_limits": copy.deepcopy(source_trader.get("risk_limits", {})),
@@ -1901,7 +1938,7 @@ async def create_trader(session: AsyncSession, payload: dict[str, Any]) -> dict[
         name=normalized["name"],
         description=normalized["description"],
         strategy_key=strategy_key,
-        strategy_version="v1",
+        strategy_version=_legacy_strategy_version_from_source_configs(normalized["source_configs"]),
         sources_json=sources,
         params_json=params,
         source_configs_json=normalized["source_configs"],
@@ -1962,6 +1999,7 @@ async def update_trader(
     if "source_configs" in payload:
         row.source_configs_json = normalized["source_configs"]
         row.strategy_key = strategy_key
+        row.strategy_version = _legacy_strategy_version_from_source_configs(normalized["source_configs"])
         row.sources_json = sources
         row.params_json = params
     if "risk_limits" in payload:
@@ -2276,6 +2314,7 @@ async def create_trader_decision(
     trader_id: str,
     signal: TradeSignal,
     strategy_key: str,
+    strategy_version: int | None = None,
     decision: str,
     reason: Optional[str] = None,
     score: Optional[float] = None,
@@ -2291,6 +2330,7 @@ async def create_trader_decision(
         signal_id=signal.id,
         source=str(signal.source),
         strategy_key=str(strategy_key),
+        strategy_version=int(strategy_version) if strategy_version is not None else None,
         decision=str(decision),
         reason=reason,
         score=score,
@@ -2351,6 +2391,8 @@ async def create_trader_order(
     trader_id: str,
     signal: TradeSignal,
     decision_id: Optional[str],
+    strategy_key: str | None,
+    strategy_version: int | None,
     mode: str,
     status: str,
     notional_usd: Optional[float],
@@ -2373,6 +2415,8 @@ async def create_trader_order(
         signal_id=signal.id,
         decision_id=decision_id,
         source=str(signal.source),
+        strategy_key=str(strategy_key or "").strip().lower() or None,
+        strategy_version=int(strategy_version) if strategy_version is not None else None,
         market_id=str(signal.market_id),
         market_question=signal.market_question,
         direction=signal.direction,
@@ -2471,6 +2515,7 @@ async def create_execution_session(
     signal: TradeSignal,
     decision_id: str | None,
     strategy_key: str | None,
+    strategy_version: int | None,
     mode: str,
     policy: str,
     plan_id: str | None,
@@ -2489,6 +2534,7 @@ async def create_execution_session(
         decision_id=decision_id,
         source=str(signal.source),
         strategy_key=str(strategy_key or "") or None,
+        strategy_version=int(strategy_version) if strategy_version is not None else None,
         mode=str(mode),
         status="pending",
         policy=str(policy or "SINGLE_LEG"),
