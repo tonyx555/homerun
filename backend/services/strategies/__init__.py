@@ -13,6 +13,7 @@ from .flash_crash_reversion import FlashCrashReversionStrategy
 from .tail_end_carry import TailEndCarryStrategy
 from .vpin_toxicity import VPINToxicityStrategy
 from .prob_surface_arb import ProbSurfaceArbStrategy
+from .holding_reward_yield import HoldingRewardYieldStrategy
 
 __all__ = [
     "BasicArbStrategy",
@@ -30,4 +31,5 @@ __all__ = [
     "TailEndCarryStrategy",
     "VPINToxicityStrategy",
     "ProbSurfaceArbStrategy",
+    "HoldingRewardYieldStrategy",
 ]

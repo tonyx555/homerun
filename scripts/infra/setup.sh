@@ -1,8 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-# Navigate to project root (parent of scripts/)
-cd "$(dirname "$0")/.."
+# Navigate to project root (grandparent of scripts/infra/)
+cd "$(dirname "$0")/../.."
 
 REDIS_ONLY=0
 POSTGRES_ONLY=0
@@ -313,14 +313,14 @@ echo ""
 echo "Setting up launcher tooling..."
 export CXXFLAGS="${CXXFLAGS:-} -std=c++20"
 TOOLING_OK=0
-npm --prefix scripts/tooling install --silent 2>/dev/null || npm --prefix scripts/tooling install 2>/dev/null || true
-if [ -d "scripts/tooling/node_modules/tree-sitter" ]; then
+npm --prefix scripts/infra/tooling install --silent 2>/dev/null || npm --prefix scripts/infra/tooling install 2>/dev/null || true
+if [ -d "scripts/infra/tooling/node_modules/tree-sitter" ]; then
     TOOLING_OK=1
 fi
 
 if [ "$TOOLING_OK" -eq 1 ]; then
     echo "Verifying PowerShell launcher syntax..."
-    node scripts/tooling/check_powershell_syntax.mjs scripts/run.ps1 scripts/setup.ps1 || echo "PowerShell syntax verification failed (non-fatal)."
+    node scripts/infra/tooling/check_powershell_syntax.mjs scripts/infra/run.ps1 scripts/infra/setup.ps1 || echo "PowerShell syntax verification failed (non-fatal)."
 else
     echo "Launcher tooling install failed (native module build issue); skipping syntax check."
     echo "This is non-fatal - the application will still run."
@@ -367,8 +367,8 @@ stamp = {
     "requirements_trading_sha256": sha256(root / "backend" / "requirements-trading.txt"),
     "package_json_sha256": sha256(root / "frontend" / "package.json"),
     "package_lock_sha256": sha256(root / "frontend" / "package-lock.json"),
-    "launcher_tools_package_json_sha256": sha256(root / "scripts" / "tooling" / "package.json"),
-    "launcher_tools_package_lock_sha256": sha256(root / "scripts" / "tooling" / "package-lock.json"),
+    "launcher_tools_package_json_sha256": sha256(root / "scripts" / "infra" / "tooling" / "package.json"),
+    "launcher_tools_package_lock_sha256": sha256(root / "scripts" / "infra" / "tooling" / "package-lock.json"),
 }
 
 (root / ".setup-stamp.json").write_text(json.dumps(stamp, indent=2), encoding="utf-8")
@@ -381,10 +381,10 @@ echo "  Setup Complete!"
 echo "========================================="
 echo ""
 echo "To start the application, run:"
-echo "  ./scripts/run.sh"
+echo "  ./scripts/infra/run.sh"
 echo ""
 echo "Or run runtime validation only:"
-echo "  ./scripts/run.sh --services-smoke-test"
+echo "  ./scripts/infra/run.sh --services-smoke-test"
 echo ""
 echo "Or start services individually:"
 echo "  Backend:  cd backend && source venv/bin/activate && uvicorn main:app --reload"

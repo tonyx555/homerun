@@ -645,6 +645,155 @@ class MLPredictionLog(Base):
     )
 
 
+# ==================== ML TRAINING DATA ====================
+
+
+class MLTrainingSnapshot(Base):
+    """Time-series orderbook snapshots recorded from live crypto markets for ML training.
+
+    Captured by the crypto worker every N seconds, storing price, spread, depth,
+    and volume features that can be used to train directional prediction models.
+    """
+
+    __tablename__ = "ml_training_snapshots"
+
+    id = Column(String, primary_key=True)
+    asset = Column(String(8), nullable=False)  # btc, eth, sol, xrp
+    timeframe = Column(String(8), nullable=False)  # 5m, 15m, 1h, 4h
+    timestamp = Column(DateTime, nullable=False)
+
+    # Prices
+    mid_price = Column(Float, nullable=False)  # (up_price + (1 - down_price)) / 2
+    up_price = Column(Float, nullable=True)
+    down_price = Column(Float, nullable=True)
+    best_bid = Column(Float, nullable=True)
+    best_ask = Column(Float, nullable=True)
+    spread = Column(Float, nullable=True)  # ask - bid in cents
+    combined = Column(Float, nullable=True)  # up + down (arb indicator)
+
+    # Depth & liquidity
+    liquidity = Column(Float, nullable=True)  # total market liquidity USD
+    volume = Column(Float, nullable=True)  # cumulative volume
+    volume_24h = Column(Float, nullable=True)  # rolling 24h volume
+
+    # Oracle
+    oracle_price = Column(Float, nullable=True)  # Chainlink BTC/ETH/SOL/XRP price
+    price_to_beat = Column(Float, nullable=True)  # resolution threshold price
+
+    # Market context
+    seconds_left = Column(Integer, nullable=True)  # seconds until market resolves
+    is_live = Column(Boolean, nullable=True)  # is market currently active
+
+    __table_args__ = (
+        Index("idx_mlt_asset_tf_ts", "asset", "timeframe", "timestamp"),
+        Index("idx_mlt_timestamp", "timestamp"),
+        Index("idx_mlt_asset", "asset"),
+    )
+
+
+class MLTrainedModel(Base):
+    """Trained ML model artifacts for crypto directional prediction.
+
+    Stores XGBoost/LightGBM model weights, feature definitions, metrics,
+    and promotion status. Strategies load the active model at runtime.
+    """
+
+    __tablename__ = "ml_trained_models"
+
+    id = Column(String, primary_key=True)
+    name = Column(String, nullable=False)  # e.g. "crypto_directional_v3"
+    model_type = Column(String, nullable=False)  # xgboost, lightgbm, logistic
+    version = Column(Integer, nullable=False, default=1)
+    status = Column(String, nullable=False, default="trained")  # trained, active, archived
+
+    # Model data
+    weights_json = Column(JSON, nullable=False)  # serialized model weights/trees
+    feature_names = Column(JSON, nullable=False)  # ordered feature list
+    hyperparams = Column(JSON, nullable=True)  # training hyperparameters
+
+    # Scope
+    assets = Column(JSON, nullable=False)  # ["btc", "eth", "sol", "xrp"]
+    timeframes = Column(JSON, nullable=False)  # ["5m", "15m", "1h", "4h"]
+
+    # Training metrics
+    train_accuracy = Column(Float, nullable=True)
+    test_accuracy = Column(Float, nullable=True)
+    test_auc = Column(Float, nullable=True)
+    feature_importance = Column(JSON, nullable=True)  # {feature: importance}
+    train_samples = Column(Integer, default=0)
+    test_samples = Column(Integer, default=0)
+    training_date_range = Column(JSON, nullable=True)  # {"start": iso, "end": iso}
+
+    # Walk-forward validation
+    walkforward_results = Column(JSON, nullable=True)  # [{fold, train_acc, test_acc, auc}]
+
+    # Metadata
+    created_at = Column(DateTime, default=_utcnow)
+    promoted_at = Column(DateTime, nullable=True)
+    notes = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_mlm_status", "status"),
+        Index("idx_mlm_created", "created_at"),
+        UniqueConstraint("name", "version", name="uq_ml_model_name_version"),
+    )
+
+
+class MLRecorderConfig(Base):
+    """Persistent configuration for the ML data recorder.
+
+    Stores whether recording is active, the recording interval,
+    retention policy, and schedule settings.
+    """
+
+    __tablename__ = "ml_recorder_config"
+
+    id = Column(String, primary_key=True, default="default")
+    is_recording = Column(Boolean, nullable=False, default=False)
+    interval_seconds = Column(Integer, nullable=False, default=60)  # how often to snapshot
+    retention_days = Column(Integer, nullable=False, default=90)  # auto-prune older than this
+    assets = Column(JSON, nullable=False, default=lambda: ["btc", "eth", "sol", "xrp"])
+    timeframes = Column(JSON, nullable=False, default=lambda: ["5m", "15m", "1h", "4h"])
+
+    # Schedule (null = always record when enabled)
+    schedule_enabled = Column(Boolean, nullable=False, default=False)
+    schedule_start_utc = Column(String, nullable=True)  # "08:00"
+    schedule_end_utc = Column(String, nullable=True)  # "22:00"
+
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class MLTrainingJob(Base):
+    """Tracks ML training job executions (manual or scheduled)."""
+
+    __tablename__ = "ml_training_jobs"
+
+    id = Column(String, primary_key=True)
+    status = Column(String, nullable=False, default="queued")  # queued, running, completed, failed
+    model_type = Column(String, nullable=False, default="xgboost")  # xgboost, lightgbm
+    assets = Column(JSON, nullable=False)
+    timeframes = Column(JSON, nullable=False)
+
+    # Progress
+    progress = Column(Float, default=0.0)
+    message = Column(String, nullable=True)
+    error = Column(Text, nullable=True)
+
+    # Results (filled on completion)
+    trained_model_id = Column(String, nullable=True)  # FK to ml_trained_models.id
+    result_summary = Column(JSON, nullable=True)
+
+    # Timing
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("idx_mljob_status", "status"),
+        Index("idx_mljob_created", "created_at"),
+    )
+
+
 # ==================== PARAMETER OPTIMIZATION ====================
 
 
@@ -3088,6 +3237,12 @@ async def recover_pool() -> None:
 def _run_alembic_upgrade(connection) -> None:
     from alembic import command
     from alembic.config import Config
+
+    # Temporarily remove statement_timeout during migrations so that
+    # long-running backfill / DDL statements are not killed mid-flight.
+    from sqlalchemy import text as _text
+    connection.execute(_text("SET LOCAL statement_timeout = 0"))
+    connection.execute(_text("SET LOCAL idle_in_transaction_session_timeout = 0"))
 
     backend_root = Path(__file__).resolve().parents[1]
     alembic_cfg = Config(str(backend_root / "alembic.ini"))

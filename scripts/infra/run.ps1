@@ -1,10 +1,10 @@
 # Homerun - Windows Run Script (TUI)
-# Run: .\scripts\run.ps1
+# Run: .\scripts\infra\run.ps1
 
 $ErrorActionPreference = "Stop"
 
-# Navigate to project root (parent of scripts\)
-Set-Location (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))
+# Navigate to project root (grandparent of scripts\infra\)
+Set-Location (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)))
 
 $runServiceSmokeTest = $false
 $tuiArgs = @()
@@ -36,6 +36,7 @@ $script:redisDockerCreatedByScript = $false
 $script:postgresStartedByScript = $false
 $script:postgresStartMode = ""
 $script:postgresDockerCreatedByScript = $false
+$script:databaseUrlWasProvided = [bool]$env:DATABASE_URL
 
 function Test-TcpPort {
     param(
@@ -55,6 +56,49 @@ function Test-TcpPort {
     } finally {
         if ($client) { $client.Dispose() }
     }
+}
+
+function Test-NpcapLoopbackInterference {
+    <#
+    .SYNOPSIS
+    Detect and disable the Npcap Loopback Adapter if present.
+
+    The Npcap Loopback Adapter (installed by Wireshark/Nmap) can interfere with
+    TCP connections on 127.0.0.1, causing postgres and other services to appear
+    to listen but drop all incoming SYN-ACK packets.  This function checks if
+    the adapter is present and enabled, and attempts to disable it (requires
+    elevation).  If elevation fails, it warns the user.
+    #>
+    $adapter = Get-NetAdapter -Name "Npcap Loopback Adapter" -ErrorAction SilentlyContinue
+    if (-not $adapter -or $adapter.Status -ne "Up") {
+        return  # Not present or already disabled
+    }
+
+    Write-Host "Npcap Loopback Adapter detected (enabled). This can block local database connections." -ForegroundColor Yellow
+    Write-Host "Attempting to disable it..." -ForegroundColor Yellow
+
+    try {
+        # Try directly (works if running elevated)
+        Disable-NetAdapter -Name "Npcap Loopback Adapter" -Confirm:$false -ErrorAction Stop
+        Write-Host "Npcap Loopback Adapter disabled." -ForegroundColor Green
+        return
+    } catch {}
+
+    # Try self-elevation
+    try {
+        $tmpScript = Join-Path $env:TEMP "homerun_disable_npcap.ps1"
+        "Disable-NetAdapter -Name 'Npcap Loopback Adapter' -Confirm:`$false -ErrorAction Stop" | Set-Content $tmpScript -Encoding UTF8
+        $proc = Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$tmpScript`"" -Wait -PassThru
+        Remove-Item $tmpScript -Force -ErrorAction SilentlyContinue
+        if ($proc.ExitCode -eq 0) {
+            Write-Host "Npcap Loopback Adapter disabled." -ForegroundColor Green
+            return
+        }
+    } catch {}
+
+    Write-Host "Could not disable the Npcap Loopback Adapter automatically." -ForegroundColor Red
+    Write-Host "Please disable it manually: Network Settings > Change adapter options > right-click 'Npcap Loopback Adapter' > Disable" -ForegroundColor Yellow
+    Write-Host "Or run in an elevated terminal: Disable-NetAdapter -Name 'Npcap Loopback Adapter' -Confirm:`$false" -ForegroundColor Yellow
 }
 
 function Wait-ForService {
@@ -141,7 +185,7 @@ function Ensure-RedisRuntime {
     }
     Write-Host "Redis runtime missing; invoking setup redis bootstrap..." -ForegroundColor Cyan
     try {
-        & .\scripts\setup.ps1 -RedisOnly
+        & .\scripts\infra\setup.ps1 -RedisOnly
         return (Test-RedisRuntimeAvailable)
     } catch {
         return $false
@@ -356,7 +400,7 @@ function Ensure-PostgresRuntime {
 
     Write-Host "Postgres runtime missing; invoking setup postgres bootstrap..." -ForegroundColor Cyan
     try {
-        & .\scripts\setup.ps1 -PostgresOnly
+        & .\scripts\infra\setup.ps1 -PostgresOnly
         return (Test-PostgresRuntimeAvailable)
     } catch {
         return $false
@@ -473,6 +517,47 @@ host all all ::1/128 trust
         }
     }
     return $false
+}
+
+function Ensure-PostgresFirewallRule {
+    <#
+    .SYNOPSIS
+    Ensure an inbound firewall allow rule exists for postgres.exe.
+
+    On Windows 11, when postgres.exe first listens on a port, the firewall may
+    silently block inbound connections if the UAC allow dialog was not shown or
+    was dismissed (common when started from a background script).  This function
+    adds an explicit allow rule for the binary.  Requires elevation; fails
+    silently without it.
+    #>
+    param([string]$PostgresBinDir)
+
+    $pgExe = Join-Path $PostgresBinDir "postgres.exe"
+    if (-not (Test-Path $pgExe)) { return }
+
+    $ruleName = "Homerun - PostgreSQL Server"
+
+    # Check if rule already exists
+    $existing = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+    if ($existing) { return }
+
+    try {
+        New-NetFirewallRule `
+            -DisplayName $ruleName `
+            -Direction Inbound `
+            -Action Allow `
+            -Protocol TCP `
+            -Program $pgExe `
+            -Profile Any `
+            -ErrorAction Stop | Out-Null
+    } catch {
+        # Not elevated — fall back to netsh which sometimes works or just warn
+        try {
+            netsh advfirewall firewall add rule name="$ruleName" dir=in action=allow protocol=TCP program="$pgExe" profile=any *> $null
+        } catch {
+            Write-Host "Warning: Could not add firewall rule for PostgreSQL. If connections fail, run as Administrator once or manually allow '$pgExe' in Windows Firewall." -ForegroundColor Yellow
+        }
+    }
 }
 
 function Test-PostgresDockerListenerOwned {
@@ -600,6 +685,9 @@ function Ensure-Postgres {
     $runningPort = Get-RunningLocalPostgresPort -DataDir $DataDir
     if ($runningPort) {
         $script:postgresPort = [int]$runningPort
+        # Ensure firewall rule exists even for already-running instances
+        $pgBinDir = Find-PostgresBinDir
+        if ($pgBinDir) { Ensure-PostgresFirewallRule -PostgresBinDir $pgBinDir }
         Write-Host "Postgres already running on ${PgHost}:${runningPort}" -ForegroundColor Green
         return
     }
@@ -630,6 +718,15 @@ function Ensure-Postgres {
     }
 
     Write-Host "Starting Postgres..." -ForegroundColor Cyan
+
+    # Ensure a firewall allow rule exists for postgres.exe BEFORE starting.
+    # On Windows 11, the firewall can silently block the binary on loopback
+    # if the UAC allow dialog was never shown or was dismissed.
+    $pgBinDir = Find-PostgresBinDir
+    if ($pgBinDir) {
+        Ensure-PostgresFirewallRule -PostgresBinDir $pgBinDir
+    }
+
     $dockerStarted = Start-PostgresDocker -PgHost $PgHost -Port $Port -Db $Db -User $User -Password $Password -ContainerName $ContainerName -Image $Image -DataDir $DataDir
     if ($dockerStarted -and (Wait-ForService -TargetHost $PgHost -Port $Port)) {
         $script:postgresStartedByScript = $true
@@ -677,6 +774,88 @@ function Cleanup-StartedPostgres {
     }
 }
 
+function Cleanup-StaleHomerunProcesses {
+    <#
+    .SYNOPSIS
+    Kill orphaned Python worker processes from a previous crashed run.
+
+    Finds python.exe processes whose command line contains "workers.runner"
+    or "uvicorn" running from this project's backend directory and kills them.
+    This prevents stale connections from saturating Postgres/Redis and blocking
+    startup after an unclean exit.
+    #>
+    $projectRoot = (Get-Location).Path
+    $backendDir = Join-Path $projectRoot "backend"
+
+    try {
+        $pythonProcesses = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue
+    } catch {
+        return
+    }
+
+    if (-not $pythonProcesses) {
+        return
+    }
+
+    $killed = 0
+    foreach ($proc in $pythonProcesses) {
+        $cmdLine = $proc.CommandLine
+        if (-not $cmdLine) { continue }
+
+        # Only kill homerun-related processes (workers, uvicorn backend, tui)
+        $isHomerun = $false
+        if ($cmdLine -match "workers\.runner") { $isHomerun = $true }
+        elseif ($cmdLine -match "workers\.\w+_worker") { $isHomerun = $true }
+        elseif (($cmdLine -match "uvicorn") -and ($cmdLine -match "main:app")) { $isHomerun = $true }
+        elseif ($cmdLine -match "tui\.py") { $isHomerun = $true }
+
+        if (-not $isHomerun) { continue }
+
+        # Verify the process is running from this project (not another instance)
+        if ($cmdLine -notmatch [regex]::Escape($backendDir) -and
+            $cmdLine -notmatch [regex]::Escape($projectRoot)) {
+            continue
+        }
+
+        try {
+            Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+            $killed++
+        } catch {}
+    }
+
+    if ($killed -gt 0) {
+        Write-Host "Cleaned up $killed stale Homerun process(es) from a previous run." -ForegroundColor Yellow
+        Start-Sleep -Seconds 1
+    }
+}
+
+function Cleanup-LocalPostgresIfOwned {
+    <#
+    .SYNOPSIS
+    Stop the launcher-managed local Postgres if it's running from our data directory.
+    Called during shutdown even if the launcher didn't start it this session
+    (i.e. it was already running when we launched).
+    #>
+    $binDir = Find-PostgresBinDir
+    if (-not $binDir) { return }
+    $pgctlPath = Join-Path $binDir "pg_ctl.exe"
+    if (-not (Test-Path $pgctlPath)) { return }
+
+    if (Test-LocalPostgresListenerOwned -DataDir $postgresDataDir -Port $script:postgresPort) {
+        try { & $pgctlPath -D $postgresDataDir -m fast -w stop *> $null } catch {}
+    }
+}
+
+function Cleanup-LocalRedisIfOwned {
+    <#
+    .SYNOPSIS
+    Stop the launcher-managed local Redis if it was started as a standalone process.
+    #>
+    if (Test-RedisPing -RedisHost $redisHost -RedisPort $redisPort) {
+        Send-RedisShutdown -RedisHost $redisHost -RedisPort $redisPort
+    }
+}
+
 function Test-NeedsSetup {
     if (-not (Test-Path "backend\venv")) { return $true }
     if (-not (Test-Path "backend\venv\Scripts\python.exe")) { return $true }
@@ -717,16 +896,24 @@ function Test-NeedsSetup {
     if ($stamp.requirements_trading_sha256 -ne (Get-HashOrMissing "backend\requirements-trading.txt")) { return $true }
     if ($stamp.package_json_sha256 -ne (Get-HashOrMissing "frontend\package.json")) { return $true }
     if ($stamp.package_lock_sha256 -ne (Get-HashOrMissing "frontend\package-lock.json")) { return $true }
-    if ($stamp.launcher_tools_package_json_sha256 -ne (Get-HashOrMissing "scripts\tooling\package.json")) { return $true }
-    if ($stamp.launcher_tools_package_lock_sha256 -ne (Get-HashOrMissing "scripts\tooling\package-lock.json")) { return $true }
+    if ($stamp.launcher_tools_package_json_sha256 -ne (Get-HashOrMissing "scripts\infra\tooling\package.json")) { return $true }
+    if ($stamp.launcher_tools_package_lock_sha256 -ne (Get-HashOrMissing "scripts\infra\tooling\package-lock.json")) { return $true }
 
     return $false
 }
 
 if (Test-NeedsSetup) {
     Write-Host "Setup missing or stale. Running setup..." -ForegroundColor Yellow
-    & .\scripts\setup.ps1
+    & .\scripts\infra\setup.ps1
 }
+
+# Kill orphaned workers from a previous crashed run before starting services.
+# Stale processes hold Postgres/Redis connections that can block startup.
+Cleanup-StaleHomerunProcesses
+
+# The Npcap Loopback Adapter (Wireshark/Nmap) can silently break loopback
+# TCP connections, causing Postgres to appear to listen but drop all traffic.
+Test-NpcapLoopbackInterference
 
 try {
     Ensure-Redis -RedisHost $redisHost -RedisPort $redisPort -ContainerName $redisContainerName -Image $redisImage
@@ -737,7 +924,7 @@ try {
         $env:DATABASE_URL = "postgresql+asyncpg://${postgresUser}:${postgresPassword}@${postgresHost}:${script:postgresPort}/${postgresDb}"
     }
 
-    & backend\venv\Scripts\python.exe .\scripts\ensure_postgres_ready.py --database-url $env:DATABASE_URL
+    & backend\venv\Scripts\python.exe .\scripts\infra\ensure_postgres_ready.py --database-url $env:DATABASE_URL
     if ($LASTEXITCODE -ne 0) {
         throw "Postgres readiness validation failed"
     }
@@ -754,13 +941,23 @@ try {
     }
 
     if ($runServiceSmokeTest) {
-        python .\scripts\launcher_smoke.py
+        python .\scripts\infra\launcher_smoke.py
         exit $LASTEXITCODE
     }
 
     # Launch the TUI
     python tui.py @tuiArgs
 } finally {
+    # Kill any remaining Homerun Python processes (workers, backend, etc.)
+    Cleanup-StaleHomerunProcesses
+
+    # Stop launcher-managed services
     Cleanup-StartedPostgres
     Cleanup-StartedRedis
+
+    # Also stop services the launcher adopted (already running when we started)
+    if (-not $script:databaseUrlWasProvided) {
+        Cleanup-LocalPostgresIfOwned
+    }
+    Cleanup-LocalRedisIfOwned
 }

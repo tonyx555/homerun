@@ -42,8 +42,8 @@ _SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{1,48}[a-z0-9]$")
 _SOURCE_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 _SEED_GUARD_LOCK = asyncio.Lock()
 _DATA_SOURCES_SEEDED = False
-_ALLOWED_SOURCE_KINDS = {"python", "rss", "rest_api"}
-_TEMPLATED_SOURCE_KINDS = {"rss", "rest_api"}
+_ALLOWED_SOURCE_KINDS = {"python", "rss", "rest_api", "twitter"}
+_TEMPLATED_SOURCE_KINDS = {"rss", "rest_api", "twitter"}
 _HAS_FETCH_RE = re.compile(r"\bdef\s+fetch\s*\(")
 _HAS_FETCH_ASYNC_RE = re.compile(r"\basync\s+def\s+fetch_async\s*\(")
 _HAS_TRANSFORM_RE = re.compile(r"\bdef\s+transform\s*\(")
@@ -813,7 +813,7 @@ async def create_data_source(req: DataSourceCreateRequest):
         raise HTTPException(status_code=400, detail="name is required")
 
     source_code = str(req.source_code or "")
-    if not source_code.strip() and source_kind in {"rss", "rest_api"}:
+    if not source_code.strip() and source_kind in {"rss", "rest_api", "twitter"}:
         source_code = build_data_source_source_code(
             source_kind=source_kind,
             slug=slug,

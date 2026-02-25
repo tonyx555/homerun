@@ -344,7 +344,7 @@ function OverviewHeroPanel({
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="flex items-start gap-3">
                 <div className="rounded-xl border border-cyan-500/25 bg-cyan-500/10 p-3">
-                  {username ? <User className="h-5 w-5 text-cyan-200" /> : <Wallet className="h-5 w-5 text-cyan-200" />}
+                  {username ? <User className="h-5 w-5 text-cyan-700 dark:text-cyan-200" /> : <Wallet className="h-5 w-5 text-cyan-700 dark:text-cyan-200" />}
                 </div>
                 <div>
                   <div className="flex items-center gap-2">
@@ -764,7 +764,7 @@ function RiskPanel({
       <div className="flex shrink-0 items-center justify-between border-b border-border/70 px-4 py-3">
         <div className="flex flex-wrap gap-1.5">
           {data.strategies_detected.slice(0, 5).map((strategy) => (
-            <Badge key={strategy} variant="outline" className="border-cyan-500/30 bg-cyan-500/10 text-cyan-200">
+            <Badge key={strategy} variant="outline" className="border-cyan-500/30 bg-cyan-500/10 text-cyan-700 dark:text-cyan-200">
               {strategy}
             </Badge>
           ))}
@@ -833,7 +833,7 @@ function SeverityBadge({ severity }: { severity: string }) {
       ? 'border-orange-500/35 bg-orange-500/15 text-orange-300'
       : normalized === 'medium'
       ? 'border-amber-500/35 bg-amber-500/15 text-amber-300'
-      : 'border-cyan-500/35 bg-cyan-500/15 text-cyan-300'
+      : 'border-cyan-500/35 bg-cyan-500/15 text-cyan-700 dark:text-cyan-300'
 
   return (
     <Badge variant="outline" className={cn('text-[10px] uppercase tracking-wide', tone)}>
@@ -1016,7 +1016,7 @@ export default function WalletAnalysisPanel({ initialWallet, initialUsername, on
         <CardContent className="p-4">
           <div className="flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
             <div>
-              <p className="text-[11px] uppercase tracking-wide text-cyan-200/90">Trader Intelligence</p>
+              <p className="text-[11px] uppercase tracking-wide text-cyan-700 dark:text-cyan-200/90">Trader Intelligence</p>
               <h2 className="mt-1 text-lg font-semibold text-foreground">Wallet Analysis</h2>
               <p className="mt-0.5 text-xs text-muted-foreground">
                 Profile any trader wallet with structured performance, execution, and anomaly intelligence.
@@ -1065,7 +1065,7 @@ export default function WalletAnalysisPanel({ initialWallet, initialUsername, on
                     className={cn(
                       'h-8 rounded-md px-2.5 text-xs transition-colors',
                       timePeriod === option.value
-                        ? 'bg-cyan-500/20 text-cyan-200'
+                        ? 'bg-cyan-500/20 text-cyan-700 dark:text-cyan-200'
                         : 'text-muted-foreground hover:text-foreground',
                     )}
                   >
@@ -1078,13 +1078,12 @@ export default function WalletAnalysisPanel({ initialWallet, initialUsername, on
 
           {activeWallet && (
             <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
-              <Badge variant="outline" className="border-cyan-500/30 bg-cyan-500/10 text-cyan-200">
+              <Badge variant="outline" className="border-cyan-500/30 bg-cyan-500/10 text-cyan-700 dark:text-cyan-200">
                 Active: {shortAddress(activeWallet)}
               </Badge>
               <Badge variant="outline" className={risk.badgeClass}>
                 Risk: {risk.label}
               </Badge>
-              <span className="text-muted-foreground">Tab data is paginated and table-scoped.</span>
             </div>
           )}
 
@@ -1120,7 +1119,7 @@ export default function WalletAnalysisPanel({ initialWallet, initialUsername, on
                     className={cn(
                       'h-8 gap-1.5 text-xs',
                       activeTab === tab.id
-                        ? 'border-cyan-500/30 bg-cyan-500/15 text-cyan-200 hover:bg-cyan-500/20'
+                        ? 'border-cyan-500/30 bg-cyan-500/15 text-cyan-700 dark:text-cyan-200 hover:bg-cyan-500/20'
                         : 'border-border bg-background/70 text-muted-foreground hover:text-foreground',
                     )}
                   >
@@ -1129,7 +1128,6 @@ export default function WalletAnalysisPanel({ initialWallet, initialUsername, on
                   </Button>
                 ))}
               </div>
-              <p className="text-xs text-muted-foreground">Designed for table-first browsing with pagination controls.</p>
             </div>
 
             <div className="min-h-0 flex-1">

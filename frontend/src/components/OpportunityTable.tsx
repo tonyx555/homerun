@@ -15,10 +15,14 @@ import {
   buildOutcomeSparklineSeries,
   extractOutcomeLabels,
   extractOutcomePrices,
+  toTimeValueSeries,
 } from '../lib/priceHistory'
+import { Liveline } from 'liveline'
+import type { LivelineSeries } from 'liveline'
+import { useAtomValue } from 'jotai'
+import { themeAtom } from '../store/atoms'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
-import Sparkline from './Sparkline'
 import {
   STRATEGY_COLORS,
   STRATEGY_ABBREV,
@@ -118,6 +122,7 @@ const TableRow = memo(function TableRow({
 }) {
   const [expanded, setExpanded] = useState(false)
   const [aiExpanded, setAiExpanded] = useState(false)
+  const themeMode = useAtomValue(themeAtom)
   const queryClient = useQueryClient()
 
   const inlineAnalysis = opportunity.ai_analysis
@@ -180,16 +185,22 @@ const TableRow = memo(function TableRow({
     ),
     [market, marketOutcomes],
   )
-  const sparklineSeries = useMemo(
+  const nowSec = useMemo(() => Math.floor(Date.now() / 1000), [sparkSeries])
+  const livelineSeries = useMemo<LivelineSeries[]>(
     () => sparkSeries.map((row, index) => ({
-      data: row.data,
+      id: row.key,
+      data: toTimeValueSeries(row.data, nowSec),
+      value: row.latest ?? row.data[row.data.length - 1] ?? 0,
       color: SPARKLINE_COLORS[index % SPARKLINE_COLORS.length],
-      lineWidth: index === 0 ? 1.1 : 0.95,
-      fill: false,
-      showDot: false,
+      label: row.label,
     })),
-    [sparkSeries],
+    [sparkSeries, nowSec],
   )
+  const primaryLivelineData = livelineSeries[0]?.data ?? []
+  const primaryLivelineValue = livelineSeries[0]?.value ?? 0
+  const livelineWindow = primaryLivelineData.length >= 2
+    ? primaryLivelineData[primaryLivelineData.length - 1].time - primaryLivelineData[0].time
+    : 60
 
   const roiPositive = opportunity.roi_percent >= 0
   const accentColor = recommendation ? (ACCENT_BAR_COLORS[recommendation] || '') : ''
@@ -230,14 +241,24 @@ const TableRow = memo(function TableRow({
 
         {/* Sparkline */}
         <div className="px-1 py-1">
-          {sparkSeries.length > 0 && (
-            <Sparkline
-              data={sparkSeries[0]?.data || []}
-              series={sparklineSeries}
-              width={60}
-              height={20}
-              lineWidth={1}
-              showDots
+          {primaryLivelineData.length >= 2 && (
+            <Liveline
+              data={primaryLivelineData}
+              value={primaryLivelineValue}
+              series={livelineSeries.length > 1 ? livelineSeries.slice(1) : undefined}
+              color={SPARKLINE_COLORS[0]}
+              theme={themeMode}
+              window={livelineWindow}
+              paused
+              grid={false}
+              badge={false}
+              fill={false}
+              pulse={false}
+              momentum={false}
+              scrub={false}
+              lerpSpeed={0.2}
+              padding={{ top: 2, right: 2, bottom: 2, left: 2 }}
+              style={{ height: 20 }}
             />
           )}
         </div>

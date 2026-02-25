@@ -1758,7 +1758,7 @@ async def get_strategy_versions_endpoint(
             strategy=row,
             reason="seed_on_versions_list",
             created_by="strategy_manager",
-            commit=False,
+            commit=True,
         )
         version_rows = await list_strategy_versions(
             session,
@@ -1790,7 +1790,7 @@ async def get_strategy_version_endpoint(
             strategy=row,
             reason="seed_on_version_read",
             created_by="strategy_manager",
-            commit=False,
+            commit=True,
         )
         available = await list_strategy_versions(session, strategy_id=strategy_id, limit=2000)
         if requested_version is None:

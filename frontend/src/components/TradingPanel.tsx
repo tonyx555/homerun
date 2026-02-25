@@ -4,7 +4,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useAtom, useAtomValue } from 'jotai'
 import { Liveline } from 'liveline'
-import type { LivelinePoint } from 'liveline'
+import type { LivelinePoint, LivelineSeries } from 'liveline'
 import {
   AlertTriangle,
   BarChart3,
@@ -100,7 +100,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs'
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip'
 import { FlashNumber } from './AnimatedNumber'
-import Sparkline from './Sparkline'
+import { toTimeValueSeries } from '../lib/priceHistory'
 import StrategyConfigForm from './StrategyConfigForm'
 
 type FeedFilter = 'all' | 'decision' | 'order' | 'event'
@@ -796,6 +796,11 @@ function extractLivelinePointsFromOrders(
   return points
 }
 
+interface BotLivelineResult {
+  primary: LivelinePoint[]
+  complement: LivelinePoint[]
+}
+
 function buildBotMarketLivelineSeries(params: {
   sharedHistory: unknown[]
   historyOrders: TraderOrder[]
@@ -804,7 +809,7 @@ function buildBotMarketLivelineSeries(params: {
   entryPrice: number | null
   openedAt: string | null
   updatedAt: string | null
-}): LivelinePoint[] {
+}): BotLivelineResult {
   const {
     sharedHistory,
     historyOrders,
@@ -814,20 +819,30 @@ function buildBotMarketLivelineSeries(params: {
     openedAt,
     updatedAt,
   } = params
-  const normalized = [
-    ...extractLivelinePointsFromSharedHistory(sharedHistory, directionSide),
-    ...extractLivelinePointsFromOrders(historyOrders, directionSide),
-  ].sort((left, right) => left.time - right.time)
 
-  const deduped: LivelinePoint[] = []
-  for (const point of normalized) {
-    const previous = deduped[deduped.length - 1]
-    if (previous && previous.time === point.time) {
-      deduped[deduped.length - 1] = point
-      continue
+  const complementSide: DirectionSide | null =
+    directionSide === 'YES' ? 'NO' : directionSide === 'NO' ? 'YES' : null
+
+  const buildSide = (side: DirectionSide | null): LivelinePoint[] => {
+    const normalized = [
+      ...extractLivelinePointsFromSharedHistory(sharedHistory, side),
+      ...extractLivelinePointsFromOrders(historyOrders, side),
+    ].sort((left, right) => left.time - right.time)
+
+    const deduped: LivelinePoint[] = []
+    for (const point of normalized) {
+      const previous = deduped[deduped.length - 1]
+      if (previous && previous.time === point.time) {
+        deduped[deduped.length - 1] = point
+        continue
+      }
+      deduped.push(point)
     }
-    deduped.push(point)
+    return deduped
   }
+
+  const deduped = buildSide(directionSide)
+  const complement = complementSide ? buildSide(complementSide) : []
 
   const livePrice = toFiniteNumber(markPrice ?? entryPrice)
   const nowSec = Math.floor(Date.now() / 1000)
@@ -856,8 +871,8 @@ function buildBotMarketLivelineSeries(params: {
     }
   }
 
-  if (deduped.length <= 800) return deduped
-  return deduped.slice(deduped.length - 800)
+  const cap = (arr: LivelinePoint[]) => arr.length <= 800 ? arr : arr.slice(arr.length - 800)
+  return { primary: cap(deduped), complement: cap(complement) }
 }
 
 function marketMatchesCryptoIdentity(value: string | null | undefined, market: CryptoMarket | null): boolean {
@@ -2924,7 +2939,7 @@ function BotTradePositionModal({
     scopedOrders,
   ])
 
-  const livelineData = useMemo(
+  const livelineResult = useMemo(
     () => buildBotMarketLivelineSeries({
       sharedHistory,
       historyOrders: relatedOrders,
@@ -2944,6 +2959,7 @@ function BotTradePositionModal({
       sharedHistory,
     ]
   )
+  const livelineData = livelineResult.primary
   const livelineValue = toFiniteNumber(metrics.markPrice ?? metrics.entryPrice)
     ?? livelineData[livelineData.length - 1]?.value
     ?? 0
@@ -2952,6 +2968,21 @@ function BotTradePositionModal({
   const lineColor = pnlPositive
     ? (isDark ? '#22c55e' : '#16a34a')
     : (isDark ? '#f87171' : '#dc2626')
+  const complementColor = isDark ? '#64748b' : '#94a3b8'
+  const complementValue = livelineResult.complement.length > 0
+    ? livelineResult.complement[livelineResult.complement.length - 1].value
+    : 0
+  const livelineSeries = useMemo<LivelineSeries[]>(() => {
+    if (livelineResult.complement.length < 2) return []
+    const complementLabel = scope.directionSide === 'YES' ? 'No' : 'Yes'
+    return [{
+      id: 'complement',
+      data: livelineResult.complement,
+      value: complementValue,
+      color: complementColor,
+      label: complementLabel,
+    }]
+  }, [livelineResult.complement, complementValue, complementColor, scope.directionSide])
   const referencePrice = metrics.entryPrice ?? toFiniteNumber(market?.price_to_beat)
   const livelineWindow = Math.max(
     timeframeChartWindowSeconds(market?.timeframe),
@@ -3061,6 +3092,7 @@ function BotTradePositionModal({
             <Liveline
               data={livelineData}
               value={livelineValue}
+              series={livelineSeries.length > 0 ? livelineSeries : undefined}
               color={lineColor}
               theme={isDark ? 'dark' : 'light'}
               showValue
@@ -7120,13 +7152,25 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                               Latest day {formatSignedCurrency(overviewLatestBucket?.resolvedPnl ?? 0)}
                             </p>
                             <div className="mt-1.5 h-8">
-                              <Sparkline
-                                data={overviewPnlSeries}
-                                width={220}
-                                height={30}
-                                color={globalSummary.resolvedPnl >= 0 ? '#22c55e' : '#ef4444'}
-                                showDots
-                              />
+                              {overviewPnlSeries.length >= 2 && (
+                                <Liveline
+                                  data={toTimeValueSeries(overviewPnlSeries)}
+                                  value={overviewPnlSeries[overviewPnlSeries.length - 1] ?? 0}
+                                  color={globalSummary.resolvedPnl >= 0 ? '#22c55e' : '#ef4444'}
+                                  theme={themeMode}
+                                  window={(overviewPnlSeries.length - 1) * 60}
+                                  paused
+                                  grid={false}
+                                  badge={false}
+                                  fill
+                                  pulse={false}
+                                  momentum={false}
+                                  scrub={false}
+                                  lerpSpeed={0.2}
+                                  padding={{ top: 2, right: 2, bottom: 2, left: 2 }}
+                                  style={{ height: 30 }}
+                                />
+                              )}
                             </div>
                           </div>
 
@@ -7143,13 +7187,25 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                               Prev {(overviewPreviousBucket?.orders ?? 0)} · Failed {(overviewLatestBucket?.failed ?? 0)}
                             </p>
                             <div className="mt-1.5 h-8">
-                              <Sparkline
-                                data={overviewOrdersSeries}
-                                width={220}
-                                height={30}
-                                color="#06b6d4"
-                                showDots
-                              />
+                              {overviewOrdersSeries.length >= 2 && (
+                                <Liveline
+                                  data={toTimeValueSeries(overviewOrdersSeries)}
+                                  value={overviewOrdersSeries[overviewOrdersSeries.length - 1] ?? 0}
+                                  color="#06b6d4"
+                                  theme={themeMode}
+                                  window={(overviewOrdersSeries.length - 1) * 60}
+                                  paused
+                                  grid={false}
+                                  badge={false}
+                                  fill
+                                  pulse={false}
+                                  momentum={false}
+                                  scrub={false}
+                                  lerpSpeed={0.2}
+                                  padding={{ top: 2, right: 2, bottom: 2, left: 2 }}
+                                  style={{ height: 30 }}
+                                />
+                              )}
                             </div>
                           </div>
 
@@ -7166,13 +7222,25 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                               Latest day {(overviewLatestBucket?.selected ?? 0)} · WR {formatPercent(globalSummary.winRate)}
                             </p>
                             <div className="mt-1.5 h-8">
-                              <Sparkline
-                                data={overviewSelectedSeries}
-                                width={220}
-                                height={30}
-                                color="#a78bfa"
-                                showDots
-                              />
+                              {overviewSelectedSeries.length >= 2 && (
+                                <Liveline
+                                  data={toTimeValueSeries(overviewSelectedSeries)}
+                                  value={overviewSelectedSeries[overviewSelectedSeries.length - 1] ?? 0}
+                                  color="#a78bfa"
+                                  theme={themeMode}
+                                  window={(overviewSelectedSeries.length - 1) * 60}
+                                  paused
+                                  grid={false}
+                                  badge={false}
+                                  fill
+                                  pulse={false}
+                                  momentum={false}
+                                  scrub={false}
+                                  lerpSpeed={0.2}
+                                  padding={{ top: 2, right: 2, bottom: 2, left: 2 }}
+                                  style={{ height: 30 }}
+                                />
+                              )}
                             </div>
                           </div>
 
@@ -7189,13 +7257,25 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                               Prev {overviewPreviousBucket?.warnings ?? 0}
                             </p>
                             <div className="mt-1.5 h-8">
-                              <Sparkline
-                                data={overviewRiskSeries}
-                                width={220}
-                                height={30}
-                                color="#f59e0b"
-                                showDots
-                              />
+                              {overviewRiskSeries.length >= 2 && (
+                                <Liveline
+                                  data={toTimeValueSeries(overviewRiskSeries)}
+                                  value={overviewRiskSeries[overviewRiskSeries.length - 1] ?? 0}
+                                  color="#f59e0b"
+                                  theme={themeMode}
+                                  window={(overviewRiskSeries.length - 1) * 60}
+                                  paused
+                                  grid={false}
+                                  badge={false}
+                                  fill
+                                  pulse={false}
+                                  momentum={false}
+                                  scrub={false}
+                                  lerpSpeed={0.2}
+                                  padding={{ top: 2, right: 2, bottom: 2, left: 2 }}
+                                  style={{ height: 30 }}
+                                />
+                              )}
                             </div>
                           </div>
                         </div>
@@ -7370,13 +7450,25 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                         <span className="text-[9px] text-muted-foreground">
                                           {row.open} open · {row.resolved} resolved
                                         </span>
-                                        <Sparkline
-                                          data={row.trend}
-                                          width={96}
-                                          height={24}
-                                          color={row.pnl >= 0 ? '#22c55e' : '#ef4444'}
-                                          showDots
-                                        />
+                                        {row.trend.length >= 2 && (
+                                          <Liveline
+                                            data={toTimeValueSeries(row.trend)}
+                                            value={row.trend[row.trend.length - 1] ?? 0}
+                                            color={row.pnl >= 0 ? '#22c55e' : '#ef4444'}
+                                            theme={themeMode}
+                                            window={(row.trend.length - 1) * 60}
+                                            paused
+                                            grid={false}
+                                            badge={false}
+                                            fill
+                                            pulse={false}
+                                            momentum={false}
+                                            scrub={false}
+                                            lerpSpeed={0.2}
+                                            padding={{ top: 2, right: 2, bottom: 2, left: 2 }}
+                                            style={{ height: 24, width: 96 }}
+                                          />
+                                        )}
                                       </div>
                                     </button>
                                   )

@@ -20,7 +20,7 @@ body:
       label: Steps to Reproduce
       description: How can we reproduce this?
       placeholder: |
-        1. Start the scanner with `./scripts/run.sh` (or `.\scripts\run.ps1` on Windows)
+        1. Start the scanner with `./scripts/infra/run.sh` (or `.\scripts\infra\run.ps1` on Windows)
         2. Navigate to the dashboard
         3. Click on...
     validations:

@@ -15,6 +15,11 @@ Example:
 
 Key insight: Information propagates slowly through interconnected markets.
 The cascade detector finds these propagation delays.
+
+The Bayesian aggregation engine (services.forecasting.engine) replaces the
+naive linear delta multiplication with proper log-likelihood-ratio
+accumulation, origin-based clustering, trimmed-mean outlier robustness, and
+market-price blending ported from the Polyseer forecasting system.
 """
 
 from __future__ import annotations
@@ -26,6 +31,8 @@ from typing import Any, Optional
 from models import Market, Event, Opportunity, MispricingType
 from .base import BaseStrategy, DecisionCheck, ExitDecision, ScoringWeights, SizingConfig
 from services.quality_filter import QualityFilterOverrides
+from services.forecasting.engine import run_forecast, evidence_log_lr as _fc_evidence_log_lr, TYPE_CAPS as _FC_TYPE_CAPS
+from services.forecasting.types import Evidence as FcEvidence, ForecastResult
 from utils.kelly import kelly_fraction
 from utils.logger import get_logger
 
@@ -177,6 +184,13 @@ _INVERSE_PATTERNS: list[tuple[re.Pattern, re.Pattern]] = [
     ),
 ]
 
+# Map edge relationship types to evidence quality tiers
+_RELATIONSHIP_TYPE_MAP: dict[str, str] = {
+    "implies": "B",     # strong structural signal
+    "correlates": "C",  # moderate shared-entity signal
+    "inverse": "B",     # strong structural (opposite direction)
+}
+
 
 # ---------------------------------------------------------------------------
 # Graph data structures
@@ -276,6 +290,11 @@ class BayesianCascadeStrategy(BaseStrategy):
 
     The cascade detector finds these propagation delays and creates
     opportunities to trade before the target market adjusts.
+
+    Uses a proper Bayesian aggregation engine (ported from Polyseer) for
+    evidence accumulation: log-likelihood ratios per evidence item,
+    origin-based clustering with intra-cluster correlation adjustment,
+    trimmed-mean outlier robustness, and market-price blending.
     """
 
     strategy_type = "bayesian_cascade"
@@ -544,6 +563,70 @@ class BayesianCascadeStrategy(BaseStrategy):
         return movers
 
     # ------------------------------------------------------------------
+    # Evidence construction from graph edges
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_evidence_from_edges(
+        source: MarketNode,
+        edges: list[DependencyEdge],
+        graph: BayesianGraph,
+    ) -> list[FcEvidence]:
+        """Convert dependency edges from a mover into Evidence objects.
+
+        Each outgoing edge from the source mover becomes a piece of evidence
+        about the target market.  The edge properties map to evidence
+        dimensions:
+
+        - type: relationship type -> quality tier (implies=B, correlates=C, inverse=B)
+        - polarity: +1 for implies/correlates, -1 for inverse
+        - verifiability: based on entity overlap count
+        - consistency: edge.strength (the heuristic correlation score)
+        - corroborations_indep: count of edges pointing to same target from
+          different sources
+        - origin_id: source market id (clusters signals from same mover)
+        """
+        evidence_items: list[FcEvidence] = []
+
+        # Count how many edges point to each target (for corroboration)
+        target_edge_counts: dict[str, int] = {}
+        for e in edges:
+            target_edge_counts[e.target_id] = target_edge_counts.get(e.target_id, 0) + 1
+
+        for edge in edges:
+            target = graph.nodes.get(edge.target_id)
+            if target is None:
+                continue
+
+            shared = source.entities & target.entities
+            ev_type = _RELATIONSHIP_TYPE_MAP.get(edge.relationship, "D")
+            polarity = -1 if edge.relationship == "inverse" else 1
+
+            # Scale verifiability by entity overlap: more shared = more verifiable
+            verifiability = min(1.0, 0.3 + 0.15 * len(shared))
+
+            # Corroborations: other edges also pointing at this target
+            corroborations = max(0, target_edge_counts.get(edge.target_id, 1) - 1)
+
+            evidence_items.append(FcEvidence(
+                id=f"{edge.source_id}:{edge.target_id}:{edge.relationship}",
+                claim=(
+                    f'"{source.market.question[:60]}" {edge.relationship} '
+                    f'"{target.market.question[:60]}"'
+                ),
+                polarity=polarity,
+                type=ev_type,
+                origin_id=edge.source_id,
+                verifiability=verifiability,
+                corroborations_indep=corroborations,
+                consistency=edge.strength,
+                first_report=False,
+                published_at=None,
+            ))
+
+        return evidence_items
+
+    # ------------------------------------------------------------------
     # Belief propagation and opportunity detection
     # ------------------------------------------------------------------
 
@@ -573,7 +656,7 @@ class BayesianCascadeStrategy(BaseStrategy):
         flagged_pairs: set[tuple[str, str]] = set(propagation_cache.get("flagged_pairs", []))
 
         for mover in movers:
-            # BFS propagation through the graph
+            # BFS propagation through the graph, collecting evidence per target
             self._propagate_bfs(
                 graph=graph,
                 source=mover,
@@ -602,32 +685,59 @@ class BayesianCascadeStrategy(BaseStrategy):
         """
         BFS propagation from a mover node through the dependency graph.
 
-        At each hop, the expected delta is attenuated by the edge strength
-        (and halved for 'correlates' relationships).
+        Collects all edges reaching each target market along the BFS path,
+        converts them to Evidence objects, and runs the Bayesian aggregation
+        engine to compute a proper posterior.  The mispricing is derived from
+        the forecast's edge_percent rather than naive linear delta.
         """
-        # Queue entries: (node_id, expected_delta, depth)
-        queue: list[tuple[str, float, int]] = []
+        # Collect all evidence items reaching each target across BFS
+        # target_id -> list of (evidence_item, depth)
+        target_evidence: dict[str, list[FcEvidence]] = {}
+
+        # Queue: (node_id, accumulated_edges_to_here, depth)
+        # accumulated_edges tracks the chain of edges that produced this visit
+        queue: list[tuple[str, list[DependencyEdge], int]] = []
         visited: set[str] = {source.market.id}
 
-        # Seed the queue with all outgoing neighbors of the source
+        # Seed: direct neighbors of the source
         for edge in graph.get_outgoing(source.market.id):
             if edge.target_id in visited:
                 continue
-            expected_delta = self._compute_expected_delta(source.price_delta, edge)
-            queue.append((edge.target_id, expected_delta, 1))
+            queue.append((edge.target_id, [edge], 1))
             visited.add(edge.target_id)
 
         while queue:
-            target_id, expected_delta, depth = queue.pop(0)
+            target_id, path_edges, depth = queue.pop(0)
 
             target_node = graph.nodes.get(target_id)
             if target_node is None:
                 continue
 
-            # How much has the target actually moved?
-            actual_delta = target_node.price_delta
-            mispricing = expected_delta - actual_delta
-            mispricing_abs = abs(mispricing)
+            # Build evidence from edges leading to this target
+            ev_items = self._build_evidence_from_edges(source, path_edges, graph)
+
+            # Also include the source's price move magnitude as a scaling
+            # factor on each evidence item.  A big mover produces stronger
+            # evidence than a tiny one.  We encode this via log_lr_hint: the
+            # engine formula produces a base LLR, and we scale by the
+            # source's absolute price delta (clamped to a reasonable range).
+            move_scale = min(5.0, abs(source.price_delta) / 0.02)  # 2c move = 1x, 10c = 5x
+            for ev in ev_items:
+                base_llr = _fc_evidence_log_lr(ev)
+                cap = _FC_TYPE_CAPS.get(ev.type, 0.2)
+                scaled = max(-cap, min(cap, base_llr * move_scale))
+                ev.log_lr_hint = scaled
+
+            target_evidence.setdefault(target_id, []).extend(ev_items)
+
+            # Run forecast for this target
+            forecast = run_forecast(
+                p0=target_node.price,
+                evidence=target_evidence[target_id],
+                market_prob=target_node.price,
+            )
+
+            mispricing_abs = abs(forecast.edge_percent) / 100.0
 
             if mispricing_abs >= min_edge_pct:
                 pair_key = (source.market.id, target_id)
@@ -636,9 +746,7 @@ class BayesianCascadeStrategy(BaseStrategy):
                     opp = self._create_cascade_opportunity(
                         source=source,
                         target=target_node,
-                        expected_delta=expected_delta,
-                        actual_delta=actual_delta,
-                        mispricing=mispricing,
+                        forecast=forecast,
                         market_to_event=market_to_event,
                     )
                     if opp is not None:
@@ -648,30 +756,11 @@ class BayesianCascadeStrategy(BaseStrategy):
             if depth < max_depth:
                 for edge in graph.get_outgoing(target_id):
                     if edge.target_id not in visited:
-                        next_delta = self._compute_expected_delta(expected_delta, edge)
-                        # Only propagate if the cascaded delta is still
-                        # meaningful (> 0.5%)
-                        if abs(next_delta) >= 0.005:
-                            queue.append((edge.target_id, next_delta, depth + 1))
-                            visited.add(edge.target_id)
-
-    @staticmethod
-    def _compute_expected_delta(source_delta: float, edge: DependencyEdge) -> float:
-        """
-        Compute expected price delta for a target based on source delta,
-        the edge relationship type, and edge strength.
-
-        - IMPLIES:    target moves same direction, scaled by strength
-        - CORRELATES: target moves same direction, scaled by strength * 0.5
-        - INVERSE:    target moves opposite direction, scaled by strength
-        """
-        if edge.relationship == "implies":
-            return source_delta * edge.strength
-        elif edge.relationship == "correlates":
-            return source_delta * edge.strength * 0.5
-        elif edge.relationship == "inverse":
-            return -source_delta * edge.strength
-        return 0.0
+                        # Pass along the edge chain so deeper targets
+                        # accumulate evidence from the full path
+                        next_edges = path_edges + [edge]
+                        queue.append((edge.target_id, next_edges, depth + 1))
+                        visited.add(edge.target_id)
 
     # ------------------------------------------------------------------
     # Opportunity creation
@@ -681,21 +770,18 @@ class BayesianCascadeStrategy(BaseStrategy):
         self,
         source: MarketNode,
         target: MarketNode,
-        expected_delta: float,
-        actual_delta: float,
-        mispricing: float,
+        forecast: ForecastResult,
         market_to_event: dict[str, Event],
     ) -> Optional[Opportunity]:
         """
         Create an arbitrage opportunity from a cascade mispricing.
 
         The position is:
-        - BUY YES if the target should go UP (expected_delta > actual_delta,
-          i.e. the target is under-priced relative to the cascade).
-        - BUY NO if the target should go DOWN (expected_delta < actual_delta,
-          i.e. the target is over-priced relative to the cascade).
+        - BUY YES if the target should go UP (p_blended > market price).
+        - BUY NO if the target should go DOWN (p_blended < market price).
         """
         target_market = target.market
+        mispricing = forecast.edge_percent / 100.0  # signed, in probability space
 
         # Determine direction and compute cost
         if mispricing > 0:
@@ -709,13 +795,6 @@ class BayesianCascadeStrategy(BaseStrategy):
             price = target_market.no_price
             token_id = target_market.clob_token_ids[1] if len(target_market.clob_token_ids) > 1 else None
 
-        # Model cost so ROI reflects the cascade edge, not full resolution
-        # probability.  Buying YES at $0.55 expecting resolution gives 78% ROI
-        # which would be filtered as implausible.  What we actually capture is
-        # the *mispricing spread*.  Using total_cost = 1.0 - |mispricing| maps
-        # the edge cleanly into the create_opportunity ROI framework:
-        #   mispricing 5%  -> total_cost 0.95 -> ROI ~3%
-        #   mispricing 10% -> total_cost 0.90 -> ROI ~9%
         total_cost = price
 
         positions = [
@@ -729,19 +808,28 @@ class BayesianCascadeStrategy(BaseStrategy):
         ]
 
         source_direction = "UP" if source.price_delta > 0 else "DOWN"
-        expected_pct = abs(expected_delta) * 100
-        actual_pct = abs(actual_delta) * 100
-        mispricing_pct = abs(mispricing) * 100
+        mispricing_pct = abs(forecast.edge_percent)
 
         event = market_to_event.get(target_market.id)
+
+        # Compute confidence from evidence quality: mean of cluster effective
+        # counts weighted by absolute contribution, normalised to [0, 1].
+        total_contribution = sum(abs(c.contribution) for c in forecast.clusters)
+        if total_contribution > 0 and forecast.clusters:
+            weighted_quality = sum(
+                abs(c.contribution) * min(1.0, c.effective_count / c.size)
+                for c in forecast.clusters
+            ) / total_contribution
+        else:
+            weighted_quality = 0.5
+        confidence = min(1.0, max(0.0, weighted_quality))
 
         description = (
             f"Source market moved {source_direction} by "
             f"{abs(source.price_delta) * 100:.1f}%: "
             f'"{source.market.question[:60]}". '
-            f"Expected target to adjust by {expected_pct:.1f}%, "
-            f"but actual adjustment is {actual_pct:.1f}% "
-            f"(mispricing: {mispricing_pct:.1f}%). "
+            f"Bayesian posterior {forecast.p_blended:.3f} vs market "
+            f"{forecast.market_prob:.3f} (edge: {mispricing_pct:.1f}%). "
             f"Position: BUY {outcome} at ${price:.3f}."
         )
 
@@ -753,10 +841,51 @@ class BayesianCascadeStrategy(BaseStrategy):
             positions=positions,
             event=event,
             is_guaranteed=False,
+            confidence=confidence,
         )
 
         if opp is not None:
             opp.mispricing_type = MispricingType.CROSS_MARKET
+            opp.strategy_context = {
+                "source_key": "scanner",
+                "strategy_slug": self.strategy_type,
+                "forecast": {
+                    "prior": round(forecast.prior, 4),
+                    "p_neutral": round(forecast.p_neutral, 4),
+                    "p_blended": round(forecast.p_blended, 4),
+                    "market_prob": round(forecast.market_prob, 4),
+                    "edge_percent": round(forecast.edge_percent, 2),
+                    "evidence_count_for": forecast.evidence_count_for,
+                    "evidence_count_against": forecast.evidence_count_against,
+                },
+                "clusters": [
+                    {
+                        "cluster_id": c.cluster_id[:40],
+                        "size": c.size,
+                        "rho": round(c.rho, 3),
+                        "effective_count": round(c.effective_count, 3),
+                        "mean_log_lr": round(c.mean_log_lr, 4),
+                        "contribution": round(c.contribution, 4),
+                    }
+                    for c in forecast.clusters
+                ],
+                "top_influence": [
+                    {
+                        "evidence_id": inf.evidence_id[:40],
+                        "claim": inf.claim[:80],
+                        "polarity": inf.polarity,
+                        "delta_pp": round(inf.delta_pp, 4),
+                    }
+                    for inf in sorted(
+                        forecast.influence, key=lambda x: x.delta_pp, reverse=True
+                    )[:5]
+                ],
+                "source_market": {
+                    "id": source.market.id,
+                    "question": source.market.question[:80],
+                    "price_delta": round(source.price_delta, 4),
+                },
+            }
 
         return opp
 
@@ -795,9 +924,17 @@ class BayesianCascadeStrategy(BaseStrategy):
     def compute_size(
         self, base_size: float, max_size: float, edge: float, confidence: float, risk_score: float, market_count: int
     ) -> float:
-        """Kelly-informed sizing for Bayesian cascade."""
-        p_estimated = 0.5 + (edge / 200.0)
+        """Kelly-informed sizing using Bayesian posterior.
+
+        Uses the forecast's p_blended as p_estimated rather than the old
+        naive ``0.5 + edge/200`` heuristic.  The edge here is
+        ``forecast.edge_percent`` so ``p_estimated = market + edge/100``.
+        """
+        # Reconstruct p_estimated from edge percent.
+        # edge is edge_percent (e.g. 5.0 means 5%).
+        # p_market defaults to 0.5; p_estimated = p_market + edge/100.
         p_market = 0.5
+        p_estimated = min(0.99, max(0.01, p_market + edge / 100.0))
         kelly_f = kelly_fraction(p_estimated, p_market, fraction=0.25)
         kelly_sz = base_size * (1.0 + kelly_f * 10.0)
         size = kelly_sz * (0.7 + confidence * 0.6) * max(0.4, 1.0 - risk_score)

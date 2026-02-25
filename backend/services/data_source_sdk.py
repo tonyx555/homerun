@@ -26,8 +26,8 @@ from services.data_source_loader import (
 
 _SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{1,48}[a-z0-9]$")
 _SOURCE_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
-_ALLOWED_SOURCE_KINDS = {"python", "rss", "rest_api"}
-_TEMPLATED_SOURCE_KINDS = {"rss", "rest_api"}
+_ALLOWED_SOURCE_KINDS = {"python", "rss", "rest_api", "twitter"}
+_TEMPLATED_SOURCE_KINDS = {"rss", "rest_api", "twitter"}
 _RETENTION_BOUNDS: dict[str, tuple[int, int]] = {
     "max_records": (1, 250_000),
     "max_age_days": (1, 3650),

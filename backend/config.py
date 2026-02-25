@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     # WebSocket URLs
     CLOB_WS_URL: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     KALSHI_WS_URL: str = "wss://api.elections.kalshi.com/trade-api/ws/v2"
+    BINANCE_WS_ENABLED: bool = True
+    BINANCE_WS_URL: str = "wss://stream.binance.com:9443/ws/btcusdt@bookTicker/ethusdt@bookTicker/solusdt@bookTicker/xrpusdt@bookTicker"
 
     # WebSocket Feed Settings
     WS_FEED_ENABLED: bool = True  # Enable real-time WebSocket price feeds
@@ -203,6 +205,12 @@ class Settings(BaseSettings):
     BTC_ETH_HF_SERIES_XRP_4H: str = "10327"
     BTC_ETH_HF_MAKER_MODE: bool = True  # Place maker (limit) orders to avoid fees & earn rebates
     BTC_ETH_HF_FEE_ESTIMATE: float = 0.0156  # Midpoint taker fee estimate at 50% probability
+
+    # Holding Reward Yield Strategy
+    HOLDING_REWARD_YIELD_ENABLED: bool = True
+    HOLDING_REWARD_MIN_APY: float = 2.0  # Minimum annualized APY (%) to surface
+    HOLDING_REWARD_MIN_LIQUIDITY: float = 5000.0  # Min USD liquidity to consider
+    HOLDING_REWARD_MIN_DAYS_TO_RESOLUTION: float = 30.0  # Must be long-dated
 
     # Miracle Strategy Thresholds
     MIRACLE_MIN_NO_PRICE: float = 0.90  # Only consider NO prices >= this

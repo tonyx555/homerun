@@ -445,6 +445,24 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         config_schema=_SCANNER_SCHEMA_MARKET_MAKING,
     ),
     SystemOpportunityStrategySeed(
+        slug="holding_reward_yield",
+        source_key="scanner",
+        import_module="services.strategies.holding_reward_yield",
+        sort_order=165,
+        config_schema={
+            "param_fields": [
+                {"key": "min_apy", "label": "Min APY (%)", "type": "number", "min": 0.1, "max": 50},
+                {"key": "min_liquidity", "label": "Min Liquidity (USD)", "type": "number", "min": 0},
+                {"key": "min_days_to_resolution", "label": "Min Days To Resolution", "type": "number", "min": 1},
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
+                {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
+                {"key": "max_risk_score", "label": "Max Risk Score", "type": "number", "min": 0, "max": 1},
+                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
+                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
+            ]
+        },
+    ),
+    SystemOpportunityStrategySeed(
         slug="stat_arb",
         source_key="scanner",
         import_module="services.strategies.stat_arb",

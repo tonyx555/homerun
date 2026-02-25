@@ -143,14 +143,14 @@ async def ensure_strategy_version_seeded(
     commit: bool = False,
 ) -> StrategyVersion:
     latest = await _latest_version_row_for_strategy(session, strategy_id=str(strategy.id))
-    if latest is not None:
-        return latest
     strategy_version = int(strategy.version or 1)
+    if latest is not None and int(latest.version or 0) >= strategy_version:
+        return latest
     seeded = await create_strategy_version_snapshot(
         session,
         strategy=strategy,
         forced_version=max(1, strategy_version),
-        parent_version=None,
+        parent_version=int(latest.version) if latest is not None else None,
         reason=reason,
         created_by=created_by,
         commit=commit,

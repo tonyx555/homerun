@@ -1,8 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-# Navigate to project root (parent of scripts/)
-cd "$(dirname "$0")/.."
+# Navigate to project root (grandparent of scripts/infra/)
+cd "$(dirname "$0")/../.."
 
 # Colors
 GREEN='\033[0;32m'
@@ -199,7 +199,7 @@ bootstrap_redis_runtime() {
         return 0
     fi
     echo -e "${CYAN}Redis runtime missing; invoking setup redis bootstrap...${NC}"
-    ./scripts/setup.sh --redis-only
+    ./scripts/infra/setup.sh --redis-only
 }
 
 cleanup_started_redis() {
@@ -337,7 +337,7 @@ bootstrap_postgres_runtime() {
         return 0
     fi
     echo -e "${CYAN}Postgres runtime missing; invoking setup postgres bootstrap...${NC}"
-    ./scripts/setup.sh --postgres-only
+    ./scripts/infra/setup.sh --postgres-only
 }
 
 cleanup_started_postgres() {
@@ -457,9 +457,53 @@ ensure_postgres() {
     exit 1
 }
 
+cleanup_stale_homerun_processes() {
+    # Kill orphaned Python worker processes from a previous crashed run.
+    local project_root
+    project_root="$(pwd)"
+    local pids
+    pids="$(ps -eo pid=,command= 2>/dev/null | grep -E 'workers\.runner|workers\.\w+_worker|uvicorn.*main:app|tui\.py' | grep -v grep | awk '{print $1}')" || true
+    if [ -z "$pids" ]; then
+        return 0
+    fi
+    local killed=0
+    for pid in $pids; do
+        if [ "$pid" = "$$" ]; then
+            continue
+        fi
+        kill -9 "$pid" 2>/dev/null && killed=$((killed + 1)) || true
+    done
+    if [ "$killed" -gt 0 ]; then
+        echo -e "${YELLOW}Cleaned up ${killed} stale Homerun process(es) from a previous run.${NC}"
+        sleep 1
+    fi
+}
+
+cleanup_local_postgres_if_owned() {
+    local pg_bin_dir
+    pg_bin_dir="$(resolve_postgres_bin_dir 2>/dev/null || true)"
+    if [ -z "$pg_bin_dir" ] || [ ! -x "$pg_bin_dir/pg_ctl" ]; then
+        return 0
+    fi
+    if local_postgres_listener_on_requested_port; then
+        "$pg_bin_dir/pg_ctl" -D "$POSTGRES_DATA_DIR" -m fast -w stop >/dev/null 2>&1 || true
+    fi
+}
+
+cleanup_local_redis_if_owned() {
+    if redis_ping; then
+        redis_shutdown >/dev/null 2>&1 || true
+    fi
+}
+
 cleanup_started_services() {
+    cleanup_stale_homerun_processes
     cleanup_started_postgres
     cleanup_started_redis
+    if [ -z "${DATABASE_URL_WAS_PROVIDED:-}" ]; then
+        cleanup_local_postgres_if_owned
+    fi
+    cleanup_local_redis_if_owned
 }
 
 needs_setup() {
@@ -521,8 +565,8 @@ current = {
     "requirements_trading_sha256": sha256(root / "backend" / "requirements-trading.txt"),
     "package_json_sha256": sha256(root / "frontend" / "package.json"),
     "package_lock_sha256": sha256(root / "frontend" / "package-lock.json"),
-    "launcher_tools_package_json_sha256": sha256(root / "scripts" / "tooling" / "package.json"),
-    "launcher_tools_package_lock_sha256": sha256(root / "scripts" / "tooling" / "package-lock.json"),
+    "launcher_tools_package_json_sha256": sha256(root / "scripts" / "infra" / "tooling" / "package.json"),
+    "launcher_tools_package_lock_sha256": sha256(root / "scripts" / "infra" / "tooling" / "package-lock.json"),
 }
 
 for key, value in current.items():
@@ -535,8 +579,13 @@ PY
 
 if needs_setup; then
     echo -e "${YELLOW}Setup missing or stale. Running setup...${NC}"
-    ./scripts/setup.sh
+    ./scripts/infra/setup.sh
 fi
+
+# Kill orphaned workers from a previous crashed run before starting services.
+cleanup_stale_homerun_processes
+
+DATABASE_URL_WAS_PROVIDED="${DATABASE_URL:-}"
 
 trap cleanup_started_services EXIT
 
@@ -549,7 +598,7 @@ else
     export DATABASE_URL="postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}"
 fi
 
-backend/venv/bin/python scripts/ensure_postgres_ready.py --database-url "$DATABASE_URL"
+backend/venv/bin/python scripts/infra/ensure_postgres_ready.py --database-url "$DATABASE_URL"
 
 # Ensure TUI dependencies are installed
 source backend/venv/bin/activate
@@ -559,7 +608,7 @@ python -c "import textual" 2>/dev/null || {
 }
 
 if [ "$RUN_SERVICE_SMOKE_TEST" -eq 1 ]; then
-    python scripts/launcher_smoke.py
+    python scripts/infra/launcher_smoke.py
     exit $?
 fi
 

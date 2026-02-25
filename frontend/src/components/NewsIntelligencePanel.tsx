@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
+import { useState, useMemo, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { AnimatePresence, motion } from 'framer-motion'
@@ -40,18 +40,22 @@ import {
   buildOutcomeSparklineSeries,
   extractOutcomeLabels,
   extractOutcomePrices,
+  toTimeValueSeries,
 } from '../lib/priceHistory'
 import {
   buildKalshiMarketUrl,
   buildPolymarketMarketUrl,
   inferMarketPlatform,
 } from '../lib/marketUrls'
+import { Liveline } from 'liveline'
+import type { LivelineSeries } from 'liveline'
+import { useAtomValue } from 'jotai'
+import { themeAtom } from '../store/atoms'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { Button } from './ui/button'
 import { Badge } from './ui/badge'
 import { Card } from './ui/card'
 import { Input } from './ui/input'
-import Sparkline from './Sparkline'
 import OpportunityEmptyState from './OpportunityEmptyState'
 
 type SubView = 'workflow' | 'feed'
@@ -589,8 +593,7 @@ function FindingCard({
 }) {
   const [expandedArticles, setExpandedArticles] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
-  const sparklineRef = useRef<HTMLDivElement>(null)
-  const [sparklineWidth, setSparklineWidth] = useState(260)
+  const themeMode = useAtomValue(themeAtom)
   const evidence = finding.evidence as Record<string, unknown> | null
   const cluster = (evidence?.cluster && typeof evidence.cluster === 'object')
     ? (evidence.cluster as Record<string, unknown>)
@@ -625,16 +628,22 @@ function FindingCard({
     [finding.price_history, odds.yes, odds.no, outcomeSnapshot, yesOutcomeLabel, noOutcomeLabel],
   )
   const hasSparkline = sparkSeries.length > 0
-  const sparklineSeries = useMemo(
+  const nowSec = useMemo(() => Math.floor(Date.now() / 1000), [sparkSeries])
+  const livelineSeries = useMemo<LivelineSeries[]>(
     () => sparkSeries.map((row, index) => ({
-      data: row.data,
+      id: row.key,
+      data: toTimeValueSeries(row.data, nowSec),
+      value: row.latest ?? row.data[row.data.length - 1] ?? 0,
       color: SPARKLINE_COLORS[index % SPARKLINE_COLORS.length],
-      lineWidth: index === 0 ? 1.6 : 1.3,
-      fill: false,
-      showDot: true,
+      label: row.label,
     })),
-    [sparkSeries],
+    [sparkSeries, nowSec],
   )
+  const primaryLivelineData = livelineSeries[0]?.data ?? []
+  const primaryLivelineValue = livelineSeries[0]?.value ?? 0
+  const livelineWindow = primaryLivelineData.length >= 2
+    ? primaryLivelineData[primaryLivelineData.length - 1].time - primaryLivelineData[0].time
+    : 60
   const marketLinks = useMemo(() => resolveFindingMarketLinks(finding), [finding])
 
   const articleCount = Math.max(
@@ -670,19 +679,6 @@ function FindingCard({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [isModalView, modalOpen])
 
-  useEffect(() => {
-    if (!hasSparkline) return
-    if (!sparklineRef.current) return
-
-    const measure = () => {
-      if (!sparklineRef.current) return
-      setSparklineWidth(Math.max(240, sparklineRef.current.offsetWidth))
-    }
-    measure()
-    const ro = new ResizeObserver(measure)
-    ro.observe(sparklineRef.current)
-    return () => ro.disconnect()
-  }, [hasSparkline, finding.id])
 
   return (
     <>
@@ -794,15 +790,29 @@ function FindingCard({
         </div>
 
         <div className="space-y-1.5 mb-3">
-          {hasSparkline && (
-            <div ref={sparklineRef} className="w-full">
-              <Sparkline
-                data={sparkSeries[0]?.data || []}
-                series={sparklineSeries}
-                width={sparklineWidth}
-                height={44}
-                lineWidth={1.5}
-                showDots
+          {hasSparkline && primaryLivelineData.length >= 2 && (
+            <div className="w-full">
+              <Liveline
+                data={primaryLivelineData}
+                value={primaryLivelineValue}
+                series={livelineSeries.length > 1 ? livelineSeries.slice(1) : undefined}
+                color={SPARKLINE_COLORS[0]}
+                theme={themeMode}
+                window={livelineWindow}
+                paused
+                grid={isModalView}
+                badge={false}
+                fill={livelineSeries.length <= 2}
+                pulse={false}
+                momentum={isModalView}
+                scrub={isModalView}
+                seriesToggleCompact
+                lerpSpeed={0.15}
+                padding={isModalView
+                  ? { top: 6, right: 6, bottom: 6, left: 6 }
+                  : { top: 4, right: 4, bottom: 4, left: 4 }}
+                formatValue={(v) => v.toFixed(2)}
+                style={{ height: isModalView ? 120 : 56 }}
               />
               <div className="mt-0 flex flex-wrap gap-x-1.5 gap-y-0.5 px-0.5 text-[9px] font-data">
                 {sparkSeries.map((row, index) => (

@@ -73,9 +73,14 @@ homerun/
 │   └── versions/               # Timestamped migration files
 ├── data/                       # Postgres data dir (launcher-managed)
 ├── scripts/                    # Run/setup scripts and OS launchers
-│   ├── run.sh / run.ps1        # Application launchers
-│   ├── setup.sh / setup.ps1    # Environment setup
-│   └── Homerun.*               # OS-specific click-to-run launchers
+│   ├── infra/                  # Setup, runtime, and health checks
+│   │   ├── run.sh / run.ps1   # Application launchers
+│   │   ├── setup.sh / setup.ps1 # Environment setup
+│   │   └── tooling/           # Syntax checker
+│   ├── launchers/             # OS-specific click-to-run launchers
+│   │   └── Homerun.*
+│   ├── ml/                    # Offline ML pipelines
+│   └── monitoring/            # Live operational monitoring
 ├── tui.py                      # Terminal UI (Textual + Rich)
 └── docs/                       # Documentation and strategy research
 ```

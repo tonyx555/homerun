@@ -61,6 +61,7 @@ _DEFAULT_RETENTION_BY_KIND: dict[str, dict[str, int]] = {
     "python": {"max_records": 25_000, "max_age_days": 180},
     "rss": {"max_records": 7_500, "max_age_days": 30},
     "rest_api": {"max_records": 15_000, "max_age_days": 45},
+    "twitter": {"max_records": 10_000, "max_age_days": 14},
 }
 
 _EVENTS_RETENTION_POLICY: dict[str, int] = {"max_records": 50_000, "max_age_days": 365}
@@ -157,6 +158,18 @@ def _rest_api_config_schema() -> dict:
             {"key": "category_override", "label": "Category Override", "type": "string"},
             {"key": "feed_source", "label": "Feed Source", "type": "string"},
             {"key": "limit", "label": "Max Records", "type": "integer", "min": 1, "max": 5000},
+        ]
+    }
+
+
+def _twitter_config_schema() -> dict:
+    return {
+        "param_fields": [
+            {"key": "handles", "label": "Accounts (@handles, comma-separated)", "type": "string"},
+            {"key": "keywords", "label": "Keywords (comma-separated)", "type": "string"},
+            {"key": "bearer_token", "label": "X API Bearer Token (optional)", "type": "string"},
+            {"key": "nitter_instance", "label": "Nitter Instance", "type": "string"},
+            {"key": "limit", "label": "Max Tweets", "type": "integer", "min": 1, "max": 200},
         ]
     }
 
@@ -404,6 +417,203 @@ def _stories_rest_api_source_code(
     return "\n".join([*imports, *class_lines])
 
 
+def _twitter_default_config(
+    *,
+    handles: str,
+    keywords: str,
+    bearer_token: str,
+    nitter_instance: str,
+) -> dict:
+    return {
+        "handles": str(handles or "").strip(),
+        "keywords": str(keywords or "").strip(),
+        "bearer_token": str(bearer_token or "").strip(),
+        "nitter_instance": str(nitter_instance or "nitter.privacydev.net").strip(),
+        "limit": 50,
+    }
+
+
+def _twitter_source_code(
+    *,
+    class_name: str,
+    source_name: str,
+    source_description: str,
+    default_config: dict,
+    include_seed_marker: bool,
+) -> str:
+    imports = [
+        _SEED_MARKER if include_seed_marker else None,
+        "from __future__ import annotations",
+        "",
+        "import hashlib",
+        "from datetime import datetime, timezone",
+        "",
+        "import httpx",
+        "from services.data_source_sdk import BaseDataSource",
+    ]
+    imports = [line for line in imports if line is not None]
+
+    class_lines = [
+        "",
+        "",
+        f"class {class_name}(BaseDataSource):",
+        f'    name = "{_escape_py_string(source_name)}"',
+        f'    description = "{_escape_py_string(source_description)}"',
+        "",
+        f"    default_config = {repr(default_config)}",
+        "",
+        "    async def fetch_async(self):",
+        "        raw_handles = str(self.config.get('handles') or '').strip()",
+        "        raw_keywords = str(self.config.get('keywords') or '').strip()",
+        "        handles = [h.strip().lstrip('@').lower() for h in raw_handles.split(',') if h.strip()]",
+        "        keywords = [k.strip() for k in raw_keywords.split(',') if k.strip()]",
+        "        bearer_token = str(self.config.get('bearer_token') or '').strip()",
+        "        nitter_instance = str(self.config.get('nitter_instance') or 'nitter.privacydev.net').strip().rstrip('/')",
+        "        limit = self._as_int(self.config.get('limit'), 50, 1, 200)",
+        "",
+        "        if not handles and not keywords:",
+        "            return []",
+        "",
+        "        if bearer_token:",
+        "            return await self._fetch_x_api(handles, keywords, bearer_token, limit)",
+        "        return await self._fetch_nitter(handles, nitter_instance, limit)",
+        "",
+        "    async def _fetch_x_api(self, handles, keywords, bearer_token, limit):",
+        "        query_parts = []",
+        "        for handle in handles:",
+        "            query_parts.append(f'from:{handle}')",
+        "        for keyword in keywords:",
+        "            query_parts.append(keyword)",
+        "        if not query_parts:",
+        "            return []",
+        "        query = ' OR '.join(query_parts)",
+        "        headers = {",
+        "            'Authorization': f'Bearer {bearer_token}',",
+        "            'User-Agent': 'HomerunPredictionMarketBot/1.0',",
+        "        }",
+        "        params = {",
+        "            'query': query,",
+        "            'max_results': str(min(limit, 100)),",
+        "            'tweet.fields': 'created_at,author_id,public_metrics,entities',",
+        "            'expansions': 'author_id',",
+        "            'user.fields': 'username,name',",
+        "        }",
+        "        try:",
+        "            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:",
+        "                response = await client.get(",
+        "                    'https://api.x.com/2/tweets/search/recent',",
+        "                    headers=headers,",
+        "                    params=params,",
+        "                )",
+        "                if response.status_code == 429:",
+        "                    return []",
+        "                response.raise_for_status()",
+        "                payload = response.json()",
+        "        except Exception:",
+        "            return []",
+        "",
+        "        users_by_id = {}",
+        "        for user in (payload.get('includes') or {}).get('users') or []:",
+        "            if isinstance(user, dict):",
+        "                users_by_id[str(user.get('id') or '')] = user",
+        "",
+        "        records = []",
+        "        for tweet in (payload.get('data') or [])[:limit]:",
+        "            if not isinstance(tweet, dict):",
+        "                continue",
+        "            tweet_id = str(tweet.get('id') or '').strip()",
+        "            text = str(tweet.get('text') or '').strip()",
+        "            if not tweet_id or not text:",
+        "                continue",
+        "            author_id = str(tweet.get('author_id') or '').strip()",
+        "            author = users_by_id.get(author_id, {})",
+        "            username = str(author.get('username') or '').strip().lower()",
+        "            author_name = str(author.get('name') or username).strip()",
+        "            metrics = tweet.get('public_metrics') or {}",
+        "            observed = self._parse_datetime(tweet.get('created_at'))",
+        "            observed_at = observed.isoformat() if observed is not None else None",
+        "            tweet_url = f'https://x.com/{username}/status/{tweet_id}' if username else f'https://x.com/i/status/{tweet_id}'",
+        "",
+        "            tags = ['twitter', 'social_media']",
+        "            if username:",
+        "                tags.append(username)",
+        "            for kw in keywords:",
+        "                if kw.lower() in text.lower():",
+        "                    tags.append(kw.lower())",
+        "",
+        "            records.append({",
+        "                'external_id': hashlib.sha256(f'tweet:{tweet_id}'.encode('utf-8')).hexdigest()[:32],",
+        "                'title': (f'@{username}: {text}' if username else text)[:280],",
+        "                'summary': text[:2000],",
+        "                'url': tweet_url,",
+        "                'source': f'twitter/@{username}' if username else 'twitter',",
+        "                'category': 'social_media',",
+        "                'observed_at': observed_at,",
+        "                'tags': tags,",
+        "                'payload': {",
+        "                    'tweet_id': tweet_id,",
+        "                    'author_id': author_id,",
+        "                    'username': username,",
+        "                    'author_name': author_name,",
+        "                    'full_text': text,",
+        "                    'retweet_count': metrics.get('retweet_count', 0),",
+        "                    'like_count': metrics.get('like_count', 0),",
+        "                    'reply_count': metrics.get('reply_count', 0),",
+        "                    'quote_count': metrics.get('quote_count', 0),",
+        "                    'impression_count': metrics.get('impression_count', 0),",
+        "                },",
+        "            })",
+        "        return records",
+        "",
+        "    async def _fetch_nitter(self, handles, nitter_instance, limit):",
+        "        if not handles:",
+        "            return []",
+        "        records = []",
+        "        for handle in handles:",
+        "            rss_url = f'https://{nitter_instance}/{handle}/rss'",
+        "            feed_title, entries = await self._fetch_rss(rss_url, timeout=20.0)",
+        "            for entry in list(entries or [])[:max(1, limit // max(len(handles), 1))]:",
+        "                guid = str(entry.get('id') or entry.get('guid') or entry.get('link') or '').strip()",
+        "                if not guid:",
+        "                    continue",
+        "                title_text = str(entry.get('title') or '').strip()",
+        "                description = str(entry.get('summary') or entry.get('description') or '').strip()",
+        "                link = str(entry.get('link') or '').strip()",
+        "                published = entry.get('published_parsed') or entry.get('updated_parsed')",
+        "                observed = self._parse_datetime(published)",
+        "                observed_at = observed.isoformat() if observed is not None else None",
+        "",
+        "                tweet_text = title_text or description",
+        "                # Strip HTML tags from nitter RSS content",
+        "                import re as _re",
+        "                clean_text = _re.sub(r'<[^>]+>', '', tweet_text).strip()",
+        "",
+        "                tags = ['twitter', 'social_media', handle]",
+        "                records.append({",
+        "                    'external_id': hashlib.sha256(f'nitter:{handle}:{guid}'.encode('utf-8')).hexdigest()[:32],",
+        "                    'title': f'@{handle}: {clean_text}'[:280],",
+        "                    'summary': clean_text[:2000],",
+        "                    'url': link or f'https://x.com/{handle}',",
+        "                    'source': f'twitter/@{handle}',",
+        "                    'category': 'social_media',",
+        "                    'observed_at': observed_at,",
+        "                    'tags': tags,",
+        "                    'payload': {",
+        "                        'username': handle,",
+        "                        'full_text': clean_text,",
+        "                        'nitter_instance': nitter_instance,",
+        "                        'feed_source': 'nitter',",
+        "                    },",
+        "                })",
+        "            if len(records) >= limit:",
+        "                break",
+        "        return records[:limit]",
+        "",
+    ]
+
+    return "\n".join([*imports, *class_lines])
+
+
 def build_data_source_source_code(
     *,
     source_kind: str,
@@ -447,6 +657,24 @@ def build_data_source_source_code(
             default_config.update(dict(config))
         class_name = _source_class_name_from_slug(normalized_slug, suffix="RestApiSource")
         return _stories_rest_api_source_code(
+            class_name=class_name,
+            source_name=source_name,
+            source_description=source_description,
+            default_config=default_config,
+            include_seed_marker=include_seed_marker,
+        )
+
+    if normalized_kind == "twitter":
+        default_config = _twitter_default_config(
+            handles=str((config or {}).get("handles") or "").strip(),
+            keywords=str((config or {}).get("keywords") or "").strip(),
+            bearer_token=str((config or {}).get("bearer_token") or "").strip(),
+            nitter_instance=str((config or {}).get("nitter_instance") or "nitter.privacydev.net").strip(),
+        )
+        if config:
+            default_config.update(dict(config))
+        class_name = _source_class_name_from_slug(normalized_slug, suffix="TwitterSource")
+        return _twitter_source_code(
             class_name=class_name,
             source_name=source_name,
             source_description=source_description,

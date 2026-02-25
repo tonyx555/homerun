@@ -4194,3 +4194,155 @@ export const getUnifiedDataSourceDocs = async (): Promise<Record<string, any>> =
   const { data } = await api.get('/data-sources/docs')
   return unwrapApiData(data)
 }
+
+
+// ==================== ML Training Pipeline ====================
+
+export interface MLRecorderConfig {
+  is_recording: boolean
+  interval_seconds: number
+  retention_days: number
+  assets: string[]
+  timeframes: string[]
+  schedule_enabled: boolean
+  schedule_start_utc: string | null
+  schedule_end_utc: string | null
+}
+
+export interface MLRecorderStats {
+  config: MLRecorderConfig
+  total_snapshots: number
+  oldest_snapshot: string | null
+  newest_snapshot: string | null
+  snapshots_by_asset: Record<string, number>
+}
+
+export interface MLTrainingJob {
+  id: string
+  status: string
+  model_type: string
+  assets: string[]
+  timeframes: string[]
+  progress: number
+  message: string | null
+  error: string | null
+  trained_model_id: string | null
+  result_summary: Record<string, any> | null
+  created_at: string | null
+  started_at: string | null
+  finished_at: string | null
+}
+
+export interface MLTrainedModel {
+  id: string
+  name: string
+  model_type: string
+  version: number
+  status: string
+  assets: string[]
+  timeframes: string[]
+  train_accuracy: number | null
+  test_accuracy: number | null
+  test_auc: number | null
+  feature_importance: Record<string, number> | null
+  train_samples: number
+  test_samples: number
+  training_date_range: { start: string | null; end: string | null } | null
+  walkforward_results: any[] | null
+  created_at: string | null
+  promoted_at: string | null
+  notes: string | null
+}
+
+export interface MLDataStats {
+  total_snapshots: number
+  oldest: string | null
+  newest: string | null
+  groups: Array<{
+    asset: string
+    timeframe: string
+    count: number
+    oldest: string | null
+    newest: string | null
+  }>
+}
+
+// Recorder
+export const getMLRecorderConfig = async (): Promise<MLRecorderStats> => {
+  const { data } = await api.get('/ml/recorder/config')
+  return data
+}
+
+export const updateMLRecorderConfig = async (config: Partial<MLRecorderConfig>): Promise<MLRecorderStats> => {
+  const { data } = await api.put('/ml/recorder/config', config)
+  return data
+}
+
+// Data
+export const getMLDataStats = async (): Promise<MLDataStats> => {
+  const { data } = await api.get('/ml/data/stats')
+  return data
+}
+
+export const pruneMLData = async (olderThanDays?: number, confirm = false) => {
+  const { data } = await api.post('/ml/data/prune', { older_than_days: olderThanDays, confirm })
+  return data
+}
+
+export const deleteAllMLData = async () => {
+  const { data } = await api.delete('/ml/data/all', { params: { confirm: true } })
+  return data
+}
+
+// Training
+export const startMLTraining = async (params: {
+  model_type?: string
+  assets?: string[]
+  timeframes?: string[]
+  days_lookback?: number
+  hyperparams?: Record<string, any>
+}): Promise<{ job_id: string; status: string }> => {
+  const { data } = await api.post('/ml/train', params)
+  return data
+}
+
+export const getMLTrainingJobs = async (status?: string): Promise<MLTrainingJob[]> => {
+  const { data } = await api.get('/ml/train/jobs', { params: { status } })
+  return Array.isArray(data) ? data : []
+}
+
+export const getMLTrainingJob = async (jobId: string): Promise<MLTrainingJob> => {
+  const { data } = await api.get(`/ml/train/jobs/${jobId}`)
+  return data
+}
+
+// Models
+export const getMLModels = async (status?: string): Promise<MLTrainedModel[]> => {
+  const { data } = await api.get('/ml/models', { params: { status } })
+  return Array.isArray(data) ? data : []
+}
+
+export const getMLModel = async (modelId: string): Promise<MLTrainedModel> => {
+  const { data } = await api.get(`/ml/models/${modelId}`)
+  return data
+}
+
+export const promoteMLModel = async (modelId: string) => {
+  const { data } = await api.post(`/ml/models/${modelId}/promote`)
+  return data
+}
+
+export const archiveMLModel = async (modelId: string) => {
+  const { data } = await api.post(`/ml/models/${modelId}/archive`)
+  return data
+}
+
+export const deleteMLModel = async (modelId: string) => {
+  const { data } = await api.delete(`/ml/models/${modelId}`, { params: { confirm: true } })
+  return data
+}
+
+export const getActiveMLModel = async (modelType?: string) => {
+  const { data } = await api.get('/ml/active-model', { params: { model_type: modelType } })
+  return data
+}

@@ -34,6 +34,7 @@ import DataSourceApiDocsFlyout from './DataSourceApiDocsFlyout'
 import DataSourcePreviewFlyout from './DataSourcePreviewFlyout'
 import RestApiSourceForm from './RestApiSourceForm'
 import RssSourceForm from './RssSourceForm'
+import TwitterSourceForm from './TwitterSourceForm'
 import StrategyConfigForm from './StrategyConfigForm'
 import { getWorldSourceStatus } from '../services/eventsApi'
 import {
@@ -197,6 +198,7 @@ const SOURCE_KIND_LABELS: Record<string, string> = {
   python: 'Python',
   rss: 'RSS Feed',
   rest_api: 'REST API',
+  twitter: 'Twitter/X',
 }
 
 interface NewDataSourceTemplate {
@@ -243,7 +245,7 @@ const FALLBACK_TEMPLATE = [
 
 const DEFAULT_NEW_SOURCE_PRESET_ID = 'python_custom'
 const DEFAULT_REST_API_PRESET_ID = 'rest_api_custom'
-const CREATE_SOURCE_KIND_ORDER = ['python', 'rss', 'rest_api']
+const CREATE_SOURCE_KIND_ORDER = ['python', 'rss', 'rest_api', 'twitter']
 
 export default function DataSourcesManager() {
   const queryClient = useQueryClient()
@@ -386,6 +388,23 @@ export default function DataSourcesManager() {
       })
     }
 
+    const hasTwitterTemplate = presets.some((preset) => preset.source_kind === 'twitter')
+    if (!hasTwitterTemplate) {
+      presets.push({
+        id: 'twitter_custom',
+        slug_prefix: 'custom_twitter',
+        name: 'Custom Twitter/X Source',
+        description: 'Ingest tweets from Twitter/X handles or keyword searches',
+        source_key: 'custom',
+        source_kind: 'twitter',
+        source_code: templateQuery.data?.template || FALLBACK_TEMPLATE,
+        retention: {},
+        config: {},
+        config_schema: { param_fields: [] },
+        is_system_seed: false,
+      })
+    }
+
     return presets
   }, [templateQuery.data?.presets, templateQuery.data?.template])
 
@@ -410,9 +429,7 @@ export default function DataSourcesManager() {
 
   const templatesForCreateKind = useMemo(() => {
     const normalizedKind = String(newSourceTemplateKind || '').trim().toLowerCase()
-    const byKind = templatePresets.filter((preset) => String(preset.source_kind || '').trim().toLowerCase() === normalizedKind)
-    if (byKind.length > 0) return byKind
-    return templatePresets
+    return templatePresets.filter((preset) => String(preset.source_kind || '').trim().toLowerCase() === normalizedKind)
   }, [templatePresets, newSourceTemplateKind])
 
   const selectedCreateTemplate = useMemo(() => {
@@ -506,19 +523,18 @@ export default function DataSourcesManager() {
     }
   }, [catalog, selectedSourceId, draftToken])
 
+  const templateDefaultsAppliedRef = useRef(false)
   useEffect(() => {
-    if (templatePresets.length === 0) return
+    if (templatePresets.length === 0 || templateDefaultsAppliedRef.current) return
+    templateDefaultsAppliedRef.current = true
     const defaultKind = String(templateQuery.data?.default_preset || '').trim()
     const defaultTemplate = templatePresets.find((preset) => preset.id === defaultKind)
-      || templatePresets.find((preset) => String(preset.source_kind || '').trim().toLowerCase() === String(newSourceTemplateKind || '').trim().toLowerCase())
       || templatePresets[0]
     const normalizedKind = String(defaultTemplate.source_kind || 'python').trim().toLowerCase() || 'python'
     const kindTemplates = templatePresets.filter((preset) => String(preset.source_kind || '').trim().toLowerCase() === normalizedKind)
-    if (!kindTemplates.some((preset) => preset.id === newSourceTemplateKey)) {
-      setNewSourceTemplateKind(normalizedKind)
-      setNewSourceTemplateKey(kindTemplates[0]?.id || templatePresets[0]?.id || '')
-    }
-  }, [templateQuery.data?.default_preset, templatePresets, newSourceTemplateKind, newSourceTemplateKey])
+    setNewSourceTemplateKind(normalizedKind)
+    setNewSourceTemplateKey(kindTemplates[0]?.id || templatePresets[0]?.id || '')
+  }, [templatePresets, templateQuery.data?.default_preset])
 
   useEffect(() => {
     if (!selectedSourceId) {
@@ -684,6 +700,7 @@ export default function DataSourcesManager() {
     const normalizedKind = String(fallback?.source_kind || 'python').trim().toLowerCase() || 'python'
     const normalizedSourceKey = String(fallback?.source_key || 'custom').trim().toLowerCase() || 'custom'
 
+    templateDefaultsAppliedRef.current = true
     setShowCreateModal(true)
     setNewSourceName(fallback?.name || 'Custom Data Source')
     setNewSourceDescription(fallback?.description || '')
@@ -759,7 +776,7 @@ export default function DataSourcesManager() {
     }
   }, [editorSchemaJson])
 
-  const hasSimpleForm = editorSourceKind === 'rss' || editorSourceKind === 'rest_api'
+  const hasSimpleForm = editorSourceKind === 'rss' || editorSourceKind === 'rest_api' || editorSourceKind === 'twitter'
   const saveDisabled = busy || !editorName.trim() || !editorSlug.trim() || (!hasSimpleForm && !editorCode.trim())
 
   const latestRun = runsQuery.data?.runs?.[0] || null
@@ -1256,7 +1273,7 @@ export default function DataSourcesManager() {
                       <div className="flex items-center gap-2">
                         <Settings2 className="w-3.5 h-3.5 text-cyan-400" />
                         <span className="text-xs font-medium">
-                          {editorSourceKind === 'rss' ? 'RSS Feed Configuration' : 'REST API Configuration'}
+                          {editorSourceKind === 'rss' ? 'RSS Feed Configuration' : editorSourceKind === 'twitter' ? 'Twitter/X Configuration' : 'REST API Configuration'}
                         </span>
                       </div>
                       <button
@@ -1271,6 +1288,13 @@ export default function DataSourcesManager() {
                     <div className="flex-1 min-h-0 overflow-auto px-4 pb-3">
                       {editorSourceKind === 'rss' ? (
                         <RssSourceForm
+                          config={(() => {
+                            try { return JSON.parse(editorConfigJson || '{}') } catch { return {} }
+                          })()}
+                          onChange={(config) => setEditorConfigJson(JSON.stringify(config, null, 2))}
+                        />
+                      ) : editorSourceKind === 'twitter' ? (
+                        <TwitterSourceForm
                           config={(() => {
                             try { return JSON.parse(editorConfigJson || '{}') } catch { return {} }
                           })()}

@@ -445,3 +445,18 @@ export function buildYesNoSparklineSeries(
 
   return { yes, no }
 }
+
+/**
+ * Convert a numeric sparkline series into `{time, value}` points suitable for
+ * Liveline.  When real timestamps are unavailable we synthesise evenly-spaced
+ * times ending at `now` so the chart fills naturally.
+ */
+export function toTimeValueSeries(
+  values: number[],
+  nowSec: number = Math.floor(Date.now() / 1000),
+  spacingSec: number = 60,
+): { time: number; value: number }[] {
+  if (values.length < 2) return []
+  const start = nowSec - (values.length - 1) * spacingSec
+  return values.map((value, i) => ({ time: start + i * spacingSec, value }))
+}

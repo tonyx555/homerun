@@ -154,6 +154,43 @@ class ChainlinkFeed:
             return best_price
         return None
 
+    def update_from_binance_direct(
+        self,
+        asset: str,
+        mid: float,
+        bid: float,
+        ask: float,
+        timestamp_ms: int,
+    ) -> None:
+        """Ingest a direct Binance price update into ``_prices_by_source``.
+
+        Called by the :class:`~services.binance_feed.BinanceFeed` on_update
+        callback (wired in ``crypto_worker``).  Writes to source
+        ``"binance_direct"`` alongside the existing ``"binance"``
+        (RTDS-relayed) and ``"chainlink"`` entries.
+
+        Does NOT overwrite ``_prices[asset]`` — Chainlink remains the
+        primary price.  Only sets ``_prices[asset]`` as a last resort if
+        no other source has written yet.
+        """
+        asset = asset.upper()
+        oracle = OraclePrice(asset=asset, price=mid, updated_at_ms=timestamp_ms)
+        oracle.source = "binance_direct"
+
+        if asset not in self._prices_by_source:
+            self._prices_by_source[asset] = {}
+        self._prices_by_source[asset]["binance_direct"] = oracle
+
+        # Only write to primary price dict if no other source exists yet.
+        existing = self._prices.get(asset)
+        if existing is None:
+            self._prices[asset] = oracle
+            if self._on_update:
+                try:
+                    self._on_update(oracle)
+                except Exception:
+                    pass
+
     def on_update(self, callback: Callable[[OraclePrice], None]) -> None:
         """Register a callback for price updates."""
         self._on_update = callback

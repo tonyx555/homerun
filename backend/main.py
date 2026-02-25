@@ -48,6 +48,7 @@ from api.routes_validation import router as validation_router
 from api.routes_trader_orchestrator import router as trader_orchestrator_router
 from api.routes_trader_sources import router as trader_sources_router
 from api.routes_strategies import router as strategies_router
+from api.routes_ml import router as ml_router
 from api.routes_data_sources import router as data_sources_router
 from api.routes_traders import router as traders_router
 from services.wallet_tracker import wallet_tracker
@@ -852,6 +853,7 @@ app.include_router(signals_router, prefix="/api", tags=["Signals"])
 app.include_router(workers_router, prefix="/api", tags=["Workers"])
 app.include_router(validation_router, prefix="/api", tags=["Validation"])
 app.include_router(events_router, prefix="/api", tags=["Events"])
+app.include_router(ml_router, prefix="/api", tags=["ML Training Pipeline"])
 
 
 # WebSocket endpoint

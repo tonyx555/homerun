@@ -12,8 +12,8 @@ Thanks for your interest in contributing. This document covers the process for c
    ```
 3. Set up your development environment:
    ```bash
-   ./scripts/setup.sh
-   ./scripts/run.sh
+   ./scripts/infra/setup.sh
+   ./scripts/infra/run.sh
    ```
 4. Create a feature branch:
    ```bash

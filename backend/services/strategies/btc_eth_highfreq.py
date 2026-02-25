@@ -208,6 +208,9 @@ CRYPTO_HF_SCOPE_DEFAULTS: dict[str, Any] = {
     "oracle_fallback_degrade_edge_multiplier": 1.35,
     "oracle_fallback_degrade_confidence_multiplier": 1.08,
     "oracle_fallback_degrade_size_multiplier": 0.45,
+    "oracle_fallback_degrade_edge_multiplier_direct": 1.15,
+    "oracle_fallback_degrade_confidence_multiplier_direct": 1.04,
+    "oracle_fallback_degrade_size_multiplier_direct": 0.70,
     "min_edge_persistence_ms": 1400,
     "max_recent_move_zscore_for_entry": 2.25,
     "max_spread_widening_bps": 28.0,
@@ -586,6 +589,8 @@ def _normalize_oracle_source(value: Any) -> str | None:
         return None
     if "chainlink" in text:
         return "chainlink"
+    if "binance_direct" in text:
+        return "binance_direct"
     if "binance" in text:
         return "binance"
     return text
@@ -739,6 +744,8 @@ def _extract_oracle_status(
     if selected_source not in by_source:
         if "chainlink" in by_source:
             selected_source = "chainlink"
+        elif "binance_direct" in by_source:
+            selected_source = "binance_direct"
         elif "binance" in by_source:
             selected_source = "binance"
         elif by_source:
@@ -3105,6 +3112,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         )
         chainlink_point = oracle_by_source.get("chainlink")
         binance_point = oracle_by_source.get("binance")
+        binance_direct_point = oracle_by_source.get("binance_direct")
         chainlink_age_ms = (
             self._float(chainlink_point.get("age_ms"))
             if isinstance(chainlink_point, dict)
@@ -3115,7 +3123,17 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             if isinstance(binance_point, dict)
             else (oracle_age_ms if str(oracle_status.get("source") or "").strip().lower() == "binance" else None)
         )
-        binance_fresh = binance_age_ms is not None and binance_age_ms <= max_oracle_age_ms
+        binance_direct_age_ms = (
+            self._float(binance_direct_point.get("age_ms"))
+            if isinstance(binance_direct_point, dict)
+            else None
+        )
+        binance_rtds_fresh = binance_age_ms is not None and binance_age_ms <= max_oracle_age_ms
+        binance_direct_fresh = binance_direct_age_ms is not None and binance_direct_age_ms <= max_oracle_age_ms
+        binance_fresh = binance_rtds_fresh or binance_direct_fresh
+        # Prefer direct Binance (lower latency) over RTDS-relayed Binance.
+        binance_fallback_source = "binance_direct" if binance_direct_fresh else "binance"
+        binance_fallback_point = binance_direct_point if binance_direct_fresh else binance_point
         chainlink_stale_binance_fresh = (
             chainlink_age_ms is not None and chainlink_age_ms > max_oracle_age_ms and bool(binance_fresh)
         )
@@ -3134,19 +3152,19 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             else:
                 oracle_fallback_used = True
                 oracle_fallback_degraded = oracle_source_policy == "degrade"
-                oracle_effective_source = "binance"
+                oracle_effective_source = binance_fallback_source
                 fallback_price_to_beat = self._float(oracle_status.get("price_to_beat"))
-                if isinstance(binance_point, dict):
-                    fallback_price = self._float(binance_point.get("price"))
-                    fallback_updated_at_ms = self._float(binance_point.get("updated_at_ms"))
-                    fallback_age_ms = self._float(binance_point.get("age_ms"))
+                if isinstance(binance_fallback_point, dict):
+                    fallback_price = self._float(binance_fallback_point.get("price"))
+                    fallback_updated_at_ms = self._float(binance_fallback_point.get("updated_at_ms"))
+                    fallback_age_ms = self._float(binance_fallback_point.get("age_ms"))
                     if fallback_price is not None:
                         oracle_status["price"] = fallback_price
                     if fallback_updated_at_ms is not None:
                         oracle_status["updated_at_ms"] = int(fallback_updated_at_ms)
                     if fallback_age_ms is not None:
                         oracle_status["age_ms"] = fallback_age_ms
-                    oracle_status["source"] = "binance"
+                    oracle_status["source"] = binance_fallback_source
                     oracle_age_ms = self._float(oracle_status.get("age_ms"))
                     oracle_age_seconds = (oracle_age_ms / 1000.0) if oracle_age_ms is not None else None
                 fallback_price = self._float(oracle_status.get("price"))
@@ -3178,21 +3196,40 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         oracle_threshold_conf_multiplier = 1.0
         oracle_size_multiplier = 1.0
         if oracle_fallback_degraded:
-            oracle_threshold_edge_multiplier = clamp(
-                to_float(params.get("oracle_fallback_degrade_edge_multiplier"), 1.35),
-                1.0,
-                3.0,
-            )
-            oracle_threshold_conf_multiplier = clamp(
-                to_float(params.get("oracle_fallback_degrade_confidence_multiplier"), 1.08),
-                1.0,
-                2.0,
-            )
-            oracle_size_multiplier = clamp(
-                to_float(params.get("oracle_fallback_degrade_size_multiplier"), 0.45),
-                0.05,
-                1.0,
-            )
+            # Direct Binance WS has lower latency than RTDS relay — apply
+            # reduced degradation penalties when it is the fallback source.
+            if oracle_effective_source == "binance_direct":
+                oracle_threshold_edge_multiplier = clamp(
+                    to_float(params.get("oracle_fallback_degrade_edge_multiplier_direct"), 1.15),
+                    1.0,
+                    3.0,
+                )
+                oracle_threshold_conf_multiplier = clamp(
+                    to_float(params.get("oracle_fallback_degrade_confidence_multiplier_direct"), 1.04),
+                    1.0,
+                    2.0,
+                )
+                oracle_size_multiplier = clamp(
+                    to_float(params.get("oracle_fallback_degrade_size_multiplier_direct"), 0.70),
+                    0.05,
+                    1.0,
+                )
+            else:
+                oracle_threshold_edge_multiplier = clamp(
+                    to_float(params.get("oracle_fallback_degrade_edge_multiplier"), 1.35),
+                    1.0,
+                    3.0,
+                )
+                oracle_threshold_conf_multiplier = clamp(
+                    to_float(params.get("oracle_fallback_degrade_confidence_multiplier"), 1.08),
+                    1.0,
+                    2.0,
+                )
+                oracle_size_multiplier = clamp(
+                    to_float(params.get("oracle_fallback_degrade_size_multiplier"), 0.45),
+                    0.05,
+                    1.0,
+                )
 
         oracle_fresh_base = oracle_available and oracle_age_ms is not None and oracle_age_ms <= max_oracle_age_ms
         if oracle_required:

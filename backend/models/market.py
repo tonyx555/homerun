@@ -60,6 +60,9 @@ class Market(BaseModel):
     end_date: Optional[datetime] = None
     tags: list[str] = []
     platform: str = "polymarket"  # "polymarket" or "kalshi"
+    rewards_min_size: Optional[float] = None
+    rewards_max_spread: Optional[float] = None
+    clob_rewards: list[dict] = []
 
     @classmethod
     def from_gamma_response(cls, data: dict) -> "Market":
@@ -135,6 +138,24 @@ class Market(BaseModel):
         elif isinstance(raw_tags, str) and raw_tags.strip():
             tags.append(raw_tags.strip())
 
+        rewards_min_size_raw = data.get("rewardsMinSize", data.get("rewards_min_size"))
+        try:
+            rewards_min_size = float(rewards_min_size_raw) if rewards_min_size_raw is not None else None
+        except (TypeError, ValueError):
+            rewards_min_size = None
+
+        rewards_max_spread_raw = data.get("rewardsMaxSpread", data.get("rewards_max_spread"))
+        try:
+            rewards_max_spread = float(rewards_max_spread_raw) if rewards_max_spread_raw is not None else None
+        except (TypeError, ValueError):
+            rewards_max_spread = None
+
+        clob_rewards_raw = data.get("clobRewards", data.get("clob_rewards", []))
+        if isinstance(clob_rewards_raw, list):
+            clob_rewards = [r for r in clob_rewards_raw if isinstance(r, dict)]
+        else:
+            clob_rewards = []
+
         return cls(
             id=str(data.get("id", "")),
             condition_id=data.get("condition_id", data.get("conditionId", "")),
@@ -159,6 +180,9 @@ class Market(BaseModel):
             liquidity=float(data.get("liquidity") or data.get("liquidityNum") or 0),
             end_date=data.get("endDate"),
             tags=tags,
+            rewards_min_size=rewards_min_size,
+            rewards_max_spread=rewards_max_spread,
+            clob_rewards=clob_rewards,
         )
 
     @property

@@ -1,5 +1,5 @@
 # Homerun - Windows Setup Script
-# Run: .\scripts\setup.ps1
+# Run: .\scripts\infra\setup.ps1
 
 param(
     [switch]$RedisOnly,
@@ -8,8 +8,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# Navigate to project root (parent of scripts\)
-Set-Location (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))
+# Navigate to project root (grandparent of scripts\infra\)
+Set-Location (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)))
 
 Write-Host "=========================================" -ForegroundColor Green
 Write-Host "  Homerun Setup (Windows)" -ForegroundColor Green
@@ -411,9 +411,9 @@ try {
     $originalCxxFlags = $env:CXXFLAGS
     $env:CXXFLAGS = "$($env:CXXFLAGS) /std:c++20".Trim()
     $ErrorActionPreference = "Continue"
-    npm --prefix scripts/tooling install --silent 2>$null
+    npm --prefix scripts/infra/tooling install --silent 2>$null
     if ($LASTEXITCODE -ne 0) {
-        npm --prefix scripts/tooling install 2>$null
+        npm --prefix scripts/infra/tooling install 2>$null
     }
     $toolingInstallOk = ($LASTEXITCODE -eq 0)
 } catch {
@@ -427,7 +427,7 @@ if ($toolingInstallOk) {
     Write-Host "Verifying PowerShell launcher syntax..." -ForegroundColor Cyan
     try {
         $ErrorActionPreference = "Continue"
-        node .\scripts\tooling\check_powershell_syntax.mjs .\scripts\run.ps1 .\scripts\setup.ps1
+        node .\scripts\infra\tooling\check_powershell_syntax.mjs .\scripts\infra\run.ps1 .\scripts\infra\setup.ps1
         $ErrorActionPreference = "Stop"
         if ($LASTEXITCODE -ne 0) {
             Write-Host "PowerShell syntax verification failed (non-fatal)." -ForegroundColor Yellow
@@ -470,8 +470,8 @@ $stamp = @{
     requirements_trading_sha256 = Get-HashOrMissing "backend\requirements-trading.txt"
     package_json_sha256 = Get-HashOrMissing "frontend\package.json"
     package_lock_sha256 = Get-HashOrMissing "frontend\package-lock.json"
-    launcher_tools_package_json_sha256 = Get-HashOrMissing "scripts\tooling\package.json"
-    launcher_tools_package_lock_sha256 = Get-HashOrMissing "scripts\tooling\package-lock.json"
+    launcher_tools_package_json_sha256 = Get-HashOrMissing "scripts\infra\tooling\package.json"
+    launcher_tools_package_lock_sha256 = Get-HashOrMissing "scripts\infra\tooling\package-lock.json"
 }
 
 $stamp | ConvertTo-Json | Set-Content -Path ".setup-stamp.json" -Encoding UTF8
@@ -483,10 +483,10 @@ Write-Host "  Setup Complete!" -ForegroundColor Green
 Write-Host "=========================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "To start the application, run:"
-Write-Host "  .\scripts\run.ps1" -ForegroundColor Cyan
+Write-Host "  .\scripts\infra\run.ps1" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Or run runtime validation only:"
-Write-Host "  .\scripts\run.ps1 --services-smoke-test" -ForegroundColor Cyan
+Write-Host "  .\scripts\infra\run.ps1 --services-smoke-test" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Or start services individually:"
 Write-Host "  Backend:  cd backend; .\venv\Scripts\Activate.ps1; uvicorn main:app --reload" -ForegroundColor Gray

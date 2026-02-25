@@ -12,7 +12,7 @@ python -m pip install -r backend/requirements.txt
 
 ## Script
 
-- `scripts/build_polymarket_crypto_ml.py`
+- `scripts/ml/build_polymarket_crypto_ml.py`
 
 ## Inputs
 
@@ -46,7 +46,7 @@ Generated files:
 From repo root:
 
 ```bash
-python scripts/build_polymarket_crypto_ml.py --mode run
+python scripts/ml/build_polymarket_crypto_ml.py --mode run
 ```
 
 This does all three stages:
@@ -58,13 +58,13 @@ This does all three stages:
 ## Download Only
 
 ```bash
-python scripts/build_polymarket_crypto_ml.py --mode download
+python scripts/ml/build_polymarket_crypto_ml.py --mode download
 ```
 
 ## Build Only (from local raw files)
 
 ```bash
-python scripts/build_polymarket_crypto_ml.py --mode build
+python scripts/ml/build_polymarket_crypto_ml.py --mode build
 ```
 
 ## Useful Flags
@@ -72,19 +72,19 @@ python scripts/build_polymarket_crypto_ml.py --mode build
 Limit file count while validating quickly:
 
 ```bash
-python scripts/build_polymarket_crypto_ml.py --mode run --max-files-per-asset 25
+python scripts/ml/build_polymarket_crypto_ml.py --mode run --max-files-per-asset 25
 ```
 
 Custom output location:
 
 ```bash
-python scripts/build_polymarket_crypto_ml.py --mode run --output-dir output/ml/my_crypto_bundle
+python scripts/ml/build_polymarket_crypto_ml.py --mode run --output-dir output/ml/my_crypto_bundle
 ```
 
 Custom datasets/assets/timeframes:
 
 ```bash
-python scripts/build_polymarket_crypto_ml.py \
+python scripts/ml/build_polymarket_crypto_ml.py \
   --mode run \
   --dataset-ids trentmkelly/polymarket_crypto_derivatives \
   --assets btc,eth,sol,xrp \

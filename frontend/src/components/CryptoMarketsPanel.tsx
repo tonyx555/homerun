@@ -22,7 +22,6 @@ import type { LivelinePoint, CandlePoint } from 'liveline'
 import { Card } from './ui/card'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
-import Sparkline from './Sparkline'
 import OpportunityEmptyState from './OpportunityEmptyState'
 import { themeAtom } from '../store/atoms'
 
@@ -383,23 +382,10 @@ export function CryptoMarketCard({
   isModalView?: boolean
   onCloseModal?: () => void
 }) {
-  const chartRef = useRef<HTMLDivElement>(null)
   const lastLivelineDataRef = useRef<LivelinePoint[]>([])
-  const [chartWidth, setChartWidth] = useState(300)
   const [modalOpen, setModalOpen] = useState(false)
   const [chartMode, setChartMode] = useState<'line' | 'candle'>('line')
   const closeModal = () => setModalOpen(false)
-
-  useEffect(() => {
-    if (!chartRef.current) return
-    const measure = () => {
-      if (chartRef.current) setChartWidth(chartRef.current.offsetWidth)
-    }
-    measure()
-    const ro = new ResizeObserver(measure)
-    ro.observe(chartRef.current)
-    return () => ro.disconnect()
-  }, [])
 
   useEffect(() => {
     if (isModalView || !modalOpen) return undefined
@@ -435,20 +421,6 @@ export function CryptoMarketCard({
   const polyUrl = buildPolymarketMarketUrl({
     eventSlug: market.event_slug,
   })
-
-  const oracleSeries = useMemo(() => {
-    const raw = Array.isArray(market.oracle_history) ? market.oracle_history : []
-    const points = raw
-      .map((pt) => toFiniteNumber((pt as { p?: unknown; price?: unknown })?.p ?? (pt as { price?: unknown })?.price))
-      .filter((v): v is number => Number.isFinite(v))
-
-    if (points.length >= 2) {
-      return points
-    }
-
-    const now = toFiniteNumber(market.oracle_price)
-    return now !== null ? [now, now] : []
-  }, [market.oracle_history, market.oracle_price])
 
   const livelineData = useMemo<LivelinePoint[]>(() => {
     const raw = Array.isArray(market.oracle_history) ? market.oracle_history : []
@@ -684,24 +656,26 @@ export function CryptoMarketCard({
             )}
           </div>
         ) : (
-          <div ref={chartRef} className="relative h-14 w-full bg-muted/10 rounded-lg overflow-hidden">
-            {oracleSeries.length >= 2 ? (
-              <>
-                {market.price_to_beat !== null && (
-                  <div className="absolute inset-0 flex items-center">
-                    <div className="w-full border-t border-dashed border-muted-foreground/20" />
-                  </div>
-                )}
-                <Sparkline
-                  data={oracleSeries}
-                  width={chartWidth}
-                  height={56}
-                  color={market.oracle_price !== null && market.price_to_beat !== null
-                    ? (market.oracle_price >= market.price_to_beat ? '#4ade80' : '#f87171')
-                    : '#a1a1aa'}
-                  animated={false}
-                />
-              </>
+          <div className="relative h-14 w-full bg-muted/10 rounded-lg overflow-hidden">
+            {livelineData.length >= 2 ? (
+              <Liveline
+                data={livelineData}
+                value={livelineValue}
+                color={livelineColor}
+                theme={isDarkTheme ? 'dark' : 'light'}
+                window={livelineWindow}
+                grid={false}
+                badge={false}
+                fill
+                pulse={false}
+                momentum={false}
+                scrub={false}
+                lerpSpeed={0.12}
+                padding={{ top: 4, right: 4, bottom: 4, left: 4 }}
+                referenceLine={market.price_to_beat !== null ? { value: market.price_to_beat } : undefined}
+                formatValue={(value) => formatPrice(value, 2)}
+                style={{ height: 56 }}
+              />
             ) : (
               <div className="flex items-center justify-center h-full text-[10px] text-muted-foreground/40">
                 Waiting for price data...

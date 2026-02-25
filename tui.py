@@ -1498,10 +1498,10 @@ class HomerunApp(App):
                 "-ExecutionPolicy",
                 "Bypass",
                 "-File",
-                str(PROJECT_ROOT / "scripts" / "setup.ps1"),
+                str(PROJECT_ROOT / "scripts" / "infra" / "setup.ps1"),
             ]
         else:
-            setup_cmd = ["bash", str(PROJECT_ROOT / "scripts" / "setup.sh")]
+            setup_cmd = ["bash", str(PROJECT_ROOT / "scripts" / "infra" / "setup.sh")]
 
         self._enqueue_log(">>> Running setup script...", source="SYSTEM", level="INFO")
         try:
@@ -1598,7 +1598,7 @@ class HomerunApp(App):
         else:
             venv_python = BACKEND_DIR / "venv" / "bin" / "python"
         if not venv_python.exists():
-            setup_cmd = ".\\scripts\\setup.ps1" if sys.platform == "win32" else "./scripts/setup.sh"
+            setup_cmd = ".\\scripts\\infra\\setup.ps1" if sys.platform == "win32" else "./scripts/infra/setup.sh"
             self._enqueue_log(
                 f"ERROR: Virtual environment not found. Run {setup_cmd} first.",
                 source="BACKEND",
@@ -2126,8 +2126,10 @@ class HomerunApp(App):
     def _kill_children(self) -> None:
         """Kill child processes and close their pipes to unblock reader threads.
 
-        Workers run in-process inside the backend; killing the backend process
-        stops all workers too.  Only backend + frontend are OS subprocesses.
+        The backend spawns worker subprocesses (via asyncio.create_subprocess_exec).
+        taskkill /T kills the process tree, but on Windows subprocess children
+        can escape the tree if the parent exits first.  As a safety net, we also
+        sweep for any orphaned Homerun worker processes by command-line pattern.
         """
         procs = [
             p
@@ -2162,6 +2164,70 @@ class HomerunApp(App):
                 proc.wait(timeout=1)
             except Exception:
                 pass
+        # Sweep for orphaned worker processes that escaped the process tree kill.
+        # The backend spawns workers via asyncio.create_subprocess_exec; if the
+        # backend dies before taskkill /T runs, those children become orphans.
+        self._kill_orphaned_workers()
+
+    def _kill_orphaned_workers(self) -> None:
+        """Kill orphaned Homerun Python worker processes by command-line pattern."""
+        if sys.platform != "win32":
+            return
+        my_pid = os.getpid()
+        backend_dir = str(BACKEND_DIR)
+        project_root = str(PROJECT_ROOT)
+        try:
+            import ctypes
+            import ctypes.wintypes
+
+            # Use WMI via PowerShell for reliable command-line inspection.
+            # This is the same approach as the launcher's Cleanup-StaleHomerunProcesses.
+            result = subprocess.run(
+                [
+                    "powershell", "-NoProfile", "-Command",
+                    "Get-CimInstance Win32_Process -Filter \"Name = 'python.exe'\" "
+                    "| Select-Object ProcessId,CommandLine "
+                    "| ConvertTo-Json -Compress",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return
+
+            import json as _json
+            data = _json.loads(result.stdout)
+            if isinstance(data, dict):
+                data = [data]
+
+            for entry in data:
+                pid = entry.get("ProcessId")
+                cmd = entry.get("CommandLine") or ""
+                if not pid or pid == my_pid:
+                    continue
+
+                is_homerun = False
+                if "workers.runner" in cmd or "workers." in cmd and "_worker" in cmd:
+                    is_homerun = True
+                elif "uvicorn" in cmd and "main:app" in cmd:
+                    is_homerun = True
+
+                if not is_homerun:
+                    continue
+                if backend_dir not in cmd and project_root not in cmd:
+                    continue
+
+                try:
+                    subprocess.run(
+                        ["taskkill", "/F", "/PID", str(pid)],
+                        capture_output=True,
+                        timeout=5,
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -2178,7 +2244,7 @@ def main() -> None:
     # Verify venv exists
     venv_dir = BACKEND_DIR / "venv"
     if not venv_dir.exists():
-        setup_cmd = ".\\scripts\\setup.ps1" if sys.platform == "win32" else "./scripts/setup.sh"
+        setup_cmd = ".\\scripts\\infra\\setup.ps1" if sys.platform == "win32" else "./scripts/infra/setup.sh"
         print(f"Setup not complete. Run {setup_cmd} first.")
         sys.exit(1)
 

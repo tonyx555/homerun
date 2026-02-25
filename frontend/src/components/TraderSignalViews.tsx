@@ -24,9 +24,11 @@ import { buildPolymarketMarketUrl } from '../lib/marketUrls'
 import {
   buildOutcomeFallbacks,
   buildOutcomeSparklineSeries,
+  toTimeValueSeries,
 } from '../lib/priceHistory'
+import { Liveline } from 'liveline'
+import type { LivelineSeries } from 'liveline'
 import { Badge } from './ui/badge'
-import Sparkline from './Sparkline'
 import { CryptoMarketCard } from './CryptoMarketsPanel'
 import { themeAtom } from '../store/atoms'
 import type { TrackedTraderOpportunity } from '../services/discoveryApi'
@@ -629,8 +631,7 @@ function TraderSignalCard({
 }) {
   const [expanded, setExpanded] = useState(isModalView)
   const [modalOpen, setModalOpen] = useState(false)
-  const chartRef = useRef<HTMLDivElement>(null)
-  const [chartWidth, setChartWidth] = useState(280)
+  const themeMode = useAtomValue(themeAtom)
   const isBuy = signal.direction === 'BUY'
   const marketLabel = normalizeMarketLabel(signal)
   const yesLabel = yesOutcomeLabel(signal)
@@ -647,16 +648,22 @@ function TraderSignalCard({
     [signal, currentYes, currentNo],
   )
   const hasSparkline = sparkSeries.length > 0
-  const sparklineSeries = useMemo(
+  const nowSec = useMemo(() => Math.floor(Date.now() / 1000), [sparkSeries])
+  const livelineSeries = useMemo<LivelineSeries[]>(
     () => sparkSeries.map((row, index) => ({
-      data: row.data,
+      id: row.key,
+      data: toTimeValueSeries(row.data, nowSec),
+      value: row.latest ?? row.data[row.data.length - 1] ?? 0,
       color: SPARKLINE_COLORS[index % SPARKLINE_COLORS.length],
-      lineWidth: index === 0 ? 1.6 : 1.3,
-      fill: false,
-      showDot: true,
+      label: row.label,
     })),
-    [sparkSeries],
+    [sparkSeries, nowSec],
   )
+  const primaryLivelineData = livelineSeries[0]?.data ?? []
+  const primaryLivelineValue = livelineSeries[0]?.value ?? 0
+  const livelineWindow = primaryLivelineData.length >= 2
+    ? primaryLivelineData[primaryLivelineData.length - 1].time - primaryLivelineData[0].time
+    : 60
   const accentBar = ACCENT_BAR_COLORS[signal.tier] || 'bg-yellow-500'
 
   const poolWallets = signal.source_breakdown?.pool_wallets || 0
@@ -690,19 +697,6 @@ function TraderSignalCard({
         ? 'from-orange-500/[0.04] via-transparent to-transparent'
         : 'from-yellow-500/[0.03] via-transparent to-transparent'
   const closeModal = () => setModalOpen(false)
-
-  useEffect(() => {
-    if (isModalView) return undefined
-    if (!chartRef.current) return
-    const measure = () => {
-      if (!chartRef.current) return
-      setChartWidth(Math.max(140, chartRef.current.offsetWidth - 4))
-    }
-    measure()
-    const ro = new ResizeObserver(measure)
-    ro.observe(chartRef.current)
-    return () => ro.disconnect()
-  }, [isModalView])
 
   useEffect(() => {
     if (isModalView || !modalOpen) return undefined
@@ -818,16 +812,30 @@ function TraderSignalCard({
           )}
         </div>
 
-        {/* Row 4: Sparkline */}
-        {hasSparkline && (
-          <div ref={chartRef} className="mb-3 w-full">
-            <Sparkline
-              data={sparkSeries[0]?.data || []}
-              series={sparklineSeries}
-              width={chartWidth}
-              height={46}
-              lineWidth={1.5}
-              showDots
+        {/* Row 4: Liveline chart */}
+        {hasSparkline && primaryLivelineData.length >= 2 && (
+          <div className="mb-3 w-full">
+            <Liveline
+              data={primaryLivelineData}
+              value={primaryLivelineValue}
+              series={livelineSeries.length > 1 ? livelineSeries.slice(1) : undefined}
+              color={SPARKLINE_COLORS[0]}
+              theme={themeMode}
+              window={livelineWindow}
+              paused
+              grid={expanded || isModalView}
+              badge={false}
+              fill={livelineSeries.length <= 2}
+              pulse={false}
+              momentum={expanded || isModalView}
+              scrub={expanded || isModalView}
+              seriesToggleCompact
+              lerpSpeed={0.15}
+              padding={expanded || isModalView
+                ? { top: 6, right: 6, bottom: 6, left: 6 }
+                : { top: 4, right: 4, bottom: 4, left: 4 }}
+              formatValue={(v) => `${(v * 100).toFixed(0)}¢`}
+              style={{ height: expanded || isModalView ? 120 : 56 }}
             />
             <div className="mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5 px-0.5 text-[11px] font-data font-bold">
               {sparkSeries.map((row, index) => (

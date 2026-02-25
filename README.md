@@ -99,9 +99,9 @@ The fastest way to start Homerun — double-click the launcher for your OS:
 
 | OS | File | How |
 |---|---|---|
-| macOS | `scripts/Homerun.command` | Double-click in Finder |
-| Windows | `scripts/Homerun.bat` | Double-click in Explorer |
-| Linux | `scripts/Homerun.desktop` | Double-click in file manager |
+| macOS | `scripts/launchers/Homerun.command` | Double-click in Finder |
+| Windows | `scripts/launchers/Homerun.bat` | Double-click in Explorer |
+| Linux | `scripts/launchers/Homerun.desktop` | Double-click in file manager |
 
 The launcher automatically installs dependencies (Python venv, npm, Redis, Postgres) on first run, then opens the terminal UI. No manual setup required.
 
@@ -110,7 +110,7 @@ The launcher automatically installs dependencies (Python venv, npm, Redis, Postg
 ```bash
 git clone <your-repo-url>
 cd homerun
-./scripts/run.sh
+./scripts/infra/run.sh
 ```
 
 `run.sh` detects missing or stale setup and runs `setup.sh` automatically. It starts Redis and Postgres (via Docker or local install), runs DB migrations, and launches the TUI.
@@ -118,8 +118,8 @@ cd homerun
 To run setup separately:
 
 ```bash
-./scripts/setup.sh        # install all deps + bootstrap runtime prerequisites
-./scripts/run.sh           # start everything
+./scripts/infra/setup.sh        # install all deps + bootstrap runtime prerequisites
+./scripts/infra/run.sh           # start everything
 ```
 
 ### Local dev (frontend + backend)

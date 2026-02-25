@@ -27,6 +27,7 @@ from services.strategy_signal_bridge import bridge_opportunities_to_signals
 from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.event_bus import event_bus
 from services.market_regime import market_regime_classifier
+from services.ml_recorder import ml_recorder
 from services.worker_state import (
     clear_worker_run_request,
     ensure_worker_control,
@@ -601,6 +602,35 @@ async def _run_loop() -> None:
     chainlink_feed_started_mono = time.monotonic()
     chainlink_restart_allowed_after = 0.0
 
+    # Direct Binance WebSocket feed (lower latency than RTDS relay).
+    _binance_feed = None
+    _binance_feed_started_mono = 0.0
+    _BINANCE_STALE_RESTART_AGE_SECONDS = 60.0
+    _BINANCE_WARMUP_SECONDS = 15.0
+    _binance_restart_allowed_after = 0.0
+
+    if settings.BINANCE_WS_ENABLED:
+        from services.binance_feed import get_binance_feed as _get_binance_feed
+
+        _binance_feed = _get_binance_feed()
+
+        def _on_binance_direct_update(asset: str, mid: float, bid: float, ask: float, ts_ms: int) -> None:
+            try:
+                chainlink_feed.update_from_binance_direct(asset, mid, bid, ask, ts_ms)
+            except Exception:
+                pass
+
+        _binance_feed.on_update(_on_binance_direct_update)
+        try:
+            await _binance_feed.start()
+            _binance_feed_started_mono = time.monotonic()
+        except Exception as exc:
+            logger.warning("Binance direct feed start failed (continuing): %s", exc)
+
+    # ML recorder prune cadence: check once per hour.
+    _ml_prune_interval_seconds = 3600.0
+    _ml_last_prune_mono = 0.0
+
     feed_manager = None
     ws_feeds_running = False
     subscribed_tokens: set[str] = set()
@@ -642,6 +672,40 @@ async def _run_loop() -> None:
             "stale": bool(stale and not warm),
             "age_seconds": age_seconds,
             "samples": int(samples),
+            "restarted": restarted,
+        }
+
+    async def _ensure_binance_feed_healthy() -> dict[str, object]:
+        nonlocal _binance_feed_started_mono
+        nonlocal _binance_restart_allowed_after
+        if _binance_feed is None or not settings.BINANCE_WS_ENABLED:
+            return {"started": False, "enabled": False}
+        feed_started = bool(getattr(_binance_feed, "started", False))
+        now_mono = time.monotonic()
+        last_ms = getattr(_binance_feed, "last_update_ms", 0)
+        if last_ms > 0:
+            age_seconds = max(0.0, (int(time.time() * 1000) - last_ms) / 1000.0)
+        else:
+            age_seconds = now_mono - _binance_feed_started_mono
+        stale = age_seconds > _BINANCE_STALE_RESTART_AGE_SECONDS
+        warm = (now_mono - _binance_feed_started_mono) < _BINANCE_WARMUP_SECONDS
+        should_restart = ((not feed_started) or (stale and not warm)) and now_mono >= _binance_restart_allowed_after
+        restarted = False
+        if should_restart:
+            _binance_restart_allowed_after = now_mono + 30.0
+            try:
+                if feed_started:
+                    await _binance_feed.stop()
+                await _binance_feed.start()
+                _binance_feed_started_mono = time.monotonic()
+                restarted = True
+            except Exception as exc:
+                logger.warning("Binance direct feed health restart failed: %s", exc)
+            feed_started = bool(getattr(_binance_feed, "started", False))
+        return {
+            "started": feed_started,
+            "stale": bool(stale and not warm),
+            "age_seconds": round(age_seconds, 1),
             "restarted": restarted,
         }
 
@@ -702,6 +766,7 @@ async def _run_loop() -> None:
 
     startup_stats["ws_feeds"] = _snapshot_ws_feed_status()
     startup_stats["chainlink_feed"] = await _ensure_chainlink_feed_healthy()
+    startup_stats["binance_feed"] = await _ensure_binance_feed_healthy()
 
     def _on_ws_price_update(token_id: str, mid: float, bid: float, ask: float) -> None:
         nonlocal ws_reactive_task
@@ -772,6 +837,7 @@ async def _run_loop() -> None:
         ws_reactive_enabled = bool(enabled and not paused)
         interval = configured_interval if fast_mode else max(configured_interval, _IDLE_INTERVAL_SECONDS)
         chainlink_feed_status = await _ensure_chainlink_feed_healthy()
+        binance_feed_status = await _ensure_binance_feed_healthy()
 
         if (not enabled or paused) and not viewer_active:
             async with AsyncSessionLocal() as session:
@@ -789,6 +855,7 @@ async def _run_loop() -> None:
                         "markets": [],
                         "ws_feeds": _snapshot_ws_feed_status(),
                         "chainlink_feed": chainlink_feed_status,
+                        "binance_feed": binance_feed_status,
                     },
                 )
             ws_reactive_enabled = False
@@ -838,6 +905,20 @@ async def _run_loop() -> None:
             )
             elapsed = max(round(time.monotonic() - started_at, 3), dispatch_elapsed)
 
+            # Record ML training snapshots if enabled.
+            try:
+                ml_snapshots_written = await ml_recorder.maybe_record(markets_payload)
+            except Exception:
+                ml_snapshots_written = 0
+
+            # Periodic ML snapshot pruning (once per hour).
+            if (time.monotonic() - _ml_last_prune_mono) > _ml_prune_interval_seconds:
+                try:
+                    await ml_recorder.prune_old_snapshots()
+                except Exception:
+                    pass
+                _ml_last_prune_mono = time.monotonic()
+
             async with AsyncSessionLocal() as session:
                 await write_worker_snapshot(
                     session,
@@ -858,6 +939,7 @@ async def _run_loop() -> None:
                         "markets": markets_payload,
                         "ws_feeds": _snapshot_ws_feed_status(),
                         "chainlink_feed": chainlink_feed_status,
+                        "binance_feed": binance_feed_status,
                     },
                 )
 
@@ -895,6 +977,7 @@ async def _run_loop() -> None:
                         "markets": markets_payload,
                         "ws_feeds": _snapshot_ws_feed_status(),
                         "chainlink_feed": chainlink_feed_status,
+                        "binance_feed": binance_feed_status,
                     },
                 )
 
