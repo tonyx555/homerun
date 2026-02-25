@@ -379,9 +379,7 @@ async def get_trader_market_history(
     if not requested_ids:
         return {"histories": {}, "updated_at": None}
 
-    row = (
-        await session.execute(select(ScannerSnapshot).where(ScannerSnapshot.id == "latest"))
-    ).scalar_one_or_none()
+    row = (await session.execute(select(ScannerSnapshot).where(ScannerSnapshot.id == "latest"))).scalar_one_or_none()
     history_map = row.market_history_json if row is not None and isinstance(row.market_history_json, dict) else {}
     opportunities = row.opportunities_json if row is not None and isinstance(row.opportunities_json, list) else []
     market_catalog_row = (

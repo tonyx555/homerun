@@ -1653,9 +1653,7 @@ async def _run_trader_once(
         )
         control_settings = dict(control.get("settings") or {})
         global_runtime_settings = dict(control_settings.get("global_runtime") or {})
-        pending_live_exit_guard_settings = dict(
-            global_runtime_settings.get("pending_live_exit_guard") or {}
-        )
+        pending_live_exit_guard_settings = dict(global_runtime_settings.get("pending_live_exit_guard") or {})
         pending_live_exit_max_allowed = max(
             0,
             safe_int(
@@ -1933,9 +1931,7 @@ async def _run_trader_once(
                 effective_risk_limits["max_daily_loss_usd"] = fallback_daily_loss
         live_risk_clamp_changes: dict[str, dict[str, Any]] = {}
         if run_mode == "live":
-            live_risk_clamp_settings = dict(
-                global_runtime_settings.get("live_risk_clamps") or DEFAULT_LIVE_RISK_CLAMPS
-            )
+            live_risk_clamp_settings = dict(global_runtime_settings.get("live_risk_clamps") or DEFAULT_LIVE_RISK_CLAMPS)
             live_risk_clamp_changes = _apply_live_risk_clamps(
                 effective_risk_limits,
                 live_risk_clamp_settings,

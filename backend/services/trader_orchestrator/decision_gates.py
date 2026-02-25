@@ -746,9 +746,7 @@ def apply_platform_decision_gates(
         signal_risk_score = _runtime_signal_risk_score(runtime_signal)
         risk_gate_enabled = max_risk_score is not None
         risk_gate_passed = (
-            (not risk_gate_enabled)
-            or signal_risk_score is None
-            or signal_risk_score <= float(max_risk_score)
+            (not risk_gate_enabled) or signal_risk_score is None or signal_risk_score <= float(max_risk_score)
         )
         checks_payload.append(
             {
@@ -806,11 +804,7 @@ def apply_platform_decision_gates(
                     "detail": (
                         f"risk_score={signal_risk_score:.3f} max={float(max_risk_score):.3f}"
                         if risk_gate_enabled and signal_risk_score is not None
-                        else (
-                            "Signal risk unavailable; guard skipped"
-                            if risk_gate_enabled
-                            else "Guard not configured"
-                        )
+                        else ("Signal risk unavailable; guard skipped" if risk_gate_enabled else "Guard not configured")
                     ),
                 }
             )

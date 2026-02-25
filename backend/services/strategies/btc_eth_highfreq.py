@@ -474,10 +474,7 @@ def crypto_highfreq_should_flatten_resolution_risk(
 
     pnl_text = f"{pnl_percent:.2f}%" if pnl_percent is not None else "unknown"
     headroom_text = f"{exit_headroom_ratio:.2f}x" if exit_headroom_ratio is not None else "unknown"
-    detail = (
-        f"seconds_left={seconds_left:.1f}s <= {seconds_budget:.1f}s, "
-        f"pnl={pnl_text}, headroom={headroom_text}"
-    )
+    detail = f"seconds_left={seconds_left:.1f}s <= {seconds_budget:.1f}s, pnl={pnl_text}, headroom={headroom_text}"
     return True, detail
 
 
@@ -749,7 +746,9 @@ def _extract_oracle_status(
 
     selected_point = by_source.get(selected_source) if selected_source else None
     top_level_price = to_float(_first_present(selected.get("oracle_price"), selected.get("price")), None)
-    top_level_updated_at_ms = _epoch_ms(_first_present(selected.get("oracle_updated_at_ms"), selected.get("updated_at_ms")))
+    top_level_updated_at_ms = _epoch_ms(
+        _first_present(selected.get("oracle_updated_at_ms"), selected.get("updated_at_ms"))
+    )
     top_level_age_ms = _age_ms(
         age_ms=_first_present(selected.get("oracle_age_ms"), selected.get("age_ms")),
         age_seconds=_first_present(selected.get("oracle_age_seconds"), selected.get("age_seconds")),
@@ -3102,35 +3101,23 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             oracle_source_policy = "degrade"
 
         oracle_by_source = (
-            dict(oracle_status.get("by_source"))
-            if isinstance(oracle_status.get("by_source"), dict)
-            else {}
+            dict(oracle_status.get("by_source")) if isinstance(oracle_status.get("by_source"), dict) else {}
         )
         chainlink_point = oracle_by_source.get("chainlink")
         binance_point = oracle_by_source.get("binance")
         chainlink_age_ms = (
             self._float(chainlink_point.get("age_ms"))
             if isinstance(chainlink_point, dict)
-            else (
-                oracle_age_ms
-                if str(oracle_status.get("source") or "").strip().lower() == "chainlink"
-                else None
-            )
+            else (oracle_age_ms if str(oracle_status.get("source") or "").strip().lower() == "chainlink" else None)
         )
         binance_age_ms = (
             self._float(binance_point.get("age_ms"))
             if isinstance(binance_point, dict)
-            else (
-                oracle_age_ms
-                if str(oracle_status.get("source") or "").strip().lower() == "binance"
-                else None
-            )
+            else (oracle_age_ms if str(oracle_status.get("source") or "").strip().lower() == "binance" else None)
         )
         binance_fresh = binance_age_ms is not None and binance_age_ms <= max_oracle_age_ms
         chainlink_stale_binance_fresh = (
-            chainlink_age_ms is not None
-            and chainlink_age_ms > max_oracle_age_ms
-            and bool(binance_fresh)
+            chainlink_age_ms is not None and chainlink_age_ms > max_oracle_age_ms and bool(binance_fresh)
         )
         oracle_available = bool(oracle_status.get("available"))
         oracle_fallback_used = False
@@ -3185,11 +3172,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                     oracle_status["availability_state"] = str(fallback_availability["availability_state"])
                 oracle_status["available"] = fallback_available
                 oracle_available = fallback_available
-                oracle_fallback_reason = (
-                    "degraded_binance_fallback"
-                    if oracle_fallback_degraded
-                    else "binance_fallback"
-                )
+                oracle_fallback_reason = "degraded_binance_fallback" if oracle_fallback_degraded else "binance_fallback"
 
         oracle_threshold_edge_multiplier = 1.0
         oracle_threshold_conf_multiplier = 1.0
@@ -3211,9 +3194,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 1.0,
             )
 
-        oracle_fresh_base = (
-            oracle_available and oracle_age_ms is not None and oracle_age_ms <= max_oracle_age_ms
-        )
+        oracle_fresh_base = oracle_available and oracle_age_ms is not None and oracle_age_ms <= max_oracle_age_ms
         if oracle_required:
             oracle_fresh_ok = oracle_fresh_base and oracle_source_policy_ok
             if oracle_fallback_used:
@@ -3221,9 +3202,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                     oracle_available and oracle_age_ms is not None and oracle_age_ms <= max_oracle_age_ms
                 )
         else:
-            oracle_fresh_ok = (
-                not oracle_available or oracle_age_ms is None or oracle_age_ms <= max_oracle_age_ms
-            )
+            oracle_fresh_ok = not oracle_available or oracle_age_ms is None or oracle_age_ms <= max_oracle_age_ms
             if oracle_fallback_used and not oracle_source_policy_ok:
                 oracle_fresh_ok = False
 
@@ -3255,9 +3234,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
 
         # --- Regime-aware required thresholds ---
         required_edge = (
-            min_edge
-            * _EDGE_MODE_FACTORS.get(regime, {}).get(active_mode, 1.0)
-            * oracle_threshold_edge_multiplier
+            min_edge * _EDGE_MODE_FACTORS.get(regime, {}).get(active_mode, 1.0) * oracle_threshold_edge_multiplier
         )
         required_conf = (
             min_conf
@@ -4219,10 +4196,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 rapid_state["window_minutes"] = rapid_window_minutes
 
             token_id = str(
-                state.get("token_id")
-                or context_payload.get("token_id")
-                or rapid_state.get("token_id")
-                or ""
+                state.get("token_id") or context_payload.get("token_id") or rapid_state.get("token_id") or ""
             ).strip()
             if not token_id:
                 execution_plan = context_payload.get("execution_plan")
@@ -4406,15 +4380,13 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                     rapid_state["armed_price"] = current_price
                 rapid_state["armed_peak_price"] = peak_price
 
-            should_flatten_resolution_risk, resolution_risk_detail = (
-                crypto_highfreq_should_flatten_resolution_risk(
-                    config,
-                    timeframe=timeframe,
-                    seconds_left=seconds_left,
-                    pnl_percent=pnl_pct,
-                    exit_headroom_ratio=exit_headroom_ratio,
-                    take_profit_armed=bool(rapid_state.get("armed")),
-                )
+            should_flatten_resolution_risk, resolution_risk_detail = crypto_highfreq_should_flatten_resolution_risk(
+                config,
+                timeframe=timeframe,
+                seconds_left=seconds_left,
+                pnl_percent=pnl_pct,
+                exit_headroom_ratio=exit_headroom_ratio,
+                take_profit_armed=bool(rapid_state.get("armed")),
             )
             if should_flatten_resolution_risk:
                 context_payload[rapid_state_key] = rapid_state
@@ -4719,14 +4691,18 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         if seconds_left is not None and seconds_left < reverse_min_seconds_left:
             return None
 
-        current_direction = str(
-            _first_present(
-                getattr(position, "direction", None),
-                strategy_context.get("direction"),
-                market_state.get("direction"),
+        current_direction = (
+            str(
+                _first_present(
+                    getattr(position, "direction", None),
+                    strategy_context.get("direction"),
+                    market_state.get("direction"),
+                )
+                or ""
             )
-            or ""
-        ).strip().lower()
+            .strip()
+            .lower()
+        )
         reverse_direction = StrategySDK.opposite_direction(current_direction, default="")
         if reverse_direction not in {"buy_yes", "buy_no"}:
             return None

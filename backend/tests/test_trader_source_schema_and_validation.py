@@ -56,14 +56,20 @@ async def test_crypto_schema_populates_defaults_and_dedupes_param_fields(tmp_pat
         schema = await build_trader_config_schema(session)
 
     crypto_source = next(source for source in schema["sources"] if source["key"] == "crypto")
-    btc_option = next(option for option in (crypto_source.get("strategy_options") or []) if option.get("key") == "btc_eth_highfreq")
+    btc_option = next(
+        option for option in (crypto_source.get("strategy_options") or []) if option.get("key") == "btc_eth_highfreq"
+    )
 
     default_params = dict(btc_option.get("default_params") or {})
     assert len(default_params) >= 120
     assert default_params.get("max_open_order_seconds") == 14.0
     assert default_params.get("reverse_on_adverse_velocity_enabled") is False
 
-    param_keys = [str(field.get("key") or "").strip() for field in (btc_option.get("param_fields") or []) if isinstance(field, dict)]
+    param_keys = [
+        str(field.get("key") or "").strip()
+        for field in (btc_option.get("param_fields") or [])
+        if isinstance(field, dict)
+    ]
     assert param_keys
     assert len(param_keys) == len(set(param_keys))
     assert "max_opportunities" not in param_keys

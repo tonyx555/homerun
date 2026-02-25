@@ -1818,7 +1818,9 @@ async def reconcile_live_positions(
     pending_exit_snapshots: dict[str, dict[str, Any]] = {}
     if pending_exit_provider_ids:
         try:
-            pending_exit_snapshots = await live_execution_service.get_order_snapshots_by_clob_ids(pending_exit_provider_ids)
+            pending_exit_snapshots = await live_execution_service.get_order_snapshots_by_clob_ids(
+                pending_exit_provider_ids
+            )
         except Exception:
             pending_exit_snapshots = {}
 
@@ -1869,11 +1871,7 @@ async def reconcile_live_positions(
             else (
                 pending_clob_side_price
                 if pending_clob_side_price is not None
-                else (
-                    pending_market_side_price
-                    if pending_market_side_price is not None
-                    else wallet_mark_price
-                )
+                else (pending_market_side_price if pending_market_side_price is not None else wallet_mark_price)
             )
         )
         pending_current_price = _state_price_floor(pending_current_price)
@@ -2657,11 +2655,7 @@ async def reconcile_live_positions(
             else (
                 clob_side_price
                 if clob_side_price is not None
-                else (
-                    market_side_price
-                    if market_side_price is not None
-                    else wallet_mark_price
-                )
+                else (market_side_price if market_side_price is not None else wallet_mark_price)
             )
         )
         current_price = _state_price_floor(current_price)

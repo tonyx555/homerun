@@ -917,8 +917,12 @@ class LiveExecutionService:
             return True, None
 
         signature_value_raw = balance.get("signature_type")
-        signature_value = int(signature_value_raw) if isinstance(signature_value_raw, int) else self._resolved_signature_type()
-        funder_wallet = str(self._funder_for_signature_type(signature_value) or self._execution_wallet_address() or "").strip()
+        signature_value = (
+            int(signature_value_raw) if isinstance(signature_value_raw, int) else self._resolved_signature_type()
+        )
+        funder_wallet = str(
+            self._funder_for_signature_type(signature_value) or self._execution_wallet_address() or ""
+        ).strip()
         shortfall = max(ZERO, required_usdc - available)
         error_message = (
             "BUY pre-submit gate failed: not enough collateral balance/allowance. "
@@ -1025,7 +1029,9 @@ class LiveExecutionService:
                         return True, None
 
         signature_value = int(snapshot["signature_type"])
-        funder_wallet = str(self._funder_for_signature_type(signature_value) or self._execution_wallet_address() or "").strip()
+        funder_wallet = str(
+            self._funder_for_signature_type(signature_value) or self._execution_wallet_address() or ""
+        ).strip()
         shortfall = max(ZERO, required_raw - available_raw)
         error_message = (
             "SELL pre-submit gate failed: not enough conditional token balance/allowance. "

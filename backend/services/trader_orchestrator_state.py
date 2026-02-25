@@ -316,7 +316,10 @@ def _normalize_global_risk(value: Any) -> dict[str, Any]:
     return {
         "max_gross_exposure_usd": max(
             1.0,
-            min(1_000_000.0, safe_float(source.get("max_gross_exposure_usd"), DEFAULT_GLOBAL_RISK["max_gross_exposure_usd"])),
+            min(
+                1_000_000.0,
+                safe_float(source.get("max_gross_exposure_usd"), DEFAULT_GLOBAL_RISK["max_gross_exposure_usd"]),
+            ),
         ),
         "max_daily_loss_usd": max(
             0.0,
@@ -4553,9 +4556,7 @@ async def compose_trader_orchestrator_config(session: AsyncSession) -> dict[str,
     )
     live_risk_clamps = dict(global_runtime.get("live_risk_clamps") or _normalize_live_risk_clamps({}))
     live_market_context = dict(global_runtime.get("live_market_context") or _normalize_live_market_context({}))
-    live_provider_health = dict(
-        global_runtime.get("live_provider_health") or _normalize_live_provider_health({})
-    )
+    live_provider_health = dict(global_runtime.get("live_provider_health") or _normalize_live_provider_health({}))
     return {
         "mode": control.get("mode", "paper"),
         "kill_switch": bool(control.get("kill_switch", False)),
@@ -4579,9 +4580,7 @@ async def compose_trader_orchestrator_config(session: AsyncSession) -> dict[str,
                 ),
             },
             "live_risk_clamps": {
-                "enforce_allow_averaging_off": bool(
-                    live_risk_clamps.get("enforce_allow_averaging_off", True)
-                ),
+                "enforce_allow_averaging_off": bool(live_risk_clamps.get("enforce_allow_averaging_off", True)),
                 "min_cooldown_seconds": int(live_risk_clamps.get("min_cooldown_seconds", 0) or 0),
                 "max_consecutive_losses_cap": int(live_risk_clamps.get("max_consecutive_losses_cap", 1) or 1),
                 "max_open_orders_cap": int(live_risk_clamps.get("max_open_orders_cap", 1) or 1),
@@ -4595,9 +4594,7 @@ async def compose_trader_orchestrator_config(session: AsyncSession) -> dict[str,
             "live_market_context": {
                 "enabled": bool(live_market_context.get("enabled", True)),
                 "history_window_seconds": int(live_market_context.get("history_window_seconds", 7200) or 7200),
-                "history_fidelity_seconds": int(
-                    live_market_context.get("history_fidelity_seconds", 300) or 300
-                ),
+                "history_fidelity_seconds": int(live_market_context.get("history_fidelity_seconds", 300) or 300),
                 "max_history_points": int(live_market_context.get("max_history_points", 120) or 120),
                 "timeout_seconds": float(live_market_context.get("timeout_seconds", 4.0) or 4.0),
             },

@@ -109,6 +109,7 @@ class CodeBacktestOptimizeRequest(BaseModel):
     train_ratio: float = Field(default=0.75, gt=0.1, lt=0.95)
     top_k: int = Field(default=10, ge=1, le=200)
 
+
 _LIVE_TRUTH_EXPORT_ARTIFACTS = {
     "summary_json",
     "report_jsonl",
