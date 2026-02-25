@@ -1152,7 +1152,11 @@ async def test_run_trader_once_blocks_stacking_when_allow_averaging_false(monkey
     monkeypatch.setattr(
         trader_orchestrator_worker,
         "resolve_strategy_version",
-        AsyncMock(side_effect=lambda _session, *, strategy_key, requested_version: _mock_resolve_strategy_version(strategy_key)),
+        AsyncMock(
+            side_effect=lambda _session, *, strategy_key, requested_version: _mock_resolve_strategy_version(
+                strategy_key
+            )
+        ),
     )
     monkeypatch.setattr(
         trader_orchestrator_worker,
@@ -1296,7 +1300,11 @@ async def test_run_trader_once_handles_aware_loss_cooldown_without_datetime_type
     monkeypatch.setattr(
         trader_orchestrator_worker,
         "resolve_strategy_version",
-        AsyncMock(side_effect=lambda _session, *, strategy_key, requested_version: _mock_resolve_strategy_version(strategy_key)),
+        AsyncMock(
+            side_effect=lambda _session, *, strategy_key, requested_version: _mock_resolve_strategy_version(
+                strategy_key
+            )
+        ),
     )
     monkeypatch.setattr(
         trader_orchestrator_worker,
@@ -1421,7 +1429,11 @@ async def test_run_trader_once_allows_reentry_when_allow_averaging_true(monkeypa
     monkeypatch.setattr(
         trader_orchestrator_worker,
         "resolve_strategy_version",
-        AsyncMock(side_effect=lambda _session, *, strategy_key, requested_version: _mock_resolve_strategy_version(strategy_key)),
+        AsyncMock(
+            side_effect=lambda _session, *, strategy_key, requested_version: _mock_resolve_strategy_version(
+                strategy_key
+            )
+        ),
     )
     monkeypatch.setattr(
         trader_orchestrator_worker,
@@ -1557,7 +1569,11 @@ async def test_run_trader_once_marks_signal_skipped_when_strategy_skips(monkeypa
     monkeypatch.setattr(
         trader_orchestrator_worker,
         "resolve_strategy_version",
-        AsyncMock(side_effect=lambda _session, *, strategy_key, requested_version: _mock_resolve_strategy_version(strategy_key)),
+        AsyncMock(
+            side_effect=lambda _session, *, strategy_key, requested_version: _mock_resolve_strategy_version(
+                strategy_key
+            )
+        ),
     )
     monkeypatch.setattr(
         trader_orchestrator_worker,
@@ -1742,7 +1758,11 @@ async def test_run_trader_once_blocks_unavailable_strategy_only(monkeypatch):
     monkeypatch.setattr(
         trader_orchestrator_worker,
         "resolve_strategy_version",
-        AsyncMock(side_effect=lambda _session, *, strategy_key, requested_version: _mock_resolve_strategy_version(strategy_key)),
+        AsyncMock(
+            side_effect=lambda _session, *, strategy_key, requested_version: _mock_resolve_strategy_version(
+                strategy_key
+            )
+        ),
     )
     monkeypatch.setattr(
         trader_orchestrator_worker,

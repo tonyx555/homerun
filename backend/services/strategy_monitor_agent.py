@@ -114,7 +114,14 @@ async def _tool_get_trader_context(args: dict[str, Any]) -> dict[str, Any]:
             (
                 await session.execute(
                     select(TradeSignal)
-                    .where(TradeSignal.source.in_([cfg["source_key"] for cfg in _serialize_trader_source_configs(trader_row.source_configs_json)]))
+                    .where(
+                        TradeSignal.source.in_(
+                            [
+                                cfg["source_key"]
+                                for cfg in _serialize_trader_source_configs(trader_row.source_configs_json)
+                            ]
+                        )
+                    )
                     .order_by(desc(TradeSignal.created_at))
                     .limit(30)
                 )
@@ -302,8 +309,7 @@ async def _tool_update_strategy_source(args: dict[str, Any]) -> dict[str, Any]:
     validation = validate_strategy_source(source_code)
     if not validation.get("valid"):
         raise RuntimeError(
-            "Source validation failed: "
-            + "; ".join(str(item) for item in list(validation.get("errors") or [])[:6])
+            "Source validation failed: " + "; ".join(str(item) for item in list(validation.get("errors") or [])[:6])
         )
 
     async with AsyncSessionLocal() as session:

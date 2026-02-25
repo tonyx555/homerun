@@ -25,9 +25,7 @@ def _normalize_strategy_key(value: Any) -> str:
 def _normalize_status(value: Any) -> str:
     status = str(value or "").strip().lower()
     if status not in _EXPERIMENT_STATUSES:
-        raise ValueError(
-            "status must be one of: active, paused, completed, archived"
-        )
+        raise ValueError("status must be one of: active, paused, completed, archived")
     return status
 
 
@@ -87,9 +85,7 @@ async def _get_strategy_row(session: AsyncSession, *, strategy_key: str) -> Stra
     return (
         (
             await session.execute(
-                select(Strategy)
-                .where(func.lower(func.coalesce(Strategy.slug, "")) == normalized_strategy)
-                .limit(1)
+                select(Strategy).where(func.lower(func.coalesce(Strategy.slug, "")) == normalized_strategy).limit(1)
             )
         )
         .scalars()
@@ -210,11 +206,9 @@ async def list_strategy_experiments(
             func.lower(func.coalesce(StrategyExperiment.strategy_key, "")) == _normalize_strategy_key(strategy_key)
         )
     if status is not None:
-        query = query.where(
-            func.lower(func.coalesce(StrategyExperiment.status, "")) == _normalize_status(status)
-        )
+        query = query.where(func.lower(func.coalesce(StrategyExperiment.status, "")) == _normalize_status(status))
     query = query.limit(max(1, min(int(limit or 200), 2000)))
-    rows = ((await session.execute(query)).scalars().all())
+    rows = (await session.execute(query)).scalars().all()
     return list(rows)
 
 
@@ -291,12 +285,10 @@ async def promote_strategy_experiment(
         strategy_key=str(row.strategy_key or ""),
         version=int(target_version),
     ):
-        raise ValueError(
-            f"Strategy '{str(row.strategy_key or '')}' does not have version v{int(target_version)}"
-        )
+        raise ValueError(f"Strategy '{str(row.strategy_key or '')}' does not have version v{int(target_version)}")
 
     applied_count = 0
-    traders = ((await session.execute(select(Trader))).scalars().all())
+    traders = (await session.execute(select(Trader))).scalars().all()
     for trader in traders:
         next_configs, changed = _set_source_strategy_version_on_configs(
             source_configs=trader.source_configs_json,
@@ -365,8 +357,10 @@ async def get_active_strategy_experiment(
                 select(StrategyExperiment)
                 .where(
                     and_(
-                        func.lower(func.coalesce(StrategyExperiment.source_key, "")) == _normalize_source_key(source_key),
-                        func.lower(func.coalesce(StrategyExperiment.strategy_key, "")) == _normalize_strategy_key(strategy_key),
+                        func.lower(func.coalesce(StrategyExperiment.source_key, ""))
+                        == _normalize_source_key(source_key),
+                        func.lower(func.coalesce(StrategyExperiment.strategy_key, ""))
+                        == _normalize_strategy_key(strategy_key),
                         func.lower(func.coalesce(StrategyExperiment.status, "")) == "active",
                     )
                 )

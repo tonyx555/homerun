@@ -2431,9 +2431,7 @@ async def _run_trader_once(
                         str(version_resolution.strategy.slug or strategy_key).strip().lower() or strategy_key
                     )
                     resolved_strategy_version = int(
-                        version_resolution.version_row.version
-                        or version_resolution.latest_version
-                        or 1
+                        version_resolution.version_row.version or version_resolution.latest_version or 1
                     )
                     strategy = None
                     strategy_detail: str | None = None

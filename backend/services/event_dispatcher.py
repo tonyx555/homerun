@@ -137,7 +137,9 @@ class EventDispatcher:
                 float(getattr(settings, "EVENT_HANDLER_TIMEOUT_SECONDS", 60.0) or 60.0),
             )
         )
-        runtime_env = str(os.getenv("HOMERUN_ENV", os.getenv("APP_ENV", "development")) or "development").strip().lower()
+        runtime_env = (
+            str(os.getenv("HOMERUN_ENV", os.getenv("APP_ENV", "development")) or "development").strip().lower()
+        )
         strict_override = os.getenv("EVENT_DISPATCHER_FAIL_ON_UNOWNED_REMOTE_OPPS")
         if strict_override is None:
             self._fail_on_unowned_remote = runtime_env in {"production", "prod", "staging"}

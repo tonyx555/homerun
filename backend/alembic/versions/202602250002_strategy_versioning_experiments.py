@@ -80,9 +80,10 @@ def _backfill_strategy_versions_from_current_rows() -> None:
         return
 
     bind = op.get_bind()
-    rows = bind.execute(
-        sa.text(
-            """
+    rows = (
+        bind.execute(
+            sa.text(
+                """
             SELECT
                 id,
                 slug,
@@ -102,8 +103,11 @@ def _backfill_strategy_versions_from_current_rows() -> None:
                 updated_at
             FROM strategies
             """
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
 
     for row in rows:
         strategy_id = str(row.get("id") or "").strip()
@@ -180,7 +184,9 @@ def _backfill_strategy_versions_from_current_rows() -> None:
                     "source_code": str(row.get("source_code") or ""),
                     "class_name": row.get("class_name"),
                     "config": json.dumps(row.get("config") if isinstance(row.get("config"), dict) else {}),
-                    "config_schema": json.dumps(row.get("config_schema") if isinstance(row.get("config_schema"), dict) else {}),
+                    "config_schema": json.dumps(
+                        row.get("config_schema") if isinstance(row.get("config_schema"), dict) else {}
+                    ),
                     "aliases": json.dumps(row.get("aliases") if isinstance(row.get("aliases"), list) else []),
                     "enabled": bool(row.get("enabled")),
                     "is_system": bool(row.get("is_system")),

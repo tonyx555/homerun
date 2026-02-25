@@ -109,13 +109,7 @@ async def get_strategy_by_id_or_slug(
     if not key:
         return None
     return (
-        (
-            await session.execute(
-                select(Strategy)
-                .where(func.lower(func.coalesce(Strategy.slug, "")) == key)
-                .limit(1)
-            )
-        )
+        (await session.execute(select(Strategy).where(func.lower(func.coalesce(Strategy.slug, "")) == key).limit(1)))
         .scalars()
         .first()
     )
@@ -219,9 +213,7 @@ async def create_strategy_version_snapshot(
         return existing_version
 
     await session.execute(
-        update(StrategyVersion)
-        .where(StrategyVersion.strategy_id == strategy_id)
-        .values(is_latest=False)
+        update(StrategyVersion).where(StrategyVersion.strategy_id == strategy_id).values(is_latest=False)
     )
 
     snapshot = StrategyVersion(
@@ -307,9 +299,7 @@ async def resolve_strategy_version(
         .first()
     )
     if version_row is None:
-        raise ValueError(
-            f"Strategy '{normalized_key}' does not have version {int(requested_version)}"
-        )
+        raise ValueError(f"Strategy '{normalized_key}' does not have version {int(requested_version)}")
 
     return ResolvedStrategyVersion(
         strategy=strategy_row,
@@ -328,7 +318,9 @@ async def strategy_versions_by_slug(
     if source_key is not None:
         normalized_source = str(source_key or "").strip().lower()
         query = query.where(func.lower(func.coalesce(StrategyVersion.source_key, "")) == normalized_source)
-    rows = (await session.execute(query.order_by(StrategyVersion.strategy_slug.asc(), StrategyVersion.version.desc()))).all()
+    rows = (
+        await session.execute(query.order_by(StrategyVersion.strategy_slug.asc(), StrategyVersion.version.desc()))
+    ).all()
     out: dict[str, list[int]] = {}
     for slug, version in rows:
         key = _normalize_strategy_key(slug)
