@@ -229,9 +229,7 @@ def _overlay_ws_trade_volume_on_market_row(row: dict, market, feed_manager) -> N
     if price_cache is None or not hasattr(price_cache, "get_trade_volume"):
         return
 
-    lookback_seconds = _ws_trade_volume_lookback_seconds(
-        row.get("timeframe") or getattr(market, "timeframe", None)
-    )
+    lookback_seconds = _ws_trade_volume_lookback_seconds(row.get("timeframe") or getattr(market, "timeframe", None))
     up_token, down_token = _market_leg_tokens(market)
     token_ids = {token for token in (up_token, down_token) if token}
     if not token_ids:
@@ -626,9 +624,7 @@ async def _run_loop() -> None:
         )
         now_mono = time.monotonic()
         warm = (now_mono - chainlink_feed_started_mono) < _CHAINLINK_WARMUP_SECONDS
-        should_restart = (
-            (not feed_started) or (stale and not warm)
-        ) and now_mono >= chainlink_restart_allowed_after
+        should_restart = ((not feed_started) or (stale and not warm)) and now_mono >= chainlink_restart_allowed_after
         restarted = False
         if should_restart:
             chainlink_restart_allowed_after = now_mono + _CHAINLINK_STALE_RESTART_COOLDOWN_SECONDS

@@ -155,7 +155,12 @@ def _strategy_param_fields(row: Any, *, default_params: dict[str, Any]) -> list[
 
     # Retention controls are scanner-opportunity retention knobs; they do not
     # affect trader evaluate()/execution flows in the bot flyout.
-    retention_keys = {"max_opportunities", "retention_window", "retention_max_age_minutes", "retention_max_opportunities"}
+    retention_keys = {
+        "max_opportunities",
+        "retention_window",
+        "retention_max_age_minutes",
+        "retention_max_opportunities",
+    }
     hidden_keys = retention_keys | _HIDDEN_PARAM_FIELD_KEYS
     return [field for field in deduped if str(field.get("key") or "").strip() not in hidden_keys]
 

@@ -632,7 +632,9 @@ class CTFExecutionService:
         wallet_address: str | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]:
-        execution_wallet = str(wallet_address or live_execution_service.get_execution_wallet_address() or "").strip().lower()
+        execution_wallet = (
+            str(wallet_address or live_execution_service.get_execution_wallet_address() or "").strip().lower()
+        )
         if not execution_wallet:
             return {
                 "wallet_address": "",
