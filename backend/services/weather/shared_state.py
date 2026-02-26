@@ -275,6 +275,36 @@ async def get_weather_opportunities_from_db(
         except Exception:
             pass
 
+    if opportunities:
+        history_candidates: list[Opportunity] = []
+        seen_ids: set[str] = set()
+        for opp in opportunities:
+            has_missing_market_history = False
+            for market in opp.markets:
+                history = market.get("price_history")
+                if not isinstance(history, list) or len(history) < 2:
+                    has_missing_market_history = True
+                    break
+            if not has_missing_market_history:
+                continue
+            candidate_id = str(getattr(opp, "stable_id", "") or getattr(opp, "id", "") or "").strip()
+            if candidate_id and candidate_id in seen_ids:
+                continue
+            if candidate_id:
+                seen_ids.add(candidate_id)
+            history_candidates.append(opp)
+
+        if history_candidates:
+            try:
+                from services.scanner import scanner as market_scanner
+
+                await market_scanner.attach_price_history_to_opportunities(
+                    history_candidates,
+                    timeout_seconds=0.0,
+                )
+            except Exception:
+                pass
+
     if opportunities and exclude_near_resolution:
         now = datetime.now(timezone.utc)
         filtered: list[Opportunity] = []

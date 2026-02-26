@@ -90,6 +90,10 @@ function formatUsd(value: number): string {
   return `$${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
+function formatNativeGas(value: number): string {
+  return `${value.toFixed(4)} POL`
+}
+
 function formatSignedUsd(value: number): string {
   return `${value >= 0 ? '+' : ''}${formatUsd(value)}`
 }
@@ -1500,6 +1504,36 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
                       <MetricPair label="Max Daily" value={formatUsd(toFiniteNumber(tradingStatus?.limits.max_daily_volume))} />
                       <MetricPair label="Max Open" value={`${toFiniteNumber(tradingStatus?.limits.max_open_positions)}`} />
                       <MetricPair label="Min Order" value={formatUsd(toFiniteNumber(tradingStatus?.limits.min_order_size_usd))} />
+                      <MetricPair
+                        label="Native Gas"
+                        value={tradingStatus?.native_gas ? formatNativeGas(toFiniteNumber(tradingStatus.native_gas.balance_native)) : '--'}
+                        valueClass={
+                          tradingStatus?.native_gas
+                            ? (toFiniteNumber(tradingStatus.native_gas.balance_native) > 0 ? 'text-emerald-300' : 'text-red-300')
+                            : undefined
+                        }
+                      />
+                      <MetricPair
+                        label="Gas Needed"
+                        value={tradingStatus?.native_gas ? formatNativeGas(toFiniteNumber(tradingStatus.native_gas.required_native_for_approval)) : '--'}
+                      />
+                      <MetricPair
+                        label="Gas Ready"
+                        value={tradingStatus?.native_gas ? (tradingStatus.native_gas.affordable_for_approval ? 'Yes' : 'No') : '--'}
+                        valueClass={
+                          tradingStatus?.native_gas
+                            ? (tradingStatus.native_gas.affordable_for_approval ? 'text-emerald-300' : 'text-red-300')
+                            : undefined
+                        }
+                      />
+                      <MetricPair
+                        label="Order Path"
+                        value={
+                          tradingStatus?.execution_paths?.normal_trading === 'clob_only'
+                            ? 'CLOB only'
+                            : '--'
+                        }
+                      />
                     </div>
                   </div>
                   <div className="rounded-lg border border-border/70 bg-card/80 overflow-hidden">

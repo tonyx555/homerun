@@ -28,6 +28,7 @@ from models.database import (
     TradeSignalSnapshot,
 )
 from services.event_bus import event_bus
+from services.trade_signal_stream import publish_trade_signal_batch as publish_trade_signal_stream_batch
 from models.opportunity import Opportunity
 from services.market_tradability import get_market_tradability_map
 
@@ -489,18 +490,30 @@ async def _publish_trade_signal_batch(
 ) -> None:
     if not signal_ids:
         return
+    normalized_event_type = str(event_type or "").strip().lower()
+    normalized_source = str(source or "").strip().lower()
+    emitted_at_iso = _utc_now().isoformat()
+    payload = {
+        "event_type": normalized_event_type,
+        "source": normalized_source,
+        "reason": reason,
+        "signal_count": int(len(signal_ids)),
+        "signal_ids": signal_ids[:500],
+        "emitted_at": emitted_at_iso,
+        "trigger": "signal_bus",
+    }
     try:
-        await event_bus.publish(
-            "trade_signal_batch",
-            {
-                "event_type": str(event_type),
-                "source": str(source or ""),
-                "reason": reason,
-                "signal_count": int(len(signal_ids)),
-                "signal_ids": signal_ids[:500],
-                "emitted_at": _utc_now().isoformat(),
-                "trigger": "signal_bus",
-            },
+        await event_bus.publish("trade_signal_batch", payload)
+    except Exception:
+        pass
+    try:
+        await publish_trade_signal_stream_batch(
+            event_type=normalized_event_type,
+            source=normalized_source,
+            signal_ids=signal_ids,
+            trigger="signal_bus",
+            reason=reason,
+            emitted_at=emitted_at_iso,
         )
     except Exception:
         pass

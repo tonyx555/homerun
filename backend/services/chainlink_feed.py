@@ -154,6 +154,34 @@ class ChainlinkFeed:
             return best_price
         return None
 
+    def get_price_at_or_after_time(
+        self,
+        asset: str,
+        timestamp_s: float,
+        *,
+        max_delay_seconds: float = 300.0,
+    ) -> Optional[float]:
+        """Get the first Chainlink price at-or-after ``timestamp_s``.
+
+        Returns None when no recorded price exists within ``max_delay_seconds``
+        after the target timestamp.
+        """
+        asset = asset.upper()
+        history = self._history.get(asset)
+        if not history:
+            return None
+
+        target_ms = int(float(timestamp_s) * 1000.0)
+        max_delay_ms = max(0, int(float(max_delay_seconds) * 1000.0))
+
+        for ts_ms, price in history:
+            if ts_ms < target_ms:
+                continue
+            if ts_ms - target_ms > max_delay_ms:
+                return None
+            return price
+        return None
+
     def update_from_binance_direct(
         self,
         asset: str,

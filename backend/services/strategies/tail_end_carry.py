@@ -43,7 +43,7 @@ class TailEndCarryStrategy(BaseStrategy):
     mispricing_type = "within_market"
     requires_resolution_date = True
     subscriptions = ["market_data_refresh"]
-    realtime_processing_mode = "incremental"
+    realtime_processing_mode = "full_snapshot"
 
     quality_filter_overrides = QualityFilterOverrides(
         min_roi=1.0,
@@ -51,7 +51,7 @@ class TailEndCarryStrategy(BaseStrategy):
     )
 
     pipeline_defaults = {
-        "min_edge_percent": 1.6,
+        "min_edge_percent": 1.0,
         "min_confidence": 0.35,
         "max_risk_score": 0.78,
         "base_size_usd": 14.0,
@@ -68,15 +68,15 @@ class TailEndCarryStrategy(BaseStrategy):
     sizing_config = SizingConfig()
 
     default_config = {
-        "min_probability": 0.93,
-        "max_probability": 0.99,
-        "min_days_to_resolution": 0.03,
-        "max_days_to_resolution": 1.0,
-        "min_liquidity": 5000.0,
-        "max_spread": 0.03,
+        "min_probability": 0.85,
+        "max_probability": 0.999,
+        "min_days_to_resolution": 0.01,
+        "max_days_to_resolution": 2.0,
+        "min_liquidity": 3500.0,
+        "max_spread": 0.05,
         "min_repricing_buffer": 0.015,
         "repricing_weight": 0.45,
-        "max_opportunities": 35,
+        "max_opportunities": 120,
         "panic_drop_threshold": 0.08,
         "panic_window_points": 6,
         "panic_recovery_ratio_max": 0.20,
@@ -86,6 +86,7 @@ class TailEndCarryStrategy(BaseStrategy):
     def __init__(self) -> None:
         super().__init__()
         self.config = dict(self.default_config)
+        self.min_profit = 0.01
 
     @staticmethod
     def _book_value(payload: Optional[dict], key: str) -> Optional[float]:
@@ -136,15 +137,15 @@ class TailEndCarryStrategy(BaseStrategy):
         cfg = dict(self.default_config)
         cfg.update(getattr(self, "config", {}) or {})
 
-        min_probability = clamp(safe_float(cfg.get("min_probability"), 0.93), 0.5, 0.995)
-        max_probability = clamp(safe_float(cfg.get("max_probability"), 0.99), min_probability + 0.005, 0.999)
-        min_days = max(0.0, safe_float(cfg.get("min_days_to_resolution"), 0.03))
-        max_days = max(min_days + 0.005, safe_float(cfg.get("max_days_to_resolution"), 1.0))
-        min_liquidity = max(100.0, safe_float(cfg.get("min_liquidity"), 5000.0))
-        max_spread = clamp(safe_float(cfg.get("max_spread"), 0.03), 0.005, 0.20)
+        min_probability = clamp(safe_float(cfg.get("min_probability"), 0.85), 0.5, 0.995)
+        max_probability = clamp(safe_float(cfg.get("max_probability"), 0.999), min_probability + 0.005, 0.999)
+        min_days = max(0.0, safe_float(cfg.get("min_days_to_resolution"), 0.01))
+        max_days = max(min_days + 0.005, safe_float(cfg.get("max_days_to_resolution"), 2.0))
+        min_liquidity = max(100.0, safe_float(cfg.get("min_liquidity"), 3500.0))
+        max_spread = clamp(safe_float(cfg.get("max_spread"), 0.05), 0.005, 0.20)
         min_repricing_buffer = clamp(safe_float(cfg.get("min_repricing_buffer"), 0.015), 0.005, 0.10)
         repricing_weight = clamp(safe_float(cfg.get("repricing_weight"), 0.45), 0.10, 0.90)
-        max_opportunities = max(1, int(safe_float(cfg.get("max_opportunities"), 35)))
+        max_opportunities = max(1, int(safe_float(cfg.get("max_opportunities"), 120)))
         panic_drop_threshold = clamp(safe_float(cfg.get("panic_drop_threshold"), 0.08), 0.02, 0.30)
         panic_window_points = max(3, int(safe_float(cfg.get("panic_window_points"), 6)))
         panic_recovery_ratio_max = clamp(safe_float(cfg.get("panic_recovery_ratio_max"), 0.20), 0.0, 0.9)
@@ -281,10 +282,10 @@ class TailEndCarryStrategy(BaseStrategy):
 
     def custom_checks(self, signal: Any, context: dict, params: dict, payload: dict) -> list[DecisionCheck]:
         """Tail carry: source, strategy type, entry band, resolution window checks."""
-        min_entry = clamp(to_float(params.get("min_entry_price", 0.93), 0.93), 0.01, 0.995)
-        max_entry = clamp(to_float(params.get("max_entry_price", 0.99), 0.99), min_entry, 0.999)
-        min_days = max(0.0, to_float(params.get("min_days_to_resolution", 0.03), 0.03))
-        max_days = max(min_days + 0.005, to_float(params.get("max_days_to_resolution", 1.0), 1.0))
+        min_entry = clamp(to_float(params.get("min_entry_price", 0.85), 0.85), 0.01, 0.995)
+        max_entry = clamp(to_float(params.get("max_entry_price", 0.999), 0.999), min_entry, 0.999)
+        min_days = max(0.0, to_float(params.get("min_days_to_resolution", 0.01), 0.01))
+        max_days = max(min_days + 0.005, to_float(params.get("max_days_to_resolution", 2.0), 2.0))
 
         source = str(getattr(signal, "source", "") or "").strip().lower()
         strategy_type = (
@@ -346,7 +347,7 @@ class TailEndCarryStrategy(BaseStrategy):
         params = context.get("params") or {}
         payload = signal_payload(signal)
 
-        min_edge = to_float(params.get("min_edge_percent", 1.6), 1.6)
+        min_edge = to_float(params.get("min_edge_percent", 1.0), 1.0)
         min_conf = to_confidence(params.get("min_confidence", 0.35), 0.35)
         max_risk = to_confidence(params.get("max_risk_score", 0.78), 0.78)
         base_size = max(1.0, to_float(params.get("base_size_usd", 14.0), 14.0))

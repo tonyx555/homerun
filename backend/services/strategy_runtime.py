@@ -104,25 +104,36 @@ async def refresh_strategy_runtime_if_needed(
 
     scope_fully_loaded = True
     if normalized_sources:
-        enabled_rows = (
+        scoped_rows = (
             (
                 await session.execute(
-                    select(Strategy.slug).where(
-                        Strategy.enabled == True,  # noqa: E712
+                    select(Strategy.slug, Strategy.enabled).where(
                         func.lower(func.coalesce(Strategy.source_key, "")).in_(tuple(normalized_sources)),
                     )
                 )
             )
-            .scalars()
             .all()
         )
-        for slug in enabled_rows:
-            normalized_slug = str(slug or "").strip().lower()
+
+        enabled_slugs: set[str] = set()
+        scoped_slugs: set[str] = set()
+        for slug_raw, enabled_raw in scoped_rows:
+            normalized_slug = str(slug_raw or "").strip().lower()
             if not normalized_slug:
                 continue
-            if strategy_loader.get_strategy(normalized_slug) is None:
+            scoped_slugs.add(normalized_slug)
+            if bool(enabled_raw):
+                enabled_slugs.add(normalized_slug)
+
+        for slug in enabled_slugs:
+            if strategy_loader.get_strategy(slug) is None:
                 scope_fully_loaded = False
                 break
+
+        if scope_fully_loaded:
+            loaded_scoped_slugs = {slug for slug in strategy_loader._loaded.keys() if slug in scoped_slugs}
+            if any(slug not in enabled_slugs for slug in loaded_scoped_slugs):
+                scope_fully_loaded = False
 
     if not force and previous_stamp == effective_stamp and scope_fully_loaded:
         return {

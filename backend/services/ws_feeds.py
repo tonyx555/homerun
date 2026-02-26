@@ -1234,7 +1234,7 @@ class FeedManager:
         self._redis_price_updates: Dict[str, tuple[float | None, float | None, float | None]] = {}
         self._redis_update_lock = asyncio.Lock()
         self._redis_flush_task: Optional[asyncio.Task] = None
-        self._redis_flush_interval_seconds: float = 0.5
+        self._redis_flush_interval_seconds: float = max(0.01, float(settings.WS_REDIS_FLUSH_INTERVAL_SECONDS))
         self._cache.add_on_change_callback(self._on_price_change)
         self._cache.add_on_trade_callback(self._on_trade)
         self._cache.add_on_update_callback(self._on_price_update)

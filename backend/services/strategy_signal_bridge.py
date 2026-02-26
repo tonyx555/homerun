@@ -21,6 +21,7 @@ from services.signal_bus import (
     refresh_trade_signal_snapshots,
     upsert_trade_signal,
 )
+from services.trade_signal_stream import publish_trade_signal_batch as publish_trade_signal_stream_batch
 from services.worker_state import _commit_with_retry
 from utils.logger import get_logger
 from utils.utcnow import utcnow
@@ -217,14 +218,16 @@ async def bridge_opportunities_to_signals(
     await _commit_with_retry(session)
     await refresh_trade_signal_snapshots(session)
     if signal_ids:
+        emitted_at_iso = now.isoformat()
         try:
             await event_bus.publish(
                 "trade_signal_batch",
                 {
+                    "event_type": "upsert_insert",
                     "source": str(source),
                     "signal_count": int(len(signal_ids)),
                     "signal_ids": signal_ids[:500],
-                    "emitted_at": now.isoformat(),
+                    "emitted_at": emitted_at_iso,
                     "trigger": "strategy_signal_bridge",
                     "market_data_age_ms_avg": (
                         round(sum(market_data_ages_ms) / len(market_data_ages_ms), 2) if market_data_ages_ms else None
@@ -235,6 +238,27 @@ async def bridge_opportunities_to_signals(
         except Exception as exc:
             logger.warning(
                 "Failed to publish trade_signal_batch event",
+                source=str(source),
+                signal_count=len(signal_ids),
+                exc_info=exc,
+            )
+        try:
+            await publish_trade_signal_stream_batch(
+                event_type="upsert_insert",
+                source=str(source),
+                signal_ids=signal_ids,
+                trigger="strategy_signal_bridge",
+                emitted_at=emitted_at_iso,
+                metadata={
+                    "market_data_age_ms_avg": (
+                        round(sum(market_data_ages_ms) / len(market_data_ages_ms), 2) if market_data_ages_ms else None
+                    ),
+                    "market_data_age_ms_max": max(market_data_ages_ms) if market_data_ages_ms else None,
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to append trade_signal_batch stream event",
                 source=str(source),
                 signal_count=len(signal_ids),
                 exc_info=exc,

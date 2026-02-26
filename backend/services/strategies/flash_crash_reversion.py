@@ -7,6 +7,7 @@ liquidity/spread constraints make execution realistic.
 
 from __future__ import annotations
 
+import re
 import time
 from collections import deque
 from typing import Any, Optional
@@ -78,12 +79,146 @@ class FlashCrashReversionStrategy(BaseStrategy):
         "max_spread": 0.07,
         "min_liquidity": 2500.0,
         "max_opportunities": 40,
+        "exclude_crypto_markets": True,
+        "exclude_market_keywords": [],
         "take_profit_pct": 8.0,
     }
+    _CRYPTO_MARKET_HINTS = (
+        "btc",
+        "bitcoin",
+        "eth",
+        "ethereum",
+        "sol",
+        "solana",
+        "xrp",
+        "doge",
+        "crypto",
+        "cryptocurrency",
+        "coinbase",
+    )
 
     def __init__(self) -> None:
         super().__init__()
         self.config = dict(self.default_config)
+
+    @staticmethod
+    def _to_bool(value: Any, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return default
+
+    @staticmethod
+    def _append_text(chunks: list[str], value: Any) -> None:
+        text = str(value or "").strip().lower()
+        if text:
+            chunks.append(text)
+
+    @staticmethod
+    def _normalize_excluded_keywords(value: Any) -> list[str]:
+        if isinstance(value, str):
+            candidates: list[Any] = [token.strip() for token in value.split(",")]
+        elif isinstance(value, list):
+            candidates = list(value)
+        else:
+            candidates = []
+        out: list[str] = []
+        seen: set[str] = set()
+        for raw in candidates:
+            token = str(raw or "").strip().lower()
+            if not token or token in seen:
+                continue
+            seen.add(token)
+            out.append(token)
+        return out
+
+    @staticmethod
+    def _keyword_in_text(keyword: str, text: str) -> bool:
+        if not keyword or not text:
+            return False
+        if len(keyword) <= 4 and keyword.replace("-", "").replace("_", "").isalnum():
+            return re.search(rf"\b{re.escape(keyword)}\b", text) is not None
+        return keyword in text
+
+    @classmethod
+    def _is_crypto_market_text(cls, text: str) -> bool:
+        return any(cls._keyword_in_text(hint, text) for hint in cls._CRYPTO_MARKET_HINTS)
+
+    @classmethod
+    def _first_blocked_keyword(cls, text: str, excluded_keywords: list[str]) -> str | None:
+        for keyword in excluded_keywords:
+            if cls._keyword_in_text(keyword, text):
+                return keyword
+        return None
+
+    @classmethod
+    def _detect_market_text(cls, market: Market, event: Optional[Event]) -> str:
+        chunks: list[str] = []
+        for value in (market.id, market.question, market.slug, market.group_item_title, market.event_slug):
+            cls._append_text(chunks, value)
+        for tag in list(getattr(market, "tags", []) or []):
+            cls._append_text(chunks, tag)
+        if event is not None:
+            for value in (event.id, event.slug, event.title, event.category):
+                cls._append_text(chunks, value)
+            for tag in list(getattr(event, "tags", []) or []):
+                cls._append_text(chunks, tag)
+        return " | ".join(chunks)
+
+    @classmethod
+    def _signal_market_text(cls, signal: Any, payload: dict[str, Any]) -> str:
+        chunks: list[str] = []
+        for value in (
+            getattr(signal, "market_question", None),
+            payload.get("market_question"),
+            payload.get("title"),
+            payload.get("description"),
+            payload.get("market_id"),
+            payload.get("market_slug"),
+            payload.get("event_title"),
+            payload.get("event_slug"),
+            payload.get("category"),
+        ):
+            cls._append_text(chunks, value)
+
+        markets = payload.get("markets")
+        if isinstance(markets, list):
+            for raw_market in markets[:2]:
+                if not isinstance(raw_market, dict):
+                    continue
+                for value in (
+                    raw_market.get("id"),
+                    raw_market.get("question"),
+                    raw_market.get("slug"),
+                    raw_market.get("event_slug"),
+                    raw_market.get("group_item_title"),
+                ):
+                    cls._append_text(chunks, value)
+                tags = raw_market.get("tags")
+                if isinstance(tags, list):
+                    for tag in tags:
+                        cls._append_text(chunks, tag)
+                else:
+                    cls._append_text(chunks, tags)
+
+        event = payload.get("event")
+        if isinstance(event, dict):
+            for value in (event.get("id"), event.get("slug"), event.get("title"), event.get("category")):
+                cls._append_text(chunks, value)
+            tags = event.get("tags")
+            if isinstance(tags, list):
+                for tag in tags:
+                    cls._append_text(chunks, tag)
+            else:
+                cls._append_text(chunks, tags)
+
+        return " | ".join(chunks)
 
     @staticmethod
     def _extract_book_value(payload: Optional[dict], key: str) -> Optional[float]:
@@ -162,6 +297,8 @@ class FlashCrashReversionStrategy(BaseStrategy):
         max_spread = clamp(safe_float(cfg.get("max_spread"), 0.07), 0.005, 0.25)
         min_liquidity = max(100.0, safe_float(cfg.get("min_liquidity"), 2500.0))
         max_opportunities = max(1, int(safe_float(cfg.get("max_opportunities"), 40)))
+        exclude_crypto_markets = self._to_bool(cfg.get("exclude_crypto_markets"), True)
+        exclude_market_keywords = self._normalize_excluded_keywords(cfg.get("exclude_market_keywords"))
 
         event_by_market: dict[str, Event] = {}
         for event in events:
@@ -173,6 +310,13 @@ class FlashCrashReversionStrategy(BaseStrategy):
 
         for market in markets:
             if market.closed or not market.active:
+                continue
+            event = event_by_market.get(market.id)
+            market_text = self._detect_market_text(market, event)
+            if exclude_crypto_markets and self._is_crypto_market_text(market_text):
+                continue
+            blocked_keyword = self._first_blocked_keyword(market_text, exclude_market_keywords)
+            if blocked_keyword is not None:
                 continue
             if (
                 len(list(getattr(market, "outcome_prices", []) or [])) < 2
@@ -267,7 +411,7 @@ class FlashCrashReversionStrategy(BaseStrategy):
                     expected_payout=target_price,
                     markets=[market],
                     positions=positions,
-                    event=event_by_market.get(market.id),
+                    event=event,
                     is_guaranteed=False,
                     min_liquidity_hard=min_liquidity,
                     min_position_size=max(settings.MIN_POSITION_SIZE, 5.0),
@@ -317,6 +461,8 @@ class FlashCrashReversionStrategy(BaseStrategy):
         min_liquidity = max(0.0, to_float(params.get("min_liquidity", 1500.0), 1500.0))
         min_abs_move_5m = max(0.1, to_float(params.get("min_abs_move_5m", 1.5), 1.5))
         require_alignment = bool(params.get("require_crash_alignment", True))
+        exclude_crypto_markets = self._to_bool(params.get("exclude_crypto_markets"), True)
+        exclude_market_keywords = self._normalize_excluded_keywords(params.get("exclude_market_keywords"))
 
         source = str(getattr(signal, "source", "") or "").strip().lower()
         direction = str(getattr(signal, "direction", "") or "").strip().lower()
@@ -329,6 +475,23 @@ class FlashCrashReversionStrategy(BaseStrategy):
 
         liquidity = max(0.0, to_float(getattr(signal, "liquidity", 0.0), 0.0))
         move_5m_pct = live_move(live_market, "move_5m")
+        if move_5m_pct is None:
+            move_5m_pct = to_float(
+                payload.get("move_5m_pct", payload.get("move_5m_percent", payload.get("move_5m"))),
+                None,
+            )
+        if move_5m_pct is None:
+            positions = payload.get("positions_to_take") if isinstance(payload.get("positions_to_take"), list) else []
+            first_position = positions[0] if positions and isinstance(positions[0], dict) else {}
+            flash = first_position.get("_flash_crash") if isinstance(first_position.get("_flash_crash"), dict) else {}
+            old_price = to_float(flash.get("old_price"), None)
+            new_price = to_float(flash.get("new_price"), None)
+            if old_price is not None and old_price > 0.0 and new_price is not None and new_price > 0.0:
+                selected_leg_move_pct = ((new_price - old_price) / old_price) * 100.0
+                if direction == "buy_yes":
+                    move_5m_pct = selected_leg_move_pct
+                elif direction == "buy_no":
+                    move_5m_pct = -selected_leg_move_pct
 
         alignment_ok = True
         if require_alignment:
@@ -341,11 +504,19 @@ class FlashCrashReversionStrategy(BaseStrategy):
             else:
                 alignment_ok = False
 
+        market_text = self._signal_market_text(signal, payload)
+        is_crypto_market = self._is_crypto_market_text(market_text)
+        blocked_keyword = self._first_blocked_keyword(market_text, exclude_market_keywords)
+        market_scope_ok = (not exclude_crypto_markets) or (not is_crypto_market)
+        keyword_filter_ok = blocked_keyword is None
+
         # Stash for compute_score / evaluate
         payload["_signal_liquidity"] = liquidity
         payload["_move_5m_pct"] = move_5m_pct
         payload["_direction"] = direction
         payload["_strategy_type"] = strategy_type
+        payload["_is_crypto_market"] = is_crypto_market
+        payload["_blocked_keyword"] = blocked_keyword
 
         return [
             DecisionCheck("source", "Scanner source", source == "scanner", detail="Requires source=scanner."),
@@ -365,6 +536,18 @@ class FlashCrashReversionStrategy(BaseStrategy):
                 alignment_ok,
                 score=move_5m_pct,
                 detail=f"abs move >= {min_abs_move_5m:.2f}% in signal direction",
+            ),
+            DecisionCheck(
+                "market_scope",
+                "Exclude crypto markets",
+                market_scope_ok,
+                detail=f"exclude_crypto_markets={exclude_crypto_markets}",
+            ),
+            DecisionCheck(
+                "keyword_filter",
+                "Exclude keyword matches",
+                keyword_filter_ok,
+                detail=f"blocked={blocked_keyword}" if blocked_keyword else "no blocked keyword match",
             ),
         ]
 
@@ -417,6 +600,8 @@ class FlashCrashReversionStrategy(BaseStrategy):
         move_5m_pct = payload.get("_move_5m_pct")
         direction = str(payload.get("_direction", "") or "")
         strategy_type = str(payload.get("_strategy_type", "") or "")
+        is_crypto_market = bool(payload.get("_is_crypto_market", False))
+        blocked_keyword = payload.get("_blocked_keyword")
 
         if not all(c.passed for c in checks):
             return StrategyDecision(
@@ -430,6 +615,8 @@ class FlashCrashReversionStrategy(BaseStrategy):
                     "risk_score": risk_score,
                     "liquidity": liquidity,
                     "move_5m_pct": move_5m_pct,
+                    "is_crypto_market": is_crypto_market,
+                    "blocked_keyword": blocked_keyword,
                 },
             )
 
@@ -463,6 +650,8 @@ class FlashCrashReversionStrategy(BaseStrategy):
                 "risk_score": risk_score,
                 "liquidity": liquidity,
                 "move_5m_pct": move_5m_pct,
+                "is_crypto_market": is_crypto_market,
+                "blocked_keyword": blocked_keyword,
                 "sizing": sizing,
                 "strategy_type": strategy_type,
             },

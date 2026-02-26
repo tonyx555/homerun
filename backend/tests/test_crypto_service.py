@@ -62,9 +62,16 @@ class _FakeClient:
 
 
 class _FakePriceToBeatClient:
-    def __init__(self, *, response_data: dict, status_code: int = 200):
+    def __init__(
+        self,
+        *,
+        response_data: dict | list | None = None,
+        status_code: int = 200,
+        responses_by_url: dict[str, tuple[dict | list | None, int]] | None = None,
+    ):
         self._response_data = response_data
         self._status_code = status_code
+        self._responses_by_url = responses_by_url or {}
         self.calls: list[tuple[str, dict]] = []
 
     def __enter__(self):
@@ -78,6 +85,9 @@ class _FakePriceToBeatClient:
 
     def get(self, url: str, params: dict) -> _FakeResponse:
         self.calls.append((url, dict(params)))
+        if url in self._responses_by_url:
+            payload, status = self._responses_by_url[url]
+            return _FakeResponse(payload, status_code=status)
         return _FakeResponse(self._response_data, status_code=self._status_code)
 
 
@@ -224,3 +234,122 @@ def test_update_price_to_beat_falls_back_to_chainlink_history_when_api_missing(m
     svc._update_price_to_beat([market])
 
     assert svc._price_to_beat["eth-updown-15m-test"] == 1999.25
+
+
+def test_update_price_to_beat_uses_delayed_chainlink_history_when_exact_point_missing(monkeypatch):
+    start_time = (
+        (datetime.now(timezone.utc) - timedelta(minutes=3)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    )
+    market = crypto_service.CryptoMarket(
+        slug="btc-updown-15m-delayed-history",
+        asset="BTC",
+        timeframe="15min",
+        start_time=start_time,
+    )
+
+    class _Feed:
+        @staticmethod
+        def get_price_at_time(asset: str, timestamp_s: float):
+            return None
+
+        @staticmethod
+        def get_price_at_or_after_time(asset: str, timestamp_s: float, *, max_delay_seconds: float = 300.0):
+            return 70654.12
+
+        @staticmethod
+        def get_price(asset: str):
+            return None
+
+    fake_client = _FakePriceToBeatClient(response_data={"openPrice": None}, status_code=500)
+    monkeypatch.setattr(crypto_service.httpx, "Client", lambda timeout=2.0: fake_client)
+    monkeypatch.setattr("services.chainlink_feed.get_chainlink_feed", lambda: _Feed())
+
+    svc = crypto_service.CryptoService()
+    svc._update_price_to_beat([market])
+
+    assert svc._price_to_beat["btc-updown-15m-delayed-history"] == 70654.12
+
+
+def test_update_price_to_beat_uses_binance_kline_when_api_rate_limited(monkeypatch):
+    base_now = 1_800_000_000.0
+    start_dt = datetime.fromtimestamp(base_now - 120.0, tz=timezone.utc)
+    start_time = start_dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    market = crypto_service.CryptoMarket(
+        slug="btc-updown-15m-binance-fallback",
+        asset="BTC",
+        timeframe="15min",
+        start_time=start_time,
+    )
+
+    class _Feed:
+        @staticmethod
+        def get_price_at_time(asset: str, timestamp_s: float):
+            return None
+
+        @staticmethod
+        def get_price_at_or_after_time(asset: str, timestamp_s: float, *, max_delay_seconds: float = 300.0):
+            return None
+
+        @staticmethod
+        def get_price(asset: str):
+            return None
+
+    start_ms = int(start_dt.timestamp() * 1000)
+    fake_client = _FakePriceToBeatClient(
+        responses_by_url={
+            crypto_service._CRYPTO_PRICE_TO_BEAT_API_URL: ({}, 429),
+            crypto_service._BINANCE_KLINES_API_URL: ([[start_ms, "70234.98"]], 200),
+        }
+    )
+
+    monkeypatch.setattr(crypto_service.httpx, "Client", lambda timeout=2.0: fake_client)
+    monkeypatch.setattr("services.chainlink_feed.get_chainlink_feed", lambda: _Feed())
+    monkeypatch.setattr(crypto_service.time, "time", lambda: base_now)
+
+    svc = crypto_service.CryptoService()
+    svc._update_price_to_beat([market])
+
+    assert svc._price_to_beat["btc-updown-15m-binance-fallback"] == 70234.98
+
+
+def test_update_price_to_beat_does_not_requery_every_cycle_when_unresolved(monkeypatch):
+    base_now = 1_800_000_000.0
+    start_dt = datetime.fromtimestamp(base_now - 120.0, tz=timezone.utc)
+    start_time = start_dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    market = crypto_service.CryptoMarket(
+        slug="btc-updown-15m-retry-window",
+        asset="BTC",
+        timeframe="15min",
+        start_time=start_time,
+    )
+
+    class _Feed:
+        @staticmethod
+        def get_price_at_time(asset: str, timestamp_s: float):
+            return None
+
+        @staticmethod
+        def get_price_at_or_after_time(asset: str, timestamp_s: float, *, max_delay_seconds: float = 300.0):
+            return None
+
+        @staticmethod
+        def get_price(asset: str):
+            return None
+
+    fake_client = _FakePriceToBeatClient(
+        responses_by_url={
+            crypto_service._CRYPTO_PRICE_TO_BEAT_API_URL: ({}, 429),
+            crypto_service._BINANCE_KLINES_API_URL: ([], 500),
+        }
+    )
+
+    monkeypatch.setattr(crypto_service.httpx, "Client", lambda timeout=2.0: fake_client)
+    monkeypatch.setattr("services.chainlink_feed.get_chainlink_feed", lambda: _Feed())
+    monkeypatch.setattr(crypto_service.time, "time", lambda: base_now)
+
+    svc = crypto_service.CryptoService()
+    svc._update_price_to_beat([market])
+    svc._update_price_to_beat([market])
+
+    crypto_api_calls = [call for call in fake_client.calls if call[0] == crypto_service._CRYPTO_PRICE_TO_BEAT_API_URL]
+    assert len(crypto_api_calls) == 1

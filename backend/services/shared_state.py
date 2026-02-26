@@ -535,9 +535,18 @@ async def read_scanner_snapshot(
         try:
             opp = Opportunity.model_validate(d)
             for market in opp.markets:
-                mid = market.get("id", "")
-                if mid and mid in market_history:
-                    market["price_history"] = market_history.get(mid, [])
+                candidates = (
+                    str(market.get("id", "") or "").strip(),
+                    str(market.get("condition_id", "") or "").strip(),
+                    str(market.get("conditionId", "") or "").strip(),
+                )
+                for candidate in candidates:
+                    if not candidate:
+                        continue
+                    history = market_history.get(candidate)
+                    if isinstance(history, list) and len(history) >= 2:
+                        market["price_history"] = history
+                        break
             opportunities.append(opp)
         except Exception as e:
             logger.debug("Skip invalid opportunity row: %s", e)
@@ -805,28 +814,31 @@ async def get_opportunities_from_db(
         except Exception:
             pass
 
-    # For trader-sourced cards, trigger non-blocking sparkline hydration on read.
-    # This keeps API/UI latency low while allowing history to warm in the
-    # scanner cache/snapshot even when worker cycles are delayed.
-    if opportunities and source_key in {"traders", "all"}:
-        trader_candidates: list[Opportunity] = []
+    if opportunities:
+        history_candidates: list[Opportunity] = []
+        seen_ids: set[str] = set()
         for opp in opportunities:
-            if source_key == "all" and not _is_traders_opportunity(opp):
-                continue
             has_missing_market_history = False
             for market in opp.markets:
                 history = market.get("price_history")
                 if not isinstance(history, list) or len(history) < 2:
                     has_missing_market_history = True
                     break
-            if has_missing_market_history:
-                trader_candidates.append(opp)
-        if trader_candidates:
+            if not has_missing_market_history:
+                continue
+            candidate_id = str(getattr(opp, "stable_id", "") or getattr(opp, "id", "") or "").strip()
+            if candidate_id and candidate_id in seen_ids:
+                continue
+            if candidate_id:
+                seen_ids.add(candidate_id)
+            history_candidates.append(opp)
+
+        if history_candidates:
             try:
                 from services.scanner import scanner as market_scanner
 
                 await market_scanner.attach_price_history_to_opportunities(
-                    trader_candidates,
+                    history_candidates,
                     timeout_seconds=0.0,
                 )
             except Exception:

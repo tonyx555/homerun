@@ -13,7 +13,12 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from config import settings
 import services.live_execution_service as live_execution_module
-from services.live_execution_service import OrderSide, OrderStatus, Position, LiveExecutionService
+from services.live_execution_service import (
+    OrderSide,
+    OrderStatus,
+    Position,
+    LiveExecutionService,
+)
 
 
 class _BalanceClient:
@@ -281,7 +286,6 @@ async def test_sell_pre_submit_gate_rechecks_fresh_snapshot_before_blocking(monk
     service._balance_signature_type = 1
     service._client = _StaleThenFreshClient()
     service._select_signature_type_for_conditional_token = AsyncMock(return_value=1)
-    service._ensure_exchange_approval_for_sells = AsyncMock(return_value=False)
     service.refresh_conditional_balance_allowance = AsyncMock(return_value=False)
 
     gate_ok, gate_error = await service._enforce_sell_pre_submit_gate(token_id="token-123", size=2.0)
@@ -423,3 +427,56 @@ async def test_place_buy_order_fails_before_submit_when_pre_submit_gate_fails(mo
     assert order.error_message is not None
     assert "BUY pre-submit gate failed" in order.error_message
     assert client.post_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_buy_pre_submit_gate_auto_recovers_collateral_allowance(monkeypatch):
+    _install_balance_allowance_modules(monkeypatch)
+
+    class _StaleThenFreshClient(_BalanceClient):
+        def __init__(self):
+            super().__init__({}, builder_sig_type=1)
+            self.snapshot_calls = 0
+
+        def get_balance_allowance(self, params=None):
+            self.snapshot_calls += 1
+            if self.snapshot_calls == 1:
+                return {"balance": "5.0", "allowance": "1.0"}
+            return {"balance": "5.0", "allowance": "5.0"}
+
+    service = LiveExecutionService()
+    service._initialized = True
+    service._wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
+    service._proxy_funder_address = service._wallet_address
+    service._balance_signature_type = 1
+    service._client = _StaleThenFreshClient()
+    service.refresh_collateral_balance_allowance = AsyncMock(return_value=True)
+
+    gate_ok, gate_error = await service._enforce_buy_pre_submit_gate(
+        token_id="token-123",
+        required_notional_usd=Decimal("4.0"),
+    )
+
+    assert gate_ok is True
+    assert gate_error is None
+    service.refresh_collateral_balance_allowance.assert_awaited_once()
+    assert service._client.snapshot_calls >= 2
+
+
+@pytest.mark.asyncio
+async def test_prepare_sell_balance_allowance_refreshes_clob_cache_only(monkeypatch):
+    _install_balance_allowance_modules(monkeypatch)
+    service = LiveExecutionService()
+    service._initialized = True
+    service._wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
+    service._proxy_funder_address = service._wallet_address
+    service._balance_signature_type = 1
+    service._client = _BalanceClient({1: {"balance": "1.0", "allowance": "1.0"}}, builder_sig_type=1)
+    service.refresh_conditional_balance_allowance = AsyncMock(return_value=True)
+    service._select_signature_type_for_conditional_token = AsyncMock(return_value=1)
+
+    refreshed = await service.prepare_sell_balance_allowance("token-123")
+
+    assert refreshed is True
+    service._select_signature_type_for_conditional_token.assert_awaited_once_with("token-123")
+    service.refresh_conditional_balance_allowance.assert_awaited_once_with("token-123")

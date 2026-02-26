@@ -108,3 +108,48 @@ async def test_list_serialized_trader_orders_keeps_existing_payload_metadata(tmp
     assert payload["event_slug"] == "payload-event-slug"
     assert payload["market_url"] == "https://polymarket.com/market/payload-market-slug"
     assert payload["polymarket_url"] == "https://polymarket.com/market/payload-market-slug"
+
+
+@pytest.mark.asyncio
+async def test_list_serialized_trader_orders_uses_cached_market_outcome_labels_for_direction(tmp_path):
+    condition_id = "0x5e20ce52f9449f89d6a14341a26167e6eea76a3ec78357d5a17ad5df85c74bc2"
+    yes_label = "BOS"
+    no_label = "DEN"
+
+    engine, session_factory = await _build_session_factory(tmp_path)
+    async with session_factory() as session:
+        session.add(
+            CachedMarket(
+                condition_id=condition_id,
+                question="BOS vs DEN",
+                slug="bos-vs-den",
+                extra_data={
+                    "condition_id": condition_id,
+                    "outcome_labels": [yes_label, no_label],
+                },
+            )
+        )
+        session.add(
+            TraderOrder(
+                id="order_3",
+                trader_id="trader_3",
+                source="traders",
+                market_id=condition_id,
+                market_question="BOS vs DEN",
+                direction="buy_yes",
+                mode="paper",
+                status="open",
+                payload_json={},
+            )
+        )
+        await session.commit()
+
+        rows = await list_serialized_trader_orders(session, trader_id="trader_3", limit=20)
+
+    await engine.dispose()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["direction_side"] == "YES"
+    assert row["direction_label"] == yes_label
+    assert row["yes_label"] == yes_label
+    assert row["no_label"] == no_label

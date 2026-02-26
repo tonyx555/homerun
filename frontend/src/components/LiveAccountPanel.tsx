@@ -7,6 +7,7 @@ import {
   Briefcase,
   DollarSign,
   ExternalLink,
+  Fuel,
   RefreshCw,
   ShieldAlert,
   TrendingDown,
@@ -69,6 +70,10 @@ function formatSize(value: number): string {
 
 function formatPct(value: number): string {
   return `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`
+}
+
+function formatNativeGas(value: number): string {
+  return `${value.toFixed(4)} POL`
 }
 
 function shortText(value: string | null | undefined, head = 10, tail = 8): string {
@@ -190,6 +195,12 @@ function PolymarketAccount() {
   const unrealizedPnl = positions.reduce((sum, position) => sum + position.unrealizedPnl, 0)
   const markedPositions = positions.filter((position) => position.currentPrice > 0).length
   const markCoverage = positions.length > 0 ? (markedPositions / positions.length) * 100 : 0
+  const nativeGas = tradingStatus?.native_gas
+  const nativeGasBalance = toNumber(nativeGas?.balance_native)
+  const nativeGasRequired = toNumber(nativeGas?.required_native_for_approval)
+  const nativeGasAffordable = Boolean(nativeGas?.affordable_for_approval)
+  const nativeGasError = String(nativeGas?.error || '').trim()
+  const executionPaths = tradingStatus?.execution_paths
   const isLoading = tradingStatusQuery.isLoading || (connected && (positionsQuery.isLoading || balanceQuery.isLoading))
   const isFetching = tradingStatusQuery.isFetching || positionsQuery.isFetching || balanceQuery.isFetching
 
@@ -208,7 +219,20 @@ function PolymarketAccount() {
       subtitle="Marked live positions, wallet balances, and execution footprint from your active wallet."
       connected={connected}
       identityLabel={tradingStatus?.wallet_address ? shortText(tradingStatus.wallet_address) : 'No wallet linked'}
-      statusHint={connected ? 'Authenticated and ready for live reads' : 'Connect Polymarket credentials in Settings'}
+      statusHint={
+        connected
+          ? (
+              nativeGas
+                ? (nativeGasError
+                    ? 'Authenticated and ready for live reads • Native gas check unavailable'
+                    : (nativeGasAffordable
+                        ? 'Authenticated and ready for live reads • Native gas ready'
+                        : 'Authenticated and ready for live reads • Native gas low'))
+                : 'Authenticated and ready for live reads'
+            )
+          + (executionPaths?.normal_trading === 'clob_only' ? ' • CLOB-only normal orders' : '')
+          : 'Connect Polymarket credentials in Settings'
+      }
       isLoading={isLoading}
       isFetching={isFetching}
       onRefresh={refresh}
@@ -230,6 +254,19 @@ function PolymarketAccount() {
           value: positions.length.toString(),
           hint: 'Active contracts',
           icon: Briefcase,
+        },
+        {
+          label: 'Native Gas',
+          value: nativeGas ? formatNativeGas(nativeGasBalance) : '--',
+          hint: nativeGas
+            ? (
+                nativeGasError
+                  ? 'Gas telemetry unavailable'
+                  : `Need ~${formatNativeGas(nativeGasRequired)} for approval tx`
+              )
+            : 'Gas telemetry unavailable',
+          icon: Fuel,
+          tone: nativeGas && !nativeGasError ? (nativeGasAffordable ? 'positive' : 'negative') : undefined,
         },
         {
           label: 'Marked Value',
@@ -260,6 +297,14 @@ function PolymarketAccount() {
               { label: 'Max Open Positions', value: `${toNumber(tradingStatus.limits.max_open_positions)}` },
               { label: 'Min Order Size', value: formatUsd(toNumber(tradingStatus.limits.min_order_size_usd)) },
               { label: 'Max Slippage', value: `${toNumber(tradingStatus.limits.max_slippage_percent)}%` },
+              {
+                label: 'Normal Orders',
+                value: executionPaths?.normal_trading === 'clob_only' ? 'CLOB only' : '--',
+              },
+              {
+                label: 'Direct CTF',
+                value: executionPaths?.direct_ctf_actions === 'explicit_only' ? 'Explicit only' : '--',
+              },
             ]
           : null
       }

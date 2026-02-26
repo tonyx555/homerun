@@ -795,14 +795,14 @@ function FindingCard({
               <Liveline
                 data={primaryLivelineData}
                 value={primaryLivelineValue}
-                series={livelineSeries.length > 1 ? livelineSeries.slice(1) : undefined}
+                series={livelineSeries.length > 1 ? livelineSeries : undefined}
                 color={SPARKLINE_COLORS[0]}
                 theme={themeMode}
                 window={livelineWindow}
-                paused
+                paused={livelineSeries.length <= 1}
                 grid={isModalView}
                 badge={false}
-                fill={livelineSeries.length <= 2}
+                fill={livelineSeries.length <= 1}
                 pulse={false}
                 momentum={isModalView}
                 scrub={isModalView}

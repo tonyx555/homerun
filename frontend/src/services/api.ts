@@ -1324,7 +1324,24 @@ export interface TradingStatus {
   authenticated: boolean
   credentials_configured: boolean
   wallet_address: string | null
+  execution_wallet_address?: string | null
+  eoa_wallet_address?: string | null
+  proxy_funder_wallet?: string | null
   auth_error?: string | null
+  native_gas?: {
+    wallet_address: string | null
+    affordable_for_approval: boolean
+    balance_wei: number
+    balance_native: number
+    gas_price_wei: number
+    required_wei_for_approval: number
+    required_native_for_approval: number
+    error?: string | null
+  } | null
+  execution_paths?: {
+    normal_trading: string
+    direct_ctf_actions: string
+  } | null
   stats: {
     total_trades: number
     winning_trades: number
@@ -1889,6 +1906,8 @@ export interface TraderDecision {
   direction: string | null
   direction_side?: string | null
   direction_label?: string | null
+  yes_label?: string | null
+  no_label?: string | null
   market_price: number | null
   model_probability: number | null
   edge_percent: number | null
@@ -1919,6 +1938,8 @@ export interface TraderOrder {
   direction: string | null
   direction_side?: string | null
   direction_label?: string | null
+  yes_label?: string | null
+  no_label?: string | null
   mode: string
   status: string
   notional_usd: number | null

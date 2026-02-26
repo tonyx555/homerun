@@ -118,7 +118,24 @@ class CancelAllOrdersResponse(BaseModel):
     message: str
 
 
+class NativeGasStatusResponse(BaseModel):
+    wallet_address: Optional[str]
+    affordable_for_approval: bool
+    balance_wei: int
+    balance_native: float
+    gas_price_wei: int
+    required_wei_for_approval: int
+    required_native_for_approval: float
+    error: Optional[str]
+
+
+class ExecutionPathStatusResponse(BaseModel):
+    normal_trading: str
+    direct_ctf_actions: str
+
+
 class TradingStatusResponse(BaseModel):
+
     initialized: bool
     authenticated: bool
     credentials_configured: bool
@@ -127,6 +144,8 @@ class TradingStatusResponse(BaseModel):
     eoa_wallet_address: Optional[str]
     proxy_funder_wallet: Optional[str]
     auth_error: Optional[str]
+    native_gas: NativeGasStatusResponse
+    execution_paths: ExecutionPathStatusResponse
     stats: dict
     limits: dict
     vpn: dict
@@ -181,6 +200,37 @@ async def get_trading_status():
         except Exception as exc:
             auth_error = str(exc)
 
+    native_gas = {
+        "wallet_address": eoa_wallet_address or execution_wallet_address or wallet_address,
+        "affordable_for_approval": False,
+        "balance_wei": 0,
+        "balance_native": 0.0,
+        "gas_price_wei": 0,
+        "required_wei_for_approval": 0,
+        "required_native_for_approval": 0.0,
+        "error": None,
+    }
+    try:
+        from services.ctf_execution import ctf_execution_service
+
+        gas_snapshot = await ctf_execution_service.get_native_gas_affordability(gas_limit=170_000)
+        balance_wei = int(gas_snapshot.get("balance_wei") or 0)
+        required_wei = int(gas_snapshot.get("required_wei") or 0)
+        gas_price_wei = int(gas_snapshot.get("gas_price_wei") or 0)
+        gas_wallet_address = str(gas_snapshot.get("wallet_address") or native_gas["wallet_address"] or "").strip() or None
+        native_gas = {
+            "wallet_address": gas_wallet_address,
+            "affordable_for_approval": bool(gas_snapshot.get("affordable", False)),
+            "balance_wei": balance_wei,
+            "balance_native": float(balance_wei / 10**18),
+            "gas_price_wei": gas_price_wei,
+            "required_wei_for_approval": required_wei,
+            "required_native_for_approval": float(required_wei / 10**18),
+            "error": str(gas_snapshot.get("error") or "").strip() or None,
+        }
+    except Exception as exc:
+        native_gas["error"] = str(exc)
+
     return TradingStatusResponse(
         initialized=initialized,
         authenticated=authenticated,
@@ -190,6 +240,11 @@ async def get_trading_status():
         eoa_wallet_address=eoa_wallet_address,
         proxy_funder_wallet=proxy_funder_wallet,
         auth_error=auth_error,
+        native_gas=native_gas,
+        execution_paths={
+            "normal_trading": "clob_only",
+            "direct_ctf_actions": "explicit_only",
+        },
         stats={
             "total_trades": stats.total_trades,
             "winning_trades": stats.winning_trades,
@@ -230,14 +285,12 @@ async def get_vpn_status():
 @router.post("/initialize")
 async def initialize_trading():
     """Initialize the trading service with configured credentials.
-    If already initialized, re-runs the USDC allowance approval (useful
-    after funding the wallet with MATIC for gas)."""
+    If already initialized, refreshes CLOB balance/allowance cache."""
     if live_execution_service.is_ready():
-        # Re-run allowance approval in case the wallet was just funded with MATIC.
         await live_execution_service._approve_clob_allowance()
         return {
             "status": "already_initialized",
-            "message": "Trading service already initialized; USDC allowance re-checked",
+            "message": "Trading service already initialized; CLOB allowance cache refreshed",
         }
 
     success = await live_execution_service.initialize()
@@ -252,12 +305,11 @@ async def initialize_trading():
 
 @router.post("/approve-allowance")
 async def approve_clob_allowance():
-    """Re-run the on-chain USDC approve for the CLOB exchange contract.
-    Call this after funding the trading wallet with MATIC for gas fees."""
+    """Refresh CLOB collateral balance/allowance cache for supported signature types."""
     if not live_execution_service.is_ready():
         raise HTTPException(status_code=400, detail="Trading service not initialized")
     await live_execution_service._approve_clob_allowance()
-    return {"status": "success", "message": "USDC allowance check/approve completed"}
+    return {"status": "success", "message": "CLOB allowance cache refresh completed"}
 
 
 @router.post("/orders", response_model=OrderResponse)

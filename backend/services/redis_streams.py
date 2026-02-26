@@ -6,6 +6,7 @@ from datetime import date, datetime
 from typing import Any, Optional
 
 from redis.asyncio import Redis
+from redis.exceptions import ResponseError
 
 from config import settings
 from utils.logger import get_logger
@@ -93,6 +94,47 @@ class RedisStreamClient:
             await self._close_client()
             return None
 
+    async def ensure_consumer_group(
+        self,
+        *,
+        stream: str,
+        group: str,
+        start_id: str = "$",
+        create_stream: bool = True,
+    ) -> bool:
+        if not stream or not group:
+            return False
+        try:
+            client = await self._get_client()
+            await client.xgroup_create(
+                name=stream,
+                groupname=group,
+                id=str(start_id or "$"),
+                mkstream=bool(create_stream),
+            )
+            return True
+        except ResponseError as exc:
+            # Redis returns BUSYGROUP if the group already exists.
+            if "BUSYGROUP" in str(exc):
+                return True
+            logger.debug(
+                "Redis stream group create failed",
+                stream=stream,
+                group=group,
+                exc_info=exc,
+            )
+            await self._close_client()
+            return False
+        except Exception as exc:
+            logger.debug(
+                "Redis stream group create failed",
+                stream=stream,
+                group=group,
+                exc_info=exc,
+            )
+            await self._close_client()
+            return False
+
     async def read_raw(
         self,
         stream: str,
@@ -125,6 +167,127 @@ class RedisStreamClient:
                 if isinstance(raw, str):
                     out.append((str(entry_id), raw))
         return out
+
+    async def read_group_raw(
+        self,
+        *,
+        stream: str,
+        group: str,
+        consumer: str,
+        block_ms: int,
+        count: int,
+        include_pending: bool = False,
+    ) -> list[tuple[str, str]]:
+        if not stream or not group or not consumer:
+            return []
+
+        read_id = "0" if include_pending else ">"
+        try:
+            client = await self._get_client()
+            chunks = await client.xreadgroup(
+                groupname=group,
+                consumername=consumer,
+                streams={stream: read_id},
+                count=max(1, int(count)),
+                block=max(1, int(block_ms)),
+            )
+        except ResponseError as exc:
+            logger.debug(
+                "Redis stream group read failed",
+                stream=stream,
+                group=group,
+                consumer=consumer,
+                exc_info=exc,
+            )
+            await self._close_client()
+            await asyncio.sleep(0.05)
+            return []
+        except Exception as exc:
+            logger.debug(
+                "Redis stream group read failed",
+                stream=stream,
+                group=group,
+                consumer=consumer,
+                exc_info=exc,
+            )
+            await self._close_client()
+            await asyncio.sleep(0.05)
+            return []
+
+        out: list[tuple[str, str]] = []
+        for _stream_name, entries in chunks:
+            for entry_id, fields in entries:
+                raw = fields.get("data")
+                if isinstance(raw, str):
+                    out.append((str(entry_id), raw))
+        return out
+
+    async def ack(
+        self,
+        *,
+        stream: str,
+        group: str,
+        entry_ids: list[str],
+    ) -> int:
+        if not stream or not group:
+            return 0
+        ids = [str(entry_id).strip() for entry_id in entry_ids if str(entry_id).strip()]
+        if not ids:
+            return 0
+        try:
+            client = await self._get_client()
+            acknowledged = await client.xack(stream, group, *ids)
+            return int(acknowledged or 0)
+        except Exception as exc:
+            logger.debug(
+                "Redis stream ack failed",
+                stream=stream,
+                group=group,
+                entry_count=len(ids),
+                exc_info=exc,
+            )
+            await self._close_client()
+            return 0
+
+    async def auto_claim_raw(
+        self,
+        *,
+        stream: str,
+        group: str,
+        consumer: str,
+        min_idle_ms: int,
+        start_id: str = "0-0",
+        count: int = 100,
+    ) -> tuple[str, list[tuple[str, str]]]:
+        if not stream or not group or not consumer:
+            return start_id, []
+        try:
+            client = await self._get_client()
+            next_start_id, entries, _deleted = await client.xautoclaim(
+                name=stream,
+                groupname=group,
+                consumername=consumer,
+                min_idle_time=max(1, int(min_idle_ms)),
+                start_id=str(start_id or "0-0"),
+                count=max(1, int(count)),
+            )
+        except Exception as exc:
+            logger.debug(
+                "Redis stream auto-claim failed",
+                stream=stream,
+                group=group,
+                consumer=consumer,
+                exc_info=exc,
+            )
+            await self._close_client()
+            return start_id, []
+
+        out: list[tuple[str, str]] = []
+        for entry_id, fields in entries:
+            raw = fields.get("data")
+            if isinstance(raw, str):
+                out.append((str(entry_id), raw))
+        return str(next_start_id or start_id), out
 
     async def hgetall_many(self, keys: list[str]) -> list[dict[str, str]]:
         if not keys:

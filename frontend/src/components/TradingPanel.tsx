@@ -186,6 +186,8 @@ type BotMarketModalScope = {
   marketQuestion: string
   directionSide: DirectionSide | null
   directionLabel: string
+  yesLabel: string | null
+  noLabel: string | null
   anchorOrderId: string | null
   sourceSummary: string
   statusSummary: string
@@ -517,6 +519,8 @@ type StrategyOptionDetail = {
   versions: number[]
 }
 
+const STABLE_OUTCOME_LABELS_BY_MARKET_SIDE = new Map<string, string>()
+
 
 function toNumber(value: unknown): number {
   const parsed = Number(value)
@@ -706,6 +710,29 @@ function timeframeChartWindowSeconds(timeframe: string | null | undefined): numb
   if (normalized === '1h') return 3600
   if (normalized === '4h') return 14_400
   return 900
+}
+
+const BOT_MODAL_SERIES_COLORS_DARK = ['#38bdf8', '#a78bfa', '#f59e0b', '#22d3ee', '#fb923c']
+const BOT_MODAL_SERIES_COLORS_LIGHT = ['#0284c7', '#7c3aed', '#d97706', '#0e7490', '#c2410c']
+
+function formatSeriesLabel(value: string): string {
+  return String(value || '')
+    .trim()
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase()) || 'Series'
+}
+
+function buildFlatLivelineSeries(
+  value: number,
+  startTime: number,
+  endTime: number,
+): LivelinePoint[] {
+  const start = Math.max(1, Math.floor(startTime))
+  const end = Math.max(start + 1, Math.floor(endTime))
+  return [
+    { time: start, value },
+    { time: end, value },
+  ]
 }
 
 function historyPointTimestampSeconds(point: Record<string, unknown> | unknown[]): number | null {
@@ -1537,14 +1564,78 @@ function normalizeDirectionSide(value: unknown): DirectionSide | null {
   return null
 }
 
+function isGenericDirectionLabel(value: string | null | undefined): boolean {
+  const key = String(value || '').trim().toUpperCase()
+  return key === 'YES' || key === 'NO'
+}
+
+function resolveOrderBinaryOutcomeLabels(
+  order: TraderOrder,
+): { yesLabel: string | null; noLabel: string | null } {
+  let yesLabel = cleanText(order.yes_label)
+  let noLabel = cleanText(order.no_label)
+  const side = normalizeDirectionSide(order.direction_side ?? order.direction)
+  const explicitLabel = cleanText(order.direction_label)
+  if (explicitLabel && !isGenericDirectionLabel(explicitLabel)) {
+    if (side === 'YES' && !yesLabel) yesLabel = explicitLabel
+    if (side === 'NO' && !noLabel) noLabel = explicitLabel
+  }
+
+  return {
+    yesLabel: yesLabel || null,
+    noLabel: noLabel || null,
+  }
+}
+
 function resolveOrderDirectionPresentation(
   order: TraderOrder,
-): { side: DirectionSide | null; label: string } {
+): {
+  side: DirectionSide | null
+  label: string
+  yesLabel: string | null
+  noLabel: string | null
+} {
   const side = normalizeDirectionSide(order.direction_side ?? order.direction)
-  const label = cleanText(order.direction_label) || side || String(order.direction || '').trim().toUpperCase() || 'N/A'
+  const binaryLabels = resolveOrderBinaryOutcomeLabels(order)
+  const explicitLabel = cleanText(order.direction_label)
+  const marketAliases = collectOrderMarketAliasIds(order)
+  const stableMarketKey = marketAliases[0] || normalizeMarketAlias(order.market_id)
+  const stableSideKey = side && stableMarketKey ? `${stableMarketKey}:${side}` : null
+  const explicitIsGeneric = isGenericDirectionLabel(explicitLabel)
+
+  if (stableSideKey && side === 'YES' && binaryLabels.yesLabel) {
+    STABLE_OUTCOME_LABELS_BY_MARKET_SIDE.set(stableSideKey, binaryLabels.yesLabel)
+  }
+  if (stableSideKey && side === 'NO' && binaryLabels.noLabel) {
+    STABLE_OUTCOME_LABELS_BY_MARKET_SIDE.set(stableSideKey, binaryLabels.noLabel)
+  }
+  if (stableSideKey && explicitLabel && !explicitIsGeneric) {
+    STABLE_OUTCOME_LABELS_BY_MARKET_SIDE.set(stableSideKey, explicitLabel)
+  }
+
+  const stableSideLabel = stableSideKey
+    ? STABLE_OUTCOME_LABELS_BY_MARKET_SIDE.get(stableSideKey) || null
+    : null
+  const sideLabel = (
+    side === 'YES'
+      ? (binaryLabels.yesLabel || stableSideLabel)
+      : side === 'NO'
+        ? (binaryLabels.noLabel || stableSideLabel)
+        : null
+  )
+  const label = (
+    sideLabel
+    || (explicitLabel && !isGenericDirectionLabel(explicitLabel) ? explicitLabel : null)
+    || explicitLabel
+    || side
+    || String(order.direction || '').trim().toUpperCase()
+    || 'N/A'
+  )
   return {
     side,
     label,
+    yesLabel: binaryLabels.yesLabel,
+    noLabel: binaryLabels.noLabel,
   }
 }
 
@@ -2959,37 +3050,205 @@ function BotTradePositionModal({
       sharedHistory,
     ]
   )
-  const livelineData = livelineResult.primary
-  const livelineValue = toFiniteNumber(metrics.markPrice ?? metrics.entryPrice)
-    ?? livelineData[livelineData.length - 1]?.value
-    ?? 0
+  const oracleHistoryData = useMemo<LivelinePoint[]>(() => {
+    const raw = Array.isArray(market?.oracle_history) ? market.oracle_history : []
+    const normalized = raw
+      .map((point) => {
+        if (!point || typeof point !== 'object') return null
+        const row = point as Record<string, unknown>
+        const rawTime = toFiniteNumber(row.t ?? row.time)
+        const rawValue = toFiniteNumber(row.p ?? row.price)
+        if (rawTime === null || rawValue === null) return null
+        return {
+          time: Math.max(1, toUnixSeconds(rawTime)),
+          value: rawValue,
+        }
+      })
+      .filter((point): point is LivelinePoint => point !== null)
+      .sort((left, right) => left.time - right.time)
+
+    const deduped: LivelinePoint[] = []
+    for (const point of normalized) {
+      const previous = deduped[deduped.length - 1]
+      if (previous && previous.time === point.time) {
+        deduped[deduped.length - 1] = point
+      } else {
+        deduped.push(point)
+      }
+    }
+
+    const oracleValue = toFiniteNumber(market?.oracle_price)
+    if (oracleValue !== null) {
+      const currentRawTime = toFiniteNumber(market?.oracle_updated_at_ms)
+      const fallbackTime = currentRawTime !== null ? toUnixSeconds(currentRawTime) : Math.floor(Date.now() / 1000)
+      if (deduped.length === 0) {
+        deduped.push({ time: Math.max(1, fallbackTime - 1), value: oracleValue })
+        deduped.push({ time: Math.max(2, fallbackTime), value: oracleValue })
+      } else {
+        const last = deduped[deduped.length - 1]
+        const pointTime = Math.max(last.time, fallbackTime)
+        if (pointTime > last.time) {
+          deduped.push({ time: pointTime, value: oracleValue })
+        } else if (Math.abs(last.value - oracleValue) > 1e-9) {
+          deduped[deduped.length - 1] = { time: last.time, value: oracleValue }
+        }
+      }
+    }
+
+    if (deduped.length < 2) return []
+    return deduped.length <= 600 ? deduped : deduped.slice(deduped.length - 600)
+  }, [market?.oracle_history, market?.oracle_price, market?.oracle_updated_at_ms])
+  const useOracleSeries = oracleHistoryData.length >= 2
+  const livelineData = useOracleSeries ? oracleHistoryData : livelineResult.primary
+  const oracleValue = toFiniteNumber(market?.oracle_price)
+  const livelineValue = useOracleSeries
+    ? (
+      oracleValue
+      ?? oracleHistoryData[oracleHistoryData.length - 1]?.value
+      ?? 0
+    )
+    : (
+      toFiniteNumber(metrics.markPrice ?? metrics.entryPrice)
+      ?? livelineData[livelineData.length - 1]?.value
+      ?? 0
+    )
   const isDark = themeMode === 'dark'
+  const yesSeriesLabel = scope.yesLabel || 'Yes'
+  const noSeriesLabel = scope.noLabel || 'No'
+  const priceToBeat = toFiniteNumber(market?.price_to_beat)
   const pnlPositive = (metrics.activePnl ?? 0) >= 0
-  const lineColor = pnlPositive
-    ? (isDark ? '#22c55e' : '#16a34a')
-    : (isDark ? '#f87171' : '#dc2626')
+  const colorByPriceToBeat = priceToBeat !== null && oracleValue !== null
+  const lineColor = (
+    colorByPriceToBeat
+      ? (
+        oracleValue >= priceToBeat
+          ? (isDark ? '#22c55e' : '#16a34a')
+          : (isDark ? '#f87171' : '#dc2626')
+      )
+      : (
+        pnlPositive
+          ? (isDark ? '#22c55e' : '#16a34a')
+          : (isDark ? '#f87171' : '#dc2626')
+      )
+  )
   const complementColor = isDark ? '#64748b' : '#94a3b8'
   const complementValue = livelineResult.complement.length > 0
     ? livelineResult.complement[livelineResult.complement.length - 1].value
     : 0
+  const oracleSourceSeries = useMemo<LivelineSeries[]>(() => {
+    if (!useOracleSeries) return []
+    const sourceMap = market?.oracle_prices_by_source
+    if (!sourceMap || typeof sourceMap !== 'object') return []
+    if (livelineData.length < 2) return []
+    const entries = Object.entries(sourceMap)
+      .map(([sourceKey, rawSnapshot]) => {
+        if (!rawSnapshot || typeof rawSnapshot !== 'object') return null
+        const snapshot = rawSnapshot as Record<string, unknown>
+        const resolvedSource = String(snapshot.source || sourceKey || '').trim()
+        const value = toFiniteNumber(snapshot.price)
+        if (!resolvedSource || value === null) return null
+        return {
+          key: resolvedSource.toLowerCase(),
+          label: formatSeriesLabel(resolvedSource),
+          value,
+        }
+      })
+      .filter((row): row is { key: string; label: string; value: number } => row !== null)
+
+    if (entries.length < 2) return []
+
+    const primarySourceKey = String(market?.oracle_source || '').trim().toLowerCase()
+    const filteredEntries = entries
+      .filter((entry) => !primarySourceKey || entry.key !== primarySourceKey)
+      .sort((left, right) => left.label.localeCompare(right.label))
+      .slice(0, 4)
+
+    if (filteredEntries.length === 0) return []
+
+    const startTime = livelineData[0]?.time || Math.floor(Date.now() / 1000) - 60
+    const endTime = livelineData[livelineData.length - 1]?.time || startTime + 60
+    const palette = isDark ? BOT_MODAL_SERIES_COLORS_DARK : BOT_MODAL_SERIES_COLORS_LIGHT
+
+    return filteredEntries.map((entry, index) => ({
+      id: `oracle-source-${entry.key}`,
+      data: buildFlatLivelineSeries(entry.value, startTime, endTime),
+      value: entry.value,
+      color: palette[index % palette.length],
+      label: entry.label,
+    }))
+  }, [
+    isDark,
+    livelineData,
+    market?.oracle_prices_by_source,
+    market?.oracle_source,
+    useOracleSeries,
+  ])
   const livelineSeries = useMemo<LivelineSeries[]>(() => {
-    if (livelineResult.complement.length < 2) return []
-    const complementLabel = scope.directionSide === 'YES' ? 'No' : 'Yes'
-    return [{
-      id: 'complement',
-      data: livelineResult.complement,
-      value: complementValue,
-      color: complementColor,
-      label: complementLabel,
-    }]
-  }, [livelineResult.complement, complementValue, complementColor, scope.directionSide])
-  const referencePrice = metrics.entryPrice ?? toFiniteNumber(market?.price_to_beat)
+    const series: LivelineSeries[] = []
+    if (livelineData.length >= 2) {
+      const primaryLabel = (
+        useOracleSeries
+          ? formatSeriesLabel(String(market?.oracle_source || 'oracle'))
+          : scope.directionSide === 'YES'
+            ? yesSeriesLabel
+            : scope.directionSide === 'NO'
+              ? noSeriesLabel
+              : 'Primary'
+      )
+      series.push({
+        id: 'primary',
+        data: livelineData,
+        value: livelineValue,
+        color: lineColor,
+        label: primaryLabel,
+      })
+    }
+    if (!useOracleSeries && livelineResult.complement.length >= 2) {
+      const complementLabel = scope.directionSide === 'YES' ? noSeriesLabel : yesSeriesLabel
+      series.push({
+        id: 'complement',
+        data: livelineResult.complement,
+        value: complementValue,
+        color: complementColor,
+        label: complementLabel,
+      })
+    }
+    if (oracleSourceSeries.length > 0) {
+      series.push(...oracleSourceSeries)
+    }
+    return series
+  }, [
+    complementColor,
+    complementValue,
+    lineColor,
+    livelineData,
+    livelineResult.complement,
+    livelineValue,
+    oracleSourceSeries,
+    market?.oracle_source,
+    noSeriesLabel,
+    scope.directionSide,
+    yesSeriesLabel,
+    useOracleSeries,
+  ])
+  const referencePrice = priceToBeat ?? metrics.entryPrice
+  const referenceLabel = (
+    priceToBeat !== null
+      ? 'Price to beat'
+      : metrics.entryPrice !== null
+        ? 'Entry'
+        : null
+  )
   const livelineWindow = Math.max(
     timeframeChartWindowSeconds(market?.timeframe),
     livelineData.length > 1
       ? livelineData[livelineData.length - 1].time - livelineData[0].time
       : 0
   )
+  const entryMarkLabel = useOracleSeries ? 'Oracle / Price to beat' : 'Entry / Mark'
+  const entryValue = useOracleSeries ? oracleValue : metrics.entryPrice
+  const markValue = useOracleSeries ? priceToBeat : metrics.markPrice
+  const markUpdateLabel = useOracleSeries ? 'oracle update' : 'mark update'
   const pnlLabel = metrics.openCount > 0 ? 'Live P&L' : metrics.resolvedCount > 0 ? 'Realized P&L' : 'P&L'
   const returnLabel = metrics.openCount > 0 ? 'Live Return' : 'Return'
   const oracleAgeSeconds = toFiniteNumber(market?.oracle_age_seconds)
@@ -3063,13 +3322,13 @@ function BotTradePositionModal({
             <p className="text-[10px] text-muted-foreground">{metrics.openCount} open · {metrics.resolvedCount} resolved · {metrics.failedCount} failed</p>
           </div>
           <div className="rounded-md border border-border/60 bg-card/80 px-2.5 py-2">
-            <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Entry / Mark</p>
+            <p className="text-[10px] uppercase tracking-wider text-muted-foreground">{entryMarkLabel}</p>
             <p className="text-sm font-mono">
-              {metrics.entryPrice !== null ? metrics.entryPrice.toFixed(3) : '—'}
+              {entryValue !== null ? entryValue.toFixed(3) : '—'}
               <span className="mx-1 text-muted-foreground">→</span>
-              {metrics.markPrice !== null ? metrics.markPrice.toFixed(3) : '—'}
+              {markValue !== null ? markValue.toFixed(3) : '—'}
             </p>
-            <p className="text-[10px] text-muted-foreground">mark update {markUpdatedAge}</p>
+            <p className="text-[10px] text-muted-foreground">{markUpdateLabel} {markUpdatedAge}</p>
           </div>
           <div className="rounded-md border border-border/60 bg-card/80 px-2.5 py-2">
             <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Edge / Confidence</p>
@@ -3092,7 +3351,7 @@ function BotTradePositionModal({
             <Liveline
               data={livelineData}
               value={livelineValue}
-              series={livelineSeries.length > 0 ? livelineSeries : undefined}
+              series={livelineSeries.length > 1 ? livelineSeries : undefined}
               color={lineColor}
               theme={isDark ? 'dark' : 'light'}
               showValue
@@ -3100,13 +3359,14 @@ function BotTradePositionModal({
               grid
               badge
               pulse
-              fill
+              fill={livelineSeries.length <= 1}
+              seriesToggleCompact={livelineSeries.length > 1}
               window={livelineWindow > 0 ? livelineWindow : undefined}
               lerpSpeed={0.1}
               padding={{ top: 8, right: 80, bottom: 24, left: 14 }}
               tooltipOutline={isDark}
               formatValue={(value) => `$${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
-              referenceLine={referencePrice !== null ? { value: referencePrice, label: metrics.entryPrice !== null ? 'Entry' : 'Price to beat' } : undefined}
+              referenceLine={referencePrice !== null && referenceLabel ? { value: referencePrice, label: referenceLabel } : undefined}
               style={{ height: 280 }}
             />
           ) : (
@@ -3631,6 +3891,14 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     if (!key) return null
     return cryptoMarketById.get(key) || cryptoMarketById.get(key.toLowerCase()) || null
   }
+  const resolveCryptoMarketFromAliases = (values: unknown[]): CryptoMarket | null => {
+    const aliases = collectMarketAliases(values)
+    for (const alias of aliases) {
+      const market = resolveCryptoMarket(alias)
+      if (market) return market
+    }
+    return null
+  }
   const [marketModalState, setMarketModalState] = useState<BotMarketModalState | null>(null)
   const marketModalMarket = marketModalState ? marketModalState.market : null
   const themeMode = useAtomValue(themeAtom)
@@ -3724,22 +3992,25 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const marketHistoryQuery = useQuery({
     queryKey: ['trader-market-history', marketModalMarketIdsKey],
     enabled: marketModalMarketIds.length > 0,
-    refetchInterval: marketModalState ? (isConnected ? 15000 : 1000) : false,
+    refetchInterval: marketModalState ? 1000 : false,
     staleTime: 0,
     refetchOnMount: 'always',
     queryFn: async () => {
       if (marketModalMarketIds.length === 0) return {}
-      return getTraderMarketHistory(marketModalMarketIds, 240)
+      return getTraderMarketHistory(marketModalMarketIds, 600)
     },
   })
   const modalSharedHistory = useMemo(
     () => {
       const byMarket = marketHistoryQuery.data || {}
+      let bestHistory: unknown[] = []
       for (const marketId of marketModalMarketIds) {
         const history = byMarket[marketId]
-        if (Array.isArray(history) && history.length >= 2) return history
+        if (Array.isArray(history) && history.length >= 2 && history.length > bestHistory.length) {
+          bestHistory = history
+        }
       }
-      return []
+      return bestHistory.length >= 2 ? bestHistory : []
     },
     [marketHistoryQuery.data, marketModalMarketIds]
   )
@@ -5456,6 +5727,8 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     order: TraderOrder
     directionSide: DirectionSide | null
     directionLabel: string
+    yesLabel: string | null
+    noLabel: string | null
     statusSummary: string
     executionSummary: string
     outcomeSummary: string | null
@@ -5469,25 +5742,34 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       order,
       directionSide,
       directionLabel,
+      yesLabel,
+      noLabel,
       statusSummary,
       executionSummary,
       outcomeSummary,
       links,
     } = params
+    const marketAliases = collectOrderMarketAliasIds(order)
+    const resolvedMarket = market || resolveCryptoMarketFromAliases([
+      order.market_id,
+      ...marketAliases,
+    ])
     const traderId = cleanText(order.trader_id) || null
     const traderName = traderId ? (traderNameById[traderId] || shortId(traderId)) : 'All Bots'
     const modeSummary = String(order.mode || '').trim().toUpperCase() || 'N/A'
     setMarketModalState({
-      market,
+      market: resolvedMarket,
       scope: {
         kind: 'trade',
         traderId,
         traderName,
         marketId: String(order.market_id || ''),
-        marketIds: collectOrderMarketAliasIds(order),
-        marketQuestion: String(order.market_question || order.market_id || market?.question || 'Unknown market'),
+        marketIds: marketAliases,
+        marketQuestion: String(order.market_question || order.market_id || resolvedMarket?.question || 'Unknown market'),
         directionSide,
         directionLabel,
+        yesLabel,
+        noLabel,
         anchorOrderId: String(order.id || ''),
         sourceSummary: String(order.source || '').trim().toUpperCase() || 'UNKNOWN',
         statusSummary,
@@ -5506,19 +5788,23 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     traderName?: string
   }) => {
     const { market, row } = params
+    const marketAliases = row.marketAliases.length > 0 ? row.marketAliases : [normalizeMarketAlias(row.marketId)]
+    const resolvedMarket = market || resolveCryptoMarketFromAliases([row.marketId, ...marketAliases])
     const traderId = params.traderId ?? row.traderId ?? null
     const traderName = params.traderName || row.traderName || (traderId ? (traderNameById[traderId] || shortId(traderId)) : 'All Bots')
     setMarketModalState({
-      market,
+      market: resolvedMarket,
       scope: {
         kind: 'position',
         traderId,
         traderName,
         marketId: row.marketId,
-        marketIds: row.marketAliases.length > 0 ? row.marketAliases : [normalizeMarketAlias(row.marketId)],
+        marketIds: marketAliases,
         marketQuestion: row.marketQuestion,
         directionSide: row.directionSide,
         directionLabel: row.direction,
+        yesLabel: row.directionSide === 'YES' && !isGenericDirectionLabel(row.direction) ? row.direction : null,
+        noLabel: row.directionSide === 'NO' && !isGenericDirectionLabel(row.direction) ? row.direction : null,
         anchorOrderId: null,
         sourceSummary: row.sourceSummary,
         statusSummary: row.statusSummary,
@@ -6033,6 +6319,8 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         links,
         directionSide: directionPresentation.side,
         directionLabel: directionPresentation.label,
+        yesLabel: directionPresentation.yesLabel,
+        noLabel: directionPresentation.noLabel,
         executionSummary,
         outcomeHeadline: outcome.headline,
         outcomeDetail: outcome.detail,
@@ -7615,8 +7903,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                   const venuePresentation = resolveVenueStatusPresentation(providerSnapshotStatus)
                                   const directionPresentation = resolveOrderDirectionPresentation(order)
                                   const traderLabel = traderNameById[String(order.trader_id || '')] || shortId(order.trader_id)
-                                  const marketId = String(order.market_id || '').trim()
-                                  const marketForModal = resolveCryptoMarket(marketId)
+                                  const marketForModal = resolveCryptoMarketFromAliases(collectOrderMarketAliasIds(order))
                                   return (
                                   <TableRow
                                     key={order.id}
@@ -7627,6 +7914,8 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                         order,
                                         directionSide: directionPresentation.side,
                                         directionLabel: directionPresentation.label,
+                                        yesLabel: directionPresentation.yesLabel,
+                                        noLabel: directionPresentation.noLabel,
                                         statusSummary: lifecycleLabel,
                                         executionSummary,
                                         outcomeSummary: outcome.detail,
@@ -7879,7 +8168,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                               </TableHeader>
                               <TableBody>
                                 {filteredAllPositionBook.map((row) => {
-                                  const marketForModal = resolveCryptoMarket(row.marketId)
+                                  const marketForModal = resolveCryptoMarketFromAliases([row.marketId, ...row.marketAliases])
                                   return (
                                   <TableRow
                                     key={row.key}
@@ -8191,6 +8480,8 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                   links,
                                   directionSide,
                                   directionLabel,
+                                  yesLabel,
+                                  noLabel,
                                   executionSummary,
                                   outcomeHeadline,
                                   outcomeDetail,
@@ -8208,8 +8499,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                   : `E:${pendingExitStatus.slice(0, 4).toUpperCase()}`
                                 const statusBadge = resolveOrderStatusBadgePresentation(status, pnl)
                                 const outcomeBadgeClassName = resolveOrderOutcomeBadgeClassName(status)
-                                const marketId = String(order.market_id || '').trim()
-                                const marketForModal = resolveCryptoMarket(marketId)
+                                const marketForModal = resolveCryptoMarketFromAliases(collectOrderMarketAliasIds(order))
                                 return (
                                   <TableRow
                                     key={order.id}
@@ -8220,6 +8510,8 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                         order,
                                         directionSide,
                                         directionLabel,
+                                        yesLabel,
+                                        noLabel,
                                         statusSummary: lifecycleLabel,
                                         executionSummary,
                                         outcomeSummary: outcomeDetail,

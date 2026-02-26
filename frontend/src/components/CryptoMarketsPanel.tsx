@@ -230,6 +230,30 @@ function resolveCryptoStrategySdk(market: CryptoMarket): string {
   return 'btc_eth_highfreq'
 }
 
+function normalizeOracleSourceKey(value: string | null | undefined): string {
+  const raw = String(value || '').trim().toLowerCase()
+  if (!raw) return 'unknown'
+  if (raw.includes('binance_direct')) return 'binance_direct'
+  if (raw.includes('chainlink')) return 'chainlink'
+  if (raw.includes('binance')) return 'binance'
+  return raw
+}
+
+function oracleSourceLabel(value: string | null | undefined): string {
+  const key = normalizeOracleSourceKey(value)
+  if (key === 'chainlink') return 'chainlink (resolution)'
+  if (key === 'binance_direct') return 'binance direct (ws)'
+  if (key === 'binance') return 'binance relay (rtds)'
+  return key.replace(/_/g, ' ')
+}
+
+function oracleSourceSortOrder(value: string): number {
+  if (value === 'chainlink') return 0
+  if (value === 'binance_direct') return 1
+  if (value === 'binance') return 2
+  return 3
+}
+
 // ─── Countdown Timer ─────────────────────────────────────
 
 function LiveCountdown({ endTime }: { endTime: string | null }) {
@@ -292,25 +316,31 @@ function OraclePriceDisplay({
 
   const delta = (priceToBeat !== null && priceToBeat !== undefined) ? price - priceToBeat : null
   const isUp = delta !== null && delta >= 0
-  const sourceLabel = source
-    ? source.toLowerCase().includes('chainlink')
-      ? 'chainlink'
-      : source.toLowerCase().includes('binance')
-        ? 'binance'
-        : source
-    : 'chainlink'
+  const sourceLabel = source ? oracleSourceLabel(source) : 'chainlink (resolution)'
 
   const sourceRows = Object.values(sourceMap || {})
     .filter((row) => row && typeof row.price === 'number')
     .map((row) => ({
-      label: row.source,
+      key: normalizeOracleSourceKey(row.source),
+      label: oracleSourceLabel(row.source),
       price: row.price as number,
       age: row.age_seconds,
     }))
+    .sort((a, b) => {
+      const orderDiff = oracleSourceSortOrder(a.key) - oracleSourceSortOrder(b.key)
+      if (orderDiff !== 0) return orderDiff
+      return a.label.localeCompare(b.label)
+    })
 
-  const chainlink = sourceRows.find((row) => row.label.includes('chainlink'))
-  const binance = sourceRows.find((row) => row.label.includes('binance'))
-  const sourceDelta = chainlink && binance ? (binance.price - chainlink.price) : null
+  const chainlink = sourceRows.find((row) => row.key === 'chainlink')
+  const binanceDirect = sourceRows.find((row) => row.key === 'binance_direct')
+  const binanceRelay = sourceRows.find((row) => row.key === 'binance')
+  const sourceDeltas = chainlink
+    ? [
+      ...(binanceDirect ? [{ label: 'binance direct - chainlink', value: binanceDirect.price - chainlink.price }] : []),
+      ...(binanceRelay ? [{ label: 'binance relay - chainlink', value: binanceRelay.price - chainlink.price }] : []),
+    ]
+    : []
 
   return (
     <div className="space-y-1.5">
@@ -355,14 +385,14 @@ function OraclePriceDisplay({
               </span>
             </div>
           ))}
-          {sourceDelta !== null && (
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">binance - chainlink</span>
-              <span className={cn("text-xs font-data", sourceDelta >= 0 ? 'text-green-400' : 'text-red-400')}>
-                {sourceDelta >= 0 ? '+' : ''}{formatPrice(sourceDelta, 2)}
+          {sourceDeltas.map((sourceDelta) => (
+            <div key={sourceDelta.label} className="flex items-center justify-between">
+              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">{sourceDelta.label}</span>
+              <span className={cn("text-xs font-data", sourceDelta.value >= 0 ? 'text-green-400' : 'text-red-400')}>
+                {sourceDelta.value >= 0 ? '+' : ''}{formatPrice(sourceDelta.value, 2)}
               </span>
             </div>
-          )}
+          ))}
         </div>
       )}
     </div>

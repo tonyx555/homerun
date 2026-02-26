@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import os
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,29 +28,6 @@ from services.trader_orchestrator_state import (
 from utils.utcnow import utcnow
 
 router = APIRouter(prefix="/trader-orchestrator", tags=["Trader Orchestrator"])
-
-# ---------------------------------------------------------------------------
-# Authentication dependency for state-changing orchestrator endpoints.
-# Set ORCHESTRATOR_API_KEY in environment to enable. When set, callers
-# must pass the same value in the X-API-Key header.
-# ---------------------------------------------------------------------------
-_ORCHESTRATOR_API_KEY: str | None = os.environ.get("ORCHESTRATOR_API_KEY") or None
-
-
-async def _require_orchestrator_auth(x_api_key: Optional[str] = Header(None)) -> None:
-    """Validate the X-API-Key header against the configured orchestrator key.
-
-    When ORCHESTRATOR_API_KEY is not configured the guard is a no-op so
-    existing development setups are not broken.  In production the env var
-    MUST be set.
-    """
-    if _ORCHESTRATOR_API_KEY is None:
-        return  # auth not configured -- allow (dev / local mode)
-    if not x_api_key or x_api_key != _ORCHESTRATOR_API_KEY:
-        raise HTTPException(
-            status_code=401,
-            detail="Missing or invalid X-API-Key header for orchestrator endpoints.",
-        )
 
 
 class StartRequest(BaseModel):
@@ -195,7 +171,6 @@ async def get_status(session: AsyncSession = Depends(get_db_session)):
 async def update_orchestrator_settings(
     request: UpdateSettingsRequest,
     session: AsyncSession = Depends(get_db_session),
-    _auth: None = Depends(_require_orchestrator_auth),
 ):
     update_kwargs: dict[str, object] = {}
     settings_updates: dict[str, object] = {}
@@ -238,7 +213,6 @@ async def update_orchestrator_settings(
 async def start_orchestrator(
     request: StartRequest = StartRequest(),
     session: AsyncSession = Depends(get_db_session),
-    _auth: None = Depends(_require_orchestrator_auth),
 ):
     _assert_not_globally_paused()
     mode = str(request.mode or "paper").strip().lower()
@@ -300,7 +274,6 @@ async def start_orchestrator(
 @router.post("/stop")
 async def stop_orchestrator(
     session: AsyncSession = Depends(get_db_session),
-    _auth: None = Depends(_require_orchestrator_auth),
 ):
     control = await update_orchestrator_control(
         session,
@@ -328,7 +301,6 @@ async def stop_orchestrator(
 async def set_kill_switch(
     request: KillSwitchRequest,
     session: AsyncSession = Depends(get_db_session),
-    _auth: None = Depends(_require_orchestrator_auth),
 ):
     control = await update_orchestrator_control(
         session,
@@ -354,7 +326,6 @@ async def set_kill_switch(
 async def run_live_preflight(
     request: LivePreflightRequest,
     session: AsyncSession = Depends(get_db_session),
-    _auth: None = Depends(_require_orchestrator_auth),
 ):
     result = await create_live_preflight(
         session,
@@ -368,7 +339,6 @@ async def run_live_preflight(
 async def arm_live(
     request: LiveArmRequest,
     session: AsyncSession = Depends(get_db_session),
-    _auth: None = Depends(_require_orchestrator_auth),
 ):
     try:
         return await arm_live_start(
@@ -385,7 +355,6 @@ async def arm_live(
 async def start_live(
     request: LiveStartRequest,
     session: AsyncSession = Depends(get_db_session),
-    _auth: None = Depends(_require_orchestrator_auth),
 ):
     _assert_not_globally_paused()
     preflight = await create_live_preflight(
@@ -431,7 +400,6 @@ async def start_live(
 async def stop_live(
     request: LiveStopRequest = LiveStopRequest(),
     session: AsyncSession = Depends(get_db_session),
-    _auth: None = Depends(_require_orchestrator_auth),
 ):
     control = await update_orchestrator_control(
         session,

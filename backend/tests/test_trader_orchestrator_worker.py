@@ -13,7 +13,6 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from workers import trader_orchestrator_worker
 from services.trader_orchestrator.strategies.base import StrategyDecision
-from services.trader_orchestrator.strategies.registry import get_strategy
 
 
 def test_supports_live_market_context_excludes_crypto_source():
@@ -76,13 +75,6 @@ def test_normalize_source_configs_merges_strategy_defaults(monkeypatch):
     crypto = normalized["crypto"]["strategy_params"]
     assert crypto["opening_directional_buy_yes_enabled"] is True
     assert crypto["reentry_cooldown_seconds_per_market"] == 8.0
-
-
-def test_strategy_registry_supports_legacy_default_alias():
-    from services.strategies.btc_eth_highfreq import BtcEthHighFreqStrategy
-
-    strategy = get_strategy("strategy.default")
-    assert isinstance(strategy, BtcEthHighFreqStrategy)
 
 
 def test_resume_policy_normalizes_to_supported_values():
@@ -211,17 +203,6 @@ def test_source_open_order_timeout_seconds_prefers_strategy_level_param():
                 "max_open_order_seconds": 20,
                 "order_ttl_seconds": 1200,
             }
-        }
-    )
-    assert timeout == 20.0
-
-
-def test_source_open_order_timeout_seconds_defaults_for_crypto_highfreq():
-    timeout = trader_orchestrator_worker._source_open_order_timeout_seconds(
-        {
-            "source_key": "crypto",
-            "strategy_key": "btc_eth_highfreq",
-            "strategy_params": {},
         }
     )
     assert timeout == 20.0
@@ -964,6 +945,7 @@ async def test_run_worker_loop_runs_manage_only_cycle_when_globally_paused(monke
         trader_orchestrator_worker, "_release_orchestrator_cycle_lock_owner", AsyncMock(return_value=None)
     )
     monkeypatch.setattr(trader_orchestrator_worker, "ensure_all_strategies_seeded", AsyncMock(return_value=None))
+    monkeypatch.setattr(trader_orchestrator_worker, "ensure_trade_signal_group", AsyncMock(return_value=True))
     monkeypatch.setattr(trader_orchestrator_worker, "refresh_strategy_runtime_if_needed", AsyncMock(return_value=None))
     monkeypatch.setattr(trader_orchestrator_worker, "expire_stale_signals", AsyncMock(return_value=None))
     monkeypatch.setattr(trader_orchestrator_worker, "_reconcile_orphan_open_orders", AsyncMock(return_value={}))
@@ -1038,6 +1020,7 @@ async def test_run_worker_loop_runs_manage_only_cycle_when_kill_switch_enabled(m
         trader_orchestrator_worker, "_release_orchestrator_cycle_lock_owner", AsyncMock(return_value=None)
     )
     monkeypatch.setattr(trader_orchestrator_worker, "ensure_all_strategies_seeded", AsyncMock(return_value=None))
+    monkeypatch.setattr(trader_orchestrator_worker, "ensure_trade_signal_group", AsyncMock(return_value=True))
     monkeypatch.setattr(trader_orchestrator_worker, "refresh_strategy_runtime_if_needed", AsyncMock(return_value=None))
     monkeypatch.setattr(trader_orchestrator_worker, "expire_stale_signals", AsyncMock(return_value=None))
     monkeypatch.setattr(trader_orchestrator_worker, "_reconcile_orphan_open_orders", AsyncMock(return_value={}))

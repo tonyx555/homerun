@@ -125,6 +125,11 @@ _LEGACY_STRATEGY_KEY_ALIASES = {
     "crypto_15m": "btc_eth_highfreq",
     "crypto_5m": "btc_eth_highfreq",
 }
+_LEGACY_CRYPTO_TIMEFRAME_SCOPE_KEYS = {
+    "allowed_timeframes",
+    "enforce_hard_timeframe_allowlist",
+    "hard_allowed_timeframes",
+}
 _TRADER_MODES = {"paper", "live"}
 
 
@@ -616,6 +621,34 @@ def _resolve_direction_label_from_signal(
     return label or None
 
 
+def _resolve_binary_labels_from_signal(
+    signal_payload: dict[str, Any],
+    *,
+    market_id: str,
+) -> tuple[Optional[str], Optional[str]]:
+    labels: list[str] = []
+    matched_market = _find_signal_market(signal_payload, market_id)
+    if isinstance(matched_market, dict):
+        labels = _extract_market_outcome_labels(matched_market)
+    if not labels:
+        for key in ("outcome_labels", "outcomeLabels", "outcomes", "labels"):
+            labels = _extract_outcome_labels(signal_payload.get(key))
+            if labels:
+                break
+    yes_label = str(labels[0] or "").strip() if len(labels) > 0 else ""
+    no_label = str(labels[1] or "").strip() if len(labels) > 1 else ""
+    return (yes_label or None, no_label or None)
+
+
+def _resolve_binary_labels_from_market_payload(
+    market_payload: dict[str, Any],
+) -> tuple[Optional[str], Optional[str]]:
+    labels = _extract_market_outcome_labels(market_payload)
+    yes_label = str(labels[0] or "").strip() if len(labels) > 0 else ""
+    no_label = str(labels[1] or "").strip() if len(labels) > 1 else ""
+    return (yes_label or None, no_label or None)
+
+
 def _resolve_direction_label_from_payload(payload: dict[str, Any]) -> Optional[str]:
     if not isinstance(payload, dict):
         return None
@@ -643,30 +676,40 @@ def _resolve_direction_presentation(
     direction: Any,
     payload: Optional[dict[str, Any]] = None,
     signal_payload: Optional[dict[str, Any]] = None,
+    market_payload: Optional[dict[str, Any]] = None,
     market_id: Any = None,
-) -> tuple[Optional[str], str]:
+) -> tuple[Optional[str], str, Optional[str], Optional[str]]:
     payload_obj = payload if isinstance(payload, dict) else {}
     signal_payload_obj = signal_payload if isinstance(signal_payload, dict) else {}
+    market_payload_obj = market_payload if isinstance(market_payload, dict) else {}
     direction_side = _normalize_direction_side(direction)
     leg = payload_obj.get("leg")
     leg = leg if isinstance(leg, dict) else {}
     leg_outcome_side = _normalize_direction_side(leg.get("outcome"))
     if leg_outcome_side:
         direction_side = leg_outcome_side
+    resolved_market_id = str(market_id or leg.get("market_id") or payload_obj.get("market_id") or "").strip()
+    yes_label, no_label = _resolve_binary_labels_from_signal(
+        signal_payload_obj,
+        market_id=resolved_market_id,
+    )
+    if not yes_label or not no_label:
+        market_yes_label, market_no_label = _resolve_binary_labels_from_market_payload(market_payload_obj)
+        yes_label = yes_label or market_yes_label
+        no_label = no_label or market_no_label
     direction_label = _resolve_direction_label_from_payload(payload_obj)
     if not direction_label and direction_side:
-        resolved_market_id = str(market_id or leg.get("market_id") or payload_obj.get("market_id") or "").strip()
+        direction_label = yes_label if direction_side == "YES" else no_label
+    if not direction_label and direction_side:
         direction_label = _resolve_direction_label_from_signal(
-            signal_payload_obj,
-            market_id=resolved_market_id,
-            direction_side=direction_side,
+            signal_payload_obj, market_id=resolved_market_id, direction_side=direction_side
         )
     if not direction_label and direction_side:
         direction_label = direction_side
     if not direction_label:
         raw_direction = str(direction or "").strip()
         direction_label = raw_direction.upper() if raw_direction else "N/A"
-    return direction_side, direction_label
+    return direction_side, direction_label, yes_label, no_label
 
 
 def _first_float_from_dicts(candidates: list[Any], keys: tuple[str, ...]) -> Optional[float]:
@@ -999,6 +1042,9 @@ def _normalize_strategy_params(value: Any, source_key: str) -> dict[str, Any]:
     params = value if isinstance(value, dict) else {}
     out = dict(params)
     normalized_source = str(source_key or "").strip().lower()
+    if normalized_source == "crypto":
+        for legacy_key in _LEGACY_CRYPTO_TIMEFRAME_SCOPE_KEYS:
+            out.pop(legacy_key, None)
     if normalized_source == "traders":
         return StrategySDK.validate_trader_filter_config(out)
     if normalized_source == "news":
@@ -1296,7 +1342,7 @@ def _serialize_decision_with_signal(
             None,
         )
 
-    direction_side, direction_label = _resolve_direction_presentation(
+    direction_side, direction_label, yes_label, no_label = _resolve_direction_presentation(
         direction=direction,
         payload=row.payload_json if isinstance(row.payload_json, dict) else {},
         signal_payload=signal_payload_full if isinstance(signal_payload_full, dict) else {},
@@ -1310,6 +1356,8 @@ def _serialize_decision_with_signal(
             "direction": direction,
             "direction_side": direction_side,
             "direction_label": direction_label,
+            "yes_label": yes_label,
+            "no_label": no_label,
             "market_price": market_price,
             "model_probability": model_probability,
             "edge_percent": edge_percent,
@@ -1479,10 +1527,11 @@ def _serialize_order(
         unrealized_pnl = (quantity * current_price) - filled_notional_display
 
     signal_payload = signal.payload_json if signal is not None and isinstance(signal.payload_json, dict) else {}
-    direction_side, direction_label = _resolve_direction_presentation(
+    direction_side, direction_label, yes_label, no_label = _resolve_direction_presentation(
         direction=row.direction,
         payload=payload,
         signal_payload=signal_payload,
+        market_payload=cached_market_payload,
         market_id=row.market_id,
     )
 
@@ -1499,6 +1548,8 @@ def _serialize_order(
         "direction": row.direction,
         "direction_side": direction_side,
         "direction_label": direction_label,
+        "yes_label": yes_label,
+        "no_label": no_label,
         "mode": row.mode,
         "status": row.status,
         "notional_usd": row.notional_usd,

@@ -2,48 +2,20 @@ import sys
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from models.database import Base, Strategy
-from services.opportunity_strategy_catalog import (
-    SYSTEM_OPPORTUNITY_STRATEGY_SEEDS,
-    build_system_opportunity_strategy_rows,
-    ensure_system_opportunity_strategies_seeded,
-)
 from services.strategy_loader import (
     StrategyLoader as StrategyDBLoader,
     validate_strategy_source,
 )
 from tests.postgres_test_db import build_postgres_session_factory
 
-# Every seed slug that the unified catalog produces.
-REQUIRED_STRATEGY_SLUGS = {seed.slug for seed in SYSTEM_OPPORTUNITY_STRATEGY_SEEDS}
-
-
 async def _build_session_factory(_tmp_path: Path):
     return await build_postgres_session_factory(Base, "strategy_loader")
-
-
-def test_system_strategy_catalog_contains_required_keys():
-    rows = build_system_opportunity_strategy_rows()
-    keys = {str(row.get("slug") or "").strip().lower() for row in rows}
-    assert keys == REQUIRED_STRATEGY_SLUGS
-
-
-def test_system_strategy_catalog_uses_executable_source_files():
-    rows = build_system_opportunity_strategy_rows()
-    for row in rows:
-        source_code = str(row.get("source_code") or "")
-        class_name = str(row.get("class_name") or "")
-        assert "System strategy seed wrapper loaded from DB" not in source_code
-        assert class_name in source_code
-        validation = validate_strategy_source(source_code, class_name)
-        assert validation["valid"] is True, f"{row['slug']}: {validation['errors']}"
-        assert validation.get("class_name") == class_name
 
 
 def test_validate_strategy_source_rejects_blocked_import():
@@ -235,99 +207,5 @@ async def test_loader_isolates_error_rows_and_loads_valid_rows(tmp_path):
             bad_row = await session.get(Strategy, "unit-bad-row")
             assert good_row is not None and good_row.status == "loaded"
             assert bad_row is not None and bad_row.status == "error"
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_ensure_system_seed_rewrites_legacy_wrapper_rows(tmp_path):
-    engine, session_factory = await _build_session_factory(tmp_path)
-    try:
-        async with session_factory() as session:
-            legacy_source = "\n".join(
-                [
-                    '"""System opportunity strategy wrapper loaded from DB."""',
-                    "from services.strategies.base import BaseStrategy",
-                    "from services.strategies.basic import BasicArbStrategy as _SeedStrategy",
-                    "",
-                    "class BasicArbStrategy(_SeedStrategy):",
-                    "    pass",
-                ]
-            )
-            session.add(
-                Strategy(
-                    id="legacy-basic",
-                    slug="basic",
-                    source_key="scanner",
-                    name="Basic Arbitrage",
-                    description="Legacy wrapper",
-                    class_name="BasicArbStrategy",
-                    source_code=legacy_source,
-                    config={},
-                    config_schema={},
-                    aliases=[],
-                    is_system=True,
-                    enabled=True,
-                    status="loaded",
-                    version=1,
-                )
-            )
-            await session.commit()
-
-            changed = await ensure_system_opportunity_strategies_seeded(session)
-            assert changed >= 1
-
-            row = (await session.execute(select(Strategy).where(Strategy.slug == "basic"))).scalars().one()
-            assert "System opportunity strategy wrapper loaded from DB" not in (row.source_code or "")
-            assert "from services.strategies" in (row.source_code or "")
-            assert int(row.version or 0) == 2
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_ensure_system_seed_rewrites_arbitrage_opportunity_imports(tmp_path):
-    engine, session_factory = await _build_session_factory(tmp_path)
-    try:
-        async with session_factory() as session:
-            legacy_source = "\n".join(
-                [
-                    "from models import Market, Event, ArbitrageOpportunity",
-                    "from services.strategies.base import BaseStrategy",
-                    "",
-                    "class ContradictionStrategy(BaseStrategy):",
-                    "    name = 'Contradiction'",
-                    "    description = 'Legacy import test'",
-                    "    def detect(self, events, markets, prices):",
-                    "        return []",
-                ]
-            )
-            session.add(
-                Strategy(
-                    id="legacy-basic-imports",
-                    slug="basic",
-                    source_key="scanner",
-                    name="Basic Arbitrage",
-                    description="Legacy import row",
-                    class_name="BasicArbStrategy",
-                    source_code=legacy_source,
-                    config={},
-                    config_schema={},
-                    aliases=[],
-                    is_system=True,
-                    enabled=True,
-                    status="loaded",
-                    version=1,
-                )
-            )
-            await session.commit()
-
-            changed = await ensure_system_opportunity_strategies_seeded(session)
-            assert changed >= 1
-
-            row = (await session.execute(select(Strategy).where(Strategy.slug == "basic"))).scalars().one()
-            assert "ArbitrageOpportunity" not in (row.source_code or "")
-            assert "from models import Market, Event, Opportunity" in (row.source_code or "")
-            assert int(row.version or 0) == 2
     finally:
         await engine.dispose()

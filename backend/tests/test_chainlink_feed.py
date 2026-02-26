@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 import json
 import sys
 import time
@@ -87,3 +88,19 @@ def test_handle_message_parses_payload_list_and_respects_source_priority():
     assert by_source["binance"].price == 1940.5
     assert by_source["chainlink"].price == 1939.8
     assert list(feed._history.get("ETH") or []) == [(ts_chainlink * 1000, 1939.8)]
+
+
+def test_get_price_at_or_after_time_returns_first_point_within_delay():
+    feed = ChainlinkFeed()
+    now_s = int(time.time())
+    target_ms = now_s * 1000
+    feed._history["BTC"] = deque(
+        [
+            (target_ms - 20_000, 67000.0),
+            (target_ms + 15_000, 67020.0),
+            (target_ms + 45_000, 67050.0),
+        ]
+    )
+
+    assert feed.get_price_at_or_after_time("BTC", float(now_s), max_delay_seconds=20.0) == 67020.0
+    assert feed.get_price_at_or_after_time("BTC", float(now_s), max_delay_seconds=5.0) is None

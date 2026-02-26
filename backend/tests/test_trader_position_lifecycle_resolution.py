@@ -471,6 +471,175 @@ async def test_live_exit_submission_uses_gtc_for_lifecycle_close(tmp_path, monke
 
 
 @pytest.mark.asyncio
+async def test_live_exit_submission_uses_ioc_for_rapid_strategy_close(tmp_path, monkeypatch):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    try:
+        async with session_factory() as session:
+            await _seed_order(
+                session,
+                mode="live",
+                status="open",
+                payload_json={
+                    "strategy_type": "btc_eth_highfreq",
+                    "token_id": "token-1",
+                    "provider_reconciliation": {
+                        "filled_size": 5.0,
+                        "average_fill_price": 0.4,
+                        "filled_notional_usd": 2.0,
+                    },
+                },
+            )
+            monkeypatch.setattr(
+                position_lifecycle,
+                "load_market_info_for_orders",
+                AsyncMock(
+                    return_value={
+                        "market-1": {
+                            "closed": False,
+                            "accepting_orders": True,
+                            "winner": None,
+                            "winning_outcome": None,
+                            "outcome_prices": [0.5, 0.5],
+                        }
+                    }
+                ),
+            )
+            monkeypatch.setattr(
+                position_lifecycle,
+                "_load_execution_wallet_positions_by_token",
+                AsyncMock(return_value={"token-1": {"asset": "token-1", "size": 5.0, "curPrice": 0.5}}),
+            )
+            monkeypatch.setattr(
+                position_lifecycle,
+                "_load_execution_wallet_recent_sell_trades_by_token",
+                AsyncMock(return_value={}),
+            )
+
+            class _RapidStrategy:
+                def should_exit(self, _position, _market_state):
+                    return ExitDecision(action="close", reason="Rapid hard-cap take profit (23.8% >= 18.0%)")
+
+            monkeypatch.setattr(
+                "services.strategy_loader.strategy_loader.get_strategy",
+                lambda _slug: SimpleNamespace(instance=_RapidStrategy()),
+            )
+
+            execute_mock = AsyncMock(
+                return_value=SimpleNamespace(
+                    status="failed",
+                    error_message="mock_exit_failure",
+                    order_id=None,
+                    payload={},
+                )
+            )
+            monkeypatch.setattr("services.live_execution_adapter.execute_live_order", execute_mock)
+
+            result = await position_lifecycle.reconcile_live_positions(
+                session,
+                trader_id="trader-1",
+                trader_params={},
+                dry_run=False,
+            )
+            order = await session.get(TraderOrder, "order-1")
+
+            assert result["closed"] == 0
+            assert order is not None
+            pending_exit = (order.payload_json or {}).get("pending_live_exit")
+            assert isinstance(pending_exit, dict)
+            assert pending_exit.get("status") == "failed"
+            assert execute_mock.await_count == 1
+            assert execute_mock.await_args.kwargs.get("time_in_force") == "IOC"
+            assert execute_mock.await_args.kwargs.get("resolve_live_price") is True
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_live_failed_rapid_exit_retry_uses_ioc_and_does_not_block_min_notional(tmp_path, monkeypatch):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    try:
+        async with session_factory() as session:
+            last_attempt_at = (datetime.utcnow() - timedelta(seconds=30)).isoformat() + "Z"
+            await _seed_order(
+                session,
+                mode="live",
+                status="open",
+                payload_json={
+                    "token_id": "token-1",
+                    "provider_reconciliation": {
+                        "filled_size": 3.33,
+                        "average_fill_price": 0.4,
+                        "filled_notional_usd": 1.332,
+                    },
+                    "pending_live_exit": {
+                        "status": "failed",
+                        "close_trigger": "strategy:Rapid hard-cap take profit (23.8% >= 18.0%)",
+                        "close_price": 0.7,
+                        "exit_size": 3.33,
+                        "filled_size": 3.1,
+                        "retry_count": 0,
+                        "last_attempt_at": last_attempt_at,
+                        "last_error": "mock_prior_failure",
+                    },
+                },
+            )
+            monkeypatch.setattr(
+                position_lifecycle,
+                "load_market_info_for_orders",
+                AsyncMock(
+                    return_value={
+                        "market-1": {
+                            "closed": False,
+                            "accepting_orders": True,
+                            "winner": None,
+                            "winning_outcome": None,
+                            "outcome_prices": [0.7, 0.3],
+                        }
+                    }
+                ),
+            )
+            monkeypatch.setattr(
+                position_lifecycle,
+                "_load_execution_wallet_positions_by_token",
+                AsyncMock(return_value={}),
+            )
+            monkeypatch.setattr(
+                position_lifecycle,
+                "_load_execution_wallet_recent_sell_trades_by_token",
+                AsyncMock(return_value={}),
+            )
+            execute_mock = AsyncMock(
+                return_value=SimpleNamespace(
+                    status="failed",
+                    error_message="retry_mock_failure",
+                    order_id=None,
+                    payload={},
+                )
+            )
+            monkeypatch.setattr("services.live_execution_adapter.execute_live_order", execute_mock)
+
+            result = await position_lifecycle.reconcile_live_positions(
+                session,
+                trader_id="trader-1",
+                trader_params={},
+                dry_run=False,
+            )
+            order = await session.get(TraderOrder, "order-1")
+
+            assert result["closed"] == 0
+            assert order is not None
+            pending_exit = (order.payload_json or {}).get("pending_live_exit")
+            assert isinstance(pending_exit, dict)
+            assert pending_exit.get("status") == "failed"
+            assert pending_exit.get("last_error") == "retry_mock_failure"
+            assert execute_mock.await_count == 1
+            assert execute_mock.await_args.kwargs.get("time_in_force") == "IOC"
+            assert execute_mock.await_args.kwargs.get("resolve_live_price") is True
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_live_pending_exit_partial_fill_does_not_close_position(tmp_path, monkeypatch):
     engine, session_factory = await _build_session_factory(tmp_path)
     try:
@@ -550,6 +719,183 @@ async def test_live_pending_exit_partial_fill_does_not_close_position(tmp_path, 
             assert pending_exit.get("status") == "submitted"
             assert pending_exit.get("fill_ratio") == pytest.approx(6.22 / 7.4, rel=1e-9)
             assert (order.payload_json or {}).get("position_close") is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_live_pending_exit_terminal_partial_fill_marks_failed_for_retry_when_wallet_still_open(tmp_path, monkeypatch):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    try:
+        async with session_factory() as session:
+            await _seed_order(
+                session,
+                mode="live",
+                status="open",
+                payload_json={
+                    "token_id": "token-1",
+                    "provider_reconciliation": {
+                        "filled_size": 7.4,
+                        "average_fill_price": 0.4,
+                        "filled_notional_usd": 2.96,
+                    },
+                    "pending_live_exit": {
+                        "status": "submitted",
+                        "close_trigger": "strategy:Stop loss hit",
+                        "exit_size": 7.4,
+                        "exit_order_id": "exit-order-1",
+                        "provider_clob_order_id": "0xexit-order",
+                    },
+                },
+            )
+            monkeypatch.setattr(
+                position_lifecycle,
+                "load_market_info_for_orders",
+                AsyncMock(
+                    return_value={
+                        "market-1": {
+                            "closed": False,
+                            "accepting_orders": True,
+                            "winner": None,
+                            "winning_outcome": None,
+                            "outcome_prices": [0.45, 0.55],
+                        }
+                    }
+                ),
+            )
+            monkeypatch.setattr(position_lifecycle.polymarket_client, "get_midpoint", AsyncMock(return_value=None))
+            monkeypatch.setattr(
+                position_lifecycle,
+                "_load_execution_wallet_positions_by_token",
+                AsyncMock(return_value={"token-1": {"asset": "token-1", "size": 1.18, "curPrice": 0.18}}),
+            )
+            monkeypatch.setattr(
+                position_lifecycle,
+                "_load_execution_wallet_recent_sell_trades_by_token",
+                AsyncMock(return_value={}),
+            )
+            monkeypatch.setattr(
+                position_lifecycle.live_execution_service,
+                "get_order_snapshots_by_clob_ids",
+                AsyncMock(
+                    return_value={
+                        "0xexit-order": {
+                            "normalized_status": "filled",
+                            "filled_size": 6.22,
+                            "average_fill_price": 0.18,
+                        }
+                    }
+                ),
+            )
+            execute_mock = AsyncMock()
+            monkeypatch.setattr("services.live_execution_adapter.execute_live_order", execute_mock)
+
+            result = await position_lifecycle.reconcile_live_positions(
+                session,
+                trader_id="trader-1",
+                trader_params={},
+                dry_run=False,
+            )
+            order = await session.get(TraderOrder, "order-1")
+
+            assert result["closed"] == 0
+            assert result["held"] >= 1
+            assert order is not None
+            assert order.status == "open"
+            pending_exit = (order.payload_json or {}).get("pending_live_exit", {})
+            assert pending_exit.get("status") == "failed"
+            assert str(pending_exit.get("last_error") or "").startswith("provider_partial_fill_terminal")
+            assert pending_exit.get("next_retry_at")
+            assert execute_mock.await_count == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_live_failed_exit_retry_exhausted_soft_bypass_retries_when_wallet_still_open(tmp_path, monkeypatch):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    try:
+        async with session_factory() as session:
+            stale_attempt_at = (datetime.utcnow() - timedelta(minutes=2)).isoformat() + "Z"
+            await _seed_order(
+                session,
+                mode="live",
+                status="open",
+                payload_json={
+                    "token_id": "token-1",
+                    "provider_reconciliation": {
+                        "filled_size": 10.0,
+                        "average_fill_price": 0.4,
+                        "filled_notional_usd": 4.0,
+                    },
+                    "pending_live_exit": {
+                        "status": "failed",
+                        "close_trigger": "strategy:Stop loss hit",
+                        "close_price": 0.2,
+                        "exit_size": 10.0,
+                        "retry_count": 5,
+                        "last_attempt_at": stale_attempt_at,
+                        "last_error": "mock_retry_exhausted",
+                    },
+                },
+            )
+            monkeypatch.setattr(
+                position_lifecycle,
+                "load_market_info_for_orders",
+                AsyncMock(
+                    return_value={
+                        "market-1": {
+                            "closed": False,
+                            "accepting_orders": True,
+                            "winner": None,
+                            "winning_outcome": None,
+                            "outcome_prices": [0.45, 0.55],
+                        }
+                    }
+                ),
+            )
+            monkeypatch.setattr(position_lifecycle.polymarket_client, "get_midpoint", AsyncMock(return_value=None))
+            monkeypatch.setattr(
+                position_lifecycle,
+                "_load_execution_wallet_positions_by_token",
+                AsyncMock(return_value={"token-1": {"asset": "token-1", "size": 2.0, "curPrice": 0.2}}),
+            )
+            monkeypatch.setattr(
+                position_lifecycle,
+                "_load_execution_wallet_recent_sell_trades_by_token",
+                AsyncMock(return_value={}),
+            )
+            monkeypatch.setattr(
+                position_lifecycle.live_execution_service,
+                "prepare_sell_balance_allowance",
+                AsyncMock(return_value=None),
+            )
+            execute_mock = AsyncMock(
+                return_value=SimpleNamespace(
+                    status="submitted",
+                    order_id="exit-retry-1",
+                    payload={"clob_order_id": "0xretry-order", "trading_status": "open"},
+                    error_message=None,
+                )
+            )
+            monkeypatch.setattr("services.live_execution_adapter.execute_live_order", execute_mock)
+
+            result = await position_lifecycle.reconcile_live_positions(
+                session,
+                trader_id="trader-1",
+                trader_params={},
+                dry_run=False,
+            )
+            order = await session.get(TraderOrder, "order-1")
+
+            assert result["closed"] == 0
+            assert result["held"] >= 1
+            assert execute_mock.await_count == 1
+            assert order is not None
+            pending_exit = (order.payload_json or {}).get("pending_live_exit", {})
+            assert pending_exit.get("status") == "submitted"
+            assert pending_exit.get("provider_clob_order_id") == "0xretry-order"
+            assert pending_exit.get("retry_count") == 5
     finally:
         await engine.dispose()
 

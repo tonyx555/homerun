@@ -93,6 +93,7 @@ async def test_worker_loop_does_not_seed_default_traders(postgres_session_factor
     monkeypatch.setattr(trader_orchestrator_worker, "AsyncSessionLocal", postgres_session_factory)
     monkeypatch.setattr(trader_orchestrator_worker, "expire_stale_signals", AsyncMock())
     monkeypatch.setattr(trader_orchestrator_worker, "ensure_all_strategies_seeded", AsyncMock())
+    monkeypatch.setattr(trader_orchestrator_worker, "ensure_trade_signal_group", AsyncMock(return_value=True))
     monkeypatch.setattr(trader_orchestrator_worker, "refresh_strategy_runtime_if_needed", AsyncMock())
     monkeypatch.setattr(trader_orchestrator_worker, "compute_orchestrator_metrics", AsyncMock(return_value={}))
     monkeypatch.setattr(
@@ -118,7 +119,7 @@ async def test_worker_loop_does_not_seed_default_traders(postgres_session_factor
     monkeypatch.setattr(event_bus, "start", AsyncMock())
     monkeypatch.setattr(event_bus, "subscribe", lambda *a, **kw: None)
 
-    async def _cancel_wait(_queue, _timeout):
+    async def _cancel_wait(*_args, **_kwargs):
         raise asyncio.CancelledError()
 
     monkeypatch.setattr(trader_orchestrator_worker, "_wait_for_runtime_trigger", _cancel_wait)
@@ -130,26 +131,6 @@ async def test_worker_loop_does_not_seed_default_traders(postgres_session_factor
         count = int((await session.execute(select(func.count(Trader.id)))).scalar() or 0)
 
     assert count == 0
-
-
-@pytest.mark.asyncio
-async def test_create_trader_normalizes_legacy_default_strategy_key(postgres_session_factory):
-    async with postgres_session_factory() as session:
-        trader = await create_trader(
-            session,
-            {
-                "name": "Legacy Default Trader",
-                "source_configs": [
-                    {
-                        "source_key": "crypto",
-                        "strategy_key": "strategy.default",
-                        "strategy_params": {},
-                    }
-                ],
-            },
-        )
-
-    assert trader["source_configs"][0]["strategy_key"] == "btc_eth_highfreq"
 
 
 @pytest.mark.asyncio

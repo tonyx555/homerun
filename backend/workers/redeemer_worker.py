@@ -1,4 +1,4 @@
-"""Redeemer worker: periodically redeems resolved CTF positions on-chain."""
+"""Redeemer worker: scheduled dry-runs plus explicit on-demand CTF redemption."""
 
 from __future__ import annotations
 
@@ -85,7 +85,7 @@ async def run_worker_loop() -> None:
                 continue
 
             cycle_reason = "requested" if requested_run else "scheduled"
-            summary = await _run_redeem_cycle(dry_run=False)
+            summary = await _run_redeem_cycle(dry_run=not requested_run)
 
             async with AsyncSessionLocal() as session:
                 await write_worker_snapshot(
@@ -94,7 +94,8 @@ async def run_worker_loop() -> None:
                     running=True,
                     enabled=True,
                     current_activity=(
-                        f"Redeemed={int(summary.get('redeemed', 0))}, "
+                        f"{'DryRun' if bool(summary.get('dry_run')) else 'Redeem'}="
+                        f"{int(summary.get('redeemed', 0))}, "
                         f"resolved={int(summary.get('resolved_conditions', 0))}, "
                         f"failed={int(summary.get('failed', 0))}"
                     ),

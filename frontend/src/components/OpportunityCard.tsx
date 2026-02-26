@@ -595,12 +595,24 @@ function OpportunityCard({
     },
     [market, marketYesPrice, marketNoPrice, isMultiMarket, multiMarketOutcomes, singleMarketOutcomes, opportunity.markets],
   )
-  const hasSparkline = sparkSeries.length > 0 || (isWeatherOpportunity && marketProbability != null)
-  const nowSec = useMemo(() => Math.floor(Date.now() / 1000), [sparkSeries])
+  const hasSparkline = (
+    sparkSeries.length > 0
+    || (
+      isWeatherOpportunity
+      && (
+        marketProbability != null
+        || modelProbability != null
+        || (market && marketYesPrice >= 0 && marketYesPrice <= 1)
+      )
+    )
+  )
+  const nowSec = Math.floor(Date.now() / 1000)
   const livelineSeries = useMemo<LivelineSeries[]>(() => {
     // If there's sparkline data from price_history, use it directly
     if (sparkSeries.length > 0 && sparkSeries.some((row) => row.data.length >= 2)) {
-      return sparkSeries.map((row, index) => ({
+      return sparkSeries
+        .filter((row) => row.data.length >= 2)
+        .map((row, index) => ({
         id: row.key,
         data: toTimeValueSeries(row.data, nowSec),
         value: row.latest ?? row.data[row.data.length - 1] ?? 0,
@@ -610,14 +622,17 @@ function OpportunityCard({
     }
     // For weather opportunities without price history, synthesise series
     // from market probability vs model consensus probability.
-    if (isWeatherOpportunity && marketProbability != null) {
+    if (isWeatherOpportunity) {
       const series: LivelineSeries[] = []
-      const mktData = toTimeValueSeries([marketProbability, marketProbability], nowSec)
-      if (mktData.length >= 2) {
+      const weatherMarketProbability = marketProbability ?? (market ? marketYesPrice : null)
+      const mktData = weatherMarketProbability != null
+        ? toTimeValueSeries([weatherMarketProbability, weatherMarketProbability], nowSec)
+        : []
+      if (mktData.length >= 2 && weatherMarketProbability != null) {
         series.push({
           id: 'market',
           data: mktData,
-          value: marketProbability,
+          value: weatherMarketProbability,
           color: SPARKLINE_COLORS[0],
           label: 'Market',
         })
@@ -637,19 +652,24 @@ function OpportunityCard({
       return series
     }
     // Generic fallback: just convert sparkSeries as-is
-    return sparkSeries.map((row, index) => ({
+    return sparkSeries
+      .filter((row) => row.data.length >= 2)
+      .map((row, index) => ({
       id: row.key,
       data: toTimeValueSeries(row.data, nowSec),
       value: row.latest ?? row.data[row.data.length - 1] ?? 0,
       color: SPARKLINE_COLORS[index % SPARKLINE_COLORS.length],
       label: row.label,
     }))
-  }, [sparkSeries, nowSec, isWeatherOpportunity, marketProbability, modelProbability])
+  }, [sparkSeries, nowSec, isWeatherOpportunity, market, marketProbability, marketYesPrice, modelProbability])
   const primaryLivelineData = livelineSeries[0]?.data ?? []
   const primaryLivelineValue = livelineSeries[0]?.value ?? 0
   const livelineWindow = primaryLivelineData.length >= 2
-    ? primaryLivelineData[primaryLivelineData.length - 1].time - primaryLivelineData[0].time
-    : 60
+    ? Math.max(
+      600,
+      primaryLivelineData[primaryLivelineData.length - 1].time - primaryLivelineData[0].time,
+    )
+    : 600
 
   // Accent bar color
   const accentColor = recommendation ? (ACCENT_BAR_COLORS[recommendation] || 'bg-border') : 'bg-border/50'
@@ -803,14 +823,14 @@ function OpportunityCard({
               <Liveline
                 data={primaryLivelineData}
                 value={primaryLivelineValue}
-                series={livelineSeries.length > 1 ? livelineSeries.slice(1) : undefined}
+                series={livelineSeries.length > 1 ? livelineSeries : undefined}
                 color={SPARKLINE_COLORS[0]}
                 theme={themeMode}
                 window={livelineWindow}
-                paused
+                paused={livelineSeries.length <= 1}
                 grid={expanded || isModalView}
                 badge={false}
-                fill={livelineSeries.length <= 2}
+                fill={livelineSeries.length <= 1}
                 pulse={false}
                 momentum={expanded || isModalView}
                 scrub={expanded || isModalView}
@@ -820,7 +840,7 @@ function OpportunityCard({
                   ? { top: 6, right: 6, bottom: 6, left: 6 }
                   : { top: 4, right: 4, bottom: 4, left: 4 }}
                 formatValue={(v) => v.toFixed(2)}
-                style={{ height: expanded || isModalView ? 120 : 56 }}
+                style={{ height: expanded || isModalView ? 132 : 64 }}
               />
               <div className={cn(
                 "mt-0 flex flex-wrap gap-x-1.5 gap-y-0.5 px-0.5 text-[9px] font-data"

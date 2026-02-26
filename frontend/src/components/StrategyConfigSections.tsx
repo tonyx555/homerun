@@ -187,8 +187,12 @@ function StrategyConfigCard({
             onClick={(e) => e.stopPropagation()}
             onCheckedChange={(next) => {
               setLocalEnabled(next)
-              setDirty(true)
+              saveMutation.mutate({
+                config: localConfig,
+                enabled: next,
+              })
             }}
+            disabled={saveMutation.isPending}
             className="scale-75"
           />
           {open ? (

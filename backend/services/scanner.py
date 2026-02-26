@@ -629,6 +629,32 @@ class ArbitrageScanner:
         has_tokens = 1.0 if list(getattr(market, "clob_token_ids", None) or []) else 0.0
         return (volume, liquidity, has_tokens)
 
+    def _is_tail_end_priority_market(self, market: object, now: datetime) -> bool:
+        end_date = _make_aware(getattr(market, "end_date", None))
+        if end_date is None:
+            return False
+        days_to_resolution = (end_date - now).total_seconds() / 86400.0
+        if days_to_resolution <= 0.0 or days_to_resolution > 2.0:
+            return False
+
+        yes, no = self._extract_market_yes_no_prices(market, {})
+        if yes is None or no is None:
+            return False
+        return max(float(yes), float(no)) >= 0.85
+
+    def _tail_end_priority_key(self, market: object, now: datetime) -> tuple[float, float, float, float]:
+        end_date = _make_aware(getattr(market, "end_date", None))
+        if end_date is None:
+            days_to_resolution = 9999.0
+        else:
+            days_to_resolution = max(0.0, (end_date - now).total_seconds() / 86400.0)
+        yes, no = self._extract_market_yes_no_prices(market, {})
+        side_probability = max(float(yes or 0.0), float(no or 0.0))
+        liquidity = float(getattr(market, "liquidity", 0.0) or 0.0)
+        volume = float(getattr(market, "volume", 0.0) or 0.0)
+        time_priority = 1.0 / max(days_to_resolution, 1e-6)
+        return (time_priority, side_probability, liquidity, volume)
+
     def _enforce_catalog_caps(self, events: list, markets: list) -> tuple[list, list]:
         market_cap = int(getattr(settings, "MAX_MARKETS_TO_SCAN", 0) or 0)
         event_cap = int(getattr(settings, "MAX_EVENTS_TO_SCAN", 0) or 0)
@@ -2563,12 +2589,28 @@ class ArbitrageScanner:
                     ]
                 else:
                     cap = int(getattr(settings, "SCANNER_FULL_SNAPSHOT_MAX_MARKETS", 0) or 0)
-                    full_snapshot_markets = [
-                        market for market in cached_markets_snapshot if self._is_market_active(market, now)
-                    ]
-                    full_snapshot_markets.sort(key=self._market_priority_key, reverse=True)
-                    if cap > 0 and len(full_snapshot_markets) > cap:
-                        full_snapshot_markets = full_snapshot_markets[:cap]
+                    active_markets = [market for market in cached_markets_snapshot if self._is_market_active(market, now)]
+                    if "tail_end_carry" in full_slugs:
+                        tail_priority = [
+                            market for market in active_markets if self._is_tail_end_priority_market(market, now)
+                        ]
+                        tail_priority.sort(key=lambda market: self._tail_end_priority_key(market, now), reverse=True)
+                        if cap > 0 and len(tail_priority) >= cap:
+                            full_snapshot_markets = tail_priority[:cap]
+                        else:
+                            seen_ids = {str(getattr(market, "id", "") or "") for market in tail_priority}
+                            remaining = [
+                                market
+                                for market in sorted(active_markets, key=self._market_priority_key, reverse=True)
+                                if str(getattr(market, "id", "") or "") not in seen_ids
+                            ]
+                            full_snapshot_markets = tail_priority + remaining
+                            if cap > 0 and len(full_snapshot_markets) > cap:
+                                full_snapshot_markets = full_snapshot_markets[:cap]
+                    else:
+                        full_snapshot_markets = sorted(active_markets, key=self._market_priority_key, reverse=True)
+                        if cap > 0 and len(full_snapshot_markets) > cap:
+                            full_snapshot_markets = full_snapshot_markets[:cap]
 
                 if not full_snapshot_markets:
                     async with self._scan_lock:

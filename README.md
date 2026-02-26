@@ -114,6 +114,7 @@ cd homerun
 ```
 
 `run.sh` detects missing or stale setup and runs `setup.sh` automatically. It starts Redis and Postgres (via Docker or local install), runs DB migrations, and launches the TUI.
+The launcher writes the active DB URL to `backend/.runtime/database_url`; use that value when inspecting Postgres from another shell.
 
 To run setup separately:
 

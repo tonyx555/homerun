@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy.exc import OperationalError
 
+from config import settings
 from models.database import (
     AppSettings,
     AsyncSessionLocal,
     DiscoveredWallet,
     SimulationAccount,
+    TradeSignal,
+    TraderSignalConsumption,
     TraderOrder,
     TrackedWallet,
     Trader,
@@ -54,7 +59,12 @@ from services.strategy_loader import StrategyValidationError, strategy_loader
 from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.strategy_sdk import StrategySDK
 from services.strategy_versioning import normalize_strategy_version, resolve_strategy_version
-from services.event_bus import event_bus
+from services.trade_signal_stream import (
+    ack_trade_signal_batches,
+    auto_claim_trade_signal_batches,
+    ensure_trade_signal_group,
+    read_trade_signal_batches,
+)
 from services.trader_orchestrator_state import (
     DEFAULT_LIVE_MARKET_CONTEXT,
     DEFAULT_LIVE_PROVIDER_HEALTH,
@@ -93,7 +103,6 @@ from services.signal_bus import expire_stale_signals, set_trade_signal_status
 from utils.utcnow import utcnow
 from utils.converters import safe_float, safe_int
 from utils.secrets import decrypt_secret
-from sqlalchemy.exc import OperationalError
 
 logger = logging.getLogger("trader_orchestrator_worker")
 strategy_db_loader = strategy_loader
@@ -104,7 +113,7 @@ _ORPHAN_CLEANUP_MAX_TRADERS_PER_CYCLE = 32
 _ORCHESTRATOR_CYCLE_LOCK_KEY = 0x54524F5243485354  # "TRORCHST"
 _orchestrator_lock_session: Any | None = None
 _TRADER_IDLE_MAINTENANCE_INTERVAL_SECONDS = 60
-_HIGH_FREQUENCY_CRYPTO_LOOP_INTERVAL_SECONDS = 0.25
+_HIGH_FREQUENCY_CRYPTO_MAINTENANCE_INTERVAL_SECONDS = 1.0
 _STANDARD_MAX_SIGNALS_PER_CYCLE = 500
 _STANDARD_DEFAULT_MAX_SIGNALS_PER_CYCLE = 200
 _HIGH_FREQUENCY_MAX_SIGNALS_PER_CYCLE = 5000
@@ -113,13 +122,7 @@ _HIGH_FREQUENCY_DEFAULT_SCAN_BATCH_SIZE = 1000
 _trader_idle_maintenance_last_run: dict[str, datetime] = {}
 _TRADER_CYCLE_HEARTBEAT_EVENT_INTERVAL_SECONDS = 15
 _trader_cycle_heartbeat_last_emitted: dict[str, datetime] = {}
-_ORCHESTRATOR_TRIGGER_QUEUE_MAXSIZE = 8192
-_ORCHESTRATOR_TRIGGER_EVENTS = frozenset(
-    {
-        "trade_signal_batch",
-        "trade_signal_emission",
-    }
-)
+_TRADE_SIGNAL_STREAM_DRAIN_READS = 4
 _TERMINAL_STALE_ORDER_CHECK_INTERVAL_SECONDS = 30
 _TERMINAL_STALE_ORDER_MIN_AGE_MINUTES = 3
 _TERMINAL_STALE_ORDER_ALERT_COOLDOWN_SECONDS = 300
@@ -157,15 +160,115 @@ async def _worker_sleep(interval_seconds: float) -> None:
     await asyncio.sleep(interval_seconds)
 
 
-async def _wait_for_runtime_trigger(
-    trigger_queue: asyncio.Queue[dict[str, Any]],
-    timeout_seconds: float,
+def _coalesce_stream_trigger(
+    stream_rows: list[tuple[str, dict[str, Any]]],
 ) -> dict[str, Any] | None:
-    timeout = max(0.05, float(timeout_seconds))
-    try:
-        return await asyncio.wait_for(trigger_queue.get(), timeout=timeout)
-    except asyncio.TimeoutError:
+    if not stream_rows:
         return None
+    source_signal_ids: dict[str, list[str]] = {}
+    source_seen_ids: dict[str, set[str]] = {}
+    stream_entry_ids: list[str] = []
+    for entry_id, payload in stream_rows:
+        stream_entry_ids.append(str(entry_id))
+        source_key = normalize_source_key(payload.get("source")) or "__all__"
+        source_signal_ids.setdefault(source_key, [])
+        source_seen_ids.setdefault(source_key, set())
+        for raw_signal_id in payload.get("signal_ids") or []:
+            signal_id = str(raw_signal_id or "").strip()
+            if not signal_id or signal_id in source_seen_ids[source_key]:
+                continue
+            source_seen_ids[source_key].add(signal_id)
+            source_signal_ids[source_key].append(signal_id)
+    if not stream_entry_ids:
+        return None
+    if not source_signal_ids:
+        return {
+            "event_type": "trade_signal_stream",
+            "source": "",
+            "source_signal_ids": {},
+            "stream_entry_ids": stream_entry_ids,
+        }
+    non_global_sources = sorted(source for source in source_signal_ids.keys() if source != "__all__")
+    trigger_source = non_global_sources[0] if len(non_global_sources) == 1 and "__all__" not in source_signal_ids else ""
+    return {
+        "event_type": "trade_signal_stream",
+        "source": trigger_source,
+        "source_signal_ids": source_signal_ids,
+        "stream_entry_ids": stream_entry_ids,
+    }
+
+
+async def _wait_for_trade_signal_stream_trigger(
+    *,
+    consumer: str,
+    timeout_seconds: float,
+    claim_cursor: str,
+    last_claim_run_at: datetime | None,
+) -> tuple[dict[str, Any] | None, str, datetime]:
+    timeout = max(0.05, float(timeout_seconds))
+    deadline = datetime.now(timezone.utc) + timedelta(seconds=timeout)
+    stream_rows: list[tuple[str, dict[str, Any]]] = []
+    next_claim_cursor = str(claim_cursor or "0-0")
+    now = datetime.now(timezone.utc)
+    claim_interval_seconds = max(0.1, float(settings.TRADE_SIGNAL_STREAM_CLAIM_INTERVAL_SECONDS))
+    claim_due = (
+        last_claim_run_at is None
+        or (now - last_claim_run_at).total_seconds() >= claim_interval_seconds
+    )
+    last_claim = last_claim_run_at or now
+    if claim_due:
+        next_claim_cursor, claimed_rows = await auto_claim_trade_signal_batches(
+            consumer=consumer,
+            min_idle_ms=int(settings.TRADE_SIGNAL_STREAM_CLAIM_IDLE_MS),
+            start_id=next_claim_cursor,
+            count=int(settings.TRADE_SIGNAL_STREAM_CLAIM_READ_COUNT),
+        )
+        if claimed_rows:
+            stream_rows.extend(claimed_rows)
+            return _coalesce_stream_trigger(stream_rows), next_claim_cursor, now
+        last_claim = now
+    while datetime.now(timezone.utc) < deadline:
+        remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
+        if remaining <= 0:
+            break
+        block_ms = max(1, min(int(remaining * 1000), int(settings.TRADE_SIGNAL_STREAM_BLOCK_MS)))
+        rows = await read_trade_signal_batches(
+            consumer=consumer,
+            block_ms=block_ms,
+            count=int(settings.TRADE_SIGNAL_STREAM_READ_COUNT),
+            include_pending=False,
+        )
+        if not rows:
+            continue
+        stream_rows.extend(rows)
+        for _ in range(_TRADE_SIGNAL_STREAM_DRAIN_READS):
+            tail_rows = await read_trade_signal_batches(
+                consumer=consumer,
+                block_ms=1,
+                count=int(settings.TRADE_SIGNAL_STREAM_READ_COUNT),
+                include_pending=False,
+            )
+            if not tail_rows:
+                break
+            stream_rows.extend(tail_rows)
+        break
+    return _coalesce_stream_trigger(stream_rows), next_claim_cursor, last_claim
+
+
+async def _wait_for_runtime_trigger(
+    _trigger_queue: Any,
+    timeout_seconds: float,
+    *,
+    consumer: str,
+    claim_cursor: str,
+    last_claim_run_at: datetime | None,
+) -> tuple[dict[str, Any] | None, str, datetime]:
+    return await _wait_for_trade_signal_stream_trigger(
+        consumer=consumer,
+        timeout_seconds=timeout_seconds,
+        claim_cursor=claim_cursor,
+        last_claim_run_at=last_claim_run_at,
+    )
 
 
 def _session_dialect_name(session: Any) -> str:
@@ -373,6 +476,14 @@ def _is_due(trader: dict[str, Any], now: datetime) -> bool:
     return (now - last_run.astimezone(timezone.utc)).total_seconds() >= interval
 
 
+def _is_high_frequency_maintenance_due(trader: dict[str, Any], now: datetime) -> bool:
+    last_run = _parse_iso(trader.get("last_run_at"))
+    if last_run is None:
+        return True
+    elapsed_seconds = (now - last_run.astimezone(timezone.utc)).total_seconds()
+    return elapsed_seconds >= _HIGH_FREQUENCY_CRYPTO_MAINTENANCE_INTERVAL_SECONDS
+
+
 def _is_high_frequency_crypto_trader(trader: dict[str, Any]) -> bool:
     source_configs = _normalize_source_configs(trader)
     if not source_configs:
@@ -386,6 +497,21 @@ def _runtime_trigger_matches_trader(
 ) -> bool:
     if not trigger_event:
         return False
+    source_signal_ids = trigger_event.get("source_signal_ids")
+    if isinstance(source_signal_ids, dict):
+        if "__all__" in source_signal_ids:
+            return True
+        source_configs = _normalize_source_configs(trader)
+        if not source_configs:
+            return False
+        trader_sources = set(_query_sources_for_configs(source_configs))
+        if not trader_sources:
+            return False
+        for source_key in source_signal_ids.keys():
+            normalized_source = normalize_source_key(source_key)
+            if normalized_source and normalized_source in trader_sources:
+                return True
+        return False
     source = str(trigger_event.get("source") or "").strip().lower()
     if not source:
         return True
@@ -393,6 +519,56 @@ def _runtime_trigger_matches_trader(
     if not source_configs:
         return False
     return source in _query_sources_for_configs(source_configs)
+
+
+def _trigger_signal_ids_for_trader(
+    trader: dict[str, Any],
+    trigger_event: dict[str, Any] | None,
+) -> dict[str, list[str]] | None:
+    if not trigger_event:
+        return None
+    raw = trigger_event.get("source_signal_ids")
+    if not isinstance(raw, dict) or not raw:
+        return None
+
+    source_configs = _normalize_source_configs(trader)
+    trader_sources = set(_query_sources_for_configs(source_configs))
+    if not trader_sources:
+        return None
+
+    filtered: dict[str, list[str]] = {}
+    global_ids: list[str] = []
+    global_seen: set[str] = set()
+    for source_key, signal_ids in raw.items():
+        source_token = str(source_key or "").strip().lower()
+        normalized_source = normalize_source_key(source_token)
+        if not isinstance(signal_ids, list):
+            continue
+        if source_token == "__all__":
+            for raw_signal_id in signal_ids:
+                signal_id = str(raw_signal_id or "").strip()
+                if not signal_id or signal_id in global_seen:
+                    continue
+                global_seen.add(signal_id)
+                global_ids.append(signal_id)
+            continue
+        if not normalized_source or normalized_source not in trader_sources:
+            continue
+        seen: set[str] = set()
+        out: list[str] = []
+        for raw_signal_id in signal_ids:
+            signal_id = str(raw_signal_id or "").strip()
+            if not signal_id or signal_id in seen:
+                continue
+            seen.add(signal_id)
+            out.append(signal_id)
+        if out:
+            filtered[normalized_source] = out
+    if global_ids:
+        filtered["__all__"] = global_ids
+    if not filtered:
+        return None
+    return filtered
 
 
 def _checks_to_payload(checks: list[Any]) -> list[dict[str, Any]]:
@@ -1313,6 +1489,113 @@ def _signal_cursor_timestamp(signal: Any) -> Any:
     return getattr(signal, "created_at", None)
 
 
+def _signal_sort_key(signal: Any) -> tuple[datetime, str]:
+    ts = _signal_cursor_timestamp(signal)
+    if not isinstance(ts, datetime):
+        ts = datetime(1970, 1, 1)
+    elif ts.tzinfo is not None:
+        ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
+    signal_id = str(getattr(signal, "id", "") or "")
+    return ts, signal_id
+
+
+async def _list_triggered_trade_signals(
+    session: Any,
+    *,
+    trader_id: str,
+    signal_ids_by_source: dict[str, list[str]],
+    sources: list[str],
+    strategy_types_by_source: dict[str, list[str]],
+    cursor_created_at: datetime | None,
+    cursor_signal_id: str | None,
+    statuses: list[str],
+    limit: int,
+) -> list[TradeSignal]:
+    if not signal_ids_by_source or not sources:
+        return []
+
+    normalized_signal_ids: list[str] = []
+    seen_ids: set[str] = set()
+    global_signal_ids = signal_ids_by_source.get("__all__") or []
+    for raw_signal_id in global_signal_ids:
+        signal_id = str(raw_signal_id or "").strip()
+        if not signal_id or signal_id in seen_ids:
+            continue
+        seen_ids.add(signal_id)
+        normalized_signal_ids.append(signal_id)
+    for source_key in sources:
+        source_signal_ids = signal_ids_by_source.get(source_key) or []
+        for raw_signal_id in source_signal_ids:
+            signal_id = str(raw_signal_id or "").strip()
+            if not signal_id or signal_id in seen_ids:
+                continue
+            seen_ids.add(signal_id)
+            normalized_signal_ids.append(signal_id)
+
+    if not normalized_signal_ids:
+        return []
+
+    signal_sort_ts = func.coalesce(TradeSignal.updated_at, TradeSignal.created_at)
+    latest_consumed_at = (
+        select(func.max(TraderSignalConsumption.consumed_at))
+        .where(
+            TraderSignalConsumption.trader_id == trader_id,
+            TraderSignalConsumption.signal_id == TradeSignal.id,
+        )
+        .correlate(TradeSignal)
+        .scalar_subquery()
+    )
+    query = (
+        select(TradeSignal)
+        .where(TradeSignal.id.in_(normalized_signal_ids))
+        .where(or_(latest_consumed_at.is_(None), signal_sort_ts > latest_consumed_at))
+    )
+    normalized_cursor_created_at = cursor_created_at
+    if isinstance(normalized_cursor_created_at, datetime) and normalized_cursor_created_at.tzinfo is not None:
+        normalized_cursor_created_at = normalized_cursor_created_at.astimezone(timezone.utc).replace(tzinfo=None)
+    normalized_cursor_signal_id = str(cursor_signal_id or "").strip()
+    if normalized_cursor_created_at is not None:
+        if normalized_cursor_signal_id:
+            query = query.where(
+                or_(
+                    signal_sort_ts > normalized_cursor_created_at,
+                    and_(signal_sort_ts == normalized_cursor_created_at, TradeSignal.id > normalized_cursor_signal_id),
+                )
+            )
+        else:
+            query = query.where(signal_sort_ts > normalized_cursor_created_at)
+    now_naive = utcnow().replace(tzinfo=None)
+    query = query.where(or_(TradeSignal.expires_at.is_(None), TradeSignal.expires_at >= now_naive))
+
+    normalized_statuses = [str(status or "").strip().lower() for status in statuses if str(status or "").strip()]
+    if normalized_statuses:
+        query = query.where(func.lower(func.coalesce(TradeSignal.status, "")).in_(normalized_statuses))
+
+    normalized_sources = [normalize_source_key(source) for source in sources if normalize_source_key(source)]
+    if normalized_sources:
+        query = query.where(func.lower(func.coalesce(TradeSignal.source, "")).in_(normalized_sources))
+
+    source_strategy_clauses = []
+    for source_key, strategy_types in strategy_types_by_source.items():
+        if not strategy_types:
+            continue
+        normalized_strategy_types = [str(item or "").strip().lower() for item in strategy_types if str(item or "").strip()]
+        if not normalized_strategy_types:
+            continue
+        source_strategy_clauses.append(
+            and_(
+                func.lower(func.coalesce(TradeSignal.source, "")) == normalize_source_key(source_key),
+                func.lower(func.coalesce(TradeSignal.strategy_type, "")).in_(normalized_strategy_types),
+            )
+        )
+    if source_strategy_clauses:
+        query = query.where(or_(*source_strategy_clauses))
+
+    rows = list((await session.execute(query)).scalars().all())
+    rows.sort(key=_signal_sort_key)
+    return rows[: max(1, min(limit, 5000))]
+
+
 async def _emit_cycle_heartbeat_if_due(
     session: Any,
     *,
@@ -1498,6 +1781,7 @@ async def _run_trader_once(
     control: dict[str, Any],
     *,
     process_signals: bool = True,
+    trigger_signal_ids_by_source: dict[str, list[str]] | None = None,
 ) -> tuple[int, int, int]:
     decisions_written = 0
     orders_written = 0
@@ -1543,20 +1827,38 @@ async def _run_trader_once(
             trader_id=trader_id,
         )
         prefetched_signals: list[Any] | None = None
+        stream_trigger_mode = bool(trigger_signal_ids_by_source)
         if effective_process_signals and sources:
-            pending_preview = await list_unconsumed_trade_signals(
-                session,
-                trader_id=trader_id,
-                sources=sources,
-                statuses=["pending", "selected"],
-                strategy_types_by_source=strategy_types_by_source,
-                cursor_created_at=cursor_created_at,
-                cursor_signal_id=cursor_signal_id,
-                limit=1,
-            )
-            if pending_preview:
-                prefetched_signals = pending_preview
+            if stream_trigger_mode:
+                prefetched_signals = await _list_triggered_trade_signals(
+                    session,
+                    trader_id=trader_id,
+                    signal_ids_by_source=trigger_signal_ids_by_source or {},
+                    sources=sources,
+                    strategy_types_by_source=strategy_types_by_source,
+                    cursor_created_at=cursor_created_at,
+                    cursor_signal_id=cursor_signal_id,
+                    statuses=["pending", "selected"],
+                    limit=max(
+                        _STANDARD_MAX_SIGNALS_PER_CYCLE,
+                        _HIGH_FREQUENCY_MAX_SIGNALS_PER_CYCLE,
+                    ),
+                )
             else:
+                pending_preview = await list_unconsumed_trade_signals(
+                    session,
+                    trader_id=trader_id,
+                    sources=sources,
+                    statuses=["pending", "selected"],
+                    strategy_types_by_source=strategy_types_by_source,
+                    cursor_created_at=cursor_created_at,
+                    cursor_signal_id=cursor_signal_id,
+                    limit=1,
+                )
+                if pending_preview:
+                    prefetched_signals = pending_preview
+
+            if not prefetched_signals:
                 now = utcnow()
                 idle_maintenance_interval_seconds = int(
                     max(
@@ -1581,6 +1883,7 @@ async def _run_trader_once(
                             payload={
                                 "idle_maintenance_interval_seconds": idle_maintenance_interval_seconds,
                                 "elapsed_seconds": elapsed_seconds,
+                                "triggered_cycle": stream_trigger_mode,
                             },
                         )
                         effective_process_signals = False
@@ -2139,8 +2442,10 @@ async def _run_trader_once(
             batch_limit = min(scan_batch_size, max_signals_per_cycle - processed_signals)
             if prefetched_signals is not None:
                 signals = prefetched_signals[:batch_limit]
-                prefetched_signals = None
+                prefetched_signals = prefetched_signals[batch_limit:] if len(prefetched_signals) > batch_limit else None
             else:
+                if stream_trigger_mode:
+                    break
                 signals = await list_unconsumed_trade_signals(
                     session,
                     trader_id=trader_id,
@@ -3301,6 +3606,7 @@ async def _run_trader_once_with_timeout(
     control: dict[str, Any],
     *,
     process_signals: bool,
+    trigger_signal_ids_by_source: dict[str, list[str]] | None,
     timeout_seconds: float,
 ) -> tuple[int, int, int]:
     timeout = max(1.0, float(timeout_seconds))
@@ -3311,6 +3617,7 @@ async def _run_trader_once_with_timeout(
                 trader,
                 control,
                 process_signals=process_signals,
+                trigger_signal_ids_by_source=trigger_signal_ids_by_source,
             ),
             timeout=timeout,
         )
@@ -3361,51 +3668,12 @@ async def run_worker_loop() -> None:
     except Exception as exc:
         logger.warning("Orchestrator strategy startup sync failed: %s", exc)
 
-    trigger_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=_ORCHESTRATOR_TRIGGER_QUEUE_MAXSIZE)
     runtime_trigger_event: dict[str, Any] | None = None
-    coalesced_triggers_by_source: dict[str, dict[str, Any]] = {}
-
-    def _pop_coalesced_trigger() -> dict[str, Any] | None:
-        if not coalesced_triggers_by_source:
-            return None
-        source_key = next(iter(coalesced_triggers_by_source.keys()))
-        return coalesced_triggers_by_source.pop(source_key, None)
-
-    async def _on_runtime_event(event_type: str, data: dict[str, Any]) -> None:
-        if event_type not in _ORCHESTRATOR_TRIGGER_EVENTS:
-            return
-        payload = data if isinstance(data, dict) else {}
-        if event_type == "trade_signal_emission":
-            status_key = str(payload.get("status") or "").strip().lower()
-            emission_key = str(payload.get("event_type") or "").strip().lower()
-            if status_key != "pending" and emission_key not in {"upsert_insert", "upsert_update", "upsert_reactivated"}:
-                return
-        if event_type == "trade_signal_batch":
-            batch_event_key = str(payload.get("event_type") or "").strip().lower()
-            batch_trigger = str(payload.get("trigger") or "").strip().lower()
-            if batch_event_key and batch_event_key not in {"upsert_insert", "upsert_update", "upsert_reactivated"}:
-                if batch_trigger != "strategy_signal_bridge":
-                    return
-        try:
-            trigger_queue.put_nowait(
-                {
-                    "event_type": str(event_type),
-                    "source": str(payload.get("source") or "").strip().lower(),
-                }
-            )
-        except asyncio.QueueFull:
-            source_key = str(payload.get("source") or "").strip().lower() or "__all__"
-            coalesced_triggers_by_source[source_key] = {
-                "event_type": str(event_type),
-                "source": "" if source_key == "__all__" else source_key,
-            }
-            logger.warning(
-                "Orchestrator runtime trigger queue full; coalescing trigger",
-                extra={"event_type": event_type, "source": source_key},
-            )
-
-    await event_bus.start()
-    event_bus.subscribe("*", _on_runtime_event)
+    stream_consumer_name = f"{os.getpid()}-{utcnow().strftime('%Y%m%d%H%M%S%f')}"
+    stream_claim_cursor = "0-0"
+    stream_last_claim_run_at: datetime | None = None
+    if not await ensure_trade_signal_group():
+        logger.warning("Trade signal stream group ensure failed; worker will continue with scheduled polling fallback")
 
     try:
         while True:
@@ -3413,8 +3681,15 @@ async def run_worker_loop() -> None:
             sleep_seconds = 2
             skip_cycle = False
             manual_force_cycle = False
-            cycle_trigger = runtime_trigger_event or _pop_coalesced_trigger()
+            cycle_trigger = runtime_trigger_event
             runtime_trigger_event = None
+            cycle_stream_entry_ids: list[str] = []
+            if isinstance(cycle_trigger, dict):
+                cycle_stream_entry_ids = [
+                    str(entry_id).strip()
+                    for entry_id in (cycle_trigger.get("stream_entry_ids") or [])
+                    if str(entry_id).strip()
+                ]
             manage_only_cycle = False
             manage_only_reasons: list[str] = []
             mode = "paper"
@@ -3594,9 +3869,19 @@ async def run_worker_loop() -> None:
                         )
 
                 if skip_cycle:
-                    runtime_trigger_event = _pop_coalesced_trigger()
-                    if runtime_trigger_event is None:
-                        runtime_trigger_event = await _wait_for_runtime_trigger(trigger_queue, sleep_seconds)
+                    if cycle_stream_entry_ids:
+                        await ack_trade_signal_batches(cycle_stream_entry_ids)
+                    (
+                        runtime_trigger_event,
+                        stream_claim_cursor,
+                        stream_last_claim_run_at,
+                    ) = await _wait_for_runtime_trigger(
+                        None,
+                        sleep_seconds,
+                        consumer=stream_consumer_name,
+                        claim_cursor=stream_claim_cursor,
+                        last_claim_run_at=stream_last_claim_run_at,
+                    )
                     continue
 
                 total_decisions = 0
@@ -3618,7 +3903,7 @@ async def run_worker_loop() -> None:
                 if high_frequency_crypto_active and not manage_only_cycle:
                     sleep_seconds = min(
                         float(sleep_seconds),
-                        _HIGH_FREQUENCY_CRYPTO_LOOP_INTERVAL_SECONDS,
+                        _HIGH_FREQUENCY_CRYPTO_MAINTENANCE_INTERVAL_SECONDS,
                     )
                 for trader in traders:
                     trader_id = str(trader.get("id") or "")
@@ -3634,9 +3919,23 @@ async def run_worker_loop() -> None:
                     runtime_trigger_for_trader = _runtime_trigger_matches_trader(trader, cycle_trigger)
                     due = manual_force_cycle or runtime_trigger_for_trader or _is_due(trader, now)
                     if trader_id in high_frequency_trader_ids and not manage_only_cycle and not is_paused:
-                        due = True
+                        due = manual_force_cycle or runtime_trigger_for_trader or _is_high_frequency_maintenance_due(
+                            trader,
+                            now,
+                        )
                     process_signals_for_trader = True
                     if manage_only_cycle or is_paused or not due:
+                        process_signals_for_trader = False
+                    trigger_signal_ids_by_source = (
+                        _trigger_signal_ids_for_trader(trader, cycle_trigger) if runtime_trigger_for_trader else None
+                    )
+                    if (
+                        process_signals_for_trader
+                        and runtime_trigger_for_trader
+                        and isinstance(cycle_trigger, dict)
+                        and str(cycle_trigger.get("event_type") or "").strip().lower() == "trade_signal_stream"
+                        and trigger_signal_ids_by_source is None
+                    ):
                         process_signals_for_trader = False
 
                     if mode not in ("paper", "live"):
@@ -3645,6 +3944,7 @@ async def run_worker_loop() -> None:
                         trader,
                         control,
                         process_signals=process_signals_for_trader,
+                        trigger_signal_ids_by_source=trigger_signal_ids_by_source,
                         timeout_seconds=trader_cycle_timeout_seconds,
                     )
                     total_decisions += decisions
@@ -3695,9 +3995,27 @@ async def run_worker_loop() -> None:
                         stats=metrics,
                     )
 
-                runtime_trigger_event = _pop_coalesced_trigger()
-                if runtime_trigger_event is None:
-                    runtime_trigger_event = await _wait_for_runtime_trigger(trigger_queue, sleep_seconds)
+                if cycle_stream_entry_ids:
+                    acknowledged = await ack_trade_signal_batches(cycle_stream_entry_ids)
+                    if acknowledged < len(cycle_stream_entry_ids):
+                        logger.warning(
+                            "Trade signal stream ack partial",
+                            extra={
+                                "requested": len(cycle_stream_entry_ids),
+                                "acknowledged": int(acknowledged),
+                            },
+                        )
+                (
+                    runtime_trigger_event,
+                    stream_claim_cursor,
+                    stream_last_claim_run_at,
+                ) = await _wait_for_runtime_trigger(
+                    None,
+                    sleep_seconds,
+                    consumer=stream_consumer_name,
+                    claim_cursor=stream_claim_cursor,
+                    last_claim_run_at=stream_last_claim_run_at,
+                )
             except Exception as exc:
                 logger.exception("Trader orchestrator worker cycle failed: %s", exc)
                 try:
@@ -3719,11 +4037,18 @@ async def run_worker_loop() -> None:
                         "Failed to persist orchestrator worker error state",
                         error=str(snapshot_exc),
                     )
-                runtime_trigger_event = _pop_coalesced_trigger()
-                if runtime_trigger_event is None:
-                    runtime_trigger_event = await _wait_for_runtime_trigger(trigger_queue, 2)
+                (
+                    runtime_trigger_event,
+                    stream_claim_cursor,
+                    stream_last_claim_run_at,
+                ) = await _wait_for_runtime_trigger(
+                    None,
+                    2,
+                    consumer=stream_consumer_name,
+                    claim_cursor=stream_claim_cursor,
+                    last_claim_run_at=stream_last_claim_run_at,
+                )
     finally:
-        event_bus.unsubscribe("*", _on_runtime_event)
         await _release_orchestrator_cycle_lock_owner()
 
 

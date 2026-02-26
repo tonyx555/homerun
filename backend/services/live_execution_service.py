@@ -629,120 +629,10 @@ class LiveExecutionService:
         return patch_clob_client_proxy()
 
     async def _approve_clob_allowance(self) -> None:
-        """Ensure on-chain USDC ERC-20 allowance is set for the CLOB exchange contract.
-
-        Polymarket's CLOB API rejects orders with 'not enough balance / allowance'
-        when the wallet's USDC.allowance(owner, ctf_exchange) is 0 on Polygon.
-        This submits a real on-chain USDC.approve(ctf_exchange, MAX_UINT256) if
-        the current allowance is below a safe threshold, then calls
-        update_balance_allowance to refresh the CLOB server's cached view.
-        """
+        """Refresh CLOB collateral balance/allowance cache for supported signature types."""
         if not self.is_ready():
             return
 
-        configured_signature_type = int(getattr(settings, "POLYMARKET_SIGNATURE_TYPE", 1))
-        active_signature_type = (
-            int(self._balance_signature_type)
-            if isinstance(self._balance_signature_type, int)
-            else configured_signature_type
-        )
-
-        # --- Step 1: on-chain ERC-20 approve via web3 ---
-        if active_signature_type == 0:
-            try:
-                from web3 import Web3
-                from py_clob_client.config import get_contract_config
-                from eth_account import Account
-
-                _ERC20_ABI = [
-                    {
-                        "name": "approve",
-                        "type": "function",
-                        "inputs": [
-                            {"name": "spender", "type": "address"},
-                            {"name": "amount", "type": "uint256"},
-                        ],
-                        "outputs": [{"name": "", "type": "bool"}],
-                        "stateMutability": "nonpayable",
-                    },
-                    {
-                        "name": "allowance",
-                        "type": "function",
-                        "inputs": [
-                            {"name": "owner", "type": "address"},
-                            {"name": "spender", "type": "address"},
-                        ],
-                        "outputs": [{"name": "", "type": "uint256"}],
-                        "stateMutability": "view",
-                    },
-                ]
-                _MAX_UINT256 = 2**256 - 1
-                # Require at least $500k USDC (6 decimals) before re-approving
-                _MIN_ALLOWANCE = 500_000 * 10**6
-
-                def _do_on_chain_approve(private_key: str, chain_id: int) -> str:
-                    _rpc_candidates = [
-                        url
-                        for url in [
-                            settings.POLYGON_RPC_URL,
-                            "https://rpc-mainnet.matic.quiknode.pro",
-                            "https://polygon.gateway.tenderly.co",
-                        ]
-                        if url
-                    ]
-                    w3 = None
-                    last_err = None
-                    for rpc_url in _rpc_candidates:
-                        try:
-                            candidate = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 10}))
-                            candidate.eth.block_number
-                            w3 = candidate
-                            break
-                        except Exception as e:
-                            last_err = e
-                    if w3 is None:
-                        raise RuntimeError(f"All Polygon RPCs failed; last error: {last_err}")
-                    contract_cfg = get_contract_config(chain_id)
-                    if contract_cfg is None:
-                        return "no contract config"
-                    usdc_addr = Web3.to_checksum_address(contract_cfg.collateral)
-                    exchange_addr = Web3.to_checksum_address(contract_cfg.exchange)
-                    account = Account.from_key(private_key)
-                    owner_addr = account.address
-                    usdc = w3.eth.contract(address=usdc_addr, abi=_ERC20_ABI)
-                    current_allowance = usdc.functions.allowance(owner_addr, exchange_addr).call()
-                    if current_allowance >= _MIN_ALLOWANCE:
-                        return f"sufficient (current={current_allowance // 10**6} USDC)"
-                    nonce = w3.eth.get_transaction_count(owner_addr)
-                    tx = usdc.functions.approve(exchange_addr, _MAX_UINT256).build_transaction(
-                        {
-                            "from": owner_addr,
-                            "nonce": nonce,
-                            "gas": 100_000,
-                            "gasPrice": w3.eth.gas_price,
-                            "chainId": chain_id,
-                        }
-                    )
-                    signed = w3.eth.account.sign_transaction(tx, private_key)
-                    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-                    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
-                    return f"tx={tx_hash.hex()} status={receipt.status}"
-
-                private_key, _, _, _, _ = await self._resolve_polymarket_credentials()
-                if private_key:
-                    result = await asyncio.to_thread(_do_on_chain_approve, private_key, settings.CHAIN_ID)
-                    logger.info("USDC on-chain allowance check/approve: %s", result)
-                else:
-                    logger.warning("No private key available for on-chain USDC approve")
-            except Exception as exc:
-                logger.warning("On-chain USDC allowance approval failed (non-fatal): %s", exc)
-        else:
-            logger.info(
-                "Skipping on-chain USDC allowance transaction for proxy signature type=%s",
-                active_signature_type,
-            )
-
-        # --- Step 2: refresh CLOB server's cached view of balance/allowance ---
         try:
             from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
 
@@ -836,23 +726,6 @@ class LiveExecutionService:
             )
             return False
 
-    async def _ensure_exchange_approval_for_sells(self) -> bool:
-        try:
-            from services.ctf_execution import ctf_execution_service
-
-            result = await ctf_execution_service.ensure_exchange_approval()
-            if str(result.status or "").strip().lower() == "executed":
-                return True
-            logger.warning(
-                "Conditional exchange approval check failed before sell",
-                status=str(result.status or ""),
-                error=str(result.error_message or ""),
-            )
-            return False
-        except Exception as exc:
-            logger.warning("Conditional exchange approval check failed before sell", exc_info=exc)
-            return False
-
     async def prepare_sell_balance_allowance(self, token_id: str) -> bool:
         token_key = str(token_id or "").strip()
         if token_key:
@@ -860,7 +733,6 @@ class LiveExecutionService:
                 await self._select_signature_type_for_conditional_token(token_key)
             except Exception:
                 pass
-        exchange_approval_checked = await self._ensure_exchange_approval_for_sells()
         conditional_refreshed = False
         if token_key:
             conditional_refreshed = await self.refresh_conditional_balance_allowance(token_key)
@@ -873,7 +745,7 @@ class LiveExecutionService:
                     if await self.refresh_conditional_balance_allowance(token_key):
                         conditional_refreshed = True
                         break
-        return conditional_refreshed or exchange_approval_checked
+        return conditional_refreshed
 
     async def _enforce_buy_pre_submit_gate(
         self,
@@ -915,6 +787,18 @@ class LiveExecutionService:
         collateral_balance = max(ZERO, _to_decimal(balance_raw))
         if available >= required_usdc:
             return True, None
+
+        if collateral_balance >= required_usdc and available < required_usdc:
+            await self.refresh_collateral_balance_allowance()
+            refreshed_balance = await self.get_balance()
+            refreshed_available_raw = safe_float(refreshed_balance.get("available")) if isinstance(refreshed_balance, dict) else None
+            refreshed_balance_raw = safe_float(refreshed_balance.get("balance")) if isinstance(refreshed_balance, dict) else None
+            if refreshed_available_raw is not None:
+                available = max(ZERO, _to_decimal(refreshed_available_raw))
+            if refreshed_balance_raw is not None:
+                collateral_balance = max(ZERO, _to_decimal(refreshed_balance_raw))
+            if available >= required_usdc:
+                return True, None
 
         signature_value_raw = balance.get("signature_type")
         signature_value = (
@@ -1011,7 +895,6 @@ class LiveExecutionService:
                     return True, None
 
         if balance_raw >= required_raw and allowance_raw < required_raw:
-            await self._ensure_exchange_approval_for_sells()
             await self.refresh_conditional_balance_allowance(token_key)
             refreshed_signature_type = await self._select_signature_type_for_conditional_token(token_key)
             if isinstance(refreshed_signature_type, int):

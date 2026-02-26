@@ -489,6 +489,8 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                 {"key": "max_entry_price", "label": "Max Entry Price", "type": "number", "min": 0.1, "max": 1},
                 {"key": "max_spread", "label": "Max Spread", "type": "number", "min": 0.005, "max": 0.25},
                 {"key": "min_liquidity", "label": "Min Liquidity", "type": "number", "min": 0},
+                {"key": "exclude_crypto_markets", "label": "Exclude Crypto Markets", "type": "boolean"},
+                {"key": "exclude_market_keywords", "label": "Exclude Market Keywords", "type": "list"},
                 {"key": "min_abs_move_5m", "label": "Min |5m Move| (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "require_crash_alignment", "label": "Require Crash Alignment", "type": "boolean"},
                 {

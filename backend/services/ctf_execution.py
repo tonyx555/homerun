@@ -16,6 +16,11 @@ _USDC_DECIMALS = 6
 _MAX_UINT256 = 2**256 - 1
 _ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 _MIN_APPROVAL_BUFFER_BASE = 10_000_000  # 10 USDC (6 decimals)
+_NONCE_RACE_ERROR_MARKERS = (
+    "replacement transaction underpriced",
+    "transaction underpriced",
+    "nonce too low",
+)
 
 
 @dataclass
@@ -259,6 +264,12 @@ class CTFExecutionService:
         except Exception:
             return False
 
+    async def _next_sender_nonce(self, w3, address: str) -> int:
+        try:
+            return int(await asyncio.to_thread(lambda: w3.eth.get_transaction_count(address, "pending")))
+        except TypeError:
+            return int(await asyncio.to_thread(lambda: w3.eth.get_transaction_count(address)))
+
     async def _send_eoa_call(
         self,
         *,
@@ -272,7 +283,7 @@ class CTFExecutionService:
         chain_id = int(getattr(settings, "CHAIN_ID", 137) or 137)
 
         async with self._tx_lock:
-            nonce = await asyncio.to_thread(lambda: w3.eth.get_transaction_count(from_address))
+            nonce = await self._next_sender_nonce(w3, from_address)
             gas_price = await asyncio.to_thread(lambda: w3.eth.gas_price)
             tx = {
                 "from": from_address,
@@ -324,7 +335,7 @@ class CTFExecutionService:
             )
             signature = await self._safe_signature(safe_tx_hash, private_key)
 
-            owner_nonce = await asyncio.to_thread(lambda: w3.eth.get_transaction_count(owner_eoa))
+            owner_nonce = await self._next_sender_nonce(w3, owner_eoa)
             gas_price = await asyncio.to_thread(lambda: w3.eth.gas_price)
             tx = safe.functions.execTransaction(
                 to_address,
@@ -400,12 +411,27 @@ class CTFExecutionService:
                 },
             )
         except Exception as exc:
-            logger.error("CTF contract call failed", action=action, exc_info=exc)
+            error_message = str(exc)
+            normalized_error = error_message.lower()
+            if "insufficient funds for gas" in normalized_error:
+                logger.warning(
+                    "CTF contract call skipped due to insufficient native gas",
+                    action=action,
+                    error=error_message,
+                )
+            elif any(marker in normalized_error for marker in _NONCE_RACE_ERROR_MARKERS):
+                logger.warning(
+                    "CTF contract call deferred due to nonce/gas pricing race",
+                    action=action,
+                    error=error_message,
+                )
+            else:
+                logger.error("CTF contract call failed", action=action, exc_info=exc)
             return CTFExecutionResult(
                 status="failed",
                 action=action,
                 tx_hash=None,
-                error_message=str(exc),
+                error_message=error_message,
                 payload={"contract_address": contract_address},
             )
 
@@ -509,6 +535,31 @@ class CTFExecutionService:
                 error_message=str(exc),
                 payload={},
             )
+
+    async def get_native_gas_affordability(self, *, gas_limit: int) -> dict[str, Any]:
+        try:
+            wallet_ctx = await self._resolve_wallet_context()
+            w3 = await self._get_web3()
+            eoa_address = w3.to_checksum_address(wallet_ctx["eoa_address"])
+            balance_wei = int(await asyncio.to_thread(lambda: w3.eth.get_balance(eoa_address)) or 0)
+            gas_price_wei = int(await asyncio.to_thread(lambda: w3.eth.gas_price) or 0)
+            required_wei = max(0, int(gas_limit)) * max(0, gas_price_wei)
+            return {
+                "affordable": balance_wei >= required_wei,
+                "balance_wei": balance_wei,
+                "required_wei": required_wei,
+                "gas_price_wei": gas_price_wei,
+                "wallet_address": eoa_address,
+            }
+        except Exception as exc:
+            return {
+                "affordable": False,
+                "balance_wei": 0,
+                "required_wei": 0,
+                "gas_price_wei": 0,
+                "wallet_address": "",
+                "error": str(exc),
+            }
 
     async def split_position(self, *, condition_id: str, amount_usd: float) -> CTFExecutionResult:
         normalized_condition_id = self._normalize_condition_id(condition_id)

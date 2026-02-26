@@ -924,6 +924,9 @@ try {
         $env:DATABASE_URL = "postgresql+asyncpg://${postgresUser}:${postgresPassword}@${postgresHost}:${script:postgresPort}/${postgresDb}"
     }
 
+    New-Item -ItemType Directory -Path "backend\.runtime" -Force | Out-Null
+    Set-Content -Path "backend\.runtime\database_url" -Value $env:DATABASE_URL -Encoding UTF8
+
     & backend\venv\Scripts\python.exe .\scripts\infra\ensure_postgres_ready.py --database-url $env:DATABASE_URL
     if ($LASTEXITCODE -ne 0) {
         throw "Postgres readiness validation failed"

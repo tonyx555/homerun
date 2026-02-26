@@ -598,6 +598,9 @@ else
     export DATABASE_URL="postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}"
 fi
 
+mkdir -p backend/.runtime
+printf '%s\n' "$DATABASE_URL" > backend/.runtime/database_url
+
 backend/venv/bin/python scripts/infra/ensure_postgres_ready.py --database-url "$DATABASE_URL"
 
 # Ensure TUI dependencies are installed

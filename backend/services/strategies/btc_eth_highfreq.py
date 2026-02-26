@@ -553,12 +553,27 @@ def _to_iso_utc(value: Optional[datetime]) -> Optional[str]:
 
 def _get_component_edge(payload: dict[str, Any], direction: str, mode: str) -> float:
     component_edges = payload.get("component_edges")
-    if not isinstance(component_edges, dict):
+    if isinstance(component_edges, dict):
+        side_edges = component_edges.get(direction)
+        if isinstance(side_edges, dict):
+            return max(0.0, to_float(side_edges.get(mode), 0.0))
+        return max(0.0, to_float(component_edges.get(mode), 0.0))
+
+    mode_edges = payload.get("mode_edges")
+    if isinstance(mode_edges, dict):
+        side_mode_edges = mode_edges.get(direction)
+        if isinstance(side_mode_edges, dict):
+            return max(0.0, to_float(side_mode_edges.get(mode), 0.0))
+        return max(0.0, to_float(mode_edges.get(mode), 0.0))
+
+    per_mode_key = {
+        "directional": "directional_edge",
+        "pure_arb": "pure_arb_edge",
+        "rebalance": "rebalance_edge",
+    }.get(mode)
+    if per_mode_key is None:
         return 0.0
-    side_edges = component_edges.get(direction)
-    if not isinstance(side_edges, dict):
-        return 0.0
-    return max(0.0, to_float(side_edges.get(mode), 0.0))
+    return max(0.0, to_float(payload.get(per_mode_key), 0.0))
 
 
 def _get_net_edge(payload: dict[str, Any], direction: str, fallback: float) -> float:
@@ -628,22 +643,37 @@ def _resolve_oracle_availability(
     has_price = price is not None and price > 0.0
     has_price_to_beat = price_to_beat is not None and price_to_beat > 0.0
     has_time = age_ms is not None or updated_at_ms is not None
-    reasons: list[str] = []
+    freshness_reasons: list[str] = []
     if not has_price:
-        reasons.append("missing_price")
+        freshness_reasons.append("missing_price")
+    if not has_time:
+        freshness_reasons.append("missing_timestamp")
+    fresh_available = not freshness_reasons
+
+    reasons = list(freshness_reasons)
     if not has_price_to_beat:
         reasons.append("missing_price_to_beat")
-    if not has_time:
-        reasons.append("missing_timestamp")
-    available = not reasons
-    if available:
+    directional_available = not reasons
+    if directional_available:
         state = "available"
     elif age_ms is not None:
         state = "age_present_but_unavailable"
     else:
         state = reasons[0]
+    if fresh_available:
+        freshness_state = "fresh"
+    elif age_ms is not None:
+        freshness_state = "age_present_but_unavailable"
+    else:
+        freshness_state = freshness_reasons[0]
     return {
-        "available": bool(available),
+        "available": bool(directional_available),
+        "fresh_available": bool(fresh_available),
+        "freshness_state": freshness_state,
+        "freshness_reasons": freshness_reasons,
+        "directional_available": bool(directional_available),
+        "directional_state": state,
+        "directional_reasons": reasons,
         "availability_state": state,
         "availability_reasons": reasons,
         "has_price": bool(has_price),
@@ -694,7 +724,28 @@ def _extract_oracle_status(
 
     def _candidate_score(candidate: dict[str, Any]) -> tuple[int, int]:
         has_price = to_float(_first_present(candidate.get("oracle_price"), candidate.get("price")), None) is not None
-        has_price_to_beat = to_float(candidate.get("price_to_beat"), None) is not None
+        candidate_price_to_beat = to_float(
+            _first_present(
+                candidate.get("price_to_beat"),
+                (
+                    candidate.get("oracle_status", {}).get("price_to_beat")
+                    if isinstance(candidate.get("oracle_status"), dict)
+                    else None
+                ),
+                (
+                    candidate.get("strategy_context", {}).get("price_to_beat")
+                    if isinstance(candidate.get("strategy_context"), dict)
+                    else None
+                ),
+                (
+                    candidate.get("strategy_context_json", {}).get("price_to_beat")
+                    if isinstance(candidate.get("strategy_context_json"), dict)
+                    else None
+                ),
+            ),
+            None,
+        )
+        has_price_to_beat = candidate_price_to_beat is not None and candidate_price_to_beat > 0.0
         has_time = (
             _epoch_ms(_first_present(candidate.get("oracle_updated_at_ms"), candidate.get("updated_at_ms"))) is not None
             or _age_ms(
@@ -741,7 +792,36 @@ def _extract_oracle_status(
             selected.get("source"),
         )
     )
-    if selected_source not in by_source:
+    freshest_source: str | None = None
+    freshest_age_ms: float | None = None
+    freshest_rank = 99
+    for source, point in by_source.items():
+        if not isinstance(point, dict):
+            continue
+        point_price = to_float(point.get("price"), None)
+        point_age_ms = to_float(point.get("age_ms"), None)
+        if point_price is None or point_price <= 0.0 or point_age_ms is None or point_age_ms < 0.0:
+            continue
+        if source == "binance_direct":
+            source_rank = 0
+        elif source == "chainlink":
+            source_rank = 1
+        elif source == "binance":
+            source_rank = 2
+        else:
+            source_rank = 3
+        if (
+            freshest_age_ms is None
+            or point_age_ms < freshest_age_ms
+            or (point_age_ms == freshest_age_ms and source_rank < freshest_rank)
+        ):
+            freshest_source = source
+            freshest_age_ms = point_age_ms
+            freshest_rank = source_rank
+
+    if freshest_source is not None:
+        selected_source = freshest_source
+    elif selected_source not in by_source:
         if "chainlink" in by_source:
             selected_source = "chainlink"
         elif "binance_direct" in by_source:
@@ -786,6 +866,43 @@ def _extract_oracle_status(
         selected_source = _normalize_oracle_source(selected.get("source"))
 
     price_to_beat = to_float(selected.get("price_to_beat"), None)
+    if price_to_beat is None:
+        for _label, candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            candidate_price_to_beat = to_float(
+                _first_present(
+                    candidate.get("price_to_beat"),
+                    (
+                        candidate.get("oracle_status", {}).get("price_to_beat")
+                        if isinstance(candidate.get("oracle_status"), dict)
+                        else None
+                    ),
+                    (
+                        candidate.get("strategy_context", {}).get("price_to_beat")
+                        if isinstance(candidate.get("strategy_context"), dict)
+                        else None
+                    ),
+                    (
+                        candidate.get("strategy_context_json", {}).get("price_to_beat")
+                        if isinstance(candidate.get("strategy_context_json"), dict)
+                        else None
+                    ),
+                ),
+                None,
+            )
+            if candidate_price_to_beat is None:
+                markets = candidate.get("markets")
+                if isinstance(markets, list):
+                    for market in markets:
+                        if not isinstance(market, dict):
+                            continue
+                        candidate_price_to_beat = to_float(market.get("price_to_beat"), None)
+                        if candidate_price_to_beat is not None:
+                            break
+            if candidate_price_to_beat is not None and candidate_price_to_beat > 0.0:
+                price_to_beat = candidate_price_to_beat
+                break
     availability = _resolve_oracle_availability(
         price=selected_price,
         price_to_beat=price_to_beat,
@@ -799,6 +916,12 @@ def _extract_oracle_status(
         "source": selected_source,
         "updated_at_ms": selected_updated_at_ms,
         "age_ms": selected_age_ms,
+        "fresh_available": availability["fresh_available"],
+        "freshness_state": availability["freshness_state"],
+        "freshness_reasons": availability["freshness_reasons"],
+        "directional_available": availability["directional_available"],
+        "directional_state": availability["directional_state"],
+        "directional_reasons": availability["directional_reasons"],
         "availability_state": availability["availability_state"],
         "availability_reasons": availability["availability_reasons"],
         "available": availability["available"],
@@ -1370,6 +1493,24 @@ def _resolve_enabled_sub_strategies(config: Any) -> set[SubStrategy]:
         if normalized is not None:
             enabled.add(normalized)
     return enabled
+
+
+def _resolve_enabled_active_modes(config: Any) -> set[str]:
+    enabled_sub_strategies = _resolve_enabled_sub_strategies(config)
+    if not enabled_sub_strategies:
+        return {"directional", "pure_arb", "rebalance"}
+
+    enabled_modes: set[str] = set()
+    if SubStrategy.DIRECTIONAL_EDGE in enabled_sub_strategies:
+        enabled_modes.add("directional")
+    if SubStrategy.PURE_ARB in enabled_sub_strategies:
+        enabled_modes.add("pure_arb")
+    if SubStrategy.DUMP_HEDGE in enabled_sub_strategies or SubStrategy.PRE_PLACED_LIMITS in enabled_sub_strategies:
+        enabled_modes.add("rebalance")
+
+    if not enabled_modes:
+        return {"directional", "pure_arb", "rebalance"}
+    return enabled_modes
 
 
 # ---------------------------------------------------------------------------
@@ -2708,6 +2849,8 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         active_mode = dominant_mode if requested_mode == "auto" and dominant_mode != "auto" else requested_mode
         if active_mode == "auto":
             active_mode = "directional"
+        enabled_active_modes = _resolve_enabled_active_modes(params)
+        mode_allowlist_ok = active_mode in enabled_active_modes
 
         # --- Source / origin checks ---
         source_ok = str(getattr(signal, "source", "")) == "crypto"
@@ -2908,6 +3051,8 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         edge = max(0.0, to_float(getattr(signal, "edge_percent", 0.0), 0.0))
         confidence = to_confidence(getattr(signal, "confidence", 0.0), 0.0)
         mode_edge = _get_component_edge(payload, direction, active_mode)
+        if mode_edge <= 0.0 and active_mode == dominant_mode and edge > 0.0:
+            mode_edge = edge
         net_edge = _get_net_edge(payload, direction, edge)
 
         signal_liquidity_usd = self._float(
@@ -3102,7 +3247,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         )
         max_oracle_age_seconds = max_oracle_age_ms / 1000.0
         require_oracle_for_directional = to_bool(params.get("require_oracle_for_directional"), True)
-        oracle_required = require_oracle_for_directional and active_mode in {"directional", "rebalance"}
+        oracle_required = require_oracle_for_directional and active_mode == "directional"
         oracle_source_policy = str(params.get("oracle_source_policy") or "degrade").strip().lower()
         if oracle_source_policy not in {"degrade", "hard_skip", "allow_fallback"}:
             oracle_source_policy = "degrade"
@@ -3137,13 +3282,23 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         chainlink_stale_binance_fresh = (
             chainlink_age_ms is not None and chainlink_age_ms > max_oracle_age_ms and bool(binance_fresh)
         )
+        oracle_fresh_available = bool(
+            oracle_status.get("fresh_available")
+            if oracle_status.get("fresh_available") is not None
+            else (oracle_status.get("has_price") and oracle_status.get("has_timestamp"))
+        )
         oracle_available = bool(oracle_status.get("available"))
+        oracle_directional_available = bool(
+            oracle_status.get("directional_available")
+            if oracle_status.get("directional_available") is not None
+            else oracle_available
+        )
         oracle_fallback_used = False
         oracle_fallback_degraded = False
         oracle_source_policy_ok = True
         oracle_effective_source = str(oracle_status.get("source") or "").strip().lower() or None
         oracle_fallback_reason = "not_needed"
-        if oracle_required and not oracle_available:
+        if oracle_required and not oracle_directional_available:
             oracle_fallback_reason = "required_but_unavailable"
         if oracle_required and chainlink_stale_binance_fresh:
             if oracle_source_policy == "hard_skip":
@@ -3176,7 +3331,15 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                     updated_at_ms=(int(fallback_updated_at_ms) if fallback_updated_at_ms is not None else None),
                 )
                 fallback_available = bool(fallback_availability["available"])
+                fallback_fresh_available = bool(fallback_availability["fresh_available"])
+                fallback_directional_available = bool(fallback_availability["directional_available"])
                 oracle_status["availability_reasons"] = list(fallback_availability["availability_reasons"])
+                oracle_status["fresh_available"] = bool(fallback_availability["fresh_available"])
+                oracle_status["freshness_state"] = str(fallback_availability["freshness_state"])
+                oracle_status["freshness_reasons"] = list(fallback_availability["freshness_reasons"])
+                oracle_status["directional_available"] = bool(fallback_availability["directional_available"])
+                oracle_status["directional_state"] = str(fallback_availability["directional_state"])
+                oracle_status["directional_reasons"] = list(fallback_availability["directional_reasons"])
                 oracle_status["has_price"] = bool(fallback_availability["has_price"])
                 oracle_status["has_price_to_beat"] = bool(fallback_availability["has_price_to_beat"])
                 oracle_status["has_timestamp"] = bool(fallback_availability["has_timestamp"])
@@ -3189,7 +3352,9 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 else:
                     oracle_status["availability_state"] = str(fallback_availability["availability_state"])
                 oracle_status["available"] = fallback_available
+                oracle_fresh_available = fallback_fresh_available
                 oracle_available = fallback_available
+                oracle_directional_available = fallback_directional_available
                 oracle_fallback_reason = "degraded_binance_fallback" if oracle_fallback_degraded else "binance_fallback"
 
         oracle_threshold_edge_multiplier = 1.0
@@ -3231,15 +3396,18 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                     1.0,
                 )
 
-        oracle_fresh_base = oracle_available and oracle_age_ms is not None and oracle_age_ms <= max_oracle_age_ms
+        oracle_fresh_base = oracle_fresh_available and oracle_age_ms is not None and oracle_age_ms <= max_oracle_age_ms
         if oracle_required:
-            oracle_fresh_ok = oracle_fresh_base and oracle_source_policy_ok
+            oracle_fresh_ok = oracle_fresh_base and oracle_source_policy_ok and oracle_directional_available
             if oracle_fallback_used:
                 oracle_fresh_ok = oracle_source_policy_ok and (
-                    oracle_available and oracle_age_ms is not None and oracle_age_ms <= max_oracle_age_ms
+                    oracle_fresh_available
+                    and oracle_directional_available
+                    and oracle_age_ms is not None
+                    and oracle_age_ms <= max_oracle_age_ms
                 )
         else:
-            oracle_fresh_ok = not oracle_available or oracle_age_ms is None or oracle_age_ms <= max_oracle_age_ms
+            oracle_fresh_ok = (not oracle_fresh_available) or oracle_age_ms is None or oracle_age_ms <= max_oracle_age_ms
             if oracle_fallback_used and not oracle_source_policy_ok:
                 oracle_fresh_ok = False
 
@@ -3250,22 +3418,34 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             f"binance_age_ms={binance_age_ms if binance_age_ms is not None else 'n/a'}"
         )
         oracle_reasons_text = ",".join(str(reason) for reason in (oracle_status.get("availability_reasons") or []))
+        oracle_freshness_reasons_text = ",".join(str(reason) for reason in (oracle_status.get("freshness_reasons") or []))
+        oracle_directional_reasons_text = ",".join(
+            str(reason) for reason in (oracle_status.get("directional_reasons") or [])
+        )
         if not oracle_reasons_text:
             oracle_reasons_text = "none"
+        if not oracle_freshness_reasons_text:
+            oracle_freshness_reasons_text = "none"
+        if not oracle_directional_reasons_text:
+            oracle_directional_reasons_text = "none"
         oracle_freshness_detail = (
             (
-                f"available={oracle_available} state={oracle_status.get('availability_state')} "
+                f"fresh_available={oracle_fresh_available} directional_available={oracle_directional_available} "
+                f"state={oracle_status.get('availability_state')} fresh_state={oracle_status.get('freshness_state')} "
                 f"source={oracle_effective_source or 'unknown'} age_ms={oracle_age_ms:.0f} "
                 f"max_ms={max_oracle_age_ms:.0f} required={oracle_required} "
                 f"policy={oracle_source_policy} fallback={oracle_fallback_reason} "
-                f"reasons={oracle_reasons_text}"
+                f"reasons={oracle_reasons_text} fresh_reasons={oracle_freshness_reasons_text} "
+                f"directional_reasons={oracle_directional_reasons_text}"
             )
             if oracle_age_ms is not None
             else (
-                f"available={oracle_available} state={oracle_status.get('availability_state')} "
+                f"fresh_available={oracle_fresh_available} directional_available={oracle_directional_available} "
+                f"state={oracle_status.get('availability_state')} fresh_state={oracle_status.get('freshness_state')} "
                 f"source={oracle_effective_source or 'unknown'} age=unknown required={oracle_required} "
                 f"policy={oracle_source_policy} fallback={oracle_fallback_reason} "
-                f"reasons={oracle_reasons_text}"
+                f"reasons={oracle_reasons_text} fresh_reasons={oracle_freshness_reasons_text} "
+                f"directional_reasons={oracle_directional_reasons_text}"
             )
         )
 
@@ -3572,6 +3752,15 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 ),
             ),
             DecisionCheck(
+                "mode_allowlist",
+                "Enabled strategy modes",
+                mode_allowlist_ok,
+                detail=(
+                    f"active_mode={active_mode} "
+                    f"enabled={','.join(sorted(enabled_active_modes)) or 'none'}"
+                ),
+            ),
+            DecisionCheck(
                 "liquidity",
                 "Minimum liquidity",
                 liquidity_ok,
@@ -3608,7 +3797,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             ),
             DecisionCheck(
                 "oracle_freshness",
-                "Oracle freshness",
+                "Oracle readiness",
                 oracle_fresh_ok,
                 score=oracle_age_ms,
                 detail=oracle_freshness_detail,
@@ -3789,6 +3978,8 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             "oracle_fallback_degraded": bool(oracle_fallback_degraded),
             "oracle_fallback_reason": oracle_fallback_reason,
             "oracle_effective_source": oracle_effective_source,
+            "oracle_fresh_available": bool(oracle_fresh_available),
+            "oracle_directional_available": bool(oracle_directional_available),
             "oracle_policy_detail": oracle_policy_detail,
             "oracle_chainlink_age_ms": chainlink_age_ms,
             "oracle_binance_age_ms": binance_age_ms,
@@ -3812,6 +4003,8 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 "enabled": guardrail_enabled,
                 "blocked": guardrail_blocked,
                 "oracle_available": oracle_available,
+                "oracle_fresh_available": bool(oracle_fresh_available),
+                "oracle_directional_available": bool(oracle_directional_available),
                 "regime": regime,
                 "regimes": sorted(guardrail_regimes),
                 "prob_floor": guardrail_prob_floor,
@@ -3838,6 +4031,8 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                     "passed": bool(oracle_fresh_ok),
                     "source": oracle_effective_source,
                     "availability_state": oracle_status.get("availability_state"),
+                    "fresh_available": bool(oracle_fresh_available),
+                    "directional_available": bool(oracle_directional_available),
                 },
                 "signal_context": {
                     "signal_age_seconds": signal_age_seconds,
@@ -4028,9 +4223,11 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         config.setdefault("rapid_take_profit_pct", defaults.get("rapid_take_profit_pct", 10.0))
         config.setdefault("take_profit_pct", defaults.get("take_profit_pct", 8.0))
         config.setdefault("stop_loss_pct", to_float(defaults.get("stop_loss_pct"), 4.0))
-        default_stop_loss_policy = str(defaults.get("stop_loss_policy") or "always").strip().lower()
-        if default_stop_loss_policy in {"near_close", "near_close_only", "close_window"}:
-            default_stop_loss_policy = "always"
+        default_stop_loss_policy = str(defaults.get("stop_loss_policy") or "near_close_only").strip().lower()
+        if default_stop_loss_policy in {"near_close", "close_window"}:
+            default_stop_loss_policy = "near_close_only"
+        if default_stop_loss_policy not in {"always", "near_close_only", "volatility_adaptive"}:
+            default_stop_loss_policy = "near_close_only"
         config.setdefault("stop_loss_policy", default_stop_loss_policy)
         config.setdefault(
             "stop_loss_activation_seconds",
@@ -4155,6 +4352,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 "underwater_rebound_pct_min",
                 "underwater_exit_fade_pct",
                 "underwater_timeout_minutes",
+                "underwater_timeout_loss_pct",
                 "force_flatten_seconds_left",
                 "force_flatten_max_profit_pct",
                 "force_flatten_min_loss_pct",
@@ -4186,6 +4384,30 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 ),
             )
             rapid_hard_cap_pct = max(rapid_take_profit_pct + 6.0, rapid_take_profit_pct * 1.8)
+            winner_target_profit_pct = max(rapid_hard_cap_pct + 8.0, rapid_take_profit_pct * 3.0, 30.0)
+            winner_target_override = _timeframe_override(config, "winner_ride_target_profit_pct", timeframe)
+            if winner_target_override is None:
+                winner_target_override = config.get("winner_ride_target_profit_pct")
+            winner_target_profit_pct = max(
+                rapid_arm_pct + 1.0,
+                to_float(winner_target_override, winner_target_profit_pct),
+            )
+            winner_take_profit_floor_pct = max(winner_target_profit_pct + 6.0, rapid_hard_cap_pct + 10.0)
+            winner_take_profit_floor_override = _timeframe_override(
+                config,
+                "winner_ride_take_profit_floor_pct",
+                timeframe,
+            )
+            if winner_take_profit_floor_override is None:
+                winner_take_profit_floor_override = config.get("winner_ride_take_profit_floor_pct")
+            winner_take_profit_floor_pct = max(
+                winner_target_profit_pct + 1.0,
+                to_float(winner_take_profit_floor_override, winner_take_profit_floor_pct),
+            )
+            winner_peak_buffer_pct_override = _timeframe_override(config, "winner_ride_peak_buffer_pct", timeframe)
+            if winner_peak_buffer_pct_override is None:
+                winner_peak_buffer_pct_override = config.get("winner_ride_peak_buffer_pct")
+            winner_peak_buffer_pct = clamp(to_float(winner_peak_buffer_pct_override, 0.65), 0.25, 2.5)
             trailing_stop_pct = max(0.5, to_float(config.get("trailing_stop_pct"), 3.0))
 
             timeframe_backside_factor = {
@@ -4284,6 +4506,13 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 dynamic_backside_pct *= clamp(1.0 + (flow_imbalance * 0.30), 0.65, 1.35)
             if momentum_short_pct is not None:
                 dynamic_backside_pct *= clamp(1.0 + (momentum_short_pct / 5.0), 0.60, 1.25)
+            if pnl_pct > rapid_arm_pct:
+                winner_progress = clamp(
+                    (pnl_pct - rapid_arm_pct) / max(1.0, winner_target_profit_pct - rapid_arm_pct),
+                    0.0,
+                    1.0,
+                )
+                dynamic_backside_pct *= clamp(1.0 - (winner_progress * 0.40), 0.40, 1.0)
             dynamic_backside_pct = clamp(
                 dynamic_backside_pct,
                 0.45,
@@ -4361,6 +4590,9 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             rapid_state["exit_headroom_ratio"] = exit_headroom_ratio
             rapid_state["executable_hazard_score"] = hazard_score
             rapid_state["time_pressure"] = time_pressure
+            rapid_state["winner_target_profit_pct"] = winner_target_profit_pct
+            rapid_state["winner_take_profit_floor_pct"] = winner_take_profit_floor_pct
+            rapid_state["winner_peak_buffer_pct"] = winner_peak_buffer_pct
 
             if exit_headroom_ratio is not None and exit_headroom_ratio <= urgent_headroom_ratio and pnl_pct <= 0.5:
                 context_payload[rapid_state_key] = rapid_state
@@ -4437,14 +4669,21 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 }
 
             if bool(rapid_state.get("armed")):
-                config["take_profit_pct"] = max(take_profit_pct, rapid_hard_cap_pct + 1.0)
-                if pnl_pct >= rapid_hard_cap_pct:
+                config["take_profit_pct"] = max(take_profit_pct, winner_take_profit_floor_pct)
+                if pnl_pct >= winner_target_profit_pct:
+                    rapid_state["winner_target_hit"] = True
+                    rapid_state["winner_target_hit_pnl_pct"] = pnl_pct
+                if bool(rapid_state.get("winner_target_hit")) and drawdown_from_peak_pct >= winner_peak_buffer_pct:
                     context_payload[rapid_state_key] = rapid_state
                     return {
                         "config": config,
                         "decision": {
                             "action": "close",
-                            "reason": f"Rapid hard-cap take profit ({pnl_pct:.1f}% >= {rapid_hard_cap_pct:.1f}%)",
+                            "reason": (
+                                "Winner ride peak-lock exit "
+                                f"(drawdown={drawdown_from_peak_pct:.2f}% >= {winner_peak_buffer_pct:.2f}%, "
+                                f"target={winner_target_profit_pct:.1f}%)"
+                            ),
                             "close_price": current_price,
                         },
                     }
@@ -5046,6 +5285,22 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             weighted_components = {k: selected_components[k] * weights[k] for k in selected_components}
             dominant_strategy = max(weighted_components, key=lambda k: weighted_components[k])
             dominant_weighted_edge = weighted_components[dominant_strategy]
+            component_edges = {
+                "buy_yes": {
+                    "directional": directional_yes,
+                    "pure_arb": pure_arb_yes,
+                    "rebalance": rebalance_yes,
+                },
+                "buy_no": {
+                    "directional": directional_no,
+                    "pure_arb": pure_arb_no,
+                    "rebalance": rebalance_no,
+                },
+            }
+            net_edges = {
+                "buy_yes": net_yes,
+                "buy_no": net_no,
+            }
 
             confidence = clamp(
                 0.32
@@ -5116,6 +5371,8 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                             "execution_penalty_percent": round(execution_penalty, 6),
                             "live_market_fetched_at": live_market_fetched_at,
                             "market_data_age_ms": market_data_age_ms,
+                            "component_edges": component_edges,
+                            "net_edges": net_edges,
                         },
                     }
                 ],
@@ -5168,6 +5425,8 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                     "execution_penalty_percent": round(execution_penalty, 6),
                     "live_market_fetched_at": live_market_fetched_at,
                     "market_data_age_ms": market_data_age_ms,
+                    "component_edges": component_edges,
+                    "net_edges": net_edges,
                 }
                 opportunities.append(opp)
 
