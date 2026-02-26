@@ -47,7 +47,7 @@ _SOURCE_ADAPTERS: dict[str, SourceAdapter] = {
         label="Traders",
         description="Tracked/pool/individual/group trader activity signals.",
         domains=["event_markets"],
-        signal_types=["confluence"],
+        signal_types=["confluence", "copy_trade"],
     ),
 }
 

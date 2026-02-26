@@ -1038,14 +1038,17 @@ async def _validate_strategy_key(session: AsyncSession, strategy_key: str) -> No
         raise ValueError(f"Unknown strategy_key '{strategy_key}'. Valid strategy keys: {allowed}")
 
 
-def _normalize_strategy_params(value: Any, source_key: str) -> dict[str, Any]:
+def _normalize_strategy_params(value: Any, source_key: str, strategy_key: str = "") -> dict[str, Any]:
     params = value if isinstance(value, dict) else {}
     out = dict(params)
     normalized_source = str(source_key or "").strip().lower()
+    normalized_strategy_key = str(strategy_key or "").strip().lower()
     if normalized_source == "crypto":
         for legacy_key in _LEGACY_CRYPTO_TIMEFRAME_SCOPE_KEYS:
             out.pop(legacy_key, None)
     if normalized_source == "traders":
+        if normalized_strategy_key == "traders_copy_trade":
+            return StrategySDK.validate_traders_copy_trade_config(out)
         return StrategySDK.validate_trader_filter_config(out)
     if normalized_source == "news":
         return StrategySDK.validate_news_filter_config(out)
@@ -1077,7 +1080,7 @@ def _normalize_source_config(raw: Any) -> dict[str, Any]:
         _normalize_strategy_key(item.get("strategy_key")),
     )
     strategy_version = normalize_strategy_version(item.get("strategy_version"))
-    strategy_params = _normalize_strategy_params(item.get("strategy_params"), source_key)
+    strategy_params = _normalize_strategy_params(item.get("strategy_params"), source_key, strategy_key)
     normalized: dict[str, Any] = {
         "source_key": source_key,
         "strategy_key": strategy_key,

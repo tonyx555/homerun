@@ -407,6 +407,122 @@ class StrategySDK:
             },
         ]
     }
+    TRADERS_COPY_TRADE_DEFAULTS: dict[str, Any] = {
+        "min_confidence": 0.45,
+        "min_source_notional_usd": 10.0,
+        "max_entry_price": 0.98,
+        "max_signal_age_seconds": 900,
+        "copy_delay_seconds": 0,
+        "copy_buys": True,
+        "copy_sells": True,
+        "max_position_size": 1000.0,
+        "proportional_sizing": True,
+        "proportional_multiplier": 1.0,
+        "base_size_usd": 25.0,
+        "max_size_usd": 1500.0,
+        "traders_scope": {
+            "modes": ["tracked", "pool"],
+            "individual_wallets": [],
+            "group_ids": [],
+        },
+    }
+    TRADERS_COPY_TRADE_CONFIG_SCHEMA: dict[str, Any] = {
+        "param_fields": [
+            {
+                "key": "min_confidence",
+                "label": "Min Confidence",
+                "type": "number",
+                "min": 0,
+                "max": 1,
+            },
+            {
+                "key": "min_source_notional_usd",
+                "label": "Min Source Notional (USD)",
+                "type": "number",
+                "min": 0,
+            },
+            {
+                "key": "max_entry_price",
+                "label": "Max Entry Price",
+                "type": "number",
+                "min": 0,
+                "max": 1,
+            },
+            {
+                "key": "max_signal_age_seconds",
+                "label": "Max Signal Age (sec)",
+                "type": "integer",
+                "min": 1,
+                "max": 3600,
+            },
+            {
+                "key": "copy_delay_seconds",
+                "label": "Copy Delay (sec)",
+                "type": "integer",
+                "min": 0,
+                "max": 300,
+            },
+            {"key": "copy_buys", "label": "Copy Buys", "type": "boolean"},
+            {"key": "copy_sells", "label": "Copy Sells", "type": "boolean"},
+            {
+                "key": "max_position_size",
+                "label": "Max Position Size (USD)",
+                "type": "number",
+                "min": 1,
+                "max": 1000000,
+            },
+            {
+                "key": "proportional_sizing",
+                "label": "Proportional Sizing",
+                "type": "boolean",
+            },
+            {
+                "key": "proportional_multiplier",
+                "label": "Proportional Multiplier",
+                "type": "number",
+                "min": 0.01,
+                "max": 100,
+            },
+            {
+                "key": "base_size_usd",
+                "label": "Base Size (USD)",
+                "type": "number",
+                "min": 1,
+                "max": 10000,
+            },
+            {
+                "key": "max_size_usd",
+                "label": "Max Size (USD)",
+                "type": "number",
+                "min": 1,
+                "max": 50000,
+            },
+            {
+                "key": "traders_scope",
+                "label": "Wallet Scope",
+                "type": "object",
+                "properties": [
+                    {
+                        "key": "modes",
+                        "label": "Modes",
+                        "type": "array[string]",
+                        "options": ["tracked", "pool", "individual", "group"],
+                        "required": True,
+                    },
+                    {
+                        "key": "individual_wallets",
+                        "label": "Individual Wallets",
+                        "type": "array[string]",
+                    },
+                    {
+                        "key": "group_ids",
+                        "label": "Group IDs",
+                        "type": "array[string]",
+                    },
+                ],
+            },
+        ]
+    }
     POOL_ELIGIBILITY_DEFAULTS: dict[str, Any] = {
         "target_pool_size": 500,
         "min_pool_size": 400,
@@ -2063,6 +2179,14 @@ class StrategySDK:
         return dict(StrategySDK.COPY_TRADING_CONFIG_SCHEMA)
 
     @staticmethod
+    def traders_copy_trade_defaults() -> dict[str, Any]:
+        return dict(StrategySDK.TRADERS_COPY_TRADE_DEFAULTS)
+
+    @staticmethod
+    def traders_copy_trade_config_schema() -> dict[str, Any]:
+        return dict(StrategySDK.TRADERS_COPY_TRADE_CONFIG_SCHEMA)
+
+    @staticmethod
     def pool_eligibility_defaults() -> dict[str, Any]:
         return dict(StrategySDK.POOL_ELIGIBILITY_DEFAULTS)
 
@@ -2570,6 +2694,53 @@ class StrategySDK:
         cfg["proportional_sizing"] = StrategySDK._coerce_bool(cfg.get("proportional_sizing"), False)
         cfg["proportional_multiplier"] = StrategySDK._coerce_float(cfg.get("proportional_multiplier"), 1.0, 0.01, 100.0)
         return cfg
+
+    @staticmethod
+    def validate_traders_copy_trade_config(config: Any) -> dict[str, Any]:
+        cfg = dict(StrategySDK.TRADERS_COPY_TRADE_DEFAULTS)
+        raw = config if isinstance(config, dict) else {}
+        cfg.update({str(k): v for k, v in raw.items() if str(k) != "_schema"})
+
+        cfg["min_confidence"] = StrategySDK._coerce_float(cfg.get("min_confidence"), 0.45, 0.0, 1.0)
+        cfg["min_source_notional_usd"] = StrategySDK._coerce_float(
+            cfg.get("min_source_notional_usd"),
+            10.0,
+            0.0,
+            1_000_000.0,
+        )
+        cfg["max_entry_price"] = StrategySDK._coerce_float(cfg.get("max_entry_price"), 0.98, 0.0, 1.0)
+        cfg["max_signal_age_seconds"] = StrategySDK._coerce_int(
+            cfg.get("max_signal_age_seconds"),
+            900,
+            1,
+            3600,
+        )
+        cfg["copy_delay_seconds"] = StrategySDK._coerce_int(cfg.get("copy_delay_seconds"), 0, 0, 300)
+        cfg["copy_buys"] = StrategySDK._coerce_bool(cfg.get("copy_buys"), True)
+        cfg["copy_sells"] = StrategySDK._coerce_bool(cfg.get("copy_sells"), True)
+        cfg["max_position_size"] = StrategySDK._coerce_float(cfg.get("max_position_size"), 1000.0, 1.0, 1_000_000.0)
+        cfg["proportional_sizing"] = StrategySDK._coerce_bool(cfg.get("proportional_sizing"), True)
+        cfg["proportional_multiplier"] = StrategySDK._coerce_float(
+            cfg.get("proportional_multiplier"),
+            1.0,
+            0.01,
+            100.0,
+        )
+        cfg["base_size_usd"] = StrategySDK._coerce_float(cfg.get("base_size_usd"), 25.0, 1.0, 10_000.0)
+        cfg["max_size_usd"] = StrategySDK._coerce_float(
+            cfg.get("max_size_usd"),
+            max(1.0, float(cfg["base_size_usd"])),
+            1.0,
+            50_000.0,
+        )
+        base_size_usd = StrategySDK._coerce_float(cfg.get("base_size_usd"), 25.0, 1.0, 10_000.0)
+        max_size_usd = StrategySDK._coerce_float(cfg.get("max_size_usd"), base_size_usd, 1.0, 50_000.0)
+        if max_size_usd < base_size_usd:
+            max_size_usd = base_size_usd
+        cfg["base_size_usd"] = base_size_usd
+        cfg["max_size_usd"] = max_size_usd
+        cfg["traders_scope"] = StrategySDK.validate_trader_scope_config(cfg.get("traders_scope"))
+        return StrategySDK.normalize_strategy_retention_config(cfg)
 
     @staticmethod
     def validate_news_filter_config(config: Any) -> dict[str, Any]:

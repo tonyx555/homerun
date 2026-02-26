@@ -11,6 +11,9 @@ from urllib.parse import urlsplit, urlunsplit
 import asyncpg
 
 
+_MIN_REDIS_VERSION_FOR_STREAMS = 5
+
+
 def _redis_ping(host: str, port: int) -> None:
     payload = b"*1\r\n$4\r\nPING\r\n"
     with socket.create_connection((host, port), timeout=2.0) as sock:
@@ -19,6 +22,39 @@ def _redis_ping(host: str, port: int) -> None:
         data = sock.recv(64)
     if b"+PONG" not in data:
         raise RuntimeError("Redis PING did not return PONG")
+
+
+def _redis_version_check(host: str, port: int) -> None:
+    """Check Redis version and warn if Streams are not supported."""
+    payload = b"*2\r\n$4\r\nINFO\r\n$6\r\nserver\r\n"
+    try:
+        with socket.create_connection((host, port), timeout=2.0) as sock:
+            sock.settimeout(2.0)
+            sock.sendall(payload)
+            data = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+                if b"redis_version:" in data:
+                    break
+            text = data.decode("ascii", errors="replace")
+            for line in text.split("\n"):
+                if line.startswith("redis_version:"):
+                    version = line.split(":")[1].strip()
+                    major = int(version.split(".")[0])
+                    if major < _MIN_REDIS_VERSION_FOR_STREAMS:
+                        print(
+                            f"WARNING: Redis version {version} does NOT support "
+                            f"Streams (requires >= {_MIN_REDIS_VERSION_FOR_STREAMS}.0). "
+                            f"Trade signal streaming will be disabled."
+                        )
+                    else:
+                        print(f"Redis version {version} (Streams supported)")
+                    return
+    except Exception:
+        pass
 
 
 async def _postgres_ping(database_url: str) -> None:
@@ -50,6 +86,7 @@ async def _main_async() -> None:
         raise ValueError("--database-url (or DATABASE_URL) is required")
 
     _redis_ping(args.redis_host, int(args.redis_port))
+    _redis_version_check(args.redis_host, int(args.redis_port))
     await _postgres_ping(database_url)
 
 

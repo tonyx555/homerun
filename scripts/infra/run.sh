@@ -133,6 +133,49 @@ raise SystemExit(1)
 PY
 }
 
+redis_version_check() {
+    # Returns 0 if Redis >= 5.0 (Streams supported), 1 if too old, 2 if unknown
+    python3 - "$REDIS_HOST" "$REDIS_PORT" <<'PY'
+import socket
+import sys
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+# Send: INFO server
+payload = b"*2\r\n$4\r\nINFO\r\n$6\r\nserver\r\n"
+
+try:
+    with socket.create_connection((host, port), timeout=2.0) as sock:
+        sock.settimeout(2.0)
+        sock.sendall(payload)
+        data = b""
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+            if b"redis_version:" in data:
+                break
+        text = data.decode("ascii", errors="replace")
+        for line in text.split("\n"):
+            if line.startswith("redis_version:"):
+                version = line.split(":")[1].strip()
+                major = int(version.split(".")[0])
+                if major >= 5:
+                    print(f"Redis version {version} (Streams supported)")
+                    raise SystemExit(0)
+                else:
+                    print(f"WARNING: Redis version {version} does NOT support Streams (requires >= 5.0)")
+                    raise SystemExit(1)
+except SystemExit as e:
+    raise
+except Exception:
+    pass
+
+raise SystemExit(2)
+PY
+}
+
 redis_shutdown() {
     python3 - "$REDIS_HOST" "$REDIS_PORT" <<'PY'
 import socket
@@ -225,9 +268,23 @@ cleanup_started_redis() {
     fi
 }
 
+warn_redis_version() {
+    redis_version_check
+    local rc=$?
+    if [ "$rc" -eq 1 ]; then
+        echo ""
+        echo -e "${YELLOW}Trade signal streaming will be DISABLED. The bot will fall back to slower DB polling.${NC}"
+        echo -e "${CYAN}To fix, install a modern Redis:${NC}"
+        echo "  Option 1 (macOS): brew install redis"
+        echo "  Option 2: Docker Desktop  ->  automatically uses redis:7-alpine"
+        echo ""
+    fi
+}
+
 ensure_redis() {
     if redis_ping; then
         echo -e "${GREEN}Redis already running on ${REDIS_HOST}:${REDIS_PORT}${NC}"
+        warn_redis_version
         return 0
     fi
 
@@ -238,6 +295,7 @@ ensure_redis() {
         REDIS_STARTED_BY_SCRIPT=1
         REDIS_START_MODE="docker"
         echo -e "${GREEN}Redis started via Docker on ${REDIS_HOST}:${REDIS_PORT}${NC}"
+        warn_redis_version
         return 0
     fi
 
@@ -245,6 +303,7 @@ ensure_redis() {
         REDIS_STARTED_BY_SCRIPT=1
         REDIS_START_MODE="local"
         echo -e "${GREEN}Redis started via redis-server on ${REDIS_HOST}:${REDIS_PORT}${NC}"
+        warn_redis_version
         return 0
     fi
 

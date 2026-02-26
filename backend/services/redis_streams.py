@@ -13,6 +13,9 @@ from utils.logger import get_logger
 
 logger = get_logger("redis_streams")
 
+# Minimum Redis version required for Streams (XADD, XREADGROUP, etc.)
+_MIN_REDIS_VERSION_FOR_STREAMS = (5, 0, 0)
+
 
 def _json_default(value: Any) -> Any:
     if isinstance(value, (datetime, date)):
@@ -22,10 +25,28 @@ def _json_default(value: Any) -> Any:
     return str(value)
 
 
+def _parse_redis_version(version_str: str) -> tuple[int, ...]:
+    """Parse a Redis version string like '7.2.4' into a tuple of ints."""
+    parts: list[int] = []
+    for segment in str(version_str or "").strip().split("."):
+        cleaned = ""
+        for ch in segment:
+            if ch.isdigit():
+                cleaned += ch
+            else:
+                break
+        if cleaned:
+            parts.append(int(cleaned))
+    return tuple(parts) if parts else (0,)
+
+
 class RedisStreamClient:
     def __init__(self) -> None:
         self._client: Optional[Redis] = None
         self._lock = asyncio.Lock()
+        self._streams_available: Optional[bool] = None
+        self._server_version: str = ""
+        self._streams_check_logged: bool = False
 
     async def _close_client(self) -> None:
         client = self._client
@@ -59,6 +80,55 @@ class RedisStreamClient:
             self._client = Redis(**kwargs)
             return self._client
 
+    async def check_streams_available(self) -> bool:
+        """Check if the connected Redis server supports Streams (requires 5.0+).
+
+        The result is cached after the first successful probe.  If the server
+        version is below 5.0, a loud WARNING is emitted once so the operator
+        can upgrade.  All stream operations (xadd, xreadgroup, xack, etc.)
+        short-circuit to no-ops when this returns False.
+        """
+        if self._streams_available is not None:
+            return self._streams_available
+        try:
+            client = await self._get_client()
+            info: dict[str, Any] = await client.info("server")  # type: ignore[arg-type]
+            version_str = str(info.get("redis_version", "0"))
+            self._server_version = version_str
+            parsed = _parse_redis_version(version_str)
+            supported = parsed >= _MIN_REDIS_VERSION_FOR_STREAMS
+            self._streams_available = supported
+            if not supported and not self._streams_check_logged:
+                self._streams_check_logged = True
+                logger.warning(
+                    "Redis server version %s does NOT support Streams "
+                    "(requires >= %s). Trade signal streaming, consumer groups, "
+                    "and stream-based IPC will be DISABLED. "
+                    "Upgrade Redis (Docker redis:7-alpine, Memurai, or brew install redis).",
+                    version_str,
+                    ".".join(str(v) for v in _MIN_REDIS_VERSION_FOR_STREAMS),
+                )
+            elif supported and not self._streams_check_logged:
+                self._streams_check_logged = True
+                logger.info(
+                    "Redis server version %s supports Streams.", version_str,
+                )
+            return supported
+        except Exception as exc:
+            logger.debug("Redis streams capability check failed", exc_info=exc)
+            # Don't cache failure — allow retry on next call
+            return False
+
+    @property
+    def streams_available(self) -> Optional[bool]:
+        """Return the cached Streams availability flag (None if not yet checked)."""
+        return self._streams_available
+
+    @property
+    def server_version(self) -> str:
+        """Return the cached Redis server version string."""
+        return self._server_version
+
     async def ping(self) -> bool:
         try:
             client = await self._get_client()
@@ -75,6 +145,8 @@ class RedisStreamClient:
         *,
         maxlen: int,
     ) -> Optional[str]:
+        if not await self.check_streams_available():
+            return None
         try:
             client = await self._get_client()
             body = json.dumps(payload, default=_json_default, separators=(",", ":"))
@@ -103,6 +175,8 @@ class RedisStreamClient:
         create_stream: bool = True,
     ) -> bool:
         if not stream or not group:
+            return False
+        if not await self.check_streams_available():
             return False
         try:
             client = await self._get_client()
@@ -143,6 +217,8 @@ class RedisStreamClient:
         block_ms: int,
         count: int,
     ) -> list[tuple[str, str]]:
+        if not await self.check_streams_available():
+            return []
         try:
             client = await self._get_client()
             chunks = await client.xread(
@@ -179,6 +255,8 @@ class RedisStreamClient:
         include_pending: bool = False,
     ) -> list[tuple[str, str]]:
         if not stream or not group or not consumer:
+            return []
+        if not await self.check_streams_available():
             return []
 
         read_id = "0" if include_pending else ">"
@@ -231,6 +309,8 @@ class RedisStreamClient:
     ) -> int:
         if not stream or not group:
             return 0
+        if not await self.check_streams_available():
+            return 0
         ids = [str(entry_id).strip() for entry_id in entry_ids if str(entry_id).strip()]
         if not ids:
             return 0
@@ -260,6 +340,8 @@ class RedisStreamClient:
         count: int = 100,
     ) -> tuple[str, list[tuple[str, str]]]:
         if not stream or not group or not consumer:
+            return start_id, []
+        if not await self.check_streams_available():
             return start_id, []
         try:
             client = await self._get_client()

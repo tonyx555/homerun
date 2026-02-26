@@ -130,18 +130,25 @@ TRADER_TEMPLATES: list[dict[str, Any]] = [
         },
     },
     {
-        "id": "traders_confluence",
-        "name": "Traders Flow",
-        "description": "Confluence trader-flow strategy across tracked and pool scopes.",
+        "id": "traders_copy_trade",
+        "name": "Traders Copy Trade",
+        "description": "Real-time explicit copy trading strategy with wallet-scope controls.",
         "source_configs": [
             {
                 "source_key": "traders",
-                "strategy_key": "traders_confluence",
+                "strategy_key": "traders_copy_trade",
                 "strategy_params": {
-                    "min_edge_percent": 3.0,
-                    "min_confidence": 0.5,
-                    "min_confluence_strength": 0.55,
-                    "base_size_usd": 18.0,
+                    "min_confidence": 0.45,
+                    "min_source_notional_usd": 15.0,
+                    "max_signal_age_seconds": 600,
+                    "copy_delay_seconds": 0,
+                    "copy_buys": True,
+                    "copy_sells": True,
+                    "max_position_size": 500.0,
+                    "proportional_sizing": True,
+                    "proportional_multiplier": 1.0,
+                    "base_size_usd": 20.0,
+                    "max_size_usd": 1000.0,
                     "traders_scope": {
                         "modes": ["tracked", "pool"],
                         "individual_wallets": [],
@@ -150,10 +157,10 @@ TRADER_TEMPLATES: list[dict[str, Any]] = [
                 },
             }
         ],
-        "interval_seconds": 90,
+        "interval_seconds": 5,
         "risk_limits": {
-            "max_open_orders": 10,
-            "max_per_market_exposure_usd": 350.0,
+            "max_open_orders": 30,
+            "max_per_market_exposure_usd": 600.0,
         },
     },
 ]

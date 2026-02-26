@@ -84,18 +84,24 @@ function Ensure-RedisRuntime {
     }
 
     Write-Host "Redis runtime prerequisite missing. Attempting to install..." -ForegroundColor Cyan
+    Write-Host "NOTE: Redis Streams (required for trade signal streaming) need Redis >= 5.0." -ForegroundColor Cyan
+    Write-Host "The old Redis.Redis/redis-64 packages install Redis 3.0 which is too old." -ForegroundColor Cyan
 
     $winget = Get-Command winget -ErrorAction SilentlyContinue
     if ($winget) {
+        # Memurai first — it's a native Windows Redis-compatible server that
+        # supports modern Redis features (Streams, consumer groups, etc.)
+        # Redis.Redis installs the ancient 3.0.504 Microsoft port — last resort only.
         $wingetIds = @(
-            "Redis.Redis",
-            "Memurai.MemuraiDeveloper"
+            "Memurai.MemuraiDeveloper",
+            "Redis.Redis"
         )
         foreach ($id in $wingetIds) {
             try {
                 winget install --id $id --exact --silent --accept-source-agreements --accept-package-agreements *> $null
                 if (Test-RedisRuntimeAvailable) {
-                    Write-Host "Redis runtime installed via winget ($id)." -ForegroundColor Green
+                    $label = if ($id -eq "Redis.Redis") { "$id (WARNING: v3.0 — no Streams support)" } else { $id }
+                    Write-Host "Redis runtime installed via winget ($label)." -ForegroundColor Green
                     return $true
                 }
             } catch {
@@ -108,7 +114,8 @@ function Ensure-RedisRuntime {
         try {
             choco install redis-64 -y *> $null
             if (Test-RedisRuntimeAvailable) {
-                Write-Host "Redis runtime installed via Chocolatey." -ForegroundColor Green
+                Write-Host "Redis runtime installed via Chocolatey (WARNING: redis-64 is v3.0 — no Streams support)." -ForegroundColor Yellow
+                Write-Host "Consider installing Memurai for full feature support: winget install Memurai.MemuraiDeveloper" -ForegroundColor Cyan
                 return $true
             }
         } catch {
@@ -116,7 +123,7 @@ function Ensure-RedisRuntime {
     }
 
     Write-Host "Failed to auto-install Redis runtime prerequisites." -ForegroundColor Red
-    Write-Host "Install Docker Desktop, redis-server, or Memurai, then rerun setup." -ForegroundColor Yellow
+    Write-Host "Install Docker Desktop or Memurai (winget install Memurai.MemuraiDeveloper), then rerun setup." -ForegroundColor Yellow
     return $false
 }
 

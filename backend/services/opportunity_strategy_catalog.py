@@ -41,6 +41,11 @@ _SYSTEM_SOURCE_REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
         "def build_opportunities_from_firehose",
         "async def on_event",
     ),
+    "traders_copy_trade": (
+        'source_key = "traders"',
+        "strategy_type = \"traders_copy_trade\"",
+        "def evaluate",
+    ),
     "weather_distribution": (
         'source_key = "weather"',
         'subscriptions = ["weather_update"]',
@@ -744,6 +749,17 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                 {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
                 {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
                 *StrategySDK.trader_filter_config_schema().get("param_fields", []),
+            ]
+        },
+    ),
+    SystemOpportunityStrategySeed(
+        slug="traders_copy_trade",
+        source_key="traders",
+        import_module="services.strategies.traders_copy_trade",
+        sort_order=211,
+        config_schema={
+            "param_fields": [
+                *StrategySDK.traders_copy_trade_config_schema().get("param_fields", []),
             ]
         },
     ),

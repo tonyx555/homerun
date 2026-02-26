@@ -77,6 +77,32 @@ def test_normalize_source_configs_merges_strategy_defaults(monkeypatch):
     assert crypto["reentry_cooldown_seconds_per_market"] == 8.0
 
 
+def test_merged_strategy_params_for_traders_copy_trade_uses_copy_validator(monkeypatch):
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "_strategy_instance_for_source_config",
+        lambda source_config: None,
+    )
+
+    merged = trader_orchestrator_worker._merged_strategy_params_for_source_config(
+        {
+            "source_key": "traders",
+            "strategy_key": "traders_copy_trade",
+            "strategy_params": {
+                "min_confidence": "0.73",
+                "copy_buys": "false",
+                "copy_sells": "true",
+                "max_signal_age_seconds": "45",
+            },
+        }
+    )
+
+    assert merged["min_confidence"] == 0.73
+    assert merged["copy_buys"] is False
+    assert merged["copy_sells"] is True
+    assert merged["max_signal_age_seconds"] == 45
+
+
 def test_resume_policy_normalizes_to_supported_values():
     assert trader_orchestrator_worker._normalize_resume_policy("manage_only") == "manage_only"
     assert trader_orchestrator_worker._normalize_resume_policy("flatten_then_start") == "flatten_then_start"

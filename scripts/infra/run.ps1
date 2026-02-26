@@ -221,6 +221,65 @@ function Test-RedisPing {
     }
 }
 
+function Get-RedisVersion {
+    param(
+        [string]$RedisHost,
+        [int]$RedisPort
+    )
+
+    $client = $null
+    $stream = $null
+    try {
+        $client = [System.Net.Sockets.TcpClient]::new()
+        $client.ReceiveTimeout = 2000
+        $client.SendTimeout = 2000
+        $client.Connect($RedisHost, $RedisPort)
+        $stream = $client.GetStream()
+        # Send: INFO server
+        $payload = [System.Text.Encoding]::ASCII.GetBytes("*2`r`n`$4`r`nINFO`r`n`$6`r`nserver`r`n")
+        $stream.Write($payload, 0, $payload.Length)
+        $buffer = New-Object byte[] 4096
+        $bytesRead = $stream.Read($buffer, 0, $buffer.Length)
+        if ($bytesRead -le 0) { return "" }
+        $response = [System.Text.Encoding]::ASCII.GetString($buffer, 0, $bytesRead)
+        foreach ($line in $response -split "`r`n|`n") {
+            if ($line.StartsWith("redis_version:")) {
+                return $line.Substring("redis_version:".Length).Trim()
+            }
+        }
+        return ""
+    } catch {
+        return ""
+    } finally {
+        if ($stream) { $stream.Dispose() }
+        if ($client) { $client.Dispose() }
+    }
+}
+
+function Test-RedisVersionOk {
+    <#
+    .SYNOPSIS
+    Check if Redis version is >= 5.0 (required for Streams).
+    Returns $true if version is OK, $false if too old, $null if version unknown.
+    #>
+    param(
+        [string]$RedisHost,
+        [int]$RedisPort
+    )
+
+    $version = Get-RedisVersion -RedisHost $RedisHost -RedisPort $RedisPort
+    if (-not $version) { return $null }
+
+    $parts = $version.Split(".")
+    if ($parts.Count -lt 1) { return $null }
+    try {
+        $major = [int]$parts[0]
+        return ($major -ge 5)
+    } catch {
+        return $null
+    }
+}
+
 function Send-RedisShutdown {
     param(
         [string]$RedisHost,
@@ -289,16 +348,10 @@ function Start-RedisLocal {
         [int]$RedisPort
     )
 
-    $redisServerPath = Find-RedisServer
-    if ($redisServerPath) {
-        try {
-            Start-Process -FilePath $redisServerPath -ArgumentList "--bind $RedisHost --port $RedisPort --save `"`" --appendonly no" -WindowStyle Hidden | Out-Null
-            return $true
-        } catch {
-        }
-    }
-
-    foreach ($svcName in @("Redis", "Memurai")) {
+    # Prefer Memurai service first — it supports Redis 5+ features (Streams)
+    # The old Redis.Redis/redis-64 packages install Redis 3.0 which does NOT
+    # support Streams and will silently break trade signal streaming.
+    foreach ($svcName in @("Memurai", "Redis")) {
         try {
             $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
             if ($svc) {
@@ -311,7 +364,41 @@ function Start-RedisLocal {
         }
     }
 
+    $redisServerPath = Find-RedisServer
+    if ($redisServerPath) {
+        try {
+            Start-Process -FilePath $redisServerPath -ArgumentList "--bind $RedisHost --port $RedisPort --save `"`" --appendonly no" -WindowStyle Hidden | Out-Null
+            return $true
+        } catch {
+        }
+    }
+
     return $false
+}
+
+function Warn-RedisVersionIfOld {
+    param(
+        [string]$RedisHost,
+        [int]$RedisPort
+    )
+
+    $version = Get-RedisVersion -RedisHost $RedisHost -RedisPort $RedisPort
+    if (-not $version) { return }
+
+    $versionOk = Test-RedisVersionOk -RedisHost $RedisHost -RedisPort $RedisPort
+    if ($versionOk -eq $false) {
+        Write-Host ""
+        Write-Host "WARNING: Redis version $version does NOT support Streams (requires >= 5.0)." -ForegroundColor Red
+        Write-Host "Trade signal streaming will be DISABLED. The bot will fall back to slower DB polling." -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "To fix, install a modern Redis:" -ForegroundColor Cyan
+        Write-Host "  Option 1: Docker Desktop  ->  automatically uses redis:7-alpine" -ForegroundColor White
+        Write-Host "  Option 2: Memurai         ->  winget install Memurai.MemuraiDeveloper" -ForegroundColor White
+        Write-Host "  Option 3: WSL2            ->  wsl --install && sudo apt install redis-server" -ForegroundColor White
+        Write-Host ""
+    } elseif ($versionOk -eq $true) {
+        Write-Host "Redis version $version (Streams supported)" -ForegroundColor Green
+    }
 }
 
 function Ensure-Redis {
@@ -323,35 +410,61 @@ function Ensure-Redis {
     )
 
     if (Test-RedisPing -RedisHost $RedisHost -RedisPort $RedisPort) {
+        $versionOk = Test-RedisVersionOk -RedisHost $RedisHost -RedisPort $RedisPort
+        if ($versionOk -eq $false) {
+            # Running Redis is too old. Try Docker for a modern version first.
+            Write-Host "Running Redis is too old for Streams support. Attempting Docker upgrade..." -ForegroundColor Yellow
+            $dockerStarted = Start-RedisDocker -RedisHost $RedisHost -RedisPort $RedisPort -ContainerName $ContainerName -Image $Image
+            if (-not $dockerStarted) {
+                # Can't replace it — warn and continue with degraded mode
+                Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort
+                return
+            }
+            if (Wait-ForService -TargetHost $RedisHost -Port $RedisPort) {
+                $script:redisStartedByScript = $true
+                $script:redisStartMode = "docker"
+                Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort
+                return
+            }
+            # Docker started but can't reach it — fall through, old Redis still works
+            Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort
+            return
+        }
         Write-Host "Redis already running on ${RedisHost}:${RedisPort}" -ForegroundColor Green
+        Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort
         return
     }
 
     if (-not (Ensure-RedisRuntime)) {
         Write-Host "Failed to provision Redis runtime automatically." -ForegroundColor Red
-        Write-Host "Install Docker Desktop, redis-server, or Memurai, then rerun." -ForegroundColor Yellow
+        Write-Host "Install Docker Desktop, Memurai, or redis-server, then rerun." -ForegroundColor Yellow
         exit 1
     }
 
     Write-Host "Starting Redis..." -ForegroundColor Cyan
+
+    # Prefer Docker (redis:7-alpine) — guaranteed modern Redis with Streams support
     $dockerStarted = Start-RedisDocker -RedisHost $RedisHost -RedisPort $RedisPort -ContainerName $ContainerName -Image $Image
     if ($dockerStarted -and (Wait-ForService -TargetHost $RedisHost -Port $RedisPort)) {
         $script:redisStartedByScript = $true
         $script:redisStartMode = "docker"
         Write-Host "Redis started via Docker on ${RedisHost}:${RedisPort}" -ForegroundColor Green
+        Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort
         return
     }
 
+    # Fall back to local (Memurai service preferred over redis-server.exe)
     $localStarted = Start-RedisLocal -RedisHost $RedisHost -RedisPort $RedisPort
     if ($localStarted -and (Wait-ForService -TargetHost $RedisHost -Port $RedisPort)) {
         $script:redisStartedByScript = $true
         $script:redisStartMode = "local"
-        Write-Host "Redis started via redis-server on ${RedisHost}:${RedisPort}" -ForegroundColor Green
+        Write-Host "Redis started via local service on ${RedisHost}:${RedisPort}" -ForegroundColor Green
+        Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort
         return
     }
 
     Write-Host "Failed to start Redis automatically." -ForegroundColor Red
-    Write-Host "Install Docker or redis-server, then rerun." -ForegroundColor Yellow
+    Write-Host "Install Docker Desktop, Memurai, or redis-server, then rerun." -ForegroundColor Yellow
     exit 1
 }
 

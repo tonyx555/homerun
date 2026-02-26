@@ -236,6 +236,9 @@ async def verify_vpn_active() -> dict:
     Verify the VPN proxy is active by checking the external IP through the proxy
     vs. the direct connection. Returns status dict.
 
+    Always tests the stored proxy URL regardless of the enabled toggle so the
+    user can verify connectivity before enabling the proxy for trading.
+
     Loads fresh settings from the DB each time to pick up UI changes.
     """
     cfg = await _load_config_from_db()
@@ -249,9 +252,8 @@ async def verify_vpn_active() -> dict:
         "vpn_active": False,
     }
 
-    if not cfg.enabled or not cfg.proxy_url:
-        result["vpn_active"] = False
-        result["error"] = "Proxy not configured"
+    if not cfg.proxy_url:
+        result["error"] = "No proxy URL configured"
         return result
 
     ip_check_url = "https://api.ipify.org?format=json"
@@ -264,20 +266,23 @@ async def verify_vpn_active() -> dict:
     except Exception as e:
         result["direct_ip_error"] = str(e)
 
-    # Get proxy IP
+    # Get proxy IP — use a temporary client with the stored URL directly
+    # so the test works even when the proxy toggle is off.
     try:
-        proxy_client = get_async_proxy_client()
-        resp = await proxy_client.get(ip_check_url)
-        proxy_ip = resp.json().get("ip")
-        result["proxy_ip"] = proxy_ip
-        result["proxy_reachable"] = True
+        async with httpx.AsyncClient(
+            proxy=cfg.proxy_url,
+            timeout=cfg.timeout,
+            verify=cfg.verify_ssl,
+        ) as test_client:
+            resp = await test_client.get(ip_check_url)
+            proxy_ip = resp.json().get("ip")
+            result["proxy_ip"] = proxy_ip
+            result["proxy_reachable"] = True
 
-        # VPN is active if proxy IP differs from direct IP
-        if result["direct_ip"] and proxy_ip:
-            result["vpn_active"] = result["direct_ip"] != proxy_ip
-        elif proxy_ip:
-            # Can't verify direct IP but proxy works
-            result["vpn_active"] = True
+            if result["direct_ip"] and proxy_ip:
+                result["vpn_active"] = result["direct_ip"] != proxy_ip
+            elif proxy_ip:
+                result["vpn_active"] = True
     except Exception as e:
         result["proxy_ip_error"] = str(e)
         result["proxy_reachable"] = False

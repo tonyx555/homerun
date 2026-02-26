@@ -59,6 +59,7 @@ from services.strategy_loader import StrategyValidationError, strategy_loader
 from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.strategy_sdk import StrategySDK
 from services.strategy_versioning import normalize_strategy_version, resolve_strategy_version
+from services.redis_streams import redis_streams as _redis_stream_client
 from services.trade_signal_stream import (
     ack_trade_signal_batches,
     auto_claim_trade_signal_batches,
@@ -206,16 +207,24 @@ async def _wait_for_trade_signal_stream_trigger(
     last_claim_run_at: datetime | None,
 ) -> tuple[dict[str, Any] | None, str, datetime]:
     timeout = max(0.05, float(timeout_seconds))
-    deadline = datetime.now(timezone.utc) + timedelta(seconds=timeout)
-    stream_rows: list[tuple[str, dict[str, Any]]] = []
-    next_claim_cursor = str(claim_cursor or "0-0")
     now = datetime.now(timezone.utc)
+    next_claim_cursor = str(claim_cursor or "0-0")
+    last_claim = last_claim_run_at or now
+
+    # If Streams are not available (Redis < 5.0), sleep for the timeout
+    # and return None so the caller falls through to scheduled DB polling.
+    # This avoids the tight spin-loop of failed xreadgroup calls.
+    if not await _redis_stream_client.check_streams_available():
+        await asyncio.sleep(timeout)
+        return None, next_claim_cursor, last_claim
+
+    deadline = now + timedelta(seconds=timeout)
+    stream_rows: list[tuple[str, dict[str, Any]]] = []
     claim_interval_seconds = max(0.1, float(settings.TRADE_SIGNAL_STREAM_CLAIM_INTERVAL_SECONDS))
     claim_due = (
         last_claim_run_at is None
         or (now - last_claim_run_at).total_seconds() >= claim_interval_seconds
     )
-    last_claim = last_claim_run_at or now
     if claim_due:
         next_claim_cursor, claimed_rows = await auto_claim_trade_signal_batches(
             consumer=consumer,
@@ -385,6 +394,7 @@ def _strategy_instance_for_source_config(source_config: dict[str, Any] | None) -
 
 def _merged_strategy_params_for_source_config(source_config: dict[str, Any]) -> dict[str, Any]:
     source_key = normalize_source_key(source_config.get("source_key"))
+    strategy_key = str(source_config.get("strategy_key") or "").strip().lower()
     explicit_params = dict(source_config.get("strategy_params") or {})
     strategy_defaults: dict[str, Any] = {}
     strategy_version = normalize_strategy_version(source_config.get("strategy_version"))
@@ -403,7 +413,10 @@ def _merged_strategy_params_for_source_config(source_config: dict[str, Any]) -> 
     merged = {**strategy_defaults, **explicit_params}
 
     if source_key == "traders":
-        merged = StrategySDK.validate_trader_filter_config(merged)
+        if strategy_key == "traders_copy_trade":
+            merged = StrategySDK.validate_traders_copy_trade_config(merged)
+        else:
+            merged = StrategySDK.validate_trader_filter_config(merged)
     elif source_key == "news":
         merged = StrategySDK.validate_news_filter_config(merged)
 

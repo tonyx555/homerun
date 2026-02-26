@@ -53,6 +53,7 @@ from api.routes_data_sources import router as data_sources_router
 from api.routes_traders import router as traders_router
 from services.wallet_tracker import wallet_tracker
 from services.copy_trader import copy_trader
+from services.traders_copy_trade_signal_service import traders_copy_trade_signal_service
 from services.live_execution_service import live_execution_service
 from services.wallet_discovery import wallet_discovery
 from services.position_monitor import position_monitor
@@ -520,6 +521,7 @@ async def lifespan(app: FastAPI):
 
         # Start copy trading service
         await copy_trader.start()
+        await traders_copy_trade_signal_service.start()
 
         # Start position monitor (spread trading exit strategies)
         await position_monitor.start()
@@ -670,6 +672,7 @@ async def lifespan(app: FastAPI):
         await snapshot_broadcaster.stop()
         wallet_tracker.stop()
         copy_trader.stop()
+        traders_copy_trade_signal_service.stop()
         wallet_discovery.stop()
         position_monitor.stop()
         maintenance_service.stop()

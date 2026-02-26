@@ -67,3 +67,35 @@ def test_resolve_min_order_size_prefers_mode_specific_then_base_then_portfolio()
         )
         == 6.0
     )
+
+
+def test_validate_traders_copy_trade_config_normalizes_and_clamps_fields():
+    cfg = StrategySDK.validate_traders_copy_trade_config(
+        {
+            "min_confidence": "0.6",
+            "min_source_notional_usd": "12.5",
+            "max_signal_age_seconds": "120",
+            "copy_delay_seconds": "7",
+            "copy_buys": "true",
+            "copy_sells": "false",
+            "max_position_size": "2500",
+            "proportional_sizing": "1",
+            "proportional_multiplier": "1.75",
+            "base_size_usd": "15",
+            "max_size_usd": "10",
+            "traders_scope": {"modes": ["individual"], "individual_wallets": ["0xabc"], "group_ids": []},
+        }
+    )
+
+    assert cfg["min_confidence"] == 0.6
+    assert cfg["min_source_notional_usd"] == 12.5
+    assert cfg["max_signal_age_seconds"] == 120
+    assert cfg["copy_delay_seconds"] == 7
+    assert cfg["copy_buys"] is True
+    assert cfg["copy_sells"] is False
+    assert cfg["max_position_size"] == 2500.0
+    assert cfg["proportional_sizing"] is True
+    assert cfg["proportional_multiplier"] == 1.75
+    assert cfg["base_size_usd"] == 15.0
+    assert cfg["max_size_usd"] == 15.0
+    assert cfg["traders_scope"]["modes"] == ["individual"]

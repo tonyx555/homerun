@@ -1135,17 +1135,23 @@ async def test_trading_proxy():
 
         status = await verify_vpn_active()
 
+        if status.get("error"):
+            return {"status": "error", "message": status["error"], **status}
+
         if not status.get("proxy_reachable"):
             return {
                 "status": "error",
-                "message": f"Proxy unreachable: {status.get('proxy_ip_error', 'unknown error')}",
+                "message": f"Proxy unreachable: {status.get('proxy_ip_error', 'connection failed')}",
                 **status,
             }
+
+        proxy_ip = status.get("proxy_ip")
+        enabled_note = "" if status.get("proxy_enabled") else " (proxy toggle is off — enable it to route trades)"
 
         if status.get("vpn_active"):
             return {
                 "status": "success",
-                "message": f"VPN active — trading through {status.get('proxy_ip')}",
+                "message": f"VPN active — trading through {proxy_ip}{enabled_note}",
                 **status,
             }
         else:
