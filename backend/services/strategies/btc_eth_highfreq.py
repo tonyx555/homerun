@@ -5119,61 +5119,37 @@ class BtcEthHighFreqStrategy(BaseStrategy):
 
             regime = self._crypto_regime(seconds_left, timeframe_seconds)
 
-            # --- Oracle-only directional edge ---
-            # Direction is determined SOLELY by oracle sign.  Edge is the
-            # oracle signal strength scaled by time remaining -- NOT
-            # model_prob vs market_price (that is rebalance in disguise).
-            _MIN_ORACLE_DIFF_FOR_EDGE = 0.15  # % -- below this, no signal
+            # --- Minimal detect: pass every live market through to evaluate() ---
+            # All real filtering (oracle gates, edge thresholds, fee gates, entry
+            # windows) happens in evaluate(). The detect/on_event path just needs
+            # to get each market into the signal pipeline.
             if has_oracle and price_to_beat is not None and oracle_price is not None:
                 diff_pct = ((oracle_price - price_to_beat) / price_to_beat) * 100.0
             else:
                 diff_pct = 0.0
 
-            if abs(diff_pct) < _MIN_ORACLE_DIFF_FOR_EDGE:
-                # Oracle diff too small to be meaningful -- skip
-                continue
+            spread = clamp(self._float(market.get("spread")) or 0.0, 0.0, 0.10)
+            liquidity = max(0.0, self._float(market.get("liquidity")) or 0.0)
 
-            # Direction from oracle SIGN only -- never buy against oracle
+            # Direction: oracle hint if available, else cheaper side
             if diff_pct > 0:
+                direction = "buy_yes"
+                entry_price = up_price
+            elif diff_pct < 0:
+                direction = "buy_no"
+                entry_price = down_price
+            elif up_price <= down_price:
                 direction = "buy_yes"
                 entry_price = up_price
             else:
                 direction = "buy_no"
                 entry_price = down_price
 
-            # Edge = oracle magnitude scaled by time urgency.
-            # Late in the window the oracle is more predictive.
-            time_ratio = clamp(seconds_left / float(max(1, timeframe_seconds)), 0.01, 1.0)
-            time_multiplier = 1.0 + 2.0 * (1.0 - time_ratio)  # 1x early, 3x at expiry
-            edge_percent = abs(diff_pct) * time_multiplier
-
-            # Fee-aware entry gate
-            taker_fee_pct = polymarket_fee_pct(entry_price) if entry_price > 0 else 0.0
-            min_required_edge = taker_fee_pct * 200.0  # 2x fee as percentage points
-            if edge_percent < max(1.0, min_required_edge):
-                continue
-
-            # Execution penalties (simplified -- no rebalance/pure_arb)
-            spread = clamp(self._float(market.get("spread")) or 0.0, 0.0, 0.10)
-            liquidity = max(0.0, self._float(market.get("liquidity")) or 0.0)
-            spread_penalty = spread * 100.0 * 0.35
-            liquidity_scale = clamp(liquidity / 250000.0, 0.0, 1.0)
-            slippage_penalty = (1.35 - (0.95 * liquidity_scale))
-            net_edge = edge_percent - spread_penalty - slippage_penalty
-            if net_edge < 1.0:
-                continue
-            edge_percent = net_edge
-
-            # Confidence -- based on oracle diff strength and edge magnitude
-            confidence = clamp(
-                0.32
-                + clamp(edge_percent / 20.0, 0.0, 0.35)
-                + clamp(abs(diff_pct) / 1.0, 0.0, 0.20),
-                0.05,
-                0.97,
-            )
-            if not has_oracle:
-                confidence = clamp(confidence * 0.75, 0.05, 0.85)
+            # Baseline edge/confidence — evaluate() will recompute these.
+            # Must exceed strategy min_profit (2.5%) to pass create_opportunity.
+            edge_percent = max(abs(diff_pct), 3.0)
+            confidence = clamp(0.40 + clamp(abs(diff_pct) / 1.0, 0.0, 0.20), 0.35, 0.70)
+            min_required_edge = 0.0  # No filtering in detect
 
             side = "YES" if direction == "buy_yes" else "NO"
             slug = market.get("slug") or market_id
@@ -5182,117 +5158,168 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             token_ids = typed_market.clob_token_ids or []
             position_token_id = token_ids[token_idx] if len(token_ids) > token_idx else None
 
-            opp = self.create_opportunity(
-                title=f"Crypto HF: {slug} {side}",
-                description=(
-                    f"{regime} regime, oracle directional | edge={edge_percent:.1f}%, conf={confidence:.0%}"
-                ),
-                total_cost=entry_price,
-                expected_payout=entry_price + (edge_percent / 100.0),
-                markets=[typed_market],
-                positions=[
-                    {
-                        "action": "BUY",
-                        "outcome": side,
-                        "price": entry_price,
-                        "token_id": position_token_id,
-                        "post_only": True,
-                        "_maker_mode": True,
-                        "_maker_price": entry_price,
-                        "_crypto_context": {
-                            "signal_version": "crypto_worker_v3",
-                            "signal_family": "crypto_maker",
-                            "strategy_origin": "crypto_worker",
-                            "selected_direction": direction,
-                            "asset": asset,
-                            "timeframe": timeframe,
-                            "regime": regime,
-                            "start_time": start_time,
-                            "end_time": end_time,
-                            "seconds_left": float(seconds_left),
-                            "is_live": is_live,
-                            "is_current": is_current,
-                            "oracle_available": has_oracle,
-                            "oracle_age_seconds": self._float(market.get("oracle_age_seconds")),
-                            "oracle_updated_at_ms": self._float(market.get("oracle_updated_at_ms")),
-                            "oracle_status": dict(oracle_status),
-                            "oracle_source": oracle_status.get("source"),
-                            "oracle_prices_by_source": _json_safe(market.get("oracle_prices_by_source") or {}),
-                            "oracle_diff_pct": diff_pct,
-                            "taker_fee_gate": min_required_edge,
-                            "edge_percent": edge_percent,
-                            "spread": spread,
-                            "spread_widening_bps": self._float(market.get("spread_widening_bps")),
-                            "orderbook_imbalance": self._float(
-                                _first_present(
-                                    market.get("orderbook_imbalance"),
-                                    market.get("book_imbalance"),
-                                    market.get("imbalance"),
-                                )
-                            ),
-                            "liquidity": liquidity,
-                            "volume": self._float(market.get("volume")) or 0.0,
-                            "price_to_beat": price_to_beat,
-                            "oracle_price": oracle_price,
-                            "live_market_fetched_at": live_market_fetched_at,
-                            "market_data_age_ms": market_data_age_ms,
-                        },
-                    }
-                ],
-                is_guaranteed=False,
-                skip_fee_model=True,
-                custom_roi_percent=edge_percent,
-                custom_risk_score=1.0 - confidence,
-                confidence=confidence,
+            opp = self._build_detect_opportunity(
+                typed_market=typed_market, market=market, market_id=market_id,
+                slug=slug, asset=asset, timeframe=timeframe, regime=regime,
+                direction=direction, side=side, entry_price=entry_price,
+                edge_percent=edge_percent, confidence=confidence, diff_pct=diff_pct,
+                min_required_edge=min_required_edge, spread=spread,
+                liquidity=liquidity, has_oracle=has_oracle, oracle_status=oracle_status,
+                oracle_price=oracle_price, price_to_beat=price_to_beat,
+                seconds_left=seconds_left, is_live=is_live, is_current=is_current,
+                start_time=start_time, end_time=end_time,
+                live_market_fetched_at=live_market_fetched_at,
+                market_data_age_ms=market_data_age_ms,
+                signal_family="crypto_maker", token_id=position_token_id,
             )
             if opp is not None:
-                opp.risk_factors = [
-                    f"Crypto {regime} regime",
-                    f"Oracle directional (diff={diff_pct:+.3f}%)",
-                    f"Oracle: {'available' if has_oracle else 'unavailable'}",
-                    f"Fee gate: edge {edge_percent:.1f}% > 2x fee {min_required_edge:.1f}%",
-                ]
-                opp.strategy_context = {
-                    "source_key": "crypto",
-                    "strategy_slug": self.strategy_type,
-                    "strategy_origin": "crypto_worker",
-                    "asset": asset,
-                    "timeframe": timeframe,
-                    "regime": regime,
-                    "start_time": start_time,
-                    "end_time": end_time,
-                    "seconds_left": float(seconds_left),
-                    "is_live": is_live,
-                    "is_current": is_current,
-                    "selected_direction": direction,
-                    "oracle_available": has_oracle,
-                    "oracle_age_seconds": self._float(market.get("oracle_age_seconds")),
-                    "oracle_updated_at_ms": self._float(market.get("oracle_updated_at_ms")),
-                    "oracle_status": dict(oracle_status),
-                    "oracle_source": oracle_status.get("source"),
-                    "oracle_prices_by_source": _json_safe(market.get("oracle_prices_by_source") or {}),
-                    "oracle_diff_pct": diff_pct,
-                    "taker_fee_gate": min_required_edge,
-                    "edge_percent": edge_percent,
-                    "spread": spread,
-                    "spread_widening_bps": self._float(market.get("spread_widening_bps")),
-                    "orderbook_imbalance": self._float(
-                        _first_present(
-                            market.get("orderbook_imbalance"),
-                            market.get("book_imbalance"),
-                            market.get("imbalance"),
-                        )
-                    ),
-                    "liquidity": liquidity,
-                    "volume": self._float(market.get("volume")) or 0.0,
-                    "price_to_beat": price_to_beat,
-                    "oracle_price": oracle_price,
-                    "live_market_fetched_at": live_market_fetched_at,
-                    "market_data_age_ms": market_data_age_ms,
-                }
                 opportunities.append(opp)
 
         return opportunities
+
+    def _build_detect_opportunity(
+        self,
+        *,
+        typed_market,
+        market: dict,
+        market_id: str,
+        slug: str,
+        asset: str,
+        timeframe: str,
+        regime: str,
+        direction: str,
+        side: str,
+        entry_price: float,
+        edge_percent: float,
+        confidence: float,
+        diff_pct: float,
+        min_required_edge: float,
+        spread: float,
+        liquidity: float,
+        has_oracle: bool,
+        oracle_status: dict,
+        oracle_price,
+        price_to_beat,
+        seconds_left: float,
+        is_live: bool,
+        is_current: bool,
+        start_time,
+        end_time,
+        live_market_fetched_at,
+        market_data_age_ms,
+        signal_family: str,
+        token_id,
+    ):
+        """Build and return an Opportunity for the detect/on_event path."""
+        opp = self.create_opportunity(
+            title=f"Crypto HF: {slug} {side}",
+            description=(
+                f"{regime} regime, {signal_family} | edge={edge_percent:.1f}%, conf={confidence:.0%}"
+            ),
+            total_cost=entry_price,
+            expected_payout=entry_price + (edge_percent / 100.0),
+            markets=[typed_market],
+            positions=[
+                {
+                    "action": "BUY",
+                    "outcome": side,
+                    "price": entry_price,
+                    "token_id": token_id,
+                    "post_only": True,
+                    "_maker_mode": True,
+                    "_maker_price": entry_price,
+                    "_crypto_context": {
+                        "signal_version": "crypto_worker_v3",
+                        "signal_family": signal_family,
+                        "strategy_origin": "crypto_worker",
+                        "selected_direction": direction,
+                        "asset": asset,
+                        "timeframe": timeframe,
+                        "regime": regime,
+                        "start_time": start_time,
+                        "end_time": end_time,
+                        "seconds_left": float(seconds_left),
+                        "is_live": is_live,
+                        "is_current": is_current,
+                        "oracle_available": has_oracle,
+                        "oracle_age_seconds": self._float(market.get("oracle_age_seconds")),
+                        "oracle_updated_at_ms": self._float(market.get("oracle_updated_at_ms")),
+                        "oracle_status": dict(oracle_status),
+                        "oracle_source": oracle_status.get("source"),
+                        "oracle_prices_by_source": _json_safe(market.get("oracle_prices_by_source") or {}),
+                        "oracle_diff_pct": diff_pct,
+                        "taker_fee_gate": min_required_edge,
+                        "edge_percent": edge_percent,
+                        "spread": spread,
+                        "spread_widening_bps": self._float(market.get("spread_widening_bps")),
+                        "orderbook_imbalance": self._float(
+                            _first_present(
+                                market.get("orderbook_imbalance"),
+                                market.get("book_imbalance"),
+                                market.get("imbalance"),
+                            )
+                        ),
+                        "liquidity": liquidity,
+                        "volume": self._float(market.get("volume")) or 0.0,
+                        "price_to_beat": price_to_beat,
+                        "oracle_price": oracle_price,
+                        "live_market_fetched_at": live_market_fetched_at,
+                        "market_data_age_ms": market_data_age_ms,
+                    },
+                }
+            ],
+            is_guaranteed=False,
+            skip_fee_model=True,
+            custom_roi_percent=edge_percent,
+            custom_risk_score=1.0 - confidence,
+            confidence=confidence,
+        )
+        if opp is not None:
+            opp.risk_factors = [
+                f"Crypto {regime} regime",
+                f"Signal family: {signal_family}",
+                f"Oracle directional (diff={diff_pct:+.3f}%)",
+                f"Oracle: {'available' if has_oracle else 'unavailable'}",
+            ]
+            opp.strategy_context = {
+                "source_key": "crypto",
+                "strategy_slug": self.strategy_type,
+                "strategy_origin": "crypto_worker",
+                "asset": asset,
+                "timeframe": timeframe,
+                "regime": regime,
+                "start_time": start_time,
+                "end_time": end_time,
+                "seconds_left": float(seconds_left),
+                "is_live": is_live,
+                "is_current": is_current,
+                "selected_direction": direction,
+                "oracle_available": has_oracle,
+                "oracle_age_seconds": self._float(market.get("oracle_age_seconds")),
+                "oracle_updated_at_ms": self._float(market.get("oracle_updated_at_ms")),
+                "oracle_status": dict(oracle_status),
+                "oracle_source": oracle_status.get("source"),
+                "oracle_prices_by_source": _json_safe(market.get("oracle_prices_by_source") or {}),
+                "oracle_diff_pct": diff_pct,
+                "taker_fee_gate": min_required_edge,
+                "edge_percent": edge_percent,
+                "spread": spread,
+                "spread_widening_bps": self._float(market.get("spread_widening_bps")),
+                "orderbook_imbalance": self._float(
+                    _first_present(
+                        market.get("orderbook_imbalance"),
+                        market.get("book_imbalance"),
+                        market.get("imbalance"),
+                    )
+                ),
+                "liquidity": liquidity,
+                "volume": self._float(market.get("volume")) or 0.0,
+                "price_to_beat": price_to_beat,
+                "oracle_price": oracle_price,
+                "live_market_fetched_at": live_market_fetched_at,
+                "market_data_age_ms": market_data_age_ms,
+            }
+        return opp
 
     @staticmethod
     def _float(value: object) -> float | None:
