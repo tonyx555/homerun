@@ -141,7 +141,7 @@ def test_crypto_highfreq_scope_schema_contains_include_exclude_fields():
 
 def test_crypto_highfreq_scope_defaults_include_stop_loss_policy():
     defaults = StrategySDK.crypto_highfreq_scope_defaults()
-    assert defaults["stop_loss_policy"] == "near_close_only"
+    assert defaults["stop_loss_policy"] == "always"
     assert defaults["stop_loss_activation_seconds"] == 90
     assert defaults["min_liquidity_usd"] == 250.0
     assert defaults["min_liquidity_usd_opening"] == 4000.0

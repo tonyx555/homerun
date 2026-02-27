@@ -288,12 +288,17 @@ CRYPTO_HF_SCOPE_DEFAULTS: dict[str, Any] = {
     "underwater_timeout_minutes_4h": 45.0,
     "underwater_timeout_loss_pct": 8.0,
     "take_profit_pct": 8.0,
-    "stop_loss_pct": 5.0,
-    "stop_loss_policy": "near_close_only",
-    "stop_loss_policy_5m": "near_close_only",
-    "stop_loss_policy_15m": "near_close_only",
-    "stop_loss_policy_1h": "near_close_only",
-    "stop_loss_policy_4h": "near_close_only",
+    "stop_loss_pct": 3.0,
+    "stop_loss_policy": "always",
+    "stop_loss_policy_5m": "always",
+    "stop_loss_policy_15m": "always",
+    "stop_loss_policy_1h": "always",
+    "stop_loss_policy_4h": "always",
+    "immediate_stop_loss_pct": 2.0,
+    "immediate_stop_loss_pct_5m": 1.5,
+    "immediate_stop_loss_pct_15m": 2.0,
+    "immediate_stop_loss_pct_1h": 3.0,
+    "immediate_stop_loss_pct_4h": 4.0,
     "stop_loss_activation_seconds": 90,
     "stop_loss_activation_seconds_5m": 45.0,
     "stop_loss_activation_seconds_15m": 120.0,
@@ -1159,10 +1164,7 @@ _LIMIT_SIGNIFICANT_VOLUME_USD = 10000.0  # High volume reduces fill probability
 _LIMIT_SIGNIFICANT_VOLUME_PENALTY = 0.4  # Multiplied against score
 _NEW_MARKET_VOLUME_THRESHOLD = 5000.0  # Markets with volume below this are "new"
 
-# -- Directional Edge scoring --
-_DIRECTIONAL_TREND_SCALE = 2.0  # Scale factor: trend -> probability adjustment
-_DIRECTIONAL_MODEL_PROB_MIN = 0.30  # Min model probability clamp
-_DIRECTIONAL_MODEL_PROB_MAX = 0.70  # Max model probability clamp
+# -- Directional Edge scoring (oracle-based) --
 _DIRECTIONAL_EARLY_PHASE_MINUTES = 10.0  # Remaining minutes for early/mid boundary
 _DIRECTIONAL_EARLY_MIN_EDGE = 0.08  # Required edge in early phase
 _DIRECTIONAL_EARLY_SCORE_MULT = 1.0
@@ -1173,11 +1175,25 @@ _DIRECTIONAL_LATE_MIN_EDGE = 0.03  # Required edge in late phase
 _DIRECTIONAL_LATE_SCORE_MULT = 2.0
 _DIRECTIONAL_EDGE_SCORE_SCALE = 500.0  # Score scale for edge magnitude
 _DIRECTIONAL_MAX_SCORE = 80.0  # Cap on directional score
-_DIRECTIONAL_STRONG_TREND_THRESHOLD = 0.05  # High trend strength
-_DIRECTIONAL_STRONG_TREND_BONUS = 15.0
-_DIRECTIONAL_MODERATE_TREND_THRESHOLD = 0.02  # Moderate trend strength
-_DIRECTIONAL_MODERATE_TREND_BONUS = 8.0
 _DIRECTIONAL_LATE_PHASE_BONUS = 20.0  # Extra score in late phase
+_DIRECTIONAL_ORACLE_PROB_MIN = 0.03  # Min/max model probability clamp (sigmoid)
+_DIRECTIONAL_ORACLE_PROB_MAX = 0.97
+_DIRECTIONAL_BASE_SCALE = 0.50  # Base sigmoid scale (diff_pct / scale)
+_DIRECTIONAL_MIN_SCALE = 0.08  # Min sigmoid scale (late in window)
+
+# -- Passive Quote (market-making) scoring --
+_PASSIVE_QUOTE_MIN_SPREAD = 0.02  # Minimum bid-ask spread ($0.02 = 2 cents)
+_PASSIVE_QUOTE_MIN_LIQUIDITY = 500.0  # Minimum market liquidity in USD
+_PASSIVE_QUOTE_MIN_SECONDS_LEFT = 60.0  # Minimum time remaining
+_PASSIVE_QUOTE_TICK_SIZE = 0.01  # 1 tick = $0.01
+_PASSIVE_QUOTE_BASE_SCORE = 15.0  # Base score for qualifying markets
+_PASSIVE_QUOTE_SPREAD_SCORE_SCALE = 300.0  # Score scale for spread width
+_PASSIVE_QUOTE_MAX_SCORE = 70.0  # Cap on passive quote score
+_PASSIVE_QUOTE_THIN_BOOK_USD = 1000.0  # Below this, higher fill probability
+_PASSIVE_QUOTE_THIN_BOOK_BONUS = 12.0
+_PASSIVE_QUOTE_MIN_SIZE_USD = 5.0  # Minimum position size per side
+_PASSIVE_QUOTE_MAX_SIZE_USD = 15.0  # Maximum position size per side
+_PASSIVE_QUOTE_RESOLUTION_RISK_SECONDS = 90.0  # Extra risk near resolution
 
 # Price history defaults
 _DEFAULT_HISTORY_WINDOW_SEC = 300  # 5 minutes for 15-min markets
@@ -1451,6 +1467,7 @@ class SubStrategy(str, Enum):
     DUMP_HEDGE = "dump_hedge"
     PRE_PLACED_LIMITS = "pre_placed_limits"
     DIRECTIONAL_EDGE = "directional_edge"
+    PASSIVE_QUOTE = "passive_quote"
 
 
 _SUB_STRATEGY_ALIASES: dict[str, SubStrategy] = {
@@ -1467,6 +1484,11 @@ _SUB_STRATEGY_ALIASES: dict[str, SubStrategy] = {
     "directional_edge": SubStrategy.DIRECTIONAL_EDGE,
     "directional": SubStrategy.DIRECTIONAL_EDGE,
     "edge_directional": SubStrategy.DIRECTIONAL_EDGE,
+    "passive_quote": SubStrategy.PASSIVE_QUOTE,
+    "passivequote": SubStrategy.PASSIVE_QUOTE,
+    "passive": SubStrategy.PASSIVE_QUOTE,
+    "market_make": SubStrategy.PASSIVE_QUOTE,
+    "maker": SubStrategy.PASSIVE_QUOTE,
 }
 
 
@@ -1927,6 +1949,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             self._score_dump_hedge(candidate),
             self._score_pre_placed_limits(candidate),
             self._score_directional_edge(candidate),
+            self._score_passive_quote(candidate),
         ]
         scores: list[SubStrategyScore] = []
         for score in candidate_scores:
@@ -2248,14 +2271,16 @@ class BtcEthHighFreqStrategy(BaseStrategy):
     # -- Sub-strategy D: Directional Edge scoring --
 
     def _score_directional_edge(self, c: HighFreqCandidate) -> SubStrategyScore:
-        """Score directional edge opportunity using Chainlink oracle prices.
+        """Score directional edge using oracle price vs price-to-beat.
 
-        Compares real-time Chainlink oracle price against the market's
-        "price to beat" to estimate probability of Up vs Down.  When the
-        model probability diverges from market-implied probability by >5%,
-        there's a directional edge.
+        Compares the real-time Chainlink oracle price against the oracle
+        price recorded at market open (the "price to beat") to compute
+        a sigmoid model probability of Up vs Down.  When this diverges
+        from the market-implied probability, there is a directional edge.
 
-        This is the primary alpha strategy for 15-minute crypto markets.
+        This replaces the old momentum-chasing approach that used
+        Polymarket order-book trend, which was the root cause of
+        money-losing trades (trading the market's own noise).
         """
         try:
             from services.chainlink_feed import get_chainlink_feed
@@ -2284,44 +2309,64 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 reason=f"Oracle price stale ({age_ms / 1000:.0f}s old)",
             )
 
-        # Extract "price to beat" from the market question
-        # E.g. "Bitcoin Up or Down - February 10, 10:15AM-10:30AM ET"
-        # The price to beat is the Chainlink price at start_time
-        # For now, we use the midpoint: if up_price > 0.5, market thinks Up
-        market_up_prob = c.yes_price  # Market-implied probability of Up
-        market_down_prob = c.no_price
+        oracle_price = oracle.price
 
-        # Build a simple directional model:
-        # If oracle price is trending in a direction, that direction is more likely
-        # The market at fair value has Up/Down both at ~0.50
-        # Any deviation > 5% from 0.50 implies the oracle is moving
-        price_history = self._price_histories.get(c.market.id)
-        if not price_history or len(price_history.snapshots) < 3:
+        # --- Derive price_to_beat from Chainlink history at market open ---
+        # The market's start time is end_date minus the timeframe duration.
+        # We look up the Chainlink price at that start timestamp.
+        _TF_SECONDS: dict[str, int] = {
+            "5min": 300, "15min": 900, "1hr": 3600, "4hr": 14400,
+        }
+        timeframe_seconds = _TF_SECONDS.get(c.timeframe, 900)
+
+        remaining_secs: Optional[float] = None
+        start_ts: Optional[float] = None
+        if c.market.end_date:
+            try:
+                if hasattr(c.market.end_date, "timestamp"):
+                    end_ts = c.market.end_date.timestamp()
+                else:
+                    end_str = str(c.market.end_date)
+                    end_ts = datetime.fromisoformat(end_str.replace("Z", "+00:00")).timestamp()
+                remaining_secs = max(0.0, end_ts - time.time())
+                start_ts = end_ts - float(timeframe_seconds)
+            except (ValueError, AttributeError):
+                pass
+
+        price_to_beat: Optional[float] = None
+        if start_ts is not None:
+            price_to_beat = feed.get_price_at_time(c.asset, start_ts)
+
+        if price_to_beat is None or price_to_beat <= 0.0:
             return SubStrategyScore(
                 strategy=SubStrategy.DIRECTIONAL_EDGE,
                 score=0.0,
-                reason="Insufficient price history for directional signal",
+                reason=(
+                    f"No price_to_beat for {c.asset} "
+                    f"(start_ts={'none' if start_ts is None else f'{start_ts:.0f}'})"
+                ),
             )
 
-        # Calculate model probability from market movement
-        # If yes_price (Up) has been rising, model should agree
-        snapshots = list(price_history.snapshots)
-        recent_yes = [s.yes_price for s in snapshots[-5:]]  # Last 5 yes prices
-        if len(recent_yes) < 3:
-            return SubStrategyScore(
-                strategy=SubStrategy.DIRECTIONAL_EDGE,
-                score=0.0,
-                reason="Not enough recent snapshots",
-            )
+        # --- Sigmoid model: oracle vs price_to_beat ---
+        diff_pct = ((oracle_price - price_to_beat) / price_to_beat) * 100.0
 
-        # Trend: is the market moving consistently in one direction?
-        trend = recent_yes[-1] - recent_yes[0]  # Positive = trending Up
-        trend_strength = abs(trend)
-
-        # Model probability: base 50/50, adjusted by trend
-        model_up = 0.50 + (trend * _DIRECTIONAL_TREND_SCALE)
-        model_up = max(_DIRECTIONAL_MODEL_PROB_MIN, min(_DIRECTIONAL_MODEL_PROB_MAX, model_up))
+        # Scale by time remaining: more aggressive (smaller scale) late in window
+        if remaining_secs is not None:
+            time_ratio = clamp(remaining_secs / float(max(1, timeframe_seconds)), 0.08, 1.0)
+        else:
+            time_ratio = 1.0
+        directional_scale = max(_DIRECTIONAL_MIN_SCALE, _DIRECTIONAL_BASE_SCALE * time_ratio)
+        directional_z = clamp(diff_pct / directional_scale, -60.0, 60.0)
+        model_up = clamp(
+            1.0 / (1.0 + math.exp(-directional_z)),
+            _DIRECTIONAL_ORACLE_PROB_MIN,
+            _DIRECTIONAL_ORACLE_PROB_MAX,
+        )
         model_down = 1.0 - model_up
+
+        # Market-implied probabilities
+        market_up_prob = c.yes_price
+        market_down_prob = c.no_price
 
         # Calculate edge: model vs market
         edge_up = model_up - market_up_prob
@@ -2330,23 +2375,8 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         best_side = "UP" if edge_up > edge_down else "DOWN"
         best_edge = edge_up if best_side == "UP" else edge_down
 
-        # Time-phase awareness: determine where we are in the 15-min window
-        # EARLY (10-15 min left): conservative, require large edge
-        # MID (5-10 min left): moderate thresholds
-        # LATE (<5 min left): aggressive, model is most reliable
-        remaining_secs = None
-        if c.market.end_date:
-            try:
-                end_str = str(c.market.end_date)
-                if hasattr(c.market.end_date, "timestamp"):
-                    end_ts = c.market.end_date.timestamp()
-                else:
-                    end_ts = datetime.fromisoformat(end_str.replace("Z", "+00:00")).timestamp()
-                remaining_secs = max(0, end_ts - time.time())
-            except (ValueError, AttributeError):
-                pass
-
-        remaining_min = (remaining_secs / 60.0) if remaining_secs else 15.0
+        # Time-phase awareness
+        remaining_min = (remaining_secs / 60.0) if remaining_secs is not None else 15.0
 
         if remaining_min > _DIRECTIONAL_EARLY_PHASE_MINUTES:
             phase = "EARLY"
@@ -2369,6 +2399,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                     f"Edge too small ({phase}): {best_side} edge={best_edge:.3f} "
                     f"(need >{min_edge:.2f}), model_up={model_up:.2f} "
                     f"vs market_up={market_up_prob:.3f}, "
+                    f"diff_pct={diff_pct:+.4f}%, "
                     f"{remaining_min:.1f}min left"
                 ),
             )
@@ -2376,13 +2407,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         # Score based on edge size, amplified by time phase
         score = min(best_edge * _DIRECTIONAL_EDGE_SCORE_SCALE * score_multiplier, _DIRECTIONAL_MAX_SCORE)
 
-        # Bonus for trend strength
-        if trend_strength > _DIRECTIONAL_STRONG_TREND_THRESHOLD:
-            score += _DIRECTIONAL_STRONG_TREND_BONUS
-        elif trend_strength > _DIRECTIONAL_MODERATE_TREND_THRESHOLD:
-            score += _DIRECTIONAL_MODERATE_TREND_BONUS
-
-        # LATE phase bonus: we're most confident here
+        # LATE phase bonus: oracle signal is most predictive near resolution
         if phase == "LATE":
             score += _DIRECTIONAL_LATE_PHASE_BONUS
 
@@ -2396,8 +2421,9 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             reason=(
                 f"Directional {best_side} ({phase}, {remaining_min:.0f}m left): "
                 f"edge={best_edge:.3f}, model_up={model_up:.2f}, "
-                f"market_up={market_up_prob:.3f}, trend={trend:+.4f}, "
-                f"fee={buy_fee:.4f}"
+                f"market_up={market_up_prob:.3f}, "
+                f"oracle={oracle_price:.2f}, ptb={price_to_beat:.2f}, "
+                f"diff_pct={diff_pct:+.4f}%, fee={buy_fee:.4f}"
             ),
             params={
                 "side": best_side,
@@ -2407,11 +2433,142 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 "market_up": market_up_prob,
                 "market_down": market_down_prob,
                 "buy_price": buy_price,
-                "oracle_price": oracle.price,
-                "trend": trend,
-                "trend_strength": trend_strength,
+                "oracle_price": oracle_price,
+                "price_to_beat": price_to_beat,
+                "diff_pct": diff_pct,
                 "phase": phase,
                 "remaining_minutes": remaining_min,
+            },
+        )
+
+    # -- Sub-strategy E: Passive Quote (market-making) scoring --
+
+    def _score_passive_quote(self, c: HighFreqCandidate) -> SubStrategyScore:
+        """Score passive quoting (market-making) opportunity.
+
+        Places post_only limit orders on BOTH YES and NO sides to earn
+        the bid-ask spread plus maker rebates.  Direction-agnostic: does
+        not need to predict whether the asset goes up or down.
+
+        Requirements:
+          - Spread > 2 cents (otherwise not worth the resolution risk)
+          - Liquidity > $500 (need reasonable fill probability)
+          - Seconds remaining > 60 (avoid resolution-window risk)
+        """
+        spread = abs(1.0 - c.yes_price - c.no_price)
+        if spread < _PASSIVE_QUOTE_MIN_SPREAD:
+            return SubStrategyScore(
+                strategy=SubStrategy.PASSIVE_QUOTE,
+                score=0.0,
+                reason=f"Spread too narrow ({spread:.4f} < {_PASSIVE_QUOTE_MIN_SPREAD})",
+            )
+
+        liquidity = c.market.liquidity
+        if liquidity < _PASSIVE_QUOTE_MIN_LIQUIDITY:
+            return SubStrategyScore(
+                strategy=SubStrategy.PASSIVE_QUOTE,
+                score=0.0,
+                reason=f"Liquidity too low (${liquidity:.0f} < ${_PASSIVE_QUOTE_MIN_LIQUIDITY:.0f})",
+            )
+
+        # Calculate seconds remaining
+        remaining_secs: Optional[float] = None
+        if c.market.end_date:
+            try:
+                if hasattr(c.market.end_date, "timestamp"):
+                    end_ts = c.market.end_date.timestamp()
+                else:
+                    end_str = str(c.market.end_date)
+                    end_ts = datetime.fromisoformat(end_str.replace("Z", "+00:00")).timestamp()
+                remaining_secs = max(0.0, end_ts - time.time())
+            except (ValueError, AttributeError):
+                pass
+
+        if remaining_secs is not None and remaining_secs < _PASSIVE_QUOTE_MIN_SECONDS_LEFT:
+            return SubStrategyScore(
+                strategy=SubStrategy.PASSIVE_QUOTE,
+                score=0.0,
+                reason=f"Too close to resolution ({remaining_secs:.0f}s < {_PASSIVE_QUOTE_MIN_SECONDS_LEFT:.0f}s)",
+            )
+
+        # Quote prices: 1 tick below each side's current ask
+        quote_yes = c.yes_price - _PASSIVE_QUOTE_TICK_SIZE
+        quote_no = c.no_price - _PASSIVE_QUOTE_TICK_SIZE
+
+        if quote_yes <= 0.01 or quote_no <= 0.01:
+            return SubStrategyScore(
+                strategy=SubStrategy.PASSIVE_QUOTE,
+                score=0.0,
+                reason="Quote price too low after tick adjustment",
+            )
+
+        # Expected spread capture per pair: if both sides fill,
+        # we pay (quote_yes + quote_no) and receive $1.00 at resolution.
+        combined_cost = quote_yes + quote_no
+        spread_capture = max(0.0, 1.0 - combined_cost)
+
+        # Fill probability: higher when liquidity is lower (thin books fill more)
+        if liquidity < _PASSIVE_QUOTE_THIN_BOOK_USD:
+            fill_prob = clamp(0.6 + 0.3 * (1.0 - liquidity / _PASSIVE_QUOTE_THIN_BOOK_USD), 0.3, 0.9)
+        else:
+            fill_prob = clamp(0.5 - 0.2 * (liquidity / 10000.0), 0.1, 0.5)
+
+        # Resolution risk: if only one side fills, we're exposed directionally.
+        # Risk increases as we approach resolution.
+        if remaining_secs is not None and remaining_secs < _PASSIVE_QUOTE_RESOLUTION_RISK_SECONDS:
+            resolution_risk = 0.15 * (1.0 - remaining_secs / _PASSIVE_QUOTE_RESOLUTION_RISK_SECONDS)
+        else:
+            resolution_risk = 0.0
+
+        expected_profit = spread_capture * fill_prob - resolution_risk
+        if expected_profit <= 0.0:
+            return SubStrategyScore(
+                strategy=SubStrategy.PASSIVE_QUOTE,
+                score=0.0,
+                reason=(
+                    f"Negative EV: spread_capture={spread_capture:.4f}, "
+                    f"fill_prob={fill_prob:.2f}, resolution_risk={resolution_risk:.4f}"
+                ),
+            )
+
+        # Build score
+        score = _PASSIVE_QUOTE_BASE_SCORE + spread_capture * _PASSIVE_QUOTE_SPREAD_SCORE_SCALE
+
+        # Thin book bonus
+        if liquidity < _PASSIVE_QUOTE_THIN_BOOK_USD:
+            score += _PASSIVE_QUOTE_THIN_BOOK_BONUS
+
+        score = min(score, _PASSIVE_QUOTE_MAX_SCORE)
+
+        # Position size: scale between min and max based on spread
+        size_ratio = clamp(spread_capture / 0.06, 0.0, 1.0)
+        size_usd = _PASSIVE_QUOTE_MIN_SIZE_USD + size_ratio * (
+            _PASSIVE_QUOTE_MAX_SIZE_USD - _PASSIVE_QUOTE_MIN_SIZE_USD
+        )
+
+        return SubStrategyScore(
+            strategy=SubStrategy.PASSIVE_QUOTE,
+            score=score,
+            reason=(
+                f"Passive quote: spread={spread:.4f}, "
+                f"combined=${combined_cost:.4f}, "
+                f"spread_capture=${spread_capture:.4f}, "
+                f"fill_prob={fill_prob:.2f}, "
+                f"EV=${expected_profit:.4f}, "
+                f"liq=${liquidity:.0f}, "
+                f"size=${size_usd:.1f}/side"
+            ),
+            params={
+                "quote_yes": quote_yes,
+                "quote_no": quote_no,
+                "combined_cost": combined_cost,
+                "spread_capture": spread_capture,
+                "fill_probability": fill_prob,
+                "expected_profit": expected_profit,
+                "resolution_risk": resolution_risk,
+                "size_usd": size_usd,
+                "liquidity": liquidity,
+                "remaining_seconds": remaining_secs,
             },
         )
 
@@ -2439,6 +2596,8 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             return self._generate_pre_placed_limits(candidate, params)
         elif sub == SubStrategy.DIRECTIONAL_EDGE:
             return self._generate_directional_edge(candidate, params)
+        elif sub == SubStrategy.PASSIVE_QUOTE:
+            return self._generate_passive_quote(candidate, params)
 
         logger.warning(
             "BtcEthHighFreq: unknown sub-strategy %s for market %s",
@@ -2653,6 +2812,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                     "token_id": token_id,
                     "_maker_mode": maker_mode,
                     "_maker_price": buy_price,
+                    "post_only": maker_mode,
                 }
             ]
 
@@ -2691,6 +2851,88 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             )
         return opp
 
+    def _generate_passive_quote(
+        self,
+        c: HighFreqCandidate,
+        params: dict,
+    ) -> Optional[Opportunity]:
+        """Generate opportunity for sub-strategy E: Passive Quote.
+
+        Places post_only limit buy orders on BOTH YES and NO sides,
+        1 tick below each side's current ask.  Earns the bid-ask spread
+        plus maker rebates when both sides fill.
+        """
+        market = c.market
+        quote_yes = params["quote_yes"]
+        quote_no = params["quote_no"]
+        combined_cost = params["combined_cost"]
+        size_usd = params["size_usd"]
+
+        positions: list[dict] = []
+        if market.clob_token_ids and len(market.clob_token_ids) >= 2:
+            positions = [
+                {
+                    "action": "LIMIT_BUY",
+                    "outcome": "YES",
+                    "price": quote_yes,
+                    "token_id": market.clob_token_ids[0],
+                    "post_only": True,
+                    "_maker_mode": True,
+                    "_maker_price": quote_yes,
+                    "note": f"Passive quote YES @ ${quote_yes:.2f}",
+                },
+                {
+                    "action": "LIMIT_BUY",
+                    "outcome": "NO",
+                    "price": quote_no,
+                    "token_id": market.clob_token_ids[1],
+                    "post_only": True,
+                    "_maker_mode": True,
+                    "_maker_price": quote_no,
+                    "note": f"Passive quote NO @ ${quote_no:.2f}",
+                },
+            ]
+
+        spread_capture = params["spread_capture"]
+        expected_profit = params["expected_profit"]
+
+        opp = self.create_opportunity(
+            title=(
+                f"BTC/ETH HF Passive Quote: {c.asset} {c.timeframe} "
+                f"(spread ${spread_capture:.3f})"
+            ),
+            description=(
+                f"Passive quoting on {c.asset} {c.timeframe} market. "
+                f"Quote YES@${quote_yes:.2f} + NO@${quote_no:.2f} = "
+                f"${combined_cost:.4f} for $1.00 payout. "
+                f"Spread capture: ${spread_capture:.4f}. "
+                f"Post-only maker orders (0% taker fee + rebates)."
+            ),
+            total_cost=combined_cost,
+            expected_payout=1.0,
+            markets=[market],
+            positions=positions,
+            is_guaranteed=False,
+            min_liquidity_hard=0.0,
+            min_position_size=0.0,
+            min_absolute_profit=0.0,
+        )
+
+        if opp is not None:
+            opp.max_position_size = max(opp.max_position_size, size_usd * 2.0)
+            self._attach_highfreq_metadata(
+                opp,
+                c,
+                SubStrategy.PASSIVE_QUOTE,
+                params,
+            )
+            opp.risk_factors.insert(
+                0,
+                "Passive quote: profit requires BOTH sides filling; "
+                "single-side fill creates directional exposure",
+            )
+        return opp
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -2713,6 +2955,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                     "token_id": market.clob_token_ids[0],
                     "_maker_mode": maker_mode,
                     "_maker_price": yes_price,
+                    "post_only": maker_mode,
                 },
                 {
                     "action": "BUY",
@@ -2721,6 +2964,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                     "token_id": market.clob_token_ids[1],
                     "_maker_mode": maker_mode,
                     "_maker_price": no_price,
+                    "post_only": maker_mode,
                 },
             ]
         return positions
@@ -3634,7 +3878,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
 
         directional_entry_price_floor = max(
             0.0,
-            to_float(params.get("directional_min_entry_price_floor", 0.10), 0.10),
+            to_float(params.get("directional_min_entry_price_floor", 0.25), 0.25),
         )
         rebalance_entry_price_floor = max(
             directional_entry_price_floor,
@@ -4102,7 +4346,16 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             )
 
         # --- Position sizing ---
-        edge_boost = 1.0 + max(0.0, edge_for_gate - required_edge) / 30.0
+        # Historical data shows edge calibration is inverted: higher reported
+        # edge correlates with worse outcomes. Use a conservative, capped
+        # edge boost that penalises suspiciously large edges.
+        edge_excess = max(0.0, edge_for_gate - required_edge)
+        if edge_excess > 15.0:
+            # Suspiciously large edge — size DOWN (inverted calibration)
+            edge_boost = max(0.5, 1.0 - (edge_excess - 15.0) / 60.0)
+        else:
+            # Moderate edge — small linear boost, capped
+            edge_boost = 1.0 + min(edge_excess / 50.0, 0.3)
         conf_boost = 0.8 + (confidence * 0.8)
         size = (
             base_size
@@ -4223,11 +4476,11 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         config.setdefault("rapid_take_profit_pct", defaults.get("rapid_take_profit_pct", 10.0))
         config.setdefault("take_profit_pct", defaults.get("take_profit_pct", 8.0))
         config.setdefault("stop_loss_pct", to_float(defaults.get("stop_loss_pct"), 4.0))
-        default_stop_loss_policy = str(defaults.get("stop_loss_policy") or "near_close_only").strip().lower()
+        default_stop_loss_policy = str(defaults.get("stop_loss_policy") or "always").strip().lower()
         if default_stop_loss_policy in {"near_close", "close_window"}:
             default_stop_loss_policy = "near_close_only"
         if default_stop_loss_policy not in {"always", "near_close_only", "volatility_adaptive"}:
-            default_stop_loss_policy = "near_close_only"
+            default_stop_loss_policy = "always"
         config.setdefault("stop_loss_policy", default_stop_loss_policy)
         config.setdefault(
             "stop_loss_activation_seconds",
@@ -4374,6 +4627,26 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         current_price = self._float(state.get("current_price"))
         if entry_price is not None and entry_price > 0.0 and current_price is not None and current_price > 0.0:
             pnl_pct = ((current_price - entry_price) / entry_price) * 100.0
+
+            # --- IMMEDIATE stop-loss (always active, regardless of policy) ---
+            immediate_stop_loss_pct = max(0.5, to_float(config.get("immediate_stop_loss_pct"), 2.0))
+            immediate_stop_loss_pct_override = _timeframe_override(config, "immediate_stop_loss_pct", timeframe)
+            if immediate_stop_loss_pct_override is not None:
+                immediate_stop_loss_pct = max(0.5, to_float(immediate_stop_loss_pct_override, 2.0))
+            if pnl_pct <= -immediate_stop_loss_pct:
+                context_payload["_crypto_hf_rapid_exit_state"] = context_payload.get("_crypto_hf_rapid_exit_state", {})
+                return {
+                    "config": config,
+                    "decision": {
+                        "action": "close",
+                        "reason": (
+                            f"Immediate stop-loss triggered "
+                            f"(pnl={pnl_pct:.2f}% <= -{immediate_stop_loss_pct:.1f}%)"
+                        ),
+                        "close_price": current_price,
+                    },
+                }
+
             take_profit_pct = max(0.1, to_float(config.get("take_profit_pct"), 8.0))
             rapid_take_profit_pct = max(0.1, to_float(config.get("rapid_take_profit_pct"), 10.0))
             rapid_arm_pct = max(

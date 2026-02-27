@@ -55,6 +55,7 @@ async def execute_live_order(
     time_in_force: str = "GTC",
     post_only: bool = False,
     resolve_live_price: bool = True,
+    prefer_cached_price: bool = True,
 ) -> LiveOrderExecution:
     normalized_token_id = str(token_id or "").strip()
     normalized_side = _normalize_side(side)
@@ -108,10 +109,49 @@ async def execute_live_order(
         price_resolution = "fallback_price"
         try:
             live_quote = None
-            if normalized_side == OrderSide.BUY:
-                live_quote = safe_float(await polymarket_client.get_price(normalized_token_id, side="BUY"))
-            else:
-                live_quote = safe_float(await polymarket_client.get_price(normalized_token_id, side="SELL"))
+
+            # Fast path: try cached prices before HTTP
+            if prefer_cached_price:
+                # Try WS in-memory cache first (sub-10ms)
+                try:
+                    from services.ws_feeds import get_feed_manager
+                    fm = get_feed_manager()
+                    if fm.cache.is_fresh(normalized_token_id):
+                        cached = fm.cache.get_mid_price(normalized_token_id)
+                        if cached is not None and cached > 0:
+                            cached_notional = float(cached) * requested_size
+                            if cached_notional + 1e-9 >= min_order_size:
+                                live_quote = cached
+                                price_resolution = "ws_cache"
+                except Exception:
+                    pass
+
+                # Try Redis cross-process cache (~5ms)
+                if live_quote is None:
+                    try:
+                        from services.redis_price_cache import redis_price_cache
+                        redis_result = await redis_price_cache.read_prices([normalized_token_id])
+                        redis_entry = redis_result.get(normalized_token_id)
+                        if redis_entry is not None:
+                            mid = safe_float(redis_entry.get("mid"))
+                            if mid is not None and mid > 0:
+                                redis_notional = float(mid) * requested_size
+                                if redis_notional + 1e-9 >= min_order_size:
+                                    live_quote = mid
+                                    price_resolution = "redis_cache"
+                    except Exception:
+                        pass
+
+            # Slow path: HTTP API call (50-500ms)
+            if live_quote is None:
+                if normalized_side == OrderSide.BUY:
+                    live_quote = safe_float(await polymarket_client.get_price(normalized_token_id, side="BUY"))
+                else:
+                    live_quote = safe_float(await polymarket_client.get_price(normalized_token_id, side="SELL"))
+                if live_quote is not None and live_quote > 0:
+                    price_resolution = "live_quote"
+
+            # Apply the resolved price with min notional guard
             if live_quote is not None and live_quote > 0:
                 live_notional = float(live_quote) * requested_size
                 fallback_notional = (float(fallback) * requested_size) if fallback is not None and fallback > 0 else 0.0
@@ -125,7 +165,6 @@ async def execute_live_order(
                     price_resolution = "fallback_min_notional_guard"
                 else:
                     resolved_price = live_quote
-                    price_resolution = "live_quote"
         except Exception as exc:
             logger.warning(
                 "Live quote resolution failed; using fallback price",
