@@ -9,13 +9,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from config import apply_runtime_settings_overrides, settings
 from models.database import AsyncSessionLocal
+from services.redis_price_cache import redis_price_cache
 from services.scanner import scanner
-from services.shared_state import read_market_catalog
+from services.shared_state import read_market_catalog, read_scanner_status
 from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.worker_state import clear_worker_run_request, read_worker_control, write_worker_snapshot
 from utils.logger import setup_logging
@@ -27,13 +29,47 @@ logger = logging.getLogger("market_universe_worker")
 
 async def _read_catalog_stats() -> dict[str, Any]:
     async with AsyncSessionLocal() as session:
-        _, _, metadata = await read_market_catalog(session)
+        _, markets, metadata = await read_market_catalog(session)
+        scanner_status = await read_scanner_status(session, include_opportunity_count=False)
+
+    token_ids: list[str] = []
+    market_token_pairs: list[tuple[str, str]] = []
+    for market in markets:
+        raw_tokens = list(getattr(market, "clob_token_ids", None) or [])
+        clean_tokens = [str(token_id or "").strip() for token_id in raw_tokens if str(token_id or "").strip()]
+        if len(clean_tokens) < 2:
+            continue
+        yes_token = clean_tokens[0]
+        no_token = clean_tokens[1]
+        market_token_pairs.append((yes_token, no_token))
+        token_ids.extend((yes_token, no_token))
+
+    deduped_tokens = sorted({token for token in token_ids if token})
+    fresh_prices = await redis_price_cache.read_prices(deduped_tokens) if deduped_tokens else {}
+    fresh_tokens = set(fresh_prices.keys())
+    stale_markets = 0
+    for yes_token, no_token in market_token_pairs:
+        if yes_token not in fresh_tokens or no_token not in fresh_tokens:
+            stale_markets += 1
+
+    tiered = scanner_status.get("tiered_scanning") or {}
+    scanned_markets = int(
+        tiered.get("full_snapshot_cycle_processed_markets")
+        or tiered.get("last_full_snapshot_chunk_market_count")
+        or 0
+    )
+    total_markets = int(metadata.get("market_count") or 0)
+    coverage_ratio = round(float(scanned_markets) / float(total_markets), 6) if total_markets > 0 else None
+
     updated_at = metadata.get("updated_at")
     updated_iso = updated_at.isoformat() if isinstance(updated_at, datetime) else None
     return {
         "catalog_updated_at": updated_iso,
         "event_count": int(metadata.get("event_count") or 0),
         "market_count": int(metadata.get("market_count") or 0),
+        "scanned_markets": scanned_markets,
+        "stale_markets": stale_markets,
+        "coverage_ratio": coverage_ratio,
         "fetch_duration_seconds": (
             float(metadata.get("fetch_duration_seconds"))
             if metadata.get("fetch_duration_seconds") is not None
@@ -67,8 +103,14 @@ async def _run_loop() -> None:
         "activity": "Market universe worker started; first refresh pending.",
         "last_error": None,
         "last_run_at": None,
+        "run_id": None,
+        "phase": "idle",
+        "progress": 0.0,
         "last_market_count": 0,
         "last_event_count": 0,
+        "last_scanned_markets": 0,
+        "last_stale_markets": 0,
+        "last_coverage_ratio": None,
         "catalog_updated_at": None,
         "fetch_duration_seconds": None,
     }
@@ -99,8 +141,14 @@ async def _run_loop() -> None:
                 last_run_at=loop_state.get("last_run_at"),
                 last_error=(str(loop_state["last_error"]) if loop_state.get("last_error") is not None else None),
                 stats={
+                    "run_id": loop_state.get("run_id"),
+                    "phase": loop_state.get("phase"),
+                    "progress": float(loop_state.get("progress", 0.0) or 0.0),
                     "event_count": int(loop_state.get("last_event_count", 0) or 0),
                     "market_count": int(loop_state.get("last_market_count", 0) or 0),
+                    "scanned_markets": int(loop_state.get("last_scanned_markets", 0) or 0),
+                    "stale_markets": int(loop_state.get("last_stale_markets", 0) or 0),
+                    "coverage_ratio": loop_state.get("last_coverage_ratio"),
                     "catalog_updated_at": loop_state.get("catalog_updated_at"),
                     "fetch_duration_seconds": loop_state.get("fetch_duration_seconds"),
                 },
@@ -144,23 +192,35 @@ async def _run_loop() -> None:
             state["interval_seconds"] = interval_seconds
 
             if not should_run:
+                state["phase"] = "idle"
+                state["progress"] = 0.0
                 state["activity"] = "Paused" if paused else "Idle - waiting for next catalog refresh."
                 await asyncio.sleep(min(5.0, float(interval_seconds)))
                 continue
 
+            state["run_id"] = uuid.uuid4().hex[:16]
+            state["phase"] = "refresh_catalog"
+            state["progress"] = 0.2
             state["activity"] = "Refreshing market universe catalog..."
             try:
                 market_count = await asyncio.wait_for(scanner.refresh_catalog(), timeout=float(refresh_timeout))
+                state["phase"] = "read_coverage"
+                state["progress"] = 0.75
                 catalog_stats = await _read_catalog_stats()
                 state["last_market_count"] = int(catalog_stats.get("market_count") or market_count or 0)
                 state["last_event_count"] = int(catalog_stats.get("event_count") or 0)
+                state["last_scanned_markets"] = int(catalog_stats.get("scanned_markets") or 0)
+                state["last_stale_markets"] = int(catalog_stats.get("stale_markets") or 0)
+                state["last_coverage_ratio"] = catalog_stats.get("coverage_ratio")
                 state["catalog_updated_at"] = catalog_stats.get("catalog_updated_at")
                 state["fetch_duration_seconds"] = catalog_stats.get("fetch_duration_seconds")
                 state["last_error"] = None
                 state["last_run_at"] = utcnow()
+                state["phase"] = "idle"
+                state["progress"] = 1.0
                 state["activity"] = (
                     f"Market universe refresh complete: {state['last_event_count']} events, "
-                    f"{state['last_market_count']} markets."
+                    f"{state['last_market_count']} markets ({state['last_stale_markets']} stale)."
                 )
                 async with AsyncSessionLocal() as session:
                     await clear_worker_run_request(session, worker_name)
@@ -169,6 +229,8 @@ async def _run_loop() -> None:
                 raise
             except Exception as exc:
                 state["last_error"] = str(exc)
+                state["phase"] = "error"
+                state["progress"] = 1.0
                 state["activity"] = f"Market universe refresh error: {exc}"
                 logger.exception("Market universe refresh cycle failed: %s", exc)
                 async with AsyncSessionLocal() as session:

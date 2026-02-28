@@ -146,6 +146,7 @@ const NAV_ITEMS: { id: Tab; icon: React.ElementType; label: string; shortcut: st
 type WorkerHealthTone = 'green' | 'amber' | 'red'
 
 const WORKER_HEALTH_ORDER = [
+  'market_data',
   'market_universe',
   'scanner',
   'opportunity_aggregator',
@@ -160,6 +161,7 @@ const WORKER_HEALTH_ORDER = [
 ] as const
 
 const WORKER_HEALTH_LABELS: Record<string, string> = {
+  market_data: 'Market Data',
   market_universe: 'Market Universe',
   scanner: 'Scanner',
   opportunity_aggregator: 'Opportunity Aggregator',
@@ -717,15 +719,6 @@ function App() {
     return Array.from(channels)
   }, [activeTab, opportunitiesView, dataView])
 
-  useEffect(() => {
-    if (!isConnected) return
-    sendMessage({
-      type: 'subscribe',
-      channels: wsChannels,
-      visible: typeof document === 'undefined' ? true : document.visibilityState === 'visible',
-    })
-  }, [isConnected, wsChannels, sendMessage])
-
   // Reset page when filters change
   useEffect(() => {
     setCurrentPage(0)
@@ -775,6 +768,45 @@ function App() {
 
   const opportunities = opportunitiesData?.opportunities || []
   const totalOpportunities = opportunitiesData?.total || 0
+
+  const wsTopics = useMemo(() => {
+    const topics = new Set<string>(['opportunities.summary'])
+    if (activeTab !== 'opportunities') {
+      return Array.from(topics)
+    }
+    topics.add('opportunities.detail:*')
+    if (opportunitiesView !== 'scanner') {
+      return Array.from(topics)
+    }
+    const marketIds = new Set<string>()
+    for (const opportunity of opportunities as Opportunity[]) {
+      const markets = Array.isArray(opportunity?.markets) ? opportunity.markets : []
+      for (const market of markets) {
+        const rawMarketId = String(market?.condition_id || market?.conditionId || market?.id || '').trim().toLowerCase()
+        if (!rawMarketId) continue
+        marketIds.add(rawMarketId)
+        if (marketIds.size >= 80) break
+      }
+      if (marketIds.size >= 80) break
+    }
+    if (marketIds.size === 0) {
+      return Array.from(topics)
+    }
+    for (const marketId of marketIds) {
+      topics.add(`prices:${marketId}`)
+    }
+    return Array.from(topics)
+  }, [activeTab, opportunitiesView, opportunities])
+
+  useEffect(() => {
+    if (!isConnected) return
+    sendMessage({
+      type: 'subscribe',
+      channels: wsChannels,
+      topics: wsTopics,
+      visible: typeof document === 'undefined' ? true : document.visibilityState === 'visible',
+    })
+  }, [isConnected, wsChannels, wsTopics, sendMessage])
 
   const {
     data: status,

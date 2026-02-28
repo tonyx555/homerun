@@ -2098,12 +2098,14 @@ class OpportunityState(Base):
     opportunity_json = Column(JSON, nullable=False)
     first_seen_at = Column(DateTime, default=_utcnow, nullable=False)
     last_seen_at = Column(DateTime, nullable=False)
+    last_updated_at = Column(DateTime, default=_utcnow, nullable=False)
     is_active = Column(Boolean, nullable=False, default=True)
     last_run_id = Column(String, ForeignKey("scanner_runs.id"), nullable=True)
 
     __table_args__ = (
         Index("idx_opportunity_state_active", "is_active"),
         Index("idx_opportunity_state_last_seen", "last_seen_at"),
+        Index("idx_opportunity_state_last_updated", "last_updated_at"),
         Index("idx_opportunity_state_last_run", "last_run_id"),
     )
 

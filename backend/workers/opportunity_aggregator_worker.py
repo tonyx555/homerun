@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -19,6 +20,7 @@ from models.opportunity import Opportunity
 from services.shared_state import (
     claim_next_scanner_batch,
     cleanup_processed_scanner_batches,
+    count_dead_letter_scanner_batches,
     count_pending_scanner_batches,
     mark_scanner_batch_failed,
     mark_scanner_batch_processed,
@@ -101,9 +103,13 @@ async def _run_loop() -> None:
         "activity": "Aggregator worker started; waiting for scanner batches.",
         "last_error": None,
         "last_run_at": None,
+        "run_id": None,
+        "phase": "idle",
+        "progress": 0.0,
         "processed_batches": 0,
         "last_batch_id": None,
         "pending_batches": 0,
+        "dead_letter_batches": 0,
         "signals_emitted_last_run": 0,
     }
     heartbeat_stop_event = asyncio.Event()
@@ -113,7 +119,9 @@ async def _run_loop() -> None:
             try:
                 async with AsyncSessionLocal() as session:
                     pending = await count_pending_scanner_batches(session)
+                    dead_letter = await count_dead_letter_scanner_batches(session)
                     state["pending_batches"] = int(pending)
+                    state["dead_letter_batches"] = int(dead_letter)
                     await write_worker_snapshot(
                         session,
                         worker_name,
@@ -124,8 +132,12 @@ async def _run_loop() -> None:
                         last_run_at=state.get("last_run_at"),
                         last_error=(str(state["last_error"]) if state.get("last_error") is not None else None),
                         stats={
+                            "run_id": state.get("run_id"),
+                            "phase": state.get("phase"),
+                            "progress": float(state.get("progress", 0.0) or 0.0),
                             "processed_batches": int(state.get("processed_batches", 0) or 0),
                             "pending_batches": int(state.get("pending_batches", 0) or 0),
+                            "dead_letter_batches": int(state.get("dead_letter_batches", 0) or 0),
                             "last_batch_id": state.get("last_batch_id"),
                             "signals_emitted_last_run": int(state.get("signals_emitted_last_run", 0) or 0),
                         },
@@ -158,6 +170,8 @@ async def _run_loop() -> None:
             state["interval_seconds"] = max(1, int(round(idle_sleep)))
 
             if not enabled and not requested:
+                state["phase"] = "idle"
+                state["progress"] = 0.0
                 state["activity"] = "Paused"
                 await asyncio.sleep(heartbeat_interval)
                 continue
@@ -171,6 +185,9 @@ async def _run_loop() -> None:
                 )
 
             if batch is None:
+                state["run_id"] = uuid.uuid4().hex[:16]
+                state["phase"] = "idle"
+                state["progress"] = 0.0
                 state["activity"] = "Idle - waiting for scanner batches."
                 state["signals_emitted_last_run"] = 0
                 await asyncio.sleep(idle_sleep)
@@ -185,6 +202,9 @@ async def _run_loop() -> None:
                         skipped,
                         batch_id,
                     )
+                state["run_id"] = uuid.uuid4().hex[:16]
+                state["phase"] = "aggregate_batch"
+                state["progress"] = 0.2
                 state["activity"] = (
                     f"Aggregating scanner batch {batch_id} ({batch_kind}) with {len(opportunities)} opportunities..."
                 )
@@ -211,6 +231,8 @@ async def _run_loop() -> None:
                     state["signals_emitted_last_run"] = int(emitted)
                     state["last_error"] = None
                     state["last_run_at"] = utcnow()
+                    state["phase"] = "idle"
+                    state["progress"] = 1.0
                     state["activity"] = (
                         f"Aggregated scanner batch {batch_id}: {len(opportunities)} opportunities, {int(emitted)} signals."
                     )
@@ -221,6 +243,8 @@ async def _run_loop() -> None:
                     requeue = attempt_count < max_attempts
                     state["last_error"] = str(exc)
                     state["signals_emitted_last_run"] = 0
+                    state["phase"] = "error"
+                    state["progress"] = 1.0
                     state["activity"] = f"Aggregator batch error: {exc}"
                     logger.exception(
                         "Failed processing scanner batch %s (attempt=%d requeue=%s)",

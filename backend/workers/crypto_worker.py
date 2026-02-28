@@ -737,6 +737,8 @@ async def _run_loop() -> None:
         nonlocal ws_feed_retry_delay_seconds
         nonlocal ws_feed_next_retry_monotonic
         nonlocal ws_reactive_callback_registered
+        if bool(getattr(settings, "MARKET_DATA_WORKER_OWNS_WS", True)):
+            return
         if ws_feeds_running or not settings.WS_FEED_ENABLED:
             return
         now_monotonic = time.monotonic()
@@ -779,6 +781,13 @@ async def _run_loop() -> None:
     def _snapshot_ws_feed_status() -> dict[str, object]:
         if not settings.WS_FEED_ENABLED:
             return {"healthy": False, "started": False, "enabled": False}
+        if bool(getattr(settings, "MARKET_DATA_WORKER_OWNS_WS", True)):
+            return {
+                "healthy": True,
+                "started": False,
+                "enabled": True,
+                "owner": "market_data_worker",
+            }
         if not ws_feeds_running or feed_manager is None:
             return {"healthy": False, "started": False, "enabled": True}
         try:

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -216,6 +217,9 @@ async def _run_scan_loop() -> None:
         "interval_seconds": 60,
         "last_error": None,
         "last_run_at": None,
+        "run_id": None,
+        "phase": "idle",
+        "progress": 0.0,
         "queue_pending": 0,
         "dropped_batches": 0,
         "last_batch_id": None,
@@ -249,6 +253,9 @@ async def _run_scan_loop() -> None:
                             else None
                         ),
                         stats={
+                            "run_id": heartbeat_state.get("run_id"),
+                            "phase": heartbeat_state.get("phase"),
+                            "progress": float(heartbeat_state.get("progress", 0.0) or 0.0),
                             "opportunities_count": int(status.get("opportunities_count", 0) or 0),
                             "signals_emitted_last_run": 0,
                             "full_snapshot_running": bool(tiered.get("full_snapshot_strategy_running", False)),
@@ -355,6 +362,8 @@ async def _run_scan_loop() -> None:
             )
 
             if paused and not requested:
+                heartbeat_state["phase"] = "idle"
+                heartbeat_state["progress"] = 0.0
                 if heavy_scan_task is not None and not heavy_scan_task.done():
                     heavy_scan_task.cancel()
                     try:
@@ -379,6 +388,9 @@ async def _run_scan_loop() -> None:
                 pending_heavy_targeted_ids = list(targeted_ids)
 
             scan_error: Exception | None = None
+            heartbeat_state["run_id"] = uuid.uuid4().hex[:16]
+            heartbeat_state["phase"] = "fast_scan"
+            heartbeat_state["progress"] = 0.25
             try:
                 reactive_tokens = await scanner.consume_reactive_tokens()
                 await asyncio.wait_for(
@@ -432,6 +444,25 @@ async def _run_scan_loop() -> None:
                         pass
                     heavy_scan_task = None
                 run_heavy_now = force_heavy_scan or scanner._full_snapshot_strategy_due(datetime.now(timezone.utc))
+                if run_heavy_now and bool(getattr(settings, "SCANNER_DEGRADE_HEAVY_ON_BACKLOG", True)):
+                    heavy_backlog_threshold = max(
+                        1,
+                        int(getattr(settings, "SCANNER_DEGRADE_HEAVY_BACKLOG_THRESHOLD", 120) or 120),
+                    )
+                    async with AsyncSessionLocal() as session:
+                        pending_for_heavy = await count_pending_scanner_batches(session)
+                    if pending_for_heavy >= heavy_backlog_threshold:
+                        run_heavy_now = False
+                        heartbeat_state["phase"] = "degraded"
+                        heartbeat_state["progress"] = 0.6
+                        logger.warning(
+                            "Skipping heavy scan due queue backlog (pending=%d threshold=%d)",
+                            pending_for_heavy,
+                            heavy_backlog_threshold,
+                        )
+                        scanner._current_activity = (
+                            f"Heavy lane degraded: queue backlog {pending_for_heavy} >= {heavy_backlog_threshold}."
+                        )
                 if run_heavy_now:
                     pending_heavy_targeted_ids = None
                     heavy_scan_task = asyncio.create_task(
@@ -493,6 +524,8 @@ async def _run_scan_loop() -> None:
 
             batch_kind = "scan_error" if scan_error is not None else "scan_cycle"
             try:
+                heartbeat_state["phase"] = "enqueue_batch"
+                heartbeat_state["progress"] = 0.85
                 batch_id, pending, dropped = await _enqueue_detection_batch(
                     opportunities,
                     status,
@@ -504,8 +537,12 @@ async def _run_scan_loop() -> None:
                 heartbeat_state["last_run_at"] = utcnow()
                 if dropped > 0:
                     logger.warning("Scanner enqueued batch after dropping %d stale pending batches", dropped)
+                heartbeat_state["phase"] = "idle"
+                heartbeat_state["progress"] = 1.0
             except Exception as exc:
                 heartbeat_state["last_error"] = str(exc)
+                heartbeat_state["phase"] = "error"
+                heartbeat_state["progress"] = 1.0
                 logger.exception("Failed enqueueing scanner detection batch: %s", exc)
 
             sleep_seconds = (

@@ -424,6 +424,7 @@ class SnapshotBroadcaster:
                     await manager.broadcast(
                         {
                             "type": "opportunity_events",
+                            "topic": "opportunities.summary",
                             "data": {
                                 "events": [
                                     {
@@ -439,6 +440,24 @@ class SnapshotBroadcaster:
                             },
                         }
                     )
+                    for row in event_rows:
+                        payload = row.opportunity_json if isinstance(row.opportunity_json, dict) else {}
+                        revision = int(payload.get("revision") or 0)
+                        await manager.broadcast(
+                            {
+                                "type": "opportunity_update",
+                                "topic": f"opportunities.detail:{row.stable_id}",
+                                "data": {
+                                    "id": row.id,
+                                    "stable_id": row.stable_id,
+                                    "run_id": row.run_id,
+                                    "event_type": row.event_type,
+                                    "revision": revision,
+                                    "opportunity": payload,
+                                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                                },
+                            }
+                        )
 
                 activity = status.get("current_activity") or "Idle"
                 status_sig = (
@@ -459,17 +478,30 @@ class SnapshotBroadcaster:
 
                 if activity != self._last_activity:
                     self._last_activity = activity
-                    await manager.broadcast({"type": "scanner_activity", "data": {"activity": activity}})
+                    await manager.broadcast(
+                        {
+                            "type": "scanner_activity",
+                            "topic": "opportunities.summary",
+                            "data": {"activity": activity},
+                        }
+                    )
 
                 if status_sig != self._last_status_sig:
                     self._last_status_sig = status_sig
-                    await manager.broadcast({"type": "scanner_status", "data": status})
+                    await manager.broadcast(
+                        {
+                            "type": "scanner_status",
+                            "topic": "opportunities.summary",
+                            "data": status,
+                        }
+                    )
 
                 if opp_sig != self._last_opp_sig:
                     self._last_opp_sig = opp_sig
                     await manager.broadcast(
                         {
                             "type": "opportunities_update",
+                            "topic": "opportunities.summary",
                             "data": {
                                 "count": len(opportunities),
                                 "opportunities": [serialize_opportunity_with_links(o) for o in opportunities[:50]],

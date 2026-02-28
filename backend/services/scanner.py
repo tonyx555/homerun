@@ -3707,6 +3707,8 @@ class ArbitrageScanner:
                 "dropped_reactive_markets": self._reactive_backpressure_dropped_markets,
                 **prioritizer_stats,
             }
+            status["coverage_ratio"] = coverage_ratio
+            status["full_coverage_completion_time"] = full_coverage_completion_seconds
 
         return status
 

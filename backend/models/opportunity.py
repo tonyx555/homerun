@@ -134,6 +134,7 @@ class Opportunity(BaseModel):
     first_detected_at: Optional[datetime] = None  # Immutable first-seen timestamp for stable_id lifecycle
     last_detected_at: Optional[datetime] = None  # Most recent scan that re-detected this opportunity
     last_priced_at: Optional[datetime] = None  # Most recent market price refresh applied to this opportunity
+    last_updated_at: Optional[datetime] = None  # Most recent lifecycle payload update
     last_seen_at: Optional[datetime] = None  # Last scan that detected this opportunity
     resolution_date: Optional[datetime] = None
 
@@ -173,6 +174,8 @@ class Opportunity(BaseModel):
             self.last_detected_at = self.detected_at
         if self.last_seen_at is None:
             self.last_seen_at = self.last_detected_at
+        if self.last_updated_at is None:
+            self.last_updated_at = self.last_detected_at
 
 
 class OpportunityFilter(BaseModel):

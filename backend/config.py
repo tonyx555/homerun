@@ -70,6 +70,15 @@ class Settings(BaseSettings):
     MARKET_UNIVERSE_HEARTBEAT_INTERVAL_SECONDS: float = 5.0  # Catalog worker heartbeat cadence
     MARKET_UNIVERSE_REFRESH_INTERVAL_SECONDS: int = 120  # Full market catalog refresh cadence
     MARKET_UNIVERSE_REFRESH_TIMEOUT_SECONDS: int = 300  # Hard timeout for one market catalog refresh
+    MARKET_DATA_WORKER_OWNS_WS: bool = True  # Dedicated market-data worker owns WS lifecycle
+    MARKET_DATA_HEARTBEAT_INTERVAL_SECONDS: float = 3.0  # Market data worker heartbeat cadence
+    MARKET_DATA_REFRESH_INTERVAL_SECONDS: int = 5  # Market data universe + subscription sync cadence
+    MARKET_DATA_STALE_POLL_INTERVAL_SECONDS: int = 3  # Gap-filler stale price poll cadence
+    MARKET_DATA_STALE_POLL_BATCH_SIZE: int = 400  # Max stale tokens polled per fallback cycle
+    MARKET_DATA_WS_SUBSCRIPTION_CAP: int = 8000  # Cap active WS token subscriptions for safety
+    MARKET_DATA_PRICE_STREAM_INTERVAL_SECONDS: float = 1.0  # WS price topic stream cadence
+    SCANNER_DEGRADE_HEAVY_ON_BACKLOG: bool = True  # Pause heavy lane under queue pressure
+    SCANNER_DEGRADE_HEAVY_BACKLOG_THRESHOLD: int = 120  # Queue threshold for heavy-lane degradation
     SCAN_INTERVAL_SECONDS: int = 60
     SCANNER_STALE_OPPORTUNITY_MINUTES: int = 45
     # Prevent one strategy from flooding the opportunities surface.

@@ -505,6 +505,15 @@ async def count_pending_scanner_batches(session: AsyncSession) -> int:
     return int(value.scalar_one() or 0)
 
 
+async def count_dead_letter_scanner_batches(session: AsyncSession) -> int:
+    value = await session.execute(
+        select(func.count())
+        .select_from(ScannerBatchQueue)
+        .where(ScannerBatchQueue.processed_at.is_not(None), ScannerBatchQueue.error.is_not(None))
+    )
+    return int(value.scalar_one() or 0)
+
+
 async def cleanup_processed_scanner_batches(
     session: AsyncSession,
     *,
@@ -616,11 +625,13 @@ async def _persist_incremental_state(
         row = existing_by_id.get(stable_id)
         if row is None:
             incoming_item["revision"] = 1
+            incoming_item["last_updated_at"] = _format_iso_utc_z(completed_at)
             row = OpportunityState(
                 stable_id=stable_id,
                 opportunity_json=incoming_item,
                 first_seen_at=completed_at,
                 last_seen_at=completed_at,
+                last_updated_at=completed_at,
                 is_active=True,
                 last_run_id=run.id,
             )
@@ -645,6 +656,17 @@ async def _persist_incremental_state(
             incoming_item["revision"] = max(1, previous_revision + 1)
         else:
             incoming_item["revision"] = max(1, previous_revision)
+
+        previous_last_updated = previous_payload.get("last_updated_at")
+        if changed or not was_active:
+            incoming_item["last_updated_at"] = _format_iso_utc_z(completed_at)
+            row.last_updated_at = completed_at
+        elif previous_last_updated:
+            incoming_item["last_updated_at"] = previous_last_updated
+        else:
+            incoming_item["last_updated_at"] = _format_iso_utc_z(completed_at)
+            row.last_updated_at = completed_at
+
         row.opportunity_json = incoming_item
         row.last_seen_at = completed_at
         row.last_run_id = run.id
@@ -677,6 +699,7 @@ async def _persist_incremental_state(
             continue
         row.is_active = False
         row.last_seen_at = completed_at
+        row.last_updated_at = completed_at
         row.last_run_id = run.id
         session.add(
             OpportunityEvent(

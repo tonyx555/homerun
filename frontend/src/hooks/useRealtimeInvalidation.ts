@@ -3,6 +3,7 @@ import { QueryClient, QueryKey } from '@tanstack/react-query'
 
 type WSMessage = {
   type?: string
+  topic?: string
   data?: Record<string, any>
 } | null | undefined
 
@@ -210,6 +211,76 @@ export function useRealtimeInvalidation(
       }
     }
 
+    const applyPricesUpdateToOpportunityCaches = (payload: any) => {
+      if (!payload || typeof payload !== 'object') return
+      const marketId = String(payload.market_id || '').trim().toLowerCase()
+      if (!marketId) return
+      const nextYes = Number(payload.yes_price)
+      const nextNo = Number(payload.no_price)
+      const yesPrice = Number.isFinite(nextYes) ? nextYes : null
+      const noPrice = Number.isFinite(nextNo) ? nextNo : null
+      const yesTsRaw = Number(payload.yes_ingest_ts)
+      const noTsRaw = Number(payload.no_ingest_ts)
+      const ingestTs = Math.max(
+        Number.isFinite(yesTsRaw) ? yesTsRaw : 0,
+        Number.isFinite(noTsRaw) ? noTsRaw : 0,
+      )
+      const pricedAtIso = ingestTs > 0 ? new Date(ingestTs * 1000).toISOString() : null
+      const isFresh = Boolean(payload.is_fresh)
+
+      const patchRows = (rows: any[]): any[] => rows.map((row: any) => {
+        if (!row || typeof row !== 'object' || !Array.isArray(row.markets)) return row
+        let touched = false
+        const nextMarkets = row.markets.map((market: any) => {
+          if (!market || typeof market !== 'object') return market
+          const currentMarketId = String(
+            market.condition_id || market.conditionId || market.id || '',
+          ).trim().toLowerCase()
+          if (currentMarketId !== marketId) return market
+          touched = true
+          const updated = {
+            ...market,
+            is_price_fresh: isFresh,
+            price_age_seconds: isFresh ? 0 : market.price_age_seconds,
+          }
+          if (yesPrice !== null) {
+            updated.current_yes_price = yesPrice
+            updated.yes_price = yesPrice
+          }
+          if (noPrice !== null) {
+            updated.current_no_price = noPrice
+            updated.no_price = noPrice
+          }
+          if (pricedAtIso) {
+            updated.price_updated_at = pricedAtIso
+          }
+          return updated
+        })
+        if (!touched) return row
+        return {
+          ...row,
+          markets: nextMarkets,
+          last_priced_at: pricedAtIso || row.last_priced_at,
+        }
+      })
+
+      queryClient.setQueriesData({ queryKey: ['opportunities'] }, (old: any) => {
+        if (Array.isArray(old)) {
+          return patchRows(old)
+        }
+        if (!old || typeof old !== 'object') {
+          return old
+        }
+        if (Array.isArray(old.opportunities)) {
+          return {
+            ...old,
+            opportunities: patchRows(old.opportunities),
+          }
+        }
+        return old
+      })
+    }
+
     const activeTab = String(context.activeTab || '')
     const opportunitiesView = String(context.opportunitiesView || '')
     const dataView = String(context.dataView || '')
@@ -258,6 +329,20 @@ export function useRealtimeInvalidation(
         ],
         { immediate: viewingScannerFamily },
       )
+    }
+    if (messageType === 'opportunity_update') {
+      queueInvalidations(
+        [
+          ['opportunities'],
+          ['opportunity-strategy-counts'],
+          ['opportunity-category-counts'],
+          ['opportunity-subfilters'],
+        ],
+        { immediate: viewingScannerFamily },
+      )
+    }
+    if (messageType === 'prices_update' && lastMessage.data) {
+      applyPricesUpdateToOpportunityCaches(lastMessage.data)
     }
     if (messageType === 'tracked_trader_signal') {
       queueInvalidations([
