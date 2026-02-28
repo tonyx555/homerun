@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -74,6 +75,16 @@ def _parse_iso_utc(value: Optional[str]) -> Optional[datetime]:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+async def _run_with_timeout_budget(coro, *, timeout_seconds: float, label: str):
+    timeout_budget = max(0.01, float(timeout_seconds))
+    started = time.monotonic()
+    result = await coro
+    elapsed = time.monotonic() - started
+    if elapsed > timeout_budget:
+        raise asyncio.TimeoutError(f"{label} exceeded timeout budget ({elapsed:.3f}s > {timeout_budget:.3f}s)")
+    return result
 
 
 async def _hydrate_scanner_pool_from_snapshot() -> int:
@@ -292,13 +303,14 @@ async def _run_scan_loop() -> None:
         watchdog_seconds: int,
     ) -> None:
         try:
-            await asyncio.wait_for(
+            await _run_with_timeout_budget(
                 scanner.scan_full_snapshot_strategies(
                     reason=reason,
                     targeted_condition_ids=targeted_ids,
                     force=force,
                 ),
-                timeout=watchdog_seconds,
+                timeout_seconds=float(watchdog_seconds),
+                label="scanner_full_snapshot",
             )
         except asyncio.TimeoutError:
             scanner.note_heavy_lane_watchdog_timeout(watchdog_seconds)
@@ -406,12 +418,13 @@ async def _run_scan_loop() -> None:
             heartbeat_state["progress"] = 0.25
             try:
                 reactive_tokens = await scanner.consume_reactive_tokens()
-                await asyncio.wait_for(
+                await _run_with_timeout_budget(
                     scanner.scan_fast(
                         reactive_token_ids=reactive_tokens,
                         targeted_condition_ids=targeted_ids or None,
                     ),
-                    timeout=scan_watchdog_seconds,
+                    timeout_seconds=float(scan_watchdog_seconds),
+                    label="scanner_fast_lane",
                 )
                 stale_scan_streak = 0
             except asyncio.CancelledError:

@@ -35,6 +35,16 @@ def _as_float(value: Any) -> float | None:
         return None
 
 
+def _parse_slo_breach_reason_metrics(reason: str) -> set[str]:
+    normalized = str(reason or "").strip()
+    if not normalized.startswith("slo_breach:"):
+        return set()
+    metrics_raw = normalized[len("slo_breach:") :]
+    if not metrics_raw:
+        return set()
+    return {item.strip() for item in metrics_raw.split(",") if item.strip()}
+
+
 async def _run_loop() -> None:
     worker_name = "scanner_slo"
     heartbeat_interval = max(
@@ -226,7 +236,11 @@ async def _run_loop() -> None:
 
                 incident_actions: list[dict[str, Any]] = []
                 breached_metric_names: list[str] = []
-                degrade_trigger_metrics = {"coverage_ratio", "full_coverage_completion_time"}
+                degrade_trigger_metrics = {
+                    "last_fast_scan_age_seconds",
+                    "opportunity_price_age_p95",
+                    "opportunity_last_detected_age_p95",
+                }
                 alert_payload: dict[str, Any] | None = None
 
                 async with AsyncSessionLocal() as session:
@@ -255,34 +269,44 @@ async def _run_loop() -> None:
                     scanner_control = await read_scanner_control(session)
                     forced_degraded = bool(scanner_control.get("heavy_lane_forced_degraded", False))
                     forced_reason = str(scanner_control.get("heavy_lane_degraded_reason") or "")
-                    breached_for_degrade = [
+                    breached_for_degrade = sorted(
                         metric for metric in breached_metric_names if metric in degrade_trigger_metrics
-                    ]
+                    )
+                    desired_reason = "slo_breach:" + ",".join(breached_for_degrade[:5])
+                    forced_metrics = _parse_slo_breach_reason_metrics(forced_reason)
 
                     degrade_action = "none"
-                    if auto_degrade_enabled and breached_for_degrade and (
-                        not forced_degraded or not forced_reason.startswith("slo_breach:")
-                    ):
-                        reason = "slo_breach:" + ",".join(sorted(breached_for_degrade)[:5])
-                        await set_scanner_heavy_lane_degraded(
-                            session,
-                            enabled=True,
-                            reason=reason,
-                            duration_seconds=auto_degrade_duration_seconds,
-                        )
-                        degrade_action = "enabled"
-                        forced_degraded = True
-                    elif auto_degrade_enabled and forced_degraded and forced_reason.startswith("slo_breach:"):
-                        await set_scanner_heavy_lane_degraded(session, enabled=False)
-                        degrade_action = "disabled"
-                        forced_degraded = False
+                    if auto_degrade_enabled:
+                        if breached_for_degrade:
+                            if not forced_degraded:
+                                await set_scanner_heavy_lane_degraded(
+                                    session,
+                                    enabled=True,
+                                    reason=desired_reason,
+                                    duration_seconds=auto_degrade_duration_seconds,
+                                )
+                                degrade_action = "enabled"
+                                forced_degraded = True
+                            elif forced_reason.startswith("slo_breach:") and forced_metrics != set(breached_for_degrade):
+                                await set_scanner_heavy_lane_degraded(
+                                    session,
+                                    enabled=True,
+                                    reason=desired_reason,
+                                    duration_seconds=auto_degrade_duration_seconds,
+                                )
+                                degrade_action = "updated"
+                                forced_degraded = True
+                        elif forced_degraded and forced_reason.startswith("slo_breach:"):
+                            await set_scanner_heavy_lane_degraded(session, enabled=False)
+                            degrade_action = "disabled"
+                            forced_degraded = False
 
                     open_incidents = await list_open_scanner_slo_incidents(session)
                     state["open_incidents"] = len(open_incidents)
                     state["breached_metrics"] = len(breached_metric_names)
                     state["heavy_lane_forced_degraded"] = bool(forced_degraded)
 
-                    should_publish = bool(incident_actions) or degrade_action in {"enabled", "disabled"}
+                    should_publish = bool(incident_actions) or degrade_action in {"enabled", "disabled", "updated"}
                     if should_publish:
                         alert_payload = {
                             "run_id": state.get("run_id"),

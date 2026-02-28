@@ -283,19 +283,28 @@ class EventDispatcher:
         handler_task = asyncio.create_task(handler(event))
 
         try:
-            result = await asyncio.wait_for(handler_task, timeout=timeout_seconds)
-            return result if isinstance(result, list) else []
-        except asyncio.TimeoutError:
-            if not handler_task.done():
-                self._timed_out_handler_tasks.add(handler_task)
-                handler_task.add_done_callback(self._timed_out_handler_tasks.discard)
-                handler_task.cancel()
+            done, _pending = await asyncio.wait({handler_task}, timeout=timeout_seconds)
+            if done:
+                result = handler_task.result()
+                return result if isinstance(result, list) else []
+            self._timed_out_handler_tasks.add(handler_task)
+
+            def _consume_late_handler_result(task: asyncio.Task[Any]) -> None:
+                self._timed_out_handler_tasks.discard(task)
                 try:
-                    await asyncio.wait_for(handler_task, timeout=1.0)
-                except (asyncio.CancelledError, asyncio.TimeoutError):
-                    pass
-                except Exception:
-                    pass
+                    task.result()
+                except asyncio.CancelledError:
+                    return
+                except Exception as exc:
+                    logger.warning(
+                        "Strategy event handler failed after timeout",
+                        strategy=slug,
+                        event_type=event.event_type,
+                        timeout_seconds=timeout_seconds,
+                        exc_info=exc,
+                    )
+
+            handler_task.add_done_callback(_consume_late_handler_result)
             logger.warning(
                 "Strategy event handler timed out",
                 strategy=slug,

@@ -317,3 +317,50 @@ async def test_event_dispatcher_unowned_remote_opportunities_fail_fast_in_produc
     finally:
         await sender.stop()
         await receiver.stop()
+
+
+@pytest.mark.asyncio
+async def test_event_dispatcher_timeout_does_not_cancel_handler(monkeypatch):
+    fake_streams = _InMemoryRedisStreams()
+    monkeypatch.setattr(event_dispatcher_module, "redis_streams", fake_streams)
+
+    dispatcher = event_dispatcher_module.EventDispatcher()
+    handler_started = asyncio.Event()
+    handler_release = asyncio.Event()
+    handler_finished = asyncio.Event()
+    handler_cancelled = False
+
+    async def _slow_handler(event: DataEvent) -> list:
+        nonlocal handler_cancelled
+        handler_started.set()
+        try:
+            await handler_release.wait()
+        except asyncio.CancelledError:
+            handler_cancelled = True
+            raise
+        handler_finished.set()
+        return []
+
+    dispatcher.subscribe("strategy.timeout", EventType.PRICE_CHANGE, _slow_handler)
+    outbound = DataEvent(
+        event_type=EventType.PRICE_CHANGE,
+        source="scanner_worker",
+        timestamp=utcnow().astimezone(timezone.utc),
+        token_id="tok-timeout",
+        old_price=0.5,
+        new_price=0.55,
+    )
+    try:
+        opportunities = await dispatcher.dispatch(outbound, handler_timeout_seconds=1.0)
+        assert opportunities == []
+        await asyncio.wait_for(handler_started.wait(), timeout=1.0)
+        assert len(dispatcher._timed_out_handler_tasks) == 1
+
+        handler_release.set()
+        await asyncio.wait_for(handler_finished.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+
+        assert not handler_cancelled
+        assert len(dispatcher._timed_out_handler_tasks) == 0
+    finally:
+        await dispatcher.stop()

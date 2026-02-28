@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -77,6 +78,16 @@ async def _read_catalog_stats() -> dict[str, Any]:
         ),
         "error": metadata.get("error"),
     }
+
+
+async def _run_with_timeout_budget(coro, *, timeout_seconds: float, label: str):
+    timeout_budget = max(0.01, float(timeout_seconds))
+    started = time.monotonic()
+    result = await coro
+    elapsed = time.monotonic() - started
+    if elapsed > timeout_budget:
+        raise asyncio.TimeoutError(f"{label} exceeded timeout budget ({elapsed:.3f}s > {timeout_budget:.3f}s)")
+    return result
 
 
 async def _run_loop() -> None:
@@ -236,17 +247,19 @@ async def _run_loop() -> None:
             try:
                 sync_timeout = float(refresh_timeout if force_full else incremental_timeout)
                 try:
-                    sync_result = await asyncio.wait_for(
+                    sync_result = await _run_with_timeout_budget(
                         scanner.refresh_catalog_incremental(force_full=force_full),
-                        timeout=sync_timeout,
+                        timeout_seconds=sync_timeout,
+                        label="market_universe_sync",
                     )
                 except Exception:
                     if force_full:
                         raise
                     logger.warning("Market universe incremental sync failed, retrying full reconcile", exc_info=True)
-                    sync_result = await asyncio.wait_for(
+                    sync_result = await _run_with_timeout_budget(
                         scanner.refresh_catalog_incremental(force_full=True),
-                        timeout=float(refresh_timeout),
+                        timeout_seconds=float(refresh_timeout),
+                        label="market_universe_full_reconcile",
                     )
                     force_full = True
                 market_count = int(sync_result.get("market_count") or 0)
