@@ -116,6 +116,7 @@ export interface Opportunity {
   resolution_date?: string
   positions_to_take: Position[]
   strategy_context?: Record<string, unknown> | null
+  revision?: number | null
   ai_analysis: AIAnalysis | null
 }
 

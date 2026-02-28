@@ -116,8 +116,18 @@ class ScannerSettingsModel(BaseModel):
 
     scan_interval_seconds: int = Field(default=60, ge=10, le=3600, description="Scan interval in seconds")
     min_profit_threshold: float = Field(default=2.5, ge=0, description="Minimum profit threshold %")
-    max_markets_to_scan: int = Field(default=5000, ge=10, le=10000, description="Maximum markets to scan per cycle")
-    max_events_to_scan: int = Field(default=3000, ge=10, le=10000, description="Maximum events to scan per cycle")
+    max_markets_to_scan: int = Field(
+        default=0,
+        ge=0,
+        le=200000,
+        description="Maximum markets to scan per cycle (0 disables cap)",
+    )
+    max_events_to_scan: int = Field(
+        default=0,
+        ge=0,
+        le=200000,
+        description="Maximum events to scan per cycle (0 disables cap)",
+    )
     market_fetch_page_size: int = Field(
         default=200, ge=50, le=500, description="API page size for market/event fetches"
     )

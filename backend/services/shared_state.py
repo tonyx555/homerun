@@ -425,11 +425,13 @@ async def _persist_incremental_state(
 
     # Upsert current opportunities and emit detected/updated/reactivated events.
     for stable_id, item in current_map.items():
+        incoming_item = item if isinstance(item, dict) else dict(item)
         row = existing_by_id.get(stable_id)
         if row is None:
+            incoming_item["revision"] = 1
             row = OpportunityState(
                 stable_id=stable_id,
-                opportunity_json=item,
+                opportunity_json=incoming_item,
                 first_seen_at=completed_at,
                 last_seen_at=completed_at,
                 is_active=True,
@@ -442,15 +444,21 @@ async def _persist_incremental_state(
                     stable_id=stable_id,
                     run_id=run.id,
                     event_type="detected",
-                    opportunity_json=item,
+                    opportunity_json=incoming_item,
                     created_at=completed_at,
                 )
             )
             continue
 
         was_active = bool(row.is_active)
-        changed = row.opportunity_json != item
-        row.opportunity_json = item
+        previous_payload = row.opportunity_json if isinstance(row.opportunity_json, dict) else {}
+        previous_revision = int(previous_payload.get("revision") or 0)
+        changed = row.opportunity_json != incoming_item
+        if changed:
+            incoming_item["revision"] = max(1, previous_revision + 1)
+        else:
+            incoming_item["revision"] = max(1, previous_revision)
+        row.opportunity_json = incoming_item
         row.last_seen_at = completed_at
         row.last_run_id = run.id
         row.is_active = True
@@ -469,7 +477,7 @@ async def _persist_incremental_state(
                     stable_id=stable_id,
                     run_id=run.id,
                     event_type=event_type,
-                    opportunity_json=item,
+                    opportunity_json=incoming_item,
                     created_at=completed_at,
                 )
             )

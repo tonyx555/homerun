@@ -835,8 +835,8 @@ class AppSettings(Base):
     # Scanner Settings
     scan_interval_seconds = Column(Integer, default=60)
     min_profit_threshold = Column(Float, default=2.5)
-    max_markets_to_scan = Column(Integer, default=5000)
-    max_events_to_scan = Column(Integer, default=3000)
+    max_markets_to_scan = Column(Integer, default=0)
+    max_events_to_scan = Column(Integer, default=0)
     market_fetch_page_size = Column(Integer, default=200)
     market_fetch_order = Column(String, default="volume")
     min_liquidity = Column(Float, default=1000.0)

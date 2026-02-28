@@ -153,6 +153,7 @@ class Opportunity(BaseModel):
 
     # Strategy-specific context passed from detect() to evaluate() and should_exit()
     strategy_context: dict = {}
+    revision: Optional[int] = None
 
     def __init__(self, **data):
         super().__init__(**data)

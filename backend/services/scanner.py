@@ -83,6 +83,12 @@ class ArbitrageScanner:
         self._heavy_lane_error: Optional[str] = None
         self._fast_watchdog_timeout_count: int = 0
         self._heavy_watchdog_timeout_count: int = 0
+        self._full_snapshot_cursor_index: int = 0
+        self._last_full_snapshot_chunk_market_count: int = 0
+        self._full_snapshot_cycle_total_markets: int = 0
+        self._full_snapshot_cycle_processed_markets: int = 0
+        self._full_snapshot_cycle_started_at: Optional[datetime] = None
+        self._full_snapshot_cycle_completed_at: Optional[datetime] = None
         self._opportunities: list[Opportunity] = []
         self._scan_callbacks: List[Callable] = []
         self._status_callbacks: List[Callable] = []
@@ -666,8 +672,12 @@ class ArbitrageScanner:
         return (time_priority, side_probability, liquidity, volume)
 
     def _enforce_catalog_caps(self, events: list, markets: list) -> tuple[list, list]:
-        market_cap = int(getattr(settings, "MAX_MARKETS_TO_SCAN", 0) or 0)
-        event_cap = int(getattr(settings, "MAX_EVENTS_TO_SCAN", 0) or 0)
+        if bool(getattr(settings, "SCANNER_FORCE_FULL_UNIVERSE", True)):
+            market_cap = 0
+            event_cap = 0
+        else:
+            market_cap = int(getattr(settings, "MAX_MARKETS_TO_SCAN", 0) or 0)
+            event_cap = int(getattr(settings, "MAX_EVENTS_TO_SCAN", 0) or 0)
 
         capped_markets = list(markets)
         if market_cap > 0 and len(capped_markets) > market_cap:
@@ -1057,6 +1067,11 @@ class ArbitrageScanner:
         return filtered
 
     def _full_snapshot_strategy_due(self, now: datetime) -> bool:
+        if (
+            self._full_snapshot_cycle_total_markets > 0
+            and self._full_snapshot_cycle_processed_markets < self._full_snapshot_cycle_total_markets
+        ):
+            return True
         interval = max(
             int(getattr(settings, "FAST_SCAN_INTERVAL_SECONDS", 15) or 15),
             int(getattr(settings, "SCANNER_FULL_SNAPSHOT_STRATEGY_INTERVAL_SECONDS", 120) or 120),
@@ -1111,7 +1126,10 @@ class ArbitrageScanner:
         }
 
     def _select_full_snapshot_markets(self, now: datetime, changed_markets: list, hot_markets: list) -> list:
-        cap = int(getattr(settings, "SCANNER_FULL_SNAPSHOT_MAX_MARKETS", 0) or 0)
+        if bool(getattr(settings, "SCANNER_FORCE_FULL_UNIVERSE", True)):
+            cap = 0
+        else:
+            cap = int(getattr(settings, "SCANNER_FULL_SNAPSHOT_MAX_MARKETS", 0) or 0)
         pool = [market for market in self._cached_markets if self._is_market_active(market, now)]
         if not pool:
             return []
@@ -2658,7 +2676,10 @@ class ArbitrageScanner:
                         and self._is_market_active(market, now)
                     ]
                 else:
-                    cap = int(getattr(settings, "SCANNER_FULL_SNAPSHOT_MAX_MARKETS", 0) or 0)
+                    if bool(getattr(settings, "SCANNER_FORCE_FULL_UNIVERSE", True)):
+                        cap = 0
+                    else:
+                        cap = int(getattr(settings, "SCANNER_FULL_SNAPSHOT_MAX_MARKETS", 0) or 0)
                     active_markets = [market for market in cached_markets_snapshot if self._is_market_active(market, now)]
                     if "tail_end_carry" in full_slugs:
                         tail_priority = [
@@ -2685,23 +2706,56 @@ class ArbitrageScanner:
                 if not full_snapshot_markets:
                     async with self._scan_lock:
                         self._last_full_snapshot_strategy_market_count = 0
+                        self._last_full_snapshot_chunk_market_count = 0
                         self._last_full_snapshot_strategy_opportunity_count = 0
                         return self._opportunities
 
+                universe_markets = full_snapshot_markets
+                universe_count = len(universe_markets)
+                chunk_size = max(1, int(getattr(settings, "SCANNER_FULL_SNAPSHOT_CHUNK_SIZE", 300) or 300))
+                targeted_mode = bool(targeted_condition_ids)
+                chunk_start = 0
+                chunk_end = universe_count
+                chunk_markets = universe_markets
+                next_cursor_index = 0
+                cycle_completed = True
+                cycle_started_at = self._full_snapshot_cycle_started_at or now
+                processed_markets = universe_count
+
+                if not targeted_mode:
+                    cursor_start = max(0, int(self._full_snapshot_cursor_index or 0))
+                    if cursor_start >= universe_count or self._full_snapshot_cycle_total_markets != universe_count:
+                        cursor_start = 0
+                        cycle_started_at = now
+                    elif self._full_snapshot_cycle_started_at is None:
+                        cycle_started_at = now
+
+                    chunk_start = cursor_start
+                    chunk_end = min(universe_count, cursor_start + chunk_size)
+                    chunk_markets = universe_markets[chunk_start:chunk_end]
+                    cycle_completed = chunk_end >= universe_count
+                    next_cursor_index = 0 if cycle_completed else chunk_end
+                    processed_markets = universe_count if cycle_completed else chunk_end
+
                 async with self._scan_lock:
-                    self._last_full_snapshot_strategy_market_count = len(full_snapshot_markets)
+                    self._last_full_snapshot_strategy_market_count = universe_count
+                    self._last_full_snapshot_chunk_market_count = len(chunk_markets)
 
                 await self._set_activity(
-                    f"Heavy lane: running full-snapshot strategies on {len(full_snapshot_markets)} markets..."
+                    (
+                        f"Heavy lane: running full-snapshot chunk "
+                        f"{chunk_start + 1}-{chunk_end}/{universe_count} "
+                        f"({len(chunk_markets)} markets)..."
+                    )
                 )
 
-                token_ids = self._collect_live_token_ids(full_snapshot_markets)
+                token_ids = self._collect_live_token_ids(chunk_markets)
                 full_snapshot_prices: dict[str, dict] = {}
                 if token_ids:
                     full_snapshot_prices = await self._snapshot_ws_prices(token_ids)
-                self._apply_live_prices_to_markets(full_snapshot_markets, full_snapshot_prices)
+                self._apply_live_prices_to_markets(chunk_markets, full_snapshot_prices)
 
-                market_ids = [str(getattr(market, "id", "") or "") for market in full_snapshot_markets]
+                market_ids = [str(getattr(market, "id", "") or "") for market in chunk_markets]
                 full_event = DataEvent(
                     event_type=EventType.MARKET_DATA_REFRESH,
                     source="scanner_full_snapshot",
@@ -2710,9 +2764,14 @@ class ArbitrageScanner:
                         "scan_mode": "full_snapshot_heavy",
                         "strategy_batch": "full_snapshot",
                         "reason": reason,
+                        "targeted": targeted_mode,
+                        "chunk_start": chunk_start,
+                        "chunk_end": chunk_end,
+                        "chunk_size": len(chunk_markets),
+                        "total_market_count": universe_count,
                         "affected_market_count": len(market_ids),
                     },
-                    markets=full_snapshot_markets,
+                    markets=chunk_markets,
                     events=cached_events_snapshot,
                     prices=dict(full_snapshot_prices),
                     scan_mode="full_snapshot_heavy",
@@ -2724,7 +2783,7 @@ class ArbitrageScanner:
                     full_event,
                     incremental_slugs=set(),
                     full_slugs=full_slugs,
-                    full_market_snapshot=full_snapshot_markets,
+                    full_market_snapshot=chunk_markets,
                     full_prices=full_snapshot_prices,
                     handler_timeout_seconds=self._full_snapshot_strategy_timeout_seconds(),
                 )
@@ -2750,9 +2809,20 @@ class ArbitrageScanner:
 
                 async with self._scan_lock:
                     self._cached_prices.update(full_snapshot_prices)
-                    self._update_market_price_history(full_snapshot_markets, full_snapshot_prices, now)
+                    self._update_market_price_history(chunk_markets, full_snapshot_prices, now)
                     self._quality_reports.update(full_quality_reports)
                     self._last_full_snapshot_strategy_opportunity_count = len(full_filtered)
+                    self._full_snapshot_cycle_total_markets = universe_count
+                    self._full_snapshot_cycle_processed_markets = processed_markets
+                    self._full_snapshot_cursor_index = next_cursor_index
+                    if chunk_start == 0:
+                        self._full_snapshot_cycle_started_at = cycle_started_at
+                    elif self._full_snapshot_cycle_started_at is None:
+                        self._full_snapshot_cycle_started_at = cycle_started_at
+                    if cycle_completed:
+                        self._full_snapshot_cycle_completed_at = now
+                    elif chunk_start == 0:
+                        self._full_snapshot_cycle_completed_at = None
                     if full_filtered:
                         self._opportunities = self._merge_opportunities(full_filtered)
                     opportunities_snapshot = [_clone_model(opp) for opp in self._opportunities]
@@ -2779,8 +2849,10 @@ class ArbitrageScanner:
                     except Exception as e:
                         print(f"  Callback error: {e}")
 
+                cycle_suffix = " full coverage cycle complete." if cycle_completed else ""
                 await self._set_activity(
-                    f"Heavy lane complete — {len(full_filtered)} opportunities ({len(full_snapshot_markets)} markets)"
+                    f"Heavy lane complete — {len(full_filtered)} opportunities "
+                    f"(chunk {chunk_start + 1}-{chunk_end}/{universe_count}).{cycle_suffix}"
                 )
                 async with self._scan_lock:
                     return self._opportunities
@@ -3514,12 +3586,29 @@ class ArbitrageScanner:
         # Add tiered scanning status
         if settings.TIERED_SCANNING_ENABLED:
             prioritizer_stats = self._prioritizer.get_stats()
+            full_coverage_completion_seconds = None
+            if self._full_snapshot_cycle_started_at is not None and self._full_snapshot_cycle_completed_at is not None:
+                full_coverage_completion_seconds = round(
+                    max(0.0, (self._full_snapshot_cycle_completed_at - self._full_snapshot_cycle_started_at).total_seconds()),
+                    3,
+                )
+            coverage_ratio = None
+            if self._full_snapshot_cycle_total_markets > 0:
+                coverage_ratio = round(
+                    float(self._full_snapshot_cycle_processed_markets) / float(self._full_snapshot_cycle_total_markets),
+                    6,
+                )
             status["tiered_scanning"] = {
                 "enabled": True,
                 "fast_scan_interval": settings.FAST_SCAN_INTERVAL_SECONDS,
                 "full_scan_interval": settings.FULL_SCAN_INTERVAL_SECONDS,
                 "full_snapshot_strategy_interval": settings.SCANNER_FULL_SNAPSHOT_STRATEGY_INTERVAL_SECONDS,
                 "full_snapshot_strategy_max_markets": settings.SCANNER_FULL_SNAPSHOT_MAX_MARKETS,
+                "force_full_universe": bool(getattr(settings, "SCANNER_FORCE_FULL_UNIVERSE", True)),
+                "full_snapshot_chunk_size": max(
+                    1,
+                    int(getattr(settings, "SCANNER_FULL_SNAPSHOT_CHUNK_SIZE", 300) or 300),
+                ),
                 "fast_strategy_timeout_seconds": self._fast_strategy_timeout_seconds(),
                 "full_snapshot_strategy_timeout_seconds": self._full_snapshot_strategy_timeout_seconds(),
                 "full_snapshot_strategy_running": self._full_snapshot_strategy_running,
@@ -3537,6 +3626,7 @@ class ArbitrageScanner:
                 "last_full_snapshot_strategy_duration_seconds": self._last_full_snapshot_strategy_duration_seconds,
                 "last_full_snapshot_strategy_error": self._last_full_snapshot_strategy_error,
                 "last_full_snapshot_strategy_market_count": self._last_full_snapshot_strategy_market_count,
+                "last_full_snapshot_chunk_market_count": self._last_full_snapshot_chunk_market_count,
                 "last_full_snapshot_strategy_opportunity_count": self._last_full_snapshot_strategy_opportunity_count,
                 "last_full_snapshot_strategy_count": self._last_full_snapshot_strategy_count,
                 "heavy_last_started_at": to_iso(self._heavy_last_started_at),
@@ -3544,6 +3634,13 @@ class ArbitrageScanner:
                 "heavy_inflight": self._heavy_inflight,
                 "heavy_lane_error": self._heavy_lane_error,
                 "heavy_watchdog_timeout_count": self._heavy_watchdog_timeout_count,
+                "full_snapshot_cursor_index": self._full_snapshot_cursor_index,
+                "full_snapshot_cycle_total_markets": self._full_snapshot_cycle_total_markets,
+                "full_snapshot_cycle_processed_markets": self._full_snapshot_cycle_processed_markets,
+                "full_snapshot_coverage_ratio": coverage_ratio,
+                "full_coverage_completion_time": full_coverage_completion_seconds,
+                "full_snapshot_cycle_started_at": to_iso(self._full_snapshot_cycle_started_at),
+                "full_snapshot_cycle_completed_at": to_iso(self._full_snapshot_cycle_completed_at),
                 "lane_watchdogs": lane_watchdogs,
                 "cached_markets": len(self._cached_markets),
                 "cached_events": len(self._cached_events),

@@ -347,6 +347,55 @@ async def _run_scan_loop() -> None:
     )
     heavy_scan_task: asyncio.Task | None = None
     pending_heavy_targeted_ids: list[str] | None = None
+    heartbeat_state: dict[str, object] = {
+        "enabled": True,
+        "interval_seconds": 60,
+        "last_error": None,
+    }
+    heartbeat_interval_seconds = max(
+        2.0,
+        float(getattr(settings, "SCANNER_HEARTBEAT_INTERVAL_SECONDS", 5.0) or 5.0),
+    )
+    heartbeat_stop_event = asyncio.Event()
+
+    async def _heartbeat_loop() -> None:
+        while not heartbeat_stop_event.is_set():
+            try:
+                status = scanner.get_status()
+                tiered = status.get("tiered_scanning") or {}
+                lane_watchdogs = status.get("lane_watchdogs") or {}
+                async with AsyncSessionLocal() as session:
+                    await write_worker_snapshot(
+                        session,
+                        "scanner",
+                        running=True,
+                        enabled=bool(heartbeat_state.get("enabled", True)),
+                        current_activity=str(status.get("current_activity") or "Idle"),
+                        interval_seconds=int(heartbeat_state.get("interval_seconds") or 60),
+                        last_run_at=utcnow(),
+                        last_error=(
+                            str(heartbeat_state["last_error"])
+                            if heartbeat_state.get("last_error") is not None
+                            else None
+                        ),
+                        stats={
+                            "opportunities_count": int(status.get("opportunities_count", 0) or 0),
+                            "signals_emitted_last_run": 0,
+                            "full_snapshot_running": bool(tiered.get("full_snapshot_strategy_running", False)),
+                            "fast_inflight": bool(tiered.get("fast_inflight", False)),
+                            "heavy_inflight": bool(tiered.get("heavy_inflight", False)),
+                            "lane_watchdogs": lane_watchdogs,
+                        },
+                    )
+            except Exception as exc:
+                heartbeat_state["last_error"] = str(exc)
+                logger.warning("Scanner heartbeat snapshot write failed: %s", exc)
+            try:
+                await asyncio.wait_for(heartbeat_stop_event.wait(), timeout=heartbeat_interval_seconds)
+            except asyncio.TimeoutError:
+                continue
+
+    heartbeat_task = asyncio.create_task(_heartbeat_loop(), name="scanner-heartbeat-loop")
 
     async def _run_full_snapshot_cycle(
         *,
@@ -395,6 +444,8 @@ async def _run_scan_loop() -> None:
             interval = max(10, min(3600, control["scan_interval_seconds"] or 60))
             paused = control.get("is_paused", False)
             requested = control.get("requested_scan_at")
+            heartbeat_state["enabled"] = not paused
+            heartbeat_state["interval_seconds"] = interval
 
             if paused and not requested:
                 if heavy_scan_task is not None and not heavy_scan_task.done():
@@ -420,7 +471,7 @@ async def _run_scan_loop() -> None:
                             last_run_at=None,
                             last_error=None,
                             stats={"opportunities_count": 0, "signals_emitted_last_run": 0},
-                        )
+                    )
                 except Exception:
                     pass
                 await asyncio.sleep(min(10, interval))
@@ -473,6 +524,7 @@ async def _run_scan_loop() -> None:
                 scan_error = e
 
             if scan_error is not None:
+                heartbeat_state["last_error"] = str(scan_error)
                 network_resolution_error = _is_upstream_resolution_error(scan_error)
                 timeout_error = isinstance(scan_error, asyncio.TimeoutError)
                 if timeout_error:
@@ -563,6 +615,7 @@ async def _run_scan_loop() -> None:
                 sleep_seconds = settings.FAST_SCAN_INTERVAL_SECONDS if settings.TIERED_SCANNING_ENABLED else interval
                 await asyncio.sleep(max(1, sleep_seconds))
                 continue
+            heartbeat_state["last_error"] = None
 
             force_heavy_scan = pending_heavy_targeted_ids is not None
             targeted_for_heavy = list(pending_heavy_targeted_ids or [])
@@ -733,6 +786,14 @@ async def _run_scan_loop() -> None:
             else:
                 await asyncio.sleep(sleep_seconds)
     finally:
+        heartbeat_stop_event.set()
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning("Scanner heartbeat task shutdown encountered an error: %s", exc)
         catalog_task.cancel()
         try:
             await catalog_task

@@ -59,6 +59,7 @@ class Settings(BaseSettings):
 
     # Scanner Settings
     SCAN_WATCHDOG_SECONDS: int = 600  # Max seconds before a scan cycle is killed
+    SCANNER_HEARTBEAT_INTERVAL_SECONDS: float = 5.0  # Worker heartbeat persistence cadence
     SCAN_INTERVAL_SECONDS: int = 60
     SCANNER_STALE_OPPORTUNITY_MINUTES: int = 45
     # Prevent one strategy from flooding the opportunities surface.
@@ -74,11 +75,12 @@ class Settings(BaseSettings):
     DISCOVERY_MAX_WALLETS_PER_MARKET: int = 50
 
     # Market Settings
-    MAX_MARKETS_TO_SCAN: int = 5000
-    MAX_EVENTS_TO_SCAN: int = 3000
+    MAX_MARKETS_TO_SCAN: int = 0  # 0 disables cap (scan full active market universe)
+    MAX_EVENTS_TO_SCAN: int = 0  # 0 disables cap (scan full active event universe)
     MARKET_FETCH_PAGE_SIZE: int = 200
     MARKET_FETCH_ORDER: str = "volume"  # volume, updatedAt, createdAt, or empty for default
     MIN_LIQUIDITY: float = 1000.0  # Minimum liquidity in USD
+    SCANNER_FORCE_FULL_UNIVERSE: bool = True  # Ignore market/event caps for full-coverage discovery
 
     # Opportunity Quality Filters (hard rejection thresholds)
     MIN_LIQUIDITY_HARD: float = 1000.0  # Reject opportunities below this liquidity ($)
@@ -275,7 +277,8 @@ class Settings(BaseSettings):
     # Full-snapshot strategies are CPU-heavy on large catalogs. Run them on a
     # slower cadence with an explicit bounded market batch.
     SCANNER_FULL_SNAPSHOT_STRATEGY_INTERVAL_SECONDS: int = 120
-    SCANNER_FULL_SNAPSHOT_MAX_MARKETS: int = 1500
+    SCANNER_FULL_SNAPSHOT_MAX_MARKETS: int = 0  # 0 disables cap (scan full active market universe)
+    SCANNER_FULL_SNAPSHOT_CHUNK_SIZE: int = 300  # Markets processed per heavy-lane chunk
     SCANNER_FAST_STRATEGY_TIMEOUT_SECONDS: float = 12.0
     SCANNER_FULL_SNAPSHOT_STRATEGY_TIMEOUT_SECONDS: float = 60.0
     SCANNER_FULL_SNAPSHOT_WATCHDOG_SECONDS: int = 180
@@ -732,8 +735,8 @@ async def apply_search_filters():
         # Scanner basics (already wired but also reloaded here for consistency)
         ("SCAN_INTERVAL_SECONDS", "scan_interval_seconds", 60),
         ("MIN_PROFIT_THRESHOLD", "min_profit_threshold", None),
-        ("MAX_MARKETS_TO_SCAN", "max_markets_to_scan", 5000),
-        ("MAX_EVENTS_TO_SCAN", "max_events_to_scan", 3000),
+        ("MAX_MARKETS_TO_SCAN", "max_markets_to_scan", 0),
+        ("MAX_EVENTS_TO_SCAN", "max_events_to_scan", 0),
         ("MARKET_FETCH_PAGE_SIZE", "market_fetch_page_size", 200),
         ("MARKET_FETCH_ORDER", "market_fetch_order", "volume"),
         ("MIN_LIQUIDITY", "min_liquidity", 1000.0),

@@ -216,8 +216,8 @@ export default function SettingsPanel({
   const [scannerForm, setScannerForm] = useState({
     scan_interval_seconds: 60,
     min_profit_threshold: 2.5,
-    max_markets_to_scan: 5000,
-    max_events_to_scan: 3000,
+    max_markets_to_scan: 0,
+    max_events_to_scan: 0,
     market_fetch_page_size: 200,
     market_fetch_order: 'volume',
     min_liquidity: 1000.0,
@@ -311,8 +311,8 @@ export default function SettingsPanel({
       setScannerForm({
         scan_interval_seconds: settings.scanner?.scan_interval_seconds ?? 60,
         min_profit_threshold: settings.scanner?.min_profit_threshold ?? 2.5,
-        max_markets_to_scan: settings.scanner?.max_markets_to_scan ?? 5000,
-        max_events_to_scan: settings.scanner?.max_events_to_scan ?? 3000,
+        max_markets_to_scan: settings.scanner?.max_markets_to_scan ?? 0,
+        max_events_to_scan: settings.scanner?.max_events_to_scan ?? 0,
         market_fetch_page_size: settings.scanner?.market_fetch_page_size ?? 200,
         market_fetch_order: settings.scanner?.market_fetch_order ?? 'volume',
         min_liquidity: settings.scanner?.min_liquidity ?? 1000.0,
@@ -981,22 +981,24 @@ export default function SettingsPanel({
                           <Input
                             type="number"
                             value={scannerForm.max_markets_to_scan}
-                            onChange={(e) => setScannerForm(p => ({ ...p, max_markets_to_scan: Math.max(10, parseInt(e.target.value) || 10) }))}
-                            min={10}
-                            max={10000}
+                            onChange={(e) => setScannerForm(p => ({ ...p, max_markets_to_scan: Math.max(0, parseInt(e.target.value) || 0) }))}
+                            min={0}
+                            max={200000}
                             className="mt-1 text-sm"
                           />
+                          <p className="text-[11px] text-muted-foreground/70 mt-1">Set `0` for no cap (full active universe).</p>
                         </div>
                         <div>
                           <Label className="text-xs text-muted-foreground">Max Events / Scan</Label>
                           <Input
                             type="number"
                             value={scannerForm.max_events_to_scan}
-                            onChange={(e) => setScannerForm(p => ({ ...p, max_events_to_scan: Math.max(10, parseInt(e.target.value) || 10) }))}
-                            min={10}
-                            max={10000}
+                            onChange={(e) => setScannerForm(p => ({ ...p, max_events_to_scan: Math.max(0, parseInt(e.target.value) || 0) }))}
+                            min={0}
+                            max={200000}
                             className="mt-1 text-sm"
                           />
+                          <p className="text-[11px] text-muted-foreground/70 mt-1">Set `0` for no cap (full active universe).</p>
                         </div>
                         <div>
                           <Label className="text-xs text-muted-foreground">Market Fetch Page Size</Label>
