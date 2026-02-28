@@ -236,11 +236,9 @@ async def _run_loop() -> None:
 
                 incident_actions: list[dict[str, Any]] = []
                 breached_metric_names: list[str] = []
-                degrade_trigger_metrics = {
-                    "last_fast_scan_age_seconds",
-                    "opportunity_price_age_p95",
-                    "opportunity_last_detected_age_p95",
-                }
+                # Keep SLO worker focused on incidents/alerts; automatic heavy-lane
+                # degrade is handled by scanner backlog controls to avoid feedback loops.
+                degrade_trigger_metrics: set[str] = set()
                 alert_payload: dict[str, Any] | None = None
 
                 async with AsyncSessionLocal() as session:
