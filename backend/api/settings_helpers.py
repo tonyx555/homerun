@@ -290,6 +290,7 @@ def notifications_payload(settings: AppSettings) -> dict[str, Any]:
         "notify_on_trade": settings.notify_on_trade,
         "notify_min_roi": settings.notify_min_roi,
         "notify_autotrader_orders": bool(getattr(settings, "notify_autotrader_orders", False)),
+        "notify_autotrader_closes": bool(getattr(settings, "notify_autotrader_closes", True)),
         "notify_autotrader_issues": bool(getattr(settings, "notify_autotrader_issues", True)),
         "notify_autotrader_timeline": bool(getattr(settings, "notify_autotrader_timeline", True)),
         "notify_autotrader_summary_interval_minutes": int(
@@ -686,6 +687,7 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
         settings.notify_on_trade = notif.notify_on_trade
         settings.notify_min_roi = notif.notify_min_roi
         settings.notify_autotrader_orders = bool(getattr(notif, "notify_autotrader_orders", False))
+        settings.notify_autotrader_closes = bool(getattr(notif, "notify_autotrader_closes", True))
         settings.notify_autotrader_issues = bool(getattr(notif, "notify_autotrader_issues", True))
         settings.notify_autotrader_timeline = bool(getattr(notif, "notify_autotrader_timeline", True))
         interval_minutes = int(

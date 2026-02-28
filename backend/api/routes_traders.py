@@ -396,6 +396,35 @@ async def get_all_trader_orders_all(
     }
 
 
+@router.get("/decisions/all")
+async def get_all_trader_decisions_all(
+    decision: Optional[str] = Query(default=None),
+    trader_ids: Optional[str] = Query(default=None),
+    limit: int = Query(default=2000, ge=1, le=5000),
+    per_trader_limit: int = Query(default=160, ge=1, le=1000),
+    session: AsyncSession = Depends(get_db_session),
+):
+    normalized_trader_ids: list[str] = []
+    if trader_ids:
+        seen: set[str] = set()
+        for raw in str(trader_ids).split(","):
+            value = str(raw or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            normalized_trader_ids.append(value)
+    return {
+        "decisions": await list_serialized_trader_decisions(
+            session,
+            trader_id=None,
+            trader_ids=normalized_trader_ids or None,
+            decision=decision,
+            limit=limit,
+            per_trader_limit=per_trader_limit if normalized_trader_ids else None,
+        )
+    }
+
+
 @router.get("/market-history")
 async def get_trader_market_history(
     market_ids: str = Query(default=""),

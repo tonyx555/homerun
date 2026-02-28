@@ -2469,15 +2469,68 @@ async def list_trader_decisions(
     session: AsyncSession,
     *,
     trader_id: Optional[str] = None,
+    trader_ids: Optional[list[str]] = None,
     decision: Optional[str] = None,
     limit: int = 200,
+    per_trader_limit: Optional[int] = None,
 ) -> list[TraderDecision]:
-    query = select(TraderDecision).order_by(desc(TraderDecision.created_at))
+    normalized_trader_ids: list[str] = []
+    if trader_ids:
+        seen: set[str] = set()
+        for raw in trader_ids:
+            value = str(raw or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            normalized_trader_ids.append(value)
+
     if trader_id:
-        query = query.where(TraderDecision.trader_id == trader_id)
+        query = select(TraderDecision).where(TraderDecision.trader_id == trader_id)
+        if decision:
+            query = query.where(TraderDecision.decision == decision)
+        query = query.order_by(desc(TraderDecision.created_at), desc(TraderDecision.id))
+        query = query.limit(max(1, min(limit, 1000)))
+        return list((await session.execute(query)).scalars().all())
+
+    max_limit = 5000 if normalized_trader_ids else 1000
+    capped_limit = max(1, min(limit, max_limit))
+    capped_per_trader_limit = (
+        max(1, min(int(per_trader_limit or 1), 1000))
+        if per_trader_limit is not None and normalized_trader_ids
+        else None
+    )
+
+    if capped_per_trader_limit is not None:
+        ranked_decisions = (
+            select(
+                TraderDecision.id.label("id"),
+                func.row_number()
+                .over(
+                    partition_by=TraderDecision.trader_id,
+                    order_by=(TraderDecision.created_at.desc(), TraderDecision.id.desc()),
+                )
+                .label("rn"),
+            )
+            .where(TraderDecision.trader_id.in_(normalized_trader_ids))
+        )
+        if decision:
+            ranked_decisions = ranked_decisions.where(TraderDecision.decision == decision)
+        ranked_subquery = ranked_decisions.subquery()
+        query = (
+            select(TraderDecision)
+            .join(ranked_subquery, TraderDecision.id == ranked_subquery.c.id)
+            .where(ranked_subquery.c.rn <= capped_per_trader_limit)
+            .order_by(desc(TraderDecision.created_at), desc(TraderDecision.id))
+            .limit(capped_limit)
+        )
+        return list((await session.execute(query)).scalars().all())
+
+    query = select(TraderDecision).order_by(desc(TraderDecision.created_at), desc(TraderDecision.id))
+    if normalized_trader_ids:
+        query = query.where(TraderDecision.trader_id.in_(normalized_trader_ids))
     if decision:
         query = query.where(TraderDecision.decision == decision)
-    query = query.limit(max(1, min(limit, 1000)))
+    query = query.limit(capped_limit)
     return list((await session.execute(query)).scalars().all())
 
 
@@ -5510,14 +5563,18 @@ async def list_serialized_trader_decisions(
     session: AsyncSession,
     *,
     trader_id: Optional[str] = None,
+    trader_ids: Optional[list[str]] = None,
     decision: Optional[str] = None,
     limit: int = 200,
+    per_trader_limit: Optional[int] = None,
 ) -> list[dict[str, Any]]:
     rows = await list_trader_decisions(
         session,
         trader_id=trader_id,
+        trader_ids=trader_ids,
         decision=decision,
         limit=limit,
+        per_trader_limit=per_trader_limit,
     )
     decision_ids = sorted({str(row.id).strip() for row in rows if str(row.id or "").strip()})
     signal_ids = sorted({str(row.signal_id).strip() for row in rows if str(row.signal_id or "").strip()})

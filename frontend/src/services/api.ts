@@ -2161,6 +2161,34 @@ export const getTraderDecisions = async (
   }))
 }
 
+export const getAllTraderDecisions = async (
+  traderIds: string[],
+  params?: { decision?: string; limit?: number; per_trader_limit?: number }
+): Promise<TraderDecision[]> => {
+  const normalizedTraderIds = Array.from(
+    new Set(
+      traderIds
+        .map((value) => String(value || '').trim())
+        .filter(Boolean)
+    )
+  )
+  if (normalizedTraderIds.length === 0) return []
+  const { data } = await api.get('/traders/decisions/all', {
+    params: {
+      decision: params?.decision,
+      trader_ids: normalizedTraderIds.join(','),
+      limit: Math.max(1, Math.trunc(Number(params?.limit) || 2000)),
+      per_trader_limit: Math.max(1, Math.trunc(Number(params?.per_trader_limit) || 160)),
+    },
+  })
+  const rows = Array.isArray(data.decisions) ? data.decisions : []
+  return rows.map((row: any) => ({
+    ...row,
+    failed_checks: Array.isArray(row?.failed_checks) ? row.failed_checks : [],
+    failed_check_count: Number(row?.failed_check_count || 0),
+  }))
+}
+
 export const getTraderOrders = async (
   traderId: string,
   params?: { status?: string; limit?: number }
@@ -2573,6 +2601,7 @@ export interface NotificationSettings {
   notify_on_trade: boolean
   notify_min_roi: number
   notify_autotrader_orders: boolean
+  notify_autotrader_closes: boolean
   notify_autotrader_issues: boolean
   notify_autotrader_timeline: boolean
   notify_autotrader_summary_interval_minutes: number

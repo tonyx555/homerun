@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -185,7 +184,6 @@ def _fallback_updates_from_prices(
 
 async def _run_loop() -> None:
     worker_name = "market_data"
-    owner = f"{worker_name}:{os.getpid()}"
     heartbeat_interval = max(
         1.0,
         float(getattr(settings, "MARKET_DATA_HEARTBEAT_INTERVAL_SECONDS", 3.0) or 3.0),

@@ -6,7 +6,7 @@ import asyncio
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 from sqlalchemy import and_, func, or_, select
@@ -15,12 +15,22 @@ from config import settings
 from models.database import (
     AppSettings,
     AsyncSessionLocal,
+    SimulationAccount,
     Trader,
     TraderDecision,
     TraderEvent,
     TraderOrder,
     TraderOrchestratorControl,
     TraderOrchestratorSnapshot,
+)
+from services.pause_state import global_pause_state
+from services.trader_orchestrator_state import (
+    ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS,
+    create_trader_event,
+    read_orchestrator_control,
+    read_orchestrator_snapshot,
+    update_orchestrator_control,
+    write_orchestrator_snapshot,
 )
 from utils.logger import get_logger
 from utils.secrets import decrypt_secret
@@ -33,6 +43,13 @@ MAX_MESSAGES_PER_MINUTE = 20
 MONITOR_POLL_SECONDS = 5
 SETTINGS_REFRESH_SECONDS = 30
 DEFAULT_SUMMARY_INTERVAL_MINUTES = 60
+COMMAND_POLL_TIMEOUT_SECONDS = 25
+COMMAND_LOOP_IDLE_SECONDS = 3
+CLOSE_ALERT_MARKER_LIMIT = 4000
+CLOSE_ALERT_BATCH_LIMIT = 10
+TELEGRAM_UPDATE_DRAIN_LIMIT = 50
+REALIZED_ORDER_STATUSES = {"resolved_win", "resolved_loss", "closed_win", "closed_loss", "win", "loss"}
+ISSUE_ORDER_STATUSES = {"failed", "rejected", "cancelled", "error"}
 
 
 def _escape_md(text: str) -> str:
@@ -80,6 +97,7 @@ class TelegramNotifier:
         self._notifications_enabled: bool = False
 
         self._notify_autotrader_orders: bool = False
+        self._notify_autotrader_closes: bool = True
         self._notify_autotrader_issues: bool = True
         self._notify_autotrader_timeline: bool = True
         self._summary_interval_minutes: int = DEFAULT_SUMMARY_INTERVAL_MINUTES
@@ -89,6 +107,7 @@ class TelegramNotifier:
         self._message_queue: asyncio.Queue[str] = asyncio.Queue()
         self._queue_task: Optional[asyncio.Task] = None
         self._monitor_task: Optional[asyncio.Task] = None
+        self._command_task: Optional[asyncio.Task] = None
 
         self._http_client: Optional[httpx.AsyncClient] = None
 
@@ -102,7 +121,10 @@ class TelegramNotifier:
         self._last_settings_reload_monotonic: float = 0.0
 
         self._last_order_cursor: Optional[tuple[datetime, str]] = None
+        self._last_order_update_cursor: Optional[tuple[datetime, str]] = None
         self._last_event_cursor: Optional[tuple[datetime, str]] = None
+        self._telegram_update_offset: Optional[int] = None
+        self._close_alert_markers: dict[str, str] = {}
 
     async def start(self) -> None:
         """Initialize notifier runtime and start background workers."""
@@ -122,16 +144,18 @@ class TelegramNotifier:
         self._running = True
         self._started = True
         self._last_settings_reload_monotonic = time.monotonic()
+        await self._prime_telegram_update_offset()
 
         self._queue_task = asyncio.create_task(self._queue_worker())
         self._monitor_task = asyncio.create_task(self._autotrader_monitor_loop())
+        self._command_task = asyncio.create_task(self._telegram_command_loop())
 
         logger.info("Telegram notifier started (autotrader mode)")
 
     def stop(self) -> None:
         """Stop notifier tasks."""
         self._running = False
-        for task in (self._queue_task, self._monitor_task):
+        for task in (self._queue_task, self._monitor_task, self._command_task):
             if task and not task.done():
                 task.cancel()
         logger.info("Telegram notifier stopped")
@@ -161,6 +185,7 @@ class TelegramNotifier:
             self._chat_id = settings.TELEGRAM_CHAT_ID
             self._notifications_enabled = bool(self._bot_token and self._chat_id)
             self._notify_autotrader_orders = False
+            self._notify_autotrader_closes = True
             self._notify_autotrader_issues = True
             self._notify_autotrader_timeline = True
             self._summary_interval_minutes = DEFAULT_SUMMARY_INTERVAL_MINUTES
@@ -183,6 +208,7 @@ class TelegramNotifier:
 
         # Legacy bridge: if new toggles are missing for any reason, fall back to old flags.
         self._notify_autotrader_orders = bool(getattr(row, "notify_autotrader_orders", bool(row.notify_on_trade)))
+        self._notify_autotrader_closes = bool(getattr(row, "notify_autotrader_closes", True))
         self._notify_autotrader_issues = bool(getattr(row, "notify_autotrader_issues", True))
         self._notify_autotrader_timeline = bool(
             getattr(row, "notify_autotrader_timeline", bool(row.notify_on_opportunity))
@@ -217,6 +243,17 @@ class TelegramNotifier:
                 if latest_order and latest_order[0] is not None:
                     self._last_order_cursor = (_to_utc(latest_order[0]), str(latest_order[1]))
 
+                latest_order_update = (
+                    await session.execute(
+                        select(TraderOrder.updated_at, TraderOrder.id)
+                        .where(TraderOrder.updated_at.is_not(None))
+                        .order_by(TraderOrder.updated_at.desc(), TraderOrder.id.desc())
+                        .limit(1)
+                    )
+                ).first()
+                if latest_order_update and latest_order_update[0] is not None:
+                    self._last_order_update_cursor = (_to_utc(latest_order_update[0]), str(latest_order_update[1]))
+
                 latest_event = (
                     await session.execute(
                         select(TraderEvent.created_at, TraderEvent.id)
@@ -237,6 +274,7 @@ class TelegramNotifier:
                 )
                 if self._autotrader_active:
                     self._last_summary_at = utcnow()
+                self._close_alert_markers = {}
         except Exception as exc:
             logger.debug("Notifier cursor priming skipped", exc_info=exc)
 
@@ -297,6 +335,7 @@ class TelegramNotifier:
 
                     new_events = await self._load_new_trader_events(session)
                     new_orders = await self._load_new_trader_orders(session)
+                    updated_orders = await self._load_updated_trader_orders(session)
 
                     if self._notify_autotrader_issues:
                         await self._send_issue_alerts(
@@ -310,6 +349,13 @@ class TelegramNotifier:
                         await self._send_order_activity_alert(
                             session=session,
                             orders=new_orders,
+                            mode=mode,
+                        )
+
+                    if self._notify_autotrader_closes:
+                        await self._send_position_close_alerts(
+                            session=session,
+                            orders=updated_orders,
                             mode=mode,
                         )
 
@@ -352,6 +398,32 @@ class TelegramNotifier:
             last = rows[-1]
             if last.created_at is not None:
                 self._last_order_cursor = (_to_utc(last.created_at), str(last.id))
+        return rows
+
+    async def _load_updated_trader_orders(self, session) -> list[TraderOrder]:
+        query = (
+            select(TraderOrder)
+            .where(TraderOrder.updated_at.is_not(None))
+            .order_by(TraderOrder.updated_at.asc(), TraderOrder.id.asc())
+        )
+
+        if self._last_order_update_cursor is not None:
+            cursor_ts, cursor_id = self._last_order_update_cursor
+            query = query.where(
+                or_(
+                    TraderOrder.updated_at > cursor_ts.replace(tzinfo=None),
+                    and_(
+                        TraderOrder.updated_at == cursor_ts.replace(tzinfo=None),
+                        TraderOrder.id > cursor_id,
+                    ),
+                )
+            )
+
+        rows = (await session.execute(query.limit(300))).scalars().all()
+        if rows:
+            last = rows[-1]
+            if last.updated_at is not None:
+                self._last_order_update_cursor = (_to_utc(last.updated_at), str(last.id))
         return rows
 
     async def _load_new_trader_events(self, session) -> list[TraderEvent]:
@@ -399,11 +471,15 @@ class TelegramNotifier:
     @staticmethod
     def _is_issue_order(order: TraderOrder) -> bool:
         status = str(order.status or "").strip().lower()
-        if status in {"failed", "rejected", "cancelled", "error"}:
+        if status in ISSUE_ORDER_STATUSES:
             return True
         if order.error_message:
             return True
         return False
+
+    @staticmethod
+    def _is_realized_order(order: TraderOrder) -> bool:
+        return str(order.status or "").strip().lower() in REALIZED_ORDER_STATUSES
 
     async def _load_trader_name_map(
         self,
@@ -497,6 +573,74 @@ class TelegramNotifier:
 
         await self._enqueue("\n".join(lines))
 
+    async def _send_position_close_alerts(
+        self,
+        *,
+        session,
+        orders: list[TraderOrder],
+        mode: str,
+    ) -> None:
+        realized_rows: dict[str, TraderOrder] = {}
+
+        for row in orders:
+            if not self._is_realized_order(row):
+                continue
+            updated_at = _to_utc(row.updated_at) or _to_utc(row.created_at) or utcnow()
+            marker = f"{str(row.status or '').lower()}@{updated_at.isoformat()}"
+            order_id = str(row.id)
+            if self._close_alert_markers.get(order_id) == marker:
+                continue
+            self._close_alert_markers[order_id] = marker
+            realized_rows[order_id] = row
+
+        if not realized_rows:
+            return
+
+        while len(self._close_alert_markers) > CLOSE_ALERT_MARKER_LIMIT:
+            oldest = next(iter(self._close_alert_markers.keys()), None)
+            if oldest is None:
+                break
+            self._close_alert_markers.pop(oldest, None)
+
+        rows = sorted(
+            realized_rows.values(),
+            key=lambda row: (_to_utc(row.updated_at) or _to_utc(row.created_at) or utcnow(), str(row.id)),
+        )
+        trader_ids = {str(row.trader_id) for row in rows if row.trader_id}
+        trader_names = await self._load_trader_name_map(session, trader_ids)
+
+        title = "Autotrader Position Close" if len(rows) == 1 else "Autotrader Position Closes"
+        lines = [
+            f"✅ {_bold(title)}",
+            "",
+            f"{_bold('Mode:')} {_escape_md(mode)}",
+            f"{_bold('Count:')} {_escape_md(str(len(rows)))}",
+        ]
+
+        for row in rows[:CLOSE_ALERT_BATCH_LIMIT]:
+            trader_name = trader_names.get(str(row.trader_id), str(row.trader_id)[:8] if row.trader_id else "Unknown")
+            status = str(row.status or "closed").lower()
+            status_label = status.replace("_", " ").upper()
+            pnl = float(row.actual_profit or 0.0)
+            market = str(row.market_question or row.market_id or "unknown market")
+            payload = row.payload_json if isinstance(row.payload_json, dict) else {}
+            position_close = payload.get("position_close") if isinstance(payload, dict) else {}
+            close_trigger = ""
+            if isinstance(position_close, dict):
+                close_trigger = str(position_close.get("close_trigger") or "").strip()
+
+            lines.append(
+                f"• {_escape_md(trader_name)}: {_escape_md(status_label)}, P&L {_escape_md(f'{pnl:+.2f}')}, {_escape_md(market[:120])}"
+            )
+            if close_trigger:
+                lines.append(f"  {_bold('Trigger:')} {_escape_md(close_trigger)}")
+
+        remaining = len(rows) - CLOSE_ALERT_BATCH_LIMIT
+        if remaining > 0:
+            lines.append(f"{_bold('Additional closes:')} {_escape_md(str(remaining))}")
+
+        await self._enqueue("\n".join(lines))
+
     async def _maybe_send_timeline_summary(
         self,
         *,
@@ -535,6 +679,7 @@ class TelegramNotifier:
         end: datetime,
         control: Optional[TraderOrchestratorControl],
         snapshot: Optional[TraderOrchestratorSnapshot],
+        title: str = "Autotrader Timeline",
     ) -> str:
         start_naive = _to_utc(start).replace(tzinfo=None)
         end_naive = _to_utc(end).replace(tzinfo=None)
@@ -601,7 +746,7 @@ class TelegramNotifier:
         traders_total = int(getattr(snapshot, "traders_total", 0) if snapshot else 0)
 
         lines = [
-            f"🕒 {_bold('Autotrader Timeline')}",
+            f"🕒 {_bold(_escape_md(title))}",
             "",
             f"{_bold('Window:')} {_escape_md(_to_utc(start).strftime('%Y-%m-%d %H:%M'))} -> {_escape_md(_to_utc(end).strftime('%Y-%m-%d %H:%M'))} UTC",
             f"{_bold('Mode:')} {_escape_md(mode)}",
@@ -732,6 +877,16 @@ class TelegramNotifier:
             return "none"
         return ", ".join(f"{key}={value}" for key, value in sorted(counts.items(), key=lambda item: item[0]))
 
+    @staticmethod
+    def _format_utc_timestamp(value: Any) -> str:
+        if isinstance(value, datetime):
+            dt = _to_utc(value)
+            if dt is not None:
+                return f"{dt.strftime('%Y-%m-%d %H:%M:%S')} UTC"
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return "n/a"
+
     def _format_runtime_state_message(
         self,
         *,
@@ -808,6 +963,377 @@ class TelegramNotifier:
             f"{_bold('Time:')} {_escape_md(utcnow().strftime('%Y-%m-%d %H:%M:%S'))} UTC",
         ]
         return "\n".join(lines)
+
+    async def _prime_telegram_update_offset(self) -> None:
+        if not self._bot_token or not self._chat_id:
+            self._telegram_update_offset = None
+            return
+        for _ in range(TELEGRAM_UPDATE_DRAIN_LIMIT):
+            updates = await self._fetch_telegram_updates(timeout_seconds=0)
+            if not updates:
+                break
+
+    async def _fetch_telegram_updates(self, *, timeout_seconds: int) -> list[dict[str, Any]]:
+        if not self._bot_token:
+            return []
+        if not self._http_client:
+            self._http_client = httpx.AsyncClient(timeout=15.0)
+
+        url = f"{TELEGRAM_API_BASE}/bot{self._bot_token}/getUpdates"
+        payload: dict[str, Any] = {
+            "timeout": max(0, int(timeout_seconds)),
+            "limit": 100,
+            "allowed_updates": ["message"],
+        }
+        if self._telegram_update_offset is not None:
+            payload["offset"] = int(self._telegram_update_offset)
+
+        try:
+            response = await self._http_client.post(url, json=payload, timeout=timeout_seconds + 10)
+            if response.status_code == 429:
+                retry_after = 5
+                try:
+                    body = response.json()
+                    retry_after = int(body.get("parameters", {}).get("retry_after", 5) or 5)
+                except Exception:
+                    retry_after = 5
+                logger.warning("Telegram getUpdates rate limited", retry_after=retry_after)
+                await asyncio.sleep(max(1, retry_after))
+                return []
+
+            if response.status_code != 200:
+                logger.warning("Telegram getUpdates failed", status=response.status_code, body=response.text[:250])
+                return []
+
+            body = response.json()
+            if not isinstance(body, dict) or not body.get("ok"):
+                logger.warning("Telegram getUpdates returned invalid payload")
+                return []
+
+            result = body.get("result")
+            if not isinstance(result, list):
+                return []
+
+            updates = [item for item in result if isinstance(item, dict)]
+            if updates:
+                update_ids = [int(item.get("update_id")) for item in updates if isinstance(item.get("update_id"), int)]
+                if update_ids:
+                    self._telegram_update_offset = max(update_ids) + 1
+            return updates
+        except asyncio.CancelledError:
+            raise
+        except httpx.TimeoutException:
+            return []
+        except Exception as exc:
+            logger.error("Failed to poll Telegram updates", exc_info=exc)
+            return []
+
+    async def _telegram_command_loop(self) -> None:
+        while self._running:
+            try:
+                now_monotonic = time.monotonic()
+                if now_monotonic - self._last_settings_reload_monotonic >= SETTINGS_REFRESH_SECONDS:
+                    await self._load_settings()
+                    self._last_settings_reload_monotonic = now_monotonic
+
+                if not self._bot_token or not self._chat_id:
+                    await asyncio.sleep(COMMAND_LOOP_IDLE_SECONDS)
+                    continue
+
+                updates = await self._fetch_telegram_updates(timeout_seconds=COMMAND_POLL_TIMEOUT_SECONDS)
+                for update in updates:
+                    await self._process_telegram_update(update)
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                logger.error("Telegram command loop failed", exc_info=exc)
+                await asyncio.sleep(COMMAND_LOOP_IDLE_SECONDS)
+
+    async def _process_telegram_update(self, update: dict[str, Any]) -> None:
+        message = update.get("message")
+        if not isinstance(message, dict):
+            return
+
+        chat = message.get("chat")
+        if not isinstance(chat, dict):
+            return
+        chat_id = str(chat.get("id") or "").strip()
+        if not chat_id:
+            return
+
+        expected_chat_id = str(self._chat_id or "").strip()
+        if expected_chat_id and chat_id != expected_chat_id:
+            logger.warning("Ignoring Telegram command from unexpected chat", chat_id=chat_id)
+            return
+
+        text = str(message.get("text") or "").strip()
+        if not text:
+            return
+
+        operator = "telegram"
+        sender = message.get("from")
+        if isinstance(sender, dict):
+            username = str(sender.get("username") or "").strip()
+            sender_id = str(sender.get("id") or "").strip()
+            if username:
+                operator = f"telegram:{username}"
+            elif sender_id:
+                operator = f"telegram:{sender_id}"
+
+        try:
+            response = await self._handle_telegram_command(text=text, operator=operator)
+        except Exception as exc:
+            logger.error("Telegram command processing failed", exc_info=exc)
+            response = "❌ Telegram command failed\\.\nPlease retry or check backend logs\\."
+        if response:
+            await self._enqueue(response)
+
+    async def _handle_telegram_command(self, *, text: str, operator: str) -> str:
+        stripped = str(text or "").strip()
+        if not stripped:
+            return ""
+
+        parts = stripped.split()
+        head = str(parts[0] or "").strip()
+        args = [str(item or "").strip() for item in parts[1:] if str(item or "").strip()]
+
+        if head.startswith("/"):
+            command = head.split("@", 1)[0].lower()
+        else:
+            command = head.lower()
+
+        if command in {"/help", "/commands", "help", "commands"}:
+            return self._telegram_help_message()
+        if command in {"/status", "status"}:
+            return await self._telegram_status_message()
+        if command in {"/performance", "/pnl", "performance", "pnl"}:
+            hours_arg = args[0] if args else None
+            return await self._telegram_performance_message(hours_arg=hours_arg)
+        if command in {"/stop", "stop"}:
+            return await self._telegram_stop_autotrader(operator=operator)
+        if command in {"/start", "start"}:
+            mode_arg: Optional[str] = None
+            paper_account_id: Optional[str] = None
+            if args:
+                first = args[0].lower()
+                if first in {"paper", "shadow", "live"}:
+                    mode_arg = first
+                    if len(args) > 1:
+                        paper_account_id = args[1]
+                else:
+                    paper_account_id = args[0]
+            return await self._telegram_start_autotrader(
+                mode_arg=mode_arg,
+                paper_account_id=paper_account_id,
+                operator=operator,
+            )
+        if command in {"/killswitch", "/kill", "killswitch", "kill"}:
+            if not args:
+                return "Usage: `/killswitch on` or `/killswitch off`\\."
+            toggle = args[0].strip().lower()
+            if toggle in {"on", "1", "true", "enable", "enabled"}:
+                return await self._telegram_set_kill_switch(enabled=True, operator=operator)
+            if toggle in {"off", "0", "false", "disable", "disabled"}:
+                return await self._telegram_set_kill_switch(enabled=False, operator=operator)
+            return "Usage: `/killswitch on` or `/killswitch off`\\."
+
+        return "Unknown command\\.\nUse `/help` for available Telegram commands\\."
+
+    @staticmethod
+    def _telegram_help_message() -> str:
+        return "\n".join(
+            [
+                f"🤖 {_bold('Homerun Telegram Commands')}",
+                "",
+                "`/status` \\- show orchestrator state and core metrics",
+                "`/performance [hours]` \\- timeline summary for the last N hours \\(default 24\\)",
+                "`/start [paper|shadow] [paper_account_id]` \\- start autotrader",
+                "`/stop` \\- stop autotrader",
+                "`/killswitch on|off` \\- toggle orchestrator kill switch",
+            ]
+        )
+
+    async def _telegram_status_message(self) -> str:
+        async with AsyncSessionLocal() as session:
+            control = await read_orchestrator_control(session)
+            snapshot = await read_orchestrator_snapshot(session)
+            cutoff = (utcnow() - timedelta(hours=24)).replace(tzinfo=None)
+            realized_24h = float(
+                (
+                    await session.execute(
+                        select(func.coalesce(func.sum(TraderOrder.actual_profit), 0.0)).where(
+                            TraderOrder.updated_at >= cutoff,
+                            TraderOrder.status.in_(tuple(REALIZED_ORDER_STATUSES)),
+                        )
+                    )
+                ).scalar()
+                or 0.0
+            )
+
+        mode = str(control.get("mode", "paper") or "paper").upper()
+        enabled = bool(control.get("is_enabled", False))
+        paused = bool(control.get("is_paused", True))
+        running = bool(snapshot.get("running", False))
+        state = "ACTIVE" if enabled and not paused else "PAUSED"
+        kill_switch = bool(control.get("kill_switch", False))
+        traders_running = int(snapshot.get("traders_running", 0) or 0)
+        traders_total = int(snapshot.get("traders_total", 0) or 0)
+        decisions_count = int(snapshot.get("decisions_count", 0) or 0)
+        orders_count = int(snapshot.get("orders_count", 0) or 0)
+        open_orders = int(snapshot.get("open_orders", 0) or 0)
+        daily_pnl = float(snapshot.get("daily_pnl", 0.0) or 0.0)
+        last_run = self._format_utc_timestamp(snapshot.get("last_run_at"))
+        updated_at = self._format_utc_timestamp(snapshot.get("updated_at"))
+
+        lines = [
+            f"📊 {_bold('Autotrader Status')}",
+            "",
+            f"{_bold('State:')} {_escape_md(state)} / {_escape_md('running' if running else 'idle')}",
+            f"{_bold('Mode:')} {_escape_md(mode)}",
+            f"{_bold('Kill Switch:')} {_escape_md('ON' if kill_switch else 'OFF')}",
+            f"{_bold('Traders Running:')} {_escape_md(str(traders_running))}/{_escape_md(str(traders_total))}",
+            f"{_bold('Decisions:')} {_escape_md(str(decisions_count))}",
+            f"{_bold('Orders:')} {_escape_md(str(orders_count))}",
+            f"{_bold('Open Orders:')} {_escape_md(str(open_orders))}",
+            f"{_bold('Daily P&L:')} {_escape_md(f'{daily_pnl:+.2f}')}",
+            f"{_bold('Realized 24h:')} {_escape_md(f'{realized_24h:+.2f}')}",
+            f"{_bold('Last Run:')} {_escape_md(last_run)}",
+            f"{_bold('Snapshot:')} {_escape_md(updated_at)}",
+        ]
+        return "\n".join(lines)
+
+    async def _telegram_performance_message(self, *, hours_arg: Optional[str]) -> str:
+        hours = _clamp_int(hours_arg, 1, 168, 24)
+        end = utcnow()
+        start = end - timedelta(hours=hours)
+
+        async with AsyncSessionLocal() as session:
+            control_row = await session.get(TraderOrchestratorControl, "default")
+            snapshot_row = await session.get(TraderOrchestratorSnapshot, "latest")
+            return await self._build_timeline_summary(
+                session=session,
+                start=start,
+                end=end,
+                control=control_row,
+                snapshot=snapshot_row,
+                title=f"Autotrader Performance ({hours}h)",
+            )
+
+    async def _telegram_start_autotrader(
+        self,
+        *,
+        mode_arg: Optional[str],
+        paper_account_id: Optional[str],
+        operator: str,
+    ) -> str:
+        if global_pause_state.is_paused:
+            return "❌ Global pause is active\\.\nResume workers before starting autotrader\\."
+
+        mode = str(mode_arg or "").strip().lower()
+        if mode == "live":
+            return "❌ Live mode start is blocked from Telegram\\.\nUse the in\\-app live preflight/arm/start flow\\."
+        if mode and mode not in {"paper", "shadow"}:
+            return "❌ Invalid mode\\.\nUse `paper` or `shadow`\\."
+
+        async with AsyncSessionLocal() as session:
+            control_before = await read_orchestrator_control(session)
+            selected_mode = mode or str(control_before.get("mode") or "paper").strip().lower() or "paper"
+            if selected_mode not in {"paper", "shadow"}:
+                selected_mode = "paper"
+
+            settings_updates: dict[str, Any] = {}
+            selected_paper_account_id: Optional[str] = None
+            if selected_mode == "paper":
+                requested_paper = str(paper_account_id or "").strip() or None
+                existing_paper = str((control_before.get("settings") or {}).get("paper_account_id") or "").strip() or None
+                selected_paper_account_id = requested_paper or existing_paper
+                if not selected_paper_account_id:
+                    return (
+                        "❌ Cannot start paper mode: `paper_account_id` is not configured\\.\n"
+                        "Use `/start paper <paper_account_id>` once\\."
+                    )
+                paper_exists = (
+                    await session.execute(
+                        select(SimulationAccount.id).where(SimulationAccount.id == selected_paper_account_id)
+                    )
+                ).scalar_one_or_none()
+                if paper_exists is None:
+                    return "❌ Paper account not found\\.\nProvide a valid `paper_account_id`\\."
+                settings_updates["paper_account_id"] = selected_paper_account_id
+
+            control = await update_orchestrator_control(
+                session,
+                is_enabled=True,
+                is_paused=False,
+                mode=selected_mode,
+                requested_run_at=utcnow(),
+                settings_json=settings_updates,
+            )
+            await write_orchestrator_snapshot(
+                session,
+                running=False,
+                enabled=True,
+                current_activity="Start command queued from Telegram",
+                interval_seconds=int(
+                    control.get("run_interval_seconds") or ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS
+                ),
+            )
+            await create_trader_event(
+                session,
+                event_type="started",
+                source="telegram",
+                operator=operator,
+                message=f"Trader orchestrator started in {selected_mode} mode via Telegram",
+                payload={
+                    "mode": selected_mode,
+                    "paper_account_id": selected_paper_account_id,
+                },
+            )
+
+        paper_suffix = f", paper={selected_paper_account_id}" if selected_paper_account_id else ""
+        return f"✅ Autotrader start queued\\.\nMode: {_escape_md(selected_mode.upper())}{_escape_md(paper_suffix)}"
+
+    async def _telegram_stop_autotrader(self, *, operator: str) -> str:
+        async with AsyncSessionLocal() as session:
+            control = await update_orchestrator_control(
+                session,
+                is_enabled=False,
+                is_paused=True,
+                requested_run_at=None,
+            )
+            await write_orchestrator_snapshot(
+                session,
+                running=False,
+                enabled=False,
+                current_activity="Manual stop requested from Telegram",
+                interval_seconds=int(
+                    control.get("run_interval_seconds") or ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS
+                ),
+            )
+            await create_trader_event(
+                session,
+                event_type="stopped",
+                source="telegram",
+                operator=operator,
+                message="Trader orchestrator stopped via Telegram",
+            )
+        return "🛑 Autotrader stopped\\."
+
+    async def _telegram_set_kill_switch(self, *, enabled: bool, operator: str) -> str:
+        async with AsyncSessionLocal() as session:
+            await update_orchestrator_control(session, kill_switch=bool(enabled))
+            await create_trader_event(
+                session,
+                event_type="kill_switch",
+                severity="warn" if enabled else "info",
+                source="telegram",
+                operator=operator,
+                message="Kill switch updated via Telegram",
+                payload={"enabled": bool(enabled)},
+            )
+        if enabled:
+            return "⛔ Kill switch enabled\\."
+        return "✅ Kill switch disabled\\."
 
     def _can_send_now(self) -> bool:
         now = time.monotonic()

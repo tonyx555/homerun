@@ -853,6 +853,7 @@ class AppSettings(Base):
     notify_on_trade = Column(Boolean, default=True)
     notify_min_roi = Column(Float, default=5.0)
     notify_autotrader_orders = Column(Boolean, default=False)
+    notify_autotrader_closes = Column(Boolean, default=True)
     notify_autotrader_issues = Column(Boolean, default=True)
     notify_autotrader_timeline = Column(Boolean, default=True)
     notify_autotrader_summary_interval_minutes = Column(Integer, default=60)

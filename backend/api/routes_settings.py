@@ -91,6 +91,9 @@ class NotificationSettings(BaseModel):
     notify_autotrader_orders: bool = Field(
         default=False, description="Notify immediately when orchestrator creates orders"
     )
+    notify_autotrader_closes: bool = Field(
+        default=True, description="Notify when positions transition into closed/resolved states"
+    )
     notify_autotrader_issues: bool = Field(
         default=True,
         description="Notify on orchestrator warnings/errors and failed orders",

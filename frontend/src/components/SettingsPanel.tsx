@@ -205,6 +205,7 @@ export default function SettingsPanel({
     notify_on_trade: true,
     notify_min_roi: 5.0,
     notify_autotrader_orders: false,
+    notify_autotrader_closes: true,
     notify_autotrader_issues: true,
     notify_autotrader_timeline: true,
     notify_autotrader_summary_interval_minutes: 60,
@@ -299,6 +300,7 @@ export default function SettingsPanel({
         notify_on_trade: settings.notifications?.notify_on_trade ?? true,
         notify_min_roi: settings.notifications?.notify_min_roi ?? 5.0,
         notify_autotrader_orders: settings.notifications?.notify_autotrader_orders ?? false,
+        notify_autotrader_closes: settings.notifications?.notify_autotrader_closes ?? true,
         notify_autotrader_issues: settings.notifications?.notify_autotrader_issues ?? true,
         notify_autotrader_timeline: settings.notifications?.notify_autotrader_timeline ?? true,
         notify_autotrader_summary_interval_minutes: settings.notifications?.notify_autotrader_summary_interval_minutes ?? 60,
@@ -478,6 +480,7 @@ export default function SettingsPanel({
           notify_min_roi: notificationsForm.notify_min_roi,
           telegram_chat_id: notificationsForm.telegram_chat_id || null,
           notify_autotrader_orders: notificationsForm.notify_autotrader_orders,
+          notify_autotrader_closes: notificationsForm.notify_autotrader_closes,
           notify_autotrader_issues: notificationsForm.notify_autotrader_issues,
           notify_autotrader_timeline: notificationsForm.notify_autotrader_timeline,
           notify_autotrader_summary_interval_minutes: notificationsForm.notify_autotrader_summary_interval_minutes,
@@ -1133,6 +1136,19 @@ export default function SettingsPanel({
                               <Switch
                                 checked={notificationsForm.notify_autotrader_orders}
                                 onCheckedChange={(checked) => setNotificationsForm(p => ({ ...p, notify_autotrader_orders: checked }))}
+                              />
+                            </CardContent>
+                          </Card>
+
+                          <Card className="bg-muted">
+                            <CardContent className="flex items-center justify-between p-3">
+                              <div>
+                                <p className="text-sm">Autotrader Close Alerts</p>
+                                <p className="text-xs text-muted-foreground">Immediate alert when a position closes or resolves</p>
+                              </div>
+                              <Switch
+                                checked={notificationsForm.notify_autotrader_closes}
+                                onCheckedChange={(checked) => setNotificationsForm(p => ({ ...p, notify_autotrader_closes: checked }))}
                               />
                             </CardContent>
                           </Card>

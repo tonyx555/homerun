@@ -29,12 +29,12 @@ import {
   armTraderOrchestratorLiveStart,
   createTrader,
   deleteTrader,
+  getAllTraderDecisions,
   getAllTraderOrders,
   getTraderMarketHistory,
   getCryptoMarkets,
   type CryptoMarket,
   getTraderDecisionDetail,
-  getTraderDecisions,
   getTraderEvents,
   getTraderConfigSchema,
   getTraderOrchestratorOverview,
@@ -4025,14 +4025,10 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     refetchInterval: isConnected ? 30000 : 3000,
     staleTime: 0,
     refetchOnMount: 'always',
-    queryFn: async () => {
-      const grouped = await Promise.all(
-        traderIds.map((traderId) => getTraderDecisions(traderId, { limit: 160 }))
-      )
-      return grouped
-        .flat()
-        .sort((a, b) => toTs(b.created_at) - toTs(a.created_at))
-    },
+    queryFn: () => getAllTraderDecisions(traderIds, {
+      limit: Math.min(5000, Math.max(200, traderIds.length * 160)),
+      per_trader_limit: 160,
+    }),
   })
 
   const allEventsQuery = useQuery({
@@ -4860,18 +4856,91 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       }
       return startTraderOrchestrator({ mode: 'paper', paper_account_id: selectedSandboxAccount.id })
     },
-    onSuccess: refreshAll,
+    onMutate: () => {
+      setControlActionError(null)
+    },
+    onSuccess: (result: any) => {
+      const responseControl = result?.control && typeof result.control === 'object' ? result.control : {}
+      const startMode = String(responseControl.mode || '').trim().toLowerCase()
+      queryClient.setQueryData(['trader-orchestrator-overview'], (current: any) => {
+        if (!current || typeof current !== 'object') {
+          return current
+        }
+        const currentControl = current.control && typeof current.control === 'object' ? current.control : {}
+        const currentWorker = current.worker && typeof current.worker === 'object' ? current.worker : {}
+        return {
+          ...current,
+          control: {
+            ...currentControl,
+            ...responseControl,
+          },
+          worker: {
+            ...currentWorker,
+            running: false,
+            enabled: true,
+            current_activity: startMode === 'live' ? 'Live start command queued' : 'Start command queued',
+            interval_seconds: Number(
+              responseControl.run_interval_seconds
+              || currentWorker.interval_seconds
+              || 2
+            ),
+            last_error: null,
+          },
+        }
+      })
+      refreshAll()
+    },
+    onError: (error: unknown) => {
+      setControlActionError(errorMessage(error, 'Failed to start orchestrator'))
+    },
   })
 
   const stopByModeMutation = useMutation({
     mutationFn: async () => {
       const mode = String(overviewQuery.data?.control?.mode || 'paper').toLowerCase()
       if (mode === 'live') {
-        return stopTraderOrchestratorLive()
+        return { response: await stopTraderOrchestratorLive(), mode }
       }
-      return stopTraderOrchestrator()
+      return { response: await stopTraderOrchestrator(), mode }
     },
-    onSuccess: refreshAll,
+    onMutate: () => {
+      setControlActionError(null)
+    },
+    onSuccess: (result: { response: any; mode: string }) => {
+      const responseControl = result?.response?.control && typeof result.response.control === 'object'
+        ? result.response.control
+        : {}
+      queryClient.setQueryData(['trader-orchestrator-overview'], (current: any) => {
+        if (!current || typeof current !== 'object') {
+          return current
+        }
+        const currentControl = current.control && typeof current.control === 'object' ? current.control : {}
+        const currentWorker = current.worker && typeof current.worker === 'object' ? current.worker : {}
+        return {
+          ...current,
+          control: {
+            ...currentControl,
+            ...responseControl,
+          },
+          worker: {
+            ...currentWorker,
+            running: false,
+            enabled: false,
+            current_activity: result.mode === 'live' ? 'Live stop requested' : 'Manual stop requested',
+            interval_seconds: Number(
+              responseControl.run_interval_seconds
+              || currentWorker.interval_seconds
+              || 2
+            ),
+            last_error: null,
+          },
+        }
+      })
+      refreshAll()
+    },
+    onError: (error: unknown) => {
+      setControlActionError(errorMessage(error, 'Failed to stop orchestrator'))
+    },
   })
 
   const killSwitchMutation = useMutation({
