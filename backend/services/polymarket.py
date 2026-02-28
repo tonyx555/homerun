@@ -422,6 +422,39 @@ class PolymarketClient:
             return Event.from_gamma_response(data[0])
         return None
 
+    async def get_events_by_slugs(self, slugs: list[str], closed: bool = False) -> list[Event]:
+        """Fetch events by slug with bounded concurrency for incremental catalog sync."""
+        seen: set[str] = set()
+        normalized_slugs: list[str] = []
+        for raw_slug in slugs:
+            slug = str(raw_slug or "").strip()
+            if not slug or slug in seen:
+                continue
+            seen.add(slug)
+            normalized_slugs.append(slug)
+        if not normalized_slugs:
+            return []
+
+        semaphore = asyncio.Semaphore(12)
+        events: list[Event] = []
+
+        async def _fetch(slug: str) -> None:
+            async with semaphore:
+                try:
+                    response = await self._rate_limited_get(
+                        f"{self.gamma_url}/events",
+                        params={"slug": slug, "closed": str(bool(closed)).lower(), "limit": 1},
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    if isinstance(data, list) and data:
+                        events.append(Event.from_gamma_response(data[0]))
+                except Exception:
+                    return
+
+        await asyncio.gather(*[_fetch(slug) for slug in normalized_slugs])
+        return events
+
     async def _evict_market_cache_entry(self, *keys: str):
         """Evict market metadata keys from memory and persistent SQL cache."""
         cache = await self._get_persistent_cache()

@@ -2283,6 +2283,216 @@ class ArbitrageScanner:
             await self._set_activity(f"Catalog refresh error: {e}")
             raise
 
+    async def refresh_catalog_incremental(
+        self,
+        *,
+        force_full: bool = False,
+    ) -> dict[str, object]:
+        """Incremental market/event sync with periodic full-reconcile fallback."""
+        import time as _time
+        from models.market import Event
+
+        _t0 = _time.monotonic()
+        now = datetime.now(timezone.utc)
+
+        if not self._cached_markets:
+            await self._hydrate_catalog_from_db()
+
+        if force_full or not self._cached_markets:
+            market_count = await self.refresh_catalog()
+            return {
+                "mode": "full",
+                "event_count": len(self._cached_events),
+                "market_count": int(market_count),
+                "delta_market_count": int(market_count),
+                "delta_event_count": len(self._cached_events),
+                "duration_seconds": round(max(0.0, _time.monotonic() - _t0), 3),
+            }
+
+        await self._ensure_runtime_strategies_loaded()
+        await self._set_activity("Catalog incremental sync: fetching market/event deltas...")
+
+        delta_since_minutes = max(
+            1,
+            int(getattr(settings, "MARKET_UNIVERSE_INCREMENTAL_SINCE_MINUTES", 5) or 5),
+        )
+        if self._last_catalog_refresh is not None:
+            elapsed_minutes = int(max(0.0, (now - self._last_catalog_refresh).total_seconds()) / 60.0) + 1
+            delta_since_minutes = max(delta_since_minutes, elapsed_minutes)
+        delta_since_minutes = min(delta_since_minutes, 24 * 60)
+        max_event_slugs = max(
+            10,
+            int(getattr(settings, "MARKET_UNIVERSE_INCREMENTAL_MAX_EVENT_SLUGS", 250) or 250),
+        )
+
+        delta_markets: list = []
+        try:
+            delta_markets = await self.market_data.get_recent_markets(
+                since_minutes=delta_since_minutes,
+                active=True,
+            )
+        except Exception as e:
+            print(f"  Incremental market fetch failed, falling back to full refresh: {e}")
+            market_count = await self.refresh_catalog()
+            return {
+                "mode": "full",
+                "event_count": len(self._cached_events),
+                "market_count": int(market_count),
+                "delta_market_count": 0,
+                "delta_event_count": 0,
+                "duration_seconds": round(max(0.0, _time.monotonic() - _t0), 3),
+                "error": str(e),
+            }
+
+        event_slug_candidates: list[str] = []
+        event_slug_seen: set[str] = set()
+        for market in delta_markets:
+            slug = str(getattr(market, "event_slug", "") or "").strip()
+            if not slug or slug in event_slug_seen:
+                continue
+            event_slug_seen.add(slug)
+            event_slug_candidates.append(slug)
+            if len(event_slug_candidates) >= max_event_slugs:
+                break
+
+        delta_events: list = []
+        if event_slug_candidates:
+            try:
+                delta_events = await self.market_data.get_events_by_slugs(
+                    event_slug_candidates,
+                    closed=False,
+                )
+            except Exception as e:
+                print(f"  Incremental event fetch failed (non-fatal): {e}")
+                delta_events = []
+
+        market_map: dict[str, object] = {}
+        for market in self._cached_markets:
+            market_id = str(getattr(market, "id", "") or "").strip()
+            if market_id:
+                market_map[market_id] = market
+
+        touched_market_ids: set[str] = set()
+        for market in delta_markets:
+            market_id = str(getattr(market, "id", "") or "").strip()
+            if not market_id:
+                continue
+            touched_market_ids.add(market_id)
+            if self._is_market_active(market, now):
+                market_map[market_id] = market
+            else:
+                market_map.pop(market_id, None)
+
+        merged_markets = list(market_map.values())
+        event_map: dict[str, object] = {}
+        for event in self._cached_events:
+            key = str(getattr(event, "slug", "") or getattr(event, "id", "") or "").strip()
+            if key:
+                event_map[key] = event
+
+        touched_event_keys: set[str] = set(event_slug_candidates)
+        for event in delta_events:
+            key = str(getattr(event, "slug", "") or getattr(event, "id", "") or "").strip()
+            if not key:
+                continue
+            touched_event_keys.add(key)
+            if bool(getattr(event, "closed", False)):
+                event_map.pop(key, None)
+                continue
+            event_map[key] = event
+
+        markets_by_slug: dict[str, list] = {}
+        for market in merged_markets:
+            slug = str(getattr(market, "event_slug", "") or "").strip()
+            if not slug:
+                continue
+            if slug not in markets_by_slug:
+                markets_by_slug[slug] = [market]
+            else:
+                markets_by_slug[slug].append(market)
+
+        for event_key in touched_event_keys:
+            linked_markets = markets_by_slug.get(event_key, [])
+            if not linked_markets:
+                event_map.pop(event_key, None)
+                continue
+            event = event_map.get(event_key)
+            if event is None:
+                event = Event(
+                    id=event_key,
+                    slug=event_key,
+                    title=event_key.replace("-", " ").strip().title(),
+                    description="",
+                    category=None,
+                    tags=[],
+                    markets=linked_markets,
+                    neg_risk=False,
+                    active=True,
+                    closed=False,
+                )
+                event_map[event_key] = event
+            else:
+                event.markets = linked_markets
+
+        merged_events = list(event_map.values())
+        merged_events, merged_markets = self._prune_active_catalog(merged_events, merged_markets, now)
+        merged_events, merged_markets = self._enforce_catalog_caps(merged_events, merged_markets)
+
+        all_token_ids = self._collect_live_token_ids(merged_markets)
+        prices: dict[str, dict] = {}
+        if all_token_ids:
+            prices = await self._snapshot_ws_prices(all_token_ids)
+        self._apply_live_prices_to_markets(merged_markets, prices)
+
+        self._cached_events = list(merged_events)
+        self._cached_markets = list(merged_markets)
+        self._cached_prices = dict(prices)
+        self._remember_market_tokens(merged_markets)
+        self._rebuild_realtime_graph(merged_events, merged_markets)
+        self._trim_runtime_market_caches({str(getattr(m, "id", "") or "") for m in merged_markets})
+        self._update_market_price_history(merged_markets, prices, now)
+
+        if settings.WS_FEED_ENABLED:
+            try:
+                feed_mgr = get_feed_manager()
+                if feed_mgr._started:
+                    poly_tokens = [t for t in self._collect_polymarket_tokens(merged_markets)[:500] if len(t) > 20]
+                    if poly_tokens:
+                        await feed_mgr.polymarket_feed.subscribe(token_ids=poly_tokens[:200])
+            except Exception as e:
+                print(f"  WS subscription sync failed (non-critical): {e}")
+
+        try:
+            from services.market_monitor import market_monitor
+
+            await market_monitor.ingest_snapshot(merged_events, merged_markets)
+        except Exception:
+            pass
+
+        duration = _time.monotonic() - _t0
+        try:
+            from services.shared_state import write_market_catalog
+
+            async with AsyncSessionLocal() as session:
+                await write_market_catalog(
+                    session,
+                    merged_events,
+                    merged_markets,
+                    duration_seconds=duration,
+                )
+        except Exception as e:
+            print(f"  Incremental catalog DB persist failed (non-fatal): {e}")
+
+        self._last_catalog_refresh = now
+        return {
+            "mode": "incremental",
+            "event_count": len(merged_events),
+            "market_count": len(merged_markets),
+            "delta_market_count": len(touched_market_ids),
+            "delta_event_count": len(touched_event_keys),
+            "duration_seconds": round(max(0.0, duration), 3),
+        }
+
     async def _hydrate_catalog_from_db(self, *, only_if_newer: bool = False) -> int:
         """Restore market catalog from DB on startup.
 
@@ -3400,11 +3610,36 @@ class ArbitrageScanner:
 
     async def _catalog_refresh_background(self):
         """Background loop that refreshes market catalog independently."""
+        next_full_reconcile_at: datetime | None = None
         while self._running:
             interval = max(60, settings.FULL_SCAN_INTERVAL_SECONDS)
-            timeout = min(300, interval * 2.5)
+            full_reconcile_interval = max(
+                60,
+                int(getattr(settings, "MARKET_UNIVERSE_FULL_RECONCILE_INTERVAL_SECONDS", 900) or 900),
+            )
+            incremental_timeout = max(
+                15,
+                int(getattr(settings, "MARKET_UNIVERSE_INCREMENTAL_TIMEOUT_SECONDS", 120) or 120),
+            )
+            full_timeout = max(
+                30,
+                int(getattr(settings, "MARKET_UNIVERSE_REFRESH_TIMEOUT_SECONDS", 300) or 300),
+            )
+            now = datetime.now(timezone.utc)
+            force_full = (
+                not bool(getattr(settings, "MARKET_UNIVERSE_INCREMENTAL_ENABLED", True))
+                or next_full_reconcile_at is None
+                or now >= next_full_reconcile_at
+            )
+            timeout = float(full_timeout if force_full else incremental_timeout)
             try:
-                await asyncio.wait_for(self.refresh_catalog(), timeout=timeout)
+                result = await asyncio.wait_for(
+                    self.refresh_catalog_incremental(force_full=force_full),
+                    timeout=timeout,
+                )
+                mode = str(result.get("mode") or ("full" if force_full else "incremental"))
+                if mode == "full":
+                    next_full_reconcile_at = now + timedelta(seconds=full_reconcile_interval)
             except asyncio.TimeoutError:
                 print(f"  Catalog refresh timed out after {timeout:.0f}s")
             except asyncio.CancelledError:

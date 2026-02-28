@@ -2089,6 +2089,56 @@ class ScannerBatchQueue(Base):
     )
 
 
+class StrategyDeadLetterQueue(Base):
+    """Durable per-strategy dead-letter queue for failed aggregation groups."""
+
+    __tablename__ = "strategy_dead_letter_queue"
+
+    id = Column(String, primary_key=True)
+    source = Column(String, nullable=False, default="scanner")
+    batch_id = Column(String, nullable=True)
+    strategy_type = Column(String, nullable=False, default="unknown")
+    opportunities_json = Column(JSON, nullable=False, default=list)
+    status_json = Column(JSON, nullable=False, default=dict)
+    first_failed_at = Column(DateTime, default=_utcnow, nullable=False)
+    last_failed_at = Column(DateTime, nullable=False, default=_utcnow)
+    lease_owner = Column(String, nullable=True)
+    lease_expires_at = Column(DateTime, nullable=True)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    processed_at = Column(DateTime, nullable=True)
+    terminal = Column(Boolean, nullable=False, default=False)
+    error = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_strategy_dead_letter_pending", "processed_at", "first_failed_at"),
+        Index("idx_strategy_dead_letter_lease", "lease_expires_at"),
+        Index("idx_strategy_dead_letter_strategy", "strategy_type", "processed_at"),
+    )
+
+
+class ScannerSloIncident(Base):
+    """Durable scanner SLO incident timeline (open/resolved)."""
+
+    __tablename__ = "scanner_slo_incidents"
+
+    id = Column(String, primary_key=True)
+    metric = Column(String, nullable=False, index=True)
+    severity = Column(String, nullable=False, default="warning")
+    status = Column(String, nullable=False, default="open")  # open | resolved
+    threshold_value = Column(Float, nullable=True)
+    observed_value = Column(Float, nullable=True)
+    details_json = Column(JSON, nullable=False, default=dict)
+    opened_at = Column(DateTime, default=_utcnow, nullable=False)
+    last_seen_at = Column(DateTime, nullable=False, default=_utcnow)
+    resolved_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("idx_scanner_slo_incidents_status", "status", "opened_at"),
+        Index("idx_scanner_slo_incidents_metric_status", "metric", "status"),
+        Index("idx_scanner_slo_incidents_last_seen", "last_seen_at"),
+    )
+
+
 class OpportunityState(Base):
     """Current state for each opportunity stable_id (latest known value)."""
 
@@ -2140,6 +2190,9 @@ class ScannerControl(Base):
     is_paused = Column(Boolean, default=False)
     scan_interval_seconds = Column(Integer, default=60)
     requested_scan_at = Column(DateTime, nullable=True)  # set by API to trigger one scan
+    heavy_lane_forced_degraded = Column(Boolean, default=False)
+    heavy_lane_degraded_reason = Column(Text, nullable=True)
+    heavy_lane_degraded_until = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 

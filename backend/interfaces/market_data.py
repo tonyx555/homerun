@@ -23,6 +23,9 @@ class MarketDataProvider(Protocol):
     async def get_recent_markets(self, since_minutes: int = 10, active: bool = True) -> list[Market]:
         """Fetch recently created markets for incremental scans."""
 
+    async def get_events_by_slugs(self, slugs: list[str], closed: bool = False) -> list[Event]:
+        """Fetch specific events by slug for incremental universe diffs."""
+
     async def get_prices_batch(self, token_ids: list[str]) -> dict:
         """Fetch batched token prices keyed by token ID."""
 

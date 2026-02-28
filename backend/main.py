@@ -430,6 +430,7 @@ async def lifespan(app: FastAPI):
                 weather_control = await weather_shared_state.read_weather_control(session)
                 discovery_control = await discovery_shared_state.read_discovery_control(session)
                 orchestrator_control = await read_orchestrator_control(session)
+                scanner_slo_control = await read_worker_control(session, "scanner_slo")
                 crypto_control = await read_worker_control(session, "crypto")
                 tracked_control = await read_worker_control(session, "tracked_traders")
                 events_control = await read_worker_control(session, "events")
@@ -442,6 +443,7 @@ async def lifespan(app: FastAPI):
                     weather_control,
                     discovery_control,
                     orchestrator_control,
+                    scanner_slo_control,
                     crypto_control,
                     tracked_control,
                     events_control,
@@ -639,6 +641,7 @@ async def lifespan(app: FastAPI):
             "workers.market_data_worker",
             "workers.market_universe_worker",
             "workers.scanner_worker",
+            "workers.scanner_slo_worker",
             "workers.opportunity_aggregator_worker",
             "workers.crypto_worker",
             "workers.news_worker",

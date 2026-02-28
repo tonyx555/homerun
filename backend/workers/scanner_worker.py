@@ -29,6 +29,7 @@ from config import apply_runtime_settings_overrides, settings
 from models.database import AsyncSessionLocal
 from services.scanner import scanner
 from services.shared_state import (
+    clear_scanner_heavy_lane_degrade_if_expired,
     clear_scan_request,
     count_pending_scanner_batches,
     drop_oldest_pending_scanner_batch,
@@ -223,6 +224,8 @@ async def _run_scan_loop() -> None:
         "queue_pending": 0,
         "dropped_batches": 0,
         "last_batch_id": None,
+        "heavy_lane_forced_degraded": False,
+        "heavy_lane_degraded_reason": None,
     }
     heartbeat_interval_seconds = max(
         2.0,
@@ -265,6 +268,10 @@ async def _run_scan_loop() -> None:
                             "queue_pending": int(heartbeat_state.get("queue_pending", 0) or 0),
                             "dropped_batches": int(heartbeat_state.get("dropped_batches", 0) or 0),
                             "last_batch_id": heartbeat_state.get("last_batch_id"),
+                            "heavy_lane_forced_degraded": bool(
+                                heartbeat_state.get("heavy_lane_forced_degraded", False)
+                            ),
+                            "heavy_lane_degraded_reason": heartbeat_state.get("heavy_lane_degraded_reason"),
                         },
                     )
             except Exception as exc:
@@ -331,6 +338,10 @@ async def _run_scan_loop() -> None:
     try:
         while True:
             async with AsyncSessionLocal() as session:
+                try:
+                    await clear_scanner_heavy_lane_degrade_if_expired(session)
+                except Exception as exc:
+                    logger.warning("Scanner heavy-lane degrade expiry check failed: %s", exc)
                 control = await read_scanner_control(session)
                 try:
                     await apply_runtime_settings_overrides()
@@ -350,6 +361,8 @@ async def _run_scan_loop() -> None:
             scanner._enabled = not paused
             heartbeat_state["enabled"] = not paused
             heartbeat_state["interval_seconds"] = interval
+            heartbeat_state["heavy_lane_forced_degraded"] = bool(control.get("heavy_lane_forced_degraded", False))
+            heartbeat_state["heavy_lane_degraded_reason"] = control.get("heavy_lane_degraded_reason")
 
             scan_watchdog_seconds = max(
                 30,
@@ -444,6 +457,19 @@ async def _run_scan_loop() -> None:
                         pass
                     heavy_scan_task = None
                 run_heavy_now = force_heavy_scan or scanner._full_snapshot_strategy_due(datetime.now(timezone.utc))
+                if run_heavy_now and bool(control.get("heavy_lane_forced_degraded", False)):
+                    run_heavy_now = False
+                    heartbeat_state["phase"] = "degraded"
+                    heartbeat_state["progress"] = 0.6
+                    reason = str(control.get("heavy_lane_degraded_reason") or "control_forced_degrade")
+                    degraded_until = control.get("heavy_lane_degraded_until")
+                    until_suffix = (
+                        f" until {degraded_until.isoformat()}"
+                        if isinstance(degraded_until, datetime)
+                        else ""
+                    )
+                    logger.warning("Skipping heavy scan due forced degrade: %s%s", reason, until_suffix)
+                    scanner._current_activity = f"Heavy lane degraded: {reason}{until_suffix}"
                 if run_heavy_now and bool(getattr(settings, "SCANNER_DEGRADE_HEAVY_ON_BACKLOG", True)):
                     heavy_backlog_threshold = max(
                         1,

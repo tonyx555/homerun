@@ -22,6 +22,8 @@ from models.database import (
     OpportunityState,
     OpportunityEvent,
     ScannerBatchQueue,
+    StrategyDeadLetterQueue,
+    ScannerSloIncident,
 )
 from models.opportunity import Opportunity, OpportunityFilter
 from services.event_bus import event_bus
@@ -51,6 +53,8 @@ DB_RETRY_BASE_DELAY_SECONDS = 0.05
 DB_RETRY_MAX_DELAY_SECONDS = 0.3
 SCANNER_BATCH_LEASE_MIN_SECONDS = 5
 SCANNER_BATCH_LEASE_MAX_SECONDS = 300
+STRATEGY_DLQ_LEASE_MIN_SECONDS = 5
+STRATEGY_DLQ_LEASE_MAX_SECONDS = 300
 
 # In-memory targeted condition IDs for the next scan request.
 # Set by the evaluate endpoint, consumed and cleared by the scanner worker.
@@ -514,6 +518,169 @@ async def count_dead_letter_scanner_batches(session: AsyncSession) -> int:
     return int(value.scalar_one() or 0)
 
 
+async def enqueue_strategy_dead_letter_batch(
+    session: AsyncSession,
+    *,
+    source: str,
+    batch_id: str | None,
+    strategy_type: str,
+    opportunities: list[Opportunity],
+    status: dict[str, Any] | None,
+    error: str,
+) -> str | None:
+    """Enqueue failed strategy opportunities into dedicated dead-letter queue."""
+    payload, skipped = _serialize_opportunity_payload(opportunities)
+    if skipped:
+        logger.warning(
+            "Skipped %d/%d opportunities while enqueueing strategy dead-letter batch",
+            skipped,
+            len(opportunities),
+        )
+    if not payload:
+        return None
+
+    dead_letter_id = uuid.uuid4().hex[:16]
+    now = utcnow()
+    row = StrategyDeadLetterQueue(
+        id=dead_letter_id,
+        source=str(source or "scanner"),
+        batch_id=str(batch_id or "").strip() or None,
+        strategy_type=str(strategy_type or "unknown").strip().lower() or "unknown",
+        opportunities_json=payload,
+        status_json=dict(status or {}),
+        first_failed_at=now,
+        last_failed_at=now,
+        lease_owner=None,
+        lease_expires_at=None,
+        attempt_count=0,
+        processed_at=None,
+        terminal=False,
+        error=str(error or "")[:2000],
+    )
+    session.add(row)
+    await _commit_with_retry(session)
+    return dead_letter_id
+
+
+async def claim_next_strategy_dead_letter_batch(
+    session: AsyncSession,
+    *,
+    owner: str,
+    lease_seconds: int,
+) -> dict[str, Any] | None:
+    """Claim the next unprocessed strategy dead-letter batch and lease it."""
+    now = utcnow()
+    lease_ttl = max(
+        STRATEGY_DLQ_LEASE_MIN_SECONDS,
+        min(STRATEGY_DLQ_LEASE_MAX_SECONDS, int(lease_seconds or STRATEGY_DLQ_LEASE_MIN_SECONDS)),
+    )
+    lease_until = now + timedelta(seconds=lease_ttl)
+
+    stmt = (
+        select(StrategyDeadLetterQueue)
+        .where(StrategyDeadLetterQueue.processed_at.is_(None))
+        .where(
+            (StrategyDeadLetterQueue.lease_expires_at.is_(None))
+            | (StrategyDeadLetterQueue.lease_expires_at < now)
+        )
+        .order_by(StrategyDeadLetterQueue.first_failed_at.asc(), StrategyDeadLetterQueue.id.asc())
+        .limit(1)
+    )
+    bind = session.get_bind()
+    if bind is not None and str(getattr(bind.dialect, "name", "") or "").lower() == "postgresql":
+        stmt = stmt.with_for_update(skip_locked=True)
+    row = (await session.execute(stmt)).scalars().first()
+    if row is None:
+        return None
+
+    row.lease_owner = str(owner or "")
+    row.lease_expires_at = lease_until
+    row.attempt_count = int(row.attempt_count or 0) + 1
+    await _commit_with_retry(session)
+    return {
+        "id": row.id,
+        "source": row.source,
+        "batch_id": row.batch_id,
+        "strategy_type": row.strategy_type,
+        "opportunities_json": list(row.opportunities_json or []),
+        "status_json": dict(row.status_json or {}),
+        "attempt_count": int(row.attempt_count or 0),
+    }
+
+
+async def mark_strategy_dead_letter_processed(
+    session: AsyncSession,
+    dead_letter_id: str,
+) -> None:
+    row = await session.get(StrategyDeadLetterQueue, str(dead_letter_id or "").strip())
+    if row is None:
+        return
+    row.processed_at = utcnow()
+    row.terminal = False
+    row.error = None
+    row.lease_owner = None
+    row.lease_expires_at = None
+    await _commit_with_retry(session)
+
+
+async def mark_strategy_dead_letter_failed(
+    session: AsyncSession,
+    dead_letter_id: str,
+    *,
+    error: str,
+    requeue: bool,
+) -> None:
+    row = await session.get(StrategyDeadLetterQueue, str(dead_letter_id or "").strip())
+    if row is None:
+        return
+    now = utcnow()
+    row.error = str(error or "")[:2000]
+    row.last_failed_at = now
+    row.lease_owner = None
+    row.lease_expires_at = None
+    if requeue:
+        row.processed_at = None
+        row.terminal = False
+    else:
+        row.processed_at = now
+        row.terminal = True
+    await _commit_with_retry(session)
+
+
+async def count_pending_strategy_dead_letter_batches(session: AsyncSession) -> int:
+    value = await session.execute(
+        select(func.count())
+        .select_from(StrategyDeadLetterQueue)
+        .where(StrategyDeadLetterQueue.processed_at.is_(None))
+    )
+    return int(value.scalar_one() or 0)
+
+
+async def count_terminal_strategy_dead_letter_batches(session: AsyncSession) -> int:
+    value = await session.execute(
+        select(func.count())
+        .select_from(StrategyDeadLetterQueue)
+        .where(StrategyDeadLetterQueue.processed_at.is_not(None), StrategyDeadLetterQueue.terminal.is_(True))
+    )
+    return int(value.scalar_one() or 0)
+
+
+async def cleanup_processed_strategy_dead_letter_batches(
+    session: AsyncSession,
+    *,
+    retain_hours: int = 72,
+) -> int:
+    cutoff = utcnow() - timedelta(hours=max(1, int(retain_hours or 72)))
+    result = await session.execute(
+        delete(StrategyDeadLetterQueue).where(
+            StrategyDeadLetterQueue.processed_at.is_not(None),
+            StrategyDeadLetterQueue.processed_at < cutoff,
+        )
+    )
+    await _commit_with_retry(session)
+    return int(result.rowcount or 0)
+
+
 async def cleanup_processed_scanner_batches(
     session: AsyncSession,
     *,
@@ -794,6 +961,7 @@ async def read_scanner_status(
     session: AsyncSession,
     *,
     include_opportunity_count: bool = True,
+    include_slo_metrics: bool = False,
 ) -> dict[str, Any]:
     """Read scanner status without deserializing opportunity payloads."""
     result = await session.execute(
@@ -824,7 +992,7 @@ async def read_scanner_status(
         )
 
     tiered = row.tiered_scanning_json if isinstance(row.tiered_scanning_json, dict) else {}
-    return {
+    status = {
         "running": bool(row.running),
         "enabled": bool(row.enabled),
         "interval_seconds": int(row.interval_seconds or 60),
@@ -838,6 +1006,88 @@ async def read_scanner_status(
         "tiered_scanning": row.tiered_scanning_json,
         "ws_feeds": row.ws_feeds_json,
     }
+    if not include_slo_metrics:
+        return status
+
+    def _age_seconds(dt: datetime | None, now_dt: datetime) -> float | None:
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            aware = dt.replace(tzinfo=timezone.utc)
+        else:
+            aware = dt.astimezone(timezone.utc)
+        return max(0.0, (now_dt - aware).total_seconds())
+
+    def _p95(values: list[float]) -> float | None:
+        if not values:
+            return None
+        ordered = sorted(values)
+        idx = max(0, min(len(ordered) - 1, int(round((len(ordered) - 1) * 0.95))))
+        return round(float(ordered[idx]), 3)
+
+    now_dt = utcnow()
+    last_fast_scan_at = None
+    raw_last_fast_scan = tiered.get("last_fast_scan")
+    if isinstance(raw_last_fast_scan, str):
+        try:
+            parsed = _parse_iso_datetime(raw_last_fast_scan)
+            last_fast_scan_at = parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+        except Exception:
+            last_fast_scan_at = None
+    status["last_fast_scan_age_seconds"] = _age_seconds(last_fast_scan_at, now_dt)
+
+    rows = (
+        (
+            await session.execute(
+                select(OpportunityState.opportunity_json).where(OpportunityState.is_active == True)  # noqa: E712
+            )
+        )
+        .scalars()
+        .all()
+    )
+    price_ages: list[float] = []
+    detected_ages: list[float] = []
+    for payload in rows:
+        if not isinstance(payload, dict):
+            continue
+
+        priced_at = None
+        for key in ("last_priced_at", "detected_at"):
+            raw = payload.get(key)
+            if not raw:
+                continue
+            try:
+                priced_at = _parse_iso_datetime(str(raw))
+            except Exception:
+                priced_at = None
+            if priced_at is not None:
+                break
+        if priced_at is not None:
+            age = _age_seconds(priced_at, now_dt)
+            if age is not None:
+                price_ages.append(age)
+
+        detected_at = None
+        for key in ("last_detected_at", "detected_at", "last_seen_at"):
+            raw = payload.get(key)
+            if not raw:
+                continue
+            try:
+                detected_at = _parse_iso_datetime(str(raw))
+            except Exception:
+                detected_at = None
+            if detected_at is not None:
+                break
+        if detected_at is not None:
+            age = _age_seconds(detected_at, now_dt)
+            if age is not None:
+                detected_ages.append(age)
+
+    status["opportunity_price_age_p95"] = _p95(price_ages)
+    status["opportunity_last_detected_age_p95"] = _p95(detected_ages)
+    status["coverage_ratio"] = tiered.get("full_snapshot_coverage_ratio")
+    status["full_coverage_completion_time"] = tiered.get("full_coverage_completion_time")
+    return status
 
 
 async def read_traders_snapshot(
@@ -1130,12 +1380,18 @@ async def read_scanner_control(session: AsyncSession) -> dict[str, Any]:
             "is_paused": False,
             "scan_interval_seconds": 60,
             "requested_scan_at": None,
+            "heavy_lane_forced_degraded": False,
+            "heavy_lane_degraded_reason": None,
+            "heavy_lane_degraded_until": None,
         }
     return {
         "is_enabled": row.is_enabled,
         "is_paused": row.is_paused,
         "scan_interval_seconds": row.scan_interval_seconds,
         "requested_scan_at": row.requested_scan_at,
+        "heavy_lane_forced_degraded": bool(row.heavy_lane_forced_degraded),
+        "heavy_lane_degraded_reason": row.heavy_lane_degraded_reason,
+        "heavy_lane_degraded_until": row.heavy_lane_degraded_until,
     }
 
 
@@ -1165,6 +1421,46 @@ async def set_scanner_interval(session: AsyncSession, interval_seconds: int) -> 
     row.scan_interval_seconds = max(10, min(3600, interval_seconds))
     row.updated_at = utcnow()
     await _commit_with_retry(session)
+
+
+async def set_scanner_heavy_lane_degraded(
+    session: AsyncSession,
+    *,
+    enabled: bool,
+    reason: str | None = None,
+    duration_seconds: int | None = None,
+) -> None:
+    row = await ensure_scanner_control(session)
+    now = utcnow()
+    row.heavy_lane_forced_degraded = bool(enabled)
+    row.heavy_lane_degraded_reason = str(reason or "").strip()[:1000] or None
+    if enabled and duration_seconds is not None and int(duration_seconds) > 0:
+        row.heavy_lane_degraded_until = now + timedelta(seconds=max(1, int(duration_seconds)))
+    elif enabled:
+        row.heavy_lane_degraded_until = None
+    else:
+        row.heavy_lane_degraded_until = None
+        row.heavy_lane_degraded_reason = None
+    row.updated_at = now
+    await _commit_with_retry(session)
+
+
+async def clear_scanner_heavy_lane_degrade_if_expired(session: AsyncSession) -> bool:
+    row = await ensure_scanner_control(session)
+    if not bool(row.heavy_lane_forced_degraded):
+        return False
+    degraded_until = row.heavy_lane_degraded_until
+    if degraded_until is None:
+        return False
+    now = utcnow()
+    if degraded_until > now:
+        return False
+    row.heavy_lane_forced_degraded = False
+    row.heavy_lane_degraded_until = None
+    row.heavy_lane_degraded_reason = None
+    row.updated_at = now
+    await _commit_with_retry(session)
+    return True
 
 
 async def request_one_scan(
@@ -1199,6 +1495,107 @@ async def clear_scan_request(session: AsyncSession) -> None:
     if row and row.requested_scan_at is not None:
         row.requested_scan_at = None
         await _commit_with_retry(session)
+
+
+async def upsert_scanner_slo_incident(
+    session: AsyncSession,
+    *,
+    metric: str,
+    breached: bool,
+    observed_value: float | None,
+    threshold_value: float | None,
+    severity: str,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    metric_key = str(metric or "").strip().lower()
+    if not metric_key:
+        return {"action": "noop"}
+
+    now = utcnow()
+    open_row = (
+        (
+            await session.execute(
+                select(ScannerSloIncident).where(
+                    ScannerSloIncident.metric == metric_key,
+                    ScannerSloIncident.status == "open",
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
+
+    observed = float(observed_value) if observed_value is not None else None
+    threshold = float(threshold_value) if threshold_value is not None else None
+    normalized_details = dict(details or {})
+    normalized_severity = str(severity or "warning").strip().lower() or "warning"
+
+    if breached:
+        if open_row is None:
+            row = ScannerSloIncident(
+                id=uuid.uuid4().hex[:16],
+                metric=metric_key,
+                severity=normalized_severity,
+                status="open",
+                threshold_value=threshold,
+                observed_value=observed,
+                details_json=normalized_details,
+                opened_at=now,
+                last_seen_at=now,
+                resolved_at=None,
+            )
+            session.add(row)
+            await _commit_with_retry(session)
+            return {"action": "opened", "incident_id": row.id, "metric": metric_key}
+
+        open_row.severity = normalized_severity
+        open_row.threshold_value = threshold
+        open_row.observed_value = observed
+        open_row.details_json = normalized_details
+        open_row.last_seen_at = now
+        await _commit_with_retry(session)
+        return {"action": "updated", "incident_id": open_row.id, "metric": metric_key}
+
+    if open_row is None:
+        return {"action": "noop"}
+
+    open_row.status = "resolved"
+    open_row.resolved_at = now
+    open_row.last_seen_at = now
+    open_row.observed_value = observed
+    open_row.threshold_value = threshold
+    open_row.details_json = normalized_details
+    await _commit_with_retry(session)
+    return {"action": "resolved", "incident_id": open_row.id, "metric": metric_key}
+
+
+async def list_open_scanner_slo_incidents(session: AsyncSession) -> list[dict[str, Any]]:
+    rows = (
+        (
+            await session.execute(
+                select(ScannerSloIncident)
+                .where(ScannerSloIncident.status == "open")
+                .order_by(ScannerSloIncident.opened_at.asc(), ScannerSloIncident.metric.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        {
+            "id": str(row.id),
+            "metric": str(row.metric),
+            "severity": str(row.severity or "warning"),
+            "status": str(row.status or "open"),
+            "threshold_value": float(row.threshold_value) if row.threshold_value is not None else None,
+            "observed_value": float(row.observed_value) if row.observed_value is not None else None,
+            "details": dict(row.details_json or {}),
+            "opened_at": _format_iso_utc_z(row.opened_at),
+            "last_seen_at": _format_iso_utc_z(row.last_seen_at),
+            "resolved_at": _format_iso_utc_z(row.resolved_at),
+        }
+        for row in rows
+    ]
 
 
 async def clear_opportunities_in_snapshot(session: AsyncSession) -> int:

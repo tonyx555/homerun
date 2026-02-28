@@ -70,6 +70,11 @@ class Settings(BaseSettings):
     MARKET_UNIVERSE_HEARTBEAT_INTERVAL_SECONDS: float = 5.0  # Catalog worker heartbeat cadence
     MARKET_UNIVERSE_REFRESH_INTERVAL_SECONDS: int = 120  # Full market catalog refresh cadence
     MARKET_UNIVERSE_REFRESH_TIMEOUT_SECONDS: int = 300  # Hard timeout for one market catalog refresh
+    MARKET_UNIVERSE_INCREMENTAL_ENABLED: bool = True  # Enable incremental universe diff ingestion
+    MARKET_UNIVERSE_INCREMENTAL_TIMEOUT_SECONDS: int = 120  # Timeout for one incremental universe sync
+    MARKET_UNIVERSE_INCREMENTAL_SINCE_MINUTES: int = 5  # Delta fetch horizon for updated markets
+    MARKET_UNIVERSE_INCREMENTAL_MAX_EVENT_SLUGS: int = 250  # Cap slug fanout for event-diff fetch
+    MARKET_UNIVERSE_FULL_RECONCILE_INTERVAL_SECONDS: int = 900  # Forced full reconcile cadence
     MARKET_DATA_WORKER_OWNS_WS: bool = True  # Dedicated market-data worker owns WS lifecycle
     MARKET_DATA_HEARTBEAT_INTERVAL_SECONDS: float = 3.0  # Market data worker heartbeat cadence
     MARKET_DATA_REFRESH_INTERVAL_SECONDS: int = 5  # Market data universe + subscription sync cadence
@@ -79,6 +84,19 @@ class Settings(BaseSettings):
     MARKET_DATA_PRICE_STREAM_INTERVAL_SECONDS: float = 1.0  # WS price topic stream cadence
     SCANNER_DEGRADE_HEAVY_ON_BACKLOG: bool = True  # Pause heavy lane under queue pressure
     SCANNER_DEGRADE_HEAVY_BACKLOG_THRESHOLD: int = 120  # Queue threshold for heavy-lane degradation
+    OPPORTUNITY_AGGREGATOR_BATCH_TIMEOUT_SECONDS: int = 45  # Timeout for one scanner batch aggregation
+    OPPORTUNITY_AGGREGATOR_STRATEGY_TIMEOUT_SECONDS: int = 20  # Timeout for one strategy bridge group
+    OPPORTUNITY_AGGREGATOR_GLOBAL_RUN_TIMEOUT_SECONDS: int = 120  # Hard deadline for one aggregator loop run
+    OPPORTUNITY_AGGREGATOR_STRATEGY_DLQ_RETRY_MAX_ATTEMPTS: int = 10  # Strategy DLQ retry cap before terminal
+    OPPORTUNITY_AGGREGATOR_STRATEGY_DLQ_RETAIN_HOURS: int = 72  # Retention for processed strategy DLQ rows
+    SCANNER_SLO_WORKER_INTERVAL_SECONDS: int = 5  # Scanner SLO evaluator cadence
+    SCANNER_SLO_MAX_FAST_SCAN_AGE_SECONDS: float = 120.0  # SLO threshold for fast scan freshness
+    SCANNER_SLO_MAX_FULL_COVERAGE_COMPLETION_SECONDS: float = 900.0  # SLO threshold for full coverage cycle
+    SCANNER_SLO_MAX_OPPORTUNITY_PRICE_AGE_P95_SECONDS: float = 60.0  # SLO threshold for price freshness p95
+    SCANNER_SLO_MAX_OPPORTUNITY_LAST_DETECTED_AGE_P95_SECONDS: float = 180.0  # SLO threshold detect freshness p95
+    SCANNER_SLO_MIN_COVERAGE_RATIO: float = 0.95  # SLO minimum coverage ratio
+    SCANNER_SLO_DEGRADE_HEAVY_ENABLED: bool = True  # Auto-degrade heavy lane on SLO breach
+    SCANNER_SLO_DEGRADE_HEAVY_DURATION_SECONDS: int = 180  # Heavy-lane degrade hold duration
     SCAN_INTERVAL_SECONDS: int = 60
     SCANNER_STALE_OPPORTUNITY_MINUTES: int = 45
     # Prevent one strategy from flooding the opportunities surface.

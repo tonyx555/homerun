@@ -93,6 +93,15 @@ async def _run_loop() -> None:
         30,
         int(getattr(settings, "MARKET_UNIVERSE_REFRESH_TIMEOUT_SECONDS", 300) or 300),
     )
+    incremental_timeout = max(
+        15,
+        int(getattr(settings, "MARKET_UNIVERSE_INCREMENTAL_TIMEOUT_SECONDS", 120) or 120),
+    )
+    full_reconcile_interval = max(
+        60,
+        int(getattr(settings, "MARKET_UNIVERSE_FULL_RECONCILE_INTERVAL_SECONDS", 900) or 900),
+    )
+    incremental_enabled_default = bool(getattr(settings, "MARKET_UNIVERSE_INCREMENTAL_ENABLED", True))
 
     await scanner.load_settings()
     await scanner.load_plugins(source_keys=["scanner"])
@@ -113,9 +122,14 @@ async def _run_loop() -> None:
         "last_coverage_ratio": None,
         "catalog_updated_at": None,
         "fetch_duration_seconds": None,
+        "sync_mode": "incremental" if incremental_enabled_default else "full",
+        "last_delta_market_count": 0,
+        "last_delta_event_count": 0,
+        "next_full_reconcile_at": None,
     }
     heartbeat_stop_event = asyncio.Event()
     next_scheduled_run_at: datetime | None = None
+    next_full_reconcile_at: datetime | None = None
 
     async def _heartbeat_loop() -> None:
         while not heartbeat_stop_event.is_set():
@@ -151,6 +165,10 @@ async def _run_loop() -> None:
                     "coverage_ratio": loop_state.get("last_coverage_ratio"),
                     "catalog_updated_at": loop_state.get("catalog_updated_at"),
                     "fetch_duration_seconds": loop_state.get("fetch_duration_seconds"),
+                    "sync_mode": loop_state.get("sync_mode"),
+                    "delta_market_count": int(loop_state.get("last_delta_market_count", 0) or 0),
+                    "delta_event_count": int(loop_state.get("last_delta_event_count", 0) or 0),
+                    "next_full_reconcile_at": loop_state.get("next_full_reconcile_at"),
                 },
             )
 
@@ -181,6 +199,9 @@ async def _run_loop() -> None:
                 30,
                 int(control.get("interval_seconds") or default_interval),
             )
+            incremental_enabled = bool(
+                getattr(settings, "MARKET_UNIVERSE_INCREMENTAL_ENABLED", incremental_enabled_default)
+            )
             paused = bool(control.get("is_paused", False))
             requested = control.get("requested_run_at") is not None
             enabled = bool(control.get("is_enabled", True)) and not paused
@@ -199,11 +220,46 @@ async def _run_loop() -> None:
                 continue
 
             state["run_id"] = uuid.uuid4().hex[:16]
-            state["phase"] = "refresh_catalog"
+            force_full = (
+                not incremental_enabled
+                or next_full_reconcile_at is None
+                or now >= next_full_reconcile_at
+            )
+            state["sync_mode"] = "full" if force_full else "incremental"
+            state["phase"] = "refresh_catalog_full" if force_full else "refresh_catalog_incremental"
             state["progress"] = 0.2
-            state["activity"] = "Refreshing market universe catalog..."
+            state["activity"] = (
+                "Refreshing market universe catalog (full reconcile)..."
+                if force_full
+                else "Refreshing market universe catalog (incremental deltas)..."
+            )
             try:
-                market_count = await asyncio.wait_for(scanner.refresh_catalog(), timeout=float(refresh_timeout))
+                sync_timeout = float(refresh_timeout if force_full else incremental_timeout)
+                try:
+                    sync_result = await asyncio.wait_for(
+                        scanner.refresh_catalog_incremental(force_full=force_full),
+                        timeout=sync_timeout,
+                    )
+                except Exception:
+                    if force_full:
+                        raise
+                    logger.warning("Market universe incremental sync failed, retrying full reconcile", exc_info=True)
+                    sync_result = await asyncio.wait_for(
+                        scanner.refresh_catalog_incremental(force_full=True),
+                        timeout=float(refresh_timeout),
+                    )
+                    force_full = True
+                market_count = int(sync_result.get("market_count") or 0)
+                state["sync_mode"] = str(sync_result.get("mode") or state["sync_mode"])
+                state["last_delta_market_count"] = int(sync_result.get("delta_market_count") or 0)
+                state["last_delta_event_count"] = int(sync_result.get("delta_event_count") or 0)
+                if str(state["sync_mode"]) == "full":
+                    next_full_reconcile_at = now + timedelta(seconds=full_reconcile_interval)
+                elif next_full_reconcile_at is None:
+                    next_full_reconcile_at = now + timedelta(seconds=full_reconcile_interval)
+                state["next_full_reconcile_at"] = (
+                    next_full_reconcile_at.isoformat() if next_full_reconcile_at is not None else None
+                )
                 state["phase"] = "read_coverage"
                 state["progress"] = 0.75
                 catalog_stats = await _read_catalog_stats()
@@ -219,8 +275,9 @@ async def _run_loop() -> None:
                 state["phase"] = "idle"
                 state["progress"] = 1.0
                 state["activity"] = (
-                    f"Market universe refresh complete: {state['last_event_count']} events, "
-                    f"{state['last_market_count']} markets ({state['last_stale_markets']} stale)."
+                    f"Market universe {state['sync_mode']} sync complete: {state['last_event_count']} events, "
+                    f"{state['last_market_count']} markets ({state['last_stale_markets']} stale, "
+                    f"{state['last_delta_market_count']} delta markets)."
                 )
                 async with AsyncSessionLocal() as session:
                     await clear_worker_run_request(session, worker_name)

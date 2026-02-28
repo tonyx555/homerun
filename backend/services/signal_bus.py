@@ -959,6 +959,7 @@ async def expire_source_signals_except(
     source: str,
     keep_dedupe_keys: set[str],
     signal_types: Optional[list[str]] = None,
+    strategy_types: Optional[list[str]] = None,
     commit: bool = True,
 ) -> int:
     """Expire pending source signals not present in the current emission set."""
@@ -975,6 +976,12 @@ async def expire_source_signals_except(
         ]
         if normalized_signal_types:
             query = query.where(func.lower(func.coalesce(TradeSignal.signal_type, "")).in_(normalized_signal_types))
+    if strategy_types:
+        normalized_strategy_types = [
+            str(value or "").strip().lower() for value in strategy_types if str(value or "").strip()
+        ]
+        if normalized_strategy_types:
+            query = query.where(func.lower(func.coalesce(TradeSignal.strategy_type, "")).in_(normalized_strategy_types))
     if keep:
         query = query.where(~TradeSignal.dedupe_key.in_(list(keep)))
 
@@ -1005,6 +1012,38 @@ async def expire_source_signals_except(
         await session.commit()
 
     return len(rows)
+
+
+async def list_pending_source_dedupe_keys(
+    session: AsyncSession,
+    *,
+    source: str,
+    signal_types: Optional[list[str]] = None,
+    strategy_types: Optional[list[str]] = None,
+) -> set[str]:
+    query = select(TradeSignal.dedupe_key).where(
+        TradeSignal.source == str(source),
+        TradeSignal.status == "pending",
+    )
+    if signal_types:
+        normalized_signal_types = [
+            str(value or "").strip().lower() for value in signal_types if str(value or "").strip()
+        ]
+        if normalized_signal_types:
+            query = query.where(func.lower(func.coalesce(TradeSignal.signal_type, "")).in_(normalized_signal_types))
+    if strategy_types:
+        normalized_strategy_types = [
+            str(value or "").strip().lower() for value in strategy_types if str(value or "").strip()
+        ]
+        if normalized_strategy_types:
+            query = query.where(func.lower(func.coalesce(TradeSignal.strategy_type, "")).in_(normalized_strategy_types))
+
+    rows = await session.execute(query)
+    return {
+        str(value).strip()
+        for value in rows.scalars().all()
+        if str(value).strip()
+    }
 
 
 async def list_trade_signals(

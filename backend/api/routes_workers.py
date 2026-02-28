@@ -30,6 +30,7 @@ from utils.utcnow import utcnow
 router = APIRouter(prefix="/workers", tags=["Workers"])
 ALLOWED_WORKERS = {
     "scanner",
+    "scanner_slo",
     "news",
     "weather",
     "crypto",
@@ -42,6 +43,7 @@ ALLOWED_WORKERS = {
 }
 WORKER_DISPLAY_ORDER = (
     "scanner",
+    "scanner_slo",
     "discovery",
     "weather",
     "news",
@@ -52,7 +54,7 @@ WORKER_DISPLAY_ORDER = (
     "redeemer",
     "events",
 )
-GENERIC_WORKERS = ("crypto", "tracked_traders", "trader_reconciliation", "redeemer", "events")
+GENERIC_WORKERS = ("scanner_slo", "crypto", "tracked_traders", "trader_reconciliation", "redeemer", "events")
 
 
 def _normalize_worker_name(raw: str) -> str:
@@ -98,6 +100,11 @@ async def _worker_detail(session: AsyncSession, worker_name: str) -> dict:
             "interval_seconds": int(control.get("scan_interval_seconds") or 60),
             "requested_run_at": control.get("requested_scan_at").isoformat()
             if control.get("requested_scan_at")
+            else None,
+            "heavy_lane_forced_degraded": bool(control.get("heavy_lane_forced_degraded", False)),
+            "heavy_lane_degraded_reason": control.get("heavy_lane_degraded_reason"),
+            "heavy_lane_degraded_until": control.get("heavy_lane_degraded_until").isoformat()
+            if control.get("heavy_lane_degraded_until")
             else None,
         }
     elif worker_name == "news":

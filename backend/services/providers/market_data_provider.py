@@ -24,6 +24,9 @@ class PolymarketKalshiProvider(MarketDataProvider):
     async def get_recent_markets(self, since_minutes: int = 10, active: bool = True) -> list[Market]:
         return await polymarket_client.get_recent_markets(since_minutes=since_minutes, active=active)
 
+    async def get_events_by_slugs(self, slugs: list[str], closed: bool = False) -> list[Event]:
+        return await polymarket_client.get_events_by_slugs(slugs, closed=closed)
+
     async def get_prices_batch(self, token_ids: list[str]) -> dict:
         return await polymarket_client.get_prices_batch(token_ids)
 
