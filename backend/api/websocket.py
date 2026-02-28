@@ -1,5 +1,5 @@
 from fastapi import WebSocket, WebSocketDisconnect
-from typing import Set
+from typing import Any
 import json
 
 from models.database import AsyncSessionLocal, EventsSnapshot
@@ -22,14 +22,82 @@ class ConnectionManager:
     """Manages WebSocket connections"""
 
     def __init__(self):
-        self.active_connections: Set[WebSocket] = set()
+        self.active_connections: dict[WebSocket, dict[str, Any]] = {}
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
-        self.active_connections.add(websocket)
+        self.active_connections[websocket] = {"channels": {"*"}, "visible": True}
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.discard(websocket)
+        self.active_connections.pop(websocket, None)
+
+    def update_presence(self, websocket: WebSocket, *, visible: bool | None = None) -> None:
+        state = self.active_connections.get(websocket)
+        if state is None:
+            return
+        if visible is not None:
+            state["visible"] = bool(visible)
+
+    def update_channels(self, websocket: WebSocket, channels: list[str] | None) -> list[str]:
+        state = self.active_connections.get(websocket)
+        if state is None:
+            return []
+        if not isinstance(channels, list):
+            state["channels"] = {"*"}
+            return ["*"]
+        normalized = {
+            str(channel or "").strip().lower()
+            for channel in channels
+            if str(channel or "").strip()
+        }
+        state["channels"] = normalized or {"*"}
+        return sorted(state["channels"])
+
+    @staticmethod
+    def _message_channel(message_type: str) -> str | None:
+        mapping = {
+            "scanner_status": "core",
+            "scanner_activity": "opportunities",
+            "opportunities_update": "opportunities",
+            "opportunity_events": "opportunities",
+            "crypto_markets_update": "crypto",
+            "weather_update": "weather",
+            "weather_status": "weather",
+            "news_update": "news",
+            "news_workflow_status": "news",
+            "news_workflow_update": "news",
+            "events_status": "events",
+            "events_update": "events",
+            "worker_status_update": "workers",
+            "signals_update": "signals",
+            "wallet_trade": "wallet",
+            "trader_orchestrator_status": "trading",
+            "trader_decision": "trading",
+            "trader_order": "trading",
+            "execution_order": "trading",
+            "trader_event": "trading",
+        }
+        return mapping.get(message_type)
+
+    @staticmethod
+    def _requires_visible_tab(message_type: str) -> bool:
+        return message_type in {
+            "scanner_activity",
+            "opportunities_update",
+            "opportunity_events",
+            "crypto_markets_update",
+            "weather_update",
+            "news_workflow_update",
+            "events_update",
+        }
+
+    @staticmethod
+    def _channel_allowed(channels: set[str], message_channel: str | None) -> bool:
+        if not channels or "*" in channels:
+            return True
+        if message_channel is None:
+            return True
+        return message_channel in channels
 
     async def broadcast(self, message: dict):
         """Send message to all connected clients"""
@@ -37,16 +105,26 @@ class ConnectionManager:
             return
 
         message_json = json.dumps(message, default=str)
-        disconnected = set()
+        disconnected: list[WebSocket] = []
+        message_type = str(message.get("type", "") or "")
+        channel = self._message_channel(message_type)
+        require_visible = self._requires_visible_tab(message_type)
 
-        for connection in self.active_connections:
+        for connection, state in list(self.active_connections.items()):
             try:
+                channels = state.get("channels")
+                channels = channels if isinstance(channels, set) else {"*"}
+                if not self._channel_allowed(channels, channel):
+                    continue
+                if require_visible and not bool(state.get("visible", True)):
+                    continue
                 await connection.send_text(message_json)
             except Exception:
-                disconnected.add(connection)
+                disconnected.append(connection)
 
         # Clean up disconnected clients
-        self.active_connections -= disconnected
+        for websocket in disconnected:
+            self.disconnect(websocket)
 
     async def send_personal(self, websocket: WebSocket, message: dict):
         """Send message to specific client"""
@@ -104,6 +182,11 @@ async def handle_websocket(websocket: WebSocket):
                 "scanner_status": {
                     "running": status.get("running", False),
                     "last_scan": status.get("last_scan"),
+                    "last_fast_scan": status.get("last_fast_scan"),
+                    "last_heavy_scan": status.get("last_heavy_scan"),
+                    "opportunities_count": status.get("opportunities_count", len(opportunities)),
+                    "current_activity": status.get("current_activity"),
+                    "lane_watchdogs": status.get("lane_watchdogs"),
                 },
                 "weather_status": weather_status,
                 "news_workflow_status": news_workflow_status,
@@ -144,9 +227,31 @@ async def handle_websocket(websocket: WebSocket):
 
             # Handle different message types
             if message.get("type") == "subscribe":
+                subscribed_channels = manager.update_channels(websocket, message.get("channels"))
+                visible = message.get("visible")
+                if isinstance(visible, bool):
+                    manager.update_presence(websocket, visible=visible)
                 await manager.send_personal(
                     websocket,
-                    {"type": "subscribed", "data": message.get("channels", [])},
+                    {
+                        "type": "subscribed",
+                        "data": {
+                            "channels": subscribed_channels,
+                            "visible": bool(manager.active_connections.get(websocket, {}).get("visible", True)),
+                        },
+                    },
+                )
+
+            elif message.get("type") == "ui_presence":
+                visible = message.get("visible")
+                if isinstance(visible, bool):
+                    manager.update_presence(websocket, visible=visible)
+                await manager.send_personal(
+                    websocket,
+                    {
+                        "type": "presence_ack",
+                        "data": {"visible": bool(manager.active_connections.get(websocket, {}).get("visible", True))},
+                    },
                 )
 
             elif message.get("type") == "ping":

@@ -14,6 +14,7 @@ let sharedReconnectTimeout: ReturnType<typeof setTimeout> | null = null
 let sharedReconnectAttempts = 0
 let sharedPingInterval: ReturnType<typeof setInterval> | null = null
 let sharedBlockedByUiLock = false
+let sharedUiVisible = true
 const MAX_RECONNECT_DELAY = 10_000
 const BASE_RECONNECT_DELAY = 1_000
 const CLIENT_PING_INTERVAL_MS = 15_000
@@ -46,6 +47,18 @@ function notifyStatus(connected: boolean) {
   statusListeners.forEach((fn) => fn(connected))
 }
 
+function sendUiPresence() {
+  if (typeof document !== 'undefined') {
+    sharedUiVisible = document.visibilityState === 'visible'
+  }
+  if (sharedWs?.readyState !== WebSocket.OPEN) return
+  try {
+    sharedWs.send(JSON.stringify({ type: 'ui_presence', visible: sharedUiVisible }))
+  } catch {
+    // Normal reconnect path handles transient failures.
+  }
+}
+
 function sharedConnect(url: string) {
   if (disposed) return
   if (sharedBlockedByUiLock) return
@@ -68,6 +81,7 @@ function sharedConnect(url: string) {
       sharedReconnectAttempts = 0
       notifyStatus(true)
       startPingLoop()
+      sendUiPresence()
     }
 
     ws.onmessage = (event) => {
@@ -179,9 +193,11 @@ export function useWebSocket(url: string) {
     }
 
     const onVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
+      sharedUiVisible = document.visibilityState === 'visible'
+      if (sharedUiVisible) {
         reconnectNow()
       }
+      sendUiPresence()
     }
 
     document.addEventListener('visibilitychange', onVisibilityChange)

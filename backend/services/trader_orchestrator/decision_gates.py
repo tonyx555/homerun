@@ -585,7 +585,7 @@ def apply_platform_decision_gates(
 
     if final_decision == "selected":
         freshness_enforced = _coerce_bool(params.get("enforce_market_data_freshness"), True)
-        required_sources = _normalize_text_list(params.get("require_market_data_age_for_sources", ["crypto"]))
+        required_sources = _normalize_text_list(params.get("require_market_data_age_for_sources", ["crypto", "scanner"]))
         source = str(market_data_context.get("source") or "")
         timeframe = str(market_data_context.get("timeframe") or "")
         age_ms = safe_float(market_data_context.get("age_ms"), None)

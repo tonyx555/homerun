@@ -109,6 +109,9 @@ export interface Opportunity {
   volume?: number
   max_position_size: number
   detected_at: string
+  first_detected_at?: string | null
+  last_detected_at?: string | null
+  last_priced_at?: string | null
   last_seen_at?: string | null
   resolution_date?: string
   positions_to_take: Position[]
@@ -209,8 +212,11 @@ export interface ScannerStatus {
   enabled: boolean
   interval_seconds: number
   last_scan: string | null
+  last_fast_scan?: string | null
+  last_heavy_scan?: string | null
   opportunities_count: number
   current_activity?: string | null
+  lane_watchdogs?: Record<string, unknown> | null
   strategies: Strategy[]
 }
 

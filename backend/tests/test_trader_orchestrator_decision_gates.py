@@ -496,6 +496,45 @@ def test_directional_min_timeframe_blocks_crypto_sub_5m_signal():
     )
 
 
+def test_market_data_freshness_blocks_stale_scanner_signal():
+    runtime_signal = SimpleNamespace(
+        id="signal-scanner-stale-1",
+        market_id="market-1",
+        direction="buy_yes",
+        source="scanner",
+        payload_json={
+            "market_data_age_ms": 3500,
+            "source_observed_at": "2026-02-28T00:00:00Z",
+            "strategy_context": {"source": "scanner"},
+        },
+    )
+    result = apply_platform_decision_gates(
+        decision_obj=_decision(25.0),
+        runtime_signal=runtime_signal,
+        strategy=None,
+        checks_payload=[],
+        trading_schedule_ok=True,
+        trading_schedule_config={},
+        global_limits={"max_gross_exposure_usd": 5000.0},
+        effective_risk_limits={"max_trade_notional_usd": 1000.0},
+        allow_averaging=True,
+        open_market_ids=set(),
+        pending_live_exit_count=0,
+        pending_live_exit_summary={"count": 0, "order_ids": [], "market_ids": [], "statuses": {}},
+        portfolio_allocator=None,
+        risk_evaluator=_risk_evaluator,
+        invoke_hooks=False,
+        strategy_params={"max_market_data_age_ms": 1000},
+    )
+
+    assert result["final_decision"] == "blocked"
+    assert "freshness gate blocked" in result["final_reason"].lower()
+    assert any(
+        gate["gate"] == "market_data_freshness" and gate["status"] == "blocked"
+        for gate in result["platform_gates"]
+    )
+
+
 def test_max_risk_score_guard_blocks_high_risk_signal():
     result = apply_platform_decision_gates(
         decision_obj=_decision(25.0),

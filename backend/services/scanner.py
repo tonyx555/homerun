@@ -73,6 +73,16 @@ class ArbitrageScanner:
         self._last_full_snapshot_strategy_count: int = 0
         self._full_snapshot_strategy_running: bool = False
         self._last_fast_scan_duration_seconds: Optional[float] = None
+        self._fast_last_started_at: Optional[datetime] = None
+        self._fast_last_completed_at: Optional[datetime] = None
+        self._heavy_last_started_at: Optional[datetime] = None
+        self._heavy_last_completed_at: Optional[datetime] = None
+        self._fast_inflight: bool = False
+        self._heavy_inflight: bool = False
+        self._fast_lane_error: Optional[str] = None
+        self._heavy_lane_error: Optional[str] = None
+        self._fast_watchdog_timeout_count: int = 0
+        self._heavy_watchdog_timeout_count: int = 0
         self._opportunities: list[Opportunity] = []
         self._scan_callbacks: List[Callable] = []
         self._status_callbacks: List[Callable] = []
@@ -919,8 +929,13 @@ class ArbitrageScanner:
 
         filtered: list[Opportunity] = []
         for opp in opportunities:
-            opp_seen_dt = _make_aware(getattr(opp, "last_seen_at", None) or getattr(opp, "detected_at", None))
+            opp_seen_dt = _make_aware(
+                getattr(opp, "last_detected_at", None)
+                or getattr(opp, "last_seen_at", None)
+                or getattr(opp, "detected_at", None)
+            )
             opp_seen_ts = opp_seen_dt.timestamp() if opp_seen_dt is not None else None
+            opp_last_priced_ts: Optional[float] = None
             market_price_lookup: dict[str, tuple[float, float]] = {}
             for market in opp.markets:
                 if not isinstance(market, dict):
@@ -979,6 +994,13 @@ class ArbitrageScanner:
                     market["price_updated_at"] = self._format_price_timestamp(update_ts)
                     market["price_age_seconds"] = float(round(age_seconds, 3))
                     market["is_price_fresh"] = age_seconds <= max_age_seconds
+                    if opp_last_priced_ts is None or update_ts > opp_last_priced_ts:
+                        opp_last_priced_ts = update_ts
+
+            if opp_last_priced_ts is not None:
+                opp.last_priced_at = datetime.fromtimestamp(opp_last_priced_ts, tz=timezone.utc)
+            elif getattr(opp, "last_priced_at", None) is None and opp_seen_dt is not None:
+                opp.last_priced_at = opp_seen_dt
 
             if market_price_lookup:
                 for position in opp.positions_to_take or []:
@@ -1023,7 +1045,11 @@ class ArbitrageScanner:
                 if isinstance(market, dict)
             )
             if stale_market_found:
-                seen_at = _make_aware(getattr(opp, "last_seen_at", None) or getattr(opp, "detected_at", None))
+                seen_at = _make_aware(
+                    getattr(opp, "last_detected_at", None)
+                    or getattr(opp, "last_seen_at", None)
+                    or getattr(opp, "detected_at", None)
+                )
                 if seen_at is None or (now_dt - seen_at).total_seconds() > max_age_seconds:
                     continue
             filtered.append(opp)
@@ -1048,6 +1074,41 @@ class ArbitrageScanner:
     def _full_snapshot_strategy_timeout_seconds() -> float:
         configured = float(getattr(settings, "SCANNER_FULL_SNAPSHOT_STRATEGY_TIMEOUT_SECONDS", 60.0) or 60.0)
         return max(5.0, configured)
+
+    def note_fast_lane_watchdog_timeout(self, timeout_seconds: float) -> None:
+        self._fast_watchdog_timeout_count += 1
+        self._fast_inflight = False
+        self._fast_lane_error = f"watchdog timeout after {timeout_seconds:.1f}s"
+
+    def note_heavy_lane_watchdog_timeout(self, timeout_seconds: float) -> None:
+        self._heavy_watchdog_timeout_count += 1
+        self._heavy_inflight = False
+        self._heavy_lane_error = f"watchdog timeout after {timeout_seconds:.1f}s"
+
+    @staticmethod
+    def _lane_watchdog_payload(
+        *,
+        now: datetime,
+        started_at: Optional[datetime],
+        inflight: bool,
+        threshold_seconds: float,
+    ) -> dict:
+        if not inflight or started_at is None:
+            return {
+                "inflight": bool(inflight),
+                "started_at": to_iso(started_at),
+                "inflight_age_seconds": None,
+                "threshold_seconds": float(threshold_seconds),
+                "stalled": False,
+            }
+        age_seconds = max(0.0, (now - started_at).total_seconds())
+        return {
+            "inflight": True,
+            "started_at": to_iso(started_at),
+            "inflight_age_seconds": round(age_seconds, 3),
+            "threshold_seconds": float(threshold_seconds),
+            "stalled": age_seconds > float(threshold_seconds),
+        }
 
     def _select_full_snapshot_markets(self, now: datetime, changed_markets: list, hot_markets: list) -> list:
         cap = int(getattr(settings, "SCANNER_FULL_SNAPSHOT_MAX_MARKETS", 0) or 0)
@@ -2246,6 +2307,9 @@ class ArbitrageScanner:
         strategies run in a separate heavy lane.
         """
         cycle_started = time.monotonic()
+        self._fast_last_started_at = datetime.now(timezone.utc)
+        self._fast_inflight = True
+        self._fast_lane_error = None
         async with self._scan_lock:
             now = datetime.now(timezone.utc)
             reactive_tokens = [str(t or "").strip() for t in (reactive_token_ids or []) if str(t or "").strip()]
@@ -2528,10 +2592,13 @@ class ArbitrageScanner:
                 return self._opportunities
 
             except Exception as e:
+                self._fast_lane_error = str(e)
                 print(f"[{utcnow().isoformat()}] Fast scan error: {e}")
                 await self._set_activity(f"Fast scan error: {e}")
                 raise
             finally:
+                self._fast_inflight = False
+                self._fast_last_completed_at = datetime.now(timezone.utc)
                 self._last_fast_scan_duration_seconds = round(max(0.0, time.monotonic() - cycle_started), 3)
 
     async def scan_full_snapshot_strategies(
@@ -2563,6 +2630,9 @@ class ArbitrageScanner:
                     if not self._cached_markets:
                         return self._opportunities
 
+                self._heavy_last_started_at = datetime.now(timezone.utc)
+                self._heavy_inflight = True
+                self._heavy_lane_error = None
                 self._full_snapshot_strategy_running = True
                 self._last_full_snapshot_strategy_error = None
                 cached_events_snapshot = [_clone_model(event) for event in self._cached_events]
@@ -2715,6 +2785,7 @@ class ArbitrageScanner:
                 async with self._scan_lock:
                     return self._opportunities
             except Exception as exc:
+                self._heavy_lane_error = str(exc)
                 async with self._scan_lock:
                     self._last_full_snapshot_strategy_error = str(exc)
                 await self._set_activity(f"Heavy lane error: {exc}")
@@ -2722,6 +2793,8 @@ class ArbitrageScanner:
             finally:
                 async with self._scan_lock:
                     self._full_snapshot_strategy_running = False
+                    self._heavy_inflight = False
+                    self._heavy_last_completed_at = datetime.now(timezone.utc)
                     self._last_full_snapshot_strategy_duration_seconds = round(
                         max(0.0, time.monotonic() - cycle_started),
                         3,
@@ -2949,11 +3022,16 @@ class ArbitrageScanner:
 
         for new_opp in new_opportunities:
             new_opp.last_seen_at = now
+            new_opp.last_detected_at = now
             existing = existing_map.get(new_opp.stable_id)
             if existing:
-                # Preserve original detection time and ID
-                new_opp.detected_at = existing.detected_at
+                # Preserve immutable first-detection time and ID while updating recency.
+                preserved_first = _make_aware(getattr(existing, "first_detected_at", None) or existing.detected_at) or now
+                new_opp.first_detected_at = preserved_first
+                new_opp.detected_at = preserved_first
                 new_opp.id = existing.id
+                if getattr(existing, "last_priced_at", None) and not getattr(new_opp, "last_priced_at", None):
+                    new_opp.last_priced_at = existing.last_priced_at
                 if not new_opp.markets and existing.markets:
                     new_opp.markets = [dict(m) if isinstance(m, dict) else m for m in existing.markets]
                 elif new_opp.markets and existing.markets:
@@ -3008,6 +3086,9 @@ class ArbitrageScanner:
                     new_opp.ai_analysis = existing.ai_analysis
                 updated_count += 1
             else:
+                first_detected = _make_aware(getattr(new_opp, "first_detected_at", None) or new_opp.detected_at) or now
+                new_opp.first_detected_at = first_detected
+                new_opp.detected_at = first_detected
                 new_count += 1
             existing_map[new_opp.stable_id] = new_opp
 
@@ -3384,14 +3465,41 @@ class ArbitrageScanner:
     def get_status(self) -> dict:
         """Get current scanner status"""
         strategy_rows = self._strategy_runtime_status_rows()
+        now = datetime.now(timezone.utc)
+        fast_watchdog_seconds = max(
+            30,
+            int(getattr(settings, "SCAN_WATCHDOG_SECONDS", 600) or 600),
+            int(getattr(settings, "FAST_SCAN_INTERVAL_SECONDS", 15) or 15) * 3,
+        )
+        heavy_watchdog_seconds = max(
+            30,
+            int(getattr(settings, "SCANNER_FULL_SNAPSHOT_WATCHDOG_SECONDS", 180) or 180),
+        )
+        lane_watchdogs = {
+            "fast": self._lane_watchdog_payload(
+                now=now,
+                started_at=self._fast_last_started_at,
+                inflight=self._fast_inflight,
+                threshold_seconds=fast_watchdog_seconds,
+            ),
+            "heavy": self._lane_watchdog_payload(
+                now=now,
+                started_at=self._heavy_last_started_at,
+                inflight=self._heavy_inflight,
+                threshold_seconds=heavy_watchdog_seconds,
+            ),
+        }
         status = {
             "running": self._running,
             "enabled": self._enabled,
             "interval_seconds": self._interval_seconds,
             "auto_ai_scoring": self._auto_ai_scoring,
             "last_scan": to_iso(self._last_scan),
+            "last_fast_scan": to_iso(self._last_fast_scan),
+            "last_heavy_scan": to_iso(self._last_full_snapshot_strategy_scan),
             "opportunities_count": len(self._opportunities),
             "current_activity": self._current_activity,
+            "lane_watchdogs": lane_watchdogs,
             "strategies": strategy_rows,
         }
 
@@ -3420,12 +3528,23 @@ class ArbitrageScanner:
                 "last_full_scan": to_iso(self._last_full_scan),
                 "last_fast_scan": to_iso(self._last_fast_scan),
                 "last_fast_scan_duration_seconds": self._last_fast_scan_duration_seconds,
+                "fast_last_started_at": to_iso(self._fast_last_started_at),
+                "fast_last_completed_at": to_iso(self._fast_last_completed_at),
+                "fast_inflight": self._fast_inflight,
+                "fast_lane_error": self._fast_lane_error,
+                "fast_watchdog_timeout_count": self._fast_watchdog_timeout_count,
                 "last_full_snapshot_strategy_scan": to_iso(self._last_full_snapshot_strategy_scan),
                 "last_full_snapshot_strategy_duration_seconds": self._last_full_snapshot_strategy_duration_seconds,
                 "last_full_snapshot_strategy_error": self._last_full_snapshot_strategy_error,
                 "last_full_snapshot_strategy_market_count": self._last_full_snapshot_strategy_market_count,
                 "last_full_snapshot_strategy_opportunity_count": self._last_full_snapshot_strategy_opportunity_count,
                 "last_full_snapshot_strategy_count": self._last_full_snapshot_strategy_count,
+                "heavy_last_started_at": to_iso(self._heavy_last_started_at),
+                "heavy_last_completed_at": to_iso(self._heavy_last_completed_at),
+                "heavy_inflight": self._heavy_inflight,
+                "heavy_lane_error": self._heavy_lane_error,
+                "heavy_watchdog_timeout_count": self._heavy_watchdog_timeout_count,
+                "lane_watchdogs": lane_watchdogs,
                 "cached_markets": len(self._cached_markets),
                 "cached_events": len(self._cached_events),
                 "pending_reactive_tokens": len(self._pending_reactive_tokens),
@@ -3500,7 +3619,11 @@ class ArbitrageScanner:
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
         before_count = len(self._opportunities)
 
-        self._opportunities = [opp for opp in self._opportunities if _make_aware(opp.detected_at) >= cutoff]
+        self._opportunities = [
+            opp
+            for opp in self._opportunities
+            if _make_aware(opp.last_detected_at or opp.last_seen_at or opp.detected_at) >= cutoff
+        ]
 
         removed = before_count - len(self._opportunities)
         if removed > 0:

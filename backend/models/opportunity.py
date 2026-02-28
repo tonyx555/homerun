@@ -131,6 +131,9 @@ class Opportunity(BaseModel):
 
     # Timing
     detected_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    first_detected_at: Optional[datetime] = None  # Immutable first-seen timestamp for stable_id lifecycle
+    last_detected_at: Optional[datetime] = None  # Most recent scan that re-detected this opportunity
+    last_priced_at: Optional[datetime] = None  # Most recent market price refresh applied to this opportunity
     last_seen_at: Optional[datetime] = None  # Last scan that detected this opportunity
     resolution_date: Optional[datetime] = None
 
@@ -163,6 +166,12 @@ class Opportunity(BaseModel):
             self.stable_id = f"{strategy_name}_{stable_suffix}"
         if not self.id:
             self.id = f"{strategy_name}_{stable_suffix}_{int(self.detected_at.timestamp())}"
+        if self.first_detected_at is None:
+            self.first_detected_at = self.detected_at
+        if self.last_detected_at is None:
+            self.last_detected_at = self.detected_at
+        if self.last_seen_at is None:
+            self.last_seen_at = self.last_detected_at
 
 
 class OpportunityFilter(BaseModel):

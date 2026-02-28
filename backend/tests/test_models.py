@@ -480,6 +480,9 @@ class TestOpportunity:
         assert opp.max_position_size == 500.0
         assert opp.mispricing_type == MispricingType.WITHIN_MARKET
         assert isinstance(opp.detected_at, datetime)
+        assert opp.first_detected_at == opp.detected_at
+        assert opp.last_detected_at == opp.detected_at
+        assert opp.last_seen_at == opp.last_detected_at
 
     def test_default_values(self):
         """Default values for optional fields are sensible."""
@@ -507,6 +510,9 @@ class TestOpportunity:
         assert opp.guaranteed_profit is None
         assert opp.capture_ratio is None
         assert opp.positions_to_take == []
+        assert opp.first_detected_at == opp.detected_at
+        assert opp.last_detected_at == opp.detected_at
+        assert opp.last_priced_at is None
 
     def test_mispricing_type_values(self):
         """MispricingType enum has the three expected values."""

@@ -672,7 +672,7 @@ function App() {
   }, [])
 
   // WebSocket for real-time updates
-  const { isConnected, lastMessage } = useWebSocket('/ws')
+  const { isConnected, lastMessage, sendMessage } = useWebSocket('/ws')
   useRealtimeInvalidation(lastMessage, queryClient, setScannerActivity, {
     activeTab,
     opportunitiesView,
@@ -684,6 +684,43 @@ function App() {
     queryClient,
     isConnected,
   })
+
+  const wsChannels = useMemo(() => {
+    const channels = new Set<string>(['core', 'workers', 'signals'])
+    if (activeTab === 'trading') {
+      channels.add('trading')
+    }
+    if (activeTab === 'data' && dataView === 'map') {
+      channels.add('events')
+    }
+    if (activeTab !== 'opportunities') {
+      return Array.from(channels)
+    }
+    if (opportunitiesView === 'news') {
+      channels.add('news')
+      return Array.from(channels)
+    }
+    if (opportunitiesView === 'weather') {
+      channels.add('weather')
+      return Array.from(channels)
+    }
+    if (opportunitiesView === 'crypto') {
+      channels.add('crypto')
+      return Array.from(channels)
+    }
+    channels.add('opportunities')
+    channels.add('trading')
+    return Array.from(channels)
+  }, [activeTab, opportunitiesView, dataView])
+
+  useEffect(() => {
+    if (!isConnected) return
+    sendMessage({
+      type: 'subscribe',
+      channels: wsChannels,
+      visible: typeof document === 'undefined' ? true : document.visibilityState === 'visible',
+    })
+  }, [isConnected, wsChannels, sendMessage])
 
   // Reset page when filters change
   useEffect(() => {

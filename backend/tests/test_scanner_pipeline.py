@@ -230,6 +230,46 @@ class TestScanPipeline:
         assert isinstance(scanner._last_scan, datetime)
 
     @pytest.mark.asyncio
+    async def test_refresh_opportunity_prices_sets_last_priced_at(self, mock_polymarket_client):
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+        opp = Opportunity(
+            strategy="basic",
+            title="Price refresh",
+            description="D",
+            total_cost=0.95,
+            gross_profit=0.05,
+            fee=0.02,
+            net_profit=0.03,
+            roi_percent=3.16,
+            markets=[
+                {
+                    "id": "m_refresh",
+                    "question": "Test?",
+                    "clob_token_ids": ["tok_yes_refresh", "tok_no_refresh"],
+                    "yes_price": 0.49,
+                    "no_price": 0.51,
+                }
+            ],
+            positions_to_take=[],
+        )
+        ts = utcnow()
+        ts_seconds = ts.timestamp()
+        with patch.object(
+            scanner,
+            "_snapshot_ws_prices",
+            new_callable=AsyncMock,
+            return_value={
+                "tok_yes_refresh": {"mid": 0.47, "ts": ts_seconds},
+                "tok_no_refresh": {"mid": 0.53, "ts": ts_seconds},
+            },
+        ):
+            refreshed = await scanner.refresh_opportunity_prices([opp], now=ts)
+        assert len(refreshed) == 1
+        refreshed_opp = refreshed[0]
+        assert refreshed_opp.last_priced_at is not None
+        assert abs((refreshed_opp.last_priced_at - ts).total_seconds()) < 1.0
+
+    @pytest.mark.asyncio
     async def test_full_snapshot_scan_keeps_existing_pool_when_no_new_full_results(
         self,
         mock_polymarket_client,
@@ -591,6 +631,8 @@ class TestSharedPriceHistoryAttach:
 class TestOpportunityMerge:
     def test_merge_opportunities_preserves_existing_markets_when_update_is_partial(self):
         scanner = _build_scanner(strategies=[])
+        first_seen = utcnow() - timedelta(hours=2)
+        prior_seen = utcnow() - timedelta(minutes=30)
         existing = Opportunity(
             strategy="basic",
             title="Original",
@@ -617,6 +659,10 @@ class TestOpportunityMerge:
                 }
             ],
             positions_to_take=[{"market_id": "m_1", "outcome": "YES", "price": 0.42}],
+            detected_at=first_seen,
+            first_detected_at=first_seen,
+            last_detected_at=prior_seen,
+            last_seen_at=prior_seen,
         )
         scanner._opportunities = [existing]
 
@@ -646,6 +692,10 @@ class TestOpportunityMerge:
         assert merged_opp.markets[0]["id"] == "m_1"
         assert len(merged_opp.markets[0]["price_history"]) == 2
         assert len(merged_opp.positions_to_take) == 1
+        assert merged_opp.detected_at == first_seen
+        assert merged_opp.first_detected_at == first_seen
+        assert merged_opp.last_detected_at is not None
+        assert merged_opp.last_detected_at >= prior_seen
 
 
 # ---------------------------------------------------------------------------
@@ -871,6 +921,8 @@ class TestClearAndRemove:
         # Manually set detected_at to 5 minutes ago
         opp = sample_opportunity.model_copy()
         opp.detected_at = utcnow() - timedelta(minutes=5)
+        opp.last_detected_at = opp.detected_at
+        opp.last_seen_at = opp.detected_at
         scanner._opportunities = [opp]
 
         removed = scanner.remove_old_opportunities(max_age_minutes=3)

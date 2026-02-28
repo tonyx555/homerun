@@ -187,8 +187,11 @@ async def write_scanner_snapshot(
             "enabled": status.get("enabled", True),
             "interval_seconds": status.get("interval_seconds", 60),
             "last_scan": status.get("last_scan"),
+            "last_fast_scan": status.get("last_fast_scan"),
+            "last_heavy_scan": status.get("last_heavy_scan"),
             "opportunities_count": len(opportunities),
             "current_activity": status.get("current_activity"),
+            "lane_watchdogs": status.get("lane_watchdogs"),
             "strategies": status.get("strategies", []),
             "tiered_scanning": status.get("tiered_scanning"),
             "ws_feeds": status.get("ws_feeds"),
@@ -551,13 +554,17 @@ async def read_scanner_snapshot(
         except Exception as e:
             logger.debug("Skip invalid opportunity row: %s", e)
 
+    tiered = row.tiered_scanning_json if isinstance(row.tiered_scanning_json, dict) else {}
     status = {
         "running": row.running,
         "enabled": row.enabled,
         "interval_seconds": row.interval_seconds,
         "last_scan": _format_iso_utc_z(row.last_scan_at),
+        "last_fast_scan": tiered.get("last_fast_scan"),
+        "last_heavy_scan": tiered.get("last_heavy_scan") or tiered.get("last_full_snapshot_strategy_scan"),
         "opportunities_count": len(opportunities),
         "current_activity": row.current_activity,
+        "lane_watchdogs": tiered.get("lane_watchdogs"),
         "strategies": row.strategies_json or [],
         "tiered_scanning": row.tiered_scanning_json,
         "ws_feeds": row.ws_feeds_json,
@@ -598,13 +605,17 @@ async def read_scanner_status(
             or 0
         )
 
+    tiered = row.tiered_scanning_json if isinstance(row.tiered_scanning_json, dict) else {}
     return {
         "running": bool(row.running),
         "enabled": bool(row.enabled),
         "interval_seconds": int(row.interval_seconds or 60),
         "last_scan": _format_iso_utc_z(row.last_scan_at),
+        "last_fast_scan": tiered.get("last_fast_scan"),
+        "last_heavy_scan": tiered.get("last_heavy_scan") or tiered.get("last_full_snapshot_strategy_scan"),
         "opportunities_count": opportunities_count,
         "current_activity": row.current_activity,
+        "lane_watchdogs": tiered.get("lane_watchdogs"),
         "strategies": row.strategies_json or [],
         "tiered_scanning": row.tiered_scanning_json,
         "ws_feeds": row.ws_feeds_json,
@@ -676,8 +687,11 @@ def _default_status() -> dict[str, Any]:
         "enabled": True,
         "interval_seconds": 60,
         "last_scan": None,
+        "last_fast_scan": None,
+        "last_heavy_scan": None,
         "opportunities_count": 0,
         "current_activity": "Waiting for scanner worker.",
+        "lane_watchdogs": None,
         "strategies": [],
         "tiered_scanning": None,
         "ws_feeds": None,
@@ -1005,7 +1019,7 @@ def _remove_old_opportunities(
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
 
     def ok(o: Opportunity) -> bool:
-        d = o.detected_at
+        d = o.last_detected_at or o.last_seen_at or o.detected_at
         if d.tzinfo is None:
             d = d.replace(tzinfo=timezone.utc)
         return d >= cutoff

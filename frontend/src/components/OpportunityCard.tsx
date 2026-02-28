@@ -199,6 +199,21 @@ export function timeAgo(dateStr: string): string {
   return `${Math.floor(hr / 24)}d`
 }
 
+function resolveOpportunityFreshnessTimestamp(opportunity: Opportunity): string {
+  const candidates = [
+    opportunity.last_priced_at,
+    opportunity.last_detected_at,
+    opportunity.last_seen_at,
+    opportunity.detected_at,
+  ]
+  for (const candidate of candidates) {
+    if (!candidate) continue
+    const ts = new Date(candidate).getTime()
+    if (!Number.isNaN(ts)) return candidate
+  }
+  return opportunity.detected_at
+}
+
 /** Format a resolution date as a human-readable "time remaining" string */
 function timeUntil(dateStr?: string | null): string {
   if (!dateStr) return '—'
@@ -413,6 +428,8 @@ function OpportunityCard({
   // Search result mode (market listing, not an arbitrage opportunity)
   const isSearch = opportunity.strategy === 'search'
   const strategySdk = String(opportunity.strategy || '').trim().toLowerCase()
+  const freshnessTimestamp = resolveOpportunityFreshnessTimestamp(opportunity)
+  const firstDetectedTimestamp = opportunity.first_detected_at || opportunity.detected_at
 
   // Risk color
   const riskColor = opportunity.risk_score < 0.3
@@ -1028,7 +1045,9 @@ function OpportunityCard({
             )}
             <span className="flex items-center gap-0.5">
               <Clock className="w-2.5 h-2.5" />
-              {timeAgo(opportunity.detected_at)}
+              <span title={`First detected ${timeAgo(firstDetectedTimestamp)} ago`}>
+                {timeAgo(freshnessTimestamp)}
+              </span>
             </span>
           </div>
         </div>

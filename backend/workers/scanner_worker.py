@@ -182,6 +182,22 @@ async def _hydrate_scanner_pool_from_snapshot() -> int:
         parsed_last_scan = _parse_iso_utc(existing_status.get("last_scan"))
         if parsed_last_scan is not None:
             scanner._last_scan = parsed_last_scan
+        parsed_last_fast = _parse_iso_utc(existing_status.get("last_fast_scan"))
+        if parsed_last_fast is not None:
+            scanner._last_fast_scan = parsed_last_fast
+        parsed_last_heavy = _parse_iso_utc(existing_status.get("last_heavy_scan"))
+        if parsed_last_heavy is not None:
+            scanner._last_full_snapshot_strategy_scan = parsed_last_heavy
+        tiered = existing_status.get("tiered_scanning")
+        if isinstance(tiered, dict):
+            parsed_tier_fast = _parse_iso_utc(tiered.get("last_fast_scan"))
+            if parsed_tier_fast is not None:
+                scanner._last_fast_scan = parsed_tier_fast
+            parsed_tier_heavy = _parse_iso_utc(
+                tiered.get("last_heavy_scan") or tiered.get("last_full_snapshot_strategy_scan")
+            )
+            if parsed_tier_heavy is not None:
+                scanner._last_full_snapshot_strategy_scan = parsed_tier_heavy
 
     if restored or dropped_expired:
         logger.info(
@@ -348,6 +364,7 @@ async def _run_scan_loop() -> None:
                 timeout=full_snapshot_watchdog_seconds,
             )
         except asyncio.TimeoutError:
+            scanner.note_heavy_lane_watchdog_timeout(full_snapshot_watchdog_seconds)
             logger.warning(
                 "Full-snapshot scan timed out after %ss",
                 full_snapshot_watchdog_seconds,
@@ -433,6 +450,7 @@ async def _run_scan_loop() -> None:
             except asyncio.CancelledError:
                 raise
             except asyncio.TimeoutError as exc:
+                scanner.note_fast_lane_watchdog_timeout(scan_watchdog_seconds)
                 stale_scan_streak += 1
                 logger.warning(
                     "Scanner scan cycle timed out after %ss (streak=%d)",
@@ -504,6 +522,11 @@ async def _run_scan_loop() -> None:
                 else:
                     activity = f"Last scan error: {scan_error}"
 
+                try:
+                    runtime_status = scanner.get_status()
+                except Exception:
+                    runtime_status = {}
+
                 async with AsyncSessionLocal() as session:
                     await write_scanner_snapshot(
                         session,
@@ -513,8 +536,13 @@ async def _run_scan_loop() -> None:
                             "enabled": not paused,
                             "interval_seconds": interval,
                             "last_scan": existing_last_scan,
+                            "last_fast_scan": runtime_status.get("last_fast_scan"),
+                            "last_heavy_scan": runtime_status.get("last_heavy_scan"),
                             "current_activity": activity,
+                            "lane_watchdogs": runtime_status.get("lane_watchdogs"),
                             "strategies": [],
+                            "tiered_scanning": runtime_status.get("tiered_scanning"),
+                            "ws_feeds": runtime_status.get("ws_feeds"),
                         },
                         market_history=_build_market_history_payload(prev_opps),
                     )
@@ -610,7 +638,10 @@ async def _run_scan_loop() -> None:
                     "enabled": not paused,
                     "interval_seconds": interval,
                     "last_scan": last_scan,
+                    "last_fast_scan": None,
+                    "last_heavy_scan": None,
                     "current_activity": getattr(scanner, "_current_activity", None),
+                    "lane_watchdogs": None,
                     "strategies": [],
                 }
 
