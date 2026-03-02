@@ -19,6 +19,8 @@ from services.opportunity_strategy_catalog import (
 )
 from services.strategy_loader import strategy_loader
 from services.strategy_sdk import StrategySDK
+from services.strategies.news_edge import validate_news_edge_config
+from services.strategies.traders_copy_trade import validate_traders_copy_trade_config
 from services.strategy_versioning import strategy_versions_by_slug
 from services.trader_orchestrator.templates import TRADER_TEMPLATES
 
@@ -127,11 +129,11 @@ def _resolved_default_params(row: Any) -> dict[str, Any]:
     merged = {**defaults, **(dict(overrides) if isinstance(overrides, dict) else {})}
     if source_key == "traders":
         if slug == "traders_copy_trade":
-            merged = StrategySDK.validate_traders_copy_trade_config(merged)
+            merged = validate_traders_copy_trade_config(merged)
         else:
             merged = StrategySDK.validate_trader_filter_config(merged)
     elif source_key == "news":
-        merged = StrategySDK.validate_news_filter_config(merged)
+        merged = validate_news_edge_config(merged)
     merged = StrategySDK.normalize_strategy_retention_config(merged)
     for key in ("max_opportunities", "retention_window", "retention_max_age_minutes", "retention_max_opportunities"):
         merged.pop(key, None)

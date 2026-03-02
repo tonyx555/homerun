@@ -70,6 +70,7 @@ class TailEndCarryStrategy(BaseStrategy):
     default_config = {
         "min_probability": 0.85,
         "max_probability": 0.999,
+        "min_upside_percent": 10.0,
         "min_days_to_resolution": 0.01,
         "max_days_to_resolution": 2.0,
         "min_liquidity": 3500.0,
@@ -80,7 +81,12 @@ class TailEndCarryStrategy(BaseStrategy):
         "panic_drop_threshold": 0.08,
         "panic_window_points": 6,
         "panic_recovery_ratio_max": 0.20,
-        "take_profit_pct": 8.0,
+        "take_profit_pct": 10.0,
+        "smart_take_profit_enabled": True,
+        "smart_take_profit_min_pnl_pct": 10.0,
+        "smart_take_profit_max_price_headroom": 0.03,
+        "inversion_stop_enabled": True,
+        "inversion_price_threshold": 0.50,
         "price_policy": "taker_limit",
         "time_in_force": "IOC",
         "session_timeout_seconds": 90,
@@ -142,6 +148,7 @@ class TailEndCarryStrategy(BaseStrategy):
 
         min_probability = clamp(safe_float(cfg.get("min_probability"), 0.85), 0.5, 0.995)
         max_probability = clamp(safe_float(cfg.get("max_probability"), 0.999), min_probability + 0.005, 0.999)
+        min_upside_percent = clamp(safe_float(cfg.get("min_upside_percent"), 10.0), 10.0, 100.0)
         min_days = max(0.0, safe_float(cfg.get("min_days_to_resolution"), 0.01))
         max_days = max(min_days + 0.005, safe_float(cfg.get("max_days_to_resolution"), 2.0))
         min_liquidity = max(100.0, safe_float(cfg.get("min_liquidity"), 3500.0))
@@ -185,6 +192,11 @@ class TailEndCarryStrategy(BaseStrategy):
                 price, bid, ask, token_id = self._extract_side_book(market, prices, outcome)
                 if not (min_probability <= price <= max_probability):
                     continue
+                if price <= 0.0:
+                    continue
+                max_settlement_upside_pct = ((1.0 - price) / price) * 100.0
+                if max_settlement_upside_pct < min_upside_percent:
+                    continue
 
                 history_key = f"{market.id}:{outcome}"
                 history = history_by_key.get(history_key)
@@ -224,6 +236,7 @@ class TailEndCarryStrategy(BaseStrategy):
                             "spread": spread,
                             "target_price": target_price,
                             "probability": price,
+                            "max_settlement_upside_pct": max_settlement_upside_pct,
                         },
                     }
                 ]
@@ -287,6 +300,7 @@ class TailEndCarryStrategy(BaseStrategy):
         """Tail carry: source, strategy type, entry band, resolution window checks."""
         min_entry = clamp(to_float(params.get("min_entry_price", 0.85), 0.85), 0.01, 0.995)
         max_entry = clamp(to_float(params.get("max_entry_price", 0.999), 0.999), min_entry, 0.999)
+        min_upside_percent = clamp(to_float(params.get("min_upside_percent", 10.0), 10.0), 10.0, 100.0)
         min_days = max(0.0, to_float(params.get("min_days_to_resolution", 0.01), 0.01))
         max_days = max(min_days + 0.005, to_float(params.get("max_days_to_resolution", 2.0), 2.0))
 
@@ -306,12 +320,15 @@ class TailEndCarryStrategy(BaseStrategy):
 
         dtr = days_to_resolution(payload)
         days_ok = dtr is not None and min_days <= dtr <= max_days
+        max_settlement_upside_pct = ((1.0 - entry_price) / entry_price * 100.0) if entry_price > 0.0 else 0.0
+        upside_ok = max_settlement_upside_pct >= min_upside_percent
 
         # Stash for compute_score / evaluate
         payload["_entry_price"] = entry_price
         payload["_dtr"] = dtr
         payload["_max_days"] = max_days
         payload["_strategy_type"] = strategy_type
+        payload["_max_settlement_upside_pct"] = max_settlement_upside_pct
 
         return [
             DecisionCheck("source", "Scanner source", source == "scanner", detail="Requires source=scanner."),
@@ -329,6 +346,13 @@ class TailEndCarryStrategy(BaseStrategy):
                 days_ok,
                 score=dtr,
                 detail=f"[{min_days:.2f}, {max_days:.2f}] days",
+            ),
+            DecisionCheck(
+                "upside",
+                "Max settlement upside floor",
+                upside_ok,
+                score=max_settlement_upside_pct,
+                detail=f">= {min_upside_percent:.2f}%",
             ),
         ]
 
@@ -385,6 +409,7 @@ class TailEndCarryStrategy(BaseStrategy):
 
         entry_price = float(payload.get("_entry_price", 0) or 0)
         dtr = payload.get("_dtr")
+        max_settlement_upside_pct = float(payload.get("_max_settlement_upside_pct", 0.0) or 0.0)
         strategy_type = str(payload.get("_strategy_type", "") or "")
 
         if not all(c.passed for c in checks):
@@ -399,6 +424,7 @@ class TailEndCarryStrategy(BaseStrategy):
                     "risk_score": risk_score,
                     "entry_price": entry_price,
                     "days_to_resolution": dtr,
+                    "max_settlement_upside_pct": max_settlement_upside_pct,
                 },
             )
 
@@ -431,27 +457,69 @@ class TailEndCarryStrategy(BaseStrategy):
                 "risk_score": risk_score,
                 "entry_price": entry_price,
                 "days_to_resolution": dtr,
+                "max_settlement_upside_pct": max_settlement_upside_pct,
                 "sizing": sizing,
                 "strategy_type": strategy_type,
             },
         )
 
     def should_exit(self, position: Any, market_state: dict) -> ExitDecision:
-        """Near-expiry carry: hold to resolution with tight trailing stop."""
+        """Near-expiry carry: hold unless market resolves or fully inverts."""
         if market_state.get("is_resolved"):
             return self.default_exit_check(position, market_state)
+
         config = getattr(position, "config", None) or {}
         config = dict(config)
-        configured_tp = (getattr(self, "config", None) or {}).get("take_profit_pct", 8.0)
-        try:
-            default_tp = float(configured_tp)
-        except (TypeError, ValueError):
-            default_tp = 8.0
-        config.setdefault("take_profit_pct", default_tp)
-        config.setdefault("trailing_stop_pct", 3.0)
-        config.setdefault("resolve_only", False)
-        position.config = config
-        return self.default_exit_check(position, market_state)
+
+        smart_enabled_raw = config.get("smart_take_profit_enabled")
+        if isinstance(smart_enabled_raw, bool):
+            smart_enabled = smart_enabled_raw
+        elif smart_enabled_raw is None:
+            smart_enabled = True
+        else:
+            smart_enabled = str(smart_enabled_raw).strip().lower() in {"1", "true", "yes", "on"}
+
+        smart_min_pnl_pct = clamp(safe_float(config.get("smart_take_profit_min_pnl_pct"), 10.0), 0.0, 100.0)
+        smart_max_headroom = clamp(safe_float(config.get("smart_take_profit_max_price_headroom"), 0.03), 0.001, 0.20)
+        inversion_enabled_raw = config.get("inversion_stop_enabled")
+        if isinstance(inversion_enabled_raw, bool):
+            inversion_stop_enabled = inversion_enabled_raw
+        elif inversion_enabled_raw is None:
+            inversion_stop_enabled = True
+        else:
+            inversion_stop_enabled = str(inversion_enabled_raw).strip().lower() in {"1", "true", "yes", "on"}
+        inversion_price_threshold = clamp(safe_float(config.get("inversion_price_threshold"), 0.50), 0.05, 0.95)
+
+        entry_price = safe_float(getattr(position, "entry_price", 0.0), 0.0)
+        current_price = safe_float(market_state.get("current_price"), 0.0)
+        if inversion_stop_enabled and entry_price > 0.0 and current_price > 0.0:
+            if current_price <= inversion_price_threshold:
+                return ExitDecision(
+                    "close",
+                    (
+                        f"Inversion stop triggered ({current_price:.4f} <= {inversion_price_threshold:.4f}; "
+                        f"entry={entry_price:.4f})"
+                    ),
+                    close_price=current_price,
+                )
+        if smart_enabled and entry_price > 0.0 and current_price > 0.0:
+            pnl_pct = ((current_price - entry_price) / entry_price) * 100.0
+            headroom = max(0.0, 1.0 - current_price)
+            if pnl_pct >= smart_min_pnl_pct and headroom <= smart_max_headroom:
+                return ExitDecision(
+                    "close",
+                    (
+                        f"Smart take profit near max ({pnl_pct:.1f}% >= {smart_min_pnl_pct:.1f}%, "
+                        f"headroom={headroom:.3f})"
+                    ),
+                    close_price=current_price,
+                )
+
+        return ExitDecision(
+            "hold",
+            "Tail carry hold — awaiting resolution or full inversion",
+            payload={"skip_default_exit": True},
+        )
 
     # ------------------------------------------------------------------
     # Platform gate hooks

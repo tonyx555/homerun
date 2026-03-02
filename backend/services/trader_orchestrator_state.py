@@ -44,7 +44,7 @@ from services.worker_state import (
     _db_retry_delay,
     read_worker_snapshot,
 )
-from services.simulation import simulation_service
+from services.live_execution_adapter import execute_live_order
 from services.live_execution_service import live_execution_service
 from services.polymarket import polymarket_client
 from services.trader_orchestrator.sources.registry import normalize_source_key
@@ -54,6 +54,8 @@ from services.opportunity_strategy_catalog import (
 )
 from services.strategy_versioning import normalize_strategy_version, resolve_strategy_version
 from services.strategy_sdk import StrategySDK
+from services.strategies.news_edge import validate_news_edge_config
+from services.strategies.traders_copy_trade import validate_traders_copy_trade_config
 from services.trader_orchestrator.templates import (
     DEFAULT_GLOBAL_RISK,
     TRADER_TEMPLATES,
@@ -71,7 +73,7 @@ ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS = 5
 _UNSET = object()  # Sentinel: distinguish "not provided" from explicit None
 ORCHESTRATOR_SNAPSHOT_ID = "latest"
 OPEN_ORDER_STATUSES = {"submitted", "executed", "open"}
-PAPER_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
+SHADOW_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
 LIVE_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
 CLEANUP_ELIGIBLE_ORDER_STATUSES = {"submitted", "executed", "open"}
 PENDING_LIVE_EXIT_TERMINAL_STATUSES = {
@@ -108,13 +110,15 @@ DEFAULT_LIVE_PROVIDER_HEALTH = {
     "block_seconds": 120,
 }
 LIVE_PROVIDER_CANCEL_TIMEOUT_SECONDS = 8.0
+DEFAULT_TIMEOUT_TAKER_RESCUE_PRICE_BPS = 35.0
+DEFAULT_TIMEOUT_TAKER_RESCUE_TIME_IN_FORCE = "IOC"
 REALIZED_WIN_ORDER_STATUSES = {"resolved_win", "closed_win", "win"}
 REALIZED_LOSS_ORDER_STATUSES = {"resolved_loss", "closed_loss", "loss"}
 REALIZED_ORDER_STATUSES = REALIZED_WIN_ORDER_STATUSES | REALIZED_LOSS_ORDER_STATUSES
 ACTIVE_POSITION_STATUS = "open"
 INACTIVE_POSITION_STATUS = "closed"
 ACTIVE_EXECUTION_SESSION_STATUSES = {"pending", "placing", "working", "partial", "hedging", "paused"}
-TERMINAL_EXECUTION_SESSION_STATUSES = {"completed", "failed", "cancelled", "expired"}
+TERMINAL_EXECUTION_SESSION_STATUSES = {"completed", "failed", "cancelled", "expired", "skipped"}
 TRADER_ORDER_STATUS_HASH_KEY_PREFIX = "trader_order_status:"
 TRADER_ORDER_UPDATES_STREAM = "trader_order_updates"
 TRADER_ORDER_UPDATES_STREAM_MAXLEN = 200000
@@ -122,7 +126,7 @@ TRADER_ORDER_STATUS_TTL_SECONDS = 14 * 24 * 60 * 60
 _TRADER_SCOPE_MODES = set(StrategySDK.TRADER_SCOPE_MODE_CANONICAL)
 _ORCHESTRATOR_SNAPSHOT_STALE_MULTIPLIER = 30.0
 _ORCHESTRATOR_SNAPSHOT_STALE_MIN_SECONDS = 120.0
-_TRADER_MODES = {"paper", "shadow", "live"}
+_TRADER_MODES = {"shadow", "live"}
 _MANUAL_LIVE_POSITION_SOURCE = "manual_wallet_position"
 
 
@@ -136,6 +140,8 @@ def _new_id() -> str:
 
 def _normalize_mode_key(mode: Any) -> str:
     key = str(mode or "").strip().lower()
+    if key == "paper":
+        return "shadow"
     if key in _TRADER_MODES:
         return key
     return "other"
@@ -334,6 +340,7 @@ def _normalize_global_risk(value: Any) -> dict[str, Any]:
 def _normalize_control_settings(value: Any) -> dict[str, Any]:
     settings = dict(value) if isinstance(value, dict) else {}
     removed_keys = {
+        "paper_account_id",
         "enable_live_market_context",
         "live_market_history_window_seconds",
         "live_market_history_fidelity_seconds",
@@ -347,7 +354,6 @@ def _normalize_control_settings(value: Any) -> dict[str, Any]:
         "trading_domains",
         "enabled_strategies",
         "llm_verify_trades",
-        "paper_account_id",
     }
 
     normalized = {
@@ -356,7 +362,6 @@ def _normalize_control_settings(value: Any) -> dict[str, Any]:
         "trading_domains": _coerce_string_list(settings.get("trading_domains"), ["event_markets", "crypto"]),
         "enabled_strategies": _coerce_string_list(settings.get("enabled_strategies"), list_system_strategy_keys()),
         "llm_verify_trades": bool(settings.get("llm_verify_trades", False)),
-        "paper_account_id": (str(settings.get("paper_account_id") or "").strip() or None),
     }
     for key, raw_value in settings.items():
         if key in normalized_keys or key in removed_keys:
@@ -668,9 +673,9 @@ def _normalize_wallet_position_row(
 
 def _active_statuses_for_mode(mode: Any) -> set[str]:
     mode_key = _normalize_mode_key(mode)
-    if mode_key == "paper":
-        return PAPER_ACTIVE_ORDER_STATUSES
-    if mode_key in {"live", "shadow"}:
+    if mode_key == "shadow":
+        return SHADOW_ACTIVE_ORDER_STATUSES
+    if mode_key == "live":
         return LIVE_ACTIVE_ORDER_STATUSES
     return OPEN_ORDER_STATUSES
 
@@ -1093,6 +1098,174 @@ def _resolve_provider_order_ids(
     return provider_order_id, provider_clob_order_id
 
 
+def _cleanup_timeout_reason(note_reason: str) -> bool:
+    normalized = str(note_reason or "").strip().lower()
+    return normalized.startswith("max_open_order_timeout")
+
+
+def _cleanup_rescue_side_from_direction(direction: Any) -> str:
+    direction_key = str(direction or "").strip().lower()
+    if direction_key.startswith("sell"):
+        return "SELL"
+    return "BUY"
+
+
+def _cleanup_rescue_token_id(
+    *,
+    order_payload: dict[str, Any],
+    session_order: Optional[ExecutionSessionOrder],
+) -> str:
+    candidates: list[str] = []
+    execution_payload = order_payload.get("execution_session")
+    if not isinstance(execution_payload, dict):
+        execution_payload = {}
+    leg_payload = order_payload.get("leg")
+    if not isinstance(leg_payload, dict):
+        leg_payload = {}
+    session_payload = dict(session_order.payload_json or {}) if session_order is not None else {}
+    session_leg_payload = session_payload.get("leg")
+    if not isinstance(session_leg_payload, dict):
+        session_leg_payload = {}
+
+    for value in (
+        order_payload.get("token_id"),
+        order_payload.get("selected_token_id"),
+        leg_payload.get("token_id"),
+        execution_payload.get("token_id"),
+        session_payload.get("token_id"),
+        session_leg_payload.get("token_id"),
+        order_payload.get("yes_token_id"),
+        order_payload.get("no_token_id"),
+    ):
+        text = str(value or "").strip()
+        if text:
+            candidates.append(text)
+    return candidates[0] if candidates else ""
+
+
+def _cleanup_rescue_shares(
+    *,
+    row: TraderOrder,
+    order_payload: dict[str, Any],
+    session_order: Optional[ExecutionSessionOrder],
+) -> float:
+    session_payload = dict(session_order.payload_json or {}) if session_order is not None else {}
+    requested_shares = safe_float(order_payload.get("requested_shares"), None)
+    if requested_shares is None:
+        requested_shares = safe_float((order_payload.get("leg") or {}).get("requested_shares"), None)
+    if requested_shares is None:
+        requested_shares = safe_float(session_payload.get("requested_shares"), None)
+    if requested_shares is None:
+        requested_shares = safe_float(order_payload.get("shares"), None)
+    if requested_shares is None:
+        requested_shares = safe_float(order_payload.get("size"), None)
+    if requested_shares is None:
+        requested_notional = safe_float(row.notional_usd, 0.0) or 0.0
+        entry_price = safe_float(row.entry_price, None)
+        if entry_price is None or entry_price <= 0.0:
+            entry_price = safe_float(order_payload.get("resolved_price"), None)
+        if entry_price is not None and entry_price > 0.0 and requested_notional > 0.0:
+            requested_shares = requested_notional / entry_price
+    return max(0.0, float(requested_shares or 0.0))
+
+
+def _cleanup_rescue_price(
+    *,
+    side: str,
+    row: TraderOrder,
+    order_payload: dict[str, Any],
+    rescue_price_bps: float,
+) -> float | None:
+    base_price = safe_float(row.entry_price, None)
+    if base_price is None or base_price <= 0.0:
+        base_price = safe_float(row.effective_price, None)
+    if base_price is None or base_price <= 0.0:
+        base_price = safe_float(order_payload.get("resolved_price"), None)
+    if base_price is None or base_price <= 0.0:
+        base_price = safe_float(order_payload.get("fallback_price"), None)
+    if base_price is None or base_price <= 0.0:
+        return None
+    bps = max(0.0, float(rescue_price_bps))
+    if side == "SELL":
+        adjusted = float(base_price) * (1.0 - (bps / 10_000.0))
+    else:
+        adjusted = float(base_price) * (1.0 + (bps / 10_000.0))
+    return min(0.99, max(0.01, adjusted))
+
+
+async def _attempt_timeout_taker_rescue(
+    *,
+    row: TraderOrder,
+    order_payload: dict[str, Any],
+    session_order: Optional[ExecutionSessionOrder],
+    rescue_price_bps: float,
+    rescue_time_in_force: str,
+) -> dict[str, Any]:
+    token_id = _cleanup_rescue_token_id(order_payload=order_payload, session_order=session_order)
+    side = _cleanup_rescue_side_from_direction(row.direction)
+    shares = _cleanup_rescue_shares(row=row, order_payload=order_payload, session_order=session_order)
+    fallback_price = _cleanup_rescue_price(
+        side=side,
+        row=row,
+        order_payload=order_payload,
+        rescue_price_bps=rescue_price_bps,
+    )
+    result: dict[str, Any] = {
+        "attempted": False,
+        "success": False,
+        "status": "failed",
+        "token_id": token_id or None,
+        "side": side,
+        "requested_shares": shares,
+        "fallback_price": fallback_price,
+        "time_in_force": rescue_time_in_force,
+        "price_bps": float(rescue_price_bps),
+        "order_id": None,
+        "clob_order_id": None,
+        "effective_price": None,
+        "error": None,
+        "payload": {},
+    }
+    if not token_id:
+        result["error"] = "missing_token_id"
+        return result
+    if shares <= 0.0:
+        result["error"] = "missing_shares"
+        return result
+    if fallback_price is None or fallback_price <= 0.0:
+        result["error"] = "missing_price"
+        return result
+
+    result["attempted"] = True
+    try:
+        execution = await execute_live_order(
+            token_id=token_id,
+            side=side,
+            size=float(shares),
+            fallback_price=float(fallback_price),
+            market_question=str(row.market_question or ""),
+            opportunity_id=str(row.signal_id or row.id or ""),
+            time_in_force=str(rescue_time_in_force or DEFAULT_TIMEOUT_TAKER_RESCUE_TIME_IN_FORCE).strip().upper() or "IOC",
+            post_only=False,
+            resolve_live_price=True,
+            prefer_cached_price=True,
+            enforce_fallback_bound=True,
+        )
+    except Exception as exc:
+        result["error"] = str(exc)
+        return result
+
+    status_key = _normalize_status_key(execution.status)
+    result["status"] = status_key or "failed"
+    result["success"] = status_key in {"executed", "open", "submitted"}
+    result["order_id"] = str(execution.order_id or "").strip() or None
+    result["clob_order_id"] = str((execution.payload or {}).get("clob_order_id") or "").strip() or None
+    result["effective_price"] = safe_float(execution.effective_price, None)
+    result["error"] = str(execution.error_message or "").strip() or None
+    result["payload"] = dict(execution.payload or {})
+    return result
+
+
 def _map_provider_snapshot_status(snapshot_status: str, filled_notional_usd: float) -> str:
     status_key = str(snapshot_status or "").strip().lower()
     if status_key in {"filled"}:
@@ -1222,10 +1395,12 @@ def _normalize_strategy_key(value: Any) -> str:
 
 def _normalize_trader_mode(value: Any) -> str:
     mode = str(value or "").strip().lower()
+    if mode == "paper":
+        return "shadow"
     if not mode:
-        return "paper"
+        return "shadow"
     if mode not in _TRADER_MODES:
-        raise ValueError("mode must be 'paper', 'shadow', or 'live'")
+        raise ValueError("mode must be 'shadow' or 'live'")
     return mode
 
 
@@ -1288,10 +1463,10 @@ def _normalize_strategy_params(value: Any, source_key: str, strategy_key: str = 
     normalized_strategy_key = str(strategy_key or "").strip().lower()
     if normalized_source == "traders":
         if normalized_strategy_key == "traders_copy_trade":
-            return StrategySDK.validate_traders_copy_trade_config(out)
+            return validate_traders_copy_trade_config(out)
         return StrategySDK.validate_trader_filter_config(out)
     if normalized_source == "news":
-        return StrategySDK.validate_news_filter_config(out)
+        return validate_news_edge_config(out)
     if "min_confidence" in out:
         out["min_confidence"] = _normalize_confidence_fraction(out.get("min_confidence"), 0.0)
     return StrategySDK.normalize_strategy_retention_config(out)
@@ -1404,7 +1579,7 @@ def _serialize_control(row: TraderOrchestratorControl) -> dict[str, Any]:
         "id": row.id,
         "is_enabled": bool(row.is_enabled),
         "is_paused": bool(row.is_paused),
-        "mode": str(row.mode or "paper"),
+        "mode": _normalize_trader_mode(row.mode),
         "run_interval_seconds": int(row.run_interval_seconds or ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS),
         "requested_run_at": to_iso(row.requested_run_at),
         "kill_switch": bool(row.kill_switch),
@@ -1902,7 +2077,7 @@ async def ensure_orchestrator_control(session: AsyncSession) -> TraderOrchestrat
             id=ORCHESTRATOR_CONTROL_ID,
             is_enabled=False,
             is_paused=True,
-            mode="paper",
+            mode="shadow",
             run_interval_seconds=ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS,
             kill_switch=False,
             settings_json=_default_control_settings(),
@@ -1957,7 +2132,7 @@ async def enforce_manual_start_on_startup(session: AsyncSession) -> dict[str, An
         session,
         is_enabled=False,
         is_paused=True,
-        mode="paper",
+        mode="shadow",
         requested_run_at=None,
     )
     await write_orchestrator_snapshot(
@@ -2101,7 +2276,10 @@ async def list_traders(session: AsyncSession, mode: Optional[str] = None) -> lis
     query = select(Trader)
     if mode is not None:
         mode_key = _normalize_trader_mode(mode)
-        query = query.where(func.lower(func.coalesce(Trader.mode, "paper")) == mode_key)
+        if mode_key == "shadow":
+            query = query.where(func.lower(func.coalesce(Trader.mode, "")).in_(("shadow", "paper", "")))
+        else:
+            query = query.where(func.lower(func.coalesce(Trader.mode, "")) == mode_key)
     rows = (await session.execute(query.order_by(Trader.name.asc()))).scalars().all()
     return [_serialize_trader(row) for row in rows]
 
@@ -2126,7 +2304,7 @@ async def seed_default_traders(session: AsyncSession) -> None:
                 source_configs_json=source_configs,
                 risk_limits_json=template.get("risk_limits") or {},
                 metadata_json={"template_id": template["id"]},
-                mode="paper",
+                mode="shadow",
                 is_enabled=True,
                 is_paused=False,
                 interval_seconds=int(template.get("interval_seconds", 60) or 60),
@@ -2147,7 +2325,7 @@ async def create_trader(session: AsyncSession, payload: dict[str, Any]) -> dict[
         source_trader = _serialize_trader(source_row)
         copied_payload: dict[str, Any] = {
             "description": source_trader.get("description"),
-            "mode": source_trader.get("mode", "paper"),
+            "mode": source_trader.get("mode", "shadow"),
             "source_configs": copy.deepcopy(source_trader.get("source_configs", [])),
             "interval_seconds": int(source_trader.get("interval_seconds", 60) or 60),
             "risk_limits": copy.deepcopy(source_trader.get("risk_limits", {})),
@@ -2276,14 +2454,14 @@ async def delete_trader(session: AsyncSession, trader_id: str, *, force: bool = 
         or open_other_orders > 0
     ) and not force:
         raise ValueError(
-            f"Trader {trader_id} has non-paper exposure: "
+            f"Trader {trader_id} has active exposure: "
             f"{open_live_positions} live open position(s), "
             f"{open_shadow_positions} shadow open position(s), "
             f"{open_other_positions} unknown-mode open position(s), "
             f"{open_live_orders} live active order(s), and "
             f"{open_shadow_orders} shadow active order(s), and "
             f"{open_other_orders} unknown-mode active order(s). "
-            "Flatten non-paper exposure first, or pass force=True to delete anyway."
+            "Flatten active exposure first, or pass force=True to delete anyway."
         )
 
     if force and open_total_orders > 0:
@@ -2642,6 +2820,42 @@ async def create_trader_decision(
         await event_bus.publish("trader_decision", _serialize_decision(row))
     except Exception:
         pass  # fire-and-forget
+
+    return row
+
+
+async def update_trader_decision(
+    session: AsyncSession,
+    *,
+    decision_id: str,
+    decision: str | None = None,
+    reason: str | None = None,
+    payload_patch: dict[str, Any] | None = None,
+    commit: bool = True,
+) -> TraderDecision | None:
+    row = await session.get(TraderDecision, decision_id)
+    if row is None:
+        return None
+
+    if decision is not None:
+        row.decision = str(decision)
+    if reason is not None:
+        row.reason = reason
+    if payload_patch:
+        merged_payload = dict(row.payload_json or {})
+        merged_payload.update(payload_patch)
+        row.payload_json = merged_payload
+
+    if commit:
+        await _commit_with_retry(session)
+        await session.refresh(row)
+    else:
+        await session.flush()
+
+    try:
+        await event_bus.publish("trader_decision", _serialize_decision(row))
+    except Exception:
+        pass
 
     return row
 
@@ -4537,7 +4751,7 @@ async def get_open_position_summary_for_trader(session: AsyncSession, trader_id:
         )
     ).all()
 
-    summary = {"live": 0, "shadow": 0, "paper": 0, "other": 0, "total": 0}
+    summary = {"live": 0, "shadow": 0, "other": 0, "total": 0}
     for row in rows:
         mode_key = _normalize_mode_key(row.mode)
         count = int(row.count or 0)
@@ -4545,8 +4759,6 @@ async def get_open_position_summary_for_trader(session: AsyncSession, trader_id:
             summary["live"] += count
         elif mode_key == "shadow":
             summary["shadow"] += count
-        elif mode_key == "paper":
-            summary["paper"] += count
         else:
             summary["other"] += count
         summary["total"] += count
@@ -4596,7 +4808,7 @@ async def get_open_order_summary_for_trader(session: AsyncSession, trader_id: st
         )
     ).all()
 
-    summary = {"live": 0, "shadow": 0, "paper": 0, "other": 0, "total": 0}
+    summary = {"live": 0, "shadow": 0, "other": 0, "total": 0}
     for row in rows:
         mode = _normalize_mode_key(row.mode)
         if not _is_active_order_status(mode, row.status):
@@ -4606,8 +4818,6 @@ async def get_open_order_summary_for_trader(session: AsyncSession, trader_id: st
             summary["live"] += count
         elif mode == "shadow":
             summary["shadow"] += count
-        elif mode == "paper":
-            summary["paper"] += count
         else:
             summary["other"] += count
         summary["total"] += count
@@ -4731,7 +4941,7 @@ async def cleanup_trader_open_orders(
     session: AsyncSession,
     *,
     trader_id: str,
-    scope: str = "paper",
+    scope: str = "shadow",
     max_age_hours: Optional[int] = None,
     max_age_seconds: Optional[float] = None,
     source: Optional[str] = None,
@@ -4739,14 +4949,17 @@ async def cleanup_trader_open_orders(
     dry_run: bool = False,
     target_status: str = "cancelled",
     reason: Optional[str] = None,
+    attempt_live_taker_rescue: bool = False,
+    live_taker_rescue_price_bps: Optional[float] = None,
+    live_taker_rescue_time_in_force: str = DEFAULT_TIMEOUT_TAKER_RESCUE_TIME_IN_FORCE,
 ) -> dict[str, Any]:
-    scope_key = str(scope or "paper").strip().lower()
+    scope_key = str(scope or "shadow").strip().lower()
     if scope_key == "all":
-        allowed_modes = {"paper", "shadow", "live", "other"}
-    elif scope_key in {"paper", "shadow", "live"}:
+        allowed_modes = {"shadow", "live", "other"}
+    elif scope_key in {"shadow", "live"}:
         allowed_modes = {scope_key}
     else:
-        raise ValueError("scope must be one of: paper, shadow, live, all")
+        raise ValueError("scope must be one of: shadow, live, all")
 
     query = select(TraderOrder).where(TraderOrder.trader_id == trader_id)
     rows = list((await session.execute(query)).scalars().all())
@@ -4781,7 +4994,7 @@ async def cleanup_trader_open_orders(
 
         candidates.append(row)
 
-    mode_breakdown = {"paper": 0, "shadow": 0, "live": 0, "other": 0}
+    mode_breakdown = {"shadow": 0, "live": 0, "other": 0}
     status_breakdown: dict[str, int] = {}
     for row in candidates:
         mode_key = _normalize_mode_key(row.mode)
@@ -4793,12 +5006,21 @@ async def cleanup_trader_open_orders(
     provider_cancel_attempted = 0
     provider_cancelled = 0
     provider_cancel_failed = 0
+    taker_rescue_attempted = 0
+    taker_rescue_succeeded = 0
+    taker_rescue_failed = 0
     execution_order_updates = 0
     execution_leg_updates = 0
     execution_session_updates = 0
     if not dry_run and candidates:
         now = _now()
         note_reason = str(reason or "manual_position_cleanup").strip()
+        rescue_price_bps = safe_float(live_taker_rescue_price_bps, DEFAULT_TIMEOUT_TAKER_RESCUE_PRICE_BPS)
+        rescue_price_bps = max(0.0, float(rescue_price_bps or 0.0))
+        rescue_time_in_force = str(live_taker_rescue_time_in_force or DEFAULT_TIMEOUT_TAKER_RESCUE_TIME_IN_FORCE).strip().upper()
+        if rescue_time_in_force not in {"IOC", "FOK", "GTC"}:
+            rescue_time_in_force = DEFAULT_TIMEOUT_TAKER_RESCUE_TIME_IN_FORCE
+        allow_timeout_taker_rescue = bool(attempt_live_taker_rescue and require_unfilled and _cleanup_timeout_reason(note_reason))
         candidate_ids = [str(row.id) for row in candidates]
         execution_order_rows = list(
             (
@@ -4883,36 +5105,72 @@ async def cleanup_trader_open_orders(
                     )
                 provider_cancelled += 1
 
-            if mode_key == "paper" and not _is_active_order_status(mode_key, target_status):
-                simulation_ledger = existing_payload.get("simulation_ledger")
-                if isinstance(simulation_ledger, dict):
-                    sim_account_id = str(simulation_ledger.get("account_id") or "").strip()
-                    sim_trade_id = str(simulation_ledger.get("trade_id") or "").strip()
-                    sim_position_id = str(simulation_ledger.get("position_id") or "").strip()
-                    if sim_account_id and sim_trade_id and sim_position_id:
-                        mark_price = None
-                        position_state = existing_payload.get("position_state")
-                        if isinstance(position_state, dict):
-                            mark_price = safe_float(position_state.get("last_mark_price"), 0.0)
-                        if not mark_price:
-                            mark_price = safe_float(row.effective_price, 0.0) or safe_float(row.entry_price, 0.0)
-                        try:
-                            simulation_cleanup = await simulation_service.close_orchestrator_paper_fill(
-                                account_id=sim_account_id,
-                                trade_id=sim_trade_id,
-                                position_id=sim_position_id,
-                                close_price=float(max(0.0, mark_price or 0.0)),
-                                close_trigger="manual_cleanup",
-                                price_source="cleanup_mark",
-                                reason=note_reason,
-                                session=session,
-                                commit=False,
+                if allow_timeout_taker_rescue and source_filter == "crypto":
+                    taker_rescue_attempted += 1
+                    rescue = await _attempt_timeout_taker_rescue(
+                        row=row,
+                        order_payload=existing_payload,
+                        session_order=execution_order,
+                        rescue_price_bps=rescue_price_bps,
+                        rescue_time_in_force=rescue_time_in_force,
+                    )
+                    existing_payload["timeout_taker_rescue"] = {
+                        **rescue,
+                        "attempted_at": to_iso(now),
+                    }
+                    if bool(rescue.get("success")):
+                        taker_rescue_succeeded += 1
+                        rescue_payload = dict(rescue.get("payload") or {})
+                        rescue_status = _normalize_status_key(rescue.get("status"))
+                        row.status = "open" if rescue_status in {"executed", "open", "submitted"} else "failed"
+                        row.updated_at = now
+                        existing_payload["cleanup"] = {
+                            "previous_status": previous_status,
+                            "target_status": row.status,
+                            "reason": "timeout_taker_rescue",
+                            "performed_at": to_iso(now),
+                        }
+                        if rescue_payload:
+                            existing_payload.update(
+                                {
+                                    "order_id": str(rescue.get("order_id") or rescue_payload.get("order_id") or ""),
+                                    "clob_order_id": str(rescue.get("clob_order_id") or rescue_payload.get("clob_order_id") or ""),
+                                    "provider_order_id": str(rescue.get("order_id") or rescue_payload.get("order_id") or ""),
+                                    "provider_clob_order_id": str(
+                                        rescue.get("clob_order_id") or rescue_payload.get("clob_order_id") or ""
+                                    ),
+                                    "effective_price": safe_float(rescue.get("effective_price"), None),
+                                    "filled_size": safe_float(rescue_payload.get("filled_size"), 0.0) or 0.0,
+                                    "average_fill_price": safe_float(rescue_payload.get("average_fill_price"), None),
+                                    "submission": "timeout_taker_rescue",
+                                    "post_only": False,
+                                    "time_in_force": rescue_time_in_force,
+                                }
                             )
-                            existing_payload["simulation_cleanup"] = simulation_cleanup
-                        except Exception as exc:
-                            raise ValueError(
-                                f"Failed to close linked simulation ledger for order {row.id}: {exc}"
-                            ) from exc
+                        row.payload_json = existing_payload
+                        if row.reason:
+                            row.reason = f"{row.reason} | rescue:timeout_taker_conversion"
+                        else:
+                            row.reason = "rescue:timeout_taker_conversion"
+
+                        if execution_order is not None:
+                            execution_order.status = str(row.status)
+                            execution_order.updated_at = now
+                            execution_order.provider_order_id = str(rescue.get("order_id") or "") or None
+                            execution_order.provider_clob_order_id = str(rescue.get("clob_order_id") or "") or None
+                            execution_payload = dict(execution_order.payload_json or {})
+                            execution_payload["timeout_taker_rescue"] = {
+                                **rescue,
+                                "attempted_at": to_iso(now),
+                            }
+                            execution_order.payload_json = execution_payload
+                            execution_order.error_message = None
+                            execution_order.reason = "timeout_taker_rescue"
+                            execution_order_updates += 1
+                        updated += 1
+                        continue
+
+                    taker_rescue_failed += 1
 
             row.status = target_status
             row.updated_at = now
@@ -5014,6 +5272,9 @@ async def cleanup_trader_open_orders(
         "provider_cancel_attempted": provider_cancel_attempted,
         "provider_cancelled": provider_cancelled,
         "provider_cancel_failed": provider_cancel_failed,
+        "taker_rescue_attempted": taker_rescue_attempted,
+        "taker_rescue_succeeded": taker_rescue_succeeded,
+        "taker_rescue_failed": taker_rescue_failed,
         "execution_order_updates": execution_order_updates,
         "execution_leg_updates": execution_leg_updates,
         "execution_session_updates": execution_session_updates,
@@ -5335,7 +5596,7 @@ async def compose_trader_orchestrator_config(session: AsyncSession) -> dict[str,
     live_market_context = dict(global_runtime.get("live_market_context") or _normalize_live_market_context({}))
     live_provider_health = dict(global_runtime.get("live_provider_health") or _normalize_live_provider_health({}))
     return {
-        "mode": control.get("mode", "paper"),
+        "mode": control.get("mode", "shadow"),
         "kill_switch": bool(control.get("kill_switch", False)),
         "run_interval_seconds": int(control.get("run_interval_seconds") or ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS),
         "global_risk": {
@@ -5346,7 +5607,6 @@ async def compose_trader_orchestrator_config(session: AsyncSession) -> dict[str,
         "trading_domains": settings_json.get("trading_domains") or ["event_markets", "crypto"],
         "enabled_strategies": settings_json.get("enabled_strategies") or [],
         "llm_verify_trades": bool(settings_json.get("llm_verify_trades", False)),
-        "paper_account_id": settings_json.get("paper_account_id"),
         "global_runtime": {
             "pending_live_exit_guard": {
                 "max_pending_exits": int(pending_live_exit_guard.get("max_pending_exits", 0) or 0),

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.database import get_db_session
+from models.database import get_db_session, recover_pool
 from services import discovery_shared_state, shared_state
 from services.news import shared_state as news_shared_state
 from services.pause_state import global_pause_state
@@ -55,6 +57,41 @@ WORKER_DISPLAY_ORDER = (
     "events",
 )
 GENERIC_WORKERS = ("scanner_slo", "crypto", "tracked_traders", "trader_reconciliation", "redeemer", "events")
+DB_RETRY_ATTEMPTS = 3
+DB_RETRY_BASE_DELAY_SECONDS = 0.2
+DB_RETRY_MAX_DELAY_SECONDS = 1.5
+
+
+def _is_retryable_db_error(exc: Exception) -> bool:
+    message = str(getattr(exc, "orig", exc)).lower()
+    return any(
+        marker in message
+        for marker in (
+            "deadlock detected",
+            "serialization failure",
+            "could not serialize access",
+            "lock not available",
+            "too many clients already",
+            "remaining connection slots are reserved",
+            "cannot connect now",
+            "connection is closed",
+            "underlying connection is closed",
+            "connection has been closed",
+            "closed the connection unexpectedly",
+            "connection reset by peer",
+            "broken pipe",
+            "connection was closed",
+            "connectiondoesnotexist",
+            "closed in the middle of operation",
+            "another operation",
+            "cannot switch to state",
+            "terminating connection",
+        )
+    )
+
+
+def _db_retry_delay(attempt: int) -> float:
+    return min(DB_RETRY_BASE_DELAY_SECONDS * (2**attempt), DB_RETRY_MAX_DELAY_SECONDS)
 
 
 def _normalize_worker_name(raw: str) -> str:
@@ -192,7 +229,28 @@ async def _set_all_workers_paused(session: AsyncSession, paused: bool) -> None:
 
 @router.get("/status")
 async def get_workers_status(session: AsyncSession = Depends(get_db_session)):
-    return {"workers": await _collect_workers(session)}
+    for attempt in range(DB_RETRY_ATTEMPTS):
+        try:
+            return {"workers": await _collect_workers(session)}
+        except Exception as exc:
+            if isinstance(exc, HTTPException):
+                raise
+            if not _is_retryable_db_error(exc):
+                raise
+            if attempt >= DB_RETRY_ATTEMPTS - 1:
+                raise HTTPException(status_code=503, detail="Database is busy; please retry.") from exc
+            try:
+                if session.in_transaction():
+                    await session.rollback()
+            except Exception:
+                pass
+            try:
+                await recover_pool()
+            except Exception:
+                pass
+            await asyncio.sleep(_db_retry_delay(attempt))
+
+    raise HTTPException(status_code=503, detail="Database is busy; please retry.")
 
 
 @router.post("/pause-all")

@@ -146,10 +146,8 @@ const NAV_ITEMS: { id: Tab; icon: React.ElementType; label: string; shortcut: st
 type WorkerHealthTone = 'green' | 'amber' | 'red'
 
 const WORKER_HEALTH_ORDER = [
-  'market_data',
-  'market_universe',
   'scanner',
-  'opportunity_aggregator',
+  'scanner_slo',
   'discovery',
   'weather',
   'news',
@@ -157,14 +155,15 @@ const WORKER_HEALTH_ORDER = [
   'tracked_traders',
   'trader_orchestrator',
   'trader_reconciliation',
+  'redeemer',
   'events',
 ] as const
 
+const WORKER_HEALTH_ORDER_SET = new Set<string>(WORKER_HEALTH_ORDER)
+
 const WORKER_HEALTH_LABELS: Record<string, string> = {
-  market_data: 'Market Data',
-  market_universe: 'Market Universe',
   scanner: 'Scanner',
-  opportunity_aggregator: 'Opportunity Aggregator',
+  scanner_slo: 'Scanner SLO',
   discovery: 'Discovery',
   weather: 'Weather',
   news: 'News',
@@ -172,6 +171,7 @@ const WORKER_HEALTH_LABELS: Record<string, string> = {
   tracked_traders: 'Tracked Traders',
   trader_orchestrator: 'Orchestrator',
   trader_reconciliation: 'Reconciliation',
+  redeemer: 'Redeemer',
   events: 'Events',
 }
 
@@ -695,6 +695,7 @@ function App() {
     const channels = new Set<string>(['core', 'workers', 'signals'])
     if (activeTab === 'trading') {
       channels.add('trading')
+      channels.add('crypto')
     }
     if (activeTab === 'data' && dataView === 'map') {
       channels.add('events')
@@ -766,8 +767,9 @@ function App() {
     refetchInterval: isConnected ? false : 10000,
   })
 
-  const opportunities = opportunitiesData?.opportunities || []
-  const totalOpportunities = opportunitiesData?.total || 0
+  const opportunities = Array.isArray(opportunitiesData?.opportunities) ? opportunitiesData.opportunities : []
+  const parsedTotalOpportunities = Number(opportunitiesData?.total ?? 0)
+  const totalOpportunities = Number.isFinite(parsedTotalOpportunities) ? parsedTotalOpportunities : 0
 
   const wsTopics = useMemo(() => {
     const topics = new Set<string>(['opportunities.summary'])
@@ -833,6 +835,14 @@ function App() {
   })
 
   const workers = workersData?.workers || []
+  const managedWorkers = useMemo(
+    () =>
+      workers.filter((worker) => {
+        const workerName = String(worker?.worker_name || '').trim()
+        return workerName.length > 0 && WORKER_HEALTH_ORDER_SET.has(workerName)
+      }),
+    [workers],
+  )
   const trackedTradersWorker = useMemo(
     () => workers.find((worker) => worker.worker_name === 'tracked_traders'),
     [workers],
@@ -865,14 +875,20 @@ function App() {
   })
 
   const workerHealth = useMemo(() => {
-    const byName = new Map(workers.map((worker) => [worker.worker_name, worker]))
-    const rows = WORKER_HEALTH_ORDER.map((workerName) => {
+    const byName = new Map(managedWorkers.map((worker) => [worker.worker_name, worker]))
+    const workerNames = WORKER_HEALTH_ORDER.filter((workerName) => byName.has(workerName))
+    const rows = workerNames.map((workerName) => {
       const worker = byName.get(workerName)
       const resolved = resolveWorkerHealth(worker)
+      const orchestratorPaused = workerName === 'trader_orchestrator'
+        && Boolean((worker?.control || {}).is_paused)
+        && resolved.state === 'PAUSED'
+      const tone: WorkerHealthTone = orchestratorPaused ? 'green' : resolved.tone
       return {
         workerName,
         label: WORKER_HEALTH_LABELS[workerName] || workerName,
         ...resolved,
+        tone,
       }
     })
     const red = rows.filter((row) => row.tone === 'red').length
@@ -880,7 +896,9 @@ function App() {
     const green = rows.filter((row) => row.tone === 'green').length
 
     let overallTone: WorkerHealthTone = 'green'
-    if (red > 0) {
+    if (rows.length < 1) {
+      overallTone = 'amber'
+    } else if (red > 0) {
       overallTone = 'red'
     } else if (amber > 0) {
       overallTone = 'amber'
@@ -891,7 +909,7 @@ function App() {
       overallTone,
       counts: { green, amber, red, total: rows.length },
     }
-  }, [workers])
+  }, [managedWorkers])
 
   const tradingVpnHealth = useMemo(() => {
     if (tradingVpnStatusLoading && !tradingVpnStatus) {
@@ -957,12 +975,22 @@ function App() {
     }
   }, [tradingVpnStatus, tradingVpnStatusError, tradingVpnStatusLoading])
 
+  const workerAndVpnTone = useMemo<WorkerHealthTone>(() => {
+    if (workerHealth.overallTone === 'red' || tradingVpnHealth.tone === 'red') {
+      return 'red'
+    }
+    if (workerHealth.overallTone === 'amber' || tradingVpnHealth.tone === 'amber') {
+      return 'amber'
+    }
+    return 'green'
+  }, [workerHealth.overallTone, tradingVpnHealth.tone])
+
   const globallyPaused = useMemo(() => {
-    if (workers.length === 0) {
+    if (managedWorkers.length === 0) {
       return Boolean(status && !status.enabled)
     }
-    return workers.every((worker) => Boolean((worker.control || {}).is_paused))
-  }, [workers, status?.enabled])
+    return managedWorkers.every((worker) => Boolean((worker.control || {}).is_paused))
+  }, [managedWorkers, status?.enabled])
 
   // Sync scanner activity from polled status as fallback
   useEffect(() => {
@@ -1811,7 +1839,7 @@ function App() {
                   aria-label="Worker and VPN status"
                   className="h-8 w-8 rounded-md border border-border/60 bg-card/60 hover:bg-card/90 transition-colors flex items-center justify-center cursor-help"
                 >
-                  <span className={cn("h-2.5 w-2.5 rounded-full", WORKER_TONE_CLASS[workerHealth.overallTone])} />
+                  <span className={cn("h-2.5 w-2.5 rounded-full", WORKER_TONE_CLASS[workerAndVpnTone])} />
                 </button>
               </TooltipTrigger>
               <TooltipContent side="bottom" align="end" className="w-[280px] p-2.5">

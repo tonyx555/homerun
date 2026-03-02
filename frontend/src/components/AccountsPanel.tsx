@@ -42,7 +42,7 @@ import {
 type AccountsWorkspaceTab = 'overview' | 'sandbox' | 'live'
 type DeskView = 'overview' | 'positions' | 'activity'
 type LiveVenue = 'polymarket' | 'kalshi'
-const OPEN_PAPER_ORDER_STATUSES = new Set(['submitted', 'executed', 'open'])
+const OPEN_SHADOW_ORDER_STATUSES = new Set(['submitted', 'executed', 'open'])
 
 const WORKSPACE_TAB_CONFIG: { id: AccountsWorkspaceTab; label: string; description: string; icon: React.ElementType }[] = [
   {
@@ -210,8 +210,8 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
     retry: false,
   })
 
-  const paperModeActive = Boolean(orchestratorOverview?.control?.is_enabled)
-    && String(orchestratorOverview?.control?.mode || '').toLowerCase() === 'paper'
+  const shadowModeActive = Boolean(orchestratorOverview?.control?.is_enabled)
+    && String(orchestratorOverview?.control?.mode || '').toLowerCase() === 'shadow'
 
   const { data: traderOrders = [] } = useQuery({
     queryKey: ['accounts-panel', 'trader-orders'],
@@ -222,28 +222,24 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
         return []
       }
     },
-    enabled: paperModeActive,
+    enabled: shadowModeActive,
     refetchInterval: 10000,
     retry: false,
   })
 
-  const autotraderPaperMetrics = useMemo(() => {
-    const paperAccountId = String(
-      orchestratorOverview?.config?.paper_account_id
-      || orchestratorOverview?.control?.settings?.paper_account_id
-      || ''
-    ).trim() || null
+  const autotraderShadowMetrics = useMemo(() => {
+    const linkedSandboxAccountId: string | null = null
 
-    const openPaperOrders = traderOrders.filter((order) => {
+    const openShadowOrders = traderOrders.filter((order) => {
       const mode = String(order.mode || '').toLowerCase()
       const status = String(order.status || '').toLowerCase()
-      return mode === 'paper' && OPEN_PAPER_ORDER_STATUSES.has(status)
+      return mode === 'shadow' && OPEN_SHADOW_ORDER_STATUSES.has(status)
     })
 
     const positionKeys = new Set<string>()
     let exposureUsd = 0
 
-    for (const order of openPaperOrders) {
+    for (const order of openShadowOrders) {
       const marketId = String(order.market_id || '').trim()
       if (!marketId) continue
       const side = normalizeDirection(order.direction_side ?? order.direction)
@@ -254,32 +250,32 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
     const fallbackExposure = Number(orchestratorOverview?.metrics?.gross_exposure_usd || 0)
 
     return {
-      active: paperModeActive,
-      paperAccountId,
-      openOrders: openPaperOrders.length,
+      active: shadowModeActive,
+      linkedSandboxAccountId,
+      openOrders: openShadowOrders.length,
       openPositions: positionKeys.size,
       exposureUsd: exposureUsd > 0 ? exposureUsd : fallbackExposure,
     }
-  }, [paperModeActive, orchestratorOverview, traderOrders])
+  }, [shadowModeActive, orchestratorOverview, traderOrders])
 
   const autotraderOverlay = useMemo(() => {
-    const linkedAccount = autotraderPaperMetrics.paperAccountId
-      ? sandboxAccounts.find((account) => account.id === autotraderPaperMetrics.paperAccountId)
+    const linkedAccount = autotraderShadowMetrics.linkedSandboxAccountId
+      ? sandboxAccounts.find((account) => account.id === autotraderShadowMetrics.linkedSandboxAccountId)
       : undefined
 
     const shouldOverlay = Boolean(
       linkedAccount
-      && autotraderPaperMetrics.openPositions > 0
+      && autotraderShadowMetrics.openPositions > 0
       && (linkedAccount.open_positions || 0) === 0
     )
 
     return {
-      accountId: shouldOverlay ? autotraderPaperMetrics.paperAccountId : null,
-      openPositions: shouldOverlay ? autotraderPaperMetrics.openPositions : 0,
-      openOrders: shouldOverlay ? autotraderPaperMetrics.openOrders : 0,
-      exposureUsd: shouldOverlay ? autotraderPaperMetrics.exposureUsd : 0,
+      accountId: shouldOverlay ? autotraderShadowMetrics.linkedSandboxAccountId : null,
+      openPositions: shouldOverlay ? autotraderShadowMetrics.openPositions : 0,
+      openOrders: shouldOverlay ? autotraderShadowMetrics.openOrders : 0,
+      exposureUsd: shouldOverlay ? autotraderShadowMetrics.exposureUsd : 0,
     }
-  }, [autotraderPaperMetrics, sandboxAccounts])
+  }, [autotraderShadowMetrics, sandboxAccounts])
 
   const sandboxMetrics = useMemo(() => {
     const totalInitial = sandboxAccounts.reduce((sum, account) => sum + (account.initial_capital || 0), 0)
@@ -480,8 +476,8 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
       },
       {
         label: sandboxMetrics.autotraderOverlay.openPositions > 0
-          ? `Autotrader paper active (${sandboxMetrics.autotraderOverlay.openPositions} positions)`
-          : 'No autotrader paper overlay',
+          ? `Autotrader shadow active (${sandboxMetrics.autotraderOverlay.openPositions} positions)`
+          : 'No autotrader shadow overlay',
         tone: sandboxMetrics.autotraderOverlay.openPositions > 0 ? 'amber' : 'green',
       },
     ] as const
@@ -781,7 +777,7 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
                 <div className="flex shrink-0 items-center justify-between border-b border-border/70 px-3 py-2.5">
                   <div>
                     <p className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground/70">Sandbox Fleet</p>
-                    <p className="text-xs text-muted-foreground">All paper accounts with real-time P&L context</p>
+                    <p className="text-xs text-muted-foreground">All sandbox accounts with real-time P&L context</p>
                   </div>
                   <Button
                     variant="outline"

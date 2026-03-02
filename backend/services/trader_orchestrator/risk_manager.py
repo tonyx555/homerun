@@ -66,7 +66,7 @@ def evaluate_risk(
     trader_consecutive_losses: int = 0,
     cycle_orders_placed: int = 0,
     cooldown_active: bool = False,
-    mode: str = "paper",
+    mode: str = "shadow",
 ) -> RiskResult:
     global_limits = global_limits or {}
     trader_limits = trader_limits or {}

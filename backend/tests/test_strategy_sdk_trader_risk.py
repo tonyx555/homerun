@@ -7,6 +7,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from services.strategy_sdk import StrategySDK
+from services.strategies.traders_copy_trade import validate_traders_copy_trade_config
 
 
 def test_validate_trader_risk_config_normalizes_portfolio_allocator_fields():
@@ -70,7 +71,7 @@ def test_resolve_min_order_size_prefers_mode_specific_then_base_then_portfolio()
 
 
 def test_validate_traders_copy_trade_config_normalizes_and_clamps_fields():
-    cfg = StrategySDK.validate_traders_copy_trade_config(
+    cfg = validate_traders_copy_trade_config(
         {
             "min_confidence": "0.6",
             "min_source_notional_usd": "12.5",

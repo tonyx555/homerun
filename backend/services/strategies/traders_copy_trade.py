@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 from typing import Any
 
@@ -9,6 +10,159 @@ from services.strategy_sdk import StrategySDK
 from utils.converters import safe_float, to_confidence
 
 _MAX_LIVE_COPY_SIGNAL_AGE_SECONDS = 5.0
+
+TRADERS_COPY_TRADE_DEFAULTS: dict[str, Any] = {
+    "min_confidence": 0.45,
+    "min_source_notional_usd": 10.0,
+    "max_entry_price": 0.98,
+    "max_signal_age_seconds": 5,
+    "min_live_liquidity_usd": 150.0,
+    "max_adverse_entry_drift_pct": 2.0,
+    "copy_delay_seconds": 0,
+    "copy_buys": True,
+    "copy_sells": True,
+    "max_position_size": 1000.0,
+    "proportional_sizing": True,
+    "proportional_multiplier": 1.0,
+    "base_size_usd": 25.0,
+    "max_size_usd": 1500.0,
+    "traders_scope": {
+        "modes": ["tracked", "pool"],
+        "individual_wallets": [],
+        "group_ids": [],
+    },
+}
+
+TRADERS_COPY_TRADE_CONFIG_SCHEMA: dict[str, Any] = {
+    "param_fields": [
+        {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
+        {"key": "min_source_notional_usd", "label": "Min Source Notional (USD)", "type": "number", "min": 0},
+        {"key": "max_entry_price", "label": "Max Entry Price", "type": "number", "min": 0, "max": 1},
+        {"key": "max_signal_age_seconds", "label": "Max Signal Age (sec)", "type": "integer", "min": 1, "max": 5},
+        {"key": "min_live_liquidity_usd", "label": "Min Live Liquidity (USD)", "type": "number", "min": 0},
+        {
+            "key": "max_adverse_entry_drift_pct",
+            "label": "Max Adverse Entry Drift (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {"key": "copy_delay_seconds", "label": "Copy Delay (sec)", "type": "integer", "min": 0, "max": 300},
+        {"key": "copy_buys", "label": "Copy Buys", "type": "boolean"},
+        {"key": "copy_sells", "label": "Copy Sells", "type": "boolean"},
+        {"key": "max_position_size", "label": "Max Position Size (USD)", "type": "number", "min": 1, "max": 1000000},
+        {"key": "proportional_sizing", "label": "Proportional Sizing", "type": "boolean"},
+        {"key": "proportional_multiplier", "label": "Proportional Multiplier", "type": "number", "min": 0.01, "max": 100},
+        {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
+        {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
+        {
+            "key": "traders_scope",
+            "label": "Wallet Scope",
+            "type": "object",
+            "properties": [
+                {
+                    "key": "modes",
+                    "label": "Modes",
+                    "type": "array[string]",
+                    "options": ["tracked", "pool", "individual", "group"],
+                    "required": True,
+                },
+                {"key": "individual_wallets", "label": "Individual Wallets", "type": "array[string]"},
+                {"key": "group_ids", "label": "Group IDs", "type": "array[string]"},
+            ],
+        },
+    ]
+}
+
+
+def traders_copy_trade_defaults() -> dict[str, Any]:
+    return dict(TRADERS_COPY_TRADE_DEFAULTS)
+
+
+def traders_copy_trade_config_schema() -> dict[str, Any]:
+    return dict(TRADERS_COPY_TRADE_CONFIG_SCHEMA)
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _coerce_float(value: Any, default: float, lo: float, hi: float) -> float:
+    try:
+        parsed = float(value)
+    except Exception:
+        parsed = default
+    if not math.isfinite(parsed):
+        parsed = default
+    return max(lo, min(hi, parsed))
+
+
+def _coerce_int(value: Any, default: int, lo: int, hi: int) -> int:
+    try:
+        parsed = int(float(value))
+    except Exception:
+        parsed = default
+    return max(lo, min(hi, parsed))
+
+
+def validate_traders_copy_trade_config(config: Any) -> dict[str, Any]:
+    cfg = traders_copy_trade_defaults()
+    raw = config if isinstance(config, dict) else {}
+    for key in (
+        "min_confidence",
+        "min_source_notional_usd",
+        "max_entry_price",
+        "max_signal_age_seconds",
+        "min_live_liquidity_usd",
+        "max_adverse_entry_drift_pct",
+        "copy_delay_seconds",
+        "copy_buys",
+        "copy_sells",
+        "max_position_size",
+        "proportional_sizing",
+        "proportional_multiplier",
+        "base_size_usd",
+        "max_size_usd",
+        "traders_scope",
+        "max_opportunities",
+        "retention_max_opportunities",
+        "retention_max_age_minutes",
+        "retention_window",
+        "retention_period",
+        "retention_duration",
+        "opportunity_ttl_minutes",
+        "opportunity_ttl",
+    ):
+        if key in raw:
+            cfg[key] = raw[key]
+
+    cfg["min_confidence"] = _coerce_float(cfg.get("min_confidence"), 0.45, 0.0, 1.0)
+    cfg["min_source_notional_usd"] = _coerce_float(cfg.get("min_source_notional_usd"), 10.0, 0.0, 1_000_000.0)
+    cfg["max_entry_price"] = _coerce_float(cfg.get("max_entry_price"), 0.98, 0.0, 1.0)
+    cfg["max_signal_age_seconds"] = _coerce_int(cfg.get("max_signal_age_seconds"), 5, 1, 5)
+    cfg["min_live_liquidity_usd"] = _coerce_float(cfg.get("min_live_liquidity_usd"), 150.0, 0.0, 1_000_000_000.0)
+    cfg["max_adverse_entry_drift_pct"] = _coerce_float(cfg.get("max_adverse_entry_drift_pct"), 2.0, 0.0, 100.0)
+    cfg["copy_delay_seconds"] = _coerce_int(cfg.get("copy_delay_seconds"), 0, 0, 300)
+    cfg["copy_buys"] = _coerce_bool(cfg.get("copy_buys"), True)
+    cfg["copy_sells"] = _coerce_bool(cfg.get("copy_sells"), True)
+    cfg["max_position_size"] = _coerce_float(cfg.get("max_position_size"), 1000.0, 1.0, 1_000_000.0)
+    cfg["proportional_sizing"] = _coerce_bool(cfg.get("proportional_sizing"), True)
+    cfg["proportional_multiplier"] = _coerce_float(cfg.get("proportional_multiplier"), 1.0, 0.01, 100.0)
+    cfg["base_size_usd"] = _coerce_float(cfg.get("base_size_usd"), 25.0, 1.0, 10_000.0)
+    cfg["max_size_usd"] = _coerce_float(cfg.get("max_size_usd"), max(1.0, float(cfg["base_size_usd"])), 1.0, 50_000.0)
+    if cfg["max_size_usd"] < cfg["base_size_usd"]:
+        cfg["max_size_usd"] = cfg["base_size_usd"]
+    cfg["traders_scope"] = StrategySDK.validate_trader_scope_config(cfg.get("traders_scope"))
+    return StrategySDK.normalize_strategy_retention_config(cfg)
 
 
 def _to_utc(value: Any) -> datetime | None:
@@ -36,10 +190,10 @@ class TradersCopyTradeStrategy(BaseStrategy):
     worker_affinity = "traders"
     allow_deduplication = False
     accepted_signal_strategy_types = ["traders_copy_trade"]
-    default_config = StrategySDK.traders_copy_trade_defaults()
+    default_config = traders_copy_trade_defaults()
 
     def configure(self, config: dict) -> None:
-        self.config = StrategySDK.validate_traders_copy_trade_config(config)
+        self.config = validate_traders_copy_trade_config(config)
 
     def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:
         return []
@@ -49,7 +203,7 @@ class TradersCopyTradeStrategy(BaseStrategy):
 
     def evaluate(self, signal: Any, context: dict[str, Any]) -> StrategyDecision:
         context_payload = context if isinstance(context, dict) else {}
-        params = StrategySDK.validate_traders_copy_trade_config(context_payload.get("params") or {})
+        params = validate_traders_copy_trade_config(context_payload.get("params") or {})
         payload = signal.payload_json if isinstance(getattr(signal, "payload_json", None), dict) else {}
         strategy_context = payload.get("strategy_context") if isinstance(payload.get("strategy_context"), dict) else {}
         copy_event = strategy_context.get("copy_event") if isinstance(strategy_context.get("copy_event"), dict) else {}

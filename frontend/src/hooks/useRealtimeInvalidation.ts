@@ -211,6 +211,59 @@ export function useRealtimeInvalidation(
       }
     }
 
+    const mergeOrchestratorSnapshotIntoOverview = (snapshot: Record<string, any>) => {
+      if (!snapshot || typeof snapshot !== 'object') return
+      queryClient.setQueryData(['trader-orchestrator-overview'], (old: any) => {
+        if (!old || typeof old !== 'object') return old
+
+        const previousWorker =
+          old.worker && typeof old.worker === 'object'
+            ? old.worker
+            : {}
+        const previousControl =
+          old.control && typeof old.control === 'object'
+            ? old.control
+            : {}
+        const previousMetrics =
+          old.metrics && typeof old.metrics === 'object'
+            ? old.metrics
+            : {}
+
+        const nextEnabled = typeof snapshot.enabled === 'boolean'
+          ? snapshot.enabled
+          : previousControl.is_enabled
+        const nextPaused = typeof snapshot.is_paused === 'boolean'
+          ? snapshot.is_paused
+          : (typeof nextEnabled === 'boolean' ? !nextEnabled : previousControl.is_paused)
+        const snapshotMode = String(snapshot.mode || '').trim().toLowerCase()
+        const nextMode = snapshotMode === 'shadow' || snapshotMode === 'live'
+          ? snapshotMode
+          : previousControl.mode
+
+        return {
+          ...old,
+          control: {
+            ...previousControl,
+            is_enabled: Boolean(nextEnabled),
+            is_paused: Boolean(nextPaused),
+            mode: nextMode,
+          },
+          worker: {
+            ...previousWorker,
+            ...snapshot,
+          },
+          metrics: {
+            ...previousMetrics,
+            decisions_count: Number(snapshot.decisions_count ?? previousMetrics.decisions_count ?? 0),
+            orders_count: Number(snapshot.orders_count ?? previousMetrics.orders_count ?? 0),
+            open_orders: Number(snapshot.open_orders ?? previousMetrics.open_orders ?? 0),
+            gross_exposure_usd: Number(snapshot.gross_exposure_usd ?? previousMetrics.gross_exposure_usd ?? 0),
+            daily_pnl: Number(snapshot.daily_pnl ?? previousMetrics.daily_pnl ?? 0),
+          },
+        }
+      })
+    }
+
     const applyPricesUpdateToOpportunityCaches = (payload: any) => {
       if (!payload || typeof payload !== 'object') return
       const marketId = String(payload.market_id || '').trim().toLowerCase()
@@ -514,10 +567,11 @@ export function useRealtimeInvalidation(
     if (messageType === 'trader_orchestrator_status' && lastMessage.data) {
       // Direct cache update for trader orchestrator status
       queryClient.setQueryData(['trader-orchestrator-status'], lastMessage.data)
+      mergeOrchestratorSnapshotIntoOverview(lastMessage.data)
       queueInvalidations([
         ['trader-orchestrator-overview'],
         ...(viewingTrading ? ([['traders-list']] as QueryKey[]) : []),
-      ])
+      ], { immediate: true })
     }
     if (messageType === 'trader_decision') {
       upsertTraderDecisionCache(lastMessage.data)

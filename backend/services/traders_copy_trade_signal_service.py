@@ -11,6 +11,7 @@ from models.database import AsyncSessionLocal, DiscoveredWallet, Trader, TraderG
 from services.polymarket import polymarket_client
 from services.signal_bus import make_dedupe_key, upsert_trade_signal
 from services.strategy_sdk import StrategySDK
+from services.strategies.traders_copy_trade import validate_traders_copy_trade_config
 from services.wallet_ws_monitor import WalletTradeEvent, wallet_ws_monitor
 from utils.converters import safe_float
 from utils.logger import get_logger
@@ -123,7 +124,7 @@ class TradersCopyTradeSignalService:
                         continue
                     if str(source_config.get("strategy_key") or "").strip().lower() != "traders_copy_trade":
                         continue
-                    params = StrategySDK.validate_traders_copy_trade_config(source_config.get("strategy_params") or {})
+                    params = validate_traders_copy_trade_config(source_config.get("strategy_params") or {})
                     scopes.append(StrategySDK.validate_trader_scope_config(params.get("traders_scope")))
 
             tracked_needed = any("tracked" in set(scope.get("modes") or []) for scope in scopes)

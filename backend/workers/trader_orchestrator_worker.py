@@ -16,7 +16,6 @@ from models.database import (
     AppSettings,
     AsyncSessionLocal,
     DiscoveredWallet,
-    SimulationAccount,
     TradeSignal,
     TraderSignalConsumption,
     TraderOrder,
@@ -32,11 +31,9 @@ from services.trader_orchestrator.live_market_context import (
 from services.trader_orchestrator.session_engine import ExecutionSessionEngine
 from services.trader_orchestrator.position_lifecycle import (
     load_market_info_for_orders,
-    reconcile_paper_positions,
     reconcile_shadow_positions,
 )
 from services.polymarket import polymarket_client
-from services.simulation import simulation_service
 from services.live_execution_service import live_execution_service
 from services.trader_orchestrator.risk_manager import evaluate_risk
 from services.trader_orchestrator.decision_gates import (
@@ -59,6 +56,8 @@ from services.strategy_experiments import (
 from services.strategy_loader import StrategyValidationError, strategy_loader
 from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.strategy_sdk import StrategySDK
+from services.strategies.news_edge import validate_news_edge_config
+from services.strategies.traders_copy_trade import validate_traders_copy_trade_config
 from services.strategy_versioning import normalize_strategy_version, resolve_strategy_version
 from services.redis_streams import redis_streams as _redis_stream_client
 from services.trade_signal_stream import (
@@ -68,6 +67,8 @@ from services.trade_signal_stream import (
     read_trade_signal_batches,
 )
 from services.trader_orchestrator_state import (
+    DEFAULT_TIMEOUT_TAKER_RESCUE_PRICE_BPS,
+    DEFAULT_TIMEOUT_TAKER_RESCUE_TIME_IN_FORCE,
     DEFAULT_LIVE_MARKET_CONTEXT,
     DEFAULT_LIVE_PROVIDER_HEALTH,
     DEFAULT_LIVE_RISK_CLAMPS,
@@ -99,6 +100,7 @@ from services.trader_orchestrator_state import (
     set_trader_paused,
     sync_trader_position_inventory,
     update_orchestrator_control,
+    update_trader_decision,
     upsert_trader_signal_cursor,
     write_orchestrator_snapshot,
 )
@@ -111,7 +113,7 @@ logger = logging.getLogger("trader_orchestrator_worker")
 strategy_db_loader = strategy_loader
 create_trader_order = _create_trader_order
 _RESUME_POLICIES = {"resume_full", "manage_only", "flatten_then_start"}
-_PAPER_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
+_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
 _ORPHAN_CLEANUP_MAX_TRADERS_PER_CYCLE = 32
 _ORCHESTRATOR_CYCLE_LOCK_KEY = 0x54524F5243485354  # "TRORCHST"
 _orchestrator_lock_session: Any | None = None
@@ -135,6 +137,27 @@ _LIVE_PROVIDER_BLOCK_EVENT_COOLDOWN_SECONDS = 60
 _LIVE_RISK_CLAMP_EVENT_COOLDOWN_SECONDS = 300
 _CRYPTO_OPEN_ORDER_TIMEOUT_FLOOR_SECONDS = 20.0
 _LIVE_PROVIDER_RECONCILE_MIN_INTERVAL_SECONDS = 5.0
+_EDGE_CALIBRATION_LOOKBACK_DAYS_DEFAULT = 14
+_EDGE_CALIBRATION_MAX_ROWS_DEFAULT = 500
+_EDGE_CALIBRATION_MIN_SAMPLES = 24
+_EDGE_CALIBRATION_BUCKET_MIN_SAMPLES = 8
+_EDGE_CALIBRATION_BUCKETS: tuple[tuple[float, float], ...] = (
+    (0.0, 2.0),
+    (2.0, 4.0),
+    (4.0, 7.0),
+    (7.0, 10.0),
+    (10.0, 1000.0),
+)
+_TERMINAL_ORDER_STATUSES = {
+    "resolved_win",
+    "closed_win",
+    "win",
+    "resolved_loss",
+    "closed_loss",
+    "loss",
+    "cancelled",
+    "failed",
+}
 _terminal_stale_order_last_checked_at: datetime | None = None
 _terminal_stale_order_alert_last_emitted: dict[str, datetime] = {}
 _open_order_timeout_cleanup_failure_cooldown_until: dict[str, datetime] = {}
@@ -420,11 +443,11 @@ def _merged_strategy_params_for_source_config(source_config: dict[str, Any]) -> 
 
     if source_key == "traders":
         if strategy_key == "traders_copy_trade":
-            merged = StrategySDK.validate_traders_copy_trade_config(merged)
+            merged = validate_traders_copy_trade_config(merged)
         else:
             merged = StrategySDK.validate_trader_filter_config(merged)
     elif source_key == "news":
-        merged = StrategySDK.validate_news_filter_config(merged)
+        merged = validate_news_edge_config(merged)
 
     return StrategySDK.normalize_strategy_retention_config(merged)
 
@@ -667,6 +690,10 @@ def _normalize_wallet(value: Any) -> str:
     return StrategySDK.normalize_trader_wallet(value)
 
 
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, float(value)))
+
+
 def _normalize_source_configs(trader: dict[str, Any]) -> dict[str, dict[str, Any]]:
     source_configs_raw = trader.get("source_configs")
     if not isinstance(source_configs_raw, list):
@@ -700,6 +727,11 @@ def _normalize_source_configs(trader: dict[str, Any]) -> dict[str, dict[str, Any
 def _source_open_order_timeout_seconds(source_config: dict[str, Any]) -> float | None:
     source_key = normalize_source_key(source_config.get("source_key"))
     strategy_params = dict(source_config.get("strategy_params") or {})
+    explicit_timeout_seconds = StrategySDK.resolve_open_order_timeout_seconds(
+        strategy_params,
+        default_seconds=None,
+    )
+    timeout_explicit = explicit_timeout_seconds is not None
     strategy_instance = _strategy_instance_for_source_config(source_config)
     default_seconds = None
     if strategy_instance is not None:
@@ -721,17 +753,167 @@ def _source_open_order_timeout_seconds(source_config: dict[str, Any]) -> float |
         return None
     if source_key == "crypto":
         configured_floor = safe_float(strategy_params.get("min_open_order_timeout_seconds"), None)
-        if configured_floor is None:
-            configured_floor = safe_float(
-                getattr(strategy_instance, "default_open_order_timeout_seconds", None),
-                _CRYPTO_OPEN_ORDER_TIMEOUT_FLOOR_SECONDS,
-            )
-        crypto_floor_seconds = max(
-            _CRYPTO_OPEN_ORDER_TIMEOUT_FLOOR_SECONDS,
-            max(1.0, float(configured_floor)),
-        )
-        timeout_seconds = max(float(timeout_seconds), crypto_floor_seconds)
+        if configured_floor is not None:
+            timeout_seconds = max(float(timeout_seconds), max(1.0, float(configured_floor)))
+        elif not timeout_explicit:
+            timeout_seconds = max(float(timeout_seconds), _CRYPTO_OPEN_ORDER_TIMEOUT_FLOOR_SECONDS)
     return float(timeout_seconds)
+
+
+def _source_timeout_taker_rescue_policy(source_config: dict[str, Any]) -> dict[str, Any]:
+    source_key = normalize_source_key(source_config.get("source_key"))
+    strategy_params = dict(source_config.get("strategy_params") or {})
+    enabled_default = source_key == "crypto"
+    enabled = bool(
+        strategy_params.get(
+            "timeout_taker_rescue_enabled",
+            strategy_params.get("attempt_live_taker_rescue", enabled_default),
+        )
+    )
+    price_bps = safe_float(
+        strategy_params.get(
+            "timeout_taker_rescue_price_bps",
+            strategy_params.get("live_taker_rescue_price_bps"),
+        ),
+        DEFAULT_TIMEOUT_TAKER_RESCUE_PRICE_BPS,
+    )
+    if price_bps is None:
+        price_bps = DEFAULT_TIMEOUT_TAKER_RESCUE_PRICE_BPS
+    time_in_force = str(
+        strategy_params.get(
+            "timeout_taker_rescue_time_in_force",
+            strategy_params.get("live_taker_rescue_time_in_force", DEFAULT_TIMEOUT_TAKER_RESCUE_TIME_IN_FORCE),
+        )
+        or DEFAULT_TIMEOUT_TAKER_RESCUE_TIME_IN_FORCE
+    ).strip().upper()
+    if time_in_force not in {"IOC", "FOK", "GTC"}:
+        time_in_force = DEFAULT_TIMEOUT_TAKER_RESCUE_TIME_IN_FORCE
+    return {
+        "enabled": enabled,
+        "price_bps": max(0.0, float(price_bps)),
+        "time_in_force": time_in_force,
+    }
+
+
+def _edge_bucket_key(min_edge: float, max_edge: float) -> str:
+    if max_edge >= 999.0:
+        return f"{int(min_edge)}+"
+    return f"{int(min_edge)}-{int(max_edge)}"
+
+
+async def _build_edge_calibration_profile(
+    session: Any,
+    *,
+    trader_id: str,
+    source_key: str,
+    mode: str,
+    lookback_days: int,
+    max_rows: int,
+) -> dict[str, Any]:
+    mode_key = str(mode or "").strip().lower()
+    if mode_key == "paper":
+        mode_key = "shadow"
+    source = normalize_source_key(source_key)
+    if not trader_id or not source:
+        return {
+            "sample_size": 0,
+            "threshold_edge_multiplier": 1.0,
+            "size_multiplier": 1.0,
+            "bucket_size_multipliers": {},
+        }
+
+    lookback_days_clamped = max(1, min(90, int(lookback_days)))
+    max_rows_clamped = max(50, min(5000, int(max_rows)))
+    now_utc = utcnow()
+    lookback_start = now_utc - timedelta(days=lookback_days_clamped)
+
+    status_expr = func.lower(func.coalesce(TraderOrder.status, ""))
+    source_expr = func.lower(func.coalesce(TraderOrder.source, ""))
+    mode_expr = func.lower(func.coalesce(TraderOrder.mode, ""))
+    query = (
+        select(
+            TraderOrder.edge_percent,
+            TraderOrder.actual_profit,
+        )
+        .where(TraderOrder.trader_id == trader_id)
+        .where(source_expr == source)
+        .where(mode_expr == mode_key)
+        .where(TraderOrder.created_at >= lookback_start)
+        .where(TraderOrder.edge_percent.isnot(None))
+        .where(TraderOrder.actual_profit.isnot(None))
+        .where(status_expr.in_(tuple(_TERMINAL_ORDER_STATUSES)))
+        .order_by(TraderOrder.created_at.desc())
+        .limit(max_rows_clamped)
+    )
+    rows = (await session.execute(query)).all()
+    if not rows:
+        return {
+            "sample_size": 0,
+            "lookback_days": lookback_days_clamped,
+            "threshold_edge_multiplier": 1.0,
+            "size_multiplier": 1.0,
+            "bucket_size_multipliers": {},
+            "hit_ratio": 1.0,
+        }
+
+    sample_size = len(rows)
+    actual_hits = 0.0
+    expected_hits = 0.0
+    bucket_stats: dict[str, dict[str, float]] = {
+        _edge_bucket_key(bucket[0], bucket[1]): {"count": 0.0, "actual_hits": 0.0, "expected_hits": 0.0}
+        for bucket in _EDGE_CALIBRATION_BUCKETS
+    }
+
+    for row in rows:
+        edge_percent = max(0.0, safe_float(row.edge_percent, 0.0) or 0.0)
+        actual_profit = safe_float(row.actual_profit, 0.0) or 0.0
+        expected_win = _clamp(0.5 + (edge_percent / 200.0), 0.5, 0.9)
+        realized_win = 1.0 if actual_profit > 0.0 else 0.0
+        actual_hits += realized_win
+        expected_hits += expected_win
+        for bucket_min, bucket_max in _EDGE_CALIBRATION_BUCKETS:
+            if edge_percent < bucket_min:
+                continue
+            if edge_percent >= bucket_max:
+                continue
+            bucket_key = _edge_bucket_key(bucket_min, bucket_max)
+            bucket_row = bucket_stats[bucket_key]
+            bucket_row["count"] += 1.0
+            bucket_row["actual_hits"] += realized_win
+            bucket_row["expected_hits"] += expected_win
+            break
+
+    expected_hits = max(1e-6, expected_hits)
+    hit_ratio = actual_hits / expected_hits
+    if sample_size < _EDGE_CALIBRATION_MIN_SAMPLES:
+        threshold_edge_multiplier = 1.0
+        size_multiplier = 1.0
+    else:
+        threshold_edge_multiplier = _clamp(1.0 + ((1.0 - hit_ratio) * 0.65), 0.80, 1.80)
+        size_multiplier = _clamp(0.55 + (0.45 * hit_ratio), 0.35, 1.20)
+
+    bucket_size_multipliers: dict[str, float] = {}
+    for bucket_min, bucket_max in _EDGE_CALIBRATION_BUCKETS:
+        bucket_key = _edge_bucket_key(bucket_min, bucket_max)
+        bucket_row = bucket_stats[bucket_key]
+        bucket_count = int(bucket_row["count"])
+        if bucket_count < _EDGE_CALIBRATION_BUCKET_MIN_SAMPLES:
+            continue
+        bucket_expected = max(1e-6, bucket_row["expected_hits"])
+        bucket_ratio = bucket_row["actual_hits"] / bucket_expected
+        bucket_size_multipliers[bucket_key] = _clamp(0.50 + (0.50 * bucket_ratio), 0.30, 1.25)
+
+    return {
+        "sample_size": int(sample_size),
+        "lookback_days": lookback_days_clamped,
+        "hit_ratio": round(hit_ratio, 6),
+        "realized_hit_rate": round(actual_hits / max(1.0, float(sample_size)), 6),
+        "expected_hit_rate": round(expected_hits / max(1.0, float(sample_size)), 6),
+        "threshold_edge_multiplier": round(float(threshold_edge_multiplier), 6),
+        "size_multiplier": round(float(size_multiplier), 6),
+        "bucket_size_multipliers": bucket_size_multipliers,
+        "as_of": now_utc.isoformat(),
+    }
 
 
 async def _enforce_source_open_order_timeouts(
@@ -742,12 +924,24 @@ async def _enforce_source_open_order_timeouts(
     source_configs: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     if not source_configs:
-        return {"configured": 0, "updated": 0, "suppressed": 0, "sources": [], "errors": []}
+        return {
+            "configured": 0,
+            "updated": 0,
+            "suppressed": 0,
+            "taker_rescue_attempted": 0,
+            "taker_rescue_succeeded": 0,
+            "taker_rescue_failed": 0,
+            "sources": [],
+            "errors": [],
+        }
 
-    scope = run_mode if run_mode in {"paper", "shadow", "live"} else "all"
+    scope = run_mode if run_mode in {"shadow", "live"} else "all"
     configured = 0
     updated = 0
     suppressed = 0
+    taker_rescue_attempted = 0
+    taker_rescue_succeeded = 0
+    taker_rescue_failed = 0
     source_rows: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     now_utc = utcnow()
@@ -800,6 +994,8 @@ async def _enforce_source_open_order_timeouts(
         if timeout_seconds is None:
             continue
         configured += 1
+        rescue_policy = _source_timeout_taker_rescue_policy(source_config)
+        rescue_enabled_for_source = bool(scope == "live" and rescue_policy["enabled"])
         if scope == "live" and not provider_ready_for_cleanup:
             suppressed += 1
             source_rows.append(
@@ -810,6 +1006,7 @@ async def _enforce_source_open_order_timeouts(
                     "updated": 0,
                     "suppressed": True,
                     "suppressed_reason": "provider_unavailable",
+                    "taker_rescue_enabled": rescue_enabled_for_source,
                 }
             )
             continue
@@ -825,6 +1022,7 @@ async def _enforce_source_open_order_timeouts(
                     "updated": 0,
                     "suppressed": True,
                     "suppressed_until": cooldown_until.isoformat(),
+                    "taker_rescue_enabled": rescue_enabled_for_source,
                 }
             )
             continue
@@ -839,6 +1037,9 @@ async def _enforce_source_open_order_timeouts(
                 dry_run=False,
                 target_status="cancelled",
                 reason=f"max_open_order_timeout:{source_key}",
+                attempt_live_taker_rescue=rescue_enabled_for_source,
+                live_taker_rescue_price_bps=float(rescue_policy["price_bps"]),
+                live_taker_rescue_time_in_force=str(rescue_policy["time_in_force"]),
             )
             _open_order_timeout_cleanup_failure_cooldown_until.pop(cooldown_key, None)
         except Exception as exc:
@@ -862,6 +1063,12 @@ async def _enforce_source_open_order_timeouts(
             continue
 
         source_updated = int(cleanup.get("updated", 0))
+        source_rescue_attempted = int(cleanup.get("taker_rescue_attempted", 0))
+        source_rescue_succeeded = int(cleanup.get("taker_rescue_succeeded", 0))
+        source_rescue_failed = int(cleanup.get("taker_rescue_failed", 0))
+        taker_rescue_attempted += source_rescue_attempted
+        taker_rescue_succeeded += source_rescue_succeeded
+        taker_rescue_failed += source_rescue_failed
         updated += source_updated
         source_rows.append(
             {
@@ -870,6 +1077,12 @@ async def _enforce_source_open_order_timeouts(
                 "matched": int(cleanup.get("matched", 0)),
                 "updated": source_updated,
                 "suppressed": False,
+                "taker_rescue_enabled": rescue_enabled_for_source,
+                "taker_rescue_price_bps": float(rescue_policy["price_bps"]),
+                "taker_rescue_time_in_force": str(rescue_policy["time_in_force"]),
+                "taker_rescue_attempted": source_rescue_attempted,
+                "taker_rescue_succeeded": source_rescue_succeeded,
+                "taker_rescue_failed": source_rescue_failed,
             }
         )
 
@@ -877,6 +1090,9 @@ async def _enforce_source_open_order_timeouts(
         "configured": configured,
         "updated": updated,
         "suppressed": suppressed,
+        "taker_rescue_attempted": taker_rescue_attempted,
+        "taker_rescue_succeeded": taker_rescue_succeeded,
+        "taker_rescue_failed": taker_rescue_failed,
         "provider_reconcile": provider_reconcile,
         "sources": source_rows,
         "errors": errors,
@@ -1461,97 +1677,6 @@ def _apply_live_risk_clamps(
     return changes
 
 
-async def _backfill_simulation_ledger_for_active_paper_orders(
-    session: Any,
-    *,
-    trader_id: str,
-    paper_account_id: str | None,
-) -> dict[str, Any]:
-    if not paper_account_id:
-        return {"attempted": 0, "backfilled": 0, "skipped": 0, "errors": []}
-
-    rows = list(
-        (
-            await session.execute(
-                select(TraderOrder).where(
-                    TraderOrder.trader_id == trader_id,
-                    func.lower(func.coalesce(TraderOrder.mode, "")) == "paper",
-                    func.lower(func.coalesce(TraderOrder.status, "")).in_(tuple(_PAPER_ACTIVE_ORDER_STATUSES)),
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-
-    attempted = 0
-    backfilled = 0
-    skipped = 0
-    errors: list[str] = []
-    now = utcnow()
-
-    for row in rows:
-        payload = dict(row.payload_json or {})
-        if isinstance(payload.get("simulation_ledger"), dict):
-            continue
-
-        attempted += 1
-        entry_price = safe_float(row.effective_price, None)
-        if entry_price is None or entry_price <= 0:
-            entry_price = safe_float(row.entry_price, None)
-        notional = safe_float(row.notional_usd, None)
-        if entry_price is None or entry_price <= 0 or notional is None or notional <= 0:
-            skipped += 1
-            continue
-
-        token_id = str(payload.get("token_id") or payload.get("selected_token_id") or "").strip() or None
-        paper_simulation = payload.get("paper_simulation") if isinstance(payload.get("paper_simulation"), dict) else {}
-        execution_fee_usd = safe_float(paper_simulation.get("estimated_fee_usd"), 0.0) or 0.0
-        execution_slippage_usd = safe_float(paper_simulation.get("slippage_usd"), 0.0) or 0.0
-        try:
-            ledger_entry = await simulation_service.record_orchestrator_paper_fill(
-                account_id=paper_account_id,
-                trader_id=trader_id,
-                signal_id=str(row.signal_id or row.id),
-                market_id=str(row.market_id or ""),
-                market_question=str(row.market_question or row.market_id or ""),
-                direction=str(row.direction or ""),
-                notional_usd=float(notional),
-                entry_price=float(entry_price),
-                strategy_type=str(row.source or "trader_orchestrator_backfill"),
-                token_id=token_id,
-                payload={
-                    "source": str(row.source or ""),
-                    "backfilled_from_order_id": str(row.id),
-                    "backfilled_at": now.isoformat() + "Z",
-                    "edge_percent": safe_float(row.edge_percent, 0.0) or 0.0,
-                    "confidence": safe_float(row.confidence, 0.0) or 0.0,
-                    "paper_simulation": paper_simulation,
-                },
-                execution_fee_usd=execution_fee_usd,
-                execution_slippage_usd=execution_slippage_usd,
-                session=session,
-                commit=False,
-            )
-            payload["simulation_ledger"] = ledger_entry
-            payload["simulation_backfill"] = {
-                "order_id": str(row.id),
-                "backfilled_at": now.isoformat() + "Z",
-            }
-            row.payload_json = payload
-            row.updated_at = now
-            backfilled += 1
-        except Exception as exc:
-            errors.append(f"{row.id}:{exc}")
-
-    return {
-        "attempted": attempted,
-        "backfilled": backfilled,
-        "skipped": skipped,
-        "errors": errors,
-    }
-
-
 async def _build_traders_scope_context(session: Any, traders_scope: dict[str, Any]) -> dict[str, Any]:
     normalized_scope = StrategySDK.validate_trader_scope_config(traders_scope)
     modes = {
@@ -1829,7 +1954,7 @@ async def _run_terminal_stale_order_watchdog(session: Any, *, now: datetime | No
     candidates = (
         (
             await session.execute(
-                select(TraderOrder).where(status_key_expr.in_(tuple(_PAPER_ACTIVE_ORDER_STATUSES))).limit(2000)
+                select(TraderOrder).where(status_key_expr.in_(tuple(_ACTIVE_ORDER_STATUSES))).limit(2000)
             )
         )
         .scalars()
@@ -1966,7 +2091,7 @@ async def _run_trader_once(
             position_cap_scope = "market_direction"
         metadata = StrategySDK.validate_trader_runtime_metadata(trader.get("metadata"))
         loss_streak_reset_at = _parse_iso(str(metadata.get(_LOSS_STREAK_RESET_AT_KEY) or "").strip())
-        run_mode = str(control.get("mode") or "paper").strip().lower()
+        run_mode = str(control.get("mode") or "shadow").strip().lower()
         resume_policy = _normalize_resume_policy(metadata.get("resume_policy"))
         cursor_created_at, cursor_signal_id = await get_trader_signal_cursor(
             session,
@@ -2038,50 +2163,7 @@ async def _run_trader_once(
         open_positions = 0
         open_market_ids: set[str] = set()
 
-        if run_mode == "paper":
-            backfill_result = await _backfill_simulation_ledger_for_active_paper_orders(
-                session,
-                trader_id=trader_id,
-                paper_account_id=str((control.get("settings") or {}).get("paper_account_id") or "").strip() or None,
-            )
-            if backfill_result.get("backfilled"):
-                await _commit_with_retry(session)
-                await create_trader_event(
-                    session,
-                    trader_id=trader_id,
-                    event_type="paper_ledger_backfill",
-                    source="worker",
-                    message=(f"Backfilled {int(backfill_result['backfilled'])} paper order(s) into simulation ledger"),
-                    payload=backfill_result,
-                )
-
-            force_flatten = resume_policy == "flatten_then_start"
-            lifecycle_result = await reconcile_paper_positions(
-                session,
-                trader_id=trader_id,
-                trader_params=default_strategy_params,
-                dry_run=False,
-                force_mark_to_market=force_flatten,
-                reason="worker_flatten_then_start" if force_flatten else "worker_lifecycle",
-            )
-            closed_positions = int(lifecycle_result.get("closed", 0))
-            if closed_positions > 0:
-                await create_trader_event(
-                    session,
-                    trader_id=trader_id,
-                    event_type="paper_positions_closed",
-                    source="worker",
-                    message=f"Closed {closed_positions} paper position(s)",
-                    payload={
-                        "matched": lifecycle_result.get("matched"),
-                        "closed": closed_positions,
-                        "held": lifecycle_result.get("held"),
-                        "skipped": lifecycle_result.get("skipped"),
-                        "total_realized_pnl": lifecycle_result.get("total_realized_pnl"),
-                        "by_status": lifecycle_result.get("by_status"),
-                    },
-                )
-        elif run_mode == "shadow":
+        if run_mode == "shadow":
             force_flatten = resume_policy == "flatten_then_start"
             lifecycle_result = await reconcile_shadow_positions(
                 session,
@@ -2277,15 +2359,11 @@ async def _run_trader_once(
             "open_positions": open_positions,
         }
         block_entries_event_type = "trader_resume_policy"
-        block_entries_event_severity = "warn" if run_mode in {"live", "shadow"} else "info"
+        block_entries_event_severity = "warn"
         if resume_policy == "manage_only":
             block_entries_reason = "Resume policy manage_only blocks new entries"
         elif resume_policy == "flatten_then_start" and open_positions > 0:
-            if run_mode == "paper":
-                block_entries_reason = (
-                    f"Resume policy flatten_then_start waiting to flatten {open_positions} open paper position(s)"
-                )
-            elif run_mode == "shadow":
+            if run_mode == "shadow":
                 block_entries_reason = (
                     f"Resume policy flatten_then_start waiting to flatten {open_positions} open shadow position(s)"
                 )
@@ -2652,33 +2730,6 @@ async def _run_trader_once(
                         exc,
                         exc_info=exc,
                     )
-            elif run_mode == "paper":
-                try:
-                    safe_exit_result = await reconcile_paper_positions(
-                        session,
-                        trader_id=trader_id,
-                        trader_params=default_strategy_params,
-                        dry_run=False,
-                        force_mark_to_market=True,
-                        reason="circuit_breaker_safe_exit",
-                    )
-                    safe_exit_closed = int(safe_exit_result.get("closed", 0))
-                    if safe_exit_closed > 0:
-                        await create_trader_event(
-                            session,
-                            trader_id=trader_id,
-                            event_type="circuit_breaker_safe_exit",
-                            source="worker",
-                            message=f"Circuit breaker safe exit: closed {safe_exit_closed} paper position(s)",
-                            payload=safe_exit_result,
-                        )
-                except Exception as exc:
-                    logger.warning(
-                        "Circuit breaker safe exit failed for trader %s: %s",
-                        trader_id,
-                        exc,
-                        exc_info=exc,
-                    )
 
             await _persist_trader_cycle_heartbeat(session, trader_id)
             return 0, 0, processed_signals
@@ -2691,6 +2742,7 @@ async def _run_trader_once(
                 session,
                 traders_params.get("traders_scope"),
             )
+        edge_calibration_cache: dict[str, dict[str, Any]] = {}
 
         # Kill switch is the very first gate: short-circuit before any signal
         # fetching, live-market context building, or risk evaluation.
@@ -2898,6 +2950,55 @@ async def _run_trader_once(
                     runtime_signal = RuntimeTradeSignalView(signal, live_context=live_context)
                     runtime_signal.source = signal_source
                     traders_scope_payload: dict[str, Any] | None = None
+                    edge_calibration_profile: dict[str, Any] | None = None
+                    if signal_source == "crypto":
+                        edge_calibration_key = f"{signal_source}:{run_mode}:{strategy_key}"
+                        edge_calibration_profile = edge_calibration_cache.get(edge_calibration_key)
+                        if edge_calibration_profile is None:
+                            lookback_days = max(
+                                1,
+                                min(
+                                    90,
+                                    safe_int(
+                                        strategy_params.get("edge_calibration_lookback_days"),
+                                        _EDGE_CALIBRATION_LOOKBACK_DAYS_DEFAULT,
+                                    ),
+                                ),
+                            )
+                            max_rows = max(
+                                50,
+                                min(
+                                    5000,
+                                    safe_int(
+                                        strategy_params.get("edge_calibration_max_rows"),
+                                        _EDGE_CALIBRATION_MAX_ROWS_DEFAULT,
+                                    ),
+                                ),
+                            )
+                            try:
+                                edge_calibration_profile = await _build_edge_calibration_profile(
+                                    session,
+                                    trader_id=trader_id,
+                                    source_key=signal_source,
+                                    mode=run_mode,
+                                    lookback_days=lookback_days,
+                                    max_rows=max_rows,
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    "Edge calibration profile failed for trader=%s source=%s strategy=%s",
+                                    trader_id,
+                                    signal_source,
+                                    strategy_key,
+                                    exc_info=exc,
+                                )
+                                edge_calibration_profile = {
+                                    "sample_size": 0,
+                                    "threshold_edge_multiplier": 1.0,
+                                    "size_multiplier": 1.0,
+                                    "bucket_size_multipliers": {},
+                                }
+                            edge_calibration_cache[edge_calibration_key] = dict(edge_calibration_profile)
                     experiment_row = await get_active_strategy_experiment(
                         session,
                         source_key=signal_source,
@@ -3300,12 +3401,13 @@ async def _run_trader_once(
                         {
                             "params": strategy_params,
                             "trader": trader,
-                            "mode": control.get("mode", "paper"),
+                            "mode": control.get("mode", "shadow"),
                             "live_market": live_context,
                             "source_config": source_config,
                             "traders_scope_context": (
                                 traders_scope_context if signal_source == "traders" else None
                             ),
+                            "edge_calibration": edge_calibration_profile,
                         },
                     )
                     checks_payload = _checks_to_payload(decision_obj.checks)
@@ -3478,6 +3580,22 @@ async def _run_trader_once(
                     size_usd = gate_result["size_usd"]
                     checks_payload = gate_result["checks_payload"]
                     risk_snapshot = gate_result["risk_snapshot"]
+                    strategy_payload = (
+                        dict(decision_obj.payload) if isinstance(decision_obj.payload, dict) else {}
+                    )
+                    execution_plan_override = strategy_payload.get("execution_plan_override")
+                    execution_plan_override_applied = False
+                    if final_decision == "selected" and isinstance(execution_plan_override, dict):
+                        override_legs = execution_plan_override.get("legs")
+                        if isinstance(override_legs, list) and override_legs:
+                            runtime_payload = (
+                                dict(runtime_signal.payload_json)
+                                if isinstance(getattr(runtime_signal, "payload_json", None), dict)
+                                else {}
+                            )
+                            runtime_payload["execution_plan"] = dict(execution_plan_override)
+                            runtime_signal.payload_json = runtime_payload
+                            execution_plan_override_applied = True
 
                     decision_row = await create_trader_decision(
                         session,
@@ -3493,14 +3611,16 @@ async def _run_trader_once(
                         payload={
                             "source_key": signal_source,
                             "source_config": source_config,
-                            "strategy_payload": decision_obj.payload,
+                            "strategy_payload": strategy_payload,
                             "strategy_decision": {
                                 "decision": gate_result["strategy_decision"],
                                 "reason": gate_result["strategy_reason"],
                             },
+                            "execution_plan_override_applied": execution_plan_override_applied,
                             "platform_gates": gate_result["platform_gates"],
                             "size_usd": size_usd,
                             "traders_scope": traders_scope_payload,
+                            "edge_calibration": edge_calibration_profile,
                             "live_market": {
                                 "available": bool(live_context.get("available")),
                                 "fetched_at": live_context.get("fetched_at"),
@@ -3649,13 +3769,29 @@ async def _run_trader_once(
                             strategy_version=resolved_strategy_version,
                             strategy_params=strategy_params,
                             risk_limits=effective_risk_limits,
-                            mode=str(control.get("mode", "paper")),
+                            mode=str(control.get("mode", "shadow")),
                             size_usd=size_usd,
                             reason=final_reason,
                         )
                         if isinstance(submit_result, tuple):
                             normalized_order_status = str(submit_result[0] or "").strip().lower()
                             order_status = normalized_order_status
+                            if normalized_order_status == "skipped":
+                                final_decision = "skipped"
+                                skip_reason = str(submit_result[2] or "").strip() if len(submit_result) > 2 else ""
+                                if skip_reason:
+                                    final_reason = skip_reason
+                                await update_trader_decision(
+                                    session,
+                                    decision_id=decision_row.id,
+                                    decision="skipped",
+                                    reason=final_reason,
+                                    payload_patch={
+                                        "execution_status": normalized_order_status,
+                                        "execution_skip_reason": final_reason,
+                                    },
+                                    commit=False,
+                                )
                             if normalized_order_status in {
                                 "executed",
                                 "completed",
@@ -3694,6 +3830,23 @@ async def _run_trader_once(
                             normalized_order_status = str(submit_result.status or "").strip().lower()
                             order_status = normalized_order_status
                             orders_written += int(submit_result.orders_written or 0)
+                            if normalized_order_status == "skipped":
+                                skip_reason = str(submit_result.error_message or "").strip()
+                                final_decision = "skipped"
+                                if skip_reason:
+                                    final_reason = skip_reason
+                                await update_trader_decision(
+                                    session,
+                                    decision_id=decision_row.id,
+                                    decision="skipped",
+                                    reason=final_reason,
+                                    payload_patch={
+                                        "execution_status": normalized_order_status,
+                                        "execution_skip_reason": final_reason,
+                                        "execution_session_id": str(submit_result.session_id or ""),
+                                    },
+                                    commit=False,
+                                )
 
                             if normalized_order_status in {
                                 "executed",
@@ -3913,7 +4066,7 @@ async def _reconcile_orphan_open_orders(session: Any) -> dict[str, int]:
             .select_from(TraderOrder)
             .outerjoin(Trader, Trader.id == TraderOrder.trader_id)
             .where(Trader.id.is_(None))
-            .where(status_key_expr.in_(tuple(_PAPER_ACTIVE_ORDER_STATUSES)))
+            .where(status_key_expr.in_(tuple(_ACTIVE_ORDER_STATUSES)))
             .group_by(TraderOrder.trader_id, mode_key_expr)
             .limit(_ORPHAN_CLEANUP_MAX_TRADERS_PER_CYCLE)
         )
@@ -3923,9 +4076,8 @@ async def _reconcile_orphan_open_orders(session: Any) -> dict[str, int]:
         return {
             "traders_seen": 0,
             "rows_seen": 0,
-            "paper_closed": 0,
             "shadow_closed": 0,
-            "non_paper_cancelled": 0,
+            "non_shadow_cancelled": 0,
         }
 
     per_trader_mode: dict[tuple[str, str], int] = {}
@@ -3938,22 +4090,9 @@ async def _reconcile_orphan_open_orders(session: Any) -> dict[str, int]:
             mode_key = "other"
         per_trader_mode[(trader_id, mode_key)] = int(row.count or 0)
 
-    paper_closed = 0
     shadow_closed = 0
-    non_paper_cancelled = 0
+    non_shadow_cancelled = 0
     for trader_id, mode_key in per_trader_mode:
-        if mode_key == "paper":
-            result = await reconcile_paper_positions(
-                session,
-                trader_id=trader_id,
-                trader_params={},
-                dry_run=False,
-                force_mark_to_market=False,
-                reason="orphan_trader_lifecycle",
-            )
-            paper_closed += int(result.get("closed", 0))
-            await sync_trader_position_inventory(session, trader_id=trader_id, mode="paper")
-            continue
         if mode_key == "shadow":
             result = await reconcile_shadow_positions(
                 session,
@@ -3975,7 +4114,7 @@ async def _reconcile_orphan_open_orders(session: Any) -> dict[str, int]:
             target_status="cancelled",
             reason="orphan_trader_cleanup",
         )
-        non_paper_cancelled += int(cleanup.get("updated", 0))
+        non_shadow_cancelled += int(cleanup.get("updated", 0))
 
     await create_trader_event(
         session,
@@ -3985,14 +4124,13 @@ async def _reconcile_orphan_open_orders(session: Any) -> dict[str, int]:
         source="worker",
         message=(
             f"Reconciled orphan trader open orders "
-            f"(paper_closed={paper_closed}, shadow_closed={shadow_closed}, non_paper_cancelled={non_paper_cancelled})"
+            f"(shadow_closed={shadow_closed}, non_shadow_cancelled={non_shadow_cancelled})"
         ),
         payload={
             "traders_seen": len({tid for tid, _ in per_trader_mode.keys()}),
             "rows_seen": len(per_trader_mode),
-            "paper_closed": paper_closed,
             "shadow_closed": shadow_closed,
-            "non_paper_cancelled": non_paper_cancelled,
+            "non_shadow_cancelled": non_shadow_cancelled,
         },
         commit=True,
     )
@@ -4000,9 +4138,8 @@ async def _reconcile_orphan_open_orders(session: Any) -> dict[str, int]:
     return {
         "traders_seen": len({tid for tid, _ in per_trader_mode.keys()}),
         "rows_seen": len(per_trader_mode),
-        "paper_closed": paper_closed,
         "shadow_closed": shadow_closed,
-        "non_paper_cancelled": non_paper_cancelled,
+        "non_shadow_cancelled": non_shadow_cancelled,
     }
 
 
@@ -4097,7 +4234,7 @@ async def run_worker_loop() -> None:
                 ]
             manage_only_cycle = False
             manage_only_reasons: list[str] = []
-            mode = "paper"
+            mode = "shadow"
             control: dict[str, Any] = {}
             traders: list[dict[str, Any]] = []
             try:
@@ -4141,20 +4278,21 @@ async def run_worker_loop() -> None:
                             await session.rollback()
                         logger.warning("Failed orphan-order reconciliation pass: %s", exc)
 
-                    try:
-                        stale_watchdog = await _run_terminal_stale_order_watchdog(session)
-                        if stale_watchdog.get("alerted", 0) > 0:
-                            logger.warning(
-                                "Detected stale active orders on terminal markets",
-                                extra={"stale_watchdog": stale_watchdog},
-                            )
-                    except Exception as exc:
-                        if hasattr(session, "rollback"):
-                            await session.rollback()
-                        logger.warning("Failed stale-terminal-order watchdog pass: %s", exc)
-
                     control = await read_orchestrator_control(session)
-                    mode = str(control.get("mode") or "paper").strip().lower()
+                    control_active = bool(control.get("is_enabled", False)) and not bool(control.get("is_paused", True))
+                    if control_active:
+                        try:
+                            stale_watchdog = await _run_terminal_stale_order_watchdog(session)
+                            if stale_watchdog.get("alerted", 0) > 0:
+                                logger.warning(
+                                    "Detected stale active orders on terminal markets",
+                                    extra={"stale_watchdog": stale_watchdog},
+                                )
+                        except Exception as exc:
+                            if hasattr(session, "rollback"):
+                                await session.rollback()
+                            logger.warning("Failed stale-terminal-order watchdog pass: %s", exc)
+                    mode = str(control.get("mode") or "shadow").strip().lower()
                     cycle_interval = max(
                         1,
                         int(control.get("run_interval_seconds") or ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS),
@@ -4186,7 +4324,7 @@ async def run_worker_loop() -> None:
                     if not control.get("is_enabled"):
                         traders = await list_traders(
                             session,
-                            mode=mode if mode in {"paper", "shadow", "live"} else None,
+                            mode=mode if mode in {"shadow", "live"} else None,
                         )
                         has_active_traders = any(
                             bool(trader.get("is_enabled", True)) and not bool(trader.get("is_paused", False))
@@ -4215,33 +4353,6 @@ async def run_worker_loop() -> None:
                         manage_only_reasons.append("kill_switch")
 
                     if not skip_cycle:
-                        if mode == "paper":
-                            paper_account_id = str(control_settings.get("paper_account_id") or "").strip()
-                            if not paper_account_id:
-                                await _write_orchestrator_snapshot_best_effort(
-                                    session,
-                                    running=False,
-                                    enabled=True,
-                                    current_activity="Blocked: select a sandbox account for paper mode",
-                                    interval_seconds=cycle_interval,
-                                    last_error=None,
-                                    stats=await compute_orchestrator_metrics(session),
-                                )
-                                skip_cycle = True
-                            else:
-                                paper_account = await session.get(SimulationAccount, paper_account_id)
-                                if paper_account is None:
-                                    await _write_orchestrator_snapshot_best_effort(
-                                        session,
-                                        running=False,
-                                        enabled=True,
-                                        current_activity="Blocked: selected sandbox account no longer exists",
-                                        interval_seconds=cycle_interval,
-                                        last_error=None,
-                                        stats=await compute_orchestrator_metrics(session),
-                                    )
-                                    skip_cycle = True
-
                         if not skip_cycle and mode == "live":
                             app_settings = await session.get(AppSettings, "default")
                             if not _is_live_credentials_configured(app_settings):
@@ -4270,7 +4381,7 @@ async def run_worker_loop() -> None:
                     if not skip_cycle and not traders:
                         traders = await list_traders(
                             session,
-                            mode=mode if mode in {"paper", "shadow", "live"} else None,
+                            mode=mode if mode in {"shadow", "live"} else None,
                         )
 
                 if skip_cycle:
@@ -4314,9 +4425,9 @@ async def run_worker_loop() -> None:
                     trader_id = str(trader.get("id") or "")
                     if not trader.get("is_enabled", True):
                         continue
-                    trader_mode = str(trader.get("mode") or "paper").strip().lower()
-                    if trader_mode not in {"paper", "shadow", "live"}:
-                        trader_mode = "paper"
+                    trader_mode = str(trader.get("mode") or "shadow").strip().lower()
+                    if trader_mode not in {"shadow", "live"}:
+                        trader_mode = "shadow"
                     if trader_mode != mode:
                         continue
 
@@ -4343,7 +4454,7 @@ async def run_worker_loop() -> None:
                     ):
                         process_signals_for_trader = False
 
-                    if mode not in ("paper", "shadow", "live"):
+                    if mode not in ("shadow", "live"):
                         continue
                     decisions, orders, processed_signals = await _run_trader_once_with_timeout(
                         trader,

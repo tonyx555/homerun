@@ -58,6 +58,8 @@ WALLET_BLOCK_STALE_SECONDS = 60
 DB_ALERT_WORKERS = {"trader_orchestrator", "trader_reconciliation", "event_dispatcher", "snapshot_broadcaster"}
 WALLET_CONTEXT_REFRESH_SECONDS = 60.0
 PROVIDER_SNAPSHOT_REFRESH_SECONDS = 30.0
+WALLET_CONTEXT_PENDING_GRACE_SECONDS = 15.0
+CLOSE_FILL_ABSOLUTE_TOLERANCE_SHARES = 0.5
 
 
 @dataclass
@@ -200,6 +202,53 @@ def _extract_order_reason(order: TraderOrder, payload: dict[str, Any]) -> str:
         if trigger:
             return trigger
     return str(order.reason or "").strip()
+
+
+def _is_rapid_close_trigger(close_trigger: Any) -> bool:
+    trigger = str(close_trigger or "").strip().lower()
+    if not trigger:
+        return False
+    normalized = " ".join(trigger.replace("_", " ").replace("-", " ").split())
+    rapid_markers = (
+        "rapid",
+        "stop loss",
+        "trailing stop",
+        "adaptive backside",
+        "executable notional guard",
+        "executable hazard exit",
+        "underwater",
+        "resolution risk flatten",
+        "force flatten",
+    )
+    return any(marker in normalized for marker in rapid_markers)
+
+
+def _pending_exit_fill_threshold(pending_exit: dict[str, Any]) -> float:
+    parsed = safe_float(
+        pending_exit.get("fill_ratio_threshold")
+        if pending_exit.get("fill_ratio_threshold") is not None
+        else pending_exit.get("fill_threshold_ratio")
+    )
+    if parsed is not None:
+        return max(0.5, min(1.0, float(parsed)))
+    required_exit_size = max(0.0, safe_float(pending_exit.get("exit_size"), 0.0) or 0.0)
+    retry_count = int(safe_float(pending_exit.get("retry_count"), 0) or 0)
+    close_trigger = normalize_status(pending_exit.get("close_trigger"))
+    if required_exit_size <= 10.0:
+        threshold = 0.88
+    elif required_exit_size <= 25.0:
+        threshold = 0.90
+    elif required_exit_size <= 75.0:
+        threshold = 0.93
+    elif required_exit_size <= 200.0:
+        threshold = 0.95
+    else:
+        threshold = 0.97
+    if _is_rapid_close_trigger(close_trigger):
+        threshold = min(threshold, 0.92)
+    if retry_count >= 2:
+        threshold = max(0.85, threshold - 0.03)
+    return max(0.5, min(1.0, float(threshold)))
 
 
 def _extract_wallet_token_map(positions: list[dict[str, Any]]) -> dict[str, float]:
@@ -552,6 +601,7 @@ async def run_monitor(config: MonitorConfig) -> int:
     cached_wallet_ctx: Optional[dict[str, Any]] = None
     cached_wallet_ctx_mono = -1.0
     wallet_ctx_refresh_task: Optional[asyncio.Task[dict[str, Any]]] = None
+    wallet_ctx_pending_since_mono: Optional[float] = None
     cached_provider_ids: tuple[str, ...] = ()
     cached_provider_snapshots: dict[str, dict[str, Any]] = {}
     cached_provider_snapshots_mono = -1.0
@@ -682,56 +732,76 @@ async def run_monitor(config: MonitorConfig) -> int:
 
                 if config.enable_provider_checks and active_count > 0 and not wallet_ctx["ready"]:
                     wallet_error = str(wallet_ctx.get("error") or "").strip()
-                    lowered_wallet_error = wallet_error.lower()
-                    dependency_missing = "py-clob-client" in lowered_wallet_error
-                    credential_missing = "missing_polymarket_credentials" in lowered_wallet_error
-                    proxy_missing = "missing_proxy_funder_signature_type" in lowered_wallet_error
-                    provider_rule = "provider_not_ready"
-                    provider_root_cause = (
-                        "Provider checks are enabled but live execution service is not initialized while active orders exist."
+                    wallet_ctx_pending_refresh = wallet_error == "wallet_context_refresh_pending"
+                    if wallet_ctx_pending_refresh:
+                        if wallet_ctx_pending_since_mono is None:
+                            wallet_ctx_pending_since_mono = now_mono
+                    else:
+                        wallet_ctx_pending_since_mono = None
+                    wallet_pending_seconds = (
+                        max(0.0, now_mono - wallet_ctx_pending_since_mono)
+                        if wallet_ctx_pending_since_mono is not None
+                        else 0.0
                     )
-                    provider_required_fix = (
-                        "Reinitialize live execution service and confirm credentials/funder resolution before continuing live trading."
+                    wallet_pending_grace_active = (
+                        wallet_ctx_pending_refresh
+                        and wallet_pending_seconds < WALLET_CONTEXT_PENDING_GRACE_SECONDS
                     )
-                    if dependency_missing:
-                        provider_rule = "provider_dependency_missing"
+                    if not wallet_pending_grace_active:
+                        lowered_wallet_error = wallet_error.lower()
+                        dependency_missing = "py-clob-client" in lowered_wallet_error
+                        credential_missing = "missing_polymarket_credentials" in lowered_wallet_error
+                        proxy_missing = "missing_proxy_funder_signature_type" in lowered_wallet_error
+                        provider_rule = "provider_not_ready"
                         provider_root_cause = (
-                            "Live execution dependency py-clob-client is missing, so provider truth checks cannot run."
+                            "Provider checks are enabled but live execution service is not initialized while active orders exist."
                         )
                         provider_required_fix = (
-                            "Install trading dependencies (`backend/requirements-trading.txt`) in the running backend environment."
+                            "Reinitialize live execution service and confirm credentials/funder resolution before continuing live trading."
                         )
-                    elif credential_missing:
-                        provider_rule = "provider_credentials_missing"
-                        provider_root_cause = "Polymarket credentials are missing while live orders remain active."
-                        provider_required_fix = (
-                            "Set valid Polymarket API credentials and restart provider reconciliation."
+                        if dependency_missing:
+                            provider_rule = "provider_dependency_missing"
+                            provider_root_cause = (
+                                "Live execution dependency py-clob-client is missing, so provider truth checks cannot run."
+                            )
+                            provider_required_fix = (
+                                "Install trading dependencies (`backend/requirements-trading.txt`) in the running backend environment."
+                            )
+                        elif credential_missing:
+                            provider_rule = "provider_credentials_missing"
+                            provider_root_cause = "Polymarket credentials are missing while live orders remain active."
+                            provider_required_fix = (
+                                "Set valid Polymarket API credentials and restart provider reconciliation."
+                            )
+                        elif proxy_missing:
+                            provider_rule = "provider_proxy_funder_missing"
+                            provider_root_cause = "Proxy funder resolution failed for configured signature type."
+                            provider_required_fix = (
+                                "Configure `POLYMARKET_FUNDER` or use signature_type=0 for the execution wallet."
+                            )
+                        new_alerts.append(
+                            _make_alert_record(
+                                ts=now,
+                                trader_id=trader_id,
+                                order=None,
+                                signal_id="",
+                                market_question="",
+                                local_status_reason=(
+                                    f"provider_ready={wallet_ctx['ready']} "
+                                    f"error={wallet_error or 'unknown'} "
+                                    f"pending_seconds={wallet_pending_seconds:.1f}"
+                                ),
+                                provider_clob_order_id="",
+                                provider_status="unavailable",
+                                provider_filled_size=None,
+                                provider_price=None,
+                                wallet_position_size=None,
+                                verdict="drift",
+                                root_cause=provider_root_cause,
+                                required_fix=provider_required_fix,
+                                rule=provider_rule,
+                            )
                         )
-                    elif proxy_missing:
-                        provider_rule = "provider_proxy_funder_missing"
-                        provider_root_cause = "Proxy funder resolution failed for configured signature type."
-                        provider_required_fix = (
-                            "Configure `POLYMARKET_FUNDER` or use signature_type=0 for the execution wallet."
-                        )
-                    new_alerts.append(
-                        _make_alert_record(
-                            ts=now,
-                            trader_id=trader_id,
-                            order=None,
-                            signal_id="",
-                            market_question="",
-                            local_status_reason=f"provider_ready={wallet_ctx['ready']} error={wallet_error or 'unknown'}",
-                            provider_clob_order_id="",
-                            provider_status="unavailable",
-                            provider_filled_size=None,
-                            provider_price=None,
-                            wallet_position_size=None,
-                            verdict="drift",
-                            root_cause=provider_root_cause,
-                            required_fix=provider_required_fix,
-                            rule=provider_rule,
-                        )
-                    )
 
                 if cycle_state["orchestrator_snapshot"] is not None:
                     orchestrator = cycle_state["orchestrator_snapshot"]
@@ -982,9 +1052,14 @@ async def run_monitor(config: MonitorConfig) -> int:
                             close_filled_size = pending_exit_filled_size
                         _, entry_filled_size, _ = _extract_live_fill_metrics(payload)
                         required_size = max(0.0, pending_exit_required_size if pending_exit_required_size > 0 else entry_filled_size)
+                        threshold_ratio = _pending_exit_fill_threshold(pending_exit) if isinstance(pending_exit, dict) else 0.98
+                        remaining_size = max(0.0, required_size - close_filled_size)
                         if required_size > 0 and (
                             close_provider_status not in {"filled", "matched", "executed"}
-                            or close_filled_size + 1e-9 < (required_size * 0.98)
+                            or (
+                                close_filled_size + 1e-9 < (required_size * threshold_ratio)
+                                and remaining_size > CLOSE_FILL_ABSOLUTE_TOLERANCE_SHARES
+                            )
                         ):
                             new_alerts.append(
                                 _make_alert_record(
@@ -993,7 +1068,10 @@ async def run_monitor(config: MonitorConfig) -> int:
                                     order=order,
                                     signal_id=str(order.signal_id or ""),
                                     market_question=market_question,
-                                    local_status_reason=f"terminal={status} required_close_size={required_size:.6f}",
+                                    local_status_reason=(
+                                        f"terminal={status} required_close_size={required_size:.6f} "
+                                        f"threshold={threshold_ratio:.3f} remaining={remaining_size:.6f}"
+                                    ),
                                     provider_clob_order_id=close_provider_clob_id,
                                     provider_status=close_provider_status or "missing",
                                     provider_filled_size=close_filled_size,

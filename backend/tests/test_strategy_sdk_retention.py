@@ -1,14 +1,30 @@
 import sys
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
+from models.market import Market
 from services.strategy_sdk import StrategySDK
 from services.strategies.btc_eth_highfreq import (
     crypto_highfreq_direction_allowed,
+    crypto_highfreq_scope_config_schema,
+    crypto_highfreq_scope_defaults,
     crypto_highfreq_should_flatten_resolution_risk,
+)
+from services.strategies.late_favorite_alpha import (
+    LateFavoriteAlphaStrategy,
+    late_favorite_alpha_config_schema,
+    late_favorite_alpha_defaults,
+    validate_late_favorite_alpha_config,
+)
+from services.strategies.news_edge import validate_news_edge_config
+from services.strategies.traders_copy_trade import (
+    traders_copy_trade_defaults,
+    validate_traders_copy_trade_config,
 )
 
 
@@ -39,7 +55,7 @@ def test_normalize_strategy_retention_config_sets_canonical_ttl():
 
 
 def test_validate_news_filter_config_keeps_and_normalizes_retention():
-    cfg = StrategySDK.validate_news_filter_config(
+    cfg = validate_news_edge_config(
         {
             "retention_window": "15 min",
             "max_opportunities": "80",
@@ -47,6 +63,65 @@ def test_validate_news_filter_config_keeps_and_normalizes_retention():
     )
     assert cfg["retention_max_age_minutes"] == 15
     assert cfg["max_opportunities"] == 80
+
+
+def test_traders_copy_trade_defaults_and_validation_delegate_to_strategy_module():
+    defaults = traders_copy_trade_defaults()
+    assert defaults["min_confidence"] == 0.45
+    assert defaults["max_signal_age_seconds"] == 5
+    assert defaults["copy_buys"] is True
+
+    validated = validate_traders_copy_trade_config(
+        {
+            "min_confidence": "0.7",
+            "max_signal_age_seconds": "99",
+            "base_size_usd": "100",
+            "max_size_usd": "10",
+            "retention_window": "2h",
+        }
+    )
+    assert validated["min_confidence"] == 0.7
+    assert validated["max_signal_age_seconds"] == 5
+    assert validated["max_size_usd"] >= validated["base_size_usd"]
+    assert validated["retention_max_age_minutes"] == 120
+
+
+def test_late_favorite_alpha_defaults_and_schema_are_exposed():
+    defaults = late_favorite_alpha_defaults()
+    assert defaults["min_favorite_prob"] == 0.58
+    assert defaults["max_favorite_prob"] == 0.88
+    assert defaults["max_hours_to_resolution"] == 6.0
+    assert defaults["min_alpha_prob"] == 0.014
+
+    schema = late_favorite_alpha_config_schema()
+    keys = {field.get("key") for field in schema.get("param_fields", []) if isinstance(field, dict)}
+    assert "min_favorite_prob" in keys
+    assert "max_favorite_prob" in keys
+    assert "min_hours_to_resolution" in keys
+    assert "max_hours_to_resolution" in keys
+    assert "min_alpha_prob" in keys
+    assert "max_target_exit_price" in keys
+
+
+def test_validate_late_favorite_alpha_config_clamps_ranges_and_retention():
+    cfg = validate_late_favorite_alpha_config(
+        {
+            "min_favorite_prob": "0.74",
+            "max_favorite_prob": "0.70",
+            "min_hours_to_resolution": "4",
+            "max_hours_to_resolution": "2",
+            "base_size_usd": "200",
+            "max_size_usd": "100",
+            "retention_window": "90m",
+            "max_opportunities": "120",
+        }
+    )
+    assert cfg["min_favorite_prob"] == 0.74
+    assert cfg["max_favorite_prob"] > cfg["min_favorite_prob"]
+    assert cfg["max_hours_to_resolution"] > cfg["min_hours_to_resolution"]
+    assert cfg["max_size_usd"] >= cfg["base_size_usd"]
+    assert cfg["retention_max_age_minutes"] == 90
+    assert cfg["max_opportunities"] == 120
 
 
 def test_strategy_retention_schema_contains_expected_fields():
@@ -57,7 +132,7 @@ def test_strategy_retention_schema_contains_expected_fields():
 
 
 def test_crypto_highfreq_scope_schema_contains_include_exclude_fields():
-    schema = StrategySDK.crypto_highfreq_scope_config_schema()
+    schema = crypto_highfreq_scope_config_schema()
     keys = {field.get("key") for field in schema.get("param_fields", []) if isinstance(field, dict)}
     assert "min_edge_percent" in keys
     assert "min_confidence" in keys
@@ -140,7 +215,7 @@ def test_crypto_highfreq_scope_schema_contains_include_exclude_fields():
 
 
 def test_crypto_highfreq_scope_defaults_include_stop_loss_policy():
-    defaults = StrategySDK.crypto_highfreq_scope_defaults()
+    defaults = crypto_highfreq_scope_defaults()
     assert defaults["stop_loss_policy"] == "always"
     assert defaults["stop_loss_activation_seconds"] == 90
     assert defaults["min_liquidity_usd"] == 250.0
@@ -148,14 +223,17 @@ def test_crypto_highfreq_scope_defaults_include_stop_loss_policy():
     assert defaults["max_spread_pct"] == 0.08
     assert defaults["max_signal_age_seconds"] == 35.0
     assert defaults["max_open_order_seconds"] == 45.0
+    assert defaults["enable_live_market_context"] is True
+    assert defaults["require_live_market_revalidation"] is True
+    assert defaults["require_live_revalidation_for_sources"] == ["crypto"]
     assert defaults["max_live_context_age_seconds"] == 5.0
     assert defaults["max_oracle_age_seconds"] == 20.0
     assert defaults["max_oracle_age_ms"] == 20000.0
     assert defaults["require_oracle_for_directional"] is True
     assert defaults["oracle_source_policy"] == "degrade"
-    assert defaults["min_seconds_left_for_entry_5m"] == 60.0
-    assert defaults["min_seconds_left_for_entry_15m"] == 90.0
-    assert defaults["min_seconds_left_for_entry_1h"] == 360.0
+    assert defaults["min_seconds_left_for_entry_5m"] == 35.0
+    assert defaults["min_seconds_left_for_entry_15m"] == 60.0
+    assert defaults["min_seconds_left_for_entry_1h"] == 240.0
     assert defaults["opening_directional_buy_yes_enabled"] is False
     assert defaults["opening_directional_buy_yes_block_elapsed_pct"] == 0.10
     assert defaults["opening_directional_buy_yes_block_elapsed_pct_5m"] == 0.45
@@ -198,10 +276,84 @@ def test_crypto_highfreq_scope_defaults_include_stop_loss_policy():
     assert defaults["hard_stop_loss_pct_4h"] == 25.0
     assert defaults["immediate_stop_loss_requires_time_pressure"] is False
     assert defaults["stop_loss_activation_seconds_5m"] == 0
-    assert defaults["min_edge_percent"] == 2.5
+    assert defaults["min_edge_percent"] == 0.3
     assert defaults["min_confidence"] == 0.42
-    assert defaults["directional_max_entry_price_ceiling"] == 0.65
-    assert defaults["maker_max_entry_price_ceiling"] == 0.70
+    assert defaults["directional_max_entry_price_ceiling"] == 0.80
+    assert defaults["maker_max_entry_price_ceiling"] == 0.80
+
+
+def _late_favorite_test_market(entry_yes: float = 0.70, entry_no: float = 0.30) -> Market:
+    return Market(
+        id="m1",
+        condition_id="m1",
+        question="Will this resolve soon?",
+        slug="m1-resolve-soon",
+        clob_token_ids=["token-yes", "token-no"],
+        outcome_prices=[entry_yes, entry_no],
+        active=True,
+        closed=False,
+        liquidity=5000.0,
+        end_date=datetime.now(timezone.utc) + timedelta(hours=1),
+    )
+
+
+def test_get_spread_bps_accepts_bid_ask_keys():
+    market = SimpleNamespace(clob_token_ids=["token-yes", "token-no"])
+    prices = {"token-yes": {"mid": 0.80, "bid": 0.79, "ask": 0.81}}
+    spread = StrategySDK.get_spread_bps(market, prices, side="YES")
+    assert spread is not None
+    assert abs(spread - 250.0) < 1e-6
+
+
+def test_get_spread_bps_infers_mid_when_missing():
+    market = SimpleNamespace(clob_token_ids=["token-yes", "token-no"])
+    prices = {"token-yes": {"bid": 0.79, "ask": 0.81}}
+    spread = StrategySDK.get_spread_bps(market, prices, side="YES")
+    assert spread is not None
+    assert abs(spread - 250.0) < 1e-6
+
+
+def test_late_favorite_alpha_detect_falls_back_when_trade_tape_unavailable(monkeypatch):
+    monkeypatch.setattr(StrategySDK, "is_ws_feed_started", staticmethod(lambda: False))
+
+    strategy = LateFavoriteAlphaStrategy()
+    opportunities = strategy.detect(
+        events=[],
+        markets=[_late_favorite_test_market(entry_yes=0.70, entry_no=0.30)],
+        prices={},
+    )
+
+    assert len(opportunities) == 1
+    context = opportunities[0].strategy_context or {}
+    assert context.get("trade_tape_available") is False
+    assert context.get("flow_data_available") is False
+
+
+def test_late_favorite_alpha_requires_flow_volume_when_trade_tape_available(monkeypatch):
+    monkeypatch.setattr(StrategySDK, "is_ws_feed_started", staticmethod(lambda: True))
+    monkeypatch.setattr(
+        StrategySDK,
+        "get_trade_volume",
+        staticmethod(lambda token_id, lookback_seconds=300.0: {"buy_volume": 0.0, "sell_volume": 0.0, "total": 0.0, "trade_count": 0}),
+    )
+    monkeypatch.setattr(
+        StrategySDK,
+        "get_buy_sell_imbalance",
+        staticmethod(lambda token_id, lookback_seconds=300.0: 0.0),
+    )
+    monkeypatch.setattr(
+        StrategySDK,
+        "get_price_change",
+        staticmethod(lambda token_id, lookback_seconds=300: None),
+    )
+
+    strategy = LateFavoriteAlphaStrategy()
+    opportunities = strategy.detect(
+        events=[],
+        markets=[_late_favorite_test_market(entry_yes=0.70, entry_no=0.30)],
+        prices={"token-yes": {"mid": 0.70, "bid": 0.695, "ask": 0.705}},
+    )
+    assert opportunities == []
 
 
 def test_strategy_entry_take_profit_exit_param_resolution():

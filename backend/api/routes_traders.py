@@ -18,7 +18,6 @@ from services.pause_state import global_pause_state
 from services.strategy_tune_agent import run_strategy_tune_agent
 from services.trader_orchestrator.position_lifecycle import (
     reconcile_live_positions,
-    reconcile_paper_positions,
     reconcile_shadow_positions,
 )
 from services.trader_orchestrator.session_engine import ExecutionSessionEngine
@@ -105,7 +104,6 @@ class TraderDeleteAction(str, Enum):
 
 
 class TraderPositionCleanupScope(str, Enum):
-    paper = "paper"
     shadow = "shadow"
     live = "live"
     all = "all"
@@ -117,7 +115,7 @@ class TraderPositionCleanupMethod(str, Enum):
 
 
 class TraderPositionCleanupRequest(BaseModel):
-    scope: TraderPositionCleanupScope = TraderPositionCleanupScope.paper
+    scope: TraderPositionCleanupScope = TraderPositionCleanupScope.shadow
     method: TraderPositionCleanupMethod = TraderPositionCleanupMethod.mark_to_market
     max_age_hours: Optional[int] = Field(default=None, ge=1, le=24 * 365)
     dry_run: bool = False
@@ -305,8 +303,8 @@ async def get_all_traders(
     session: AsyncSession = Depends(get_db_session),
 ):
     mode_key = str(mode or "").strip().lower()
-    if mode_key and mode_key not in {"paper", "shadow", "live"}:
-        raise HTTPException(status_code=422, detail="mode must be 'paper', 'shadow', or 'live'")
+    if mode_key and mode_key not in {"shadow", "live"}:
+        raise HTTPException(status_code=422, detail="mode must be 'shadow' or 'live'")
     return {"traders": await list_traders(session, mode=mode_key or None)}
 
 
@@ -798,12 +796,10 @@ async def delete_trader_route(
     open_order_summary = await get_open_order_summary_for_trader(session, trader_id)
     open_live_positions = int(open_summary.get("live", 0))
     open_shadow_positions = int(open_summary.get("shadow", 0))
-    open_paper_positions = int(open_summary.get("paper", 0))
     open_other_positions = int(open_summary.get("other", 0))
     open_total_positions = int(open_summary.get("total", 0))
     open_live_orders = int(open_order_summary.get("live", 0))
     open_shadow_orders = int(open_order_summary.get("shadow", 0))
-    open_paper_orders = int(open_order_summary.get("paper", 0))
     open_other_orders = int(open_order_summary.get("other", 0))
     open_total_orders = int(open_order_summary.get("total", 0))
 
@@ -828,11 +824,9 @@ async def delete_trader_route(
             payload={
                 "open_live_positions": open_live_positions,
                 "open_shadow_positions": open_shadow_positions,
-                "open_paper_positions": open_paper_positions,
                 "open_other_positions": open_other_positions,
                 "open_live_orders": open_live_orders,
                 "open_shadow_orders": open_shadow_orders,
-                "open_paper_orders": open_paper_orders,
                 "open_other_orders": open_other_orders,
             },
         )
@@ -841,13 +835,11 @@ async def delete_trader_route(
             "trader_id": trader_id,
             "open_live_positions": open_live_positions,
             "open_shadow_positions": open_shadow_positions,
-            "open_paper_positions": open_paper_positions,
             "open_other_positions": open_other_positions,
             "open_live_orders": open_live_orders,
             "open_shadow_orders": open_shadow_orders,
-            "open_paper_orders": open_paper_orders,
             "open_other_orders": open_other_orders,
-            "message": "Trader disabled and paused. Resolve non-paper exposure before permanent deletion.",
+            "message": "Trader disabled and paused. Resolve active exposure before permanent deletion.",
         }
 
     if (
@@ -863,17 +855,15 @@ async def delete_trader_route(
             detail={
                 "code": "open_live_exposure",
                 "message": (
-                    "Trader has non-paper exposure. Choose disable to pause safely, "
+                    "Trader has active exposure. Choose disable to pause safely, "
                     "or action=force_delete to permanently delete now."
                 ),
                 "trader_id": trader_id,
                 "open_live_positions": open_live_positions,
                 "open_shadow_positions": open_shadow_positions,
-                "open_paper_positions": open_paper_positions,
                 "open_other_positions": open_other_positions,
                 "open_live_orders": open_live_orders,
                 "open_shadow_orders": open_shadow_orders,
-                "open_paper_orders": open_paper_orders,
                 "open_other_orders": open_other_orders,
                 "suggested_action": TraderDeleteAction.force_delete.value,
                 "safe_action": TraderDeleteAction.disable.value,
@@ -902,11 +892,9 @@ async def delete_trader_route(
             "action": action.value,
             "open_live_positions_at_delete": open_live_positions,
             "open_shadow_positions_at_delete": open_shadow_positions,
-            "open_paper_positions_at_delete": open_paper_positions,
             "open_other_positions_at_delete": open_other_positions,
             "open_live_orders_at_delete": open_live_orders,
             "open_shadow_orders_at_delete": open_shadow_orders,
-            "open_paper_orders_at_delete": open_paper_orders,
             "open_other_orders_at_delete": open_other_orders,
         },
     )
@@ -916,11 +904,9 @@ async def delete_trader_route(
         "action": action.value,
         "open_live_positions": open_live_positions,
         "open_shadow_positions": open_shadow_positions,
-        "open_paper_positions": open_paper_positions,
         "open_other_positions": open_other_positions,
         "open_live_orders": open_live_orders,
         "open_shadow_orders": open_shadow_orders,
-        "open_paper_orders": open_paper_orders,
         "open_other_orders": open_other_orders,
         "open_total_positions": open_total_positions,
         "open_total_orders": open_total_orders,
@@ -950,16 +936,15 @@ async def start_trader(trader_id: str, session: AsyncSession = Depends(get_db_se
         raise HTTPException(status_code=404, detail="Trader not found")
 
     control = await read_orchestrator_control(session)
-    mode = str(control.get("mode") or "paper").strip().lower()
+    mode = str(control.get("mode") or "shadow").strip().lower()
     await sync_trader_position_inventory(
         session,
         trader_id=trader_id,
-        mode=mode if mode in {"paper", "shadow", "live"} else None,
+        mode=mode if mode in {"shadow", "live"} else None,
     )
     open_summary = await get_open_position_summary_for_trader(session, trader_id)
     open_live = int(open_summary.get("live", 0))
     open_shadow = int(open_summary.get("shadow", 0))
-    open_paper = int(open_summary.get("paper", 0))
     if mode == "live" and open_live > 0:
         await create_trader_event(
             session,
@@ -970,7 +955,7 @@ async def start_trader(trader_id: str, session: AsyncSession = Depends(get_db_se
             message="Trader started with existing live open positions",
             payload={
                 "open_live_positions": open_live,
-                "open_paper_positions": open_paper,
+                "open_shadow_positions": open_shadow,
             },
         )
     elif mode == "shadow" and open_shadow > 0:
@@ -981,15 +966,6 @@ async def start_trader(trader_id: str, session: AsyncSession = Depends(get_db_se
             source="operator",
             message="Trader started with existing shadow open positions",
             payload={"open_shadow_positions": open_shadow},
-        )
-    elif mode == "paper" and open_paper > 0:
-        await create_trader_event(
-            session,
-            trader_id=trader_id,
-            event_type="trader_start_notice",
-            source="operator",
-            message="Trader started with existing paper open positions",
-            payload={"open_paper_positions": open_paper},
         )
 
     await create_trader_event(
@@ -1039,13 +1015,12 @@ async def cleanup_trader_positions(
         )
 
     if request.method == TraderPositionCleanupMethod.mark_to_market and request.scope not in {
-        TraderPositionCleanupScope.paper,
         TraderPositionCleanupScope.shadow,
         TraderPositionCleanupScope.live,
     }:
         raise HTTPException(
             status_code=422,
-            detail="mark_to_market cleanup supports paper, shadow, and live scopes",
+            detail="mark_to_market cleanup supports shadow and live scopes",
         )
 
     if request.method == TraderPositionCleanupMethod.cancel:
@@ -1087,17 +1062,10 @@ async def cleanup_trader_positions(
             if not request.dry_run:
                 await sync_trader_position_inventory(session, trader_id=trader_id, mode="shadow")
         else:
-            lifecycle_result = await reconcile_paper_positions(
-                session,
-                trader_id=trader_id,
-                trader_params={},
-                dry_run=request.dry_run,
-                force_mark_to_market=True,
-                max_age_hours=request.max_age_hours,
-                reason=str(request.reason or "manual_mark_to_market_cleanup"),
+            raise HTTPException(
+                status_code=422,
+                detail="mark_to_market cleanup supports shadow and live scopes",
             )
-            if not request.dry_run:
-                await sync_trader_position_inventory(session, trader_id=trader_id, mode="paper")
         result = {
             "trader_id": trader_id,
             "scope": request.scope.value,

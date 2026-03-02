@@ -11,6 +11,7 @@ if str(BACKEND_ROOT) not in sys.path:
 import services.trader_data_access as trader_data_access
 import services.traders_firehose_pipeline as traders_firehose_pipeline
 from services.strategy_sdk import StrategySDK
+from services.strategies.news_edge import news_edge_defaults, validate_news_edge_config
 from services.traders_sdk import TradersSDK
 
 
@@ -236,7 +237,7 @@ async def test_traders_sdk_directory_wrappers_passthrough(monkeypatch):
 
 
 def test_strategy_sdk_news_filter_validation_and_defaults():
-    defaults = StrategySDK.news_filter_defaults()
+    defaults = news_edge_defaults()
     assert defaults["min_edge_percent"] == 5.0
     assert defaults["min_confidence"] == 0.45
     assert defaults["orchestrator_min_edge"] == 10.0
@@ -245,7 +246,7 @@ def test_strategy_sdk_news_filter_validation_and_defaults():
     assert defaults["min_supporting_articles"] == 2
     assert defaults["min_supporting_sources"] == 2
 
-    validated = StrategySDK.validate_news_filter_config(
+    validated = validate_news_edge_config(
         {
             "min_edge_percent": "12.5",
             "min_confidence": "0.62",

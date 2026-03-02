@@ -91,3 +91,7 @@ async def test_price_topic_subscription_state() -> None:
     state = manager.active_connections[ws]
     assert state["all_price_topics"] is True
     assert state["price_market_ids"] == set()
+
+
+def test_trader_orchestrator_status_uses_core_channel() -> None:
+    assert ConnectionManager._message_channel("trader_orchestrator_status") == "core"

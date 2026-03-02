@@ -17,6 +17,7 @@ from models.database import (
     Strategy,
     StrategyValidationProfile,
     get_db_session,
+    recover_pool,
 )
 from services import polymarket_client
 from services.wallet_tracker import wallet_tracker
@@ -77,6 +78,42 @@ STRATEGY_META_BY_TYPE: dict[str, dict[str, object]] = {
         "sources": ["scanner", "events"],
     },
 }
+
+DB_RETRY_ATTEMPTS = 3
+DB_RETRY_BASE_DELAY_SECONDS = 0.2
+DB_RETRY_MAX_DELAY_SECONDS = 1.5
+
+
+def _is_retryable_db_error(exc: Exception) -> bool:
+    message = str(getattr(exc, "orig", exc)).lower()
+    return any(
+        marker in message
+        for marker in (
+            "deadlock detected",
+            "serialization failure",
+            "could not serialize access",
+            "lock not available",
+            "too many clients already",
+            "remaining connection slots are reserved",
+            "cannot connect now",
+            "connection is closed",
+            "underlying connection is closed",
+            "connection has been closed",
+            "closed the connection unexpectedly",
+            "connection reset by peer",
+            "broken pipe",
+            "connection was closed",
+            "connectiondoesnotexist",
+            "closed in the middle of operation",
+            "another operation",
+            "cannot switch to state",
+            "terminating connection",
+        )
+    )
+
+
+def _db_retry_delay(attempt: int) -> float:
+    return min(DB_RETRY_BASE_DELAY_SECONDS * (2**attempt), DB_RETRY_MAX_DELAY_SECONDS)
 
 
 def _strategy_meta(strategy_type: str, *, is_plugin: bool) -> dict[str, object]:
@@ -344,20 +381,41 @@ async def get_opportunities(
     ),
 ):
     """Get current arbitrage opportunities (from DB snapshot)."""
-    opportunities = await _list_filtered_opportunities(
-        session,
-        min_profit=min_profit,
-        max_risk=max_risk,
-        strategy=strategy,
-        min_liquidity=min_liquidity,
-        search=search,
-        category=category,
-        sort_by=sort_by,
-        sort_dir=sort_dir,
-        exclude_strategy=exclude_strategy,
-        sub_strategy=sub_strategy,
-        source=source,
-    )
+    opportunities: list[Opportunity] = []
+    for attempt in range(DB_RETRY_ATTEMPTS):
+        try:
+            opportunities = await _list_filtered_opportunities(
+                session,
+                min_profit=min_profit,
+                max_risk=max_risk,
+                strategy=strategy,
+                min_liquidity=min_liquidity,
+                search=search,
+                category=category,
+                sort_by=sort_by,
+                sort_dir=sort_dir,
+                exclude_strategy=exclude_strategy,
+                sub_strategy=sub_strategy,
+                source=source,
+            )
+            break
+        except Exception as exc:
+            if isinstance(exc, HTTPException):
+                raise
+            if not _is_retryable_db_error(exc):
+                raise
+            if attempt >= DB_RETRY_ATTEMPTS - 1:
+                raise HTTPException(status_code=503, detail="Database is busy; please retry.") from exc
+            try:
+                if session.in_transaction():
+                    await session.rollback()
+            except Exception:
+                pass
+            try:
+                await recover_pool()
+            except Exception:
+                pass
+            await asyncio.sleep(_db_retry_delay(attempt))
 
     # Apply pagination
     total = len(opportunities)
@@ -649,7 +707,28 @@ async def get_opportunity_counts(
         category=category,
     )
 
-    opportunities = await shared_state.get_opportunities_from_db(session, filter, source=source)
+    opportunities: list[Opportunity] = []
+    for attempt in range(DB_RETRY_ATTEMPTS):
+        try:
+            opportunities = await shared_state.get_opportunities_from_db(session, filter, source=source)
+            break
+        except Exception as exc:
+            if isinstance(exc, HTTPException):
+                raise
+            if not _is_retryable_db_error(exc):
+                raise
+            if attempt >= DB_RETRY_ATTEMPTS - 1:
+                raise HTTPException(status_code=503, detail="Database is busy; please retry.") from exc
+            try:
+                if session.in_transaction():
+                    await session.rollback()
+            except Exception:
+                pass
+            try:
+                await recover_pool()
+            except Exception:
+                pass
+            await asyncio.sleep(_db_retry_delay(attempt))
 
     # Apply search filter if provided
     if search:
@@ -1015,80 +1094,94 @@ async def get_events(closed: bool = False, limit: int = 100, offset: int = 0):
 @router.get("/strategies")
 async def get_strategies():
     """Get information about available strategies and plugins."""
-    # DB-native strategy rows (system + custom)
-    async with AsyncSessionLocal() as session:
-        await ensure_system_opportunity_strategies_seeded(session)
-        result = await session.execute(
-            select(Strategy)
-            .where(Strategy.enabled)
-            .order_by(
-                Strategy.is_system.desc(),
-                Strategy.sort_order.asc(),
-                Strategy.name.asc(),
-            )
-        )
-        plugins = result.scalars().all()
-
-    db_entries: list[dict[str, object]] = [
-        {
-            "type": p.slug,
-            "name": p.name,
-            "description": p.description or f"Strategy: {p.slug}",
-            "is_plugin": not bool(p.is_system),
-            "is_system": bool(p.is_system),
-            "plugin_id": p.id,
-            "plugin_slug": p.slug,
-            "source_key": p.source_key or "scanner",
-            "status": p.status,
-            "enabled": bool(p.enabled),
-        }
-        for p in plugins
-    ]
-    combined: list[dict[str, object]] = db_entries
-
-    # Deduplicate by type while preserving first occurrence ordering.
-    seen_types: set[str] = set()
-    deduped: list[dict[str, object]] = []
-    for item in combined:
-        stype = str(item.get("type") or "").strip()
-        if not stype or stype in seen_types:
-            continue
-        seen_types.add(stype)
-        deduped.append(item)
-
-    validation_profiles: dict[str, StrategyValidationProfile] = {}
-    async with AsyncSessionLocal() as session:
-        rows = (
-            (
-                await session.execute(
-                    select(StrategyValidationProfile).where(
-                        StrategyValidationProfile.strategy_type.in_(list(seen_types))
+    for attempt in range(DB_RETRY_ATTEMPTS):
+        try:
+            async with AsyncSessionLocal() as session:
+                await ensure_system_opportunity_strategies_seeded(session)
+                result = await session.execute(
+                    select(Strategy)
+                    .where(Strategy.enabled)
+                    .order_by(
+                        Strategy.is_system.desc(),
+                        Strategy.sort_order.asc(),
+                        Strategy.name.asc(),
                     )
                 )
-            )
-            .scalars()
-            .all()
-        )
-        validation_profiles = {str(row.strategy_type): row for row in rows}
+                plugins = result.scalars().all()
 
-    enriched: list[dict[str, object]] = []
-    for item in deduped:
-        strategy_type = str(item.get("type") or "")
-        is_plugin = bool(item.get("is_plugin"))
-        meta = _strategy_meta(strategy_type, is_plugin=is_plugin)
-        profile = validation_profiles.get(strategy_type)
-        enriched.append(
-            {
-                **item,
-                "domain": meta.get("domain"),
-                "timeframe": meta.get("timeframe"),
-                "sources": meta.get("sources"),
-                "validation_status": profile.status if profile is not None else "unknown",
-                "validation_sample_size": int(profile.sample_size or 0) if profile is not None else 0,
-            }
-        )
+                db_entries: list[dict[str, object]] = [
+                    {
+                        "type": p.slug,
+                        "name": p.name,
+                        "description": p.description or f"Strategy: {p.slug}",
+                        "is_plugin": not bool(p.is_system),
+                        "is_system": bool(p.is_system),
+                        "plugin_id": p.id,
+                        "plugin_slug": p.slug,
+                        "source_key": p.source_key or "scanner",
+                        "status": p.status,
+                        "enabled": bool(p.enabled),
+                    }
+                    for p in plugins
+                ]
+                combined: list[dict[str, object]] = db_entries
 
-    return enriched
+                # Deduplicate by type while preserving first occurrence ordering.
+                seen_types: set[str] = set()
+                deduped: list[dict[str, object]] = []
+                for item in combined:
+                    stype = str(item.get("type") or "").strip()
+                    if not stype or stype in seen_types:
+                        continue
+                    seen_types.add(stype)
+                    deduped.append(item)
+
+                validation_profiles: dict[str, StrategyValidationProfile] = {}
+                if seen_types:
+                    rows = (
+                        (
+                            await session.execute(
+                                select(StrategyValidationProfile).where(
+                                    StrategyValidationProfile.strategy_type.in_(list(seen_types))
+                                )
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+                    validation_profiles = {str(row.strategy_type): row for row in rows}
+
+                enriched: list[dict[str, object]] = []
+                for item in deduped:
+                    strategy_type = str(item.get("type") or "")
+                    is_plugin = bool(item.get("is_plugin"))
+                    meta = _strategy_meta(strategy_type, is_plugin=is_plugin)
+                    profile = validation_profiles.get(strategy_type)
+                    enriched.append(
+                        {
+                            **item,
+                            "domain": meta.get("domain"),
+                            "timeframe": meta.get("timeframe"),
+                            "sources": meta.get("sources"),
+                            "validation_status": profile.status if profile is not None else "unknown",
+                            "validation_sample_size": int(profile.sample_size or 0) if profile is not None else 0,
+                        }
+                    )
+            return enriched
+        except Exception as exc:
+            if isinstance(exc, HTTPException):
+                raise
+            if not _is_retryable_db_error(exc):
+                raise
+            if attempt >= DB_RETRY_ATTEMPTS - 1:
+                raise HTTPException(status_code=503, detail="Database is busy; please retry.") from exc
+            try:
+                await recover_pool()
+            except Exception:
+                pass
+            await asyncio.sleep(_db_retry_delay(attempt))
+
+    raise HTTPException(status_code=503, detail="Database is busy; please retry.")
 
 
 # ==================== TRADER DISCOVERY ====================

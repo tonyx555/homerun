@@ -70,6 +70,7 @@ async def execute_live_order(
     post_only: bool = False,
     resolve_live_price: bool = True,
     prefer_cached_price: bool = True,
+    enforce_fallback_bound: bool = False,
 ) -> LiveOrderExecution:
     normalized_token_id = str(token_id or "").strip()
     normalized_side = _normalize_side(side)
@@ -87,6 +88,7 @@ async def execute_live_order(
         "requested_size": requested_size,
         "fallback_price": fallback,
         "post_only": bool(post_only),
+        "enforce_fallback_bound": bool(enforce_fallback_bound),
     }
 
     if not normalized_token_id:
@@ -193,7 +195,7 @@ async def execute_live_order(
 
             # Apply the resolved price with min notional guard
             if live_quote is not None and live_quote > 0:
-                if post_only and fallback is not None and fallback > 0:
+                if (post_only or enforce_fallback_bound) and fallback is not None and fallback > 0:
                     if normalized_side == OrderSide.BUY:
                         bounded_quote = min(float(live_quote), float(fallback))
                     else:

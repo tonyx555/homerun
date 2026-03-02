@@ -2500,6 +2500,26 @@ class LiveExecutionService:
         if not order_key:
             return False
 
+        async def _release_cancelled_reservation(order: Order) -> None:
+            remaining_shares = max(0.0, float(order.size or 0.0) - float(order.filled_size or 0.0))
+            if remaining_shares <= 0.0:
+                return
+            price = safe_float(order.price, None)
+            if price is None or price <= 0.0:
+                return
+            side = order.side if isinstance(order.side, OrderSide) else None
+            if side is None:
+                side_text = str(order.side or "").strip().upper()
+                if side_text not in {"BUY", "SELL"}:
+                    return
+                side = OrderSide(side_text)
+            token_id = str(order.token_id or "").strip() or None
+            await self._release_reservation(
+                size_usd=_to_decimal(price) * _to_decimal(remaining_shares),
+                side=side,
+                token_id=token_id,
+            )
+
         local_order = self._orders.get(order_key)
         if local_order is not None:
             if local_order.status not in {OrderStatus.OPEN, OrderStatus.PENDING, OrderStatus.PARTIALLY_FILLED}:
@@ -2509,6 +2529,14 @@ class LiveExecutionService:
             if not clob_order_id:
                 local_order.status = OrderStatus.CANCELLED
                 local_order.updated_at = utcnow()
+                try:
+                    await _release_cancelled_reservation(local_order)
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to release reservation for locally cancelled order",
+                        order_id=local_order.id,
+                        exc_info=exc,
+                    )
                 await self._persist_orders([local_order])
                 await self._persist_runtime_state()
                 return True
@@ -2559,16 +2587,27 @@ class LiveExecutionService:
             return False
 
         now = utcnow()
-        changed_orders: list[Order] = []
+        changed_orders_by_id: dict[str, Order] = {}
         if local_order is not None:
             local_order.status = OrderStatus.CANCELLED
             local_order.updated_at = now
-            changed_orders.append(local_order)
+            changed_orders_by_id[str(local_order.id)] = local_order
         for order in self._orders.values():
             if str(order.clob_order_id or "").strip() == clob_order_id:
                 order.status = OrderStatus.CANCELLED
                 order.updated_at = now
-                changed_orders.append(order)
+                changed_orders_by_id[str(order.id)] = order
+        changed_orders = list(changed_orders_by_id.values())
+        for order in changed_orders:
+            try:
+                await _release_cancelled_reservation(order)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to release reservation for cancelled order",
+                    order_id=order.id,
+                    clob_order_id=order.clob_order_id,
+                    exc_info=exc,
+                )
         if changed_orders:
             await self._persist_orders(changed_orders)
             await self._persist_runtime_state()

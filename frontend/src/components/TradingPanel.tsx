@@ -94,6 +94,7 @@ type PositionSortDirection = 'asc' | 'desc'
 type BotRosterSort = 'name_asc' | 'name_desc' | 'pnl_desc' | 'pnl_asc' | 'open_desc' | 'activity_desc'
 type BotRosterGroupBy = 'none' | 'status' | 'source'
 type TerminalDensity = 'compact' | 'expanded'
+type TraderToggleAction = 'enable' | 'disable'
 
 const TRADE_STATUS_FILTER_OPTIONS: Array<{ value: TradeStatusFilter; label: string }> = [
   { value: 'all', label: 'all' },
@@ -154,7 +155,7 @@ type PositionBookRow = {
   weightedConfidence: number | null
   orderCount: number
   liveOrderCount: number
-  paperOrderCount: number
+  shadowOrderCount: number
   lastUpdated: string | null
   statusSummary: string
   links: {
@@ -971,13 +972,7 @@ function resolveOrderModalSnapshot(order: TraderOrder): OrderModalSnapshot {
     confidencePercent: toFiniteNumber(order.confidence),
     source: String(order.source || '').trim().toUpperCase() || 'UNKNOWN',
     mode: String(order.mode || '').trim().toUpperCase() || 'N/A',
-    updatedAt: latestTimestampValue(
-      cleanText(order.updated_at),
-      cleanText(order.mark_updated_at),
-      cleanText(positionState.last_marked_at),
-      cleanText(order.executed_at),
-      cleanText(order.created_at)
-    ),
+    updatedAt: resolveOrderMarketUpdateTimestamp(order, payload),
     createdAt: cleanText(order.created_at) || cleanText(order.executed_at),
   }
 }
@@ -1349,6 +1344,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function cleanText(value: unknown): string | null {
   const text = String(value || '').trim()
   return text ? text : null
+}
+
+function resolveOrderMarketUpdateTimestamp(
+  order: TraderOrder,
+  payloadInput?: Record<string, unknown>,
+): string {
+  const payload = payloadInput ?? (isRecord(order.payload) ? order.payload : {})
+  const providerReconciliation = isRecord(payload.provider_reconciliation) ? payload.provider_reconciliation : {}
+  const providerSnapshot = isRecord(providerReconciliation.snapshot) ? providerReconciliation.snapshot : {}
+  const positionState = isRecord(payload.position_state) ? payload.position_state : {}
+  const liveMarket = isRecord(payload.live_market) ? payload.live_market : {}
+  return latestTimestampValue(
+    cleanText(order.mark_updated_at),
+    cleanText(positionState.last_marked_at),
+    cleanText(providerReconciliation.reconciled_at),
+    cleanText(providerReconciliation.snapshot_updated_at),
+    cleanText(providerSnapshot.updated_at),
+    cleanText(providerSnapshot.updatedAt),
+    cleanText(liveMarket.live_market_fetched_at),
+    cleanText(liveMarket.fetched_at),
+    cleanText(order.updated_at),
+    cleanText(order.executed_at),
+    cleanText(order.created_at)
+  )
 }
 
 function normalizeDecisionOutcome(value: unknown): Exclude<DecisionOutcomeFilter, 'all'> {
@@ -2303,6 +2322,14 @@ function csvToList(value: string): string[] {
     .filter(Boolean)
 }
 
+function upsertTraderRows(rows: Trader[] | undefined, trader: Trader): Trader[] {
+  const current = Array.isArray(rows) ? rows : []
+  const next = current.filter((row) => row.id !== trader.id)
+  next.push(trader)
+  next.sort((left, right) => left.name.localeCompare(right.name))
+  return next
+}
+
 function normalizeTuneList(value: unknown): string[] {
   if (Array.isArray(value)) {
     return value
@@ -2613,7 +2640,7 @@ function buildPositionBookRows(
     hasUnrealizedPnl: boolean
     orderCount: number
     liveOrderCount: number
-    paperOrderCount: number
+    shadowOrderCount: number
     markUpdatedAt: string | null
     lastUpdated: string | null
     statuses: Set<string>
@@ -2667,7 +2694,7 @@ function buildPositionBookRows(
     const sourceLabel = cleanText(order.source)?.toUpperCase() || 'UNKNOWN'
     const executionSummary = orderExecutionTypeSummary(order)
     const links = buildOrderMarketLinks(order, orderPayload, signalPayload)
-    const markUpdatedAt = cleanText(order.mark_updated_at) || cleanText(positionState.last_marked_at)
+    const markUpdatedAt = cleanText(resolveOrderMarketUpdateTimestamp(order, orderPayload))
 
     if (!buckets.has(key)) {
       buckets.set(key, {
@@ -2692,7 +2719,7 @@ function buildPositionBookRows(
         hasUnrealizedPnl: false,
         orderCount: 0,
         liveOrderCount: 0,
-        paperOrderCount: 0,
+        shadowOrderCount: 0,
         markUpdatedAt: null,
         lastUpdated: null,
         statuses: new Set<string>(),
@@ -2722,15 +2749,15 @@ function buildPositionBookRows(
     bucket.orderCount += 1
     if (mode === 'live') {
       bucket.liveOrderCount += 1
-    } else if (mode === 'paper') {
-      bucket.paperOrderCount += 1
+    } else if (mode === 'shadow') {
+      bucket.shadowOrderCount += 1
     }
     bucket.sources.add(sourceLabel)
     if (executionSummary !== '—') {
       bucket.executionTypes.add(executionSummary)
     }
-    bucket.lastUpdated = toTs(order.updated_at) > toTs(bucket.lastUpdated)
-      ? (order.updated_at || order.executed_at || order.created_at || null)
+    bucket.lastUpdated = toTs(markUpdatedAt) > toTs(bucket.lastUpdated)
+      ? markUpdatedAt
       : bucket.lastUpdated
     bucket.markUpdatedAt = toTs(markUpdatedAt) > toTs(bucket.markUpdatedAt)
       ? markUpdatedAt
@@ -2779,7 +2806,7 @@ function buildPositionBookRows(
         weightedConfidence: bucket.confidenceWeight > 0 ? bucket.weightedConfidence / bucket.confidenceWeight : null,
         orderCount: bucket.orderCount,
         liveOrderCount: bucket.liveOrderCount,
-        paperOrderCount: bucket.paperOrderCount,
+        shadowOrderCount: bucket.shadowOrderCount,
         lastUpdated: bucket.lastUpdated,
         statusSummary: Array.from(bucket.statuses).join(', '),
         links: {
@@ -2858,7 +2885,7 @@ function summarizePositionRows(rows: PositionBookRow[]): {
   avgEdge: number
   avgConfidence: number
   liveOrders: number
-  paperOrders: number
+  shadowOrders: number
   markedRows: number
   freshMarks: number
 } {
@@ -2872,7 +2899,7 @@ function summarizePositionRows(rows: PositionBookRow[]): {
   let confidenceWeighted = 0
   let confidenceWeight = 0
   let liveOrders = 0
-  let paperOrders = 0
+  let shadowOrders = 0
   let markedRows = 0
   let freshMarks = 0
 
@@ -2893,7 +2920,7 @@ function summarizePositionRows(rows: PositionBookRow[]): {
       confidenceWeight += row.exposureUsd
     }
     liveOrders += row.liveOrderCount
-    paperOrders += row.paperOrderCount
+    shadowOrders += row.shadowOrderCount
     if (row.markPrice !== null) markedRows += 1
     if (row.markFresh) freshMarks += 1
   }
@@ -2908,7 +2935,7 @@ function summarizePositionRows(rows: PositionBookRow[]): {
     avgEdge: edgeWeight > 0 ? edgeWeighted / edgeWeight : 0,
     avgConfidence: confidenceWeight > 0 ? confidenceWeighted / confidenceWeight : 0,
     liveOrders,
-    paperOrders,
+    shadowOrders,
     markedRows,
     freshMarks,
   }
@@ -2995,7 +3022,7 @@ function BotTradePositionModal({
     let resolvedCount = 0
     let failedCount = 0
     let liveOrderCount = 0
-    let paperOrderCount = 0
+    let shadowOrderCount = 0
     let weightedEntry = 0
     let weightedEntryWeight = 0
     let weightedMark = 0
@@ -3019,7 +3046,7 @@ function BotTradePositionModal({
       statusSet.add(status)
 
       if (snapshot.mode.toLowerCase() === 'live') liveOrderCount += 1
-      if (snapshot.mode.toLowerCase() === 'paper') paperOrderCount += 1
+      if (snapshot.mode.toLowerCase() === 'shadow') shadowOrderCount += 1
 
       if (basis > 0 && snapshot.entryPrice !== null) {
         weightedEntry += snapshot.entryPrice * basis
@@ -3079,7 +3106,7 @@ function BotTradePositionModal({
       resolvedCount,
       failedCount,
       liveOrderCount,
-      paperOrderCount,
+      shadowOrderCount,
       exposureUsd: totalExposure,
       entryPrice: weightedEntryWeight > 0 ? weightedEntry / weightedEntryWeight : null,
       markPrice: weightedMarkWeight > 0 ? weightedMark / weightedMarkWeight : null,
@@ -3407,7 +3434,7 @@ function BotTradePositionModal({
               <span className="mx-1 text-muted-foreground">·</span>
               {formatSignedPercent(metrics.avgConfidencePercent, 1)}
             </p>
-            <p className="text-[10px] text-muted-foreground">{metrics.liveOrderCount} live · {metrics.paperOrderCount} paper</p>
+            <p className="text-[10px] text-muted-foreground">{metrics.liveOrderCount} live · {metrics.shadowOrderCount} shadow</p>
           </div>
         </div>
 
@@ -3813,7 +3840,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const queryClient = useQueryClient()
   const [selectedAccountId] = useAtom(selectedAccountIdAtom)
   const selectedAccountIsLive = Boolean(selectedAccountId?.startsWith('live:'))
-  const selectedAccountMode: 'paper' | 'live' = selectedAccountIsLive ? 'live' : 'paper'
+  const selectedAccountMode: 'shadow' | 'live' = selectedAccountIsLive ? 'live' : 'shadow'
   const [selectedTraderId, setSelectedTraderId] = useState<string | null>(null)
   const [selectedDecisionId, setSelectedDecisionId] = useState<string | null>(null)
   const [traderFeedFilter, setTraderFeedFilter] = useState<FeedFilter>('all')
@@ -3825,7 +3852,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const [decisionSearch, setDecisionSearch] = useState('')
   const [decisionOutcomeFilter, setDecisionOutcomeFilter] = useState<DecisionOutcomeFilter>('all')
   const [botRosterSearch, setBotRosterSearch] = useState('')
-  const [botRosterHideInactive, setBotRosterHideInactive] = useState(false)
+  const [botRosterHideInactive, setBotRosterHideInactive] = useState(true)
   const [botRosterSort, setBotRosterSort] = useState<BotRosterSort>('name_asc')
   const [botRosterGroupBy, setBotRosterGroupBy] = useState<BotRosterGroupBy>('status')
   const [confirmLiveStartOpen, setConfirmLiveStartOpen] = useState(false)
@@ -3855,9 +3882,14 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const [draftParams, setDraftParams] = useState('{}')
   const [draftRisk, setDraftRisk] = useState('{}')
   const [draftMetadata, setDraftMetadata] = useState('{}')
-  const [draftMode, setDraftMode] = useState<'paper' | 'live'>('paper')
+  const [draftMode, setDraftMode] = useState<'shadow' | 'live'>('shadow')
   const [draftCopyFromTraderId, setDraftCopyFromTraderId] = useState('')
-  const [draftCopyFromMode, setDraftCopyFromMode] = useState<'paper' | 'live'>('paper')
+  const [draftCopyFromMode, setDraftCopyFromMode] = useState<'shadow' | 'live'>('shadow')
+  const [creatingTraderPreview, setCreatingTraderPreview] = useState<{
+    name: string
+    mode: 'shadow' | 'live'
+  } | null>(null)
+  const [traderTogglePendingById, setTraderTogglePendingById] = useState<Record<string, TraderToggleAction>>({})
   const [saveError, setSaveError] = useState<string | null>(null)
   const [deleteAction, setDeleteAction] = useState<'block' | 'disable' | 'force_delete'>('disable')
   const [deleteConfirmName, setDeleteConfirmName] = useState('')
@@ -3974,6 +4006,63 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     }
     return null
   }
+  const resolveOrderRealtimeCryptoSnapshot = (
+    order: TraderOrder,
+    side: DirectionSide | null,
+  ): { updatedAt: string | null; markPrice: number | null } => {
+    const market = resolveCryptoMarketFromAliases(collectOrderMarketAliasIds(order))
+    if (!market) {
+      return { updatedAt: null, markPrice: null }
+    }
+
+    let latestUpdateMs = toFiniteNumber(market.oracle_updated_at_ms)
+    if (latestUpdateMs !== null && latestUpdateMs > 0 && latestUpdateMs < 1_000_000_000_000) {
+      latestUpdateMs *= 1000
+    }
+
+    const sourceMap = market.oracle_prices_by_source
+    if (sourceMap && typeof sourceMap === 'object') {
+      for (const rawSnapshot of Object.values(sourceMap)) {
+        if (!rawSnapshot || typeof rawSnapshot !== 'object') continue
+        let sourceUpdatedMs = toFiniteNumber((rawSnapshot as Record<string, unknown>).updated_at_ms)
+        if (sourceUpdatedMs !== null && sourceUpdatedMs > 0 && sourceUpdatedMs < 1_000_000_000_000) {
+          sourceUpdatedMs *= 1000
+        }
+        if (sourceUpdatedMs !== null && sourceUpdatedMs > (latestUpdateMs || 0)) {
+          latestUpdateMs = sourceUpdatedMs
+        }
+      }
+    }
+
+    const updatedAt = latestUpdateMs && latestUpdateMs > 0
+      ? new Date(latestUpdateMs).toISOString()
+      : null
+
+    const upPrice = toFiniteNumber(market.up_price)
+    const downPrice = toFiniteNumber(market.down_price)
+    const oraclePrice = toFiniteNumber(market.oracle_price)
+    const lastTradePrice = toFiniteNumber(market.last_trade_price)
+
+    let markPrice: number | null = null
+    if (side === 'YES') {
+      markPrice = upPrice
+        ?? (downPrice !== null ? Math.max(0, Math.min(1, 1 - downPrice)) : null)
+        ?? oraclePrice
+        ?? lastTradePrice
+    } else if (side === 'NO') {
+      markPrice = downPrice
+        ?? (upPrice !== null ? Math.max(0, Math.min(1, 1 - upPrice)) : null)
+        ?? oraclePrice
+        ?? lastTradePrice
+    } else {
+      markPrice = lastTradePrice ?? oraclePrice ?? upPrice ?? downPrice
+    }
+
+    return {
+      updatedAt,
+      markPrice,
+    }
+  }
   const [marketModalState, setMarketModalState] = useState<BotMarketModalState | null>(null)
   const marketModalMarket = marketModalState ? marketModalState.market : null
   const themeMode = useAtomValue(themeAtom)
@@ -4049,8 +4138,8 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     () => (allOrdersQuery.data || []).filter((order) => {
       if (!traderIdSet.has(String(order.trader_id || ''))) return false
       const orderMode = String(order.mode || '').trim().toLowerCase()
-      if (orderMode === 'live' || orderMode === 'paper') return orderMode === selectedAccountMode
-      return selectedAccountMode === 'paper'
+      if (orderMode === 'live' || orderMode === 'shadow') return orderMode === selectedAccountMode
+      return selectedAccountMode === 'shadow'
     }),
     [allOrdersQuery.data, selectedAccountMode, traderIdSet]
   )
@@ -4570,6 +4659,17 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     queryClient.invalidateQueries({ queryKey: ['unified-strategy-versions'] })
   }
 
+  const upsertTraderInCache = (trader: Trader) => {
+    const normalizedMode: 'shadow' | 'live' = trader.mode === 'live' ? 'live' : 'shadow'
+    const otherMode: 'shadow' | 'live' = normalizedMode === 'live' ? 'shadow' : 'live'
+    queryClient.setQueryData<Trader[]>(['traders-list', 'all'], (current) => upsertTraderRows(current, trader))
+    queryClient.setQueryData<Trader[]>(['traders-list', normalizedMode], (current) => upsertTraderRows(current, trader))
+    queryClient.setQueryData<Trader[]>(['traders-list', otherMode], (current) => {
+      if (!Array.isArray(current)) return current
+      return current.filter((row) => row.id !== trader.id)
+    })
+  }
+
   const applyTraderDraftSettings = (
     trader: Trader,
     options: { preserveName?: boolean; preserveCopyFrom?: boolean; preserveMode?: boolean } = {}
@@ -4602,7 +4702,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     }
     setDraftDescription(trader.description || '')
     if (!options.preserveMode) {
-      setDraftMode(trader.mode === 'live' ? 'live' : 'paper')
+      setDraftMode(trader.mode === 'live' ? 'live' : 'shadow')
     }
     setDraftStrategyKey(normalizeStrategyKey(sourceStrategyMap.crypto || DEFAULT_STRATEGY_KEY))
     setDraftSourceStrategies(sourceStrategyMap)
@@ -4621,6 +4721,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
 
   useEffect(() => {
     if (traderFlyoutOpen) return
+    if (creatingTraderPreview) return
     if (!selectedTrader) {
       if (tuneDraftTraderId !== null) setTuneDraftTraderId(null)
       if (tuneDraftDirty) setTuneDraftDirty(false)
@@ -4634,6 +4735,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     setTuneSaveError(null)
     setTuneRevertError(null)
   }, [
+    creatingTraderPreview,
     selectedTrader,
     traderFlyoutOpen,
     tuneDraftDirty,
@@ -4704,7 +4806,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     setSelectedTraderId(trader.id)
     setTraderFlyoutMode('edit')
     applyTraderDraftSettings(trader)
-    setDraftCopyFromMode(trader.mode === 'live' ? 'live' : 'paper')
+    setDraftCopyFromMode(trader.mode === 'live' ? 'live' : 'shadow')
     setDeleteAction('disable')
     setDeleteConfirmName('')
     setSaveError(null)
@@ -4852,9 +4954,9 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         return startTraderOrchestratorLive({ arm_token: armed.arm_token, mode: 'live' })
       }
       if (!selectedSandboxAccount?.id) {
-        throw new Error('No sandbox account is selected for paper mode.')
+        throw new Error('No sandbox account is selected for shadow mode.')
       }
-      return startTraderOrchestrator({ mode: 'paper', paper_account_id: selectedSandboxAccount.id })
+      return startTraderOrchestrator({ mode: 'shadow' })
     },
     onMutate: () => {
       setControlActionError(null)
@@ -4897,7 +4999,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
 
   const stopByModeMutation = useMutation({
     mutationFn: async () => {
-      const mode = String(overviewQuery.data?.control?.mode || 'paper').toLowerCase()
+      const mode = String(overviewQuery.data?.control?.mode || 'shadow').toLowerCase()
       if (mode === 'live') {
         return { response: await stopTraderOrchestratorLive(), mode }
       }
@@ -4945,8 +5047,29 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
 
   const killSwitchMutation = useMutation({
     mutationFn: (enabled: boolean) => setTraderOrchestratorLiveKillSwitch(enabled),
-    onMutate: () => {
+    onMutate: async (enabled: boolean) => {
       setControlActionError(null)
+      await queryClient.cancelQueries({ queryKey: ['trader-orchestrator-overview'] })
+      const previousOverview = queryClient.getQueryData(['trader-orchestrator-overview'])
+      queryClient.setQueryData(['trader-orchestrator-overview'], (current: any) => {
+        if (!current || typeof current !== 'object') {
+          return current
+        }
+        const currentControl = current.control && typeof current.control === 'object' ? current.control : {}
+        const currentConfig = current.config && typeof current.config === 'object' ? current.config : {}
+        return {
+          ...current,
+          control: {
+            ...currentControl,
+            kill_switch: enabled,
+          },
+          config: {
+            ...currentConfig,
+            kill_switch: enabled,
+          },
+        }
+      })
+      return { previousOverview }
     },
     onSuccess: (result: any, enabled: boolean) => {
       queryClient.setQueryData(['trader-orchestrator-overview'], (current: any) => {
@@ -4972,7 +5095,10 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       })
       refreshAll()
     },
-    onError: (error: unknown) => {
+    onError: (error: unknown, _enabled: boolean, context: { previousOverview: unknown } | undefined) => {
+      if (context) {
+        queryClient.setQueryData(['trader-orchestrator-overview'], context.previousOverview)
+      }
       setControlActionError(errorMessage(error, 'Failed to update Block new orders'))
     },
   })
@@ -5163,12 +5289,72 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
 
   const traderEnableMutation = useMutation({
     mutationFn: (traderId: string) => updateTrader(traderId, { is_enabled: true, is_paused: false }),
-    onSuccess: refreshAll,
+    onMutate: (traderId: string) => {
+      setSaveError(null)
+      setTraderTogglePendingById((current) => ({
+        ...current,
+        [traderId]: 'enable',
+      }))
+    },
+    onSuccess: (updatedTrader) => {
+      queryClient.setQueriesData({ queryKey: ['traders-list'] }, (current: unknown) => {
+        if (!Array.isArray(current)) return current
+        return current.map((candidate) => {
+          if (!candidate || typeof candidate !== 'object') return candidate
+          const trader = candidate as Trader
+          if (trader.id !== updatedTrader.id) return candidate
+          return updatedTrader
+        })
+      })
+      refreshAll()
+    },
+    onError: (error: unknown) => {
+      setSaveError(errorMessage(error, 'Failed to enable bot'))
+    },
+    onSettled: (_data, _error, traderId) => {
+      if (!traderId) return
+      setTraderTogglePendingById((current) => {
+        if (!(traderId in current)) return current
+        const next = { ...current }
+        delete next[traderId]
+        return next
+      })
+    },
   })
 
   const traderDisableMutation = useMutation({
-    mutationFn: (traderId: string) => updateTrader(traderId, { is_enabled: false, is_paused: false }),
-    onSuccess: refreshAll,
+    mutationFn: (traderId: string) => updateTrader(traderId, { is_enabled: false, is_paused: true }),
+    onMutate: (traderId: string) => {
+      setSaveError(null)
+      setTraderTogglePendingById((current) => ({
+        ...current,
+        [traderId]: 'disable',
+      }))
+    },
+    onSuccess: (updatedTrader) => {
+      queryClient.setQueriesData({ queryKey: ['traders-list'] }, (current: unknown) => {
+        if (!Array.isArray(current)) return current
+        return current.map((candidate) => {
+          if (!candidate || typeof candidate !== 'object') return candidate
+          const trader = candidate as Trader
+          if (trader.id !== updatedTrader.id) return candidate
+          return updatedTrader
+        })
+      })
+      refreshAll()
+    },
+    onError: (error: unknown) => {
+      setSaveError(errorMessage(error, 'Failed to disable bot'))
+    },
+    onSettled: (_data, _error, traderId) => {
+      if (!traderId) return
+      setTraderTogglePendingById((current) => {
+        if (!(traderId in current)) return current
+        const next = { ...current }
+        delete next[traderId]
+        return next
+      })
+    },
   })
 
   const traderRunOnceMutation = useMutation({
@@ -5333,7 +5519,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         source_configs: buildDraftSourceConfigs(parsedParams.value),
         risk_limits: parsedRisk.value,
         metadata: parsedMetadata.value,
-        is_enabled: false,
+        is_enabled: true,
         is_paused: false,
       }
 
@@ -5343,14 +5529,28 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
 
       return createTrader(payload)
     },
+    onMutate: () => {
+      const previewName = draftName.trim() || 'Creating bot...'
+      setCreatingTraderPreview({
+        name: previewName,
+        mode: draftMode,
+      })
+      setTraderFlyoutOpen(false)
+      setSaveError(null)
+    },
     onSuccess: (trader) => {
+      setCreatingTraderPreview(null)
+      upsertTraderInCache(trader)
       setSaveError(null)
       setTraderFlyoutOpen(false)
       setSelectedTraderId(trader.id)
       refreshAll()
     },
     onError: (error: unknown) => {
-      setSaveError(errorMessage(error, 'Failed to create bot'))
+      const message = errorMessage(error, 'Failed to create bot')
+      setTraderFlyoutOpen(true)
+      setSaveError(message)
+      setCreatingTraderPreview(null)
     },
   })
 
@@ -5446,6 +5646,12 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const orchestratorConfig = overviewQuery.data?.config || null
   const metrics = overviewQuery.data?.metrics
   const killSwitchOn = Boolean(orchestratorControl?.kill_switch)
+  const killSwitchSwitchValue = killSwitchMutation.isPending && typeof killSwitchMutation.variables === 'boolean'
+    ? killSwitchMutation.variables
+    : killSwitchOn
+  const killSwitchStatusLabel = killSwitchMutation.isPending
+    ? killSwitchSwitchValue ? 'BLOCKING...' : 'OPENING...'
+    : killSwitchOn ? 'BLOCKED' : 'OPEN'
   const orchestratorEnabled = Boolean(orchestratorControl?.is_enabled) && !Boolean(orchestratorControl?.is_paused)
   const workerActivity = String(worker?.current_activity || '').trim().toLowerCase()
   const orchestratorWorkerRunning = Boolean(worker?.running)
@@ -5566,7 +5772,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         anchorOrderId: null,
         sourceSummary: row.sourceSummary,
         statusSummary: row.statusSummary,
-        modeSummary: `${row.liveOrderCount}L/${row.paperOrderCount}P`,
+        modeSummary: `${row.liveOrderCount}L/${row.shadowOrderCount}S`,
         executionSummary: row.executionSummary,
         outcomeSummary: null,
         links: row.links,
@@ -5971,6 +6177,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       const status = normalizeStatus(order.status)
       const lifecycleLabel = resolveOrderLifecycleLabel(status)
       const pnl = toNumber(order.actual_profit)
+      const directionPresentation = resolveOrderDirectionPresentation(order)
       const orderPayload = order.payload && typeof order.payload === 'object' ? order.payload : {}
       const providerReconciliation = orderPayload.provider_reconciliation && typeof orderPayload.provider_reconciliation === 'object'
         ? orderPayload.provider_reconciliation
@@ -6000,8 +6207,10 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         ?? order.effective_price
         ?? order.entry_price
       )
+      const realtimeCrypto = resolveOrderRealtimeCryptoSnapshot(order, directionPresentation.side)
       const markPx = toNumber(
-        order.current_price
+        realtimeCrypto.markPrice
+        ?? order.current_price
         ?? positionState.last_mark_price
         ?? orderPayload.market_price
         ?? orderPayload.resolved_price
@@ -6040,13 +6249,10 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       })
       const exitProgressPercent = computePendingExitProgressPercent(pendingExit as Record<string, unknown>)
       const updatedAt = latestTimestampValue(
-        order.mark_updated_at,
-        positionState.last_marked_at,
-        order.updated_at,
-        order.executed_at,
-        order.created_at
+        realtimeCrypto.updatedAt,
+        resolveOrderMarketUpdateTimestamp(order, orderPayload),
       )
-      const markUpdatedAtRaw = String(order.mark_updated_at || positionState.last_marked_at || '')
+      const markUpdatedAtRaw = updatedAt
       const markUpdatedTs = toTs(markUpdatedAtRaw)
       const markFresh = markUpdatedTs > 0 && (Date.now() - markUpdatedTs) <= 15_000
       const providerSnapshotStatus = normalizeStatus(
@@ -6066,7 +6272,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       const outcome = orderOutcomeSummary(order)
       const executionSummary = orderExecutionTypeSummary(order)
       const venuePresentation = resolveVenueStatusPresentation(providerSnapshotStatus)
-      const directionPresentation = resolveOrderDirectionPresentation(order)
       return {
         order,
         status,
@@ -6097,7 +6302,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         venuePresentation,
       }
     })
-  }, [decisionSignalPayloadByDecisionId, filteredTradeHistory])
+  }, [cryptoMarkets, decisionSignalPayloadByDecisionId, filteredTradeHistory])
 
   const selectedTradeTotals = useMemo(() => {
     let total = 0
@@ -6549,6 +6754,11 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       return a.label.localeCompare(b.label)
     })
   }, [botRosterGroupBy, filteredBotRosterRows, sourceGroupOrderByKey, sourceLabelByKey])
+  const showCreatingTraderSkeleton = Boolean(
+    creatingTraderPreview
+    && createTraderMutation.isPending
+    && creatingTraderPreview.mode === selectedAccountMode
+  )
 
   const allBotsLeaderboardRows = useMemo(() => {
     return traders
@@ -6827,8 +7037,8 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     [selectedOrders]
   )
 
-  const selectedTraderOpenPaperOrders = useMemo(
-    () => selectedOrders.filter((order) => OPEN_ORDER_STATUSES.has(normalizeStatus(order.status)) && String(order.mode || '').toLowerCase() === 'paper').length,
+  const selectedTraderOpenShadowOrders = useMemo(
+    () => selectedOrders.filter((order) => OPEN_ORDER_STATUSES.has(normalizeStatus(order.status)) && String(order.mode || '').toLowerCase() === 'shadow').length,
     [selectedOrders]
   )
 
@@ -6878,10 +7088,20 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const tradersRunningDisplay = orchestratorRunning ? toNumber(metrics?.traders_running) : 0
   const displayAvgEdge = normalizeEdgePercent(globalSummary.avgEdge)
   const selectedTraderStatus = resolveTraderStatusPresentation(selectedTrader, orchestratorRunning)
+  const selectedTraderPendingAction = selectedTrader
+    ? traderTogglePendingById[selectedTrader.id] || null
+    : null
   const selectedTraderExecutionEnabled = isTraderExecutionEnabled(selectedTrader)
-  const selectedTraderCanEnable = Boolean(selectedTrader && !selectedTraderExecutionEnabled)
-  const selectedTraderCanDisable = Boolean(selectedTrader && selectedTraderExecutionEnabled)
-  const selectedTraderControlPending = traderEnableMutation.isPending || traderDisableMutation.isPending
+  const selectedTraderCanEnable = Boolean(
+    selectedTrader
+    && !selectedTraderExecutionEnabled
+    && selectedTraderPendingAction !== 'enable'
+  )
+  const selectedTraderCanDisable = Boolean(
+    selectedTrader?.is_enabled
+    && selectedTraderPendingAction !== 'disable'
+  )
+  const selectedTraderControlPending = selectedTraderPendingAction !== null
 
   useEffect(() => {
     if (!tuneAutoEnabled) return
@@ -7030,7 +7250,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
               <TooltipTrigger asChild>
                 <span className="inline-flex">
                   <Switch
-                    checked={killSwitchOn}
+                    checked={killSwitchSwitchValue}
                     onCheckedChange={(enabled) => killSwitchMutation.mutate(enabled)}
                     disabled={controlBusy}
                     className="scale-[0.8]"
@@ -7042,6 +7262,12 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                 still be monitored, sold, and reconciled.
               </TooltipContent>
             </Tooltip>
+            {killSwitchMutation.isPending ? (
+              <span className="inline-flex items-center gap-1 text-[10px] font-medium text-red-300">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                {killSwitchSwitchValue ? 'Blocking...' : 'Opening...'}
+              </span>
+            ) : null}
           </div>
         </div>
 
@@ -7075,8 +7301,11 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
           <Badge className="h-5 px-1.5 text-[10px]" variant={selectedAccountMode === 'live' ? 'destructive' : 'outline'}>
             {selectedAccountMode.toUpperCase()}
           </Badge>
-          <Badge className="h-5 px-1.5 text-[10px]" variant={killSwitchOn ? 'destructive' : 'outline'}>
-            {killSwitchOn ? 'BLOCKED' : 'OPEN'}
+          <Badge
+            className="h-5 px-1.5 text-[10px]"
+            variant={killSwitchMutation.isPending ? 'secondary' : killSwitchOn ? 'destructive' : 'outline'}
+          >
+            {killSwitchStatusLabel}
           </Badge>
         </div>
 
@@ -7197,6 +7426,24 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                   Showing {filteredBotRosterRows.length}/{traders.length}
                 </div>
               </button>
+              {showCreatingTraderSkeleton ? (
+                <div className="w-full rounded-md border border-cyan-500/35 bg-cyan-500/10 px-2 py-1.5 animate-pulse">
+                  <div className="flex items-center justify-between gap-1.5">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 shrink-0" />
+                        <span className="text-[11px] font-medium truncate leading-tight text-foreground">
+                          {creatingTraderPreview?.name || 'Creating bot...'}
+                        </span>
+                      </div>
+                      <div className="pl-3 mt-0.5 text-[9px] text-muted-foreground">
+                        Provisioning {String(creatingTraderPreview?.mode || selectedAccountMode).toUpperCase()} bot...
+                      </div>
+                    </div>
+                    <Loader2 className="w-3.5 h-3.5 text-cyan-300 animate-spin shrink-0" />
+                  </div>
+                </div>
+              ) : null}
               {groupedBotRosterRows.length === 0 ? (
                 <p className="py-6 text-center text-[11px] text-muted-foreground">No bots match these filters.</p>
               ) : (
@@ -7214,42 +7461,68 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                       ) : null}
                       {group.rows.map((row) => {
                         const isActive = row.trader.id === selectedTraderId
+                        const pendingToggleAction = traderTogglePendingById[row.trader.id] || null
+                        const rowTogglePending = pendingToggleAction !== null
                         return (
                           <button
                             key={row.trader.id}
                             type="button"
                             onClick={() => setSelectedTraderId(row.trader.id)}
+                            disabled={rowTogglePending}
                             className={cn(
                               'w-full text-left rounded-md px-2 py-1.5 transition-colors group',
                               isActive
                                 ? 'bg-cyan-500/15 text-foreground'
-                                : 'text-muted-foreground hover:bg-muted/40 hover:text-foreground'
+                                : 'text-muted-foreground hover:bg-muted/40 hover:text-foreground',
+                              rowTogglePending && 'cursor-wait border border-cyan-500/35 bg-cyan-500/10 text-foreground/85'
                             )}
                           >
-                            <div className="flex items-center justify-between gap-1.5">
-                              <div className="min-w-0">
-                                <div className="flex items-center gap-1.5">
-                                  <span className={cn(
-                                    'w-1.5 h-1.5 rounded-full shrink-0',
-                                    row.status.dotClassName
-                                  )} />
-                                  <span className="text-[11px] font-medium truncate leading-tight">{row.trader.name}</span>
+                            {rowTogglePending ? (
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="min-w-0 flex-1 animate-pulse space-y-1">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-cyan-300/80 shrink-0" />
+                                    <div className="h-2.5 w-24 max-w-full rounded bg-muted/70" />
+                                  </div>
+                                  <div className="pl-3 h-2 w-28 max-w-full rounded bg-muted/60" />
+                                  <div className="pl-3 flex gap-1">
+                                    <span className="h-2 w-10 rounded bg-muted/60" />
+                                    <span className="h-2 w-12 rounded bg-muted/50" />
+                                  </div>
                                 </div>
-                                <div className="pl-3 mt-0.5 text-[9px] text-muted-foreground">
-                                  {row.open} open · {row.resolved} resolved
+                                <div className="shrink-0 flex items-center gap-1 text-[9px] text-cyan-300">
+                                  <Loader2 className="w-3 h-3 animate-spin" />
+                                  {pendingToggleAction === 'enable' ? 'Enabling...' : 'Disabling...'}
                                 </div>
                               </div>
-                              <span className={cn('shrink-0 text-[10px] font-mono', row.pnl > 0 ? 'text-emerald-500' : row.pnl < 0 ? 'text-red-500' : 'text-muted-foreground')}>
-                                {formatCurrency(row.pnl, true)}
-                              </span>
-                            </div>
-                            <div className="flex flex-wrap gap-0.5 mt-0.5 pl-3">
-                              {row.sourceLabels.length > 0 ? row.sourceLabels.map((sourceLabel) => (
-                                <span key={`${row.trader.id}:${sourceLabel}`} className="px-1 py-0 text-[8px] rounded bg-muted/60 text-muted-foreground leading-relaxed">{sourceLabel}</span>
-                              )) : (
-                                <span className="px-1 py-0 text-[8px] rounded bg-muted/60 text-muted-foreground leading-relaxed">Unassigned</span>
-                              )}
-                            </div>
+                            ) : (
+                              <>
+                                <div className="flex items-center justify-between gap-1.5">
+                                  <div className="min-w-0">
+                                    <div className="flex items-center gap-1.5">
+                                      <span className={cn(
+                                        'w-1.5 h-1.5 rounded-full shrink-0',
+                                        row.status.dotClassName
+                                      )} />
+                                      <span className="text-[11px] font-medium truncate leading-tight">{row.trader.name}</span>
+                                    </div>
+                                    <div className="pl-3 mt-0.5 text-[9px] text-muted-foreground">
+                                      {row.open} open · {row.resolved} resolved
+                                    </div>
+                                  </div>
+                                  <span className={cn('shrink-0 text-[10px] font-mono', row.pnl > 0 ? 'text-emerald-500' : row.pnl < 0 ? 'text-red-500' : 'text-muted-foreground')}>
+                                    {formatCurrency(row.pnl, true)}
+                                  </span>
+                                </div>
+                                <div className="flex flex-wrap gap-0.5 mt-0.5 pl-3">
+                                  {row.sourceLabels.length > 0 ? row.sourceLabels.map((sourceLabel) => (
+                                    <span key={`${row.trader.id}:${sourceLabel}`} className="px-1 py-0 text-[8px] rounded bg-muted/60 text-muted-foreground leading-relaxed">{sourceLabel}</span>
+                                  )) : (
+                                    <span className="px-1 py-0 text-[8px] rounded bg-muted/60 text-muted-foreground leading-relaxed">Unassigned</span>
+                                  )}
+                                </div>
+                              </>
+                            )}
                           </button>
                         )
                       })}
@@ -7733,8 +8006,11 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                     ?? order.effective_price
                                     ?? order.entry_price
                                   )
+                                  const directionPresentation = resolveOrderDirectionPresentation(order)
+                                  const realtimeCrypto = resolveOrderRealtimeCryptoSnapshot(order, directionPresentation.side)
                                   const markPx = toNumber(
-                                    order.current_price
+                                    realtimeCrypto.markPrice
+                                    ?? order.current_price
                                     ?? positionState.last_mark_price
                                     ?? orderPayload.market_price
                                     ?? orderPayload.resolved_price
@@ -7779,11 +8055,8 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                   const links = buildOrderMarketLinks(order, orderPayload, signalPayload)
                                   const primaryMarketLink = links.polymarket || links.kalshi
                                   const updatedAt = latestTimestampValue(
-                                    order.mark_updated_at,
-                                    positionState.last_marked_at,
-                                    order.updated_at,
-                                    order.executed_at,
-                                    order.created_at
+                                    realtimeCrypto.updatedAt,
+                                    resolveOrderMarketUpdateTimestamp(order, orderPayload),
                                   )
                                   const positionClose = orderPayload.position_close && typeof orderPayload.position_close === 'object'
                                     ? orderPayload.position_close
@@ -7804,7 +8077,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                   const outcome = orderOutcomeSummary(order)
                                   const executionSummary = orderExecutionTypeSummary(order)
                                   const venuePresentation = resolveVenueStatusPresentation(providerSnapshotStatus)
-                                  const directionPresentation = resolveOrderDirectionPresentation(order)
                                   const traderLabel = traderNameById[String(order.trader_id || '')] || shortId(order.trader_id)
                                   const marketForModal = resolveCryptoMarketFromAliases(collectOrderMarketAliasIds(order))
                                   const openModal = () => {
@@ -8020,8 +8292,8 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                           <p className="text-xs font-mono">{formatPercent(normalizeConfidencePercent(allBotsPositionSummary.avgConfidence))}</p>
                         </div>
                         <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
-                          <p className="text-[9px] uppercase text-muted-foreground">Live / Paper</p>
-                          <p className="text-xs font-mono">{allBotsPositionSummary.liveOrders} / {allBotsPositionSummary.paperOrders}</p>
+                          <p className="text-[9px] uppercase text-muted-foreground">Live / Shadow</p>
+                          <p className="text-xs font-mono">{allBotsPositionSummary.liveOrders} / {allBotsPositionSummary.shadowOrders}</p>
                         </div>
                         <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
                           <p className="text-[9px] uppercase text-muted-foreground">Marks</p>
@@ -8126,7 +8398,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                     <TableCell className="text-right font-mono py-1">{row.weightedEdge !== null ? formatPercent(row.weightedEdge) : '—'}</TableCell>
                                     <TableCell className="text-right font-mono py-1">{row.weightedConfidence !== null ? formatPercent(normalizeConfidencePercent(row.weightedConfidence)) : '—'}</TableCell>
                                     <TableCell className="text-right font-mono py-1">{row.orderCount}</TableCell>
-                                    <TableCell className="text-right font-mono py-1">{row.liveOrderCount}L/{row.paperOrderCount}P</TableCell>
+                                    <TableCell className="text-right font-mono py-1">{row.liveOrderCount}L/{row.shadowOrderCount}S</TableCell>
                                     <TableCell className="py-1 text-[10px] text-muted-foreground">{formatShortDate(row.lastUpdated || row.markUpdatedAt)}</TableCell>
                                   </TableRow>
                                   )
@@ -8151,7 +8423,11 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                     className={cn('h-5 px-1.5 text-[10px]', selectedTraderStatus.badgeClassName)}
                     variant={selectedTraderStatus.badgeVariant}
                   >
-                    {selectedTraderStatus.label}
+                    {selectedTraderPendingAction === 'enable'
+                      ? 'Enabling...'
+                      : selectedTraderPendingAction === 'disable'
+                        ? 'Disabling...'
+                        : selectedTraderStatus.label}
                   </Badge>
                   <div className="hidden md:flex items-center gap-2 text-[11px] font-mono text-muted-foreground">
                     <span className={selectedTraderSummary.pnl >= 0 ? 'text-emerald-500' : 'text-red-500'}>{formatCurrency(selectedTraderSummary.pnl)}</span>
@@ -8172,7 +8448,15 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                       disabled={selectedTraderControlPending || !selectedTraderCanEnable}
                       onClick={() => traderEnableMutation.mutate(selectedTrader.id)}
                     >
-                      <Play className="w-3 h-3 mr-0.5" /> Enable
+                      {selectedTraderPendingAction === 'enable' ? (
+                        <>
+                          <Loader2 className="w-3 h-3 mr-0.5 animate-spin" /> Enabling...
+                        </>
+                      ) : (
+                        <>
+                          <Play className="w-3 h-3 mr-0.5" /> Enable
+                        </>
+                      )}
                     </Button>
                     <Button
                       size="sm"
@@ -8181,9 +8465,23 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                       disabled={selectedTraderControlPending || !selectedTraderCanDisable}
                       onClick={() => traderDisableMutation.mutate(selectedTrader.id)}
                     >
-                      <Square className="w-3 h-3 mr-0.5" /> Disable
+                      {selectedTraderPendingAction === 'disable' ? (
+                        <>
+                          <Loader2 className="w-3 h-3 mr-0.5 animate-spin" /> Disabling...
+                        </>
+                      ) : (
+                        <>
+                          <Square className="w-3 h-3 mr-0.5" /> Disable
+                        </>
+                      )}
                     </Button>
-                    <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]" onClick={() => traderRunOnceMutation.mutate(selectedTrader.id)} disabled={traderRunOnceMutation.isPending}>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-6 px-2 text-[10px]"
+                      onClick={() => traderRunOnceMutation.mutate(selectedTrader.id)}
+                      disabled={traderRunOnceMutation.isPending || selectedTraderControlPending}
+                    >
                       <Zap className="w-3 h-3 mr-0.5" /> Once
                     </Button>
                     <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]" onClick={() => openEditTraderFlyout(selectedTrader)}>
@@ -8458,6 +8756,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                     links,
                                   })
                                 }
+                                const primaryMarketLink = links.polymarket || links.kalshi
                                 return (
                                   <Fragment key={order.id}>
                                     <TableRow
@@ -8492,7 +8791,20 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                               </a>
                                             )}
                                           </div>
-                                          <span className="truncate">{order.market_question || shortId(order.market_id)}</span>
+                                          {primaryMarketLink ? (
+                                            <a
+                                              href={primaryMarketLink}
+                                              target="_blank"
+                                              rel="noopener noreferrer"
+                                              onClick={(event) => event.stopPropagation()}
+                                              className="truncate hover:underline underline-offset-2"
+                                              title="Open market"
+                                            >
+                                              {order.market_question || shortId(order.market_id)}
+                                            </a>
+                                          ) : (
+                                            <span className="truncate">{order.market_question || shortId(order.market_id)}</span>
+                                          )}
                                         </div>
                                       </TableCell>
                                       <TableCell className="py-0.5">
@@ -9336,8 +9648,17 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
             </div>
             <div className="flex items-center justify-between">
               <span className="text-muted-foreground">Block new orders</span>
-              <span className={cn('font-mono', killSwitchOn ? 'text-red-500' : 'text-emerald-600')}>
-                {killSwitchOn ? 'ON' : 'OFF'}
+              <span
+                className={cn(
+                  'font-mono',
+                  killSwitchMutation.isPending
+                    ? 'text-amber-500'
+                    : killSwitchOn
+                      ? 'text-red-500'
+                      : 'text-emerald-600'
+                )}
+              >
+                {killSwitchMutation.isPending ? 'UPDATING' : killSwitchOn ? 'ON' : 'OFF'}
               </span>
             </div>
           </div>
@@ -9372,7 +9693,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
               <SheetHeader className="space-y-1 text-left">
                 <SheetTitle className="text-base">Global Settings</SheetTitle>
                 <SheetDescription>
-                  Configure orchestrator-wide live/paper runtime controls, risk clamps, and pending-exit behavior.
+                  Configure orchestrator-wide live/shadow runtime controls, risk clamps, and pending-exit behavior.
                 </SheetDescription>
               </SheetHeader>
             </div>
@@ -9745,9 +10066,9 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                         <Button
                           type="button"
                           size="sm"
-                          variant={draftCopyFromMode === 'paper' ? 'default' : 'outline'}
+                          variant={draftCopyFromMode === 'shadow' ? 'default' : 'outline'}
                           className="h-6 px-2 text-[10px]"
-                          onClick={() => setDraftCopyFromMode('paper')}
+                          onClick={() => setDraftCopyFromMode('shadow')}
                         >
                           Sandbox Bots
                         </Button>
@@ -10202,11 +10523,11 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                     icon={AlertTriangle}
                     iconClassName="text-red-500"
                     tone="danger"
-                    count={`${selectedTraderOpenLiveOrders + selectedTraderOpenPaperOrders} open orders`}
+                    count={`${selectedTraderOpenLiveOrders + selectedTraderOpenShadowOrders} open orders`}
                     defaultOpen={false}
                   >
                     <p className="text-xs text-muted-foreground">
-                      Open live orders: {selectedTraderOpenLiveOrders} • Open paper orders: {selectedTraderOpenPaperOrders}
+                      Open live orders: {selectedTraderOpenLiveOrders} • Open shadow orders: {selectedTraderOpenShadowOrders}
                     </p>
                     <Select
                       value={deleteAction}

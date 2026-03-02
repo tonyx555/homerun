@@ -309,6 +309,7 @@ LOG_LEVEL_ORDER = {"DEBUG": 0, "INFO": 1, "WARNING": 2, "ERROR": 3}
 
 WORKER_STATUS_ORDER: list[tuple[str, str]] = [
     ("scanner", "SCANNER"),
+    ("scanner_slo", "SCANNER SLO"),
     ("discovery", "DISCOVERY"),
     ("weather", "WEATHER"),
     ("news", "NEWS"),
@@ -316,11 +317,13 @@ WORKER_STATUS_ORDER: list[tuple[str, str]] = [
     ("tracked_traders", "TRACKED"),
     ("trader_orchestrator", "ORCHESTRATOR"),
     ("trader_reconciliation", "RECONCILIATION"),
+    ("redeemer", "REDEEMER"),
     ("events", "EVENTS"),
 ]
 
 WORKER_TAG_TO_NAME: dict[str, str] = {
     "SCANNER": "scanner",
+    "SCANNER SLO": "scanner_slo",
     "DISCOVERY": "discovery",
     "WEATHER": "weather",
     "NEWS": "news",
@@ -328,6 +331,7 @@ WORKER_TAG_TO_NAME: dict[str, str] = {
     "TRACKED": "tracked_traders",
     "ORCHESTRATOR": "trader_orchestrator",
     "RECONCILIATION": "trader_reconciliation",
+    "REDEEMER": "redeemer",
     "EVENTS": "events",
 }
 
@@ -335,6 +339,7 @@ WORKER_BACKEND_HINTS: tuple[tuple[str, str], ...] = (
     # Workers run in-process inside the API lifespan (Phase 4).
     # Backend log lines are matched to worker panels via these hints.
     ("scanner", "scanner"),
+    ("scanner_slo", "scanner_slo"),
     ("discovery", "discovery"),
     ("weather", "weather"),
     ("news_worker", "news"),
@@ -342,6 +347,7 @@ WORKER_BACKEND_HINTS: tuple[tuple[str, str], ...] = (
     ("tracked_traders", "tracked_traders"),
     ("orchestrator", "trader_orchestrator"),
     ("reconciliation", "trader_reconciliation"),
+    ("redeemer_worker", "redeemer"),
     ("events_worker", "events"),
 )
 
@@ -1043,7 +1049,7 @@ class HomerunApp(App):
         # Runtime metrics bar
         with Horizontal(id="metrics-bar"):
             yield Static("Uptime [bold]--:--:--[/]", id="metric-uptime", classes="metric-item")
-            yield Static("Workers [bold]0/8[/]", id="metric-workers", classes="metric-item")
+            yield Static(f"Workers [bold]0/{len(WORKER_STATUS_ORDER)}[/]", id="metric-workers", classes="metric-item")
             yield Static("Health [bold red]OFFLINE[/]", id="metric-health", classes="metric-item")
             yield Static("Polls [bold]0[/]", id="metric-polls", classes="metric-item")
             yield Static("Logs [bold]0[/]", id="metric-logs", classes="metric-item")

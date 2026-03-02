@@ -15,7 +15,6 @@ from config import settings
 from models.database import (
     AppSettings,
     AsyncSessionLocal,
-    SimulationAccount,
     Trader,
     TraderDecision,
     TraderEvent,
@@ -26,6 +25,9 @@ from models.database import (
 from services.pause_state import global_pause_state
 from services.trader_orchestrator_state import (
     ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS,
+    arm_live_start,
+    consume_live_arm_token,
+    create_live_preflight,
     create_trader_event,
     read_orchestrator_control,
     read_orchestrator_snapshot,
@@ -86,6 +88,60 @@ def _to_utc(value: Optional[datetime]) -> Optional[datetime]:
 
 def _format_money(value: float) -> str:
     return f"${value:,.2f}"
+
+
+def _format_signed_money(value: float) -> str:
+    amount = float(value or 0.0)
+    sign = "+" if amount >= 0 else "-"
+    return f"{sign}${abs(amount):,.2f}"
+
+
+def _truncate_text(value: Any, limit: int) -> str:
+    text = str(value or "").replace("\n", " ").replace("\r", " ").strip()
+    if len(text) <= limit:
+        return text
+    if limit <= 3:
+        return text[:limit]
+    return f"{text[: limit - 3]}..."
+
+
+def _compact_join(parts: list[str], *, max_items: int) -> str:
+    compact_parts = [str(part).strip() for part in parts if str(part).strip()]
+    if not compact_parts:
+        return "none"
+    selected = compact_parts[:max_items]
+    overflow = len(compact_parts) - len(selected)
+    if overflow > 0:
+        selected.append(f"+{overflow} more")
+    return " · ".join(selected)
+
+
+def _normalize_mode(value: Any) -> str:
+    mode = str(value or "").strip().lower()
+    if mode == "paper":
+        return "shadow"
+    if mode in {"shadow", "live"}:
+        return mode
+    return "other"
+
+
+def _mode_label(value: Any) -> str:
+    mode = _normalize_mode(value)
+    if mode == "other":
+        return "OTHER"
+    return mode.upper()
+
+
+def _mode_label_from_orders(orders: list[TraderOrder], fallback: str) -> str:
+    counts: dict[str, int] = defaultdict(int)
+    for row in orders:
+        counts[_mode_label(getattr(row, "mode", None))] += 1
+    if not counts:
+        return fallback
+    if len(counts) == 1:
+        return next(iter(counts.keys()))
+    parts = [f"{label} {counts[label]}" for label in sorted(counts.keys())]
+    return f"MIXED ({', '.join(parts)})"
 
 
 class TelegramNotifier:
@@ -305,7 +361,7 @@ class TelegramNotifier:
                     snapshot = await session.get(TraderOrchestratorSnapshot, "latest")
 
                     active = bool(control is not None and bool(control.is_enabled) and not bool(control.is_paused))
-                    mode = str(getattr(control, "mode", "paper") or "paper").upper()
+                    mode = _mode_label(getattr(control, "mode", "shadow"))
 
                     traders_running = int(getattr(snapshot, "traders_running", 0) if snapshot else 0)
                     traders_total = int(getattr(snapshot, "traders_total", 0) if snapshot else 0)
@@ -337,7 +393,7 @@ class TelegramNotifier:
                     new_orders = await self._load_new_trader_orders(session)
                     updated_orders = await self._load_updated_trader_orders(session)
 
-                    if self._notify_autotrader_issues:
+                    if active and self._notify_autotrader_issues:
                         await self._send_issue_alerts(
                             session=session,
                             events=new_events,
@@ -352,7 +408,7 @@ class TelegramNotifier:
                             mode=mode,
                         )
 
-                    if self._notify_autotrader_closes:
+                    if active and self._notify_autotrader_closes:
                         await self._send_position_close_alerts(
                             session=session,
                             orders=updated_orders,
@@ -531,24 +587,32 @@ class TelegramNotifier:
         regular_orders = [row for row in orders if not self._is_issue_order(row)]
         if not regular_orders:
             return
+        mode_label = _mode_label_from_orders(regular_orders, _mode_label(mode))
 
         status_counts: dict[str, int] = defaultdict(int)
+        status_notional: dict[str, float] = defaultdict(float)
         notional = 0.0
         trader_counts: dict[str, int] = defaultdict(int)
+        trader_notional: dict[str, float] = defaultdict(float)
         trader_ids: set[str] = set()
 
         for row in regular_orders:
-            status_counts[str(row.status or "unknown").lower()] += 1
-            notional += float(row.notional_usd or 0.0)
+            status = str(row.status or "unknown").lower()
+            order_notional = float(row.notional_usd or 0.0)
+
+            status_counts[status] += 1
+            status_notional[status] += order_notional
+            notional += order_notional
             if row.trader_id:
                 trader_id = str(row.trader_id)
                 trader_ids.add(trader_id)
                 trader_counts[trader_id] += 1
+                trader_notional[trader_id] += order_notional
 
         trader_names = await self._load_trader_name_map(session, trader_ids)
-
         status_parts = [
-            f"{_escape_md(status)}: {_escape_md(str(count))}" for status, count in sorted(status_counts.items())
+            f"{status.upper()} {status_counts[status]}/{_format_money(status_notional[status])}"
+            for status in sorted(status_counts.keys())
         ]
 
         top_traders = sorted(
@@ -557,19 +621,17 @@ class TelegramNotifier:
             reverse=True,
         )[:3]
         trader_parts = [
-            f"{_escape_md(trader_names.get(tid, tid[:8]))} {_escape_md(str(count))}" for tid, count in top_traders
+            f"{_truncate_text(trader_names.get(tid, tid[:8]), 12)} {count}/{_format_money(trader_notional.get(tid, 0.0))}"
+            for tid, count in top_traders
         ]
 
         lines = [
-            f"📈 {_bold('Autotrader Orders')}",
-            "",
-            f"{_bold('Mode:')} {_escape_md(mode)}",
-            f"{_bold('New Orders:')} {_escape_md(str(len(regular_orders)))}",
-            f"{_bold('Status Mix:')} {_escape_md(', '.join(status_parts) if status_parts else 'none')}",
-            f"{_bold('Notional:')} {_escape_md(_format_money(notional))}",
+            f"📈 {_bold('Autotrader Orders')} · {_escape_md(mode_label)}",
+            f"{_bold('New:')} {_escape_md(str(len(regular_orders)))} · {_bold('Notional:')} {_escape_md(_format_money(notional))}",
+            f"{_bold('Mix:')} {_escape_md(_compact_join(status_parts, max_items=3))}",
         ]
         if trader_parts:
-            lines.append(f"{_bold('Top Traders:')} {_escape_md(', '.join(trader_parts))}")
+            lines.append(f"{_bold('Top:')} {_escape_md(_compact_join(trader_parts, max_items=2))}")
 
         await self._enqueue("\n".join(lines))
 
@@ -606,18 +668,18 @@ class TelegramNotifier:
             realized_rows.values(),
             key=lambda row: (_to_utc(row.updated_at) or _to_utc(row.created_at) or utcnow(), str(row.id)),
         )
+        mode_label = _mode_label_from_orders(rows, _mode_label(mode))
         trader_ids = {str(row.trader_id) for row in rows if row.trader_id}
         trader_names = await self._load_trader_name_map(session, trader_ids)
 
         title = "Autotrader Position Close" if len(rows) == 1 else "Autotrader Position Closes"
-        lines = [
-            f"✅ {_bold(title)}",
-            "",
-            f"{_bold('Mode:')} {_escape_md(mode)}",
-            f"{_bold('Count:')} {_escape_md(str(len(rows)))}",
-        ]
+        realized_won = 0.0
+        realized_lost = 0.0
+        close_lines: list[str] = []
+        trigger_parts: list[str] = []
+        display_limit = min(CLOSE_ALERT_BATCH_LIMIT, 5)
 
-        for row in rows[:CLOSE_ALERT_BATCH_LIMIT]:
+        for index, row in enumerate(rows, start=1):
             trader_name = trader_names.get(str(row.trader_id), str(row.trader_id)[:8] if row.trader_id else "Unknown")
             status = str(row.status or "closed").lower()
             status_label = status.replace("_", " ").upper()
@@ -629,15 +691,40 @@ class TelegramNotifier:
             if isinstance(position_close, dict):
                 close_trigger = str(position_close.get("close_trigger") or "").strip()
 
-            lines.append(
-                f"• {_escape_md(trader_name)}: {_escape_md(status_label)}, P&L {_escape_md(f'{pnl:+.2f}')}, {_escape_md(market[:120])}"
-            )
-            if close_trigger:
-                lines.append(f"  {_bold('Trigger:')} {_escape_md(close_trigger)}")
+            if pnl >= 0:
+                realized_won += pnl
+            else:
+                realized_lost += abs(pnl)
 
-        remaining = len(rows) - CLOSE_ALERT_BATCH_LIMIT
+            if index <= display_limit:
+                status_short = "WIN" if "win" in status else "LOSS" if "loss" in status else _truncate_text(status_label, 10)
+                close_lines.append(
+                    f"{_escape_md(str(index))}\\) {_escape_md(_truncate_text(trader_name, 13))} · "
+                    f"{_escape_md(status_short)} · {_escape_md(_format_signed_money(pnl))}"
+                )
+                close_lines.append(f"   {_escape_md(_truncate_text(market, 56))}")
+            if close_trigger:
+                trigger_parts.append(
+                    f"{index}:{_truncate_text(close_trigger, 20)}"
+                )
+
+        net_realized = realized_won - realized_lost
+        lines = [
+            f"✅ {_bold(title)} · {_escape_md(mode_label)}",
+            (
+                f"{_bold('Count:')} {_escape_md(str(len(rows)))} · "
+                f"{_bold('Won:')} {_escape_md(_format_money(realized_won))} · "
+                f"{_bold('Lost:')} {_escape_md(_format_money(realized_lost))} · "
+                f"{_bold('Net:')} {_escape_md(_format_signed_money(net_realized))}"
+            ),
+        ]
+        lines.extend(close_lines)
+        if trigger_parts:
+            lines.append(f"{_bold('Triggers:')} {_escape_md(_compact_join(trigger_parts, max_items=3))}")
+
+        remaining = len(rows) - display_limit
         if remaining > 0:
-            lines.append(f"{_bold('Additional closes:')} {_escape_md(str(remaining))}")
+            lines.append(f"{_bold('More:')} {_escape_md(str(remaining))} close\\(s\\)")
 
         await self._enqueue("\n".join(lines))
 
@@ -713,20 +800,31 @@ class TelegramNotifier:
         order_counts = {str(row[0] or "unknown").lower(): int(row[1] or 0) for row in order_rows}
         total_notional = float(sum(float(row[2] or 0.0) for row in order_rows))
 
-        realized_pnl = float(
-            (
-                await session.execute(
-                    select(func.coalesce(func.sum(TraderOrder.actual_profit), 0.0)).where(
-                        TraderOrder.updated_at >= start_naive,
-                        TraderOrder.updated_at < end_naive,
-                        TraderOrder.status.in_(
-                            ("resolved_win", "resolved_loss", "closed_win", "closed_loss", "win", "loss")
-                        ),
-                    )
+        realized_rows = (
+            await session.execute(
+                select(
+                    TraderOrder.status,
+                    func.count(TraderOrder.id),
+                    func.coalesce(func.sum(TraderOrder.actual_profit), 0.0),
                 )
-            ).scalar()
-            or 0.0
-        )
+                .where(
+                    TraderOrder.updated_at >= start_naive,
+                    TraderOrder.updated_at < end_naive,
+                    TraderOrder.status.in_(tuple(REALIZED_ORDER_STATUSES)),
+                )
+                .group_by(TraderOrder.status)
+            )
+        ).all()
+
+        realized_won = 0.0
+        realized_lost = 0.0
+        for row in realized_rows:
+            pnl = float(row[2] or 0.0)
+            if pnl >= 0:
+                realized_won += pnl
+            else:
+                realized_lost += abs(pnl)
+        realized_net = realized_won - realized_lost
 
         issue_count = int(
             (
@@ -741,22 +839,41 @@ class TelegramNotifier:
             or 0
         )
 
-        mode = str(getattr(control, "mode", "paper") or "paper").upper()
+        mode = _mode_label(getattr(control, "mode", "shadow"))
         traders_running = int(getattr(snapshot, "traders_running", 0) if snapshot else 0)
         traders_total = int(getattr(snapshot, "traders_total", 0) if snapshot else 0)
 
+        decision_parts = [
+            f"{key.upper()} {decision_counts[key]}"
+            for key in sorted(decision_counts.keys(), key=lambda name: (-decision_counts[name], name))
+        ]
+        order_parts = [
+            f"{str(row[0] or 'unknown').upper()} {int(row[1] or 0)}/{_format_money(float(row[2] or 0.0))}"
+            for row in sorted(order_rows, key=lambda item: (-int(item[1] or 0), str(item[0] or "unknown")))
+        ]
+        realized_parts = [
+            f"{str(row[0] or 'unknown').upper()} {int(row[1] or 0)}/{_format_signed_money(float(row[2] or 0.0))}"
+            for row in sorted(realized_rows, key=lambda item: (-int(item[1] or 0), str(item[0] or "unknown")))
+        ]
+
         lines = [
             f"🕒 {_bold(_escape_md(title))}",
-            "",
             f"{_bold('Window:')} {_escape_md(_to_utc(start).strftime('%Y-%m-%d %H:%M'))} -> {_escape_md(_to_utc(end).strftime('%Y-%m-%d %H:%M'))} UTC",
-            f"{_bold('Mode:')} {_escape_md(mode)}",
-            f"{_bold('Traders Running:')} {_escape_md(str(traders_running))}/{_escape_md(str(traders_total))}",
-            f"{_bold('Decisions:')} {_escape_md(self._format_counts(decision_counts))}",
-            f"{_bold('Orders:')} {_escape_md(self._format_counts(order_counts))}",
-            f"{_bold('Notional:')} {_escape_md(_format_money(total_notional))}",
-            f"{_bold('Realized P&L:')} {_escape_md(f'{realized_pnl:+.2f}')}",
-            f"{_bold('Issues:')} {_escape_md(str(issue_count))}",
+            f"{_bold('Mode:')} {_escape_md(mode)} · {_bold('Traders:')} {_escape_md(str(traders_running))}/{_escape_md(str(traders_total))}",
+            f"{_bold('Notional:')} {_escape_md(_format_money(total_notional))} · {_bold('Issues:')} {_escape_md(str(issue_count))}",
+            (
+                f"{_bold('Won:')} {_escape_md(_format_money(realized_won))} · "
+                f"{_bold('Lost:')} {_escape_md(_format_money(realized_lost))} · "
+                f"{_bold('Net:')} {_escape_md(_format_signed_money(realized_net))}"
+            ),
         ]
+
+        if decision_counts:
+            lines.append(f"{_bold('Decisions:')} {_escape_md(_compact_join(decision_parts, max_items=4))}")
+        if order_counts:
+            lines.append(f"{_bold('Orders:')} {_escape_md(_compact_join(order_parts, max_items=4))}")
+        if realized_rows:
+            lines.append(f"{_bold('Realized:')} {_escape_md(_compact_join(realized_parts, max_items=4))}")
 
         if self._summary_per_trader:
             trader_lines = await self._build_per_trader_summary_lines(
@@ -765,7 +882,6 @@ class TelegramNotifier:
                 end_naive=end_naive,
             )
             if trader_lines:
-                lines.append("")
                 lines.append(_bold("Per Trader:"))
                 lines.extend(trader_lines)
 
@@ -870,12 +986,6 @@ class TelegramNotifier:
             lines.append(line)
 
         return lines
-
-    @staticmethod
-    def _format_counts(counts: dict[str, int]) -> str:
-        if not counts:
-            return "none"
-        return ", ".join(f"{key}={value}" for key, value in sorted(counts.items(), key=lambda item: item[0]))
 
     @staticmethod
     def _format_utc_timestamp(value: Any) -> str:
@@ -1109,24 +1219,28 @@ class TelegramNotifier:
         if command in {"/performance", "/pnl", "performance", "pnl"}:
             hours_arg = args[0] if args else None
             return await self._telegram_performance_message(hours_arg=hours_arg)
-        if command in {"/stop", "stop"}:
+        if command in {"/stop", "stop", "/off", "off", "/disable", "disable"}:
             return await self._telegram_stop_autotrader(operator=operator)
-        if command in {"/start", "start"}:
-            mode_arg: Optional[str] = None
-            paper_account_id: Optional[str] = None
-            if args:
-                first = args[0].lower()
-                if first in {"paper", "shadow", "live"}:
-                    mode_arg = first
-                    if len(args) > 1:
-                        paper_account_id = args[1]
-                else:
-                    paper_account_id = args[0]
+        if command in {"/start", "start", "/on", "on", "/enable", "enable"}:
+            mode_arg = self._parse_telegram_start_args(args)
             return await self._telegram_start_autotrader(
                 mode_arg=mode_arg,
-                paper_account_id=paper_account_id,
                 operator=operator,
             )
+        if command in {"/autotrader", "autotrader"}:
+            if not args:
+                return "Usage: `/autotrader on [shadow|live]` or `/autotrader off`\\."
+            action = args[0].strip().lower()
+            action_args = args[1:]
+            if action in {"on", "start", "enable", "enabled", "resume"}:
+                mode_arg = self._parse_telegram_start_args(action_args)
+                return await self._telegram_start_autotrader(
+                    mode_arg=mode_arg,
+                    operator=operator,
+                )
+            if action in {"off", "stop", "disable", "disabled", "pause"}:
+                return await self._telegram_stop_autotrader(operator=operator)
+            return "Usage: `/autotrader on [shadow|live]` or `/autotrader off`\\."
         if command in {"/killswitch", "/kill", "killswitch", "kill"}:
             if not args:
                 return "Usage: `/killswitch on` or `/killswitch off`\\."
@@ -1140,6 +1254,15 @@ class TelegramNotifier:
         return "Unknown command\\.\nUse `/help` for available Telegram commands\\."
 
     @staticmethod
+    def _parse_telegram_start_args(args: list[str]) -> Optional[str]:
+        mode_arg: Optional[str] = None
+        if args:
+            first = args[0].lower()
+            if first in {"shadow", "live"}:
+                mode_arg = first
+        return mode_arg
+
+    @staticmethod
     def _telegram_help_message() -> str:
         return "\n".join(
             [
@@ -1147,7 +1270,8 @@ class TelegramNotifier:
                 "",
                 "`/status` \\- show orchestrator state and core metrics",
                 "`/performance [hours]` \\- timeline summary for the last N hours \\(default 24\\)",
-                "`/start [paper|shadow] [paper_account_id]` \\- start autotrader",
+                "`/autotrader on|off` \\- quick autotrader power toggle",
+                "`/start [shadow|live]` \\- start autotrader",
                 "`/stop` \\- stop autotrader",
                 "`/killswitch on|off` \\- toggle orchestrator kill switch",
             ]
@@ -1158,19 +1282,31 @@ class TelegramNotifier:
             control = await read_orchestrator_control(session)
             snapshot = await read_orchestrator_snapshot(session)
             cutoff = (utcnow() - timedelta(hours=24)).replace(tzinfo=None)
-            realized_24h = float(
-                (
-                    await session.execute(
-                        select(func.coalesce(func.sum(TraderOrder.actual_profit), 0.0)).where(
-                            TraderOrder.updated_at >= cutoff,
-                            TraderOrder.status.in_(tuple(REALIZED_ORDER_STATUSES)),
-                        )
+            realized_rows = (
+                await session.execute(
+                    select(
+                        TraderOrder.status,
+                        func.coalesce(func.sum(TraderOrder.actual_profit), 0.0),
                     )
-                ).scalar()
-                or 0.0
-            )
+                    .where(
+                        TraderOrder.updated_at >= cutoff,
+                        TraderOrder.status.in_(tuple(REALIZED_ORDER_STATUSES)),
+                    )
+                    .group_by(TraderOrder.status)
+                )
+            ).all()
 
-        mode = str(control.get("mode", "paper") or "paper").upper()
+        realized_won = 0.0
+        realized_lost = 0.0
+        for row in realized_rows:
+            pnl = float(row[1] or 0.0)
+            if pnl >= 0:
+                realized_won += pnl
+            else:
+                realized_lost += abs(pnl)
+        realized_24h = realized_won - realized_lost
+
+        mode = _mode_label(control.get("mode", "shadow"))
         enabled = bool(control.get("is_enabled", False))
         paused = bool(control.get("is_paused", True))
         running = bool(snapshot.get("running", False))
@@ -1186,17 +1322,11 @@ class TelegramNotifier:
         updated_at = self._format_utc_timestamp(snapshot.get("updated_at"))
 
         lines = [
-            f"📊 {_bold('Autotrader Status')}",
-            "",
-            f"{_bold('State:')} {_escape_md(state)} / {_escape_md('running' if running else 'idle')}",
-            f"{_bold('Mode:')} {_escape_md(mode)}",
-            f"{_bold('Kill Switch:')} {_escape_md('ON' if kill_switch else 'OFF')}",
-            f"{_bold('Traders Running:')} {_escape_md(str(traders_running))}/{_escape_md(str(traders_total))}",
-            f"{_bold('Decisions:')} {_escape_md(str(decisions_count))}",
-            f"{_bold('Orders:')} {_escape_md(str(orders_count))}",
-            f"{_bold('Open Orders:')} {_escape_md(str(open_orders))}",
-            f"{_bold('Daily P&L:')} {_escape_md(f'{daily_pnl:+.2f}')}",
-            f"{_bold('Realized 24h:')} {_escape_md(f'{realized_24h:+.2f}')}",
+            f"📊 {_bold('Autotrader Status')} · {_escape_md(state)}\\/{_escape_md('running' if running else 'idle')} · {_escape_md(mode)}",
+            f"{_bold('Kill:')} {_escape_md('ON' if kill_switch else 'OFF')} · {_bold('Traders:')} {_escape_md(str(traders_running))}/{_escape_md(str(traders_total))}",
+            f"{_bold('Decisions:')} {_escape_md(str(decisions_count))} · {_bold('Orders:')} {_escape_md(str(orders_count))} \\({_escape_md(str(open_orders))} open\\)",
+            f"{_bold('Daily:')} {_escape_md(_format_signed_money(daily_pnl))} · {_bold('24h Won:')} {_escape_md(_format_money(realized_won))}",
+            f"{_bold('24h Lost:')} {_escape_md(_format_money(realized_lost))} · {_bold('24h Net:')} {_escape_md(_format_signed_money(realized_24h))}",
             f"{_bold('Last Run:')} {_escape_md(last_run)}",
             f"{_bold('Snapshot:')} {_escape_md(updated_at)}",
         ]
@@ -1223,43 +1353,80 @@ class TelegramNotifier:
         self,
         *,
         mode_arg: Optional[str],
-        paper_account_id: Optional[str],
         operator: str,
     ) -> str:
         if global_pause_state.is_paused:
             return "❌ Global pause is active\\.\nResume workers before starting autotrader\\."
 
         mode = str(mode_arg or "").strip().lower()
-        if mode == "live":
-            return "❌ Live mode start is blocked from Telegram\\.\nUse the in\\-app live preflight/arm/start flow\\."
-        if mode and mode not in {"paper", "shadow"}:
-            return "❌ Invalid mode\\.\nUse `paper` or `shadow`\\."
+        if mode and mode not in {"shadow", "live"}:
+            return "❌ Invalid mode\\.\nUse `shadow` or `live`\\."
 
         async with AsyncSessionLocal() as session:
             control_before = await read_orchestrator_control(session)
-            selected_mode = mode or str(control_before.get("mode") or "paper").strip().lower() or "paper"
-            if selected_mode not in {"paper", "shadow"}:
-                selected_mode = "paper"
-
-            settings_updates: dict[str, Any] = {}
-            selected_paper_account_id: Optional[str] = None
-            if selected_mode == "paper":
-                requested_paper = str(paper_account_id or "").strip() or None
-                existing_paper = str((control_before.get("settings") or {}).get("paper_account_id") or "").strip() or None
-                selected_paper_account_id = requested_paper or existing_paper
-                if not selected_paper_account_id:
+            selected_mode = mode or str(control_before.get("mode") or "shadow").strip().lower() or "shadow"
+            if selected_mode not in {"shadow", "live"}:
+                selected_mode = "shadow"
+            if selected_mode == "live":
+                preflight = await create_live_preflight(
+                    session,
+                    requested_mode="live",
+                    requested_by=operator,
+                )
+                if str(preflight.get("status") or "").strip().lower() != "passed":
+                    failed_checks = preflight.get("failed_checks") or []
+                    failed_ids = [
+                        str(check.get("id") or "").strip()
+                        for check in failed_checks
+                        if isinstance(check, dict) and str(check.get("id") or "").strip()
+                    ]
+                    failed_summary = ", ".join(failed_ids[:6]) if failed_ids else "preflight checks failed"
                     return (
-                        "❌ Cannot start paper mode: `paper_account_id` is not configured\\.\n"
-                        "Use `/start paper <paper_account_id>` once\\."
+                        "❌ Live preflight failed\\.\n"
+                        f"Checks: {_escape_md(failed_summary)}\\.\n"
+                        "Review live setup in the UI and retry `/autotrader on live`\\."
                     )
-                paper_exists = (
-                    await session.execute(
-                        select(SimulationAccount.id).where(SimulationAccount.id == selected_paper_account_id)
-                    )
-                ).scalar_one_or_none()
-                if paper_exists is None:
-                    return "❌ Paper account not found\\.\nProvide a valid `paper_account_id`\\."
-                settings_updates["paper_account_id"] = selected_paper_account_id
+
+                arm_response = await arm_live_start(
+                    session,
+                    preflight_id=str(preflight.get("preflight_id") or ""),
+                    ttl_seconds=300,
+                    requested_by=operator,
+                )
+                arm_token = str(arm_response.get("arm_token") or "").strip()
+                if not arm_token:
+                    return "❌ Live start failed: arm token was not issued\\."
+                if not await consume_live_arm_token(session, arm_token):
+                    return "❌ Live start failed: arm token expired\\.\nRetry `/autotrader on live`\\."
+
+                control = await update_orchestrator_control(
+                    session,
+                    is_enabled=True,
+                    is_paused=False,
+                    mode="live",
+                    requested_run_at=utcnow(),
+                )
+                await write_orchestrator_snapshot(
+                    session,
+                    running=False,
+                    enabled=True,
+                    current_activity="Live start command queued from Telegram",
+                    interval_seconds=int(
+                        control.get("run_interval_seconds") or ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS
+                    ),
+                )
+                await create_trader_event(
+                    session,
+                    event_type="live_started",
+                    source="telegram",
+                    operator=operator,
+                    message="Live trading started via Telegram",
+                    payload={
+                        "mode": "live",
+                        "preflight_id": preflight.get("preflight_id"),
+                    },
+                )
+                return "✅ Autotrader start queued\\.\nMode: LIVE"
 
             control = await update_orchestrator_control(
                 session,
@@ -1267,7 +1434,6 @@ class TelegramNotifier:
                 is_paused=False,
                 mode=selected_mode,
                 requested_run_at=utcnow(),
-                settings_json=settings_updates,
             )
             await write_orchestrator_snapshot(
                 session,
@@ -1286,12 +1452,10 @@ class TelegramNotifier:
                 message=f"Trader orchestrator started in {selected_mode} mode via Telegram",
                 payload={
                     "mode": selected_mode,
-                    "paper_account_id": selected_paper_account_id,
                 },
             )
 
-        paper_suffix = f", paper={selected_paper_account_id}" if selected_paper_account_id else ""
-        return f"✅ Autotrader start queued\\.\nMode: {_escape_md(selected_mode.upper())}{_escape_md(paper_suffix)}"
+        return f"✅ Autotrader start queued\\.\nMode: {_escape_md(selected_mode.upper())}"
 
     async def _telegram_stop_autotrader(self, *, operator: str) -> str:
         async with AsyncSessionLocal() as session:

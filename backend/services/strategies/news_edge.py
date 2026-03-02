@@ -22,6 +22,7 @@ strategies. The scanner calls detect_async() instead of detect().
 from __future__ import annotations
 
 import asyncio
+import math
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -54,6 +55,85 @@ logger = logging.getLogger(__name__)
 # to arbitrary pool threads via the default executor causes segfaults.
 _MATCHER_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="semantic")
 
+NEWS_EDGE_DEFAULT_CONFIG: dict[str, Any] = {
+    "min_edge_percent": 5.0,
+    "min_confidence": 0.45,
+    "orchestrator_min_edge": 10.0,
+    "require_verifier": True,
+    "require_second_source": False,
+    "min_supporting_articles": 2,
+    "min_supporting_sources": 2,
+    "max_signal_age_minutes": 60,
+}
+
+NEWS_EDGE_CONFIG_SCHEMA: dict[str, Any] = {
+    "param_fields": [
+        {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
+        {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
+        {"key": "orchestrator_min_edge", "label": "Min Intent Edge (%)", "type": "number", "min": 0, "max": 100},
+        {"key": "require_verifier", "label": "Require Verifier", "type": "boolean"},
+        {"key": "require_second_source", "label": "Require Second Source", "type": "boolean"},
+        {"key": "min_supporting_articles", "label": "Min Supporting Articles", "type": "integer", "min": 1, "max": 10},
+        {"key": "min_supporting_sources", "label": "Min Supporting Sources", "type": "integer", "min": 1, "max": 10},
+        {"key": "max_signal_age_minutes", "label": "Max Signal Age (Minutes)", "type": "integer", "min": 1, "max": 1440},
+    ]
+}
+
+
+def news_edge_defaults() -> dict[str, Any]:
+    return dict(NEWS_EDGE_DEFAULT_CONFIG)
+
+
+def news_edge_config_schema() -> dict[str, Any]:
+    return dict(NEWS_EDGE_CONFIG_SCHEMA)
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _coerce_float(value: Any, default: float, lo: float, hi: float) -> float:
+    try:
+        parsed = float(value)
+    except Exception:
+        parsed = default
+    if not math.isfinite(parsed):
+        parsed = default
+    return max(lo, min(hi, parsed))
+
+
+def _coerce_int(value: Any, default: int, lo: int, hi: int) -> int:
+    try:
+        parsed = int(float(value))
+    except Exception:
+        parsed = default
+    return max(lo, min(hi, parsed))
+
+
+def validate_news_edge_config(config: Any) -> dict[str, Any]:
+    cfg = news_edge_defaults()
+    raw = config if isinstance(config, dict) else {}
+    cfg.update({str(k): v for k, v in raw.items() if str(k) != "_schema"})
+
+    cfg["min_edge_percent"] = _coerce_float(cfg.get("min_edge_percent"), 5.0, 0.0, 100.0)
+    cfg["min_confidence"] = _coerce_float(cfg.get("min_confidence"), 0.45, 0.0, 1.0)
+    cfg["orchestrator_min_edge"] = _coerce_float(cfg.get("orchestrator_min_edge"), 10.0, 0.0, 100.0)
+    cfg["require_verifier"] = _coerce_bool(cfg.get("require_verifier"), True)
+    cfg["require_second_source"] = _coerce_bool(cfg.get("require_second_source"), False)
+    cfg["min_supporting_articles"] = _coerce_int(cfg.get("min_supporting_articles"), 2, 1, 10)
+    cfg["min_supporting_sources"] = _coerce_int(cfg.get("min_supporting_sources"), 2, 1, 10)
+    cfg["max_signal_age_minutes"] = _coerce_int(cfg.get("max_signal_age_minutes"), 60, 1, 1440)
+    return StrategySDK.normalize_strategy_retention_config(cfg)
+
 
 class NewsEdgeStrategy(BaseStrategy):
     """
@@ -78,14 +158,15 @@ class NewsEdgeStrategy(BaseStrategy):
         max_resolution_months=6.0,
     )
 
-    DEFAULT_CONFIG = StrategySDK.news_filter_defaults()
+    DEFAULT_CONFIG = news_edge_defaults()
+    default_config = dict(DEFAULT_CONFIG)
 
     def __init__(self) -> None:
         super().__init__()
-        self._config: dict[str, Any] = StrategySDK.validate_news_filter_config(self.DEFAULT_CONFIG)
+        self._config: dict[str, Any] = validate_news_edge_config(self.default_config)
 
     def configure(self, config: dict) -> None:
-        self._config = StrategySDK.validate_news_filter_config(config)
+        self._config = validate_news_edge_config(config)
 
     def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:
         """Sync detect -- not used for this strategy.

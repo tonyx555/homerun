@@ -62,8 +62,25 @@ interface Props {
 }
 
 type TierFilter = 'WATCH' | 'HIGH' | 'EXTREME'
+type TraderSourceScopeFilter = 'tracked' | 'group' | 'pool' | 'other'
+type TraderSourceScopeFilterState = Record<TraderSourceScopeFilter, boolean>
 const CONFLUENCE_FETCH_LIMIT_MAX = 200
 const ITEMS_PER_PAGE = 20
+const TRADER_SOURCE_SCOPE_OPTIONS: Array<{
+  key: TraderSourceScopeFilter
+  label: string
+}> = [
+  { key: 'tracked', label: 'Tracked' },
+  { key: 'group', label: 'Groups' },
+  { key: 'pool', label: 'Pool' },
+  { key: 'other', label: 'Other' },
+]
+const DEFAULT_TRADER_SOURCE_SCOPE_FILTER: TraderSourceScopeFilterState = {
+  tracked: true,
+  group: true,
+  pool: true,
+  other: true,
+}
 
 const DEFAULT_TRADER_OPPORTUNITY_SETTINGS: TraderOpportunitiesSettingsForm = {
   confluence_limit: 50,
@@ -166,14 +183,30 @@ function signalDetectedTimestamp(signal: UnifiedTraderSignal): number {
 }
 
 function hasTrackedSource(signal: UnifiedTraderSignal): boolean {
-  return Boolean(
-    signal.source_flags?.from_tracked_traders
-    || signal.source_flags?.from_trader_groups,
-  )
+  return Boolean(signal.source_flags?.from_tracked_traders)
+}
+
+function hasGroupSource(signal: UnifiedTraderSignal): boolean {
+  return Boolean(signal.source_flags?.from_trader_groups)
 }
 
 function hasPoolSource(signal: UnifiedTraderSignal): boolean {
   return Boolean(signal.source_flags?.from_pool)
+}
+
+function hasOtherSource(signal: UnifiedTraderSignal): boolean {
+  return !hasTrackedSource(signal) && !hasGroupSource(signal) && !hasPoolSource(signal)
+}
+
+function signalMatchesSourceScopeFilters(
+  signal: UnifiedTraderSignal,
+  filters: TraderSourceScopeFilterState,
+): boolean {
+  if (filters.tracked && hasTrackedSource(signal)) return true
+  if (filters.group && hasGroupSource(signal)) return true
+  if (filters.pool && hasPoolSource(signal)) return true
+  if (filters.other && hasOtherSource(signal)) return true
+  return false
 }
 
 function signalPriority(signal: UnifiedTraderSignal): number {
@@ -217,6 +250,9 @@ export default function RecentTradesPanel({
   const [showGroupForm, setShowGroupForm] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [showFilteredSignals, setShowFilteredSignals] = useState(false)
+  const [sourceScopeFilter, setSourceScopeFilter] = useState<TraderSourceScopeFilterState>(
+    () => ({ ...DEFAULT_TRADER_SOURCE_SCOPE_FILTER }),
+  )
   const [currentPage, setCurrentPage] = useState(0)
   const [settingsSaveMessage, setSettingsSaveMessage] = useState<{
     type: 'success' | 'error'
@@ -261,7 +297,10 @@ export default function RecentTradesPanel({
     },
   })
 
-  const confluenceFetchLimit = showFilteredSignals
+  const sourceScopeFilterActive = TRADER_SOURCE_SCOPE_OPTIONS.some(
+    (option) => !sourceScopeFilter[option.key],
+  )
+  const confluenceFetchLimit = showFilteredSignals || sourceScopeFilterActive
     ? CONFLUENCE_FETCH_LIMIT_MAX
     : Math.min(CONFLUENCE_FETCH_LIMIT_MAX, signalLimit)
 
@@ -427,7 +466,7 @@ export default function RecentTradesPanel({
   useEffect(() => {
     if (!showOpportunities) return
     setCurrentPage(0)
-  }, [showOpportunities, signalLimit, showFilteredSignals])
+  }, [showOpportunities, signalLimit, showFilteredSignals, sourceScopeFilter])
 
   useEffect(() => {
     const handleOpenSettings = () => setSettingsOpen(true)
@@ -468,29 +507,54 @@ export default function RecentTradesPanel({
   }, [sortedConfluenceSignals])
   const trackedWallets = rawTradesData?.tracked_wallets || trackedWalletsFromSignals
 
-  const signalView = useMemo(() => {
-    const scannedSignals = sortedConfluenceSignals
-      .sort((a, b) => signalPriority(b) - signalPriority(a))
+  const toggleSourceScopeFilter = (scope: TraderSourceScopeFilter) => {
+    setSourceScopeFilter((previous) => {
+      const enabledCount = TRADER_SOURCE_SCOPE_OPTIONS.reduce(
+        (sum, option) => sum + (previous[option.key] ? 1 : 0),
+        0,
+      )
+      if (previous[scope] && enabledCount <= 1) {
+        return previous
+      }
+      return {
+        ...previous,
+        [scope]: !previous[scope],
+      }
+    })
+  }
 
-    const executableCandidates = scannedSignals
+  const clearSourceScopeFilter = () => {
+    setSourceScopeFilter({ ...DEFAULT_TRADER_SOURCE_SCOPE_FILTER })
+  }
+
+  const signalView = useMemo(() => {
+    const allScannedSignals = [...sortedConfluenceSignals]
+      .sort((a, b) => signalPriority(b) - signalPriority(a))
+    const scopedScannedSignals = allScannedSignals
+      .filter((signal) => signalMatchesSourceScopeFilters(signal, sourceScopeFilter))
+
+    const executableCandidates = scopedScannedSignals
       .filter(isQualifiedTraderSignal)
       .sort((a, b) => signalPriority(b) - signalPriority(a))
       .slice(0, signalLimit)
     const executableSignals = executableCandidates
-    const visibleSignals = showFilteredSignals ? scannedSignals : executableSignals
+    const visibleSignals = showFilteredSignals ? scopedScannedSignals : executableSignals
 
     return {
-      scannedSignals,
+      allScannedSignals,
+      scannedSignals: scopedScannedSignals,
       executableSignals,
       visibleSignals,
-      scannedTrackedCount: scannedSignals.filter(hasTrackedSource).length,
-      scannedPoolCount: scannedSignals.filter(hasPoolSource).length,
       visibleTrackedCount: visibleSignals.filter(hasTrackedSource).length,
+      visibleGroupCount: visibleSignals.filter(hasGroupSource).length,
       visiblePoolCount: visibleSignals.filter(hasPoolSource).length,
-      filteredOut: Math.max(0, scannedSignals.length - executableSignals.length),
+      visibleOtherCount: visibleSignals.filter(hasOtherSource).length,
+      sourceScopedOut: Math.max(0, allScannedSignals.length - scopedScannedSignals.length),
+      filteredOut: Math.max(0, scopedScannedSignals.length - executableSignals.length),
     }
   }, [
     sortedConfluenceSignals,
+    sourceScopeFilter,
     signalLimit,
     showFilteredSignals,
   ])
@@ -498,6 +562,7 @@ export default function RecentTradesPanel({
   const unifiedSignals = signalView.visibleSignals
   const executableSignals = signalView.executableSignals
   const filteredOutSignals = signalView.filteredOut
+  const sourceScopedOutSignals = signalView.sourceScopedOut
 
   const handleOpenSignalCopilot = (signal: UnifiedTraderSignal) => {
     const contextId = `${signal.source}:${signal.id}`
@@ -507,8 +572,9 @@ export default function RecentTradesPanel({
 
   const rawSignalCount = signalView.scannedSignals.length
   const displayedTrackedCount = signalView.visibleTrackedCount
+  const displayedGroupCount = signalView.visibleGroupCount
   const displayedPoolCount = signalView.visiblePoolCount
-  const displayedSignalCount = unifiedSignals.length
+  const displayedOtherCount = signalView.visibleOtherCount
   const executableSignalCount = executableSignals.length
   const totalPages = Math.ceil(unifiedSignals.length / ITEMS_PER_PAGE)
   const paginatedSignals = useMemo(() => {
@@ -522,6 +588,27 @@ export default function RecentTradesPanel({
     }
     return keys.size
   }, [unifiedSignals])
+  const visibleSignalWalletCount = useMemo(() => {
+    const addresses = new Set<string>()
+    for (const signal of unifiedSignals) {
+      const wallets = Array.isArray(signal.wallets) ? signal.wallets : []
+      for (const wallet of wallets) {
+        const address = String(wallet.address || '').trim().toLowerCase()
+        if (address.startsWith('0x')) {
+          addresses.add(address)
+        }
+      }
+    }
+    return addresses.size
+  }, [unifiedSignals])
+  const selectedSourceScopeLabels = useMemo(
+    () =>
+      TRADER_SOURCE_SCOPE_OPTIONS
+        .filter((option) => sourceScopeFilter[option.key])
+        .map((option) => option.label)
+        .join(', '),
+    [sourceScopeFilter],
+  )
   const highSignals = unifiedSignals.filter(
     (signal) => signal.source === 'confluence' && tierRank(signal.tier) >= tierRank('HIGH'),
   ).length
@@ -1024,27 +1111,45 @@ export default function RecentTradesPanel({
           {mode === 'opportunities' ? (
             <div className="flex flex-wrap items-center gap-2 p-3 rounded-xl border border-border/40 bg-card/40">
               <Filter className="w-4 h-4 text-muted-foreground/70" />
-              <span className="inline-flex items-center rounded-md border border-border/60 bg-card px-2 py-1 text-[10px] text-muted-foreground">
-                Confluence limit {signalLimit}
-              </span>
 
-              <span className="inline-flex items-center rounded-md border border-border/60 bg-card px-2 py-1 text-[10px] text-muted-foreground">
-                {showFilteredSignals ? `Scanned ${displayedSignalCount}` : `Executable ${executableSignalCount}`}
-              </span>
-              <span className="inline-flex items-center rounded-md border border-border/60 bg-card px-2 py-1 text-[10px] text-muted-foreground">
-                High/Extreme {highSignals}/{extremeSignals}
-              </span>
-              <span className="inline-flex items-center rounded-md border border-border/60 bg-card px-2 py-1 text-[10px] text-muted-foreground">
-                Avg {avgConviction.toFixed(1)}
-              </span>
-              <span className="inline-flex items-center rounded-md border border-border/60 bg-card px-2 py-1 text-[10px] text-muted-foreground">
-                Markets/Wallets {uniqueSignalMarkets}/{trackedWallets}
-              </span>
-              {filteredOutSignals > 0 && (
-                <span className="inline-flex items-center rounded-md border border-red-500/30 bg-red-500/10 px-2 py-1 text-[10px] text-red-200/90">
-                  Filtered {filteredOutSignals}
-                </span>
-              )}
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-muted-foreground">Max signals:</span>
+                <select
+                  value={signalLimit}
+                  onChange={(e) => setSignalLimit(Number(e.target.value))}
+                  className="h-8 rounded-md border border-border bg-card px-2 text-xs text-foreground"
+                >
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                  <option value={200}>200</option>
+                </select>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                {TRADER_SOURCE_SCOPE_OPTIONS.map((option) => (
+                  <button
+                    key={option.key}
+                    onClick={() => toggleSourceScopeFilter(option.key)}
+                    className={cn(
+                      'inline-flex h-8 items-center rounded-md border px-2.5 text-xs transition-colors',
+                      sourceScopeFilter[option.key]
+                        ? 'border-primary/30 bg-primary/10 text-primary hover:bg-primary/15'
+                        : 'border-border/60 bg-card text-muted-foreground hover:text-foreground hover:bg-muted/60',
+                    )}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+                {sourceScopeFilterActive && (
+                  <button
+                    onClick={clearSourceScopeFilter}
+                    className="inline-flex h-8 items-center rounded-md border border-border/60 bg-card px-2.5 text-xs text-muted-foreground transition-colors hover:text-foreground hover:bg-muted/60"
+                  >
+                    All Sources
+                  </button>
+                )}
+              </div>
 
               <div className="ml-auto flex items-center gap-2">
                 <button
@@ -1105,6 +1210,31 @@ export default function RecentTradesPanel({
                   </select>
                 </div>
 
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {TRADER_SOURCE_SCOPE_OPTIONS.map((option) => (
+                    <button
+                      key={option.key}
+                      onClick={() => toggleSourceScopeFilter(option.key)}
+                      className={cn(
+                        'inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs transition-colors',
+                        sourceScopeFilter[option.key]
+                          ? 'border-primary/30 bg-primary/10 text-primary hover:bg-primary/15'
+                          : 'border-border bg-muted text-muted-foreground hover:text-foreground hover:bg-accent',
+                      )}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                  {sourceScopeFilterActive && (
+                    <button
+                      onClick={clearSourceScopeFilter}
+                      className="inline-flex items-center rounded-md border border-border px-2 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground hover:bg-accent"
+                    >
+                      All Sources
+                    </button>
+                  )}
+                </div>
+
                 <button
                   onClick={() => setShowFilteredSignals((prev) => !prev)}
                   className={cn(
@@ -1127,7 +1257,7 @@ export default function RecentTradesPanel({
                   <p className="text-lg font-semibold text-foreground">
                     {unifiedSignals.length}
                     <span className="text-muted-foreground/50 text-sm ml-1">
-                      ({displayedTrackedCount}t + {displayedPoolCount}p)
+                      ({displayedTrackedCount}t / {displayedGroupCount}g / {displayedPoolCount}p)
                     </span>
                   </p>
                 </div>
@@ -1147,16 +1277,20 @@ export default function RecentTradesPanel({
                   <p className="text-lg font-semibold text-foreground">
                     <span className="text-blue-400">{uniqueSignalMarkets}</span>
                     <span className="text-muted-foreground/50 mx-1">/</span>
-                    <span className="text-orange-400">{trackedWallets}</span>
+                    <span className="text-orange-400">{visibleSignalWalletCount}</span>
                   </p>
                 </div>
                 <div className="rounded-lg border border-border/40 bg-card/40 p-3">
-                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Pool Signals</p>
-                  <p className="text-lg font-semibold text-purple-400">{displayedPoolCount}</p>
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Source Scope</p>
+                  <p className="text-sm font-semibold text-cyan-300">{selectedSourceScopeLabels}</p>
+                  <p className="text-[10px] text-muted-foreground/70 mt-1">
+                    Other {displayedOtherCount}
+                  </p>
                 </div>
                 <div className="rounded-lg border border-border/40 bg-card/40 p-3">
                   <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Filtered Out</p>
                   <p className="text-lg font-semibold text-red-300">{filteredOutSignals}</p>
+                  <p className="text-[10px] text-orange-300/80 mt-1">Scope {sourceScopedOutSignals}</p>
                 </div>
               </div>
             </>
@@ -1174,7 +1308,9 @@ export default function RecentTradesPanel({
                 {showFilteredSignals ? 'No scanned trader signals found' : 'No executable trader signals found'}
               </p>
               <p className="text-sm text-muted-foreground/50 mt-1">
-                {showFilteredSignals
+                {sourceScopeFilterActive
+                  ? `No signals match current source scope (${selectedSourceScopeLabels}).`
+                  : showFilteredSignals
                   ? 'No pooled confluence or tracked/group individual trade signals are currently available'
                   : filteredOutSignals > 0
                     ? `${filteredOutSignals} scanned signals are currently filtered from execution`

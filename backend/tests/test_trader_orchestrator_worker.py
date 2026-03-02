@@ -330,6 +330,19 @@ def test_source_open_order_timeout_seconds_prefers_strategy_level_param():
     assert timeout == 20.0
 
 
+def test_source_open_order_timeout_seconds_honors_explicit_crypto_timeout():
+    timeout = trader_orchestrator_worker._source_open_order_timeout_seconds(
+        {
+            "source_key": "crypto",
+            "strategy_key": "btc_eth_highfreq",
+            "strategy_params": {
+                "max_open_order_seconds": 8,
+            },
+        }
+    )
+    assert timeout == 8.0
+
+
 @pytest.mark.asyncio
 async def test_enforce_source_open_order_timeouts_calls_cleanup_with_source_scoped_filters(monkeypatch):
     cleanup_mock = AsyncMock(
@@ -377,10 +390,13 @@ async def test_enforce_source_open_order_timeouts_calls_cleanup_with_source_scop
     second_call = cleanup_mock.await_args_list[1].kwargs
     assert first_call["scope"] == "live"
     assert first_call["source"] == "crypto"
-    assert first_call["max_age_seconds"] == 45.0
+    assert first_call["max_age_seconds"] == 20.0
     assert first_call["require_unfilled"] is True
+    assert first_call["attempt_live_taker_rescue"] is True
+    assert first_call["live_taker_rescue_time_in_force"] == "IOC"
     assert second_call["source"] == "scanner"
     assert second_call["max_age_seconds"] == 45.0
+    assert second_call["attempt_live_taker_rescue"] is False
     assert summary["configured"] == 2
     assert summary["updated"] == 1
     assert summary["suppressed"] == 0
@@ -1241,6 +1257,65 @@ async def test_terminal_stale_order_watchdog_respects_alert_cooldown(monkeypatch
     assert second["alerted"] == 0
     create_event_mock.assert_awaited_once()
     assert create_event_mock.await_args.kwargs["event_type"] == "terminal_stale_orders"
+
+
+@pytest.mark.asyncio
+async def test_run_worker_loop_skips_terminal_stale_watchdog_when_globally_disabled(monkeypatch):
+    class _Session:
+        async def rollback(self):
+            return None
+
+    class _SessionContext:
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    stale_watchdog_mock = AsyncMock(return_value={})
+    snapshot_mock = AsyncMock(return_value=None)
+
+    async def _cancel_wait(*_args, **_kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(trader_orchestrator_worker, "AsyncSessionLocal", lambda: _SessionContext())
+    monkeypatch.setattr(
+        trader_orchestrator_worker, "_ensure_orchestrator_cycle_lock_owner", AsyncMock(return_value=True)
+    )
+    monkeypatch.setattr(
+        trader_orchestrator_worker, "_release_orchestrator_cycle_lock_owner", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(trader_orchestrator_worker, "ensure_all_strategies_seeded", AsyncMock(return_value=None))
+    monkeypatch.setattr(trader_orchestrator_worker, "ensure_trade_signal_group", AsyncMock(return_value=True))
+    monkeypatch.setattr(trader_orchestrator_worker, "refresh_strategy_runtime_if_needed", AsyncMock(return_value=None))
+    monkeypatch.setattr(trader_orchestrator_worker, "expire_stale_signals", AsyncMock(return_value=None))
+    monkeypatch.setattr(trader_orchestrator_worker, "_reconcile_orphan_open_orders", AsyncMock(return_value={}))
+    monkeypatch.setattr(trader_orchestrator_worker, "_run_terminal_stale_order_watchdog", stale_watchdog_mock)
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "read_orchestrator_control",
+        AsyncMock(
+            return_value={
+                "is_enabled": False,
+                "is_paused": True,
+                "kill_switch": False,
+                "run_interval_seconds": 1,
+                "mode": "paper",
+                "settings": {},
+            }
+        ),
+    )
+    monkeypatch.setattr(trader_orchestrator_worker, "list_traders", AsyncMock(return_value=[]))
+    monkeypatch.setattr(trader_orchestrator_worker, "compute_orchestrator_metrics", AsyncMock(return_value={}))
+    monkeypatch.setattr(trader_orchestrator_worker, "_write_orchestrator_snapshot_best_effort", snapshot_mock)
+    monkeypatch.setattr(trader_orchestrator_worker, "_wait_for_runtime_trigger", _cancel_wait)
+
+    with pytest.raises(asyncio.CancelledError):
+        await trader_orchestrator_worker.run_worker_loop()
+
+    stale_watchdog_mock.assert_not_awaited()
+    snapshot_mock.assert_awaited_once()
+    assert snapshot_mock.await_args.kwargs["current_activity"] == "Disabled"
 
 
 @pytest.mark.asyncio

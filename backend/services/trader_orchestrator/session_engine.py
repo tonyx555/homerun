@@ -155,6 +155,17 @@ def _execution_profile_for_signal(
     }
 
 
+def _is_live_position_cap_skip(*, mode: str, status: str, error_message: str | None) -> bool:
+    if str(mode or "").strip().lower() != "live":
+        return False
+    if str(status or "").strip().lower() != "failed":
+        return False
+    error_text = str(error_message or "").strip().lower()
+    if not error_text:
+        return False
+    return "maximum open positions" in error_text and "reached" in error_text
+
+
 @dataclass
 class SessionExecutionResult:
     session_id: str
@@ -390,8 +401,10 @@ class ExecutionSessionEngine:
         order_write_inputs: list[dict[str, Any]] = []
         orders_written = 0
         failed_legs = 0
+        skipped_legs = 0
         open_legs = 0
         completed_legs = 0
+        skip_reasons: list[str] = []
 
         waves = execution_waves(plan["policy"], legs)
         reprice_enabled = supports_reprice(plan["policy"])
@@ -421,12 +434,24 @@ class ExecutionSessionEngine:
 
                 mapped_leg_status = "failed"
                 normalized_status = str(result.status or "").strip().lower()
+                if _is_live_position_cap_skip(
+                    mode=mode,
+                    status=normalized_status,
+                    error_message=result.error_message,
+                ):
+                    normalized_status = "skipped"
                 if normalized_status == "executed":
                     mapped_leg_status = "completed"
                     completed_legs += 1
                 elif normalized_status in {"open", "submitted"}:
                     mapped_leg_status = "open"
                     open_legs += 1
+                elif normalized_status == "skipped":
+                    mapped_leg_status = "skipped"
+                    skipped_legs += 1
+                    skip_reason = str(result.error_message or "").strip()
+                    if skip_reason:
+                        skip_reasons.append(skip_reason)
                 else:
                     failed_legs += 1
 
@@ -483,7 +508,7 @@ class ExecutionSessionEngine:
                     filled_notional_usd=filled_notional,
                     filled_shares=filled_shares,
                     avg_fill_price=safe_float(result.effective_price, None),
-                    last_error=result.error_message if mapped_leg_status == "failed" else None,
+                    last_error=result.error_message if mapped_leg_status in {"failed", "skipped"} else None,
                     metadata_patch={
                         "wave_index": wave_index,
                         "provider_order_id": result.provider_order_id,
@@ -569,17 +594,18 @@ class ExecutionSessionEngine:
                         exit_config[target_key] = selected_value
 
                 order_payload["strategy_exit_config"] = exit_config
-                order_write_inputs.append(
-                    {
-                        "leg_id": leg_id,
-                        "leg_row_id": leg_row.id,
-                        "leg_payload": dict(leg_payload),
-                        "normalized_status": normalized_status,
-                        "result": result,
-                        "order_payload": order_payload,
-                        "exit_config": exit_config,
-                    }
-                )
+                if normalized_status != "skipped":
+                    order_write_inputs.append(
+                        {
+                            "leg_id": leg_id,
+                            "leg_row_id": leg_row.id,
+                            "leg_payload": dict(leg_payload),
+                            "normalized_status": normalized_status,
+                            "result": result,
+                            "order_payload": order_payload,
+                            "exit_config": exit_config,
+                        }
+                    )
 
                 leg_execution_records.append(
                     {
@@ -840,7 +866,15 @@ class ExecutionSessionEngine:
         hedging_timeout_seconds: int | None = None
         hedging_started_at: datetime | None = None
         hedging_deadline_at: datetime | None = None
-        if failed_legs > 0 and completed_legs == 0 and open_legs == 0:
+        if failed_legs == 0 and completed_legs == 0 and open_legs == 0 and skipped_legs > 0:
+            final_status = "skipped"
+            signal_status = "skipped"
+            error_message = (
+                skip_reasons[0]
+                if skip_reasons
+                else "Execution skipped before order submission."
+            )
+        elif failed_legs > 0 and completed_legs == 0 and open_legs == 0:
             final_status = "failed"
             signal_status = "failed"
             error_message = "All execution legs failed."
@@ -857,6 +891,10 @@ class ExecutionSessionEngine:
 
         effective_price = self._effective_price_from_leg_results(leg_execution_records)
         session_payload_patch: dict[str, Any] = {"orders_written": orders_written}
+        if skipped_legs > 0:
+            session_payload_patch["skipped_legs"] = skipped_legs
+            if skip_reasons:
+                session_payload_patch["skip_reasons"] = skip_reasons[:5]
         if final_status == "hedging" and hedging_started_at is not None and hedging_deadline_at is not None:
             session_payload_patch.update(
                 {
@@ -888,6 +926,10 @@ class ExecutionSessionEngine:
             event_type = "session_progress"
             event_severity = "info"
             event_message = f"Execution session remains {final_status}; awaiting leg completion"
+        elif final_status == "skipped":
+            event_type = "session_skipped"
+            event_severity = "info"
+            event_message = error_message or "Execution session skipped."
         await create_execution_session_event(
             self.db,
             session_id=session_row.id,
@@ -898,6 +940,7 @@ class ExecutionSessionEngine:
                 "failed_legs": failed_legs,
                 "completed_legs": completed_legs,
                 "open_legs": open_legs,
+                "skipped_legs": skipped_legs,
                 "hedge_timeout_seconds": hedging_timeout_seconds,
                 "hedging_deadline_at": (_iso_utc(hedging_deadline_at) if hedging_deadline_at is not None else None),
             },

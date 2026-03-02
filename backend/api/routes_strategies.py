@@ -51,6 +51,25 @@ from services.strategy_versioning import (
     serialize_strategy_version,
 )
 from services.strategy_sdk import StrategySDK
+from services.strategies.btc_eth_highfreq import (
+    crypto_highfreq_scope_config_schema,
+    crypto_highfreq_scope_defaults,
+)
+from services.strategies.late_favorite_alpha import (
+    late_favorite_alpha_config_schema,
+    late_favorite_alpha_defaults,
+    validate_late_favorite_alpha_config,
+)
+from services.strategies.news_edge import (
+    news_edge_config_schema,
+    news_edge_defaults,
+    validate_news_edge_config,
+)
+from services.strategies.traders_copy_trade import (
+    traders_copy_trade_config_schema,
+    traders_copy_trade_defaults,
+    validate_traders_copy_trade_config,
+)
 from services.strategy_runtime import bump_strategy_runtime_revisions
 from utils.logger import get_logger
 
@@ -77,13 +96,24 @@ def _validate_slug(slug: str) -> str:
     return slug
 
 
-def _normalize_strategy_config_for_source(source_key: str, config: Optional[dict]) -> dict:
+def _normalize_strategy_config_for_source(
+    source_key: str,
+    config: Optional[dict],
+    *,
+    strategy_slug: Optional[str] = None,
+) -> dict:
     normalized_source_key = str(source_key or "scanner").strip().lower()
+    normalized_slug = str(strategy_slug or "").strip().lower()
     payload = dict(config or {})
+    if normalized_slug == "late_favorite_alpha":
+        return validate_late_favorite_alpha_config(payload)
     if normalized_source_key == "traders":
-        payload = StrategySDK.validate_trader_filter_config(payload)
+        if normalized_slug == "traders_copy_trade":
+            payload = validate_traders_copy_trade_config(payload)
+        else:
+            payload = StrategySDK.validate_trader_filter_config(payload)
     elif normalized_source_key == "news":
-        payload = StrategySDK.validate_news_filter_config(payload)
+        payload = validate_news_edge_config(payload)
     return StrategySDK.normalize_strategy_retention_config(payload)
 
 
@@ -122,7 +152,7 @@ def _default_config_schema_for_source(source_key: str) -> dict:
     if normalized_source_key == "traders":
         base_schema = StrategySDK.trader_filter_config_schema()
     elif normalized_source_key == "news":
-        base_schema = StrategySDK.news_filter_config_schema()
+        base_schema = news_edge_config_schema()
     else:
         base_schema = {}
     return _merge_config_schemas(base_schema, StrategySDK.strategy_retention_config_schema())
@@ -287,7 +317,7 @@ def _resolved_strategy_config(row: Strategy) -> dict:
 
     overrides = dict(row.config or {})
     merged = {**defaults, **overrides}
-    return _normalize_strategy_config_for_source(source_key, merged)
+    return _normalize_strategy_config_for_source(source_key, merged, strategy_slug=slug)
 
 
 # ---------------------------------------------------------------------------
@@ -1005,14 +1035,16 @@ async def get_unified_docs():
                 "StrategySDK.trader_risk_fields_schema()": "Schema for trader risk controls",
                 "StrategySDK.trader_opportunity_filter_defaults()": "Default trader opportunity filters",
                 "StrategySDK.trader_opportunity_filter_config_schema()": "Schema for trader opportunity filters",
-                "StrategySDK.traders_copy_trade_defaults()": "Default explicit traders copy-trade strategy params",
-                "StrategySDK.traders_copy_trade_config_schema()": "Schema for explicit traders copy-trade params",
+                "traders_copy_trade_defaults()": "Default explicit traders copy-trade strategy params",
+                "traders_copy_trade_config_schema()": "Schema for explicit traders copy-trade params",
                 "StrategySDK.pool_eligibility_defaults()": "Default smart-pool selection thresholds",
                 "StrategySDK.pool_eligibility_config_schema()": "Schema for pool eligibility tuning",
-                "StrategySDK.news_filter_defaults()": "Default news strategy filters",
-                "StrategySDK.news_filter_config_schema()": "Schema for news strategy filters",
-                "StrategySDK.crypto_highfreq_scope_defaults()": "Default high-frequency crypto scope and exit controls",
-                "StrategySDK.crypto_highfreq_scope_config_schema()": "Schema for high-frequency crypto scope controls",
+                "news_edge_defaults()": "Default news strategy filters",
+                "news_edge_config_schema()": "Schema for news strategy filters",
+                "late_favorite_alpha_defaults()": "Default late-favorite alpha strategy params",
+                "late_favorite_alpha_config_schema()": "Schema for late-favorite alpha params",
+                "crypto_highfreq_scope_defaults()": "Default high-frequency crypto scope and exit controls",
+                "crypto_highfreq_scope_config_schema()": "Schema for high-frequency crypto scope controls",
                 "StrategySDK.strategy_retention_config_schema()": "Schema for max_opportunities and retention_window",
             },
             "validation_helpers": {
@@ -1021,9 +1053,10 @@ async def get_unified_docs():
                 "StrategySDK.validate_trader_runtime_metadata(config)": "Normalize schedule/tags/runtime metadata",
                 "StrategySDK.validate_trader_risk_config(config)": "Normalize trader risk limits",
                 "StrategySDK.validate_trader_opportunity_filter_config(config)": "Normalize trader opportunity filters",
-                "StrategySDK.validate_traders_copy_trade_config(config)": "Normalize explicit traders copy-trade params",
+                "validate_traders_copy_trade_config(config)": "Normalize explicit traders copy-trade params",
                 "StrategySDK.validate_pool_eligibility_config(config)": "Normalize smart-pool eligibility params",
-                "StrategySDK.validate_news_filter_config(config)": "Normalize news filter params",
+                "validate_news_edge_config(config)": "Normalize news filter params",
+                "validate_late_favorite_alpha_config(config)": "Normalize late-favorite alpha params",
                 "StrategySDK.normalize_strategy_retention_config(config)": "Normalize retention aliases to retention_max_age_minutes",
                 "StrategySDK.normalize_reverse_intent(value, ...)": "Normalize stop-and-reverse payload for should_exit()",
                 "StrategySDK.parse_duration_minutes(value)": "Parse durations like 15m, 2h, 3d into minutes",
@@ -1062,8 +1095,14 @@ async def get_unified_docs():
                 "StrategySDK.get_trader_tags()": "Tag definitions and wallet counts",
                 "StrategySDK.get_traders_by_tag(tag_name, limit)": "Wallets for a tag",
             },
-            "crypto_highfreq_scope_defaults": StrategySDK.crypto_highfreq_scope_defaults(),
-            "crypto_highfreq_scope_schema": StrategySDK.crypto_highfreq_scope_config_schema(),
+            "crypto_highfreq_scope_defaults": crypto_highfreq_scope_defaults(),
+            "crypto_highfreq_scope_schema": crypto_highfreq_scope_config_schema(),
+            "news_edge_defaults": news_edge_defaults(),
+            "news_edge_schema": news_edge_config_schema(),
+            "late_favorite_alpha_defaults": late_favorite_alpha_defaults(),
+            "late_favorite_alpha_schema": late_favorite_alpha_config_schema(),
+            "traders_copy_trade_defaults": traders_copy_trade_defaults(),
+            "traders_copy_trade_schema": traders_copy_trade_config_schema(),
         },
         # ── Section 7: Available Imports ──────────────────────────────
         "imports": {
@@ -1894,7 +1933,7 @@ async def create_strategy(req: UnifiedStrategyCreateRequest):
     """Create a new strategy."""
     slug = _validate_slug(req.slug)
     source_key = str(req.source_key or "scanner").strip().lower()
-    normalized_config = _normalize_strategy_config_for_source(source_key, req.config)
+    normalized_config = _normalize_strategy_config_for_source(source_key, req.config, strategy_slug=slug)
     normalized_schema = _merge_config_schemas(
         req.config_schema or _default_config_schema_for_source(source_key),
         StrategySDK.strategy_retention_config_schema(),
@@ -2023,7 +2062,11 @@ async def update_strategy(strategy_id: str, req: UnifiedStrategyUpdateRequest):
             reload_reasons.add("source_code")
 
         if req.config is not None:
-            normalized_config = _normalize_strategy_config_for_source(next_source_key, req.config)
+            normalized_config = _normalize_strategy_config_for_source(
+                next_source_key,
+                req.config,
+                strategy_slug=row.slug,
+            )
             if normalized_config != (row.config or {}):
                 row.config = normalized_config
                 snapshot_fields_changed.add("config")
@@ -2042,7 +2085,11 @@ async def update_strategy(strategy_id: str, req: UnifiedStrategyUpdateRequest):
                 row.source_key = next_source_key
                 snapshot_fields_changed.add("source_key")
             if req.config is None:
-                normalized_existing_config = _normalize_strategy_config_for_source(next_source_key, row.config)
+                normalized_existing_config = _normalize_strategy_config_for_source(
+                    next_source_key,
+                    row.config,
+                    strategy_slug=row.slug,
+                )
                 if normalized_existing_config != (row.config or {}):
                     row.config = normalized_existing_config
                     snapshot_fields_changed.add("config")

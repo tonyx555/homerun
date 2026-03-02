@@ -460,9 +460,21 @@ export const getOpportunities = async (params?: {
   offset?: number
 }): Promise<OpportunitiesResponse> => {
   const response = await api.get('/opportunities', { params })
-  const total = parseInt(response.headers['x-total-count'] || '0', 10)
+  const payload = unwrapApiData(response.data)
+  const opportunities = Array.isArray(payload)
+    ? payload
+    : (payload && typeof payload === 'object' && Array.isArray((payload as { opportunities?: unknown }).opportunities)
+      ? (payload as { opportunities: Opportunity[] }).opportunities
+      : [])
+  const headerTotal = parseInt(response.headers['x-total-count'] || '', 10)
+  const payloadTotal = payload && typeof payload === 'object'
+    ? Number((payload as { total?: unknown }).total)
+    : Number.NaN
+  const total = Number.isFinite(headerTotal)
+    ? headerTotal
+    : (Number.isFinite(payloadTotal) ? payloadTotal : opportunities.length)
   return {
-    opportunities: response.data,
+    opportunities,
     total
   }
 }
@@ -1406,7 +1418,6 @@ export interface TraderOrchestratorConfig {
   trading_domains: string[]
   enabled_strategies: string[]
   llm_verify_trades: boolean
-  paper_account_id?: string | null
   global_runtime: {
     pending_live_exit_guard: {
       max_pending_exits: number
@@ -1629,7 +1640,7 @@ const mapOverviewToStatus = (overview: TraderOrchestratorOverview): TraderOrches
   const totalTrades = Number(metrics.orders_count || 0)
 
   return {
-    mode: control.mode || 'paper',
+    mode: control.mode || 'shadow',
     running: tradingActive && workerRunning,
     trading_active: tradingActive,
     worker_running: workerRunning,
@@ -1687,17 +1698,15 @@ export const getTraderOrchestratorStatus = async (): Promise<TraderOrchestratorS
 
 export const startTraderOrchestrator = async (payload?: {
   mode?: string
-  paper_account_id?: string
   requested_by?: string
 }): Promise<{ status: string; mode: string; message: string }> => {
   const { data } = await api.post('/trader-orchestrator/start', {
-    mode: payload?.mode || 'paper',
-    paper_account_id: payload?.paper_account_id,
+    mode: payload?.mode || 'shadow',
     requested_by: payload?.requested_by,
   })
   return {
     status: data.status || 'started',
-    mode: data.control?.mode || payload?.mode || 'paper',
+    mode: data.control?.mode || payload?.mode || 'shadow',
     message: 'Trader orchestrator start command submitted.',
   }
 }
@@ -1777,7 +1786,7 @@ export interface Trader {
   id: string
   name: string
   description?: string | null
-  mode: 'paper' | 'live'
+  mode: 'shadow' | 'live'
   source_configs: TraderSourceConfig[]
   risk_limits: Record<string, any>
   metadata: Record<string, any>
@@ -2065,9 +2074,10 @@ function normalizeStrategyVersionValue(value: unknown): number | null {
   return Math.trunc(parsed)
 }
 
-function normalizeTraderMode(value: unknown): 'paper' | 'live' {
+function normalizeTraderMode(value: unknown): 'shadow' | 'live' {
   const mode = String(value || '').trim().toLowerCase()
-  return mode === 'live' ? 'live' : 'paper'
+  if (mode === 'live') return 'live'
+  return 'shadow'
 }
 
 function normalizeTraderStrategyKeyForSource(sourceKey: string, value: unknown): string {
@@ -2100,7 +2110,7 @@ function normalizeTraderFields(raw: any): Trader {
   }
 }
 
-export const getTraders = async (params?: { mode?: 'paper' | 'live' }): Promise<Trader[]> => {
+export const getTraders = async (params?: { mode?: 'shadow' | 'live' }): Promise<Trader[]> => {
   const { data } = await api.get('/traders', { params })
   return (data.traders || []).map(normalizeTraderFields)
 }
@@ -2130,10 +2140,10 @@ export const deleteTrader = async (
   trader_id: string
   action?: TraderDeleteAction
   open_live_positions?: number
-  open_paper_positions?: number
+  open_shadow_positions?: number
   open_other_positions?: number
   open_live_orders?: number
-  open_paper_orders?: number
+  open_shadow_orders?: number
   open_other_orders?: number
   open_total_positions?: number
   open_total_orders?: number

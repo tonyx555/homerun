@@ -22,12 +22,17 @@ def _leg_result(
     shares: float = 0.0,
     provider_order_id: str | None = None,
     provider_clob_order_id: str | None = None,
+    error_message: str | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         leg_id=leg_id,
         status=status,
         effective_price=0.41,
-        error_message=None if status != "failed" else "submission_failed",
+        error_message=(
+            error_message
+            if error_message is not None
+            else (None if status != "failed" else "submission_failed")
+        ),
         payload={"provider": "test"},
         provider_order_id=provider_order_id,
         provider_clob_order_id=provider_clob_order_id,
@@ -245,6 +250,101 @@ async def test_execute_signal_sets_hedging_timeout_payload(monkeypatch):
     assert payload_patch["hedging_escalation"] == "auto_fail_on_timeout"
     assert isinstance(payload_patch.get("hedging_started_at"), str)
     assert isinstance(payload_patch.get("hedging_deadline_at"), str)
+
+
+@pytest.mark.asyncio
+async def test_execute_signal_skips_position_cap_failures_without_order_writes(monkeypatch):
+    db = SimpleNamespace()
+    engine = session_engine_module.ExecutionSessionEngine(db)
+
+    plan = {"policy": "SINGLE_LEG", "plan_id": "plan-skip"}
+    legs = [
+        {
+            "leg_id": "leg-1",
+            "side": "buy",
+            "requested_notional_usd": 100.0,
+            "limit_price": 0.5,
+        }
+    ]
+    constraints = {
+        "max_unhedged_notional_usd": 0.0,
+        "hedge_timeout_seconds": 20,
+    }
+    monkeypatch.setattr(engine, "_build_plan", lambda *args, **kwargs: (plan, legs, constraints))
+    monkeypatch.setattr(
+        engine,
+        "_fetch_leg_rows",
+        AsyncMock(return_value={"leg-1": SimpleNamespace(id="leg-row-1")}),
+    )
+
+    create_session_mock = AsyncMock(return_value=SimpleNamespace(id="sess-skip"))
+    create_event_mock = AsyncMock()
+    update_status_mock = AsyncMock()
+    update_leg_mock = AsyncMock()
+    set_signal_status_mock = AsyncMock()
+    create_order_mock = AsyncMock()
+    create_session_order_mock = AsyncMock()
+    commit_mock = AsyncMock()
+
+    monkeypatch.setattr(session_engine_module, "create_execution_session", create_session_mock)
+    monkeypatch.setattr(session_engine_module, "create_execution_session_event", create_event_mock)
+    monkeypatch.setattr(session_engine_module, "update_execution_session_status", update_status_mock)
+    monkeypatch.setattr(session_engine_module, "update_execution_leg", update_leg_mock)
+    monkeypatch.setattr(session_engine_module, "set_trade_signal_status", set_signal_status_mock)
+    monkeypatch.setattr(session_engine_module, "create_trader_order", create_order_mock)
+    monkeypatch.setattr(session_engine_module, "create_execution_session_order", create_session_order_mock)
+    monkeypatch.setattr(session_engine_module, "_commit_with_retry", commit_mock)
+    monkeypatch.setattr(session_engine_module, "supports_reprice", lambda _policy: False)
+    monkeypatch.setattr(session_engine_module, "execution_waves", lambda _policy, leg_rows: [leg_rows])
+    monkeypatch.setattr(session_engine_module, "requires_pair_lock", lambda _policy, _constraints: False)
+    monkeypatch.setattr(
+        session_engine_module,
+        "submit_execution_wave",
+        AsyncMock(
+            return_value=[
+                _leg_result(
+                    leg_id="leg-1",
+                    status="failed",
+                    notional_usd=0.0,
+                    shares=0.0,
+                    error_message="Maximum open positions (10) reached",
+                )
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        session_engine_module,
+        "get_execution_session_detail",
+        AsyncMock(return_value={"session": {"unhedged_notional_usd": 0.0}}),
+    )
+
+    signal = SimpleNamespace(
+        id="signal-skip",
+        trace_id="trace-skip",
+        strategy_type="late_favorite_alpha",
+        strategy_context_json={},
+        market_question="question",
+    )
+    result = await engine.execute_signal(
+        trader_id="trader-skip",
+        signal=signal,
+        decision_id="decision-skip",
+        strategy_key="late_favorite_alpha",
+        strategy_version=None,
+        strategy_params={},
+        risk_limits={},
+        mode="live",
+        size_usd=100.0,
+        reason="test-skip",
+    )
+
+    assert result.status == "skipped"
+    assert result.orders_written == 0
+    assert create_order_mock.await_count == 0
+    assert create_session_order_mock.await_count == 0
+    assert update_status_mock.await_args_list[-1].kwargs["status"] == "skipped"
+    assert set_signal_status_mock.await_args_list[-1].kwargs["status"] == "skipped"
+    assert any(call.kwargs.get("status") == "skipped" for call in update_leg_mock.await_args_list)
 
 
 @pytest.mark.asyncio

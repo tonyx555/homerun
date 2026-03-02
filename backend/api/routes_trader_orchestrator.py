@@ -6,10 +6,9 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.database import SimulationAccount, get_db_session
+from models.database import get_db_session
 from services.pause_state import global_pause_state
 from services.trader_orchestrator_state import (
     DEFAULT_PENDING_LIVE_EXIT_GUARD,
@@ -31,8 +30,7 @@ router = APIRouter(prefix="/trader-orchestrator", tags=["Trader Orchestrator"])
 
 
 class StartRequest(BaseModel):
-    mode: Optional[str] = Field(default=None, description="paper | shadow | live")
-    paper_account_id: Optional[str] = None
+    mode: Optional[str] = Field(default=None, description="shadow | live")
     requested_by: Optional[str] = None
 
 
@@ -143,13 +141,6 @@ def _assert_not_globally_paused() -> None:
         )
 
 
-async def _paper_account_exists(session: AsyncSession, account_id: str) -> bool:
-    row = (
-        await session.execute(select(SimulationAccount.id).where(SimulationAccount.id == account_id))
-    ).scalar_one_or_none()
-    return row is not None
-
-
 @router.get("/overview")
 async def get_overview(session: AsyncSession = Depends(get_db_session)):
     return await get_orchestrator_overview(session)
@@ -215,7 +206,7 @@ async def start_orchestrator(
     session: AsyncSession = Depends(get_db_session),
 ):
     _assert_not_globally_paused()
-    mode = str(request.mode or "paper").strip().lower()
+    mode = str(request.mode or "shadow").strip().lower()
     if mode == "live":
         raise HTTPException(
             status_code=422,
@@ -224,29 +215,11 @@ async def start_orchestrator(
                 "Use the /live/preflight -> /live/arm -> /live/start ceremony instead."
             ),
         )
-    if mode not in {"paper", "shadow"}:
+    if mode != "shadow":
         raise HTTPException(
             status_code=422,
-            detail="mode must be 'paper' or 'shadow'. Use /live/start for live mode.",
+            detail="mode must be 'shadow'. Use /live/start for live mode.",
         )
-
-    control_before = await read_orchestrator_control(session)
-    settings_updates = {}
-    if mode == "paper":
-        requested_paper = str(request.paper_account_id or "").strip() or None
-        existing_paper = str((control_before.get("settings") or {}).get("paper_account_id") or "").strip() or None
-        paper_account_id = requested_paper or existing_paper
-        if not paper_account_id:
-            raise HTTPException(
-                status_code=422,
-                detail="paper_account_id required for paper mode. Select a sandbox account.",
-            )
-        if not await _paper_account_exists(session, paper_account_id):
-            raise HTTPException(
-                status_code=422,
-                detail="Selected paper_account_id does not exist. Select a valid sandbox account.",
-            )
-        settings_updates["paper_account_id"] = paper_account_id
 
     control = await update_orchestrator_control(
         session,
@@ -254,7 +227,6 @@ async def start_orchestrator(
         is_paused=False,
         mode=mode,
         requested_run_at=utcnow(),
-        settings_json=settings_updates,
     )
     await write_orchestrator_snapshot(
         session,
@@ -406,7 +378,7 @@ async def stop_live(
 ):
     control = await update_orchestrator_control(
         session,
-        mode="paper",
+        mode="shadow",
         is_enabled=False,
         is_paused=True,
         requested_run_at=None,

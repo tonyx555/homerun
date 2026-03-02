@@ -116,7 +116,7 @@ class ConnectionManager:
             "worker_status_update": "workers",
             "signals_update": "signals",
             "wallet_trade": "wallet",
-            "trader_orchestrator_status": "trading",
+            "trader_orchestrator_status": "core",
             "trader_decision": "trading",
             "trader_order": "trading",
             "execution_order": "trading",

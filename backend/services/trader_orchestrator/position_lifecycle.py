@@ -158,6 +158,18 @@ def _safe_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+def _strategy_hold_blocks_default_exit(exit_decision: Any) -> bool:
+    if exit_decision is None:
+        return False
+    action = str(getattr(exit_decision, "action", "") or "").strip().lower()
+    if action != "hold":
+        return False
+    payload = getattr(exit_decision, "payload", None)
+    if not isinstance(payload, dict):
+        return False
+    return _safe_bool(payload.get("skip_default_exit"), False)
+
+
 def _is_rapid_close_trigger(close_trigger: Any) -> bool:
     trigger = str(close_trigger or "").strip().lower()
     if not trigger:
@@ -1435,6 +1447,8 @@ async def reconcile_paper_positions(
                             strategy_exit = exit_decision
                         elif exit_action == "reduce":
                             strategy_exit = exit_decision
+                        elif _strategy_hold_blocks_default_exit(exit_decision):
+                            strategy_exit = exit_decision
                     except Exception as exc:
                         logger.warning(
                             "Strategy should_exit() error for %s: %s",
@@ -1443,6 +1457,15 @@ async def reconcile_paper_positions(
                         )
 
                 if strategy_exit is not None and getattr(strategy_exit, "action", None) == "reduce":
+                    if not dry_run:
+                        payload["position_state"] = next_state
+                        row.payload_json = payload
+                        row.updated_at = now
+                        state_updates += 1
+                    held += 1
+                    continue
+
+                if _strategy_hold_blocks_default_exit(strategy_exit):
                     if not dry_run:
                         payload["position_state"] = next_state
                         row.payload_json = payload
@@ -2548,6 +2571,7 @@ async def reconcile_live_positions(
                                     time_in_force="IOC",
                                     post_only=False,
                                     resolve_live_price=True,
+                                    enforce_fallback_bound=True,
                                 )
                             else:
                                 if take_profit_floor_price is not None:
@@ -2568,6 +2592,7 @@ async def reconcile_live_positions(
                                     time_in_force="IOC" if requote_as_rapid_exit else "GTC",
                                     post_only=bool(take_profit_requote_enabled and not requote_as_rapid_exit),
                                     resolve_live_price=requote_as_rapid_exit,
+                                    enforce_fallback_bound=True,
                                 )
                             if exec_result.status in {"executed", "open", "submitted"}:
                                 pending_exit["status"] = "submitted"
@@ -2890,6 +2915,7 @@ async def reconcile_live_positions(
                         time_in_force="IOC" if rapid_retry_exit else "GTC",
                         post_only=post_only_retry,
                         resolve_live_price=rapid_retry_exit,
+                        enforce_fallback_bound=True,
                     )
                     if exec_result.status in {"executed", "open", "submitted"}:
                         logger.info(
@@ -3194,6 +3220,8 @@ async def reconcile_live_positions(
                             strategy_exit = exit_decision
                         elif exit_action == "reduce":
                             strategy_exit = exit_decision
+                        elif _strategy_hold_blocks_default_exit(exit_decision):
+                            strategy_exit = exit_decision
                     except Exception as exc:
                         logger.warning(
                             "Strategy should_exit() error for %s: %s",
@@ -3202,6 +3230,15 @@ async def reconcile_live_positions(
                         )
 
                 if strategy_exit is not None and getattr(strategy_exit, "action", None) == "reduce":
+                    if not dry_run:
+                        payload["position_state"] = next_state
+                        row.payload_json = payload
+                        row.updated_at = now
+                        state_updates += 1
+                    held += 1
+                    continue
+
+                if _strategy_hold_blocks_default_exit(strategy_exit):
                     if not dry_run:
                         payload["position_state"] = next_state
                         row.payload_json = payload
@@ -3452,6 +3489,7 @@ async def reconcile_live_positions(
                             min_order_size_usd=min_order_size_usd,
                             time_in_force="IOC" if rapid_close_exit else "GTC",
                             resolve_live_price=rapid_close_exit,
+                            enforce_fallback_bound=True,
                         )
                         if exec_result.status in {"executed", "open", "submitted"}:
                             exit_record["status"] = "submitted"

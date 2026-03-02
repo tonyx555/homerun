@@ -13,6 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import Strategy, StrategyTombstone
 from services.strategy_sdk import StrategySDK
+from services.strategies.btc_eth_highfreq import crypto_highfreq_scope_config_schema
+from services.strategies.late_favorite_alpha import late_favorite_alpha_config_schema
+from services.strategies.news_edge import news_edge_config_schema
+from services.strategies.traders_copy_trade import traders_copy_trade_config_schema
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -530,6 +534,13 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                 {"key": "max_entry_price", "label": "Max Entry Price", "type": "number", "min": 0, "max": 1},
                 {"key": "min_probability", "label": "Min Probability", "type": "number", "min": 0.5, "max": 1},
                 {"key": "max_probability", "label": "Max Probability", "type": "number", "min": 0.5, "max": 1},
+                {
+                    "key": "min_upside_percent",
+                    "label": "Min Settlement Upside (%)",
+                    "type": "number",
+                    "min": 10,
+                    "max": 100,
+                },
                 {"key": "min_days_to_resolution", "label": "Min Days To Resolution", "type": "number", "min": 0},
                 {"key": "max_days_to_resolution", "label": "Max Days To Resolution", "type": "number", "min": 0},
                 {"key": "min_liquidity", "label": "Min Liquidity", "type": "number", "min": 0},
@@ -550,6 +561,46 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                 },
                 {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
                 {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
+                {"key": "take_profit_pct", "label": "Take Profit (%)", "type": "number", "min": 0, "max": 100},
+                {"key": "trailing_stop_pct", "label": "Trailing Stop (%)", "type": "number", "min": 0, "max": 100},
+                {"key": "smart_take_profit_enabled", "label": "Smart Take Profit Enabled", "type": "boolean"},
+                {
+                    "key": "smart_take_profit_min_pnl_pct",
+                    "label": "Smart TP Min PnL (%)",
+                    "type": "number",
+                    "min": 0,
+                    "max": 100,
+                },
+                {
+                    "key": "smart_take_profit_max_price_headroom",
+                    "label": "Smart TP Max Price Headroom",
+                    "type": "number",
+                    "min": 0.001,
+                    "max": 0.2,
+                },
+                {
+                    "key": "inversion_stop_enabled",
+                    "label": "Inversion Stop Enabled",
+                    "type": "boolean",
+                },
+                {
+                    "key": "inversion_price_threshold",
+                    "label": "Inversion Price Threshold",
+                    "type": "number",
+                    "min": 0.05,
+                    "max": 0.95,
+                },
+            ]
+        },
+    ),
+    SystemOpportunityStrategySeed(
+        slug="late_favorite_alpha",
+        source_key="scanner",
+        import_module="services.strategies.late_favorite_alpha",
+        sort_order=177,
+        config_schema={
+            "param_fields": [
+                *late_favorite_alpha_config_schema().get("param_fields", []),
             ]
         },
     ),
@@ -561,7 +612,7 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         sort_order=180,
         config_schema={
             "param_fields": [
-                *StrategySDK.news_filter_config_schema().get("param_fields", []),
+                *news_edge_config_schema().get("param_fields", []),
                 {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
                 {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
@@ -581,7 +632,7 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                     "type": "enum",
                     "options": ["auto", "directional", "maker_quote", "convergence"],
                 },
-                *StrategySDK.crypto_highfreq_scope_config_schema().get("param_fields", []),
+                *crypto_highfreq_scope_config_schema().get("param_fields", []),
                 {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
                 {"key": "direction_guardrail_enabled", "label": "Direction Guardrail Enabled", "type": "boolean"},
@@ -667,6 +718,177 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                 {"key": "take_profit_pct", "label": "Take Profit (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "stop_loss_pct", "label": "Stop Loss (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "max_hold_minutes", "label": "Max Hold (minutes)", "type": "number", "min": 0},
+            ]
+        },
+    ),
+    SystemOpportunityStrategySeed(
+        slug="crypto_queue_hazard_flip",
+        source_key="crypto",
+        import_module="services.strategies.crypto_queue_hazard_flip",
+        sort_order=193,
+        config_schema={
+            "param_fields": [
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
+                {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
+                {
+                    "key": "min_flow_imbalance",
+                    "label": "Min Flow Imbalance",
+                    "type": "number",
+                    "min": 0,
+                    "max": 1,
+                },
+                {
+                    "key": "min_recent_move_zscore",
+                    "label": "Min Recent Move Z-Score",
+                    "type": "number",
+                    "min": 0,
+                    "max": 10,
+                },
+                {"key": "max_spread_widening_bps", "label": "Max Spread Widening (bps)", "type": "number", "min": 0},
+                {"key": "max_cancel_rate_30s", "label": "Max Cancel Rate 30s", "type": "number", "min": 0, "max": 1},
+                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
+                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
+            ]
+        },
+    ),
+    SystemOpportunityStrategySeed(
+        slug="crypto_oracle_lag_capture",
+        source_key="crypto",
+        import_module="services.strategies.crypto_oracle_lag_capture",
+        sort_order=194,
+        config_schema={
+            "param_fields": [
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
+                {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
+                {"key": "min_oracle_diff_pct", "label": "Min Oracle Diff (%)", "type": "number", "min": 0},
+                {"key": "max_oracle_age_seconds", "label": "Max Oracle Age (sec)", "type": "number", "min": 0.1},
+                {"key": "max_entry_price", "label": "Max Entry Price", "type": "number", "min": 0, "max": 1},
+                {
+                    "key": "sizing_policy",
+                    "label": "Sizing Policy",
+                    "type": "enum",
+                    "options": ["fixed", "linear", "adaptive", "kelly"],
+                },
+                {
+                    "key": "kelly_fractional_scale",
+                    "label": "Kelly Fractional Scale",
+                    "type": "number",
+                    "min": 0.05,
+                    "max": 1,
+                },
+                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
+                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
+            ]
+        },
+    ),
+    SystemOpportunityStrategySeed(
+        slug="crypto_entropy_maker",
+        source_key="crypto",
+        import_module="services.strategies.crypto_entropy_maker",
+        sort_order=195,
+        config_schema={
+            "param_fields": [
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
+                {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
+                {"key": "min_entropy", "label": "Min Entropy", "type": "number", "min": 0, "max": 1},
+                {"key": "min_spread_pct", "label": "Min Spread", "type": "number", "min": 0, "max": 1},
+                {"key": "max_spread_pct", "label": "Max Spread", "type": "number", "min": 0, "max": 1},
+                {"key": "max_cancel_rate_30s", "label": "Max Cancel Rate 30s", "type": "number", "min": 0, "max": 1},
+                {"key": "min_liquidity_usd", "label": "Min Liquidity (USD)", "type": "number", "min": 0},
+                {
+                    "key": "sizing_policy",
+                    "label": "Sizing Policy",
+                    "type": "enum",
+                    "options": ["fixed", "linear", "adaptive", "kelly"],
+                },
+                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
+                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
+            ]
+        },
+    ),
+    SystemOpportunityStrategySeed(
+        slug="crypto_cancel_cluster_reentry",
+        source_key="crypto",
+        import_module="services.strategies.crypto_cancel_cluster_reentry",
+        sort_order=196,
+        config_schema={
+            "param_fields": [
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
+                {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
+                {
+                    "key": "min_prior_peak_cancel_rate",
+                    "label": "Min Prior Peak Cancel Rate",
+                    "type": "number",
+                    "min": 0,
+                    "max": 1,
+                },
+                {
+                    "key": "max_current_cancel_rate",
+                    "label": "Max Current Cancel Rate",
+                    "type": "number",
+                    "min": 0,
+                    "max": 1,
+                },
+                {"key": "min_cancel_drop", "label": "Min Cancel Drop", "type": "number", "min": 0, "max": 1},
+                {"key": "max_spread_widening_bps", "label": "Max Spread Widening (bps)", "type": "number", "min": 0},
+                {
+                    "key": "min_orderflow_alignment",
+                    "label": "Min Orderflow Alignment",
+                    "type": "number",
+                    "min": 0,
+                    "max": 1,
+                },
+                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
+                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
+            ]
+        },
+    ),
+    SystemOpportunityStrategySeed(
+        slug="crypto_twin_parallel",
+        source_key="crypto",
+        import_module="services.strategies.crypto_twin_parallel",
+        sort_order=197,
+        config_schema={
+            "param_fields": [
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
+                {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
+                {
+                    "key": "max_combined_entry_price",
+                    "label": "Max YES+NO Entry Price",
+                    "type": "number",
+                    "min": 0.01,
+                    "max": 1,
+                },
+                {"key": "max_leg_entry_price", "label": "Max Leg Entry Price", "type": "number", "min": 0.01, "max": 1},
+                {"key": "min_liquidity_usd", "label": "Min Liquidity (USD)", "type": "number", "min": 0},
+                {
+                    "key": "execution_policy",
+                    "label": "Execution Policy",
+                    "type": "enum",
+                    "options": ["PARALLEL_MAKER"],
+                },
+                {"key": "time_in_force", "label": "Time In Force", "type": "enum", "options": ["GTC", "IOC", "FOK"]},
+                {
+                    "key": "maker_price_offset_bps",
+                    "label": "Maker Price Offset (bps)",
+                    "type": "number",
+                    "min": 0,
+                    "max": 100,
+                },
+                {"key": "yes_notional_weight", "label": "YES Notional Weight", "type": "number", "min": 0.0001},
+                {"key": "no_notional_weight", "label": "NO Notional Weight", "type": "number", "min": 0.0001},
+                {
+                    "key": "max_unhedged_notional_usd",
+                    "label": "Max Unhedged Notional (USD)",
+                    "type": "number",
+                    "min": 0,
+                },
+                {"key": "hedge_timeout_seconds", "label": "Hedge Timeout (sec)", "type": "integer", "min": 1, "max": 600},
+                {"key": "session_timeout_seconds", "label": "Session Timeout (sec)", "type": "integer", "min": 1, "max": 1800},
+                {"key": "max_reprice_attempts", "label": "Max Reprice Attempts", "type": "integer", "min": 0, "max": 10},
+                {"key": "pair_lock", "label": "Pair Lock", "type": "boolean"},
+                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
+                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
         },
     ),
@@ -802,7 +1024,7 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         sort_order=211,
         config_schema={
             "param_fields": [
-                *StrategySDK.traders_copy_trade_config_schema().get("param_fields", []),
+                *traders_copy_trade_config_schema().get("param_fields", []),
             ]
         },
     ),

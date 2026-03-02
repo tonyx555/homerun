@@ -40,7 +40,7 @@ from config import settings as _cfg
 from .base import BaseStrategy, DecisionCheck, StrategyDecision, ExitDecision
 from services.data_events import DataEvent
 from services.strategy_sdk import StrategySDK
-from utils.converters import to_float, to_confidence, to_bool, clamp
+from utils.converters import safe_float, to_float, to_confidence, to_bool, clamp
 from utils.signal_helpers import signal_payload
 from services.quality_filter import QualityFilterOverrides
 from utils.logger import get_logger
@@ -188,6 +188,7 @@ CRYPTO_HF_SCOPE_DEFAULTS: dict[str, Any] = {
     "include_timeframes": ["5m", "15m", "1h", "4h"],
     "exclude_timeframes": [],
     "enabled_sub_strategies": ["maker_quote", "directional_edge", "convergence"],
+    "auto_mode_priority": ["directional", "convergence", "maker_quote"],
     "live_window_required": True,
     "min_liquidity_usd": 250.0,
     "min_liquidity_usd_opening": 4000.0,
@@ -198,17 +199,21 @@ CRYPTO_HF_SCOPE_DEFAULTS: dict[str, Any] = {
     "max_signal_age_seconds_15m": 4.5,
     "max_signal_age_seconds_1h": 7.5,
     "max_signal_age_seconds_4h": 10.0,
-    "max_market_data_age_ms": 1800,
-    "max_market_data_age_ms_5m": 1300,
-    "max_market_data_age_ms_15m": 1600,
-    "max_market_data_age_ms_1h": 2000,
-    "max_market_data_age_ms_4h": 2500,
+    "max_market_data_age_ms": 2500,
+    "max_market_data_age_ms_5m": 3000,
+    "max_market_data_age_ms_15m": 3200,
+    "max_market_data_age_ms_1h": 3500,
+    "max_market_data_age_ms_4h": 4500,
     "enforce_market_data_freshness": True,
     "require_market_data_age_for_sources": ["crypto"],
+    "enable_live_market_context": True,
+    "require_live_market_revalidation": True,
+    "require_live_revalidation_for_sources": ["crypto"],
     "max_live_context_age_seconds": 5.0,
     "max_oracle_age_seconds": 20.0,
     "max_oracle_age_ms": 20_000.0,
     "require_oracle_for_directional": True,
+    "oracle_direction_gate_modes": ["directional", "convergence"],
     "oracle_source_policy": "degrade",
     "oracle_fallback_degrade_edge_multiplier": 1.35,
     "oracle_fallback_degrade_confidence_multiplier": 1.08,
@@ -220,11 +225,26 @@ CRYPTO_HF_SCOPE_DEFAULTS: dict[str, Any] = {
     "max_recent_move_zscore_for_entry": 2.25,
     "max_spread_widening_bps": 28.0,
     "max_orderbook_imbalance": 0.92,
+    "orderflow_alignment_enabled": True,
+    "orderflow_alignment_modes": ["maker_quote", "convergence"],
+    "min_orderflow_alignment": 0.05,
+    "allow_missing_orderflow_alignment": False,
+    "cancel_cluster_guard_enabled": True,
+    "cancel_cluster_guard_modes": ["maker_quote"],
+    "max_cancel_rate_30s": 0.72,
+    "edge_calibration_enabled": True,
+    "edge_calibration_threshold_multiplier_floor": 0.80,
+    "edge_calibration_threshold_multiplier_ceiling": 1.80,
+    "edge_calibration_size_multiplier_floor": 0.35,
+    "edge_calibration_size_multiplier_ceiling": 1.20,
+    "timeout_taker_rescue_enabled": False,
+    "timeout_taker_rescue_price_bps": 12.0,
+    "timeout_taker_rescue_time_in_force": "IOC",
     "reentry_cooldown_seconds_per_market": 15,
-    "min_seconds_left_for_entry_5m": 60.0,
-    "min_seconds_left_for_entry_15m": 90.0,
-    "min_seconds_left_for_entry_1h": 360.0,
-    "min_seconds_left_for_entry_4h": 600.0,
+    "min_seconds_left_for_entry_5m": 35.0,
+    "min_seconds_left_for_entry_15m": 60.0,
+    "min_seconds_left_for_entry_1h": 240.0,
+    "min_seconds_left_for_entry_4h": 480.0,
     "opening_directional_buy_yes_enabled": False,
     "opening_directional_buy_yes_block_elapsed_pct": 0.10,
     "opening_directional_buy_yes_block_elapsed_pct_5m": 0.45,
@@ -236,12 +256,13 @@ CRYPTO_HF_SCOPE_DEFAULTS: dict[str, Any] = {
     "entry_executable_exit_ratio_floor_closing": 0.24,
     "directional_min_entry_price_floor": 0.25,
     "maker_min_entry_price_floor": 0.16,
-    "directional_max_entry_price_ceiling": 0.75,
-    "maker_max_entry_price_ceiling": 0.75,
+    "directional_max_entry_price_ceiling": 0.80,
+    "maker_max_entry_price_ceiling": 0.80,
     "directional_max_entry_price_ceiling_buy_yes": 0.72,
-    "directional_max_entry_price_ceiling_buy_no": 0.85,
+    "directional_max_entry_price_ceiling_buy_no": 0.95,
     "maker_max_entry_price_ceiling_buy_yes": 0.72,
-    "maker_max_entry_price_ceiling_buy_no": 0.85,
+    "maker_max_entry_price_ceiling_buy_no": 0.95,
+    "min_execution_adjusted_edge_percent": -0.05,
     "rapid_take_profit_pct": 10.0,
     "rapid_take_profit_pct_5m": 10.0,
     "rapid_take_profit_pct_15m": 10.0,
@@ -363,8 +384,1008 @@ CRYPTO_HF_SCOPE_DEFAULTS: dict[str, Any] = {
 }
 
 
+CRYPTO_HF_SCOPE_CONFIG_SCHEMA: dict[str, Any] = {
+    "param_fields": [
+        {
+            "key": "include_assets",
+            "label": "Include Assets",
+            "type": "list",
+            "options": ["BTC", "ETH", "SOL", "XRP"],
+        },
+        {
+            "key": "exclude_assets",
+            "label": "Exclude Assets",
+            "type": "list",
+            "options": ["BTC", "ETH", "SOL", "XRP"],
+        },
+        {
+            "key": "include_timeframes",
+            "label": "Include Timeframes",
+            "type": "list",
+            "options": ["5m", "15m", "1h", "4h"],
+        },
+        {
+            "key": "exclude_timeframes",
+            "label": "Exclude Timeframes",
+            "type": "list",
+            "options": ["5m", "15m", "1h", "4h"],
+        },
+        {
+            "key": "enabled_sub_strategies",
+            "label": "Enabled Sub-Strategies",
+            "type": "array[string]",
+            "options": ["maker_quote", "directional_edge", "convergence"],
+        },
+        {
+            "key": "auto_mode_priority",
+            "label": "Auto Mode Priority",
+            "type": "array[string]",
+            "options": ["directional", "convergence", "maker_quote"],
+        },
+        {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
+        {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
+        {"key": "max_risk_score", "label": "Max Risk Score", "type": "number", "min": 0, "max": 1},
+        {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 1000000},
+        {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 1000000},
+        {"key": "live_window_required", "label": "Live Window Required", "type": "boolean"},
+        {
+            "key": "min_liquidity_usd",
+            "label": "Min Liquidity (USD)",
+            "type": "number",
+            "min": 0,
+            "max": 1000000,
+        },
+        {
+            "key": "min_liquidity_usd_opening",
+            "label": "Min Liquidity Opening (USD)",
+            "type": "number",
+            "min": 0,
+            "max": 1000000,
+        },
+        {
+            "key": "max_spread_pct",
+            "label": "Max Spread (0-1)",
+            "type": "number",
+            "min": 0,
+            "max": 1,
+        },
+        {
+            "key": "max_signal_age_seconds",
+            "label": "Max Signal Age (sec)",
+            "type": "number",
+            "min": 1,
+            "max": 3600,
+        },
+        {
+            "key": "max_open_order_seconds",
+            "label": "Max Open Order Time (sec)",
+            "type": "number",
+            "min": 1,
+            "max": 86400,
+        },
+        {
+            "key": "max_signal_age_seconds_5m",
+            "label": "Max Signal Age (5m sec)",
+            "type": "number",
+            "min": 0.1,
+            "max": 300,
+        },
+        {
+            "key": "max_signal_age_seconds_15m",
+            "label": "Max Signal Age (15m sec)",
+            "type": "number",
+            "min": 0.1,
+            "max": 900,
+        },
+        {
+            "key": "max_signal_age_seconds_1h",
+            "label": "Max Signal Age (1h sec)",
+            "type": "number",
+            "min": 0.1,
+            "max": 3600,
+        },
+        {
+            "key": "max_signal_age_seconds_4h",
+            "label": "Max Signal Age (4h sec)",
+            "type": "number",
+            "min": 0.1,
+            "max": 14400,
+        },
+        {
+            "key": "max_market_data_age_ms",
+            "label": "Max Market Data Age (ms)",
+            "type": "integer",
+            "min": 50,
+            "max": 300000,
+        },
+        {
+            "key": "max_market_data_age_ms_5m",
+            "label": "Max Data Age 5m (ms)",
+            "type": "integer",
+            "min": 50,
+            "max": 300000,
+        },
+        {
+            "key": "max_market_data_age_ms_15m",
+            "label": "Max Data Age 15m (ms)",
+            "type": "integer",
+            "min": 50,
+            "max": 300000,
+        },
+        {
+            "key": "max_market_data_age_ms_1h",
+            "label": "Max Data Age 1h (ms)",
+            "type": "integer",
+            "min": 50,
+            "max": 300000,
+        },
+        {
+            "key": "max_market_data_age_ms_4h",
+            "label": "Max Data Age 4h (ms)",
+            "type": "integer",
+            "min": 50,
+            "max": 300000,
+        },
+        {"key": "enforce_market_data_freshness", "label": "Enforce Market Data Freshness", "type": "boolean"},
+        {"key": "require_market_data_age_for_sources", "label": "Require Data Age For Sources", "type": "list"},
+        {
+            "key": "max_live_context_age_seconds",
+            "label": "Max Live Context Age (sec)",
+            "type": "number",
+            "min": 0.1,
+            "max": 60,
+        },
+        {
+            "key": "max_oracle_age_seconds",
+            "label": "Max Oracle Age (sec)",
+            "type": "number",
+            "min": 1,
+            "max": 3600,
+        },
+        {
+            "key": "max_oracle_age_ms",
+            "label": "Max Oracle Age (ms)",
+            "type": "number",
+            "min": 100,
+            "max": 3_600_000,
+        },
+        {"key": "require_oracle_for_directional", "label": "Require Oracle For Directional", "type": "boolean"},
+        {
+            "key": "oracle_direction_gate_modes",
+            "label": "Oracle Direction Gate Modes",
+            "type": "list",
+            "options": ["directional", "convergence", "maker_quote"],
+        },
+        {
+            "key": "oracle_source_policy",
+            "label": "Oracle Source Policy",
+            "type": "enum",
+            "options": ["degrade", "hard_skip", "allow_fallback"],
+        },
+        {
+            "key": "oracle_fallback_degrade_edge_multiplier",
+            "label": "Oracle Fallback Edge Multiplier",
+            "type": "number",
+            "min": 1.0,
+            "max": 3.0,
+        },
+        {
+            "key": "oracle_fallback_degrade_confidence_multiplier",
+            "label": "Oracle Fallback Confidence Multiplier",
+            "type": "number",
+            "min": 1.0,
+            "max": 2.0,
+        },
+        {
+            "key": "oracle_fallback_degrade_size_multiplier",
+            "label": "Oracle Fallback Size Multiplier",
+            "type": "number",
+            "min": 0.05,
+            "max": 1.0,
+        },
+        {
+            "key": "min_edge_persistence_ms",
+            "label": "Min Edge Persistence (ms)",
+            "type": "integer",
+            "min": 0,
+            "max": 60000,
+        },
+        {
+            "key": "max_recent_move_zscore_for_entry",
+            "label": "Max Recent Move Z-Score",
+            "type": "number",
+            "min": 0.2,
+            "max": 12.0,
+        },
+        {
+            "key": "max_spread_widening_bps",
+            "label": "Max Spread Widening (bps)",
+            "type": "number",
+            "min": 0,
+            "max": 5000,
+        },
+        {
+            "key": "max_orderbook_imbalance",
+            "label": "Max Orderbook Imbalance",
+            "type": "number",
+            "min": 0.5,
+            "max": 1.0,
+        },
+        {"key": "orderflow_alignment_enabled", "label": "Orderflow Alignment Enabled", "type": "boolean"},
+        {
+            "key": "orderflow_alignment_modes",
+            "label": "Orderflow Alignment Modes",
+            "type": "list",
+            "options": ["maker_quote", "directional", "convergence"],
+        },
+        {
+            "key": "min_orderflow_alignment",
+            "label": "Min Orderflow Alignment",
+            "type": "number",
+            "min": 0.0,
+            "max": 1.0,
+        },
+        {"key": "allow_missing_orderflow_alignment", "label": "Allow Missing Orderflow", "type": "boolean"},
+        {"key": "cancel_cluster_guard_enabled", "label": "Cancel Cluster Guard Enabled", "type": "boolean"},
+        {
+            "key": "cancel_cluster_guard_modes",
+            "label": "Cancel Cluster Guard Modes",
+            "type": "list",
+            "options": ["maker_quote", "directional", "convergence"],
+        },
+        {"key": "max_cancel_rate_30s", "label": "Max Cancel Rate 30s", "type": "number", "min": 0.0, "max": 1.0},
+        {"key": "edge_calibration_enabled", "label": "Edge Calibration Enabled", "type": "boolean"},
+        {
+            "key": "edge_calibration_threshold_multiplier_floor",
+            "label": "Edge Calibration Threshold Floor",
+            "type": "number",
+            "min": 0.5,
+            "max": 2.0,
+        },
+        {
+            "key": "edge_calibration_threshold_multiplier_ceiling",
+            "label": "Edge Calibration Threshold Ceiling",
+            "type": "number",
+            "min": 0.5,
+            "max": 2.5,
+        },
+        {
+            "key": "edge_calibration_size_multiplier_floor",
+            "label": "Edge Calibration Size Floor",
+            "type": "number",
+            "min": 0.1,
+            "max": 2.0,
+        },
+        {
+            "key": "edge_calibration_size_multiplier_ceiling",
+            "label": "Edge Calibration Size Ceiling",
+            "type": "number",
+            "min": 0.2,
+            "max": 2.0,
+        },
+        {"key": "timeout_taker_rescue_enabled", "label": "Timeout Taker Rescue Enabled", "type": "boolean"},
+        {
+            "key": "timeout_taker_rescue_price_bps",
+            "label": "Timeout Taker Rescue Price (bps)",
+            "type": "number",
+            "min": 0.0,
+            "max": 500.0,
+        },
+        {
+            "key": "timeout_taker_rescue_time_in_force",
+            "label": "Timeout Taker Rescue TIF",
+            "type": "enum",
+            "options": ["IOC", "FOK", "GTC"],
+        },
+        {
+            "key": "reentry_cooldown_seconds_per_market",
+            "label": "Re-entry Cooldown (sec)",
+            "type": "integer",
+            "min": 0,
+            "max": 86400,
+        },
+        {
+            "key": "min_seconds_left_for_entry_5m",
+            "label": "Min Seconds Left (5m)",
+            "type": "number",
+            "min": 0,
+            "max": 300,
+        },
+        {
+            "key": "min_seconds_left_for_entry_15m",
+            "label": "Min Seconds Left (15m)",
+            "type": "number",
+            "min": 0,
+            "max": 900,
+        },
+        {
+            "key": "min_seconds_left_for_entry_1h",
+            "label": "Min Seconds Left (1h)",
+            "type": "number",
+            "min": 0,
+            "max": 3600,
+        },
+        {
+            "key": "min_seconds_left_for_entry_4h",
+            "label": "Min Seconds Left (4h)",
+            "type": "number",
+            "min": 0,
+            "max": 14400,
+        },
+        {
+            "key": "opening_directional_buy_yes_enabled",
+            "label": "Opening Directional Buy-Yes Enabled",
+            "type": "boolean",
+        },
+        {
+            "key": "opening_directional_buy_yes_block_elapsed_pct",
+            "label": "Opening Buy-Yes Block Window Default (Elapsed %)",
+            "type": "number",
+            "min": 0.0,
+            "max": 1.0,
+        },
+        {
+            "key": "opening_directional_buy_yes_block_elapsed_pct_5m",
+            "label": "Opening Buy-Yes Block Window 5m (Elapsed %)",
+            "type": "number",
+            "min": 0.0,
+            "max": 1.0,
+        },
+        {
+            "key": "opening_directional_buy_yes_block_elapsed_pct_15m",
+            "label": "Opening Buy-Yes Block Window 15m (Elapsed %)",
+            "type": "number",
+            "min": 0.0,
+            "max": 1.0,
+        },
+        {
+            "key": "opening_directional_buy_yes_block_elapsed_pct_1h",
+            "label": "Opening Buy-Yes Block Window 1h (Elapsed %)",
+            "type": "number",
+            "min": 0.0,
+            "max": 1.0,
+        },
+        {
+            "key": "opening_directional_buy_yes_block_elapsed_pct_4h",
+            "label": "Opening Buy-Yes Block Window 4h (Elapsed %)",
+            "type": "number",
+            "min": 0.0,
+            "max": 1.0,
+        },
+        {
+            "key": "opening_directional_buy_no_enabled",
+            "label": "Opening Directional Buy-No Enabled",
+            "type": "boolean",
+        },
+        {
+            "key": "entry_executable_exit_ratio_floor",
+            "label": "Entry Exitability Ratio Floor",
+            "type": "number",
+            "min": 0.01,
+            "max": 1.0,
+        },
+        {
+            "key": "entry_executable_exit_ratio_floor_closing",
+            "label": "Entry Exitability Floor Closing",
+            "type": "number",
+            "min": 0.01,
+            "max": 1.0,
+        },
+        {
+            "key": "directional_min_entry_price_floor",
+            "label": "Directional Min Entry Price",
+            "type": "number",
+            "min": 0.0,
+            "max": 0.99,
+        },
+        {
+            "key": "maker_min_entry_price_floor",
+            "label": "Maker Min Entry Price",
+            "type": "number",
+            "min": 0.0,
+            "max": 0.99,
+        },
+        {
+            "key": "directional_max_entry_price_ceiling",
+            "label": "Directional Max Entry Price",
+            "type": "number",
+            "min": 0.01,
+            "max": 1.0,
+        },
+        {
+            "key": "maker_max_entry_price_ceiling",
+            "label": "Maker Max Entry Price",
+            "type": "number",
+            "min": 0.01,
+            "max": 1.0,
+        },
+        {"key": "rapid_take_profit_pct", "label": "Rapid Take Profit (%)", "type": "number", "min": 0, "max": 100},
+        {
+            "key": "rapid_take_profit_pct_5m",
+            "label": "Rapid Take Profit 5m (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {
+            "key": "rapid_take_profit_pct_15m",
+            "label": "Rapid Take Profit 15m (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {
+            "key": "rapid_take_profit_pct_1h",
+            "label": "Rapid Take Profit 1h (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {
+            "key": "rapid_take_profit_pct_4h",
+            "label": "Rapid Take Profit 4h (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {
+            "key": "rapid_exit_window_minutes",
+            "label": "Rapid Exit Window (min)",
+            "type": "number",
+            "min": 0,
+            "max": 240,
+        },
+        {
+            "key": "rapid_exit_window_minutes_5m",
+            "label": "Rapid Exit Window 5m (min)",
+            "type": "number",
+            "min": 0,
+            "max": 240,
+        },
+        {
+            "key": "rapid_exit_window_minutes_15m",
+            "label": "Rapid Exit Window 15m (min)",
+            "type": "number",
+            "min": 0,
+            "max": 240,
+        },
+        {
+            "key": "rapid_exit_window_minutes_1h",
+            "label": "Rapid Exit Window 1h (min)",
+            "type": "number",
+            "min": 0,
+            "max": 240,
+        },
+        {
+            "key": "rapid_exit_window_minutes_4h",
+            "label": "Rapid Exit Window 4h (min)",
+            "type": "number",
+            "min": 0,
+            "max": 720,
+        },
+        {
+            "key": "rapid_exit_min_increase_pct",
+            "label": "Rapid Exit Min Increase (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {
+            "key": "rapid_exit_breakeven_buffer_pct",
+            "label": "Rapid Exit Breakeven Buffer (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {"key": "reverse_on_adverse_velocity_enabled", "label": "Enable Stop-And-Reverse", "type": "boolean"},
+        {"key": "reverse_min_loss_pct", "label": "Reverse Min Loss (%)", "type": "number", "min": 0, "max": 100},
+        {
+            "key": "reverse_min_adverse_velocity_score",
+            "label": "Reverse Min Adverse Velocity Score",
+            "type": "number",
+            "min": 0,
+            "max": 1,
+        },
+        {
+            "key": "reverse_flow_imbalance_threshold",
+            "label": "Reverse Flow Imbalance Threshold",
+            "type": "number",
+            "min": -1,
+            "max": 1,
+        },
+        {
+            "key": "reverse_momentum_short_pct_threshold",
+            "label": "Reverse Momentum Threshold (%)",
+            "type": "number",
+            "min": -100,
+            "max": 100,
+        },
+        {
+            "key": "reverse_min_seconds_left",
+            "label": "Reverse Min Seconds Left",
+            "type": "number",
+            "min": 0,
+            "max": 14400,
+        },
+        {
+            "key": "reverse_min_price_headroom",
+            "label": "Reverse Min Price Headroom",
+            "type": "number",
+            "min": 0,
+            "max": 1,
+        },
+        {
+            "key": "reverse_min_edge_percent",
+            "label": "Reverse Min Edge (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {"key": "reverse_confidence", "label": "Reverse Confidence", "type": "number", "min": 0, "max": 1},
+        {
+            "key": "reverse_size_multiplier",
+            "label": "Reverse Size Multiplier",
+            "type": "number",
+            "min": 0.1,
+            "max": 10,
+        },
+        {
+            "key": "reverse_signal_ttl_seconds",
+            "label": "Reverse Signal TTL (sec)",
+            "type": "number",
+            "min": 5,
+            "max": 3600,
+        },
+        {
+            "key": "reverse_cooldown_seconds",
+            "label": "Reverse Cooldown (sec)",
+            "type": "number",
+            "min": 0,
+            "max": 3600,
+        },
+        {
+            "key": "reverse_max_reentries_per_position",
+            "label": "Reverse Max Reentries / Position",
+            "type": "integer",
+            "min": 0,
+            "max": 10,
+        },
+        {"key": "underwater_rebound_exit_enabled", "label": "Underwater Rebound Exit", "type": "boolean"},
+        {
+            "key": "underwater_dwell_minutes",
+            "label": "Underwater Dwell (min)",
+            "type": "number",
+            "min": 0,
+            "max": 720,
+        },
+        {
+            "key": "underwater_dwell_minutes_5m",
+            "label": "Underwater Dwell 5m (min)",
+            "type": "number",
+            "min": 0,
+            "max": 720,
+        },
+        {
+            "key": "underwater_dwell_minutes_15m",
+            "label": "Underwater Dwell 15m (min)",
+            "type": "number",
+            "min": 0,
+            "max": 720,
+        },
+        {
+            "key": "underwater_dwell_minutes_1h",
+            "label": "Underwater Dwell 1h (min)",
+            "type": "number",
+            "min": 0,
+            "max": 720,
+        },
+        {
+            "key": "underwater_dwell_minutes_4h",
+            "label": "Underwater Dwell 4h (min)",
+            "type": "number",
+            "min": 0,
+            "max": 1440,
+        },
+        {
+            "key": "underwater_recovery_ratio_min",
+            "label": "Min Recovery Ratio",
+            "type": "number",
+            "min": 0,
+            "max": 1,
+        },
+        {
+            "key": "underwater_recovery_ratio_min_5m",
+            "label": "Min Recovery Ratio 5m",
+            "type": "number",
+            "min": 0,
+            "max": 1,
+        },
+        {
+            "key": "underwater_recovery_ratio_min_15m",
+            "label": "Min Recovery Ratio 15m",
+            "type": "number",
+            "min": 0,
+            "max": 1,
+        },
+        {
+            "key": "underwater_recovery_ratio_min_1h",
+            "label": "Min Recovery Ratio 1h",
+            "type": "number",
+            "min": 0,
+            "max": 1,
+        },
+        {
+            "key": "underwater_recovery_ratio_min_4h",
+            "label": "Min Recovery Ratio 4h",
+            "type": "number",
+            "min": 0,
+            "max": 1,
+        },
+        {
+            "key": "underwater_rebound_pct_min",
+            "label": "Min Rebound (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {
+            "key": "underwater_rebound_pct_min_5m",
+            "label": "Min Rebound 5m (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {
+            "key": "underwater_rebound_pct_min_15m",
+            "label": "Min Rebound 15m (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {
+            "key": "underwater_rebound_pct_min_1h",
+            "label": "Min Rebound 1h (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {
+            "key": "underwater_rebound_pct_min_4h",
+            "label": "Min Rebound 4h (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {
+            "key": "underwater_exit_fade_pct",
+            "label": "Rebound Fade Trigger (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {
+            "key": "underwater_exit_fade_pct_5m",
+            "label": "Rebound Fade 5m (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {
+            "key": "underwater_exit_fade_pct_15m",
+            "label": "Rebound Fade 15m (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {
+            "key": "underwater_exit_fade_pct_1h",
+            "label": "Rebound Fade 1h (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {
+            "key": "underwater_exit_fade_pct_4h",
+            "label": "Rebound Fade 4h (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {
+            "key": "underwater_timeout_minutes",
+            "label": "Underwater Timeout (min)",
+            "type": "number",
+            "min": 0,
+            "max": 1440,
+        },
+        {
+            "key": "underwater_timeout_minutes_5m",
+            "label": "Underwater Timeout 5m (min)",
+            "type": "number",
+            "min": 0,
+            "max": 1440,
+        },
+        {
+            "key": "underwater_timeout_minutes_15m",
+            "label": "Underwater Timeout 15m (min)",
+            "type": "number",
+            "min": 0,
+            "max": 1440,
+        },
+        {
+            "key": "underwater_timeout_minutes_1h",
+            "label": "Underwater Timeout 1h (min)",
+            "type": "number",
+            "min": 0,
+            "max": 1440,
+        },
+        {
+            "key": "underwater_timeout_minutes_4h",
+            "label": "Underwater Timeout 4h (min)",
+            "type": "number",
+            "min": 0,
+            "max": 1440,
+        },
+        {
+            "key": "underwater_timeout_loss_pct",
+            "label": "Underwater Timeout Loss (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {"key": "take_profit_pct", "label": "Take Profit (%)", "type": "number", "min": 0, "max": 100},
+        {"key": "stop_loss_pct", "label": "Stop Loss (%)", "type": "number", "min": 0, "max": 100},
+        {
+            "key": "stop_loss_policy",
+            "label": "Stop Loss Policy",
+            "type": "enum",
+            "options": ["always", "near_close_only", "volatility_adaptive"],
+        },
+        {
+            "key": "stop_loss_policy_5m",
+            "label": "Stop Loss Policy (5m)",
+            "type": "enum",
+            "options": ["always", "near_close_only", "volatility_adaptive"],
+        },
+        {
+            "key": "stop_loss_policy_15m",
+            "label": "Stop Loss Policy (15m)",
+            "type": "enum",
+            "options": ["always", "near_close_only", "volatility_adaptive"],
+        },
+        {
+            "key": "stop_loss_policy_1h",
+            "label": "Stop Loss Policy (1h)",
+            "type": "enum",
+            "options": ["always", "near_close_only", "volatility_adaptive"],
+        },
+        {
+            "key": "stop_loss_policy_4h",
+            "label": "Stop Loss Policy (4h)",
+            "type": "enum",
+            "options": ["always", "near_close_only", "volatility_adaptive"],
+        },
+        {
+            "key": "stop_loss_activation_seconds",
+            "label": "Stop Loss Arm Window (sec)",
+            "type": "integer",
+            "min": 0,
+            "max": 86400,
+        },
+        {
+            "key": "stop_loss_activation_seconds_5m",
+            "label": "Stop Loss Arm (5m sec)",
+            "type": "number",
+            "min": 0,
+            "max": 300,
+        },
+        {
+            "key": "stop_loss_activation_seconds_15m",
+            "label": "Stop Loss Arm (15m sec)",
+            "type": "number",
+            "min": 0,
+            "max": 900,
+        },
+        {
+            "key": "stop_loss_activation_seconds_1h",
+            "label": "Stop Loss Arm (1h sec)",
+            "type": "number",
+            "min": 0,
+            "max": 3600,
+        },
+        {
+            "key": "stop_loss_activation_seconds_4h",
+            "label": "Stop Loss Arm (4h sec)",
+            "type": "number",
+            "min": 0,
+            "max": 14400,
+        },
+        {
+            "key": "trailing_stop_pct",
+            "label": "Trailing Stop (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {
+            "key": "trailing_stop_activation_profit_pct",
+            "label": "Trailing Arm Profit (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {
+            "key": "trailing_stop_activation_profit_pct_5m",
+            "label": "Trailing Arm Profit 5m (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {
+            "key": "trailing_stop_activation_profit_pct_15m",
+            "label": "Trailing Arm Profit 15m (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {
+            "key": "trailing_stop_activation_profit_pct_1h",
+            "label": "Trailing Arm Profit 1h (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {
+            "key": "trailing_stop_activation_profit_pct_4h",
+            "label": "Trailing Arm Profit 4h (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {"key": "min_hold_minutes", "label": "Min Hold (Minutes)", "type": "number", "min": 0, "max": 1440},
+        {"key": "max_hold_minutes", "label": "Max Hold (Minutes)", "type": "number", "min": 1, "max": 1440},
+        {
+            "key": "force_flatten_seconds_left",
+            "label": "Force Flatten Seconds Left",
+            "type": "number",
+            "min": 0,
+            "max": 14400,
+        },
+        {
+            "key": "force_flatten_seconds_left_5m",
+            "label": "Force Flatten 5m Seconds Left",
+            "type": "number",
+            "min": 0,
+            "max": 300,
+        },
+        {
+            "key": "force_flatten_seconds_left_15m",
+            "label": "Force Flatten 15m Seconds Left",
+            "type": "number",
+            "min": 0,
+            "max": 900,
+        },
+        {
+            "key": "force_flatten_seconds_left_1h",
+            "label": "Force Flatten 1h Seconds Left",
+            "type": "number",
+            "min": 0,
+            "max": 3600,
+        },
+        {
+            "key": "force_flatten_seconds_left_4h",
+            "label": "Force Flatten 4h Seconds Left",
+            "type": "number",
+            "min": 0,
+            "max": 14400,
+        },
+        {
+            "key": "force_flatten_max_profit_pct",
+            "label": "Force Flatten Max Profit (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {
+            "key": "force_flatten_headroom_floor",
+            "label": "Force Flatten Min Headroom Ratio",
+            "type": "number",
+            "min": 0,
+            "max": 10,
+        },
+        {
+            "key": "force_flatten_min_loss_pct",
+            "label": "Force Flatten Max Loss (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {
+            "key": "resolution_risk_flatten_enabled",
+            "label": "Resolution Risk Flatten Enabled",
+            "type": "boolean",
+        },
+        {
+            "key": "resolution_risk_seconds_left",
+            "label": "Resolution Risk Seconds Left",
+            "type": "number",
+            "min": 0,
+            "max": 14400,
+        },
+        {
+            "key": "resolution_risk_seconds_left_5m",
+            "label": "Resolution Risk 5m Seconds Left",
+            "type": "number",
+            "min": 0,
+            "max": 300,
+        },
+        {
+            "key": "resolution_risk_seconds_left_15m",
+            "label": "Resolution Risk 15m Seconds Left",
+            "type": "number",
+            "min": 0,
+            "max": 900,
+        },
+        {
+            "key": "resolution_risk_seconds_left_1h",
+            "label": "Resolution Risk 1h Seconds Left",
+            "type": "number",
+            "min": 0,
+            "max": 3600,
+        },
+        {
+            "key": "resolution_risk_seconds_left_4h",
+            "label": "Resolution Risk 4h Seconds Left",
+            "type": "number",
+            "min": 0,
+            "max": 14400,
+        },
+        {
+            "key": "resolution_risk_max_profit_pct",
+            "label": "Resolution Risk Max Profit (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {
+            "key": "resolution_risk_max_profit_pct_5m",
+            "label": "Resolution Risk 5m Max Profit (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {
+            "key": "resolution_risk_min_loss_pct",
+            "label": "Resolution Risk Max Loss (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+        },
+        {
+            "key": "resolution_risk_min_headroom_ratio",
+            "label": "Resolution Risk Min Headroom Ratio",
+            "type": "number",
+            "min": 0,
+            "max": 10,
+        },
+        {
+            "key": "resolution_risk_disable_when_take_profit_armed",
+            "label": "Resolution Risk Ignore Armed TP",
+            "type": "boolean",
+        },
+        {"key": "resolve_only", "label": "Resolve Only Exit", "type": "boolean"},
+        {"key": "close_on_inactive_market", "label": "Close On Inactive Market", "type": "boolean"},
+        {"key": "preplace_take_profit_exit", "label": "Pre-Place Take Profit Exit", "type": "boolean"},
+        {"key": "enforce_min_exit_notional", "label": "Enforce Min Exit Notional", "type": "boolean"},
+    ]
+}
+
 def crypto_highfreq_scope_defaults() -> dict[str, Any]:
     return dict(CRYPTO_HF_SCOPE_DEFAULTS)
+
+
+def crypto_highfreq_scope_config_schema() -> dict[str, Any]:
+    return dict(CRYPTO_HF_SCOPE_CONFIG_SCHEMA)
 
 
 def crypto_highfreq_direction_allowed(
@@ -1616,6 +2637,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
     market_categories = ["crypto"]
     requires_historical_prices = True
     subscriptions = ["crypto_update"]
+    requires_live_market_context = True
     supports_entry_take_profit_exit = True
     default_open_order_timeout_seconds = 45.0
 
@@ -2626,6 +3648,183 @@ class BtcEthHighFreqStrategy(BaseStrategy):
     # Evaluate / Should-Exit  (unified strategy interface)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _primary_market_for_signal(payload: dict[str, Any], signal: Any) -> dict[str, Any]:
+        markets = payload.get("markets")
+        if not isinstance(markets, list):
+            return {}
+        signal_market_id = str(getattr(signal, "market_id", "") or payload.get("market_id") or "").strip()
+        if signal_market_id:
+            for market in markets:
+                if not isinstance(market, dict):
+                    continue
+                market_id = str(market.get("id") or market.get("condition_id") or "").strip()
+                if market_id == signal_market_id:
+                    return market
+        for market in markets:
+            if isinstance(market, dict):
+                return market
+        return {}
+
+    def _build_maker_quote_execution_plan_override(
+        self,
+        *,
+        signal: Any,
+        payload: dict[str, Any],
+        live_market: dict[str, Any],
+        params: dict[str, Any],
+        regime: str,
+    ) -> dict[str, Any] | None:
+        market = self._primary_market_for_signal(payload, signal)
+        market_id = str(getattr(signal, "market_id", "") or market.get("id") or market.get("condition_id") or "").strip()
+        if not market_id:
+            return None
+        token_ids = market.get("clob_token_ids")
+        token_ids = token_ids if isinstance(token_ids, list) else []
+        yes_token_id = str(token_ids[0] or "").strip() if len(token_ids) > 0 else ""
+        no_token_id = str(token_ids[1] or "").strip() if len(token_ids) > 1 else ""
+        if not yes_token_id or not no_token_id:
+            return None
+
+        outcome_prices = market.get("outcome_prices")
+        outcome_prices = outcome_prices if isinstance(outcome_prices, list) else []
+        yes_market_price = self._float(outcome_prices[0]) if len(outcome_prices) > 0 else None
+        no_market_price = self._float(outcome_prices[1]) if len(outcome_prices) > 1 else None
+
+        yes_price = self._float(
+            _first_present(
+                live_market.get("yes_price"),
+                market.get("current_yes_price"),
+                market.get("yes_price"),
+                yes_market_price,
+                payload.get("up_price"),
+                payload.get("yes_price"),
+            )
+        )
+        no_price = self._float(
+            _first_present(
+                live_market.get("no_price"),
+                market.get("current_no_price"),
+                market.get("no_price"),
+                no_market_price,
+                payload.get("down_price"),
+                payload.get("no_price"),
+            )
+        )
+        if yes_price is None or no_price is None:
+            return None
+        if yes_price <= 0.0 or yes_price >= 1.0 or no_price <= 0.0 or no_price >= 1.0:
+            return None
+
+        quote_tick = clamp(
+            to_float(params.get("maker_quote_tick_size"), _MAKER_QUOTE_TICK_SIZE),
+            0.001,
+            0.05,
+        )
+        quote_yes = clamp(yes_price - quote_tick, 0.01, 0.99)
+        quote_no = clamp(no_price - quote_tick, 0.01, 0.99)
+
+        combined_cost = quote_yes + quote_no
+        if combined_cost >= 0.998:
+            excess = combined_cost - 0.998
+            quote_yes = clamp(quote_yes - (excess / 2.0), 0.01, 0.99)
+            quote_no = clamp(quote_no - (excess / 2.0), 0.01, 0.99)
+
+        market_question = str(
+            getattr(signal, "market_question", "") or market.get("question") or payload.get("title") or ""
+        ).strip()
+        session_timeout_seconds = int(
+            max(
+                60,
+                min(
+                    900,
+                    to_float(
+                        _first_present(
+                            params.get("session_timeout_seconds"),
+                            params.get("maker_session_timeout_seconds"),
+                            300,
+                        ),
+                        300.0,
+                    ),
+                ),
+            )
+        )
+        hedge_timeout_seconds = int(
+            max(
+                1,
+                min(
+                    120,
+                    to_float(
+                        _first_present(
+                            params.get("hedge_timeout_seconds"),
+                            params.get("maker_hedge_timeout_seconds"),
+                            20,
+                        ),
+                        20.0,
+                    ),
+                ),
+            )
+        )
+
+        return {
+            "plan_id": f"maker_parallel_{market_id}",
+            "policy": "PARALLEL_MAKER",
+            "time_in_force": "GTC",
+            "legs": [
+                {
+                    "leg_id": "leg_yes",
+                    "market_id": market_id,
+                    "market_question": market_question,
+                    "token_id": yes_token_id,
+                    "side": "buy",
+                    "outcome": "yes",
+                    "limit_price": quote_yes,
+                    "price_policy": "maker_limit",
+                    "time_in_force": "GTC",
+                    "post_only": True,
+                    "notional_weight": 0.5,
+                    "min_fill_ratio": 0.0,
+                    "metadata": {
+                        "active_mode": "maker_quote",
+                        "regime": regime,
+                        "target_side": "YES",
+                    },
+                },
+                {
+                    "leg_id": "leg_no",
+                    "market_id": market_id,
+                    "market_question": market_question,
+                    "token_id": no_token_id,
+                    "side": "buy",
+                    "outcome": "no",
+                    "limit_price": quote_no,
+                    "price_policy": "maker_limit",
+                    "time_in_force": "GTC",
+                    "post_only": True,
+                    "notional_weight": 0.5,
+                    "min_fill_ratio": 0.0,
+                    "metadata": {
+                        "active_mode": "maker_quote",
+                        "regime": regime,
+                        "target_side": "NO",
+                    },
+                },
+            ],
+            "constraints": {
+                "max_unhedged_notional_usd": 0.0,
+                "hedge_timeout_seconds": hedge_timeout_seconds,
+                "session_timeout_seconds": session_timeout_seconds,
+                "max_reprice_attempts": 3,
+                "pair_lock": True,
+                "leg_fill_tolerance_ratio": 0.02,
+            },
+            "metadata": {
+                "generated_by": "btc_eth_highfreq.evaluate",
+                "active_mode": "maker_quote",
+                "regime": regime,
+            },
+        }
+
     def evaluate(self, signal: Any, context: dict[str, Any]) -> StrategyDecision:
         """Full crypto high-frequency evaluation with multi-mode regime system,
         direction guardrails, component edges, and asset/timeframe filtering.
@@ -2725,13 +3924,25 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         dominant_mode = _normalize_mode(payload.get("dominant_strategy"))
         active_mode = dominant_mode if requested_mode == "auto" and dominant_mode != "auto" else requested_mode
         if requested_mode == "auto":
+            priority_seen: set[str] = set()
+            auto_mode_priority: list[str] = []
+            for item in _as_list(params.get("auto_mode_priority")):
+                normalized_mode = _normalize_mode(item)
+                if normalized_mode == "auto":
+                    continue
+                if normalized_mode in priority_seen:
+                    continue
+                priority_seen.add(normalized_mode)
+                auto_mode_priority.append(normalized_mode)
+            if not auto_mode_priority:
+                auto_mode_priority = ["directional", "convergence", "maker_quote"]
             if active_mode == "auto" or active_mode not in enabled_active_modes:
-                for candidate_mode in ("maker_quote", "directional", "convergence"):
+                for candidate_mode in auto_mode_priority:
                     if candidate_mode in enabled_active_modes:
                         active_mode = candidate_mode
                         break
             if active_mode == "auto" or active_mode not in enabled_active_modes:
-                active_mode = "maker_quote"
+                active_mode = "directional"
         mode_allowlist_ok = active_mode in enabled_active_modes
 
         # --- Source / origin checks ---
@@ -3106,6 +4317,91 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             else "orderbook imbalance unavailable"
         )
 
+        raw_orderflow_imbalance = self._float(
+            _first_present(
+                live_market.get("orderflow_imbalance"),
+                live_market.get("flow_imbalance"),
+                payload.get("orderflow_imbalance"),
+                payload.get("flow_imbalance"),
+                payload.get("buy_sell_imbalance"),
+            )
+        )
+        orderflow_imbalance = None
+        if raw_orderflow_imbalance is not None:
+            normalized_flow = float(raw_orderflow_imbalance)
+            if abs(normalized_flow) > 1.0 and abs(normalized_flow) <= 100.0:
+                normalized_flow /= 100.0
+            orderflow_imbalance = clamp(normalized_flow, -1.0, 1.0)
+
+        orderflow_alignment_enabled = to_bool(params.get("orderflow_alignment_enabled"), True)
+        orderflow_alignment_modes = {
+            _normalize_mode(item)
+            for item in _as_list(_first_present(params.get("orderflow_alignment_modes"), ["maker_quote", "convergence"]))
+            if _normalize_mode(item) in {"directional", "maker_quote", "convergence"}
+        }
+        if not orderflow_alignment_modes:
+            orderflow_alignment_modes = {"maker_quote", "convergence"}
+        min_orderflow_alignment = clamp(to_float(params.get("min_orderflow_alignment", 0.05), 0.05), 0.0, 1.0)
+        allow_missing_orderflow_alignment = to_bool(params.get("allow_missing_orderflow_alignment"), False)
+        orderflow_alignment_required = (
+            orderflow_alignment_enabled
+            and active_mode in orderflow_alignment_modes
+            and direction in {"buy_yes", "buy_no"}
+        )
+        if not orderflow_alignment_required:
+            orderflow_alignment_ok = True
+            orderflow_alignment_detail = "not required for active mode"
+        elif orderflow_imbalance is None:
+            orderflow_alignment_ok = bool(allow_missing_orderflow_alignment)
+            orderflow_alignment_detail = (
+                "orderflow imbalance unavailable; allowed by config"
+                if orderflow_alignment_ok
+                else "orderflow imbalance unavailable"
+            )
+        else:
+            aligned = (
+                orderflow_imbalance >= min_orderflow_alignment
+                if direction == "buy_yes"
+                else orderflow_imbalance <= -min_orderflow_alignment
+            )
+            orderflow_alignment_ok = bool(aligned)
+            orderflow_alignment_detail = (
+                f"imbalance={orderflow_imbalance:+.3f} direction={direction} min_alignment={min_orderflow_alignment:.3f}"
+            )
+
+        cancel_rate_30s = self._float(
+            _first_present(
+                live_market.get("cancel_rate_30s"),
+                live_market.get("maker_cancel_rate_30s"),
+                payload.get("cancel_rate_30s"),
+                payload.get("maker_cancel_rate_30s"),
+                payload.get("cancel_ratio_30s"),
+            )
+        )
+        if cancel_rate_30s is not None:
+            if cancel_rate_30s > 1.0 and cancel_rate_30s <= 100.0:
+                cancel_rate_30s /= 100.0
+            cancel_rate_30s = clamp(cancel_rate_30s, 0.0, 1.0)
+        cancel_cluster_guard_enabled = to_bool(params.get("cancel_cluster_guard_enabled"), True)
+        cancel_cluster_guard_modes = {
+            _normalize_mode(item)
+            for item in _as_list(_first_present(params.get("cancel_cluster_guard_modes"), ["maker_quote"]))
+            if _normalize_mode(item) in {"directional", "maker_quote", "convergence"}
+        }
+        if not cancel_cluster_guard_modes:
+            cancel_cluster_guard_modes = {"maker_quote"}
+        max_cancel_rate_30s = clamp(to_float(params.get("max_cancel_rate_30s", 0.72), 0.72), 0.0, 1.0)
+        cancel_cluster_guard_required = cancel_cluster_guard_enabled and active_mode in cancel_cluster_guard_modes
+        if not cancel_cluster_guard_required:
+            cancel_cluster_guard_ok = True
+            cancel_cluster_guard_detail = "not required for active mode"
+        elif cancel_rate_30s is None:
+            cancel_cluster_guard_ok = True
+            cancel_cluster_guard_detail = "cancel-rate unavailable"
+        else:
+            cancel_cluster_guard_ok = cancel_rate_30s <= max_cancel_rate_30s
+            cancel_cluster_guard_detail = f"cancel_rate_30s={cancel_rate_30s:.3f} max={max_cancel_rate_30s:.3f}"
+
         # --- Oracle / guardrail data ---
         model_prob_yes = max(0.0, min(1.0, to_float(payload.get("model_prob_yes"), 0.5)))
         model_prob_no = max(0.0, min(1.0, to_float(payload.get("model_prob_no"), 0.5)))
@@ -3341,6 +4637,45 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             * _REGIME_CONF_FACTORS.get(regime, 1.0)
             * oracle_threshold_conf_multiplier
         )
+        edge_calibration_profile = context.get("edge_calibration")
+        if not isinstance(edge_calibration_profile, dict):
+            edge_calibration_profile = {}
+        edge_calibration_enabled = to_bool(params.get("edge_calibration_enabled"), True)
+        edge_calibration_sample_size = max(0, int(safe_float(edge_calibration_profile.get("sample_size"), 0.0) or 0.0))
+        edge_calibration_threshold_multiplier = 1.0
+        edge_calibration_size_multiplier = 1.0
+        if edge_calibration_enabled and edge_calibration_sample_size > 0:
+            threshold_floor = clamp(
+                to_float(params.get("edge_calibration_threshold_multiplier_floor", 0.80), 0.80),
+                0.5,
+                2.5,
+            )
+            threshold_ceiling = clamp(
+                to_float(params.get("edge_calibration_threshold_multiplier_ceiling", 1.80), 1.80),
+                threshold_floor,
+                3.0,
+            )
+            size_floor = clamp(
+                to_float(params.get("edge_calibration_size_multiplier_floor", 0.35), 0.35),
+                0.1,
+                2.0,
+            )
+            size_ceiling = clamp(
+                to_float(params.get("edge_calibration_size_multiplier_ceiling", 1.20), 1.20),
+                size_floor,
+                2.0,
+            )
+            edge_calibration_threshold_multiplier = clamp(
+                to_float(edge_calibration_profile.get("threshold_edge_multiplier", 1.0), 1.0),
+                threshold_floor,
+                threshold_ceiling,
+            )
+            edge_calibration_size_multiplier = clamp(
+                to_float(edge_calibration_profile.get("size_multiplier", 1.0), 1.0),
+                size_floor,
+                size_ceiling,
+            )
+        required_edge *= edge_calibration_threshold_multiplier
 
         entry_price_for_execution = self._float(
             _first_present(
@@ -3398,32 +4733,38 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                         f"blocked contrarian buy_yes: model_prob_no={model_prob_no:.3f} down_price={down_price:.3f}"
                     )
 
-        # --- Oracle direction agreement (hard gate, ALL modes/regimes) ---
-        # If the oracle says UP (diff > 0), ONLY buy_yes is allowed.
-        # If the oracle says DOWN (diff < 0), ONLY buy_no is allowed.
-        # Prevents rebalance-in-disguise where edge comes from model-vs-market
-        # deviation rather than oracle signal strength.
+        # --- Oracle direction agreement (mode-scoped gate) ---
         oracle_diff_pct_for_gate = to_float(payload.get("oracle_diff_pct"), 0.0)
         oracle_direction_ok = True
-        oracle_direction_detail = "no oracle diff data"
-        if oracle_available and oracle_diff_pct_for_gate is not None and abs(oracle_diff_pct_for_gate) > 0.01:
-            oracle_says_up = oracle_diff_pct_for_gate > 0
-            if oracle_says_up and direction == "buy_no":
-                oracle_direction_ok = False
-                oracle_direction_detail = (
-                    f"BLOCKED: oracle says UP (diff={oracle_diff_pct_for_gate:+.4f}%) "
-                    f"but direction=buy_no"
-                )
-            elif not oracle_says_up and direction == "buy_yes":
-                oracle_direction_ok = False
-                oracle_direction_detail = (
-                    f"BLOCKED: oracle says DOWN (diff={oracle_diff_pct_for_gate:+.4f}%) "
-                    f"but direction=buy_yes"
-                )
-            else:
-                oracle_direction_detail = (
-                    f"oracle agrees: diff={oracle_diff_pct_for_gate:+.4f}% direction={direction}"
-                )
+        oracle_direction_detail = "not required for active mode"
+        oracle_direction_gate_modes = {
+            _normalize_mode(item)
+            for item in _as_list(_first_present(params.get("oracle_direction_gate_modes"), ["directional", "convergence"]))
+            if _normalize_mode(item) in {"directional", "maker_quote", "convergence"}
+        }
+        if not oracle_direction_gate_modes:
+            oracle_direction_gate_modes = {"directional", "convergence"}
+        oracle_direction_required = active_mode in oracle_direction_gate_modes
+        if oracle_direction_required:
+            oracle_direction_detail = "no oracle diff data"
+            if oracle_available and oracle_diff_pct_for_gate is not None and abs(oracle_diff_pct_for_gate) > 0.01:
+                oracle_says_up = oracle_diff_pct_for_gate > 0
+                if oracle_says_up and direction == "buy_no":
+                    oracle_direction_ok = False
+                    oracle_direction_detail = (
+                        f"BLOCKED: oracle says UP (diff={oracle_diff_pct_for_gate:+.4f}%) "
+                        f"but direction=buy_no"
+                    )
+                elif not oracle_says_up and direction == "buy_yes":
+                    oracle_direction_ok = False
+                    oracle_direction_detail = (
+                        f"BLOCKED: oracle says DOWN (diff={oracle_diff_pct_for_gate:+.4f}%) "
+                        f"but direction=buy_yes"
+                    )
+                else:
+                    oracle_direction_detail = (
+                        f"oracle agrees: diff={oracle_diff_pct_for_gate:+.4f}% direction={direction}"
+                    )
 
         # --- Adaptive edge gating ---
         edge_for_gate = min(edge, mode_edge) if mode_edge > 0.0 else edge
@@ -3489,6 +4830,27 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             else {}
         )
         max_trade_notional_hint = self._float(risk_limits_context.get("max_trade_notional_usd"))
+        edge_bucket_key = "10+"
+        if edge_for_gate < 2.0:
+            edge_bucket_key = "0-2"
+        elif edge_for_gate < 4.0:
+            edge_bucket_key = "2-4"
+        elif edge_for_gate < 7.0:
+            edge_bucket_key = "4-7"
+        elif edge_for_gate < 10.0:
+            edge_bucket_key = "7-10"
+        edge_calibration_bucket_map = (
+            edge_calibration_profile.get("bucket_size_multipliers")
+            if isinstance(edge_calibration_profile.get("bucket_size_multipliers"), dict)
+            else {}
+        )
+        edge_calibration_bucket_multiplier = 1.0
+        if edge_calibration_enabled and edge_calibration_sample_size > 0 and edge_calibration_bucket_map:
+            edge_calibration_bucket_multiplier = clamp(
+                to_float(edge_calibration_bucket_map.get(edge_bucket_key, 1.0), 1.0),
+                0.20,
+                2.0,
+            )
         edge_boost_for_checks = 1.0 + max(0.0, edge_for_gate - required_edge) / 30.0
         conf_boost_for_checks = 0.8 + (confidence * 0.8)
         estimated_size_for_checks = (
@@ -3498,6 +4860,8 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             * edge_boost_for_checks
             * conf_boost_for_checks
             * oracle_size_multiplier
+            * edge_calibration_size_multiplier
+            * edge_calibration_bucket_multiplier
         )
         estimated_size_for_checks = max(1.0, min(max_size, estimated_size_for_checks))
         if max_trade_notional_hint is not None and max_trade_notional_hint > 0.0:
@@ -3624,6 +4988,15 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             if entry_price_for_execution is not None
             else "entry_price unavailable"
         )
+        min_execution_adjusted_edge_percent = self._float(
+            _first_present(
+                _timeframe_override(params, "min_execution_adjusted_edge_percent", signal_timeframe),
+                params.get("min_execution_adjusted_edge_percent_closing") if regime == "closing" else None,
+                params.get("min_execution_adjusted_edge_percent"),
+            )
+        )
+        if min_execution_adjusted_edge_percent is None:
+            min_execution_adjusted_edge_percent = 0.0
 
         # --- Decision checks ---
         checks = [
@@ -3724,6 +5097,20 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 orderbook_imbalance_ok,
                 score=orderbook_imbalance,
                 detail=orderbook_imbalance_detail,
+            ),
+            DecisionCheck(
+                "orderflow_alignment",
+                "Orderflow alignment",
+                orderflow_alignment_ok,
+                score=orderflow_imbalance,
+                detail=orderflow_alignment_detail,
+            ),
+            DecisionCheck(
+                "cancel_cluster_guard",
+                "Cancel cluster guard",
+                cancel_cluster_guard_ok,
+                score=cancel_rate_30s,
+                detail=cancel_cluster_guard_detail,
             ),
             DecisionCheck(
                 "recent_move_zscore",
@@ -3831,11 +5218,37 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             DecisionCheck(
                 "execution_edge",
                 "Execution-adjusted edge",
-                net_edge > 0.0,
+                net_edge >= min_execution_adjusted_edge_percent,
                 score=net_edge,
-                detail="Requires positive post-penalty edge.",
+                detail=f"Requires post-penalty edge >= {min_execution_adjusted_edge_percent:.2f}%.",
             ),
         ]
+
+        maker_execution_plan_override: dict[str, Any] | None = None
+        maker_execution_plan_ok = True
+        maker_execution_plan_detail = "Not required for active mode."
+        if active_mode == "maker_quote":
+            maker_execution_plan_override = self._build_maker_quote_execution_plan_override(
+                signal=signal,
+                payload=payload,
+                live_market=live_market,
+                params=params,
+                regime=regime,
+            )
+            maker_execution_plan_ok = maker_execution_plan_override is not None
+            maker_execution_plan_detail = (
+                "Prepared two-leg post-only maker plan."
+                if maker_execution_plan_ok
+                else "Missing YES/NO token ids or executable market prices."
+            )
+        checks.append(
+            DecisionCheck(
+                "maker_execution_plan",
+                "Parallel maker execution plan",
+                maker_execution_plan_ok,
+                detail=maker_execution_plan_detail,
+            )
+        )
 
         if requested_mode != "auto":
             checks.append(
@@ -3874,6 +5287,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             "edge": edge,
             "mode_edge": mode_edge,
             "net_edge": net_edge,
+            "min_execution_adjusted_edge_percent": float(min_execution_adjusted_edge_percent),
             "confidence": confidence,
             "required_edge": required_edge,
             "required_confidence": required_conf,
@@ -3905,6 +5319,13 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             "max_spread_widening_bps": float(max_spread_widening_bps),
             "orderbook_imbalance": orderbook_imbalance,
             "max_orderbook_imbalance": float(max_orderbook_imbalance),
+            "orderflow_imbalance": orderflow_imbalance,
+            "orderflow_alignment_required": bool(orderflow_alignment_required),
+            "min_orderflow_alignment": float(min_orderflow_alignment),
+            "allow_missing_orderflow_alignment": bool(allow_missing_orderflow_alignment),
+            "cancel_rate_30s": cancel_rate_30s,
+            "cancel_cluster_guard_required": bool(cancel_cluster_guard_required),
+            "max_cancel_rate_30s": float(max_cancel_rate_30s),
             "move_5m_percent": move_5m_pct,
             "move_30m_percent": move_30m_pct,
             "move_2h_percent": move_2h_pct,
@@ -3929,8 +5350,19 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             "oracle_threshold_edge_multiplier": float(oracle_threshold_edge_multiplier),
             "oracle_threshold_confidence_multiplier": float(oracle_threshold_conf_multiplier),
             "oracle_size_multiplier": float(oracle_size_multiplier),
+            "oracle_direction_required": bool(oracle_direction_required),
+            "oracle_direction_gate_modes": sorted(oracle_direction_gate_modes),
             "edge_persistence_elapsed_ms": edge_persistence_elapsed_ms,
             "min_edge_persistence_ms": int(min_edge_persistence_ms),
+            "edge_calibration": {
+                "enabled": bool(edge_calibration_enabled),
+                "sample_size": int(edge_calibration_sample_size),
+                "threshold_edge_multiplier": float(edge_calibration_threshold_multiplier),
+                "size_multiplier": float(edge_calibration_size_multiplier),
+                "bucket_key": edge_bucket_key,
+                "bucket_size_multiplier": float(edge_calibration_bucket_multiplier),
+                "bucket_size_multipliers": dict(edge_calibration_profile.get("bucket_size_multipliers") or {}),
+            },
             "force_disable_reentry_cooldown": bool(force_disable_reentry_cooldown),
             "reentry_cooldown_elapsed_ms": reentry_cooldown_elapsed_ms,
             "reentry_cooldown_seconds_per_market": float(reentry_cooldown_seconds),
@@ -4000,6 +5432,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 "allowed": bool(direction_policy_ok),
                 "detail": direction_policy_detail,
             },
+            "maker_execution_plan_ready": bool(maker_execution_plan_override is not None),
             "include_assets": include_assets,
             "exclude_assets": exclude_assets,
             "include_timeframes": include_timeframes,
@@ -4032,6 +5465,8 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 "oracle_status": _json_safe(oracle_status),
             },
         }
+        if maker_execution_plan_override is not None:
+            decision_payload["execution_plan_override"] = maker_execution_plan_override
 
         score = (edge_for_gate * 0.7) + (confidence * 30.0)
 
@@ -4063,6 +5498,8 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             * edge_boost
             * conf_boost
             * oracle_size_multiplier
+            * edge_calibration_size_multiplier
+            * edge_calibration_bucket_multiplier
         )
         size = max(1.0, min(max_size, size))
         if market_id:

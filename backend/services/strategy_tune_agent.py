@@ -177,7 +177,7 @@ def _summarize_trader_context(payload: dict[str, Any]) -> dict[str, Any]:
         "trader": {
             "id": str(trader.get("id") or ""),
             "name": str(trader.get("name") or ""),
-            "mode": str(trader.get("mode") or "paper"),
+            "mode": str(trader.get("mode") or "shadow"),
             "is_enabled": bool(trader.get("is_enabled")),
             "is_paused": bool(trader.get("is_paused")),
             "source_count": len(trader.get("source_configs") or []),
@@ -265,7 +265,7 @@ async def _tool_get_trader_context(args: dict[str, Any]) -> dict[str, Any]:
         "trader": {
             "id": str(trader_row.id),
             "name": str(trader_row.name or ""),
-            "mode": str(trader_row.mode or "paper"),
+            "mode": str(trader_row.mode or "shadow"),
             "is_enabled": bool(trader_row.is_enabled),
             "is_paused": bool(trader_row.is_paused),
             "interval_seconds": int(trader_row.interval_seconds or 60),

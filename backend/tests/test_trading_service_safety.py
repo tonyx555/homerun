@@ -234,6 +234,39 @@ async def test_cancel_order_accepts_provider_clob_id(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_cancel_order_releases_unfilled_reservation(monkeypatch):
+    _configure_limits(monkeypatch)
+    service = LiveExecutionService()
+    service._initialized = True
+    client = _ProviderSnapshotClient()
+    service._client = client
+
+    release_mock = AsyncMock()
+    monkeypatch.setattr(service, "_release_reservation", release_mock)
+
+    order = Order(
+        id="local-open-1",
+        token_id="token-btc-up",
+        side=OrderSide.BUY,
+        price=0.5,
+        size=10.0,
+        status=OrderStatus.OPEN,
+        filled_size=0.0,
+        clob_order_id="clob-provider-1",
+    )
+    service._remember_order(order)
+
+    cancelled = await service.cancel_order("local-open-1")
+
+    assert cancelled is True
+    assert release_mock.await_count == 1
+    kwargs = release_mock.await_args.kwargs
+    assert float(kwargs["size_usd"]) == pytest.approx(5.0)
+    assert kwargs["side"] == OrderSide.BUY
+    assert kwargs["token_id"] == "token-btc-up"
+
+
+@pytest.mark.asyncio
 async def test_get_order_snapshots_parses_provider_fill_values(monkeypatch):
     _configure_limits(monkeypatch)
     service = LiveExecutionService()
