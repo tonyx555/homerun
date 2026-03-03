@@ -1355,6 +1355,7 @@ async def reconcile_paper_positions(
         min_hold_passed = age_minutes is None or age_minutes >= min_hold_minutes
 
         payload = dict(row.payload_json or {})
+        _exit_instance = None
         position_state = _extract_position_state(payload)
         prev_high = safe_float(position_state.get("highest_price"))
         prev_low = safe_float(position_state.get("lowest_price"))
@@ -1658,6 +1659,12 @@ async def reconcile_paper_positions(
         if simulation_close is not None:
             payload["position_close"]["simulation_close"] = simulation_close
 
+        if _exit_instance is not None and hasattr(_exit_instance, "record_trade_outcome"):
+            try:
+                _exit_instance.record_trade_outcome(won=next_status in {"closed_win", "resolved_win"})
+            except Exception:
+                pass
+
         reverse_signal_id, reverse_source = await _emit_armed_reverse_signal(
             session,
             row=row,
@@ -1824,6 +1831,7 @@ async def reconcile_live_positions(
         if row_id in candidate_ids:
             continue
         payload = dict(row.payload_json or {})
+        _exit_instance = None
         pending_exit = payload.get("pending_live_exit")
         if not isinstance(pending_exit, dict):
             continue
@@ -1989,6 +1997,7 @@ async def reconcile_live_positions(
 
     for row in candidates:
         payload = dict(row.payload_json or {})
+        _exit_instance = None
         token_id = _extract_live_token_id(payload)
         wallet_position = wallet_positions_by_token.get(token_id) if token_id else None
         wallet_position_observed = isinstance(wallet_position, dict)
@@ -3578,6 +3587,12 @@ async def reconcile_live_positions(
             "closed_at": _iso_utc(now),
             "reason": reason,
         }
+        if _exit_instance is not None and hasattr(_exit_instance, "record_trade_outcome"):
+            try:
+                _exit_instance.record_trade_outcome(won=next_status in {"closed_win", "resolved_win"})
+            except Exception:
+                pass
+
         reverse_signal_id, reverse_source = await _emit_armed_reverse_signal(
             session,
             row=row,

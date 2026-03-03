@@ -34,13 +34,14 @@ from services.trader_orchestrator.position_lifecycle import (
     reconcile_shadow_positions,
 )
 from services.polymarket import polymarket_client
+from services.simulation import simulation_service
 from services.live_execution_service import live_execution_service
 from services.trader_orchestrator.risk_manager import evaluate_risk
 from services.trader_orchestrator.decision_gates import (
     apply_platform_decision_gates,
     is_within_trading_schedule_utc,
 )
-from services.worker_state import _commit_with_retry, _is_retryable_db_error
+from services.worker_state import _commit_with_retry, _is_retryable_db_error, request_worker_run
 from services.trader_orchestrator.sources.registry import (
     normalize_source_key,
 )
@@ -105,6 +106,7 @@ from services.trader_orchestrator_state import (
     write_orchestrator_snapshot,
 )
 from services.signal_bus import expire_stale_signals, set_trade_signal_status
+from services.ws_feeds import get_feed_manager
 from utils.utcnow import utcnow
 from utils.converters import safe_float, safe_int
 from utils.secrets import decrypt_secret
@@ -112,6 +114,7 @@ from utils.secrets import decrypt_secret
 logger = logging.getLogger("trader_orchestrator_worker")
 strategy_db_loader = strategy_loader
 create_trader_order = _create_trader_order
+reconcile_paper_positions = reconcile_shadow_positions
 _RESUME_POLICIES = {"resume_full", "manage_only", "flatten_then_start"}
 _ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
 _ORPHAN_CLEANUP_MAX_TRADERS_PER_CYCLE = 32
@@ -132,6 +135,8 @@ _TRADE_SIGNAL_STREAM_DRAIN_READS = 4
 _TERMINAL_STALE_ORDER_CHECK_INTERVAL_SECONDS = 30
 _TERMINAL_STALE_ORDER_MIN_AGE_MINUTES = 3
 _TERMINAL_STALE_ORDER_ALERT_COOLDOWN_SECONDS = 300
+_WS_FAILURE_PAUSE_THRESHOLD = 10
+_ws_auto_paused = False
 _OPEN_ORDER_TIMEOUT_CLEANUP_FAILURE_COOLDOWN_SECONDS = 30
 _LIVE_PROVIDER_BLOCK_EVENT_COOLDOWN_SECONDS = 60
 _LIVE_RISK_CLAMP_EVENT_COOLDOWN_SECONDS = 300
@@ -184,6 +189,89 @@ _LIVE_PROVIDER_INFRA_ERROR_MARKERS = (
     "upstream connect error",
     "network is unreachable",
 )
+
+_CANONICAL_TRADER_MODES = {"shadow", "live"}
+_LEGACY_MODE_ALIASES = {
+    "paper": "shadow",
+}
+_LEGACY_CRYPTO_STRATEGY_TIMEFRAME_ALIASES: dict[str, str] = {
+    "crypto_5m": "5m",
+    "crypto_15m": "15m",
+    "crypto_1h": "1h",
+    "crypto_4h": "4h",
+}
+_LEGACY_STRATEGY_ALIASES: dict[str, str] = {
+    **{legacy: "btc_eth_highfreq" for legacy in _LEGACY_CRYPTO_STRATEGY_TIMEFRAME_ALIASES.keys()},
+    "news_reaction": "news_edge",
+}
+
+
+def _canonical_trader_mode(value: Any, *, default: str = "shadow") -> str:
+    key = str(value or "").strip().lower()
+    if not key:
+        key = default
+    key = _LEGACY_MODE_ALIASES.get(key, key)
+    if key not in _CANONICAL_TRADER_MODES:
+        return default
+    return key
+
+
+def _normalize_timeframe_scope(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple, set)):
+        values = value
+    elif isinstance(value, str):
+        values = [part.strip() for part in value.split(",")]
+    else:
+        values = []
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        token = str(raw or "").strip().lower()
+        if token in {"5m", "5min", "5"}:
+            token = "5m"
+        elif token in {"15m", "15min", "15"}:
+            token = "15m"
+        elif token in {"1h", "1hr", "60m", "60min"}:
+            token = "1h"
+        elif token in {"4h", "4hr", "240m", "240min"}:
+            token = "4h"
+        else:
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
+
+
+def _normalize_strategy_for_source(
+    *,
+    source_key: str,
+    strategy_key: str,
+    strategy_params: dict[str, Any],
+) -> tuple[str, dict[str, Any], str]:
+    requested_key = str(strategy_key or "").strip().lower()
+    params = dict(strategy_params or {})
+    if not requested_key:
+        return "", params, ""
+    canonical_key = _LEGACY_STRATEGY_ALIASES.get(requested_key, requested_key)
+
+    if source_key == "crypto" and requested_key in _LEGACY_CRYPTO_STRATEGY_TIMEFRAME_ALIASES:
+        timeframe = _LEGACY_CRYPTO_STRATEGY_TIMEFRAME_ALIASES[requested_key]
+        include_timeframes = _normalize_timeframe_scope(params.get("include_timeframes"))
+        params["include_timeframes"] = [timeframe] if not include_timeframes else include_timeframes
+        exclude_timeframes = [token for token in _normalize_timeframe_scope(params.get("exclude_timeframes")) if token != timeframe]
+        if exclude_timeframes:
+            params["exclude_timeframes"] = exclude_timeframes
+        elif "exclude_timeframes" in params:
+            params.pop("exclude_timeframes", None)
+        params.setdefault("enable_live_market_context", False)
+        params.setdefault("require_live_market_revalidation", False)
+        params.setdefault("require_live_revalidation_for_sources", [])
+        params.setdefault("enforce_market_data_freshness", False)
+        params.setdefault("require_market_data_age_for_sources", [])
+
+    return canonical_key, params, requested_key
 
 
 async def _worker_sleep(interval_seconds: float) -> None:
@@ -454,10 +542,13 @@ def _merged_strategy_params_for_source_config(source_config: dict[str, Any]) -> 
 
 def _accepted_signal_strategy_types(source_config: dict[str, Any]) -> set[str]:
     strategy_key = str(source_config.get("strategy_key") or "").strip().lower()
+    requested_strategy_key = str(source_config.get("requested_strategy_key") or "").strip().lower()
     if not strategy_key:
         return set()
 
     allowed = {strategy_key}
+    if requested_strategy_key:
+        allowed.add(requested_strategy_key)
     strategy_params = _merged_strategy_params_for_source_config(source_config)
     allowed.update(_normalize_strategy_type_values(strategy_params.get("accepted_signal_strategy_types")))
 
@@ -475,11 +566,9 @@ def _supports_live_market_context(
     source_config: dict[str, Any] | None = None,
 ) -> bool:
     """Apply live-market enrichment where strategy evaluation requires it."""
-    source = str(getattr(signal, "source", "") or "").strip().lower()
-    if source != "crypto":
-        return True
+    del signal
     if not isinstance(source_config, dict):
-        return False
+        return True
 
     strategy_params = _merged_strategy_params_for_source_config(source_config)
     explicit = _coerce_optional_bool(strategy_params.get("enable_live_market_context"))
@@ -496,7 +585,7 @@ def _supports_live_market_context(
         if declared is not None:
             return declared
 
-    return False
+    return True
 
 
 def _is_exit_only_strategy_instance(strategy_instance: Any) -> bool:
@@ -704,20 +793,27 @@ def _normalize_source_configs(trader: dict[str, Any]) -> dict[str, dict[str, Any
         if not isinstance(raw, dict):
             continue
         source_key = normalize_source_key(raw.get("source_key"))
-        strategy_key = str(raw.get("strategy_key") or "").strip().lower()
+        raw_strategy_key = str(raw.get("strategy_key") or "").strip().lower()
         strategy_version = normalize_strategy_version(raw.get("strategy_version"))
+        strategy_key, strategy_params, requested_strategy_key = _normalize_strategy_for_source(
+            source_key=source_key,
+            strategy_key=raw_strategy_key,
+            strategy_params=dict(raw.get("strategy_params") or {}),
+        )
         if not source_key or not strategy_key:
             continue
         source_config = {
             "source_key": source_key,
             "strategy_key": strategy_key,
+            "requested_strategy_key": requested_strategy_key,
             "strategy_version": strategy_version,
-            "strategy_params": dict(raw.get("strategy_params") or {}),
+            "strategy_params": strategy_params,
         }
         strategy_params = _merged_strategy_params_for_source_config(source_config)
         normalized[source_key] = {
             "source_key": source_key,
             "strategy_key": strategy_key,
+            "requested_strategy_key": requested_strategy_key,
             "strategy_version": strategy_version,
             "strategy_params": strategy_params,
         }
@@ -801,6 +897,167 @@ def _edge_bucket_key(min_edge: float, max_edge: float) -> str:
     return f"{int(min_edge)}-{int(max_edge)}"
 
 
+def _resolve_shadow_account_id(control: dict[str, Any], trader: dict[str, Any]) -> str:
+    settings_payload = control.get("settings")
+    settings_payload = settings_payload if isinstance(settings_payload, dict) else {}
+    metadata_payload = trader.get("metadata")
+    metadata_payload = metadata_payload if isinstance(metadata_payload, dict) else {}
+    candidates = (
+        settings_payload.get("shadow_account_id"),
+        settings_payload.get("paper_account_id"),
+        metadata_payload.get("shadow_account_id"),
+        metadata_payload.get("paper_account_id"),
+    )
+    for candidate in candidates:
+        account_id = str(candidate or "").strip()
+        if account_id:
+            return account_id
+    return ""
+
+
+def _shadow_ledger_token_id(payload: dict[str, Any], direction: str) -> str:
+    leg_payload = payload.get("leg")
+    leg_payload = leg_payload if isinstance(leg_payload, dict) else {}
+    direction_key = str(direction or "").strip().lower()
+    if "yes" in direction_key:
+        candidates = (
+            payload.get("token_id"),
+            payload.get("yes_token_id"),
+            payload.get("selected_token_id"),
+            leg_payload.get("token_id"),
+        )
+    elif "no" in direction_key:
+        candidates = (
+            payload.get("token_id"),
+            payload.get("no_token_id"),
+            payload.get("selected_token_id"),
+            leg_payload.get("token_id"),
+        )
+    else:
+        candidates = (
+            payload.get("token_id"),
+            payload.get("selected_token_id"),
+            leg_payload.get("token_id"),
+        )
+    for raw in candidates:
+        token = str(raw or "").strip()
+        if token:
+            return token
+    return ""
+
+
+async def _backfill_simulation_ledger_for_active_paper_orders(
+    session: Any,
+    *,
+    trader_id: str,
+    paper_account_id: str,
+) -> dict[str, Any]:
+    account_id = str(paper_account_id or "").strip()
+    if not trader_id or not account_id:
+        return {"attempted": 0, "backfilled": 0, "skipped": 0, "errors": []}
+
+    mode_expr = func.lower(func.coalesce(TraderOrder.mode, ""))
+    status_expr = func.lower(func.coalesce(TraderOrder.status, ""))
+    rows = list(
+        (
+            await session.execute(
+                select(TraderOrder)
+                .where(TraderOrder.trader_id == trader_id)
+                .where(mode_expr.in_(("shadow", "paper")))
+                .where(status_expr.in_(tuple(_ACTIVE_ORDER_STATUSES)))
+                .order_by(TraderOrder.created_at.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    attempted = 0
+    backfilled = 0
+    skipped = 0
+    errors: list[dict[str, Any]] = []
+    now_utc = utcnow()
+    for row in rows:
+        payload = dict(row.payload_json or {})
+        if isinstance(payload.get("simulation_ledger"), dict):
+            skipped += 1
+            continue
+        attempted += 1
+        notional = safe_float(payload.get("filled_notional_usd"), None)
+        if notional is None or notional <= 0.0:
+            notional = safe_float(payload.get("effective_notional_usd"), None)
+        if notional is None or notional <= 0.0:
+            notional = safe_float(row.notional_usd, 0.0) or 0.0
+        entry_price = safe_float(row.effective_price, None)
+        if entry_price is None or entry_price <= 0.0:
+            entry_price = safe_float(payload.get("average_fill_price"), None)
+        if entry_price is None or entry_price <= 0.0:
+            entry_price = safe_float(row.entry_price, None)
+        if entry_price is None or entry_price <= 0.0 or notional <= 0.0:
+            skipped += 1
+            errors.append(
+                {
+                    "order_id": str(row.id),
+                    "reason": "invalid_fill_metrics",
+                    "entry_price": entry_price,
+                    "notional_usd": notional,
+                }
+            )
+            continue
+
+        direction = str(row.direction or "").strip().lower()
+        paper_sim = payload.get("paper_simulation")
+        paper_sim = paper_sim if isinstance(paper_sim, dict) else {}
+        execution_fee_usd = safe_float(paper_sim.get("estimated_fee_usd"), None)
+        execution_slippage_usd = safe_float(paper_sim.get("slippage_usd"), None)
+        token_id = _shadow_ledger_token_id(payload, direction)
+        signal_id = str(row.signal_id or "").strip() or str(row.id)
+        strategy_type = str(row.strategy_key or payload.get("strategy_type") or "").strip() or "trader_orchestrator"
+        try:
+            ledger_row = await simulation_service.record_orchestrator_paper_fill(
+                account_id=account_id,
+                trader_id=str(trader_id),
+                signal_id=signal_id,
+                market_id=str(row.market_id or ""),
+                market_question=str(row.market_question or payload.get("market_question") or ""),
+                direction=direction,
+                notional_usd=float(notional),
+                entry_price=float(entry_price),
+                strategy_type=strategy_type,
+                token_id=token_id or None,
+                payload=payload,
+                execution_fee_usd=execution_fee_usd,
+                execution_slippage_usd=execution_slippage_usd,
+                session=session,
+                commit=False,
+            )
+            payload["simulation_ledger"] = {
+                **dict(ledger_row or {}),
+                "backfilled_at": now_utc.isoformat(),
+                "mode": _canonical_trader_mode(row.mode, default="shadow"),
+            }
+            row.payload_json = payload
+            row.updated_at = now_utc
+            backfilled += 1
+        except Exception as exc:
+            errors.append(
+                {
+                    "order_id": str(row.id),
+                    "reason": "record_orchestrator_paper_fill_failed",
+                    "error": str(exc),
+                }
+            )
+
+    if backfilled > 0:
+        await session.flush()
+    return {
+        "attempted": attempted,
+        "backfilled": backfilled,
+        "skipped": skipped,
+        "errors": errors,
+    }
+
+
 async def _build_edge_calibration_profile(
     session: Any,
     *,
@@ -810,9 +1067,15 @@ async def _build_edge_calibration_profile(
     lookback_days: int,
     max_rows: int,
 ) -> dict[str, Any]:
-    mode_key = str(mode or "").strip().lower()
-    if mode_key == "paper":
-        mode_key = "shadow"
+    if not hasattr(session, "execute"):
+        return {
+            "sample_size": 0,
+            "threshold_edge_multiplier": 1.0,
+            "size_multiplier": 1.0,
+            "bucket_size_multipliers": {},
+        }
+
+    mode_key = _canonical_trader_mode(mode)
     source = normalize_source_key(source_key)
     if not trader_id or not source:
         return {
@@ -1406,6 +1669,9 @@ def _crypto_signal_dimensions(signal: Any) -> tuple[str, str]:
         or body.get("cadence")
         or body.get("interval")
     )
+    if not timeframe_raw:
+        signal_strategy_type = str(getattr(signal, "strategy_type", "") or "").strip().lower()
+        timeframe_raw = _LEGACY_CRYPTO_STRATEGY_TIMEFRAME_ALIASES.get(signal_strategy_type)
     return _normalize_crypto_asset(asset_raw), _normalize_crypto_timeframe(timeframe_raw)
 
 
@@ -1430,11 +1696,11 @@ def _crypto_signal_in_scope(signal: Any, source_config: dict[str, Any]) -> bool:
 
     asset, timeframe = _crypto_signal_dimensions(signal)
 
-    if include_assets and (not asset or asset not in include_assets):
+    if include_assets and asset and asset not in include_assets:
         return False
     if asset and asset in exclude_assets:
         return False
-    if include_timeframes and (not timeframe or timeframe not in include_timeframes):
+    if include_timeframes and timeframe and timeframe not in include_timeframes:
         return False
     if timeframe and timeframe in exclude_timeframes:
         return False
@@ -2091,7 +2357,7 @@ async def _run_trader_once(
             position_cap_scope = "market_direction"
         metadata = StrategySDK.validate_trader_runtime_metadata(trader.get("metadata"))
         loss_streak_reset_at = _parse_iso(str(metadata.get(_LOSS_STREAK_RESET_AT_KEY) or "").strip())
-        run_mode = str(control.get("mode") or "shadow").strip().lower()
+        run_mode = _canonical_trader_mode(control.get("mode"), default="shadow")
         resume_policy = _normalize_resume_policy(metadata.get("resume_policy"))
         cursor_created_at, cursor_signal_id = await get_trader_signal_cursor(
             session,
@@ -2164,8 +2430,24 @@ async def _run_trader_once(
         open_market_ids: set[str] = set()
 
         if run_mode == "shadow":
+            shadow_account_id = _resolve_shadow_account_id(control, trader)
+            backfill_result = await _backfill_simulation_ledger_for_active_paper_orders(
+                session,
+                trader_id=trader_id,
+                paper_account_id=shadow_account_id,
+            )
+            if backfill_result.get("errors"):
+                await create_trader_event(
+                    session,
+                    trader_id=trader_id,
+                    event_type="shadow_ledger_backfill_failed",
+                    severity="warn",
+                    source="worker",
+                    message="Shadow ledger backfill encountered one or more errors.",
+                    payload=backfill_result,
+                )
             force_flatten = resume_policy == "flatten_then_start"
-            lifecycle_result = await reconcile_shadow_positions(
+            lifecycle_result = await reconcile_paper_positions(
                 session,
                 trader_id=trader_id,
                 trader_params=default_strategy_params,
@@ -2217,12 +2499,25 @@ async def _run_trader_once(
                     message=f"Expired {int(reconcile_result['expired'])} execution session(s)",
                     payload=reconcile_result,
                 )
-        timeout_cleanup = await _enforce_source_open_order_timeouts(
-            session,
-            trader_id=trader_id,
-            run_mode=run_mode,
-            source_configs=source_configs,
-        )
+        if hasattr(session, "execute"):
+            timeout_cleanup = await _enforce_source_open_order_timeouts(
+                session,
+                trader_id=trader_id,
+                run_mode=run_mode,
+                source_configs=source_configs,
+            )
+        else:
+            timeout_cleanup = {
+                "configured": 0,
+                "updated": 0,
+                "suppressed": 0,
+                "taker_rescue_attempted": 0,
+                "taker_rescue_succeeded": 0,
+                "taker_rescue_failed": 0,
+                "sources": [],
+                "errors": [],
+                "provider_reconcile": {},
+            }
         provider_reconcile_payload = timeout_cleanup.get("provider_reconcile")
         provider_reconcile_payload = (
             dict(provider_reconcile_payload) if isinstance(provider_reconcile_payload, dict) else {}
@@ -2590,7 +2885,7 @@ async def _run_trader_once(
             if fallback_daily_loss > 0:
                 effective_risk_limits["max_daily_loss_usd"] = fallback_daily_loss
         live_risk_clamp_changes: dict[str, dict[str, Any]] = {}
-        if run_mode in {"live", "shadow"}:
+        if run_mode == "live":
             live_risk_clamp_settings = dict(global_runtime_settings.get("live_risk_clamps") or DEFAULT_LIVE_RISK_CLAMPS)
             live_risk_clamp_changes = _apply_live_risk_clamps(
                 effective_risk_limits,
@@ -2705,7 +3000,7 @@ async def _run_trader_once(
                     )
             elif run_mode == "shadow":
                 try:
-                    safe_exit_result = await reconcile_shadow_positions(
+                    safe_exit_result = await reconcile_paper_positions(
                         session,
                         trader_id=trader_id,
                         trader_params=default_strategy_params,
@@ -2888,6 +3183,12 @@ async def _run_trader_once(
                     source_config = source_configs.get(source_key)
                     if _supports_live_market_context(sig, source_config):
                         context_candidates.append(sig)
+                if context_candidates:
+                    try:
+                        async with AsyncSessionLocal() as control_session:
+                            await request_worker_run(control_session, "market_data")
+                    except Exception as exc:
+                        logger.warning("Failed to request market_data worker run: %s", exc)
                 try:
                     live_contexts = await asyncio.wait_for(
                         build_live_signal_contexts(
@@ -2944,6 +3245,8 @@ async def _run_trader_once(
                         continue
 
                     strategy_key = str(source_config.get("strategy_key") or "").strip().lower()
+                    requested_strategy_key = str(source_config.get("requested_strategy_key") or "").strip().lower()
+                    strategy_key_for_output = requested_strategy_key or strategy_key
                     strategy_params = dict(source_config.get("strategy_params") or {})
                     requested_strategy_version = normalize_strategy_version(source_config.get("strategy_version"))
                     live_context = live_contexts.get(signal_id, {})
@@ -3034,7 +3337,7 @@ async def _run_trader_once(
                                 "score": None,
                                 "detail": strategy_detail,
                                 "payload": {
-                                    "requested_strategy_key": strategy_key,
+                                    "requested_strategy_key": strategy_key_for_output,
                                     "requested_strategy_version": requested_strategy_version,
                                     "resolved_strategy_version": resolved_version_request,
                                 },
@@ -3044,7 +3347,7 @@ async def _run_trader_once(
                             session,
                             trader_id=trader_id,
                             signal=runtime_signal,
-                            strategy_key=strategy_key,
+                            strategy_key=strategy_key_for_output,
                             strategy_version=resolved_version_request,
                             decision="blocked",
                             reason=blocked_reason,
@@ -3078,7 +3381,7 @@ async def _run_trader_once(
                                 trader_id=trader_id,
                                 signal_id=signal_id,
                                 source_key=signal_source,
-                                strategy_key=strategy_key,
+                                strategy_key=strategy_key_for_output,
                                 strategy_version=int(resolved_version_request or 1),
                                 assignment_group=str(assignment_group or "control"),
                                 decision_id=decision_row.id,
@@ -3113,7 +3416,7 @@ async def _run_trader_once(
                             payload={
                                 "decision_id": decision_row.id,
                                 "signal_id": signal.id,
-                                "requested_strategy_key": strategy_key,
+                                "requested_strategy_key": strategy_key_for_output,
                                 "requested_strategy_version": requested_strategy_version,
                                 "resolved_strategy_version": resolved_version_request,
                                 "error": strategy_detail,
@@ -3173,7 +3476,7 @@ async def _run_trader_once(
                         )
 
                     if strategy is None:
-                        blocked_reason = f"strategy_unavailable:{resolved_strategy_key}:v{resolved_strategy_version}"
+                        blocked_reason = f"strategy_unavailable:{strategy_key_for_output}:v{resolved_strategy_version}"
                         strategy_detail = str(strategy_detail or blocked_reason)
                         checks_payload = [
                             {
@@ -3183,7 +3486,7 @@ async def _run_trader_once(
                                 "score": None,
                                 "detail": strategy_detail,
                                 "payload": {
-                                    "requested_strategy_key": strategy_key,
+                                    "requested_strategy_key": strategy_key_for_output,
                                     "resolved_strategy_key": resolved_strategy_key,
                                     "requested_strategy_version": requested_strategy_version,
                                     "resolved_strategy_version": resolved_strategy_version,
@@ -3194,7 +3497,7 @@ async def _run_trader_once(
                             session,
                             trader_id=trader_id,
                             signal=runtime_signal,
-                            strategy_key=resolved_strategy_key,
+                            strategy_key=strategy_key_for_output,
                             strategy_version=resolved_strategy_version,
                             decision="blocked",
                             reason=blocked_reason,
@@ -3222,7 +3525,7 @@ async def _run_trader_once(
                                 trader_id=trader_id,
                                 signal_id=signal_id,
                                 source_key=signal_source,
-                                strategy_key=resolved_strategy_key,
+                                strategy_key=strategy_key_for_output,
                                 strategy_version=resolved_strategy_version,
                                 assignment_group=str(assignment_group or "control"),
                                 decision_id=decision_row.id,
@@ -3263,7 +3566,7 @@ async def _run_trader_once(
                             payload={
                                 "decision_id": decision_row.id,
                                 "signal_id": signal.id,
-                                "requested_strategy_key": strategy_key,
+                                "requested_strategy_key": strategy_key_for_output,
                                 "resolved_strategy_key": resolved_strategy_key,
                                 "error": strategy_detail,
                             },
@@ -3624,8 +3927,12 @@ async def _run_trader_once(
                             "live_market": {
                                 "available": bool(live_context.get("available")),
                                 "fetched_at": live_context.get("fetched_at"),
+                                "live_market_fetched_at": live_context.get("live_market_fetched_at"),
                                 "selected_outcome": live_context.get("selected_outcome"),
                                 "live_selected_price": live_context.get("live_selected_price"),
+                                "market_data_source": live_context.get("market_data_source"),
+                                "source_observed_at": live_context.get("source_observed_at"),
+                                "market_data_age_ms": live_context.get("market_data_age_ms"),
                                 "signal_entry_price": live_context.get("signal_entry_price"),
                                 "entry_price_delta": live_context.get("entry_price_delta"),
                                 "entry_price_delta_pct": live_context.get("entry_price_delta_pct"),
@@ -4077,7 +4384,9 @@ async def _reconcile_orphan_open_orders(session: Any) -> dict[str, int]:
             "traders_seen": 0,
             "rows_seen": 0,
             "shadow_closed": 0,
+            "paper_closed": 0,
             "non_shadow_cancelled": 0,
+            "non_paper_cancelled": 0,
         }
 
     per_trader_mode: dict[tuple[str, str], int] = {}
@@ -4088,13 +4397,17 @@ async def _reconcile_orphan_open_orders(session: Any) -> dict[str, int]:
         mode_key = str(row.mode_key or "").strip().lower()
         if mode_key == "":
             mode_key = "other"
+        else:
+            mode_key = _LEGACY_MODE_ALIASES.get(mode_key, mode_key)
+            if mode_key not in _CANONICAL_TRADER_MODES:
+                mode_key = "other"
         per_trader_mode[(trader_id, mode_key)] = int(row.count or 0)
 
     shadow_closed = 0
     non_shadow_cancelled = 0
     for trader_id, mode_key in per_trader_mode:
         if mode_key == "shadow":
-            result = await reconcile_shadow_positions(
+            result = await reconcile_paper_positions(
                 session,
                 trader_id=trader_id,
                 trader_params={},
@@ -4130,7 +4443,9 @@ async def _reconcile_orphan_open_orders(session: Any) -> dict[str, int]:
             "traders_seen": len({tid for tid, _ in per_trader_mode.keys()}),
             "rows_seen": len(per_trader_mode),
             "shadow_closed": shadow_closed,
+            "paper_closed": shadow_closed,
             "non_shadow_cancelled": non_shadow_cancelled,
+            "non_paper_cancelled": non_shadow_cancelled,
         },
         commit=True,
     )
@@ -4139,7 +4454,9 @@ async def _reconcile_orphan_open_orders(session: Any) -> dict[str, int]:
         "traders_seen": len({tid for tid, _ in per_trader_mode.keys()}),
         "rows_seen": len(per_trader_mode),
         "shadow_closed": shadow_closed,
+        "paper_closed": shadow_closed,
         "non_shadow_cancelled": non_shadow_cancelled,
+        "non_paper_cancelled": non_shadow_cancelled,
     }
 
 
@@ -4201,6 +4518,7 @@ async def _run_trader_once_with_timeout(
 
 
 async def run_worker_loop() -> None:
+    global _ws_auto_paused
     logger.info("Starting trader orchestrator worker loop")
 
     try:
@@ -4292,7 +4610,7 @@ async def run_worker_loop() -> None:
                             if hasattr(session, "rollback"):
                                 await session.rollback()
                             logger.warning("Failed stale-terminal-order watchdog pass: %s", exc)
-                    mode = str(control.get("mode") or "shadow").strip().lower()
+                    mode = _canonical_trader_mode(control.get("mode"), default="shadow")
                     cycle_interval = max(
                         1,
                         int(control.get("run_interval_seconds") or ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS),
@@ -4351,6 +4669,47 @@ async def run_worker_loop() -> None:
                     if not skip_cycle and bool(control.get("kill_switch")):
                         manage_only_cycle = True
                         manage_only_reasons.append("kill_switch")
+
+                    # WS feed health gate — auto-pause when Polymarket WS is persistently down
+                    if not skip_cycle and not manage_only_cycle and mode == "live":
+                        try:
+                            ws_health = get_feed_manager().health_check()
+                            poly_failures = ws_health.get("polymarket", {}).get("stats", {}).get("consecutive_failures", 0)
+                            if poly_failures >= _WS_FAILURE_PAUSE_THRESHOLD:
+                                if not _ws_auto_paused:
+                                    _ws_auto_paused = True
+                                    await update_orchestrator_control(session, is_paused=True)
+                                    await create_trader_event(
+                                        session,
+                                        trader_id=None,
+                                        event_type="ws_feed_failure",
+                                        source="worker",
+                                        severity="error",
+                                        message=(
+                                            f"Polymarket WS feed down — {poly_failures} consecutive failures. "
+                                            "Auto-trader paused."
+                                        ),
+                                    )
+                                    logger.error(
+                                        "Polymarket WS persistently down, auto-pausing orchestrator",
+                                        consecutive_failures=poly_failures,
+                                    )
+                                manage_only_cycle = True
+                                manage_only_reasons.append("ws_feed_down")
+                            elif _ws_auto_paused and poly_failures == 0:
+                                _ws_auto_paused = False
+                                await update_orchestrator_control(session, is_paused=False)
+                                await create_trader_event(
+                                    session,
+                                    trader_id=None,
+                                    event_type="ws_feed_recovery",
+                                    source="worker",
+                                    severity="info",
+                                    message="Polymarket WS feed recovered. Auto-trader resumed.",
+                                )
+                                logger.info("Polymarket WS recovered, auto-resuming orchestrator")
+                        except Exception as exc:
+                            logger.debug("WS health check skipped: %s", exc)
 
                     if not skip_cycle:
                         if not skip_cycle and mode == "live":
@@ -4425,9 +4784,7 @@ async def run_worker_loop() -> None:
                     trader_id = str(trader.get("id") or "")
                     if not trader.get("is_enabled", True):
                         continue
-                    trader_mode = str(trader.get("mode") or "shadow").strip().lower()
-                    if trader_mode not in {"shadow", "live"}:
-                        trader_mode = "shadow"
+                    trader_mode = _canonical_trader_mode(trader.get("mode"), default="shadow")
                     if trader_mode != mode:
                         continue
 
@@ -4454,8 +4811,6 @@ async def run_worker_loop() -> None:
                     ):
                         process_signals_for_trader = False
 
-                    if mode not in ("shadow", "live"):
-                        continue
                     decisions, orders, processed_signals = await _run_trader_once_with_timeout(
                         trader,
                         control,

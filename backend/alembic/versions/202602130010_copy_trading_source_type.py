@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from alembic import op
 import sqlalchemy as sa
-from alembic_helpers import column_names
+from alembic_helpers import column_names, table_names
 
 
 # revision identifiers, used by Alembic.
@@ -23,6 +23,8 @@ depends_on = None
 
 def upgrade() -> None:
     table_name = "copy_trading_configs"
+    if table_name not in table_names():
+        return
     existing = column_names(table_name)
 
     additions: list[sa.Column] = [

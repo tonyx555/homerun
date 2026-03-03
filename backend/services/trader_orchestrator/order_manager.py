@@ -219,9 +219,11 @@ async def submit_execution_leg(
     leg: dict[str, Any],
     notional_usd: float,
 ) -> LegSubmitResult:
-    mode_key = str(mode or "").strip().lower()
+    requested_mode_key = str(mode or "").strip().lower()
+    mode_key = requested_mode_key
     if mode_key == "paper":
         mode_key = "shadow"
+    legacy_paper_compat = requested_mode_key == "paper"
     if mode_key not in {"live", "shadow"}:
         return LegSubmitResult(
             leg_id=str(leg.get("leg_id") or "leg"),
@@ -411,34 +413,41 @@ async def submit_execution_leg(
                 token_source = "polymarket_api_fallback"
                 token_attempts.append(token_source)
     if not token_id:
-        return LegSubmitResult(
-            leg_id=leg_id,
-            status="failed",
-            effective_price=price,
-            error_message="No executable token_id resolved for execution leg.",
-            payload={
-                "mode": mode_key,
-                "submission": "rejected",
-                "reason": "missing_token_id",
-                "token_resolution_attempts": token_attempts,
-                "leg": dict(leg),
-            },
-            shares=shares,
-            notional_usd=notional,
-        )
+        if mode_key == "live":
+            return LegSubmitResult(
+                leg_id=leg_id,
+                status="failed",
+                effective_price=price,
+                error_message="No executable token_id resolved for execution leg.",
+                payload={
+                    "mode": mode_key,
+                    "submission": "rejected",
+                    "reason": "missing_token_id",
+                    "token_resolution_attempts": token_attempts,
+                    "leg": dict(leg),
+                },
+                shares=shares,
+                notional_usd=notional,
+            )
 
     time_in_force = str(leg.get("time_in_force") or "GTC").strip().upper()
     post_only = bool(leg.get("post_only", False))
 
     if mode_key == "shadow":
-        try:
-            quote_price = safe_float(await asyncio.wait_for(polymarket_client.get_midpoint(token_id), timeout=1.5), None)
-        except Exception:
-            quote_price = None
-        quote_source = "polymarket_midpoint"
+        quote_price = None
+        quote_source = "signal_price_fallback"
+        if token_id:
+            try:
+                quote_price = safe_float(await asyncio.wait_for(polymarket_client.get_midpoint(token_id), timeout=1.5), None)
+            except Exception:
+                quote_price = None
+            quote_source = "polymarket_midpoint"
         if quote_price is None or quote_price <= 0.0 or quote_price > 1.0:
             quote_price = price
-            quote_source = "signal_price_fallback"
+            if token_id:
+                quote_source = "signal_price_fallback"
+            else:
+                quote_source = "signal_price_fallback_no_token"
         if quote_price is None or quote_price <= 0.0:
             return LegSubmitResult(
                 leg_id=leg_id,
@@ -458,14 +467,25 @@ async def submit_execution_leg(
                 notional_usd=notional,
             )
         effective_shadow_notional = shares * quote_price
+        payload_mode = "paper" if legacy_paper_compat else "shadow"
+        submission_label = "simulated" if legacy_paper_compat else "shadow_quote_simulated"
+        paper_fill_ratio = 1.0
+        if notional > 0.0:
+            paper_fill_ratio = min(1.0, max(0.0, effective_shadow_notional / notional))
+        paper_simulation_payload = {
+            "filled": True,
+            "fill_ratio": paper_fill_ratio,
+            "estimated_fee_usd": 0.0,
+            "slippage_usd": max(0.0, notional - effective_shadow_notional),
+        }
         return LegSubmitResult(
             leg_id=leg_id,
             status="executed",
             effective_price=quote_price,
             error_message=None,
             payload={
-                "mode": "shadow",
-                "submission": "shadow_quote_simulated",
+                "mode": payload_mode,
+                "submission": submission_label,
                 "token_id": token_id,
                 "token_id_source": token_source,
                 "token_resolution_attempts": token_attempts,
@@ -482,6 +502,7 @@ async def submit_execution_leg(
                 "effective_notional_usd": effective_shadow_notional,
                 "time_in_force": time_in_force,
                 "post_only": post_only,
+                "paper_simulation": paper_simulation_payload,
             },
             provider_order_id=None,
             provider_clob_order_id=None,

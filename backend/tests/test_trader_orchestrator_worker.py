@@ -15,9 +15,22 @@ from workers import trader_orchestrator_worker
 from services.trader_orchestrator.strategies.base import StrategyDecision
 
 
-def test_supports_live_market_context_excludes_crypto_source():
-    assert trader_orchestrator_worker._supports_live_market_context(SimpleNamespace(source="crypto")) is False
+def test_supports_live_market_context_defaults_enabled():
+    assert trader_orchestrator_worker._supports_live_market_context(SimpleNamespace(source="crypto")) is True
     assert trader_orchestrator_worker._supports_live_market_context(SimpleNamespace(source="weather")) is True
+
+
+def test_supports_live_market_context_respects_explicit_disable():
+    assert (
+        trader_orchestrator_worker._supports_live_market_context(
+            SimpleNamespace(source="crypto"),
+            source_config={
+                "strategy_key": "btc_eth_highfreq",
+                "strategy_params": {"enable_live_market_context": False},
+            },
+        )
+        is False
+    )
 
 
 def test_source_config_allows_new_entries_respects_strategy_param_overrides(monkeypatch):

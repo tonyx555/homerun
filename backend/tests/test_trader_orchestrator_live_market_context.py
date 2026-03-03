@@ -319,6 +319,135 @@ async def test_build_live_signal_contexts_falls_back_to_payload_tokens_when_mark
     assert ctx["live_selected_price"] == pytest.approx(0.88)
 
 
+@pytest.mark.asyncio
+async def test_build_live_signal_contexts_rejects_relaxed_ws_prices(monkeypatch):
+    market_id = "0x" + ("7" * 64)
+    yes_token = "777777777777777777"
+    no_token = "888888888888888888"
+
+    class _Cache:
+        def get_mid_price(self, token_id: str):
+            return 0.42 if token_id == yes_token else 0.58
+
+        def staleness(self, token_id: str):
+            del token_id
+            return 4.0
+
+    monkeypatch.setattr(
+        "services.trader_orchestrator.live_market_context.get_feed_manager",
+        lambda: SimpleNamespace(_started=True, cache=_Cache()),
+    )
+    monkeypatch.setattr(
+        "services.trader_orchestrator.live_market_context.redis_price_cache.read_prices",
+        AsyncMock(return_value={}),
+    )
+
+    async def _fake_market_lookup(_market_id: str):
+        return {
+            "condition_id": market_id,
+            "question": "BTC 5m",
+            "token_ids": [yes_token, no_token],
+            "outcomes": ["Yes", "No"],
+        }
+
+    async def _fake_prices_batch(token_ids: list[str]):
+        assert set(token_ids) == {yes_token, no_token}
+        return {
+            yes_token: {"mid": 0.47},
+            no_token: {"mid": 0.53},
+        }
+
+    async def _fake_history(*args, **kwargs):
+        del args, kwargs
+        return []
+
+    monkeypatch.setattr(
+        "services.trader_orchestrator.live_market_context.polymarket_client.get_market_by_condition_id",
+        _fake_market_lookup,
+    )
+    monkeypatch.setattr(
+        "services.trader_orchestrator.live_market_context.polymarket_client.get_prices_batch",
+        _fake_prices_batch,
+    )
+    monkeypatch.setattr(
+        "services.trader_orchestrator.live_market_context.polymarket_client.get_prices_history",
+        _fake_history,
+    )
+
+    signal = SimpleNamespace(
+        id="sig_ws_relaxed",
+        market_id=market_id,
+        market_question="BTC 5m",
+        source="crypto",
+        direction="buy_yes",
+        entry_price=0.45,
+        edge_percent=4.0,
+        payload_json={},
+    )
+    contexts = await build_live_signal_contexts([signal])
+    ctx = contexts["sig_ws_relaxed"]
+    assert ctx["market_data_source"] == "http_batch"
+    assert ctx["live_selected_price"] == pytest.approx(0.47)
+    assert ctx["market_data_age_ms"] is not None
+
+
+@pytest.mark.asyncio
+async def test_build_live_signal_contexts_keeps_unknown_age_for_snapshot_without_timestamp(
+    monkeypatch,
+):
+    market_id = "0x" + ("9" * 64)
+    yes_token = "999999999999999999"
+    no_token = "101010101010101010"
+
+    async def _fake_market_lookup(_market_id: str):
+        return {
+            "condition_id": market_id,
+            "question": "Snapshot-only market",
+            "token_ids": [yes_token, no_token],
+            "outcomes": ["Yes", "No"],
+            "yes_price": 0.44,
+            "no_price": 0.56,
+        }
+
+    async def _fake_prices_batch(token_ids: list[str]):
+        del token_ids
+        return {}
+
+    async def _fake_history(*args, **kwargs):
+        del args, kwargs
+        return []
+
+    monkeypatch.setattr(
+        "services.trader_orchestrator.live_market_context.polymarket_client.get_market_by_condition_id",
+        _fake_market_lookup,
+    )
+    monkeypatch.setattr(
+        "services.trader_orchestrator.live_market_context.polymarket_client.get_prices_batch",
+        _fake_prices_batch,
+    )
+    monkeypatch.setattr(
+        "services.trader_orchestrator.live_market_context.polymarket_client.get_prices_history",
+        _fake_history,
+    )
+
+    signal = SimpleNamespace(
+        id="sig_snapshot_age_unknown",
+        market_id=market_id,
+        market_question="Snapshot-only market",
+        source="scanner",
+        direction="buy_yes",
+        entry_price=0.44,
+        edge_percent=1.0,
+        payload_json={},
+    )
+    contexts = await build_live_signal_contexts([signal])
+    ctx = contexts["sig_snapshot_age_unknown"]
+    assert ctx["market_data_source"] == "market_snapshot"
+    assert ctx["live_selected_price"] == pytest.approx(0.44)
+    assert ctx["source_observed_at"] is None
+    assert ctx["market_data_age_ms"] is None
+
+
 def test_runtime_trade_signal_view_overrides_runtime_fields():
     base = SimpleNamespace(
         id="sig_runtime",

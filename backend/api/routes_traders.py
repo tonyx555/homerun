@@ -303,6 +303,8 @@ async def get_all_traders(
     session: AsyncSession = Depends(get_db_session),
 ):
     mode_key = str(mode or "").strip().lower()
+    if mode_key == "paper":
+        mode_key = "shadow"
     if mode_key and mode_key not in {"shadow", "live"}:
         raise HTTPException(status_code=422, detail="mode must be 'shadow' or 'live'")
     return {"traders": await list_traders(session, mode=mode_key or None)}

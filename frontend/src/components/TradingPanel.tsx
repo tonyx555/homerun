@@ -6151,7 +6151,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     })
   }, [filteredDecisions])
 
-  const filteredTradeHistory = useMemo(() => {
+  const filteredTradeHistoryFull = useMemo(() => {
     const q = tradeSearch.trim().toLowerCase()
     return selectedOrders
       .filter((order) => {
@@ -6169,8 +6169,12 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         const haystack = `${order.market_question || ''} ${order.market_id || ''} ${order.source || ''} ${order.direction || ''} ${order.direction_label || ''} ${order.direction_side || ''} ${orderExecutionTypeSummary(order)}`.toLowerCase()
         return haystack.includes(q)
       })
-      .slice(0, 250)
   }, [selectedOrders, tradeSearch, tradeStatusFilter])
+
+  const filteredTradeHistory = useMemo(
+    () => filteredTradeHistoryFull.slice(0, 250),
+    [filteredTradeHistoryFull]
+  )
 
   const selectedTradeRows = useMemo(() => {
     return filteredTradeHistory.map((order) => {
@@ -6314,20 +6318,22 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     let totalNotional = 0
     let realizedPnl = 0
     let unrealizedPnl = 0
-    for (const row of selectedTradeRows) {
+    for (const order of filteredTradeHistoryFull) {
+      const status = normalizeStatus(order.status)
+      const pnl = toNumber(order.actual_profit)
       total += 1
-      totalNotional += Math.abs(toNumber(row.order.notional_usd))
-      if (OPEN_ORDER_STATUSES.has(row.status)) {
+      totalNotional += Math.abs(toNumber(order.notional_usd))
+      if (OPEN_ORDER_STATUSES.has(status)) {
         open += 1
-        unrealizedPnl += row.unrealized
+        unrealizedPnl += toNumber(order.unrealized_pnl)
       }
-      if (RESOLVED_ORDER_STATUSES.has(row.status)) {
+      if (RESOLVED_ORDER_STATUSES.has(status)) {
         resolved += 1
-        realizedPnl += row.pnl
-        if (row.pnl > 0) wins += 1
-        if (row.pnl < 0) losses += 1
+        realizedPnl += pnl
+        if (pnl > 0) wins += 1
+        if (pnl < 0) losses += 1
       }
-      if (FAILED_ORDER_STATUSES.has(row.status)) {
+      if (FAILED_ORDER_STATUSES.has(status)) {
         failed += 1
       }
     }
@@ -6343,7 +6349,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       unrealizedPnl,
       winRate: resolved > 0 ? (wins / resolved) * 100 : 0,
     }
-  }, [selectedTradeRows])
+  }, [filteredTradeHistoryFull])
 
   const filteredAllTradeHistory = useMemo(() => {
     const q = allBotsTradeSearch.trim().toLowerCase()

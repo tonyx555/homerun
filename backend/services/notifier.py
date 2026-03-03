@@ -181,6 +181,7 @@ class TelegramNotifier:
         self._last_event_cursor: Optional[tuple[datetime, str]] = None
         self._telegram_update_offset: Optional[int] = None
         self._close_alert_markers: dict[str, str] = {}
+        self._ws_alert_sent: bool = False
 
     async def start(self) -> None:
         """Initialize notifier runtime and start background workers."""
@@ -423,6 +424,28 @@ class TelegramNotifier:
                         )
                     elif not active:
                         self._last_summary_at = None
+
+                # WS feed health monitoring (runs regardless of orchestrator state)
+                try:
+                    from services.ws_feeds import get_feed_manager
+                    ws_health = get_feed_manager().health_check()
+                    poly_failures = ws_health.get("polymarket", {}).get("stats", {}).get("consecutive_failures", 0)
+                    if poly_failures >= 10 and not self._ws_alert_sent:
+                        self._ws_alert_sent = True
+                        await self._enqueue(
+                            f"{_escape_md('⚠️')} {_bold('WebSocket Feed Down')}\n"
+                            f"Polymarket WS disconnected\\.\n"
+                            f"{_escape_md(str(poly_failures))} consecutive failures\\.\n"
+                            f"Auto\\-trader paused\\."
+                        )
+                    elif poly_failures == 0 and self._ws_alert_sent:
+                        self._ws_alert_sent = False
+                        await self._enqueue(
+                            f"{_escape_md('✅')} {_bold('WebSocket Feed Recovered')}\n"
+                            f"Polymarket WS reconnected\\."
+                        )
+                except Exception:
+                    pass  # WS feeds may not be initialized in this process
 
             except asyncio.CancelledError:
                 return
