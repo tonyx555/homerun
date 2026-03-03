@@ -1028,6 +1028,34 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
             ]
         },
     ),
+    # ── Sports strategies ────────────────────────────────────
+    SystemOpportunityStrategySeed(
+        slug="sports_overreaction_fader",
+        source_key="sports",
+        import_module="services.strategies.sports_overreaction_fader",
+        sort_order=300,
+        config_schema={
+            "param_fields": [
+                {"key": "min_move_pct", "label": "Min Move (%)", "type": "number", "min": 1.0, "max": 50.0},
+                {"key": "max_move_pct", "label": "Max Move (%)", "type": "number", "min": 2.0, "max": 80.0},
+                {"key": "move_window_seconds", "label": "Move Window (sec)", "type": "number", "min": 30, "max": 3600},
+                {"key": "min_favorite_prob", "label": "Min Favorite Prob", "type": "number", "min": 0.5, "max": 0.99},
+                {"key": "max_favorite_prob", "label": "Max Favorite Prob", "type": "number", "min": 0.5, "max": 0.999},
+                {"key": "min_liquidity", "label": "Min Liquidity (USD)", "type": "number", "min": 0},
+                {"key": "max_spread_bps", "label": "Max Spread (bps)", "type": "number", "min": 0, "max": 5000},
+                {"key": "reversion_fraction", "label": "Reversion Fraction", "type": "number", "min": 0.1, "max": 1.0},
+                {"key": "min_reversion_edge", "label": "Min Reversion Edge", "type": "number", "min": 0.001, "max": 0.50},
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
+                {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
+                {"key": "max_risk_score", "label": "Max Risk Score", "type": "number", "min": 0, "max": 1},
+                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 1000000},
+                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 1000000},
+                {"key": "take_profit_pct", "label": "Take Profit (%)", "type": "number", "min": 0, "max": 100},
+                {"key": "stop_loss_pct", "label": "Stop Loss (%)", "type": "number", "min": 0, "max": 100},
+                {"key": "max_hold_minutes", "label": "Max Hold (min)", "type": "number", "min": 1, "max": 10080},
+            ]
+        },
+    ),
 ]
 
 

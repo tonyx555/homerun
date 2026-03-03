@@ -441,15 +441,12 @@ async def build_live_signal_contexts(
 
     now_epoch = time.time()
     strict_ttl = max(0.05, float(getattr(settings, "WS_EXECUTION_PRICE_STALE_SECONDS", 1.0) or 1.0))
-    relaxed_ttl = max(strict_ttl, float(getattr(settings, "WS_PRICE_STALE_SECONDS", 30.0) or 30.0))
     source_priority = {
         "ws_strict": 0,
-        "ws_relaxed": 1,
-        "redis_strict": 2,
-        "redis_relaxed": 3,
-        "http_batch": 4,
-        "market_snapshot": 5,
-        "history_tail": 6,
+        "redis_strict": 1,
+        "http_batch": 2,
+        "market_snapshot": 3,
+        "history_tail": 4,
     }
     live_prices: dict[str, float] = {}
     live_price_meta: dict[str, dict[str, Any]] = {}
@@ -467,15 +464,27 @@ async def build_live_signal_contexts(
         parsed_mid = safe_float(mid)
         if parsed_mid is None or parsed_mid < 0.0 or parsed_mid > 1.01:
             return
-        priority = source_priority.get(source, 99)
-        existing = live_price_meta.get(norm)
-        if isinstance(existing, dict):
-            existing_priority = int(existing.get("priority", 99))
-            if existing_priority <= priority:
-                return
         age_ms = None
         if observed_at_s is not None:
             age_ms = max(0.0, (now_epoch - float(observed_at_s)) * 1000.0)
+        priority = source_priority.get(source, 99)
+        existing = live_price_meta.get(norm)
+        if isinstance(existing, dict):
+            existing_age_ms = safe_float(existing.get("age_ms"), None)
+            existing_priority = int(existing.get("priority", 99))
+            if existing_age_ms is not None and age_ms is not None:
+                if existing_age_ms + 1e-6 < age_ms:
+                    return
+                if age_ms + 1e-6 < existing_age_ms:
+                    pass
+                elif existing_priority <= priority:
+                    return
+            elif existing_age_ms is not None and age_ms is None:
+                return
+            elif existing_age_ms is None and age_ms is not None:
+                pass
+            elif existing_priority <= priority:
+                return
         live_prices[norm] = float(parsed_mid)
         live_price_meta[norm] = {
             "source": source,
@@ -524,9 +533,9 @@ async def build_live_signal_contexts(
                     )
                     age_s = None
                 if age_s is not None:
-                    if age_s > relaxed_ttl:
+                    if age_s > strict_ttl:
                         continue
-                    source = "ws_strict" if age_s <= strict_ttl else "ws_relaxed"
+                    source = "ws_strict"
                     observed_at_s = now_epoch - max(0.0, float(age_s))
                 else:
                     try:
@@ -543,20 +552,7 @@ async def build_live_signal_contexts(
                         source = "ws_strict"
                         observed_at_s = now_epoch
                     else:
-                        try:
-                            relaxed_fresh = feed_manager.is_fresh(token_norm, max_age_seconds=relaxed_ttl)
-                        except Exception as exc:
-                            logger.warning(
-                                "WebSocket relaxed freshness check failed",
-                                token_id=token_norm,
-                                stale_seconds=relaxed_ttl,
-                                exc_info=exc,
-                            )
-                            relaxed_fresh = False
-                        if not relaxed_fresh:
-                            continue
-                        source = "ws_relaxed"
-                        observed_at_s = now_epoch
+                        continue
                 _record_live_price(
                     token_norm,
                     mid=parsed_mid,
@@ -583,28 +579,6 @@ async def build_live_signal_contexts(
                     token_id,
                     mid=row.get("mid"),
                     source="redis_strict",
-                    observed_at_s=safe_float(row.get("ts")),
-                )
-
-        unresolved = [token_id for token_id in token_list if token_id not in live_prices]
-        if unresolved and relaxed_ttl > strict_ttl + 1e-9:
-            try:
-                relaxed_rows = await redis_price_cache.read_prices(unresolved, stale_seconds=relaxed_ttl)
-            except Exception as exc:
-                logger.warning(
-                    "Redis relaxed price read failed",
-                    token_count=len(unresolved),
-                    stale_seconds=relaxed_ttl,
-                    exc_info=exc,
-                )
-                relaxed_rows = {}
-            for token_id, row in relaxed_rows.items():
-                if not isinstance(row, dict):
-                    continue
-                _record_live_price(
-                    token_id,
-                    mid=row.get("mid"),
-                    source="redis_relaxed",
                     observed_at_s=safe_float(row.get("ts")),
                 )
 
@@ -845,14 +819,12 @@ async def build_live_signal_contexts(
         selected_source = str(selected_meta.get("source") or "").strip().lower()
         selected_age_ms = safe_float(selected_meta.get("age_ms"))
         selected_observed_at = selected_meta.get("observed_at") or None
-        if selected_observed_at is None and selected_live is not None:
+        if selected_observed_at is None and selected_live is not None and selected_source == "http_batch":
             selected_observed_at = fetched_at_iso
         if selected_age_ms is None and selected_observed_at is not None:
             selected_observed_s = _epoch_seconds_from_market_timestamp(selected_observed_at)
             if selected_observed_s is not None:
                 selected_age_ms = max(0.0, (fetched_at_epoch - selected_observed_s) * 1000.0)
-        if selected_age_ms is None and selected_live is not None:
-            selected_age_ms = 0.0
         yes_source = str(yes_meta.get("source") or "").strip().lower() or None
         no_source = str(no_meta.get("source") or "").strip().lower() or None
         contexts[signal_id] = {

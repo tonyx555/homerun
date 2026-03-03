@@ -1,4 +1,5 @@
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -486,7 +487,10 @@ def test_directional_min_timeframe_blocks_crypto_sub_5m_signal():
         portfolio_allocator=None,
         risk_evaluator=_risk_evaluator,
         invoke_hooks=False,
-        strategy_params={"enforce_market_data_freshness": False},
+        strategy_params={
+            "enforce_market_data_freshness": False,
+            "require_live_market_revalidation": False,
+        },
     )
 
     assert result["final_decision"] == "blocked"
@@ -524,13 +528,143 @@ def test_market_data_freshness_blocks_stale_scanner_signal():
         portfolio_allocator=None,
         risk_evaluator=_risk_evaluator,
         invoke_hooks=False,
-        strategy_params={"max_market_data_age_ms": 1000},
+        strategy_params={
+            "max_market_data_age_ms": 1000,
+            "require_live_market_revalidation": False,
+        },
     )
 
     assert result["final_decision"] == "blocked"
     assert "freshness gate blocked" in result["final_reason"].lower()
     assert any(
         gate["gate"] == "market_data_freshness" and gate["status"] == "blocked"
+        for gate in result["platform_gates"]
+    )
+
+
+def test_live_market_revalidation_blocks_crypto_when_freshness_is_unprovable():
+    now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    runtime_signal = SimpleNamespace(
+        id="signal-crypto-unprovable-live",
+        market_id="market-1",
+        direction="buy_yes",
+        source="crypto",
+        payload_json={
+            "strategy_context": {"timeframe": "5m"},
+            "live_market": {
+                "live_selected_price": 0.52,
+                "fetched_at": now_iso,
+                "market_data_source": "market_snapshot",
+            },
+        },
+    )
+    result = apply_platform_decision_gates(
+        decision_obj=_decision(25.0),
+        runtime_signal=runtime_signal,
+        strategy=None,
+        checks_payload=[],
+        trading_schedule_ok=True,
+        trading_schedule_config={},
+        global_limits={"max_gross_exposure_usd": 5000.0},
+        effective_risk_limits={"max_trade_notional_usd": 1000.0},
+        allow_averaging=True,
+        open_market_ids=set(),
+        pending_live_exit_count=0,
+        pending_live_exit_summary={"count": 0, "order_ids": [], "market_ids": [], "statuses": {}},
+        portfolio_allocator=None,
+        risk_evaluator=_risk_evaluator,
+        invoke_hooks=False,
+        strategy_params={"max_market_data_age_ms": 1000},
+    )
+
+    assert result["final_decision"] == "blocked"
+    assert "live market revalidation required" in result["final_reason"].lower()
+    assert any(
+        gate["gate"] == "live_market_revalidation" and gate["status"] == "blocked"
+        for gate in result["platform_gates"]
+    )
+
+
+def test_live_market_revalidation_allows_crypto_with_trusted_live_source():
+    now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    runtime_signal = SimpleNamespace(
+        id="signal-crypto-trusted-live",
+        market_id="market-1",
+        direction="buy_yes",
+        source="crypto",
+        payload_json={
+            "strategy_context": {"timeframe": "5m"},
+            "live_market": {
+                "live_selected_price": 0.52,
+                "fetched_at": now_iso,
+                "market_data_source": "http_batch",
+            },
+        },
+    )
+    result = apply_platform_decision_gates(
+        decision_obj=_decision(25.0),
+        runtime_signal=runtime_signal,
+        strategy=None,
+        checks_payload=[],
+        trading_schedule_ok=True,
+        trading_schedule_config={},
+        global_limits={"max_gross_exposure_usd": 5000.0},
+        effective_risk_limits={"max_trade_notional_usd": 1000.0},
+        allow_averaging=True,
+        open_market_ids=set(),
+        pending_live_exit_count=0,
+        pending_live_exit_summary={"count": 0, "order_ids": [], "market_ids": [], "statuses": {}},
+        portfolio_allocator=None,
+        risk_evaluator=_risk_evaluator,
+        invoke_hooks=False,
+        strategy_params={"max_market_data_age_ms": 1000},
+    )
+
+    assert result["final_decision"] == "selected"
+    assert any(
+        gate["gate"] == "live_market_revalidation" and gate["status"] == "passed"
+        for gate in result["platform_gates"]
+    )
+
+
+def test_live_market_revalidation_keeps_explicit_zero_age_without_fallback():
+    runtime_signal = SimpleNamespace(
+        id="signal-scanner-zero-age",
+        market_id="market-1",
+        direction="buy_yes",
+        source="scanner",
+        payload_json={
+            "live_market": {
+                "live_selected_price": 0.52,
+                "market_data_source": "http_batch",
+                "market_data_age_ms": 0.0,
+                "source_observed_at": "2020-01-01T00:00:00Z",
+                "fetched_at": "2020-01-01T00:00:00Z",
+            }
+        },
+    )
+    result = apply_platform_decision_gates(
+        decision_obj=_decision(25.0),
+        runtime_signal=runtime_signal,
+        strategy=None,
+        checks_payload=[],
+        trading_schedule_ok=True,
+        trading_schedule_config={},
+        global_limits={"max_gross_exposure_usd": 5000.0},
+        effective_risk_limits={"max_trade_notional_usd": 1000.0},
+        allow_averaging=True,
+        open_market_ids=set(),
+        pending_live_exit_count=0,
+        pending_live_exit_summary={"count": 0, "order_ids": [], "market_ids": [], "statuses": {}},
+        portfolio_allocator=None,
+        risk_evaluator=_risk_evaluator,
+        invoke_hooks=False,
+        strategy_params={"max_market_data_age_ms": 1000},
+    )
+
+    assert result["final_decision"] == "selected"
+    assert any(
+        gate["gate"] == "live_market_revalidation" and gate["status"] == "passed"
         for gate in result["platform_gates"]
     )
 

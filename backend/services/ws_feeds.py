@@ -57,7 +57,7 @@ def _is_expected_close(exc: Exception) -> bool:
             received = getattr(exc, "rcvd", None)
             sent = getattr(exc, "sent", None)
             close_code = getattr(received, "code", None) or getattr(sent, "code", None)
-        return close_code in {None, 1000, 1001, 1005}
+        return close_code in {1000, 1001, 1005}
     return False
 
 
@@ -75,6 +75,8 @@ DEFAULT_HEARTBEAT_MAX_MISSES = 2
 DEFAULT_RECONNECT_BASE_DELAY = 1.0  # initial backoff delay in seconds
 DEFAULT_RECONNECT_MAX_DELAY = 60.0  # maximum backoff ceiling
 DEFAULT_RECONNECT_MULTIPLIER = 2.0  # exponential multiplier per attempt
+MAX_RECONNECT_ATTEMPTS = 30  # after this many consecutive failures, extend delay
+MAX_RECONNECT_EXTENDED_DELAY = 300.0  # 5 minutes between attempts after exhaustion
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +514,8 @@ class FeedStats:
     last_message_at: float = 0.0  # monotonic
     last_latency_ms: float = 0.0
     connection_uptime_start: float = 0.0
+    consecutive_failures: int = 0
+    last_failure_at: float = 0.0  # monotonic
 
     @property
     def uptime_seconds(self) -> float:
@@ -525,6 +529,7 @@ class FeedStats:
             "messages_parsed": self.messages_parsed,
             "parse_errors": self.parse_errors,
             "reconnections": self.reconnections,
+            "consecutive_failures": self.consecutive_failures,
             "last_latency_ms": round(self.last_latency_ms, 2),
             "uptime_seconds": round(self.uptime_seconds, 1),
         }
@@ -559,8 +564,11 @@ class PolymarketWSFeed:
         self._reconnect_base_delay = reconnect_base_delay
         self._reconnect_max_delay = reconnect_max_delay
 
+        # Callbacks
+        self.on_persistent_failure: Optional[Callable[[int], Coroutine]] = None
+        self.on_recovery: Optional[Callable[[], Coroutine]] = None
+
         # Subscription tracking
-        self._subscribed_markets: Set[str] = set()  # condition_ids
         self._subscribed_assets: Set[str] = set()  # token_ids
         self._sub_lock = asyncio.Lock()
 
@@ -570,6 +578,7 @@ class PolymarketWSFeed:
         self._run_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
+        self._reconnect_attempt = 0
 
         # Stats
         self.stats = FeedStats()
@@ -611,74 +620,77 @@ class PolymarketWSFeed:
         self._ws = None
         logger.info("PolymarketWSFeed stopped")
 
-    async def subscribe(
-        self,
-        condition_ids: Optional[List[str]] = None,
-        token_ids: Optional[List[str]] = None,
-    ) -> None:
-        """Subscribe to additional markets or assets.
+    async def subscribe(self, token_ids: List[str]) -> None:
+        """Subscribe to additional assets by token ID.
 
         Can be called before or after the feed is started.  If the connection
         is already live the subscription message is sent immediately.
         """
+        if not token_ids:
+            return
         async with self._sub_lock:
-            if condition_ids:
-                self._subscribed_markets.update(condition_ids)
-            if token_ids:
-                self._subscribed_assets.update(token_ids)
+            self._subscribed_assets.update(token_ids)
             if self._ws and self._state == ConnectionState.CONNECTED:
-                await self._send_subscribe(
-                    condition_ids or [],
-                    token_ids or [],
-                )
+                await self._send_subscribe(token_ids)
 
-    async def unsubscribe(
-        self,
-        condition_ids: Optional[List[str]] = None,
-        token_ids: Optional[List[str]] = None,
-    ) -> None:
+    async def unsubscribe(self, token_ids: List[str]) -> None:
         """Remove subscriptions.  Cached data for removed tokens is cleared."""
+        if not token_ids:
+            return
         async with self._sub_lock:
-            removed_assets: List[str] = []
-            if condition_ids:
-                self._subscribed_markets.difference_update(condition_ids)
-            if token_ids:
-                self._subscribed_assets.difference_update(token_ids)
-                removed_assets = list(token_ids)
+            self._subscribed_assets.difference_update(token_ids)
 
-        for tid in removed_assets:
+        for tid in token_ids:
             self._cache.remove(tid)
 
     # -- internal connection loop -------------------------------------------
 
     async def _run_loop(self) -> None:
         """Outer loop: connect, listen, and reconnect on failure."""
-        attempt = 0
+        self._reconnect_attempt = 0
         while not self._stop_event.is_set():
             try:
-                self._state = ConnectionState.CONNECTING if attempt == 0 else ConnectionState.RECONNECTING
+                self._state = ConnectionState.CONNECTING if self._reconnect_attempt == 0 else ConnectionState.RECONNECTING
                 await self._connect_and_listen()
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 if self._stop_event.is_set():
                     break
-                attempt += 1
+                self._reconnect_attempt += 1
                 self.stats.reconnections += 1
-                delay = min(
-                    self._reconnect_base_delay * (DEFAULT_RECONNECT_MULTIPLIER ** (attempt - 1)),
-                    self._reconnect_max_delay,
-                )
+                self.stats.consecutive_failures = self._reconnect_attempt
+                self.stats.last_failure_at = time.monotonic()
+
+                # After max attempts, switch to extended delay
+                if self._reconnect_attempt >= MAX_RECONNECT_ATTEMPTS:
+                    delay = MAX_RECONNECT_EXTENDED_DELAY
+                    if self._reconnect_attempt == MAX_RECONNECT_ATTEMPTS:
+                        logger.error(
+                            f"Polymarket WS: {MAX_RECONNECT_ATTEMPTS} consecutive failures, "
+                            f"extending retry delay to {delay}s"
+                        )
+                        if self.on_persistent_failure:
+                            try:
+                                await self.on_persistent_failure(self._reconnect_attempt)
+                            except Exception:
+                                logger.exception("on_persistent_failure callback error")
+                else:
+                    delay = min(
+                        self._reconnect_base_delay * (DEFAULT_RECONNECT_MULTIPLIER ** (self._reconnect_attempt - 1)),
+                        self._reconnect_max_delay,
+                    )
+
                 if _is_expected_close(exc):
                     logger.info(
                         "Polymarket WS disconnected cleanly; reconnecting",
                         delay=round(delay, 1),
-                        attempt=attempt,
+                        attempt=self._reconnect_attempt,
                         close_code=getattr(exc, "code", None),
                     )
                 else:
                     logger.warning(
-                        f"Polymarket WS disconnected ({exc!r}), reconnecting in {delay:.1f}s (attempt {attempt})"
+                        f"Polymarket WS disconnected ({exc!r}), reconnecting in {delay:.1f}s (attempt {self._reconnect_attempt})"
                     )
                 self._state = ConnectionState.DISCONNECTED
                 try:
@@ -689,7 +701,7 @@ class PolymarketWSFeed:
             else:
                 # Clean exit from _connect_and_listen (server closed gracefully)
                 if not self._stop_event.is_set():
-                    attempt += 1
+                    self._reconnect_attempt += 1
                     self.stats.reconnections += 1
                     continue
                 break
@@ -711,11 +723,8 @@ class PolymarketWSFeed:
 
             # Re-subscribe to everything tracked
             async with self._sub_lock:
-                if self._subscribed_markets or self._subscribed_assets:
-                    await self._send_subscribe(
-                        list(self._subscribed_markets),
-                        list(self._subscribed_assets),
-                    )
+                if self._subscribed_assets:
+                    await self._send_subscribe(list(self._subscribed_assets))
 
             # Start heartbeat
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(ws), name="polymarket-ws-heartbeat")
@@ -727,6 +736,19 @@ class PolymarketWSFeed:
                     recv_time = time.monotonic()
                     self.stats.messages_received += 1
                     self.stats.last_message_at = recv_time
+
+                    # Reset failure counter on first successful message after reconnect
+                    if self._reconnect_attempt > 0:
+                        was_failing = self.stats.consecutive_failures >= MAX_RECONNECT_ATTEMPTS
+                        self._reconnect_attempt = 0
+                        self.stats.consecutive_failures = 0
+                        if was_failing and self.on_recovery:
+                            try:
+                                await self.on_recovery()
+                            except Exception:
+                                logger.exception("on_recovery callback error")
+                        logger.info("Polymarket WS recovered, attempt counter reset")
+
                     try:
                         data = json.loads(raw)
                         if isinstance(data, list):
@@ -743,28 +765,17 @@ class PolymarketWSFeed:
                     self._heartbeat_task.cancel()
                 self._ws = None
 
-    async def _send_subscribe(
-        self,
-        condition_ids: List[str],
-        token_ids: List[str],
-    ) -> None:
+    async def _send_subscribe(self, token_ids: List[str]) -> None:
         """Send a subscribe message over the live WebSocket."""
-        if not self._ws:
+        if not self._ws or not token_ids:
             return
         msg: dict[str, Any] = {
-            "auth": {},
-            "type": "subscribe",
-            "markets": condition_ids if condition_ids else [],
-            "assets_ids": token_ids if token_ids else [],
-            "channels": ["book", "trades"],
+            "type": "market",
+            "assets_ids": token_ids,
         }
         try:
             await self._ws.send(json.dumps(msg))
-            logger.debug(
-                "Polymarket WS subscribed",
-                markets=len(condition_ids),
-                assets=len(token_ids),
-            )
+            logger.debug("Polymarket WS subscribed", assets=len(token_ids))
         except Exception as exc:
             if _is_expected_close(exc):
                 logger.info("Polymarket WS subscribe interrupted by clean close")
@@ -1260,7 +1271,7 @@ class FeedManager:
 
         mgr = FeedManager.get_instance()
         await mgr.start()
-        await mgr.polymarket_feed.subscribe(condition_ids=["0x..."], token_ids=["123..."])
+        await mgr.polymarket_feed.subscribe(["123..."])
         price = await mgr.get_price("123...")
         book  = await mgr.get_order_book("123...")
     """

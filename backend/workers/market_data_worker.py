@@ -14,13 +14,28 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from sqlalchemy import and_, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from config import apply_runtime_settings_overrides, settings
-from models.database import AsyncSessionLocal
+from models.database import (
+    AsyncSessionLocal,
+    ExecutionSession,
+    ExecutionSessionLeg,
+    Trader,
+    TraderOrder,
+    TraderPosition,
+)
 from services.kalshi_client import kalshi_client
 from services.optimization.vwap import OrderBook, OrderBookLevel
 from services.polymarket import polymarket_client
 from services.redis_price_cache import redis_price_cache
 from services.shared_state import read_market_catalog
+from services.trader_orchestrator_state import (
+    ACTIVE_EXECUTION_SESSION_STATUSES,
+    OPEN_ORDER_STATUSES,
+    list_unconsumed_trade_signals,
+)
 from services.worker_state import clear_worker_run_request, read_worker_control, write_worker_snapshot
 from services.ws_feeds import get_feed_manager
 from utils.logger import setup_logging
@@ -30,12 +45,47 @@ setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"), json_format=False)
 logger = logging.getLogger("market_data_worker")
 
 
+_TOKEN_SCALAR_KEYS = {
+    "token_id",
+    "tokenid",
+    "selected_token",
+    "selected_token_id",
+    "selectedtokenid",
+    "yes_token",
+    "yes_token_id",
+    "yestokenid",
+    "no_token",
+    "no_token_id",
+    "notokenid",
+    "asset_id",
+    "assetid",
+    "clob_token_id",
+    "clobtokenid",
+}
+_TOKEN_LIST_KEYS = {
+    "token_ids",
+    "tokenids",
+    "asset_ids",
+    "assetids",
+    "assets_ids",
+    "assetsids",
+    "clob_token_ids",
+    "clobtokenids",
+}
+_MAX_EVALUATION_SIGNALS_PER_TRADER = 600
+
+
 def _is_polymarket_token(token_id: str) -> bool:
     token = str(token_id or "").strip()
     if not token:
         return False
     lower = token.lower()
     return lower.startswith("0x") or len(token) > 20
+
+
+def _is_polymarket_market_id(value: str) -> bool:
+    text = str(value or "").strip().lower()
+    return text.startswith("0x")
 
 
 def _normalize_market_id(raw_id: object) -> str:
@@ -136,8 +186,10 @@ def _collect_catalog_index(markets: list) -> tuple[set[str], dict[str, tuple[str
     token_ids: set[str] = set()
     market_tokens: dict[str, tuple[str, str]] = {}
     for market in markets:
-        market_id = _normalize_market_id(getattr(market, "condition_id", None) or getattr(market, "id", None))
-        if not market_id:
+        condition_id = _normalize_market_id(getattr(market, "condition_id", None))
+        market_row_id = _normalize_market_id(getattr(market, "id", None))
+        market_keys = {key for key in (condition_id, market_row_id) if key}
+        if not market_keys:
             continue
         raw_tokens = list(getattr(market, "clob_token_ids", None) or [])
         clean_tokens = [_normalize_token_id(token) for token in raw_tokens if _normalize_token_id(token)]
@@ -147,8 +199,201 @@ def _collect_catalog_index(markets: list) -> tuple[set[str], dict[str, tuple[str
         no_token = clean_tokens[1]
         token_ids.add(yes_token)
         token_ids.add(no_token)
-        market_tokens[market_id] = (yes_token, no_token)
+        for market_key in market_keys:
+            if market_key not in market_tokens:
+                market_tokens[market_key] = (yes_token, no_token)
     return token_ids, market_tokens
+
+
+def _normalize_source_key(raw_source: Any) -> str:
+    return str(raw_source or "").strip().lower()
+
+
+def _collect_tokens_from_payload(payload: Any) -> set[str]:
+    out: set[str] = set()
+    stack: list[Any] = [payload]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            for raw_key, value in item.items():
+                key = str(raw_key or "").strip().lower()
+                if key in _TOKEN_SCALAR_KEYS:
+                    token = _normalize_token_id(value)
+                    if token:
+                        out.add(token)
+                elif key in _TOKEN_LIST_KEYS and isinstance(value, (list, tuple, set)):
+                    for candidate in value:
+                        token = _normalize_token_id(candidate)
+                        if token:
+                            out.add(token)
+                if isinstance(value, (dict, list, tuple, set)):
+                    stack.append(value)
+            continue
+        if isinstance(item, (list, tuple, set)):
+            for nested in item:
+                if isinstance(nested, (dict, list, tuple, set)):
+                    stack.append(nested)
+    return out
+
+
+def _add_market_tokens(
+    token_ids: set[str],
+    *,
+    market_id: Any,
+    market_tokens: dict[str, tuple[str, str]],
+) -> None:
+    key = _normalize_market_id(market_id)
+    if not key:
+        return
+    pair = market_tokens.get(key)
+    if pair is None:
+        return
+    yes_token, no_token = pair
+    if yes_token:
+        token_ids.add(yes_token)
+    if no_token:
+        token_ids.add(no_token)
+
+
+async def _collect_trader_critical_universe(
+    session: AsyncSession,
+    *,
+    market_tokens: dict[str, tuple[str, str]],
+) -> dict[str, Any]:
+    held_market_ids: set[str] = set()
+    evaluation_market_ids: set[str] = set()
+    critical_tokens: set[str] = set()
+
+    open_position_rows = (
+        await session.execute(
+            select(TraderPosition.market_id, TraderPosition.payload_json).where(
+                func.lower(func.coalesce(TraderPosition.status, "")) == "open"
+            )
+        )
+    ).all()
+    for row in open_position_rows:
+        market_id = _normalize_market_id(row.market_id)
+        if market_id:
+            held_market_ids.add(market_id)
+            _add_market_tokens(critical_tokens, market_id=market_id, market_tokens=market_tokens)
+        critical_tokens.update(_collect_tokens_from_payload(row.payload_json))
+
+    open_order_rows = (
+        await session.execute(
+            select(
+                TraderOrder.market_id,
+                TraderOrder.payload_json,
+            ).where(func.lower(func.coalesce(TraderOrder.status, "")).in_(tuple(OPEN_ORDER_STATUSES)))
+        )
+    ).all()
+    for row in open_order_rows:
+        market_id = _normalize_market_id(row.market_id)
+        if market_id:
+            held_market_ids.add(market_id)
+            _add_market_tokens(critical_tokens, market_id=market_id, market_tokens=market_tokens)
+        critical_tokens.update(_collect_tokens_from_payload(row.payload_json))
+
+    active_execution_leg_rows = (
+        await session.execute(
+            select(
+                ExecutionSessionLeg.market_id,
+                ExecutionSessionLeg.token_id,
+            )
+            .join(ExecutionSession, ExecutionSession.id == ExecutionSessionLeg.session_id)
+            .where(func.lower(func.coalesce(ExecutionSession.status, "")).in_(tuple(ACTIVE_EXECUTION_SESSION_STATUSES)))
+        )
+    ).all()
+    for row in active_execution_leg_rows:
+        market_id = _normalize_market_id(row.market_id)
+        if market_id:
+            held_market_ids.add(market_id)
+            _add_market_tokens(critical_tokens, market_id=market_id, market_tokens=market_tokens)
+        token_id = _normalize_token_id(row.token_id)
+        if token_id:
+            critical_tokens.add(token_id)
+
+    enabled_traders = (
+        await session.execute(
+            select(
+                Trader.id,
+                Trader.source_configs_json,
+            ).where(
+                and_(
+                    Trader.is_enabled == True,  # noqa: E712
+                    Trader.is_paused == False,  # noqa: E712
+                )
+            )
+        )
+    ).all()
+    evaluation_signals_count = 0
+    for trader_row in enabled_traders:
+        trader_id = str(trader_row.id or "").strip()
+        if not trader_id:
+            continue
+        source_configs = list(trader_row.source_configs_json or [])
+        sources: list[str] = []
+        for source_config in source_configs:
+            if not isinstance(source_config, dict):
+                continue
+            source_key = _normalize_source_key(source_config.get("source_key"))
+            if source_key:
+                sources.append(source_key)
+        if not sources:
+            continue
+        signals = await list_unconsumed_trade_signals(
+            session,
+            trader_id=trader_id,
+            sources=sorted(set(sources)),
+            statuses=["pending", "selected"],
+            limit=_MAX_EVALUATION_SIGNALS_PER_TRADER,
+        )
+        evaluation_signals_count += len(signals)
+        for signal in signals:
+            market_id = _normalize_market_id(getattr(signal, "market_id", ""))
+            if market_id:
+                evaluation_market_ids.add(market_id)
+                _add_market_tokens(critical_tokens, market_id=market_id, market_tokens=market_tokens)
+            payload_json = getattr(signal, "payload_json", None)
+            critical_tokens.update(_collect_tokens_from_payload(payload_json))
+
+    critical_market_ids = set(held_market_ids)
+    critical_market_ids.update(evaluation_market_ids)
+    for market_id in critical_market_ids:
+        _add_market_tokens(critical_tokens, market_id=market_id, market_tokens=market_tokens)
+
+    critical_condition_ids = {
+        market_id for market_id in critical_market_ids if _is_polymarket_market_id(market_id)
+    }
+    return {
+        "critical_tokens": critical_tokens,
+        "critical_condition_ids": critical_condition_ids,
+        "critical_market_ids": critical_market_ids,
+        "held_market_ids": held_market_ids,
+        "evaluation_market_ids": evaluation_market_ids,
+        "evaluation_signals_count": evaluation_signals_count,
+    }
+
+
+def _select_with_priority(
+    *,
+    critical_items: set[str],
+    background_items: set[str],
+    cap: int,
+) -> tuple[set[str], int]:
+    selected: set[str] = set()
+    for item in sorted(critical_items):
+        selected.add(item)
+    if len(selected) >= cap:
+        return selected, len(background_items)
+
+    for item in sorted(background_items):
+        if item in selected:
+            continue
+        if len(selected) >= cap:
+            break
+        selected.add(item)
+    dropped = max(0, len(background_items - selected))
+    return selected, dropped
 
 
 def _fallback_updates_from_prices(
@@ -224,13 +469,25 @@ async def _run_loop() -> None:
         "ws_started": False,
         "polymarket_subscriptions": 0,
         "kalshi_subscriptions": 0,
+        "critical_tokens": 0,
+        "critical_markets": 0,
+        "held_markets": 0,
+        "evaluation_markets": 0,
+        "evaluation_signals": 0,
+        "dropped_background_poly_tokens": 0,
+        "dropped_background_kalshi_tokens": 0,
     }
     heartbeat_stop_event = asyncio.Event()
 
     feed_manager = get_feed_manager()
     fallback_sequence = 0
+    catalog_tokens: set[str] = set()
+    critical_tokens: set[str] = set()
+    critical_condition_ids: set[str] = set()
+    critical_market_ids: set[str] = set()
     desired_tokens: set[str] = set()
     market_tokens: dict[str, tuple[str, str]] = {}
+    tracked_market_tokens: dict[str, tuple[str, str]] = {}
     subscribed_poly_tokens: set[str] = set()
     subscribed_kalshi_tickers: set[str] = set()
     next_stale_poll_at = datetime.now(timezone.utc)
@@ -260,6 +517,29 @@ async def _run_loop() -> None:
                     "ws_started": bool(state.get("ws_started", False)),
                     "polymarket_subscriptions": int(state.get("polymarket_subscriptions", 0) or 0),
                     "kalshi_subscriptions": int(state.get("kalshi_subscriptions", 0) or 0),
+                    "critical_tokens": int(state.get("critical_tokens", 0) or 0),
+                    "critical_markets": int(state.get("critical_markets", 0) or 0),
+                    "critical_poly_tokens": int(state.get("critical_poly_tokens", 0) or 0),
+                    "critical_kalshi_tokens": int(state.get("critical_kalshi_tokens", 0) or 0),
+                    "critical_poly_subscribed_tokens": int(
+                        state.get("critical_poly_subscribed_tokens", 0) or 0
+                    ),
+                    "critical_kalshi_subscribed_tokens": int(
+                        state.get("critical_kalshi_subscribed_tokens", 0) or 0
+                    ),
+                    "critical_poly_missing_tokens": int(state.get("critical_poly_missing_tokens", 0) or 0),
+                    "critical_kalshi_missing_tokens": int(
+                        state.get("critical_kalshi_missing_tokens", 0) or 0
+                    ),
+                    "held_markets": int(state.get("held_markets", 0) or 0),
+                    "evaluation_markets": int(state.get("evaluation_markets", 0) or 0),
+                    "evaluation_signals": int(state.get("evaluation_signals", 0) or 0),
+                    "dropped_background_poly_tokens": int(state.get("dropped_background_poly_tokens", 0) or 0),
+                    "dropped_background_kalshi_tokens": int(
+                        state.get("dropped_background_kalshi_tokens", 0) or 0
+                    ),
+                    "critical_stale_tokens": int(state.get("critical_stale_tokens", 0) or 0),
+                    "critical_stale_markets": int(state.get("critical_stale_markets", 0) or 0),
                 },
             )
 
@@ -278,29 +558,55 @@ async def _run_loop() -> None:
     async def _sync_ws_subscriptions() -> None:
         nonlocal subscribed_poly_tokens
         nonlocal subscribed_kalshi_tickers
+        nonlocal desired_tokens
 
-        desired_poly_tokens, desired_kalshi_tokens = _split_token_universe(desired_tokens)
-        desired_poly = set(desired_poly_tokens[:ws_subscription_cap])
-        desired_kalshi = _kalshi_tickers_from_tokens(set(desired_kalshi_tokens[:ws_subscription_cap]))
+        catalog_poly_tokens, catalog_kalshi_tokens = _split_token_universe(catalog_tokens)
+        critical_poly_tokens, critical_kalshi_tokens = _split_token_universe(critical_tokens)
 
-        add_poly = sorted(desired_poly - subscribed_poly_tokens)
-        remove_poly = sorted(subscribed_poly_tokens - desired_poly)
-        if add_poly:
-            await feed_manager.polymarket_feed.subscribe(token_ids=add_poly)
-        if remove_poly:
-            await feed_manager.polymarket_feed.unsubscribe(token_ids=remove_poly)
-        subscribed_poly_tokens = desired_poly
+        desired_poly_tokens, dropped_background_poly_tokens = _select_with_priority(
+            critical_items=set(critical_poly_tokens),
+            background_items=set(catalog_poly_tokens),
+            cap=ws_subscription_cap,
+        )
+        desired_kalshi_tokens, dropped_background_kalshi_tokens = _select_with_priority(
+            critical_items=set(critical_kalshi_tokens),
+            background_items=set(catalog_kalshi_tokens),
+            cap=ws_subscription_cap,
+        )
+        desired_kalshi = _kalshi_tickers_from_tokens(desired_kalshi_tokens)
 
-        add_kalshi = sorted(desired_kalshi - subscribed_kalshi_tickers)
-        remove_kalshi = sorted(subscribed_kalshi_tickers - desired_kalshi)
-        if add_kalshi:
-            await feed_manager.kalshi_feed.subscribe(add_kalshi)
-        if remove_kalshi:
-            await feed_manager.kalshi_feed.unsubscribe(remove_kalshi)
-        subscribed_kalshi_tickers = desired_kalshi
+        if settings.WS_FEED_ENABLED:
+            add_poly_tokens = sorted(desired_poly_tokens - subscribed_poly_tokens)
+            remove_poly_tokens = sorted(subscribed_poly_tokens - desired_poly_tokens)
+            if add_poly_tokens:
+                await feed_manager.polymarket_feed.subscribe(add_poly_tokens)
+            if remove_poly_tokens:
+                await feed_manager.polymarket_feed.unsubscribe(remove_poly_tokens)
+            subscribed_poly_tokens = desired_poly_tokens
 
+            add_kalshi = sorted(desired_kalshi - subscribed_kalshi_tickers)
+            remove_kalshi = sorted(subscribed_kalshi_tickers - desired_kalshi)
+            if add_kalshi:
+                await feed_manager.kalshi_feed.subscribe(add_kalshi)
+            if remove_kalshi:
+                await feed_manager.kalshi_feed.unsubscribe(remove_kalshi)
+            subscribed_kalshi_tickers = desired_kalshi
+        else:
+            subscribed_poly_tokens = desired_poly_tokens
+            subscribed_kalshi_tickers = desired_kalshi
+
+        desired_tokens = set(desired_poly_tokens)
+        desired_tokens.update(desired_kalshi_tokens)
+        state["dropped_background_poly_tokens"] = dropped_background_poly_tokens
+        state["dropped_background_kalshi_tokens"] = dropped_background_kalshi_tokens
         state["polymarket_subscriptions"] = len(subscribed_poly_tokens)
         state["kalshi_subscriptions"] = len(subscribed_kalshi_tickers)
+        state["critical_poly_tokens"] = len(critical_poly_tokens)
+        state["critical_kalshi_tokens"] = len(critical_kalshi_tokens)
+        state["critical_poly_subscribed_tokens"] = len(subscribed_poly_tokens.intersection(critical_poly_tokens))
+        state["critical_kalshi_subscribed_tokens"] = len(desired_kalshi_tokens.intersection(critical_kalshi_tokens))
+        state["critical_poly_missing_tokens"] = len(set(critical_poly_tokens) - set(subscribed_poly_tokens))
+        state["critical_kalshi_missing_tokens"] = len(set(critical_kalshi_tokens) - set(desired_kalshi_tokens))
 
     async def _run_stale_gap_filler(now_dt: datetime) -> None:
         nonlocal fallback_sequence
@@ -318,12 +624,18 @@ async def _run_loop() -> None:
         stale_tokens = [token for token in all_tokens if token not in fresh_tokens]
         state["fresh_tokens"] = len(fresh_tokens)
         state["stale_tokens"] = len(stale_tokens)
+        critical_token_set = set(critical_tokens)
+        critical_stale_tokens = [token for token in critical_token_set if token not in fresh_tokens]
+        state["critical_stale_tokens"] = len(critical_stale_tokens)
 
         stale_market_count = 0
-        for yes_token, no_token in market_tokens.values():
+        critical_stale_market_count = 0
+        for yes_token, no_token in tracked_market_tokens.values():
             if yes_token not in fresh_tokens or no_token not in fresh_tokens:
                 stale_market_count += 1
+                critical_stale_market_count += 1
         state["stale_markets"] = stale_market_count
+        state["critical_stale_markets"] = critical_stale_market_count
 
         if not bool(getattr(settings, "MARKET_DATA_WORKER_OWNS_WS", True)):
             state["fallback_polled_tokens"] = 0
@@ -356,6 +668,26 @@ async def _run_loop() -> None:
             await redis_price_cache.write_prices(updates)
         state["fallback_polled_tokens"] = len(poll_tokens)
         state["fallback_updates"] = len(updates)
+
+    async def _sleep_until_next_cycle(interval_seconds: float) -> None:
+        sleep_remaining = max(0.0, float(interval_seconds))
+        while sleep_remaining > 1e-6:
+            chunk = min(1.0, sleep_remaining)
+            await asyncio.sleep(chunk)
+            sleep_remaining -= chunk
+            if sleep_remaining <= 1e-6:
+                return
+            try:
+                async with AsyncSessionLocal() as session:
+                    control_state = await read_worker_control(
+                        session,
+                        worker_name,
+                        default_interval=sync_interval,
+                    )
+                if control_state.get("requested_run_at") is not None:
+                    return
+            except Exception:
+                continue
 
     heartbeat_task = asyncio.create_task(_heartbeat_loop(), name="market-data-heartbeat")
     logger.info("Market data worker started")
@@ -409,15 +741,33 @@ async def _run_loop() -> None:
             try:
                 async with AsyncSessionLocal() as session:
                     _, markets, metadata = await read_market_catalog(session)
+                    catalog_tokens, market_tokens = _collect_catalog_index(markets)
+                    critical_universe = await _collect_trader_critical_universe(
+                        session,
+                        market_tokens=market_tokens,
+                    )
                     await clear_worker_run_request(session, worker_name)
-                desired_tokens, market_tokens = _collect_catalog_index(markets)
-                state["catalog_markets"] = int(metadata.get("market_count") or len(markets) or 0)
-                state["catalog_tokens"] = len(desired_tokens)
 
-                if settings.WS_FEED_ENABLED:
-                    state["phase"] = "subscription_sync"
-                    state["progress"] = 0.45
-                    await _sync_ws_subscriptions()
+                critical_tokens = set(critical_universe.get("critical_tokens") or [])
+                critical_condition_ids = set(critical_universe.get("critical_condition_ids") or [])
+                critical_market_ids = set(critical_universe.get("critical_market_ids") or [])
+                tracked_market_tokens = {
+                    market_id: market_tokens[market_id]
+                    for market_id in critical_market_ids
+                    if market_id in market_tokens
+                }
+
+                state["critical_tokens"] = len(critical_tokens)
+                state["critical_markets"] = len(critical_market_ids)
+                state["held_markets"] = len(critical_universe.get("held_market_ids") or [])
+                state["evaluation_markets"] = len(critical_universe.get("evaluation_market_ids") or [])
+                state["evaluation_signals"] = int(critical_universe.get("evaluation_signals_count") or 0)
+                state["catalog_markets"] = int(metadata.get("market_count") or len(markets) or 0)
+                state["catalog_tokens"] = len(catalog_tokens)
+
+                state["phase"] = "subscription_sync"
+                state["progress"] = 0.45
+                await _sync_ws_subscriptions()
 
                 if now_dt >= next_stale_poll_at:
                     state["phase"] = "stale_gap_fill"
@@ -430,8 +780,9 @@ async def _run_loop() -> None:
                 state["phase"] = "idle"
                 state["progress"] = 1.0
                 state["activity"] = (
-                    f"Market data synced: {state['catalog_markets']} markets, {state['catalog_tokens']} tokens, "
-                    f"{state['stale_tokens']} stale tokens."
+                    f"Market data synced: catalog={state['catalog_markets']} markets/{state['catalog_tokens']} tokens, "
+                    f"critical={state['critical_markets']} markets/{state['critical_tokens']} tokens, "
+                    f"stale={state['stale_tokens']}."
                 )
             except asyncio.CancelledError:
                 raise
@@ -441,7 +792,7 @@ async def _run_loop() -> None:
                 state["activity"] = f"Market data cycle error: {exc}"
                 logger.exception("Market data cycle failed: %s", exc)
 
-            await asyncio.sleep(float(interval_seconds))
+            await _sleep_until_next_cycle(float(interval_seconds))
     finally:
         heartbeat_stop_event.set()
         heartbeat_task.cancel()

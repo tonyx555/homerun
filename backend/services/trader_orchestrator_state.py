@@ -128,6 +128,16 @@ _ORCHESTRATOR_SNAPSHOT_STALE_MULTIPLIER = 30.0
 _ORCHESTRATOR_SNAPSHOT_STALE_MIN_SECONDS = 120.0
 _TRADER_MODES = {"shadow", "live"}
 _MANUAL_LIVE_POSITION_SOURCE = "manual_wallet_position"
+_LEGACY_CRYPTO_STRATEGY_TIMEFRAME_ALIASES: dict[str, str] = {
+    "crypto_5m": "5m",
+    "crypto_15m": "15m",
+    "crypto_1h": "1h",
+    "crypto_4h": "4h",
+}
+_LEGACY_STRATEGY_ALIASES: dict[str, str] = {
+    **{legacy: "btc_eth_highfreq" for legacy in _LEGACY_CRYPTO_STRATEGY_TIMEFRAME_ALIASES.keys()},
+    "news_reaction": "news_edge",
+}
 
 
 def _now() -> datetime:
@@ -1393,6 +1403,11 @@ def _normalize_strategy_key(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
+def _canonical_strategy_key(value: Any) -> str:
+    key = _normalize_strategy_key(value)
+    return _LEGACY_STRATEGY_ALIASES.get(key, key)
+
+
 def _normalize_trader_mode(value: Any) -> str:
     mode = str(value or "").strip().lower()
     if mode == "paper":
@@ -1405,8 +1420,36 @@ def _normalize_trader_mode(value: Any) -> str:
 
 
 def _normalize_strategy_for_source(source_key: str, strategy_key: str) -> str:
-    """Normalize strategy key for a given source."""
-    return _normalize_strategy_key(strategy_key)
+    del source_key
+    return _canonical_strategy_key(strategy_key)
+
+
+def _normalize_timeframe_scope(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple, set)):
+        values = value
+    elif isinstance(value, str):
+        values = [part.strip() for part in value.split(",")]
+    else:
+        values = []
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        token = str(raw or "").strip().lower()
+        if token in {"5m", "5min", "5"}:
+            token = "5m"
+        elif token in {"15m", "15min", "15"}:
+            token = "15m"
+        elif token in {"1h", "1hr", "60m", "60min"}:
+            token = "1h"
+        elif token in {"4h", "4hr", "240m", "240min"}:
+            token = "4h"
+        else:
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
 
 
 async def _fetch_enabled_strategy_catalog(
@@ -1449,9 +1492,10 @@ async def _fetch_enabled_strategy_catalog(
 
 async def _validate_strategy_key(session: AsyncSession, strategy_key: str) -> None:
     valid_keys, _ = await _fetch_enabled_strategy_catalog(session)
-    if not strategy_key:
+    canonical_strategy_key = _canonical_strategy_key(strategy_key)
+    if not canonical_strategy_key:
         raise ValueError("strategy_key is required")
-    if strategy_key not in valid_keys:
+    if canonical_strategy_key not in valid_keys:
         allowed = ", ".join(sorted(valid_keys))
         raise ValueError(f"Unknown strategy_key '{strategy_key}'. Valid strategy keys: {allowed}")
 
@@ -1490,12 +1534,41 @@ def _validate_traders_scope(scope: dict[str, Any]) -> None:
 def _normalize_source_config(raw: Any) -> dict[str, Any]:
     item = raw if isinstance(raw, dict) else {}
     source_key = normalize_source_key(item.get("source_key"))
+    requested_strategy_key = _normalize_strategy_key(item.get("strategy_key"))
+    raw_strategy_params = dict(item.get("strategy_params") or {})
     strategy_key = _normalize_strategy_for_source(
         source_key,
-        _normalize_strategy_key(item.get("strategy_key")),
+        requested_strategy_key,
     )
+    if source_key == "crypto" and requested_strategy_key in _LEGACY_CRYPTO_STRATEGY_TIMEFRAME_ALIASES:
+        timeframe = _LEGACY_CRYPTO_STRATEGY_TIMEFRAME_ALIASES[requested_strategy_key]
+        include_timeframes = _normalize_timeframe_scope(raw_strategy_params.get("include_timeframes"))
+        raw_strategy_params["include_timeframes"] = [timeframe] if not include_timeframes else include_timeframes
+        exclude_timeframes = [
+            token for token in _normalize_timeframe_scope(raw_strategy_params.get("exclude_timeframes")) if token != timeframe
+        ]
+        if exclude_timeframes:
+            raw_strategy_params["exclude_timeframes"] = exclude_timeframes
+        elif "exclude_timeframes" in raw_strategy_params:
+            raw_strategy_params.pop("exclude_timeframes", None)
+        raw_strategy_params.setdefault("enable_live_market_context", False)
+        raw_strategy_params.setdefault("require_live_market_revalidation", False)
+        raw_strategy_params.setdefault("require_live_revalidation_for_sources", [])
+        raw_strategy_params.setdefault("enforce_market_data_freshness", False)
+        raw_strategy_params.setdefault("require_market_data_age_for_sources", [])
+    if requested_strategy_key and requested_strategy_key != strategy_key:
+        accepted = raw_strategy_params.get("accepted_signal_strategy_types")
+        if isinstance(accepted, list):
+            accepted_list = [str(item).strip().lower() for item in accepted if str(item or "").strip()]
+        elif isinstance(accepted, str):
+            accepted_list = [part.strip().lower() for part in accepted.split(",") if part.strip()]
+        else:
+            accepted_list = []
+        if requested_strategy_key not in accepted_list:
+            accepted_list.append(requested_strategy_key)
+        raw_strategy_params["accepted_signal_strategy_types"] = accepted_list
     strategy_version = normalize_strategy_version(item.get("strategy_version"))
-    strategy_params = _normalize_strategy_params(item.get("strategy_params"), source_key, strategy_key)
+    strategy_params = _normalize_strategy_params(raw_strategy_params, source_key, strategy_key)
     normalized: dict[str, Any] = {
         "source_key": source_key,
         "strategy_key": strategy_key,
@@ -4954,6 +5027,8 @@ async def cleanup_trader_open_orders(
     live_taker_rescue_time_in_force: str = DEFAULT_TIMEOUT_TAKER_RESCUE_TIME_IN_FORCE,
 ) -> dict[str, Any]:
     scope_key = str(scope or "shadow").strip().lower()
+    if scope_key == "paper":
+        scope_key = "shadow"
     if scope_key == "all":
         allowed_modes = {"shadow", "live", "other"}
     elif scope_key in {"shadow", "live"}:

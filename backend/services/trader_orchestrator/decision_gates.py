@@ -613,9 +613,11 @@ def apply_platform_decision_gates(
             market_data_source = "unknown"
 
         live_revalidation_enforced = _coerce_bool(params.get("require_live_market_revalidation"), True)
-        live_revalidation_sources = _normalize_text_list(
-            params.get("require_live_revalidation_for_sources", ["scanner"])
-        )
+        live_revalidation_sources = _normalize_text_list(params.get("require_live_revalidation_for_sources"))
+        if not live_revalidation_sources:
+            live_revalidation_sources = _normalize_text_list(
+                params.get("require_market_data_age_for_sources", ["crypto", "scanner"])
+            )
         live_revalidation_required = bool(
             live_revalidation_enforced and source and source in set(live_revalidation_sources)
         )
@@ -627,10 +629,15 @@ def apply_platform_decision_gates(
         live_observed_at = _parse_datetime_utc(
             live_market_payload.get("source_observed_at") or live_market_payload.get("signal_updated_at")
         )
-        live_age_ms = safe_float(
-            live_market_payload.get("market_data_age_ms") or live_market_payload.get("age_ms"),
-            None,
-        )
+        live_age_raw = live_market_payload.get("market_data_age_ms")
+        if live_age_raw is None:
+            live_age_raw = live_market_payload.get("age_ms")
+        live_age_ms = safe_float(live_age_raw, None)
+        trusted_live_age_sources = {
+            "ws_strict",
+            "redis_strict",
+            "http_batch",
+        }
         if live_age_ms is not None and live_age_ms < 0.0:
             live_age_ms = None
         if live_age_ms is None and live_observed_at is not None:
@@ -638,7 +645,11 @@ def apply_platform_decision_gates(
                 0.0,
                 (datetime.now(timezone.utc) - live_observed_at.astimezone(timezone.utc)).total_seconds() * 1000.0,
             )
-        if live_age_ms is None and live_fetched_at is not None:
+        if (
+            live_age_ms is None
+            and live_fetched_at is not None
+            and market_data_source in trusted_live_age_sources
+        ):
             live_age_ms = max(
                 0.0,
                 (datetime.now(timezone.utc) - live_fetched_at.astimezone(timezone.utc)).total_seconds() * 1000.0,

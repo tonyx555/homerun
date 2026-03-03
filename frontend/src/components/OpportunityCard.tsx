@@ -71,6 +71,7 @@ const STRATEGY_COLORS: Record<string, string> = {
   news_edge: 'bg-amber-500/10 text-amber-400 border-amber-500/20',
   btc_eth_highfreq: 'bg-orange-500/10 text-orange-400 border-orange-500/20',
   traders_confluence: 'bg-orange-500/10 text-orange-400 border-orange-500/20',
+  sports_overreaction_fader: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
 }
 
 const STRATEGY_ABBREV: Record<string, string> = {
@@ -100,6 +101,7 @@ const STRATEGY_ABBREV: Record<string, string> = {
   news_edge: 'NEW',
   btc_eth_highfreq: 'BTC',
   traders_confluence: 'TRD',
+  sports_overreaction_fader: 'SFD',
 }
 
 const STRATEGY_NAMES: Record<string, string> = {
@@ -129,6 +131,7 @@ const STRATEGY_NAMES: Record<string, string> = {
   news_edge: 'News Edge',
   btc_eth_highfreq: 'Crypto HF',
   traders_confluence: 'Traders Flow',
+  sports_overreaction_fader: 'Sports Fader',
 }
 
 const RECOMMENDATION_COLORS: Record<string, string> = {

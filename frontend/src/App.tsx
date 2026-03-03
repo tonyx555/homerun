@@ -36,6 +36,7 @@ import {
   Newspaper,
   ArrowUpDown,
   CloudRain,
+  Trophy,
 } from 'lucide-react'
 import { cn } from './lib/utils'
 import {
@@ -118,6 +119,7 @@ import NewsIntelligencePanel from './components/NewsIntelligencePanel'
 import CryptoMarketsPanel from './components/CryptoMarketsPanel'
 import WeatherOpportunitiesPanel from './components/WeatherOpportunitiesPanel'
 import OpportunityEmptyState from './components/OpportunityEmptyState'
+import SportsOpportunitiesPanel from './components/SportsOpportunitiesPanel'
 import DataPanel, { DataView } from './components/DataPanel'
 import UILockScreen from './components/UILockScreen'
 import TradersNetworkPanel from './components/TradersNetworkPanel'
@@ -241,7 +243,7 @@ function formatStrategySubtypeLabel(strategyType: string, subtypeKey: string): s
 interface OpportunityTabConfig {
   label: string
   // Tailwind color token used for active state. Must match active/count classNames below.
-  color: 'green' | 'orange' | 'amber' | 'cyan' | 'blue'
+  color: 'green' | 'orange' | 'amber' | 'cyan' | 'blue' | 'emerald'
   icon: React.ElementType
   // Which view-mode switcher to show (card/list/terminal). Set false to hide switcher.
   hasViewModeSwitcher: boolean
@@ -283,6 +285,12 @@ const OPPORTUNITY_TAB_CONFIG: Record<string, OpportunityTabConfig> = {
     icon: ArrowUpDown,
     hasViewModeSwitcher: false,
   },
+  sports: {
+    label: 'Sports',
+    color: 'emerald',
+    icon: Trophy,
+    hasViewModeSwitcher: true,
+  },
 }
 
 // Tailwind active-state classes per color token (kept static so Tailwind purge finds them)
@@ -292,6 +300,7 @@ const TAB_ACTIVE_CLASSES: Record<OpportunityTabConfig['color'], string> = {
   amber: 'bg-amber-500/20 text-amber-400 border-amber-500/30 hover:bg-amber-500/30 hover:text-amber-400',
   cyan: 'bg-cyan-500/20 text-cyan-400 border-cyan-500/30 hover:bg-cyan-500/30 hover:text-cyan-400',
   blue: 'bg-blue-500/20 text-blue-400 border-blue-500/30 hover:bg-blue-500/30 hover:text-blue-400',
+  emerald: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/30 hover:text-emerald-400',
 }
 
 const TAB_COUNT_CLASSES: Record<OpportunityTabConfig['color'], string> = {
@@ -300,10 +309,11 @@ const TAB_COUNT_CLASSES: Record<OpportunityTabConfig['color'], string> = {
   amber: 'bg-amber-500/20 text-amber-400',
   cyan: 'bg-cyan-500/20 text-cyan-400',
   blue: 'bg-blue-500/20 text-blue-400',
+  emerald: 'bg-emerald-500/20 text-emerald-400',
 }
 
 // Tab order — known domains appear in this order; unknown source_keys are appended after.
-const TAB_ORDER = ['scanner', 'traders', 'news', 'weather', 'crypto'] as const
+const TAB_ORDER = ['scanner', 'traders', 'news', 'weather', 'crypto', 'sports'] as const
 
 const WORKER_TONE_CLASS: Record<WorkerHealthTone, string> = {
   green: 'bg-emerald-400 shadow-[0_0_10px_rgba(16,185,129,0.7)]',
@@ -1153,6 +1163,7 @@ function App() {
     && opportunitiesView !== 'news'
     && opportunitiesView !== 'weather'
     && opportunitiesView !== 'traders'
+    && opportunitiesView !== 'sports'
   const activeSourceStrategyTypes = useMemo(
     () => new Set(strategyTypesBySourceKey[opportunitiesView] || []),
     [strategyTypesBySourceKey, opportunitiesView],
@@ -1240,10 +1251,23 @@ function App() {
     refetchInterval: isConnected ? false : 30000,
   })
 
+  const { data: sportsOpportunityCountData } = useQuery({
+    queryKey: ['sports-opportunities', 'count'],
+    queryFn: () =>
+      getOpportunities({
+        category: 'sports',
+        limit: 1,
+        offset: 0,
+      }),
+    enabled: activeTab === 'opportunities',
+    refetchInterval: isConnected ? false : 30000,
+  })
+
   const tradersCount = tradersOpportunityCountData?.total ?? trackedTradersExecutableCount ?? 0
   const newsCount = newsWorkflowFindingsCount?.total || 0
   const weatherCount = weatherWorkflowExecutableCount?.total || 0
   const cryptoCount = cryptoMarketCounts?.length || 0
+  const sportsCount = sportsOpportunityCountData?.total || 0
   const signalTotals = useMemo(() => ({
     pending: Number(signalStats?.totals?.pending || 0),
     selected: Number(signalStats?.totals?.selected || 0),
@@ -1261,15 +1285,18 @@ function App() {
     news: newsCount,
     weather: weatherCount,
     crypto: cryptoCount,
-  }), [totalOpportunities, tradersCount, newsCount, weatherCount, cryptoCount])
+    sports: sportsCount,
+  }), [totalOpportunities, tradersCount, newsCount, weatherCount, cryptoCount, sportsCount])
 
   // Build opportunities subtabs from the fixed supported source keys.
+  // Source keys that are exit-only (no detect/opportunities) are hidden from tabs.
+  const HIDDEN_SOURCE_KEYS = new Set(['manual'])
   const opportunityTabs = useMemo(() => {
     const strategySourceKeys = new Set(strategies.map((s) => normalizeStrategiesSourceKey(s.source_key)))
     const knownKeys = TAB_ORDER.filter((key) => strategySourceKeys.has(key) || key === 'scanner')
     const knownKeySet = new Set<string>(knownKeys)
     const dynamicKeys = Array.from(strategySourceKeys)
-      .filter((key) => !knownKeySet.has(key))
+      .filter((key) => !knownKeySet.has(key) && !HIDDEN_SOURCE_KEYS.has(key))
       .sort((a, b) => a.localeCompare(b))
     const allKeys = [...knownKeys, ...dynamicKeys]
     return allKeys.map((key) => ({
@@ -1919,6 +1946,7 @@ function App() {
             news: newsCount,
             weather: weatherCount,
             crypto: cryptoCount,
+            sports: sportsCount,
           }}
           signalTotals={signalTotals}
           lastMessage={lastMessage}
@@ -2363,6 +2391,12 @@ function App() {
                         setTradersSubTab('analysis')
                       }}
                     />
+                  ) : opportunitiesView === 'sports' ? (
+                    <SportsOpportunitiesPanel
+                      onExecute={setExecutingOpportunity}
+                      onOpenCopilot={handleOpenCopilotForOpportunity}
+                      viewMode={oppsViewMode}
+                    />
                   ) : opportunitiesView !== 'scanner' ? (
                     // Generic fallback panel for unknown source_keys introduced by new strategies
                     <>
@@ -2372,7 +2406,7 @@ function App() {
                             {activeOpportunityTab?.config.label || 'Opportunities'} feed
                           </span>
                           <span className="inline-flex items-center justify-center rounded-full bg-primary/15 text-primary text-[10px] font-medium min-w-[20px] h-4 px-1.5">
-                            {totalOpportunities}
+                            {displayOpportunities.length}
                           </span>
                         </div>
                       </div>
@@ -2410,7 +2444,7 @@ function App() {
                           <Separator />
                           <div className="flex items-center justify-between pt-4">
                             <div className="text-xs text-muted-foreground">
-                              {currentPage * ITEMS_PER_PAGE + 1} - {Math.min((currentPage + 1) * ITEMS_PER_PAGE, totalOpportunities)} of {totalOpportunities}
+                              {currentPage * ITEMS_PER_PAGE + 1} - {Math.min((currentPage + 1) * ITEMS_PER_PAGE, displayOpportunities.length)} of {displayOpportunities.length}
                             </div>
                             <div className="flex items-center gap-2">
                               <Button
@@ -2424,14 +2458,14 @@ function App() {
                                 Prev
                               </Button>
                               <span className="px-2.5 py-1 bg-card rounded-lg text-xs border border-border font-mono">
-                                {currentPage + 1}/{totalPages || 1}
+                                {currentPage + 1}/{Math.max(1, Math.ceil(displayOpportunities.length / ITEMS_PER_PAGE))}
                               </span>
                               <Button
                                 variant="outline"
                                 size="sm"
                                 className="h-7 text-xs"
                                 onClick={() => setCurrentPage(p => p + 1)}
-                                disabled={currentPage >= totalPages - 1}
+                                disabled={currentPage >= Math.ceil(displayOpportunities.length / ITEMS_PER_PAGE) - 1}
                               >
                                 Next
                                 <ChevronRight className="w-3.5 h-3.5" />

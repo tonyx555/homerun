@@ -63,6 +63,10 @@ class Market(BaseModel):
     rewards_min_size: Optional[float] = None
     rewards_max_spread: Optional[float] = None
     clob_rewards: list[dict] = []
+    # Sports-specific fields (from Gamma API)
+    game_start_time: Optional[str] = None
+    sports_market_type: Optional[str] = None
+    line: Optional[float] = None
 
     @classmethod
     def from_gamma_response(cls, data: dict) -> "Market":
@@ -156,6 +160,15 @@ class Market(BaseModel):
         else:
             clob_rewards = []
 
+        # Sports-specific fields
+        game_start_time = data.get("gameStartTime", data.get("game_start_time"))
+        sports_market_type = data.get("sportsMarketType", data.get("sports_market_type"))
+        line_raw = data.get("line")
+        try:
+            line_val = float(line_raw) if line_raw is not None else None
+        except (TypeError, ValueError):
+            line_val = None
+
         return cls(
             id=str(data.get("id", "")),
             condition_id=data.get("condition_id", data.get("conditionId", "")),
@@ -183,6 +196,9 @@ class Market(BaseModel):
             rewards_min_size=rewards_min_size,
             rewards_max_spread=rewards_max_spread,
             clob_rewards=clob_rewards,
+            game_start_time=str(game_start_time) if game_start_time else None,
+            sports_market_type=str(sports_market_type) if sports_market_type else None,
+            line=line_val,
         )
 
     @property

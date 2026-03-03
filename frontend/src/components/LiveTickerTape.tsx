@@ -32,6 +32,7 @@ interface SourceCounts {
   news: number
   weather: number
   crypto: number
+  sports: number
 }
 
 interface SignalTotals {

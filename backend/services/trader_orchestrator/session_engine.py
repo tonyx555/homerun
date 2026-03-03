@@ -528,6 +528,12 @@ class ExecutionSessionEngine:
                 order_payload["strategy_context"] = (
                     getattr(signal, "strategy_context_json", None) or getattr(signal, "strategy_context", None) or {}
                 )
+                # Propagate live market context to order payload for freshness tracking.
+                _signal_payload = getattr(signal, "payload_json", None)
+                if isinstance(_signal_payload, dict):
+                    _live_market = _signal_payload.get("live_market")
+                    if isinstance(_live_market, dict):
+                        order_payload["live_market"] = dict(_live_market)
                 params = dict(strategy_params or {})
                 exit_config: dict[str, Any] = {}
                 for param_key, param_value in params.items():

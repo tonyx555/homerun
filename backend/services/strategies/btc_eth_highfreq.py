@@ -178,7 +178,7 @@ def _crypto_hf_param_value(config: dict[str, Any], base_key: str, timeframe: Any
 
 
 CRYPTO_HF_SCOPE_DEFAULTS: dict[str, Any] = {
-    "min_edge_percent": 0.30,
+    "min_edge_percent": 3.0,
     "min_confidence": 0.42,
     "max_risk_score": 0.80,
     "base_size_usd": 20.0,
@@ -264,8 +264,8 @@ CRYPTO_HF_SCOPE_DEFAULTS: dict[str, Any] = {
     "maker_max_entry_price_ceiling_buy_no": 0.95,
     "min_execution_adjusted_edge_percent": -0.05,
     "rapid_take_profit_pct": 10.0,
-    "rapid_take_profit_pct_5m": 10.0,
-    "rapid_take_profit_pct_15m": 10.0,
+    "rapid_take_profit_pct_5m": 85.0,
+    "rapid_take_profit_pct_15m": 70.0,
     "rapid_take_profit_pct_1h": 12.0,
     "rapid_take_profit_pct_4h": 15.0,
     "rapid_exit_window_minutes": 2.0,
@@ -316,6 +316,8 @@ CRYPTO_HF_SCOPE_DEFAULTS: dict[str, Any] = {
     "underwater_timeout_minutes_4h": 45.0,
     "underwater_timeout_loss_pct": 8.0,
     "take_profit_pct": 8.0,
+    "take_profit_pct_5m": 85.0,
+    "take_profit_pct_15m": 70.0,
     "stop_loss_pct": 3.0,
     "stop_loss_policy": "always",
     "stop_loss_policy_5m": "always",
@@ -381,6 +383,29 @@ CRYPTO_HF_SCOPE_DEFAULTS: dict[str, Any] = {
     "hard_stop_loss_pct_15m": 18.0,
     "hard_stop_loss_pct_1h": 22.0,
     "hard_stop_loss_pct_4h": 25.0,
+    # --- Binary resolution-hold: disable mid-market exits for short-duration ---
+    # 5m/15m markets resolve too quickly for stop-loss/take-profit to add value.
+    # Mid-market price swings are noise — the binary outcome is $1.00 or $0.00.
+    # Hold to resolution, exit only on near-certainty or force-flatten near close.
+    "binary_resolution_hold_5m": True,
+    "binary_resolution_hold_15m": True,
+    "binary_resolution_hold_1h": False,
+    "binary_resolution_hold_4h": False,
+    "resolution_hold_take_profit_pct_5m": 85.0,
+    "resolution_hold_take_profit_pct_15m": 70.0,
+    # --- Latency arb gate: require decisive oracle move before entry ---
+    # Only generate signals when oracle (Binance) has moved significantly from
+    # price_to_beat AND the Polymarket market hasn't repriced yet (price lag).
+    "min_oracle_move_pct": 2.5,
+    "min_oracle_move_pct_5m": 2.5,
+    "min_oracle_move_pct_15m": 2.0,
+    "min_oracle_move_pct_1h": 1.5,
+    "min_oracle_move_pct_4h": 1.0,
+    "max_market_repricing_for_entry": 0.30,
+    # --- Consecutive loss circuit breaker ---
+    "consecutive_loss_pause_enabled": True,
+    "max_consecutive_losses_before_pause": 3,
+    "consecutive_loss_pause_minutes": 15.0,
 }
 
 
@@ -2667,6 +2692,9 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         # Runtime anti-churn controls used by evaluate().
         self._edge_first_seen_ms: dict[str, int] = {}
         self._last_selected_at_ms_by_market: dict[str, int] = {}
+        # Consecutive loss circuit breaker state.
+        self._consecutive_losses: int = 0
+        self._paused_until_ms: int = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -5759,6 +5787,56 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                     config[key] = override
             config["timeframe"] = timeframe
 
+        # --- Binary resolution-hold for short-duration markets ---
+        # 5m/15m binary markets resolve to $1.00 or $0.00 too quickly for
+        # traditional stop-loss/take-profit to add value.  Mid-market price
+        # swings are noise.  Disable all mid-market exits and hold to
+        # resolution, allowing only:
+        #   1. Near-certainty take-profit (price confirms outcome)
+        #   2. Force-flatten near close (existing logic, via default_exit_check)
+        #   3. Market resolution (handled before this method is called)
+        binary_hold = to_bool(
+            _crypto_hf_param_value(config, "binary_resolution_hold", timeframe),
+            timeframe in ("5m", "15m"),
+        )
+        if binary_hold:
+            resolution_tp_pct = max(
+                50.0,
+                to_float(
+                    _crypto_hf_param_value(config, "resolution_hold_take_profit_pct", timeframe),
+                    85.0 if timeframe == "5m" else 70.0,
+                ),
+            )
+            entry_price = self._float(getattr(position, "entry_price", None))
+            current_price = self._float(state.get("current_price"))
+            if entry_price is not None and entry_price > 0.0 and current_price is not None and current_price > 0.0:
+                pnl_pct = ((current_price - entry_price) / entry_price) * 100.0
+                if pnl_pct >= resolution_tp_pct:
+                    return {
+                        "config": config,
+                        "decision": {
+                            "action": "close",
+                            "reason": (
+                                f"Resolution-hold take profit "
+                                f"(pnl={pnl_pct:.1f}% >= {resolution_tp_pct:.0f}%)"
+                            ),
+                            "close_price": current_price,
+                        },
+                    }
+            # Override config to disable all mid-market exits for the fallback
+            # path through default_exit_check(). Set take-profit very high and
+            # disable every stop-loss/trailing/underwater mechanism.
+            config["take_profit_pct"] = resolution_tp_pct
+            config["rapid_take_profit_pct"] = resolution_tp_pct
+            config["hard_stop_loss_enabled"] = False
+            config["immediate_stop_loss_enabled"] = False
+            config["stop_loss_pct"] = None
+            config["trailing_stop_pct"] = 0
+            config["underwater_rebound_exit_enabled"] = False
+            config["underwater_timeout_minutes"] = 999999.0
+            config["max_hold_minutes"] = 999999.0
+            return {"config": config, "decision": None}
+
         entry_price = self._float(getattr(position, "entry_price", None))
         current_price = self._float(state.get("current_price"))
         if entry_price is not None and entry_price > 0.0 and current_price is not None and current_price > 0.0:
@@ -6556,11 +6634,56 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         return default_decision
 
     # ------------------------------------------------------------------
+    # Consecutive loss circuit breaker
+    # ------------------------------------------------------------------
+
+    def record_trade_outcome(self, won: bool) -> None:
+        """Called by orchestrator/position lifecycle on trade close."""
+        if won:
+            self._consecutive_losses = 0
+            self._paused_until_ms = 0
+        else:
+            self._consecutive_losses += 1
+            defaults = crypto_highfreq_scope_defaults()
+            max_streak = max(
+                1,
+                int(to_float(defaults.get("max_consecutive_losses_before_pause"), 3.0)),
+            )
+            if self._consecutive_losses >= max_streak:
+                pause_minutes = max(
+                    1.0,
+                    to_float(defaults.get("consecutive_loss_pause_minutes"), 15.0),
+                )
+                self._paused_until_ms = int(time.time() * 1000.0) + int(pause_minutes * 60_000)
+                logger.warning(
+                    "%s: circuit breaker tripped — %d consecutive losses, pausing %.0f min",
+                    self.name,
+                    self._consecutive_losses,
+                    pause_minutes,
+                )
+
+    def _circuit_breaker_active(self) -> bool:
+        defaults = crypto_highfreq_scope_defaults()
+        if not to_bool(defaults.get("consecutive_loss_pause_enabled"), True):
+            return False
+        if self._paused_until_ms <= 0:
+            return False
+        now_ms = int(time.time() * 1000.0)
+        if now_ms >= self._paused_until_ms:
+            self._paused_until_ms = 0
+            self._consecutive_losses = 0
+            return False
+        return True
+
+    # ------------------------------------------------------------------
     # Event-driven detection (crypto_update from crypto worker)
     # ------------------------------------------------------------------
 
     async def on_event(self, event: DataEvent) -> list[Opportunity]:
         if event.event_type != "crypto_update":
+            return []
+
+        if self._circuit_breaker_active():
             return []
 
         markets = event.payload.get("markets") or []
@@ -6690,38 +6813,64 @@ class BtcEthHighFreqStrategy(BaseStrategy):
 
             regime = self._crypto_regime(seconds_left, timeframe_seconds)
 
-            # --- Minimal detect: pass every live market through to evaluate() ---
-            # All real filtering (oracle gates, edge thresholds, fee gates, entry
-            # windows) happens in evaluate(). The detect/on_event path just needs
-            # to get each market into the signal pipeline.
+            # --- Latency-arb detect: only signal when oracle shows decisive move ---
+            # The oracle (Binance direct WS) updates 30-90s before the Polymarket
+            # order book reprices.  We exploit this lag by entering when the oracle
+            # has moved decisively from price_to_beat AND the market price hasn't
+            # caught up yet.
             if has_oracle and price_to_beat is not None and oracle_price is not None:
                 diff_pct = ((oracle_price - price_to_beat) / price_to_beat) * 100.0
             else:
                 diff_pct = 0.0
 
+            oracle_move_pct = abs(diff_pct)
+
+            # Gate 1: Minimum oracle move — small moves are noise, not signal.
+            defaults = crypto_highfreq_scope_defaults()
+            min_oracle_move = to_float(
+                _crypto_hf_param_value(defaults, "min_oracle_move_pct", timeframe),
+                2.5,
+            )
+            if oracle_move_pct < min_oracle_move:
+                continue
+
+            # Gate 2: Price lag detection — only enter when Polymarket hasn't
+            # repriced to reflect the oracle move.  If the contract price on our
+            # predicted winning side is already expensive, there's no lag to exploit.
+            max_repricing = to_float(defaults.get("max_market_repricing_for_entry"), 0.30)
+            if diff_pct > 0 and up_price > (0.50 + max_repricing):
+                continue  # YES side already repriced — no lag
+            if diff_pct < 0 and down_price > (0.50 + max_repricing):
+                continue  # NO side already repriced — no lag
+
             spread = clamp(self._float(market.get("spread")) or 0.0, 0.0, 0.10)
             liquidity = max(0.0, self._float(market.get("liquidity")) or 0.0)
 
-            # Direction: oracle hint if available, else cheaper side
+            # Direction: oracle dictates.
             if diff_pct > 0:
-                direction = "buy_yes"
-                entry_price = up_price
-            elif diff_pct < 0:
-                direction = "buy_no"
-                entry_price = down_price
-            elif up_price <= down_price:
                 direction = "buy_yes"
                 entry_price = up_price
             else:
                 direction = "buy_no"
                 entry_price = down_price
 
-            # Baseline edge/confidence — evaluate() will recompute these.
-            # self.min_profit is set to 0.0 so create_opportunity() never gates
-            # on ROI in the detect path; real filtering happens in evaluate().
-            edge_percent = abs(diff_pct)
-            confidence = clamp(0.40 + clamp(abs(diff_pct) / 1.0, 0.0, 0.20), 0.35, 0.70)
-            min_required_edge = 0.0  # No filtering in detect
+            # Latency-arb edge & confidence: larger oracle moves + more elapsed
+            # time in the market window = higher probability the current price
+            # trend holds through resolution.
+            edge_percent = oracle_move_pct
+            elapsed_ratio = clamp(
+                1.0 - (seconds_left / float(max(1, timeframe_seconds))),
+                0.0,
+                1.0,
+            )
+            confidence = clamp(
+                0.55
+                + clamp(oracle_move_pct / 10.0, 0.0, 0.25)
+                + clamp(elapsed_ratio * 0.15, 0.0, 0.15),
+                0.55,
+                0.92,
+            )
+            min_required_edge = 0.0  # evaluate() handles final gating
 
             side = "YES" if direction == "buy_yes" else "NO"
             slug = market.get("slug") or market_id
