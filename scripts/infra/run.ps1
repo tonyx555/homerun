@@ -580,32 +580,58 @@ function Ensure-Redis {
     if (Test-RedisPing -RedisHost $RedisHost -RedisPort $RedisPort) {
         $versionOk = Test-RedisVersionOk -RedisHost $RedisHost -RedisPort $RedisPort
         if ($versionOk -eq $false) {
-            # Running Redis is too old. Try Docker for a modern version first.
-            $dockerAvailable = Test-DockerRuntimeAvailable
-            if ($dockerAvailable) {
-                Write-Host "Running Redis is too old for Streams support. Attempting Docker upgrade..." -ForegroundColor Yellow
-            } else {
-                Write-Host "Running Redis is too old for Streams support and Docker is unavailable." -ForegroundColor Yellow
-            }
-            $dockerStarted = $false
-            if ($dockerAvailable) {
-                $dockerStarted = Start-RedisDocker -RedisHost $RedisHost -RedisPort $RedisPort -ContainerName $ContainerName -Image $Image
-            }
-            if (-not $dockerStarted) {
+            Write-Host "Running Redis does not support Streams. Attempting runtime bootstrap..." -ForegroundColor Yellow
+            if (-not (Ensure-RedisRuntime)) {
                 if (-not (Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort)) {
                     exit 1
                 }
                 return
             }
-            if (Wait-ForService -TargetHost $RedisHost -Port $RedisPort) {
-                $script:redisStartedByScript = $true
-                $script:redisStartMode = "docker"
+
+            # Stop the legacy Redis listener before starting a Streams-capable runtime.
+            try {
+                $legacyRedisService = Get-Service -Name "Redis" -ErrorAction SilentlyContinue
+                if ($legacyRedisService -and $legacyRedisService.Status -eq "Running") {
+                    Stop-Service -Name "Redis" -Force -ErrorAction SilentlyContinue
+                }
+            } catch {
+            }
+            Send-RedisShutdown -RedisHost $RedisHost -RedisPort $RedisPort
+            for ($i = 0; $i -lt 20; $i++) {
+                if (-not (Test-RedisPing -RedisHost $RedisHost -RedisPort $RedisPort)) {
+                    break
+                }
+                Start-Sleep -Milliseconds 250
+            }
+
+            $upgradedStarted = $false
+            if (Test-DockerRuntimeAvailable) {
+                $upgradedStarted = Start-RedisDocker -RedisHost $RedisHost -RedisPort $RedisPort -ContainerName $ContainerName -Image $Image
+                if ($upgradedStarted -and (Wait-ForService -TargetHost $RedisHost -Port $RedisPort)) {
+                    $script:redisStartedByScript = $true
+                    $script:redisStartMode = "docker"
+                } else {
+                    $upgradedStarted = $false
+                }
+            }
+
+            if (-not $upgradedStarted) {
+                $localStarted = Start-RedisLocal -RedisHost $RedisHost -RedisPort $RedisPort
+                if ($localStarted -and (Wait-ForService -TargetHost $RedisHost -Port $RedisPort)) {
+                    $upgradedStarted = $true
+                    $script:redisStartedByScript = $true
+                    $script:redisStartMode = "local"
+                }
+            }
+
+            if ($upgradedStarted) {
+                Write-Host "Redis upgraded to a Streams-capable runtime on ${RedisHost}:${RedisPort}" -ForegroundColor Green
                 if (-not (Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort)) {
                     exit 1
                 }
                 return
             }
-            # Docker started but can't reach it - fall through, old Redis still works
+
             if (-not (Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort)) {
                 exit 1
             }
