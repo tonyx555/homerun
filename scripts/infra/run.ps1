@@ -29,6 +29,7 @@ $postgresPassword = if ($env:POSTGRES_PASSWORD) { $env:POSTGRES_PASSWORD } else 
 $postgresContainerName = if ($env:POSTGRES_CONTAINER_NAME) { $env:POSTGRES_CONTAINER_NAME } else { "homerun-postgres" }
 $postgresImage = if ($env:POSTGRES_IMAGE) { $env:POSTGRES_IMAGE } else { "postgres:16-alpine" }
 $postgresDataDir = if ($env:POSTGRES_DATA_DIR) { $env:POSTGRES_DATA_DIR } else { Join-Path (Get-Location).Path "data\postgres" }
+$script:postgresPort = [int]$postgresPort
 
 $script:redisStartedByScript = $false
 $script:redisStartMode = ""
@@ -625,10 +626,15 @@ function Start-PostgresLocal {
     }
 
     $pgVersionPath = Join-Path $DataDir "PG_VERSION"
+    $pgInitLogPath = Join-Path $DataDir "initdb.log"
+    $pgServerLogPath = Join-Path $DataDir "postgresql.log"
     if (-not (Test-Path $pgVersionPath)) {
         try {
-            & $initdbPath -D $DataDir -U $User --encoding=UTF8 --locale=C *> $null
-            if ($LASTEXITCODE -ne 0) { return $false }
+            & $initdbPath -D $DataDir -U $User --encoding=UTF8 *> $pgInitLogPath
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "Postgres initialization failed. See: $pgInitLogPath" -ForegroundColor Yellow
+                return $false
+            }
 
             @"
 local all all trust
@@ -643,15 +649,12 @@ host all all ::1/128 trust
         }
     }
 
-    # Start via Start-Process so pg_ctl doesn't block the PowerShell pipeline.
-    # The caller's Wait-ForService handles readiness polling.
     # On Windows a hard-killed Postgres can leave stale shared-memory
     # that causes the first start to fail immediately; we retry once.
     for ($attempt = 1; $attempt -le 2; $attempt++) {
         try {
-            $proc = Start-Process -FilePath $pgctlPath -ArgumentList "-D `"$DataDir`" -o `"-h $PgHost -p $Port`" start" -WindowStyle Hidden -Wait:$false -PassThru
-            Start-Sleep -Milliseconds 500
-            if (-not $proc.HasExited -or $proc.ExitCode -eq 0) { return $true }
+            & $pgctlPath -D $DataDir -l $pgServerLogPath -o "-h $PgHost -p $Port" -w -t 20 start *> $null
+            if ($LASTEXITCODE -eq 0) { return $true }
         } catch {}
 
         if ($attempt -eq 1) {
@@ -661,6 +664,13 @@ host all all ::1/128 trust
             $stalePid = Join-Path $DataDir "postmaster.pid"
             Remove-Item -Path $stalePid -Force -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 3
+        }
+    }
+
+    if (Test-Path $pgServerLogPath) {
+        Write-Host "Postgres startup failed. Recent log output:" -ForegroundColor Yellow
+        Get-Content -Path $pgServerLogPath -Tail 20 -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "  $_" -ForegroundColor DarkYellow
         }
     }
     return $false
@@ -827,6 +837,7 @@ function Ensure-Postgres {
         [string]$Image,
         [string]$DataDir
     )
+    $script:postgresPort = [int]$Port
 
     # Check if our local Postgres is already running (on any port)
     $runningPort = Get-RunningLocalPostgresPort -DataDir $DataDir
@@ -842,6 +853,7 @@ function Ensure-Postgres {
     # Check if our Docker container is already running on the requested port
     if (Test-TcpPort -TargetHost $PgHost -Port $Port) {
         if (Test-PostgresDockerListenerOwned -ContainerName $ContainerName -Port $Port) {
+            $script:postgresPort = [int]$Port
             Write-Host "Postgres already running on ${PgHost}:${Port}" -ForegroundColor Green
             return
         }
@@ -876,6 +888,7 @@ function Ensure-Postgres {
 
     $dockerStarted = Start-PostgresDocker -PgHost $PgHost -Port $Port -Db $Db -User $User -Password $Password -ContainerName $ContainerName -Image $Image -DataDir $DataDir
     if ($dockerStarted -and (Wait-ForService -TargetHost $PgHost -Port $Port)) {
+        $script:postgresPort = [int]$Port
         $script:postgresStartedByScript = $true
         $script:postgresStartMode = "docker"
         Write-Host "Postgres started via Docker on ${PgHost}:${Port}" -ForegroundColor Green
@@ -884,6 +897,7 @@ function Ensure-Postgres {
 
     $localStarted = Start-PostgresLocal -PgHost $PgHost -Port $Port -User $User -DataDir $DataDir
     if ($localStarted -and (Wait-ForService -TargetHost $PgHost -Port $Port)) {
+        $script:postgresPort = [int]$Port
         $script:postgresStartedByScript = $true
         $script:postgresStartMode = "local"
         Write-Host "Postgres started via local postgres on ${PgHost}:${Port}" -ForegroundColor Green
@@ -1011,7 +1025,7 @@ function Test-NeedsSetup {
 
     $venvPython = "backend\venv\Scripts\python.exe"
     try {
-        & $venvPython -c "import sys; raise SystemExit(0 if sys.version_info.major == 3 and 10 <= sys.version_info.minor <= 13 else 1)" *> $null
+        & $venvPython -c "import sys; raise SystemExit(0 if sys.version_info.major == 3 and 10 <= sys.version_info.minor <= 12 else 1)" *> $null
         if ($LASTEXITCODE -ne 0) { return $true }
     } catch {
         return $true
@@ -1083,11 +1097,13 @@ try {
     & backend\venv\Scripts\Activate.ps1
 
     # Ensure TUI dependencies are installed
-    try {
-        python -c "import textual" 2>$null
-    } catch {
+    python -c "import textual" *> $null
+    if ($LASTEXITCODE -ne 0) {
         Write-Host "Installing TUI dependencies..." -ForegroundColor Cyan
-        pip install -q textual rich
+        python -m pip install -q textual rich
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to install TUI dependencies"
+        }
     }
 
     if ($runServiceSmokeTest) {

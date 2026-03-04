@@ -1,5 +1,5 @@
 # Optional: Only needed for LIVE trading on Polymarket
-# Requires Python 3.10-3.13 (launcher prefers newest available)
+# Requires Python 3.10-3.12 (launcher prefers newest available)
 # Install with: pip install -r requirements-trading.txt
 
 py-clob-client>=0.18.0

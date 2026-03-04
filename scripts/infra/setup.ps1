@@ -221,7 +221,7 @@ if ($PostgresOnly) {
 }
 
 $pythonMinMinor = 10
-$pythonMaxMinor = 13
+$pythonMaxMinor = 12
 
 function Test-PythonVersionSupported {
     param(
@@ -256,11 +256,9 @@ function Get-PythonVersionString {
 
 function Get-SupportedPythonCandidate {
     $candidates = @(
-        @{ command = "py"; prefix = @("-3.13") },
         @{ command = "py"; prefix = @("-3.12") },
         @{ command = "py"; prefix = @("-3.11") },
         @{ command = "py"; prefix = @("-3.10") },
-        @{ command = "python3.13"; prefix = @() },
         @{ command = "python3.12"; prefix = @() },
         @{ command = "python3.11"; prefix = @() },
         @{ command = "python3.10"; prefix = @() },
@@ -276,11 +274,11 @@ function Get-SupportedPythonCandidate {
 }
 
 function Install-SupportedPython {
-    Write-Host "No supported Python 3.10-3.13 interpreter found. Attempting automatic install..." -ForegroundColor Cyan
+    Write-Host "No supported Python 3.10-3.12 interpreter found. Attempting automatic install..." -ForegroundColor Cyan
 
     $winget = Get-Command winget -ErrorAction SilentlyContinue
     if ($winget) {
-        foreach ($id in @("Python.Python.3.13", "Python.Python.3.12", "Python.Python.3.11")) {
+        foreach ($id in @("Python.Python.3.12", "Python.Python.3.11", "Python.Python.3.10")) {
             try {
                 winget install --id $id --exact --silent --accept-source-agreements --accept-package-agreements *> $null
                 if (Get-SupportedPythonCandidate) {
@@ -293,7 +291,7 @@ function Install-SupportedPython {
 
     $choco = Get-Command choco -ErrorAction SilentlyContinue
     if ($choco) {
-        foreach ($pkg in @("python312", "python311", "python")) {
+        foreach ($pkg in @("python312", "python311", "python310", "python")) {
             try {
                 choco install $pkg -y *> $null
                 if (Get-SupportedPythonCandidate) {
@@ -313,7 +311,7 @@ if (-not $pythonCandidate) {
     $pythonCandidate = Get-SupportedPythonCandidate
 }
 if (-not $pythonCandidate) {
-    Write-Host "Error: Python 3.10-3.13 is required for full Homerun setup." -ForegroundColor Red
+    Write-Host "Error: Python 3.10-3.12 is required for full Homerun setup." -ForegroundColor Red
     if (Get-Command python -ErrorAction SilentlyContinue) {
         $detected = python --version 2>&1
         Write-Host "Detected python: $detected" -ForegroundColor Yellow
@@ -386,7 +384,7 @@ try {
     $activeMajor = [int]$activeMatch.Groups[1].Value
     $activeMinor = [int]$activeMatch.Groups[2].Value
     if ($activeMajor -ne 3 -or $activeMinor -lt $pythonMinMinor -or $activeMinor -gt $pythonMaxMinor) {
-        Write-Host "Error: backend virtualenv uses unsupported Python $activePythonVersion (requires 3.10-3.13)." -ForegroundColor Red
+        Write-Host "Error: backend virtualenv uses unsupported Python $activePythonVersion (requires 3.10-3.12)." -ForegroundColor Red
         Write-Host "Delete backend\\venv and rerun setup." -ForegroundColor Yellow
         exit 1
     }
@@ -396,25 +394,34 @@ try {
 }
 
 Write-Host "Installing Python dependencies..."
-pip install --quiet --upgrade pip
-pip install --quiet -r requirements.txt
-try {
-    python -c "import socksio" | Out-Null
-} catch {
+python -m pip install --quiet --upgrade pip
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Error: Failed to upgrade pip in backend virtualenv." -ForegroundColor Red
+    exit 1
+}
+
+python -m pip install --quiet -r requirements.txt
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Error: Failed to install backend dependencies from requirements.txt." -ForegroundColor Red
+    exit 1
+}
+
+python -c "import socksio" *> $null
+if ($LASTEXITCODE -ne 0) {
     Write-Host "Error: SOCKS5 proxy support dependency 'socksio' is missing after install." -ForegroundColor Red
-    Write-Host "Run: pip install `"httpx[socks]>=0.27.0,<1.0`"" -ForegroundColor Yellow
+    Write-Host "Run: python -m pip install `"httpx[socks]>=0.27.0,<1.0`"" -ForegroundColor Yellow
     exit 1
 }
 
 Write-Host "Installing trading dependencies..."
-pip install --quiet -r requirements-trading.txt
+python -m pip install --quiet -r requirements-trading.txt
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Error: Failed to install trading dependencies from requirements-trading.txt." -ForegroundColor Red
     exit 1
 }
-try {
-    python -c "import py_clob_client, eth_account" | Out-Null
-} catch {
+
+python -c "import py_clob_client, eth_account" *> $null
+if ($LASTEXITCODE -ne 0) {
     Write-Host "Error: trading dependencies are missing after install." -ForegroundColor Red
     Write-Host "Expected imports: py_clob_client, eth_account" -ForegroundColor Yellow
     exit 1
