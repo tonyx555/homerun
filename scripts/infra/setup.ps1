@@ -26,6 +26,41 @@ function Find-RedisServer {
     return $null
 }
 
+function Get-RedisServerMajorVersion {
+    param([string]$RedisServerPath)
+
+    if (-not $RedisServerPath -or -not (Test-Path $RedisServerPath)) {
+        return $null
+    }
+
+    try {
+        $versionOutput = (& $RedisServerPath --version 2>&1 | Out-String).Trim()
+    } catch {
+        return $null
+    }
+
+    $versionMatch = [regex]::Match($versionOutput, 'v=(\d+)\.(\d+)\.(\d+)')
+    if (-not $versionMatch.Success) {
+        return $null
+    }
+
+    try {
+        return [int]$versionMatch.Groups[1].Value
+    } catch {
+        return $null
+    }
+}
+
+function Test-RedisServerSupportsStreams {
+    param([string]$RedisServerPath)
+
+    $majorVersion = Get-RedisServerMajorVersion -RedisServerPath $RedisServerPath
+    if ($null -eq $majorVersion) {
+        return $false
+    }
+    return ($majorVersion -ge 5)
+}
+
 function Find-PostgresBinDir {
     if ($env:POSTGRES_BIN_DIR) {
         $envBin = $env:POSTGRES_BIN_DIR
@@ -98,7 +133,10 @@ function Test-DockerRuntimeAvailable {
 function Test-RedisRuntimeAvailable {
     if (Test-DockerRuntimeAvailable) { return $true }
     if (Find-MemuraiServer) { return $true }
-    if (Find-RedisServer) { return $true }
+    $redisServerPath = Find-RedisServer
+    if ($redisServerPath -and (Test-RedisServerSupportsStreams -RedisServerPath $redisServerPath)) {
+        return $true
+    }
     try {
         $svc = Get-Service -Name "Memurai" -ErrorAction SilentlyContinue
         if ($svc) { return $true }
@@ -108,90 +146,47 @@ function Test-RedisRuntimeAvailable {
 }
 
 function Ensure-RedisRuntime {
-    $runtimeAvailable = Test-RedisRuntimeAvailable
-    if ($runtimeAvailable) {
-        # If only the legacy Redis 3.0 runtime is present, proactively try to
-        # install Memurai so Streams support works on first launch.
-        if ((-not (Test-DockerRuntimeAvailable)) -and (-not (Find-MemuraiServer))) {
-            $legacyPath = Find-RedisServer
-            if ($legacyPath) {
-                $legacyVersionText = ""
-                try {
-                    $legacyVersionText = (& $legacyPath --version 2>&1 | Out-String).Trim()
-                } catch {
-                    $legacyVersionText = ""
-                }
-                $legacyVersionMatch = [regex]::Match($legacyVersionText, 'v=(\d+)\.(\d+)\.(\d+)')
-                if ($legacyVersionMatch.Success) {
-                    $legacyMajor = [int]$legacyVersionMatch.Groups[1].Value
-                    if ($legacyMajor -lt 5) {
-                        Write-Host "Detected legacy Redis runtime ($($legacyVersionMatch.Groups[1].Value).$($legacyVersionMatch.Groups[2].Value).$($legacyVersionMatch.Groups[3].Value)). Attempting Memurai install..." -ForegroundColor Yellow
-                        $winget = Get-Command winget -ErrorAction SilentlyContinue
-                        if ($winget) {
-                            try {
-                                winget install --id Memurai.MemuraiDeveloper --exact --silent --accept-source-agreements --accept-package-agreements *> $null
-                            } catch {
-                            }
-                        }
-                        if (-not (Find-MemuraiServer)) {
-                            $choco = Get-Command choco -ErrorAction SilentlyContinue
-                            if ($choco) {
-                                try {
-                                    choco install memurai-developer -y *> $null
-                                } catch {
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Write-Host "Redis runtime prerequisite found (docker, redis-server, or Memurai)." -ForegroundColor Green
+    if (Test-RedisRuntimeAvailable) {
+        Write-Host "Redis runtime prerequisite found (Streams-capable runtime)." -ForegroundColor Green
         return $true
     }
 
-    Write-Host "Redis runtime prerequisite missing. Attempting to install..." -ForegroundColor Cyan
-    Write-Host "NOTE: Redis Streams (required for trade signal streaming) need Redis >= 5.0." -ForegroundColor Cyan
-    Write-Host "The old Redis.Redis/redis-64 packages install Redis 3.0 which is too old." -ForegroundColor Cyan
-
-    $winget = Get-Command winget -ErrorAction SilentlyContinue
-    if ($winget) {
-        # Memurai first - it's a native Windows Redis-compatible server that
-        # supports modern Redis features (Streams, consumer groups, etc.)
-        # Redis.Redis installs the ancient 3.0.504 Microsoft port - last resort only.
-        $wingetIds = @(
-            "Memurai.MemuraiDeveloper",
-            "Redis.Redis"
-        )
-        foreach ($id in $wingetIds) {
-            try {
-                winget install --id $id --exact --silent --accept-source-agreements --accept-package-agreements *> $null
-                if (Test-RedisRuntimeAvailable) {
-                    $label = if ($id -eq "Redis.Redis") { "$id (WARNING: v3.0 - no Streams support)" } else { $id }
-                    Write-Host "Redis runtime installed via winget ($label)." -ForegroundColor Green
-                    return $true
-                }
-            } catch {
-            }
+    $legacyRedisPath = Find-RedisServer
+    if ($legacyRedisPath) {
+        $legacyMajorVersion = Get-RedisServerMajorVersion -RedisServerPath $legacyRedisPath
+        if ($null -ne $legacyMajorVersion -and $legacyMajorVersion -lt 5) {
+            Write-Host "Detected legacy Redis runtime (major version $legacyMajorVersion). Homerun requires Redis >= 5.0 Streams support." -ForegroundColor Yellow
         }
     }
 
-    $choco = Get-Command choco -ErrorAction SilentlyContinue
-    if ($choco) {
+    Write-Host "Redis Streams-capable runtime missing. Attempting to install Memurai..." -ForegroundColor Cyan
+
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if ($winget) {
         try {
-            choco install redis-64 -y *> $null
+            winget install --id Memurai.MemuraiDeveloper --exact --silent --accept-source-agreements --accept-package-agreements *> $null
             if (Test-RedisRuntimeAvailable) {
-                Write-Host "Redis runtime installed via Chocolatey (WARNING: redis-64 is v3.0 - no Streams support)." -ForegroundColor Yellow
-                Write-Host "Consider installing Memurai for full feature support: winget install Memurai.MemuraiDeveloper" -ForegroundColor Cyan
+                Write-Host "Redis runtime installed via winget (Memurai.MemuraiDeveloper)." -ForegroundColor Green
                 return $true
             }
         } catch {
         }
     }
 
-    Write-Host "Failed to auto-install Redis runtime prerequisites." -ForegroundColor Red
-    Write-Host "Install Docker Desktop or Memurai (winget install Memurai.MemuraiDeveloper), then rerun setup." -ForegroundColor Yellow
+    $choco = Get-Command choco -ErrorAction SilentlyContinue
+    if ($choco) {
+        try {
+            choco install memurai-developer -y *> $null
+            if (Test-RedisRuntimeAvailable) {
+                Write-Host "Redis runtime installed via Chocolatey (memurai-developer)." -ForegroundColor Green
+                return $true
+            }
+        } catch {
+        }
+    }
+
+    Write-Host "Failed to auto-install a Streams-capable Redis runtime." -ForegroundColor Red
+    Write-Host "Homerun requires Redis Streams (Redis >= 5.0). Install Docker Desktop or Memurai, then rerun setup." -ForegroundColor Yellow
     return $false
 }
 

@@ -127,6 +127,41 @@ function Find-RedisServer {
     return $null
 }
 
+function Get-RedisServerMajorVersion {
+    param([string]$RedisServerPath)
+
+    if (-not $RedisServerPath -or -not (Test-Path $RedisServerPath)) {
+        return $null
+    }
+
+    try {
+        $versionOutput = (& $RedisServerPath --version 2>&1 | Out-String).Trim()
+    } catch {
+        return $null
+    }
+
+    $versionMatch = [regex]::Match($versionOutput, 'v=(\d+)\.(\d+)\.(\d+)')
+    if (-not $versionMatch.Success) {
+        return $null
+    }
+
+    try {
+        return [int]$versionMatch.Groups[1].Value
+    } catch {
+        return $null
+    }
+}
+
+function Test-RedisServerSupportsStreams {
+    param([string]$RedisServerPath)
+
+    $majorVersion = Get-RedisServerMajorVersion -RedisServerPath $RedisServerPath
+    if ($null -eq $majorVersion) {
+        return $false
+    }
+    return ($majorVersion -ge 5)
+}
+
 function Find-PostgresBinDir {
     if ($env:POSTGRES_BIN_DIR) {
         $envBin = $env:POSTGRES_BIN_DIR
@@ -199,8 +234,11 @@ function Test-DockerRuntimeAvailable {
 function Test-RedisRuntimeAvailable {
     if (Test-DockerRuntimeAvailable) { return $true }
     if (Find-MemuraiServer) { return $true }
-    if (Find-RedisServer) { return $true }
-    foreach ($svcName in @("Redis", "Memurai")) {
+    $redisServerPath = Find-RedisServer
+    if ($redisServerPath -and (Test-RedisServerSupportsStreams -RedisServerPath $redisServerPath)) {
+        return $true
+    }
+    foreach ($svcName in @("Memurai")) {
         try {
             $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
             if ($svc) { return $true }
@@ -423,22 +461,41 @@ function Warn-RedisVersionIfOld {
     )
 
     $version = Get-RedisVersion -RedisHost $RedisHost -RedisPort $RedisPort
-    if (-not $version) { return }
+    if (-not $version) {
+        Write-Host ""
+        Write-Host "ERROR: Redis Streams support could not be verified." -ForegroundColor Red
+        Write-Host "Homerun requires Redis >= 5.0 with Streams support. Startup aborted." -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "Install a modern Redis runtime and rerun:" -ForegroundColor Cyan
+        Write-Host "  Option 1: Docker Desktop  ->  redis:7-alpine" -ForegroundColor White
+        Write-Host "  Option 2: Memurai         ->  winget install Memurai.MemuraiDeveloper" -ForegroundColor White
+        Write-Host "  Option 3: WSL2            ->  wsl --install && sudo apt install redis-server" -ForegroundColor White
+        Write-Host ""
+        return $false
+    }
 
     $versionOk = Test-RedisVersionOk -RedisHost $RedisHost -RedisPort $RedisPort
     if ($versionOk -eq $false) {
         Write-Host ""
-        Write-Host "WARNING: Redis version $version does NOT support Streams (requires >= 5.0)." -ForegroundColor Red
-        Write-Host "Trade signal streaming will be DISABLED. The bot will fall back to slower DB polling." -ForegroundColor Yellow
+        Write-Host "ERROR: Redis version $version does NOT support Streams (requires >= 5.0)." -ForegroundColor Red
+        Write-Host "Homerun requires Redis Streams and cannot continue with this runtime." -ForegroundColor Yellow
         Write-Host ""
-        Write-Host "To fix, install a modern Redis:" -ForegroundColor Cyan
-        Write-Host "  Option 1: Docker Desktop  ->  automatically uses redis:7-alpine" -ForegroundColor White
+        Write-Host "Install a modern Redis runtime and rerun:" -ForegroundColor Cyan
+        Write-Host "  Option 1: Docker Desktop  ->  redis:7-alpine" -ForegroundColor White
         Write-Host "  Option 2: Memurai         ->  winget install Memurai.MemuraiDeveloper" -ForegroundColor White
         Write-Host "  Option 3: WSL2            ->  wsl --install && sudo apt install redis-server" -ForegroundColor White
         Write-Host ""
+        return $false
     } elseif ($versionOk -eq $true) {
         Write-Host "Redis version $version (Streams supported)" -ForegroundColor Green
+        return $true
     }
+
+    Write-Host ""
+    Write-Host "ERROR: Redis version check returned an unknown state." -ForegroundColor Red
+    Write-Host "Homerun requires Redis >= 5.0 with Streams support. Startup aborted." -ForegroundColor Yellow
+    Write-Host ""
+    return $false
 }
 
 function Ensure-Redis {
@@ -464,27 +521,35 @@ function Ensure-Redis {
                 $dockerStarted = Start-RedisDocker -RedisHost $RedisHost -RedisPort $RedisPort -ContainerName $ContainerName -Image $Image
             }
             if (-not $dockerStarted) {
-                Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort
+                if (-not (Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort)) {
+                    exit 1
+                }
                 return
             }
             if (Wait-ForService -TargetHost $RedisHost -Port $RedisPort) {
                 $script:redisStartedByScript = $true
                 $script:redisStartMode = "docker"
-                Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort
+                if (-not (Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort)) {
+                    exit 1
+                }
                 return
             }
             # Docker started but can't reach it - fall through, old Redis still works
-            Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort
+            if (-not (Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort)) {
+                exit 1
+            }
             return
         }
         Write-Host "Redis already running on ${RedisHost}:${RedisPort}" -ForegroundColor Green
-        Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort
+        if (-not (Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort)) {
+            exit 1
+        }
         return
     }
 
     if (-not (Ensure-RedisRuntime)) {
         Write-Host "Failed to provision Redis runtime automatically." -ForegroundColor Red
-        Write-Host "Install Docker Desktop, Memurai, or redis-server, then rerun." -ForegroundColor Yellow
+        Write-Host "Install Docker Desktop, Memurai, or another Redis >= 5.0 runtime, then rerun." -ForegroundColor Yellow
         exit 1
     }
 
@@ -499,7 +564,9 @@ function Ensure-Redis {
         $script:redisStartedByScript = $true
         $script:redisStartMode = "docker"
         Write-Host "Redis started via Docker on ${RedisHost}:${RedisPort}" -ForegroundColor Green
-        Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort
+        if (-not (Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort)) {
+            exit 1
+        }
         return
     }
 
@@ -509,12 +576,14 @@ function Ensure-Redis {
         $script:redisStartedByScript = $true
         $script:redisStartMode = "local"
         Write-Host "Redis started via local service on ${RedisHost}:${RedisPort}" -ForegroundColor Green
-        Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort
+        if (-not (Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort)) {
+            exit 1
+        }
         return
     }
 
     Write-Host "Failed to start Redis automatically." -ForegroundColor Red
-    Write-Host "Install Docker Desktop, Memurai, or redis-server, then rerun." -ForegroundColor Yellow
+    Write-Host "Install Docker Desktop, Memurai, or another Redis >= 5.0 runtime, then rerun." -ForegroundColor Yellow
     exit 1
 }
 
