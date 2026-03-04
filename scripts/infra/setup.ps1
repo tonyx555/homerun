@@ -16,7 +16,24 @@ Write-Host "  Homerun Setup (Windows)" -ForegroundColor Green
 Write-Host "=========================================" -ForegroundColor Green
 Write-Host ""
 
+function Get-ProjectRedisRuntimeDir {
+    return (Join-Path (Get-Location).Path "data\runtime\redis")
+}
+
 function Find-RedisServer {
+    $projectRuntimeDir = Get-ProjectRedisRuntimeDir
+    if (Test-Path $projectRuntimeDir) {
+        $projectBinary = Join-Path $projectRuntimeDir "redis-server.exe"
+        if (Test-Path $projectBinary) {
+            return $projectBinary
+        }
+
+        $projectMatches = Get-ChildItem -Path $projectRuntimeDir -Filter "redis-server.exe" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($projectMatches) {
+            return $projectMatches.FullName
+        }
+    }
+
     $cmd = Get-Command redis-server -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
 
@@ -145,6 +162,48 @@ function Test-RedisRuntimeAvailable {
     return $false
 }
 
+function Install-PortableRedisRuntime {
+    $runtimeDir = Get-ProjectRedisRuntimeDir
+    $downloadDir = Join-Path $runtimeDir "_download"
+    $extractDir = Join-Path $runtimeDir "portable"
+    $zipPath = Join-Path $downloadDir "redis-windows.zip"
+
+    try {
+        New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
+        if (Test-Path $extractDir) {
+            Remove-Item -Path $extractDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
+
+        $headers = @{ "User-Agent" = "HomerunLauncher/1.0" }
+        $releaseApiUrl = "https://api.github.com/repos/redis-windows/redis-windows/releases/latest"
+        $release = Invoke-RestMethod -Uri $releaseApiUrl -Headers $headers -TimeoutSec 30
+        if (-not $release -or -not $release.assets) {
+            return $false
+        }
+
+        $asset = $release.assets |
+            Where-Object { $_.name -match "Windows-x64" -and $_.name -match "\.zip$" } |
+            Select-Object -First 1
+        if (-not $asset -or -not $asset.browser_download_url) {
+            return $false
+        }
+
+        Invoke-WebRequest -Uri $asset.browser_download_url -Headers $headers -OutFile $zipPath -TimeoutSec 120
+        Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
+
+        $redisExe = Get-ChildItem -Path $extractDir -Filter "redis-server.exe" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $redisExe) {
+            return $false
+        }
+
+        Write-Host "Redis portable runtime installed at $($redisExe.FullName)." -ForegroundColor Green
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 function Ensure-RedisRuntime {
     if (Test-RedisRuntimeAvailable) {
         Write-Host "Redis runtime prerequisite found (Streams-capable runtime)." -ForegroundColor Green
@@ -182,6 +241,14 @@ function Ensure-RedisRuntime {
                 return $true
             }
         } catch {
+        }
+    }
+
+    Write-Host "Memurai install unavailable. Attempting portable Redis runtime download..." -ForegroundColor Cyan
+    if (Install-PortableRedisRuntime) {
+        if (Test-RedisRuntimeAvailable) {
+            Write-Host "Redis runtime installed via portable project runtime." -ForegroundColor Green
+            return $true
         }
     }
 

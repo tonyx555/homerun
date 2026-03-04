@@ -45,6 +45,7 @@ Thumbs.db
 *.db-wal
 data/*.stale*
 data/postgres/
+data/runtime/
 
 # Logs
 *.log

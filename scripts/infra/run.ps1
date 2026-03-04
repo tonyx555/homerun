@@ -117,7 +117,24 @@ function Wait-ForService {
     return $false
 }
 
+function Get-ProjectRedisRuntimeDir {
+    return (Join-Path (Get-Location).Path "data\runtime\redis")
+}
+
 function Find-RedisServer {
+    $projectRuntimeDir = Get-ProjectRedisRuntimeDir
+    if (Test-Path $projectRuntimeDir) {
+        $projectBinary = Join-Path $projectRuntimeDir "redis-server.exe"
+        if (Test-Path $projectBinary) {
+            return $projectBinary
+        }
+
+        $projectMatches = Get-ChildItem -Path $projectRuntimeDir -Filter "redis-server.exe" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($projectMatches) {
+            return $projectMatches.FullName
+        }
+    }
+
     $cmd = Get-Command redis-server -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
 
@@ -491,7 +508,7 @@ function Start-RedisLocal {
     # Prefer Memurai service first - it supports Redis 5+ features (Streams)
     # The old Redis.Redis/redis-64 packages install Redis 3.0 which does NOT
     # support Streams and will silently break trade signal streaming.
-    foreach ($svcName in @("Memurai", "Redis")) {
+    foreach ($svcName in @("Memurai")) {
         try {
             $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
             if ($svc) {
@@ -515,6 +532,9 @@ function Start-RedisLocal {
 
     $redisServerPath = Find-RedisServer
     if ($redisServerPath) {
+        if (-not (Test-RedisServerSupportsStreams -RedisServerPath $redisServerPath)) {
+            return $false
+        }
         try {
             Start-Process -FilePath $redisServerPath -ArgumentList "--bind $RedisHost --port $RedisPort --save `"`" --appendonly no" -WindowStyle Hidden | Out-Null
             return $true
