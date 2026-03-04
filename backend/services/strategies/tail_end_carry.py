@@ -73,7 +73,7 @@ class TailEndCarryStrategy(BaseStrategy):
         "max_probability": 0.999,
         "min_upside_percent": 10.0,
         "min_days_to_resolution": 0.01,
-        "max_days_to_resolution": 2.0,
+        "max_days_to_resolution": 1.0,
         "min_liquidity": 3500.0,
         "max_spread": 0.05,
         "min_repricing_buffer": 0.015,
@@ -89,6 +89,7 @@ class TailEndCarryStrategy(BaseStrategy):
         "smart_take_profit_max_price_headroom": 0.03,
         "inversion_stop_enabled": True,
         "inversion_price_threshold": 0.50,
+        "max_hold_minutes": 1440.0,
         "price_policy": "taker_limit",
         "time_in_force": "IOC",
         "session_timeout_seconds": 90,
@@ -644,6 +645,21 @@ class TailEndCarryStrategy(BaseStrategy):
                     ),
                     close_price=current_price,
                 )
+
+        max_hold_minutes = safe_float(config.get("max_hold_minutes"), None)
+        age_minutes = safe_float(getattr(position, "age_minutes", None), None)
+        if (
+            max_hold_minutes is not None
+            and max_hold_minutes > 0.0
+            and age_minutes is not None
+            and age_minutes >= max_hold_minutes
+            and current_price > 0.0
+        ):
+            return ExitDecision(
+                "close",
+                f"Max hold exceeded ({age_minutes:.0f} >= {max_hold_minutes:.0f} min)",
+                close_price=current_price,
+            )
 
         return ExitDecision(
             "hold",

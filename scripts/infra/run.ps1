@@ -183,6 +183,11 @@ function Test-DockerRuntimeAvailable {
         return $false
     }
 
+    $dockerDesktopService = Get-Service -Name "com.docker.service" -ErrorAction SilentlyContinue
+    if ($dockerDesktopService -and $dockerDesktopService.Status -ne "Running") {
+        return $false
+    }
+
     try {
         docker info *> $null
         return ($LASTEXITCODE -eq 0)
@@ -479,7 +484,10 @@ function Ensure-Redis {
     Write-Host "Starting Redis..." -ForegroundColor Cyan
 
     # Prefer Docker (redis:7-alpine) - guaranteed modern Redis with Streams support
-    $dockerStarted = Start-RedisDocker -RedisHost $RedisHost -RedisPort $RedisPort -ContainerName $ContainerName -Image $Image
+    $dockerStarted = $false
+    if (Test-DockerRuntimeAvailable) {
+        $dockerStarted = Start-RedisDocker -RedisHost $RedisHost -RedisPort $RedisPort -ContainerName $ContainerName -Image $Image
+    }
     if ($dockerStarted -and (Wait-ForService -TargetHost $RedisHost -Port $RedisPort)) {
         $script:redisStartedByScript = $true
         $script:redisStartMode = "docker"
@@ -886,13 +894,20 @@ function Ensure-Postgres {
         Ensure-PostgresFirewallRule -PostgresBinDir $pgBinDir
     }
 
-    $dockerStarted = Start-PostgresDocker -PgHost $PgHost -Port $Port -Db $Db -User $User -Password $Password -ContainerName $ContainerName -Image $Image -DataDir $DataDir
+    $dockerStarted = $false
+    if (Test-DockerRuntimeAvailable) {
+        $dockerStarted = Start-PostgresDocker -PgHost $PgHost -Port $Port -Db $Db -User $User -Password $Password -ContainerName $ContainerName -Image $Image -DataDir $DataDir
+    }
     if ($dockerStarted -and (Wait-ForService -TargetHost $PgHost -Port $Port)) {
         $script:postgresPort = [int]$Port
         $script:postgresStartedByScript = $true
         $script:postgresStartMode = "docker"
         Write-Host "Postgres started via Docker on ${PgHost}:${Port}" -ForegroundColor Green
         return
+    }
+
+    if (-not $dockerStarted) {
+        Write-Host "Docker Postgres unavailable; falling back to local Postgres tools." -ForegroundColor DarkYellow
     }
 
     $localStarted = Start-PostgresLocal -PgHost $PgHost -Port $Port -User $User -DataDir $DataDir
@@ -1057,8 +1072,6 @@ function Test-NeedsSetup {
     if ($stamp.requirements_trading_sha256 -ne (Get-HashOrMissing "backend\requirements-trading.txt")) { return $true }
     if ($stamp.package_json_sha256 -ne (Get-HashOrMissing "frontend\package.json")) { return $true }
     if ($stamp.package_lock_sha256 -ne (Get-HashOrMissing "frontend\package-lock.json")) { return $true }
-    if ($stamp.launcher_tools_package_json_sha256 -ne (Get-HashOrMissing "scripts\infra\tooling\package.json")) { return $true }
-    if ($stamp.launcher_tools_package_lock_sha256 -ne (Get-HashOrMissing "scripts\infra\tooling\package-lock.json")) { return $true }
 
     return $false
 }
@@ -1066,6 +1079,12 @@ function Test-NeedsSetup {
 if (Test-NeedsSetup) {
     Write-Host "Setup missing or stale. Running setup..." -ForegroundColor Yellow
     & .\scripts\infra\setup.ps1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Setup failed"
+    }
+    if (Test-NeedsSetup) {
+        throw "Setup completed but required runtime artifacts are still missing or stale"
+    }
 }
 
 # Kill orphaned workers from a previous crashed run before starting services.

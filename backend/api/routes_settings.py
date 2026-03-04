@@ -6,6 +6,7 @@ Endpoints for managing application settings.
 
 import asyncio
 import uuid
+from datetime import datetime, timezone
 from enum import Enum
 
 from fastapi import APIRouter, HTTPException
@@ -20,7 +21,9 @@ from models.database import (
     DataSource,
     Strategy,
     StrategyVersion,
+    TraderOrder,
     TraderOrchestratorControl,
+    TraderPosition,
 )
 from services.strategy_versioning import normalize_strategy_version
 from utils.logger import get_logger
@@ -753,6 +756,43 @@ def _coerce_dict_list(value: Any) -> list[dict[str, Any]]:
     return [dict(item) for item in value if isinstance(item, dict)]
 
 
+def _coerce_optional_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _coerce_datetime(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _coerce_categories(raw_values: Any) -> list[str]:
     if not isinstance(raw_values, list):
         return []
@@ -818,6 +858,37 @@ def _serialize_trader_for_transfer(trader: dict[str, Any]) -> dict[str, Any]:
         "is_enabled": bool(trader.get("is_enabled", True)),
         "is_paused": bool(trader.get("is_paused", False)),
         "interval_seconds": int(trader.get("interval_seconds") or 60),
+    }
+
+
+def _serialize_trader_order_for_transfer(row: TraderOrder, trader_name: str) -> dict[str, Any]:
+    return {
+        "id": str(row.id or ""),
+        "trader_name": trader_name,
+        "signal_id": _coerce_string(row.signal_id),
+        "decision_id": _coerce_string(row.decision_id),
+        "source": _coerce_string(row.source) or "manual",
+        "strategy_key": _coerce_string(row.strategy_key),
+        "strategy_version": int(row.strategy_version) if row.strategy_version is not None else None,
+        "market_id": _coerce_string(row.market_id) or "",
+        "market_question": row.market_question,
+        "direction": row.direction,
+        "event_id": _coerce_string(row.event_id),
+        "trace_id": _coerce_string(row.trace_id),
+        "mode": _coerce_string(row.mode) or "shadow",
+        "status": _coerce_string(row.status) or "submitted",
+        "notional_usd": float(row.notional_usd) if row.notional_usd is not None else None,
+        "entry_price": float(row.entry_price) if row.entry_price is not None else None,
+        "effective_price": float(row.effective_price) if row.effective_price is not None else None,
+        "edge_percent": float(row.edge_percent) if row.edge_percent is not None else None,
+        "confidence": float(row.confidence) if row.confidence is not None else None,
+        "actual_profit": float(row.actual_profit) if row.actual_profit is not None else None,
+        "reason": row.reason,
+        "payload": _coerce_dict(row.payload_json),
+        "error_message": row.error_message,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "executed_at": row.executed_at.isoformat() if row.executed_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
 
 
@@ -918,12 +989,39 @@ async def _export_transfer_bundle(categories: list[str]) -> tuple[dict[str, Any]
         if SettingsTransferCategory.BOT_TRADERS.value in categories:
             traders = await list_traders(session)
             exported_traders = [_serialize_trader_for_transfer(trader) for trader in traders]
+            trader_name_by_id = {
+                str(trader.get("id") or "").strip(): str(trader.get("name") or "").strip()
+                for trader in traders
+                if str(trader.get("id") or "").strip() and str(trader.get("name") or "").strip()
+            }
+            trader_ids = list(trader_name_by_id.keys())
+            exported_orders: list[dict[str, Any]] = []
+            if trader_ids:
+                order_rows = (
+                    (
+                        await session.execute(
+                            select(TraderOrder)
+                            .where(TraderOrder.trader_id.in_(trader_ids))
+                            .order_by(TraderOrder.created_at.asc(), TraderOrder.id.asc())
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                for order_row in order_rows:
+                    trader_name = trader_name_by_id.get(str(order_row.trader_id or "").strip())
+                    if not trader_name:
+                        continue
+                    exported_orders.append(_serialize_trader_order_for_transfer(order_row, trader_name))
             orchestrator_row = await session.get(TraderOrchestratorControl, "default")
             bundle[SettingsTransferCategory.BOT_TRADERS.value] = {
                 "traders": exported_traders,
                 "orchestrator": (
                     _serialize_orchestrator_control_for_transfer(orchestrator_row) if orchestrator_row is not None else None
                 ),
+                "trade_state": {
+                    "orders": exported_orders,
+                },
             }
             counts[SettingsTransferCategory.BOT_TRADERS.value] = len(exported_traders)
 
@@ -1288,6 +1386,154 @@ def _normalize_trader_payload(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _normalize_trader_order_payload(raw: dict[str, Any]) -> dict[str, Any]:
+    trader_name = _coerce_string(raw.get("trader_name"))
+    if not trader_name:
+        raise ValueError("Each trader trade requires a non-empty trader_name.")
+
+    market_id = _coerce_string(raw.get("market_id"))
+    if not market_id:
+        raise ValueError(f"Trader '{trader_name}' trade is missing market_id.")
+
+    created_at = _coerce_datetime(raw.get("created_at")) or utcnow()
+    updated_at = _coerce_datetime(raw.get("updated_at")) or created_at
+    executed_at = _coerce_datetime(raw.get("executed_at"))
+
+    strategy_version = None
+    if raw.get("strategy_version") is not None:
+        strategy_version = _coerce_int(raw.get("strategy_version"), 0) or None
+
+    notional_usd = _coerce_optional_float(raw.get("notional_usd"))
+    entry_price = _coerce_optional_float(raw.get("entry_price"))
+    effective_price = _coerce_optional_float(raw.get("effective_price"))
+    edge_percent = _coerce_optional_float(raw.get("edge_percent"))
+    confidence = _coerce_optional_float(raw.get("confidence"))
+    actual_profit = _coerce_optional_float(raw.get("actual_profit"))
+
+    payload = _coerce_dict(raw.get("payload"))
+    import_origin = _coerce_dict(payload.get("import_origin"))
+    source_order_id = _coerce_string(raw.get("id"))
+    if source_order_id:
+        import_origin["source_order_id"] = source_order_id
+    source_signal_id = _coerce_string(raw.get("signal_id"))
+    if source_signal_id:
+        import_origin["source_signal_id"] = source_signal_id
+    source_decision_id = _coerce_string(raw.get("decision_id"))
+    if source_decision_id:
+        import_origin["source_decision_id"] = source_decision_id
+    if import_origin:
+        payload["import_origin"] = import_origin
+
+    return {
+        "trader_name": trader_name,
+        "source": (_coerce_string(raw.get("source")) or "manual").lower(),
+        "strategy_key": _coerce_string(raw.get("strategy_key")),
+        "strategy_version": strategy_version,
+        "market_id": market_id,
+        "market_question": _coerce_string(raw.get("market_question")),
+        "direction": _coerce_string(raw.get("direction")),
+        "event_id": _coerce_string(raw.get("event_id")),
+        "trace_id": _coerce_string(raw.get("trace_id")),
+        "mode": (_coerce_string(raw.get("mode")) or "shadow").lower(),
+        "status": (_coerce_string(raw.get("status")) or "submitted").lower(),
+        "notional_usd": notional_usd,
+        "entry_price": entry_price,
+        "effective_price": effective_price,
+        "edge_percent": edge_percent,
+        "confidence": confidence,
+        "actual_profit": actual_profit,
+        "reason": _coerce_string(raw.get("reason")),
+        "payload": payload,
+        "error_message": _coerce_string(raw.get("error_message")),
+        "created_at": created_at,
+        "executed_at": executed_at,
+        "updated_at": updated_at,
+    }
+
+
+async def _import_trader_trade_state(
+    session,
+    trader_ids_by_name: dict[str, str],
+    trade_state_payload: dict[str, Any],
+) -> dict[str, Any]:
+    from services.trader_orchestrator_state import sync_trader_position_inventory
+
+    if not trader_ids_by_name:
+        return {"orders_imported": 0, "positions_synced": 0, "open_positions": 0}
+
+    trader_ids = [trader_id for trader_id in trader_ids_by_name.values() if str(trader_id or "").strip()]
+    if not trader_ids:
+        return {"orders_imported": 0, "positions_synced": 0, "open_positions": 0}
+
+    await session.execute(delete(TraderPosition).where(TraderPosition.trader_id.in_(trader_ids)))
+    await session.execute(delete(TraderOrder).where(TraderOrder.trader_id.in_(trader_ids)))
+
+    normalized_orders = [
+        _normalize_trader_order_payload(item)
+        for item in _coerce_dict_list(trade_state_payload.get("orders"))
+    ]
+
+    orders_imported = 0
+    for normalized in normalized_orders:
+        trader_name_key = str(normalized["trader_name"]).strip().lower()
+        trader_id = trader_ids_by_name.get(trader_name_key)
+        if not trader_id:
+            raise ValueError(
+                f"Trader trade state references unknown trader '{normalized['trader_name']}'."
+            )
+
+        session.add(
+            TraderOrder(
+                id=uuid.uuid4().hex,
+                trader_id=trader_id,
+                signal_id=None,
+                decision_id=None,
+                source=normalized["source"],
+                strategy_key=normalized["strategy_key"],
+                strategy_version=normalized["strategy_version"],
+                market_id=normalized["market_id"],
+                market_question=normalized["market_question"],
+                direction=normalized["direction"],
+                event_id=normalized["event_id"],
+                trace_id=normalized["trace_id"],
+                mode=normalized["mode"],
+                status=normalized["status"],
+                notional_usd=normalized["notional_usd"],
+                entry_price=normalized["entry_price"],
+                effective_price=normalized["effective_price"],
+                edge_percent=normalized["edge_percent"],
+                confidence=normalized["confidence"],
+                actual_profit=normalized["actual_profit"],
+                reason=normalized["reason"],
+                payload_json=normalized["payload"],
+                error_message=normalized["error_message"],
+                created_at=normalized["created_at"],
+                executed_at=normalized["executed_at"],
+                updated_at=normalized["updated_at"],
+            )
+        )
+        orders_imported += 1
+
+    await session.flush()
+
+    positions_synced = 0
+    open_positions = 0
+    for trader_id in trader_ids:
+        sync_result = await sync_trader_position_inventory(
+            session,
+            trader_id=trader_id,
+            commit=False,
+        )
+        positions_synced += 1
+        open_positions += int(sync_result.get("open_positions") or 0)
+
+    return {
+        "orders_imported": orders_imported,
+        "positions_synced": positions_synced,
+        "open_positions": open_positions,
+    }
+
+
 async def _import_strategies(session, payload: Any) -> dict[str, Any]:
     normalized_payloads = [_normalize_strategy_payload(item) for item in _coerce_dict_list(payload)]
     seen: set[str] = set()
@@ -1527,12 +1773,13 @@ async def _import_traders(session, payload: Any) -> dict[str, Any]:
     from services.trader_orchestrator_state import create_trader, list_traders, update_trader
 
     payload_dict = _coerce_dict(payload)
-    if payload_dict:
-        traders_payload = payload_dict.get("traders")
-        orchestrator_payload = _coerce_dict(payload_dict.get("orchestrator"))
-    else:
-        traders_payload = payload
-        orchestrator_payload = {}
+    if not payload_dict:
+        raise ValueError("bot_traders payload must be an object.")
+
+    traders_payload = payload_dict.get("traders")
+    orchestrator_payload = _coerce_dict(payload_dict.get("orchestrator"))
+    include_trade_state = "trade_state" in payload_dict
+    trade_state_payload = _coerce_dict(payload_dict.get("trade_state"))
 
     normalized_payloads = [_normalize_trader_payload(item) for item in _coerce_dict_list(traders_payload)]
     seen: set[str] = set()
@@ -1568,12 +1815,31 @@ async def _import_traders(session, payload: Any) -> dict[str, Any]:
             updated += 1
         imported_names.append(normalized["name"])
 
+    imported_trader_ids_by_name: dict[str, str] = {}
+    for imported_name in imported_names:
+        trader = existing_by_name.get(str(imported_name).strip().lower())
+        trader_id = _coerce_string((trader or {}).get("id") if isinstance(trader, dict) else None)
+        if not trader_id:
+            raise ValueError(f"Trader '{imported_name}' is missing an id after import.")
+        imported_trader_ids_by_name[str(imported_name).strip().lower()] = trader_id
+
+    trade_state_result = {"orders_imported": 0, "positions_synced": 0, "open_positions": 0}
+    if include_trade_state:
+        trade_state_result = await _import_trader_trade_state(
+            session,
+            imported_trader_ids_by_name,
+            trade_state_payload,
+        )
+
     orchestrator_updated = await _apply_orchestrator_control_import(session, orchestrator_payload)
 
     return {
         "created": created,
         "updated": updated,
         "orchestrator_updated": 1 if orchestrator_updated else 0,
+        "orders_imported": int(trade_state_result.get("orders_imported") or 0),
+        "positions_synced": int(trade_state_result.get("positions_synced") or 0),
+        "open_positions": int(trade_state_result.get("open_positions") or 0),
         "imported_names": imported_names,
     }
 
@@ -1998,6 +2264,9 @@ async def import_settings_bundle(request: SettingsImportRequest):
                     "created": trader_result["created"],
                     "updated": trader_result["updated"],
                     "orchestrator_updated": trader_result["orchestrator_updated"],
+                    "orders_imported": int(trader_result.get("orders_imported") or 0),
+                    "positions_synced": int(trader_result.get("positions_synced") or 0),
+                    "open_positions": int(trader_result.get("open_positions") or 0),
                 }
 
             if settings_row is not None:

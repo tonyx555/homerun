@@ -590,6 +590,13 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                     "min": 0.05,
                     "max": 0.95,
                 },
+                {
+                    "key": "max_hold_minutes",
+                    "label": "Max Hold (minutes)",
+                    "type": "number",
+                    "min": 0,
+                    "max": 10080,
+                },
             ]
         },
     ),

@@ -110,7 +110,7 @@ const SETTINGS_TRANSFER_CATEGORIES: Array<{
   label: string
   description: string
 }> = [
-  { id: 'bot_traders', label: 'Bot Traders', description: 'Configured trader bots and risk/runtime settings' },
+  { id: 'bot_traders', label: 'Bot Traders', description: 'Configured trader bots, orchestrator settings, and trade state' },
   { id: 'strategies', label: 'Strategies', description: 'Strategy definitions, source code, and version snapshots' },
   { id: 'data_sources', label: 'Data Sources', description: 'Data-source definitions and retention/config' },
   { id: 'market_credentials', label: 'Market Credentials', description: 'Polymarket + Kalshi API credentials' },

@@ -63,7 +63,11 @@ async def test_import_settings_bundle_uses_bundle_categories_when_not_overridden
             bundle={
                 "schema_version": 1,
                 "categories": [routes_settings.SettingsTransferCategory.BOT_TRADERS.value],
-                "bot_traders": [{"name": "Aggro", "source_configs": []}],
+                "bot_traders": {
+                    "traders": [{"name": "Aggro", "source_configs": []}],
+                    "orchestrator": {"is_enabled": True},
+                    "trade_state": {"orders": []},
+                },
             }
         )
     )
@@ -72,7 +76,141 @@ async def test_import_settings_bundle_uses_bundle_categories_when_not_overridden
     assert response["imported_categories"] == [routes_settings.SettingsTransferCategory.BOT_TRADERS.value]
     assert response["results"][routes_settings.SettingsTransferCategory.BOT_TRADERS.value]["created"] == 2
     assert response["results"][routes_settings.SettingsTransferCategory.BOT_TRADERS.value]["updated"] == 1
+    assert response["results"][routes_settings.SettingsTransferCategory.BOT_TRADERS.value]["orders_imported"] == 0
+    assert response["results"][routes_settings.SettingsTransferCategory.BOT_TRADERS.value]["positions_synced"] == 0
+    assert response["results"][routes_settings.SettingsTransferCategory.BOT_TRADERS.value]["open_positions"] == 0
     import_traders_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_import_traders_applies_trade_state(monkeypatch):
+    import services.trader_orchestrator_state as orchestrator_state
+
+    session_obj = object()
+    list_traders_mock = AsyncMock(
+        return_value=[
+            {
+                "id": "trader_alpha",
+                "name": "Alpha",
+                "source_configs": [],
+                "risk_limits": {},
+                "metadata": {},
+                "mode": "shadow",
+                "is_enabled": True,
+                "is_paused": False,
+                "interval_seconds": 60,
+            }
+        ]
+    )
+    update_trader_mock = AsyncMock(
+        return_value={
+            "id": "trader_alpha",
+            "name": "Alpha",
+            "source_configs": [],
+            "risk_limits": {},
+            "metadata": {},
+            "mode": "shadow",
+            "is_enabled": True,
+            "is_paused": False,
+            "interval_seconds": 60,
+        }
+    )
+    monkeypatch.setattr(orchestrator_state, "list_traders", list_traders_mock)
+    monkeypatch.setattr(orchestrator_state, "update_trader", update_trader_mock)
+    monkeypatch.setattr(orchestrator_state, "create_trader", AsyncMock())
+
+    import_trade_state_mock = AsyncMock(
+        return_value={"orders_imported": 4, "positions_synced": 1, "open_positions": 2}
+    )
+    monkeypatch.setattr(routes_settings, "_import_trader_trade_state", import_trade_state_mock)
+    monkeypatch.setattr(routes_settings, "_apply_orchestrator_control_import", AsyncMock(return_value=True))
+
+    payload = {
+        "traders": [
+            {
+                "name": "Alpha",
+                "source_configs": [],
+                "risk_limits": {},
+                "metadata": {},
+            }
+        ],
+        "orchestrator": {"is_enabled": True, "is_paused": False},
+        "trade_state": {"orders": [{"trader_name": "Alpha", "market_id": "mkt_1", "source": "manual"}]},
+    }
+
+    result = await routes_settings._import_traders(session_obj, payload)
+
+    assert result["created"] == 0
+    assert result["updated"] == 1
+    assert result["orders_imported"] == 4
+    assert result["positions_synced"] == 1
+    assert result["open_positions"] == 2
+    import_trade_state_mock.assert_awaited_once_with(
+        session_obj,
+        {"alpha": "trader_alpha"},
+        {"orders": [{"trader_name": "Alpha", "market_id": "mkt_1", "source": "manual"}]},
+    )
+
+
+@pytest.mark.asyncio
+async def test_import_traders_skips_trade_state_when_absent(monkeypatch):
+    import services.trader_orchestrator_state as orchestrator_state
+
+    session_obj = object()
+    list_traders_mock = AsyncMock(
+        return_value=[
+            {
+                "id": "trader_alpha",
+                "name": "Alpha",
+                "source_configs": [],
+                "risk_limits": {},
+                "metadata": {},
+                "mode": "shadow",
+                "is_enabled": True,
+                "is_paused": False,
+                "interval_seconds": 60,
+            }
+        ]
+    )
+    update_trader_mock = AsyncMock(
+        return_value={
+            "id": "trader_alpha",
+            "name": "Alpha",
+            "source_configs": [],
+            "risk_limits": {},
+            "metadata": {},
+            "mode": "shadow",
+            "is_enabled": True,
+            "is_paused": False,
+            "interval_seconds": 60,
+        }
+    )
+    monkeypatch.setattr(orchestrator_state, "list_traders", list_traders_mock)
+    monkeypatch.setattr(orchestrator_state, "update_trader", update_trader_mock)
+    monkeypatch.setattr(orchestrator_state, "create_trader", AsyncMock())
+
+    import_trade_state_mock = AsyncMock()
+    monkeypatch.setattr(routes_settings, "_import_trader_trade_state", import_trade_state_mock)
+    monkeypatch.setattr(routes_settings, "_apply_orchestrator_control_import", AsyncMock(return_value=True))
+
+    result = await routes_settings._import_traders(
+        session_obj,
+        {
+            "traders": [{"name": "Alpha", "source_configs": []}],
+            "orchestrator": {"is_enabled": True},
+        },
+    )
+
+    assert result["orders_imported"] == 0
+    assert result["positions_synced"] == 0
+    assert result["open_positions"] == 0
+    import_trade_state_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_import_traders_rejects_non_object_payload():
+    with pytest.raises(ValueError, match="bot_traders payload must be an object"):
+        await routes_settings._import_traders(object(), [{"name": "legacy"}])
 
 
 @pytest.mark.asyncio

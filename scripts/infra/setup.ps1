@@ -82,6 +82,11 @@ function Test-DockerRuntimeAvailable {
         return $false
     }
 
+    $dockerDesktopService = Get-Service -Name "com.docker.service" -ErrorAction SilentlyContinue
+    if ($dockerDesktopService -and $dockerDesktopService.Status -ne "Running") {
+        return $false
+    }
+
     try {
         docker info *> $null
         return ($LASTEXITCODE -eq 0)
@@ -103,7 +108,45 @@ function Test-RedisRuntimeAvailable {
 }
 
 function Ensure-RedisRuntime {
-    if (Test-RedisRuntimeAvailable) {
+    $runtimeAvailable = Test-RedisRuntimeAvailable
+    if ($runtimeAvailable) {
+        # If only the legacy Redis 3.0 runtime is present, proactively try to
+        # install Memurai so Streams support works on first launch.
+        if ((-not (Test-DockerRuntimeAvailable)) -and (-not (Find-MemuraiServer))) {
+            $legacyPath = Find-RedisServer
+            if ($legacyPath) {
+                $legacyVersionText = ""
+                try {
+                    $legacyVersionText = (& $legacyPath --version 2>&1 | Out-String).Trim()
+                } catch {
+                    $legacyVersionText = ""
+                }
+                $legacyVersionMatch = [regex]::Match($legacyVersionText, 'v=(\d+)\.(\d+)\.(\d+)')
+                if ($legacyVersionMatch.Success) {
+                    $legacyMajor = [int]$legacyVersionMatch.Groups[1].Value
+                    if ($legacyMajor -lt 5) {
+                        Write-Host "Detected legacy Redis runtime ($($legacyVersionMatch.Groups[1].Value).$($legacyVersionMatch.Groups[2].Value).$($legacyVersionMatch.Groups[3].Value)). Attempting Memurai install..." -ForegroundColor Yellow
+                        $winget = Get-Command winget -ErrorAction SilentlyContinue
+                        if ($winget) {
+                            try {
+                                winget install --id Memurai.MemuraiDeveloper --exact --silent --accept-source-agreements --accept-package-agreements *> $null
+                            } catch {
+                            }
+                        }
+                        if (-not (Find-MemuraiServer)) {
+                            $choco = Get-Command choco -ErrorAction SilentlyContinue
+                            if ($choco) {
+                                try {
+                                    choco install memurai-developer -y *> $null
+                                } catch {
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Write-Host "Redis runtime prerequisite found (docker, redis-server, or Memurai)." -ForegroundColor Green
         return $true
     }
@@ -440,6 +483,10 @@ npm install --silent 2>$null
 if ($LASTEXITCODE -ne 0) {
     npm install
 }
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Error: Failed to install frontend dependencies." -ForegroundColor Red
+    exit 1
+}
 
 Pop-Location
 
@@ -509,8 +556,8 @@ $stamp = @{
     requirements_trading_sha256 = Get-HashOrMissing "backend\requirements-trading.txt"
     package_json_sha256 = Get-HashOrMissing "frontend\package.json"
     package_lock_sha256 = Get-HashOrMissing "frontend\package-lock.json"
-    launcher_tools_package_json_sha256 = Get-HashOrMissing "scripts\infra\tooling\package.json"
-    launcher_tools_package_lock_sha256 = Get-HashOrMissing "scripts\infra\tooling\package-lock.json"
+    launcher_tools_package_json_sha256 = if ($toolingInstallOk) { Get-HashOrMissing "scripts\infra\tooling\package.json" } else { "skipped" }
+    launcher_tools_package_lock_sha256 = if ($toolingInstallOk) { Get-HashOrMissing "scripts\infra\tooling\package-lock.json" } else { "skipped" }
 }
 
 $stamp | ConvertTo-Json | Set-Content -Path ".setup-stamp.json" -Encoding UTF8

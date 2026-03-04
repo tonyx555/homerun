@@ -2992,11 +2992,21 @@ export type SettingsTransferCategory =
   | 'llm_configuration'
   | 'telegram_configuration'
 
+export interface BotTraderTradeStateBundle {
+  orders: Array<Record<string, unknown>>
+}
+
+export interface BotTradersBundle {
+  traders: Array<Record<string, unknown>>
+  orchestrator?: Record<string, unknown> | null
+  trade_state?: BotTraderTradeStateBundle
+}
+
 export interface SettingsExportBundle {
   schema_version: number
   exported_at: string
   categories: SettingsTransferCategory[]
-  bot_traders?: Array<Record<string, unknown>>
+  bot_traders?: BotTradersBundle
   strategies?: Array<Record<string, unknown>>
   data_sources?: Array<Record<string, unknown>>
   market_credentials?: Record<string, unknown>
