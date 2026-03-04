@@ -453,10 +453,17 @@ function Ensure-Redis {
         $versionOk = Test-RedisVersionOk -RedisHost $RedisHost -RedisPort $RedisPort
         if ($versionOk -eq $false) {
             # Running Redis is too old. Try Docker for a modern version first.
-            Write-Host "Running Redis is too old for Streams support. Attempting Docker upgrade..." -ForegroundColor Yellow
-            $dockerStarted = Start-RedisDocker -RedisHost $RedisHost -RedisPort $RedisPort -ContainerName $ContainerName -Image $Image
+            $dockerAvailable = Test-DockerRuntimeAvailable
+            if ($dockerAvailable) {
+                Write-Host "Running Redis is too old for Streams support. Attempting Docker upgrade..." -ForegroundColor Yellow
+            } else {
+                Write-Host "Running Redis is too old for Streams support and Docker is unavailable." -ForegroundColor Yellow
+            }
+            $dockerStarted = $false
+            if ($dockerAvailable) {
+                $dockerStarted = Start-RedisDocker -RedisHost $RedisHost -RedisPort $RedisPort -ContainerName $ContainerName -Image $Image
+            }
             if (-not $dockerStarted) {
-                # Can't replace it - warn and continue with degraded mode
                 Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort
                 return
             }
@@ -635,12 +642,36 @@ function Start-PostgresLocal {
 
     $pgVersionPath = Join-Path $DataDir "PG_VERSION"
     $pgInitLogPath = Join-Path $DataDir "initdb.log"
+    $pgInitErrLogPath = Join-Path $DataDir "initdb.err.log"
     $pgServerLogPath = Join-Path $DataDir "postgresql.log"
     if (-not (Test-Path $pgVersionPath)) {
         try {
-            & $initdbPath -D $DataDir -U $User --encoding=UTF8 *> $pgInitLogPath
-            if ($LASTEXITCODE -ne 0) {
-                Write-Host "Postgres initialization failed. See: $pgInitLogPath" -ForegroundColor Yellow
+            $existingEntries = Get-ChildItem -Path $DataDir -Force -ErrorAction SilentlyContinue
+            if ($existingEntries) {
+                foreach ($entry in $existingEntries) {
+                    Remove-Item -Path $entry.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+
+            $initArgs = @(
+                "-D", $DataDir,
+                "-U", $User,
+                "--encoding=UTF8",
+                "--auth=trust",
+                "--auth-host=trust",
+                "--auth-local=trust",
+                "--no-instructions"
+            )
+            $initProc = Start-Process -FilePath $initdbPath -ArgumentList $initArgs -RedirectStandardOutput $pgInitLogPath -RedirectStandardError $pgInitErrLogPath -WindowStyle Hidden -PassThru
+            $null = Wait-Process -Id $initProc.Id -Timeout 120 -ErrorAction SilentlyContinue
+            if (-not $initProc.HasExited) {
+                Stop-Process -Id $initProc.Id -Force -ErrorAction SilentlyContinue
+                Write-Host "Postgres initialization timed out after 120s. See: $pgInitLogPath, $pgInitErrLogPath" -ForegroundColor Yellow
+                return $false
+            }
+            $initProc.Refresh()
+            if ($initProc.ExitCode -ne 0) {
+                Write-Host "Postgres initialization failed. See: $pgInitLogPath, $pgInitErrLogPath" -ForegroundColor Yellow
                 return $false
             }
 
