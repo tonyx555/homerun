@@ -2765,7 +2765,23 @@ function buildPositionBookRows(
     }
     const notional = Math.abs(toNumber(order.notional_usd))
     const px = toNumber(order.effective_price ?? order.entry_price)
-    const edge = toNumber(order.edge_percent)
+    const providerReconciliation = isRecord(orderPayload.provider_reconciliation) ? orderPayload.provider_reconciliation : {}
+    const providerSnapshot = isRecord(orderPayload.provider_position_snapshot) ? orderPayload.provider_position_snapshot : {}
+    const fillPx = toNumber(
+      order.average_fill_price
+      ?? providerReconciliation.average_fill_price
+      ?? providerSnapshot.average_fill_price
+      ?? px
+    )
+    const pnl = toNumber(order.actual_profit)
+    const edge = computeOrderDynamicEdgePercent({
+      status,
+      edgePercent: toNumber(order.edge_percent),
+      fillPrice: fillPx,
+      markPrice: markPrice,
+      realizedPnl: pnl,
+      filledNotional,
+    })
     const confidence = toNumber(order.confidence)
     const traderName = traderNameById[traderId] || shortId(traderId)
     const mode = normalizeStatus(order.mode)
@@ -8470,7 +8486,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                         <TableCell className={cn('text-right font-mono py-0.5 text-[10px] font-semibold', unrealized > 0 ? 'text-emerald-500' : unrealized < 0 ? 'text-red-500' : '')}>
                                           {OPEN_ORDER_STATUSES.has(status) ? formatCurrency(unrealized) : '\u2014'}
                                         </TableCell>
-                                        <TableCell className="text-right font-mono py-0.5 text-[10px]">{formatPercent(dynamicEdgePercent)}</TableCell>
+                                        <TableCell className={cn('text-right font-mono py-0.5 text-[10px] font-semibold', dynamicEdgePercent > 0 ? 'text-emerald-500' : dynamicEdgePercent < 0 ? 'text-red-500' : '')}>{formatPercent(dynamicEdgePercent)}</TableCell>
                                         <TableCell className={cn('text-right font-mono py-0.5 text-[10px] font-semibold', pnl > 0 ? 'text-emerald-500' : pnl < 0 ? 'text-red-500' : '')}>
                                           {RESOLVED_ORDER_STATUSES.has(status) ? formatCurrency(pnl) : '\u2014'}
                                         </TableCell>
@@ -8701,7 +8717,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                     <TableCell className={cn('text-right font-mono py-1', (row.unrealizedPnl || 0) > 0 ? 'text-emerald-500' : (row.unrealizedPnl || 0) < 0 ? 'text-red-500' : '')}>
                                       {row.unrealizedPnl !== null ? formatCurrency(row.unrealizedPnl) : '—'}
                                     </TableCell>
-                                    <TableCell className="text-right font-mono py-1">{row.weightedEdge !== null ? formatPercent(row.weightedEdge) : '—'}</TableCell>
+                                    <TableCell className={cn('text-right font-mono py-1 font-semibold', (row.weightedEdge || 0) > 0 ? 'text-emerald-500' : (row.weightedEdge || 0) < 0 ? 'text-red-500' : '')}>{row.weightedEdge !== null ? formatPercent(row.weightedEdge) : '—'}</TableCell>
                                     <TableCell className="text-right font-mono py-1">{row.weightedConfidence !== null ? formatPercent(normalizeConfidencePercent(row.weightedConfidence)) : '—'}</TableCell>
                                     <TableCell className="text-right font-mono py-1">{row.orderCount}</TableCell>
                                     <TableCell className="text-right font-mono py-1">{row.liveOrderCount}L/{row.shadowOrderCount}S</TableCell>
@@ -9180,7 +9196,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                           />
                                         ) : '\u2014'}
                                       </TableCell>
-                                      <TableCell className="text-right font-mono py-0.5 text-[10px]">{formatPercent(dynamicEdgePercent)}</TableCell>
+                                      <TableCell className={cn('text-right font-mono py-0.5 text-[10px] font-semibold', dynamicEdgePercent > 0 ? 'text-emerald-500' : dynamicEdgePercent < 0 ? 'text-red-500' : '')}>{formatPercent(dynamicEdgePercent)}</TableCell>
                                       <TableCell className={cn('text-right font-mono py-0.5 text-[10px] font-semibold', pnl > 0 ? 'text-emerald-500' : pnl < 0 ? 'text-red-500' : '')}>
                                         {RESOLVED_ORDER_STATUSES.has(status) ? formatCurrency(pnl, true) : '\u2014'}
                                       </TableCell>
