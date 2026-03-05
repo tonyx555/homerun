@@ -1,0 +1,22 @@
+services:
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    container_name: ${REDIS_CONTAINER_NAME:-homerun-redis}
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "${REDIS_HOST:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
+
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    container_name: ${POSTGRES_CONTAINER_NAME:-homerun-postgres}
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-homerun}
+      POSTGRES_USER: ${POSTGRES_USER:-homerun}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-homerun}
+    ports:
+      - "${POSTGRES_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - homerun-postgres-data:/var/lib/postgresql/data
+
+volumes:
+  homerun-postgres-data:

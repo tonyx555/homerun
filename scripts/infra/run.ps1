@@ -29,14 +29,18 @@ $postgresPassword = if ($env:POSTGRES_PASSWORD) { $env:POSTGRES_PASSWORD } else 
 $postgresContainerName = if ($env:POSTGRES_CONTAINER_NAME) { $env:POSTGRES_CONTAINER_NAME } else { "homerun-postgres" }
 $postgresImage = if ($env:POSTGRES_IMAGE) { $env:POSTGRES_IMAGE } else { "postgres:16-alpine" }
 $postgresDataDir = if ($env:POSTGRES_DATA_DIR) { $env:POSTGRES_DATA_DIR } else { Join-Path (Get-Location).Path "data\postgres" }
+$script:dockerComposeFilePath = Join-Path (Get-Location).Path "scripts\infra\docker-compose.infra.yml"
+$script:dockerComposeProjectName = if ($env:HOMERUN_COMPOSE_PROJECT) { $env:HOMERUN_COMPOSE_PROJECT } else { "homerun" }
 $script:postgresPort = [int]$postgresPort
 
 $script:redisStartedByScript = $false
 $script:redisStartMode = ""
 $script:redisDockerCreatedByScript = $false
+$script:lastRedisContainerEngine = "docker"
 $script:postgresStartedByScript = $false
 $script:postgresStartMode = ""
 $script:postgresDockerCreatedByScript = $false
+$script:lastPostgresContainerEngine = "docker"
 $script:lastPostgresDockerError = $null
 $script:databaseUrlWasProvided = [bool]$env:DATABASE_URL
 
@@ -382,6 +386,56 @@ function Invoke-DockerCommand {
     return [pscustomobject]$result
 }
 
+function Test-DockerComposeAvailable {
+    if (-not (Ensure-DockerCommand)) {
+        return $false
+    }
+
+    $composeVersion = Invoke-DockerCommand -Arguments @("compose", "version")
+    return ($composeVersion.ExitCode -eq 0)
+}
+
+function Invoke-DockerComposeCommand {
+    param(
+        [string[]]$Arguments,
+        [hashtable]$EnvironmentOverrides = @{}
+    )
+
+    $result = [ordered]@{
+        ExitCode = 1
+        Output = ""
+    }
+
+    if (-not (Test-Path $script:dockerComposeFilePath)) {
+        $result.Output = "Compose file missing: $script:dockerComposeFilePath"
+        return [pscustomobject]$result
+    }
+    if (-not (Test-DockerComposeAvailable)) {
+        $result.Output = "docker compose is unavailable."
+        return [pscustomobject]$result
+    }
+
+    $previousValues = @{}
+    foreach ($entry in $EnvironmentOverrides.GetEnumerator()) {
+        $key = [string]$entry.Key
+        $previousValues[$key] = [Environment]::GetEnvironmentVariable($key, "Process")
+        [Environment]::SetEnvironmentVariable($key, [string]$entry.Value, "Process")
+    }
+
+    try {
+        $composeArgs = @("compose", "-p", $script:dockerComposeProjectName, "-f", $script:dockerComposeFilePath) + $Arguments
+        $invoked = Invoke-DockerCommand -Arguments $composeArgs
+        $result.ExitCode = $invoked.ExitCode
+        $result.Output = $invoked.Output
+    } finally {
+        foreach ($entry in $previousValues.GetEnumerator()) {
+            [Environment]::SetEnvironmentVariable([string]$entry.Key, $entry.Value, "Process")
+        }
+    }
+
+    return [pscustomobject]$result
+}
+
 function Test-DockerRuntimeAvailable {
     $dockerInfo = Invoke-DockerCommand -Arguments @("info")
     return ($dockerInfo.ExitCode -eq 0)
@@ -578,9 +632,27 @@ function Start-RedisDocker {
         [string]$Image
     )
 
+    $script:lastRedisContainerEngine = "docker"
+
     $dockerInfo = Invoke-DockerCommand -Arguments @("info")
     if ($dockerInfo.ExitCode -ne 0) {
         return $false
+    }
+
+    if (Test-Path $script:dockerComposeFilePath) {
+        $composeResult = Invoke-DockerComposeCommand `
+            -Arguments @("up", "-d", "redis") `
+            -EnvironmentOverrides @{
+                "REDIS_HOST" = $RedisHost
+                "REDIS_PORT" = "$RedisPort"
+                "REDIS_IMAGE" = $Image
+                "REDIS_CONTAINER_NAME" = $ContainerName
+            }
+        if ($composeResult.ExitCode -eq 0) {
+            $script:lastRedisContainerEngine = "docker-compose"
+            $script:redisDockerCreatedByScript = $true
+            return $true
+        }
     }
 
     $inspectResult = Invoke-DockerCommand -Arguments @("container", "inspect", $ContainerName)
@@ -745,7 +817,7 @@ function Ensure-Redis {
                 $upgradedStarted = Start-RedisDocker -RedisHost $RedisHost -RedisPort $RedisPort -ContainerName $ContainerName -Image $Image
                 if ($upgradedStarted -and (Wait-ForService -TargetHost $RedisHost -Port $RedisPort)) {
                     $script:redisStartedByScript = $true
-                    $script:redisStartMode = "docker"
+                    $script:redisStartMode = if ($script:lastRedisContainerEngine -eq "docker-compose") { "docker-compose" } else { "docker" }
                 } else {
                     $upgradedStarted = $false
                 }
@@ -795,8 +867,9 @@ function Ensure-Redis {
     }
     if ($dockerStarted -and (Wait-ForService -TargetHost $RedisHost -Port $RedisPort)) {
         $script:redisStartedByScript = $true
-        $script:redisStartMode = "docker"
-        Write-Host "Redis started via Docker on ${RedisHost}:${RedisPort}" -ForegroundColor Green
+        $script:redisStartMode = if ($script:lastRedisContainerEngine -eq "docker-compose") { "docker-compose" } else { "docker" }
+        $redisRuntimeLabel = if ($script:redisStartMode -eq "docker-compose") { "Docker Compose" } else { "Docker" }
+        Write-Host "Redis started via $redisRuntimeLabel on ${RedisHost}:${RedisPort}" -ForegroundColor Green
         if (-not (Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort)) {
             exit 1
         }
@@ -822,6 +895,18 @@ function Ensure-Redis {
 
 function Cleanup-StartedRedis {
     if (-not $script:redisStartedByScript) {
+        return
+    }
+
+    if ($script:redisStartMode -eq "docker-compose") {
+        $composeStop = Invoke-DockerComposeCommand -Arguments @("stop", "redis") -EnvironmentOverrides @{
+            "REDIS_CONTAINER_NAME" = $redisContainerName
+        }
+        if ($composeStop.ExitCode -ne 0) {
+            if (Ensure-DockerCommand) {
+                try { docker stop $redisContainerName *> $null } catch {}
+            }
+        }
         return
     }
 
@@ -911,6 +996,7 @@ function Start-PostgresDocker {
     )
 
     $script:lastPostgresDockerError = $null
+    $script:lastPostgresContainerEngine = "docker"
 
     if (-not (Ensure-DockerCommand)) {
         $script:lastPostgresDockerError = "Docker CLI unavailable in current shell."
@@ -982,6 +1068,28 @@ function Start-PostgresDocker {
                 $script:lastPostgresDockerError = "Failed to remove existing container '$ContainerName' (exit code $($removeResult.ExitCode))."
             }
             return $false
+        }
+    }
+
+    if (Test-Path $script:dockerComposeFilePath) {
+        $composeResult = Invoke-DockerComposeCommand `
+            -Arguments @("up", "-d", "postgres") `
+            -EnvironmentOverrides @{
+                "POSTGRES_HOST" = $PgHost
+                "POSTGRES_PORT" = "$Port"
+                "POSTGRES_DB" = $Db
+                "POSTGRES_USER" = $User
+                "POSTGRES_PASSWORD" = $Password
+                "POSTGRES_IMAGE" = $Image
+                "POSTGRES_CONTAINER_NAME" = $ContainerName
+            }
+        if ($composeResult.ExitCode -eq 0) {
+            $script:lastPostgresContainerEngine = "docker-compose"
+            $script:postgresDockerCreatedByScript = $true
+            return $true
+        }
+        if ($composeResult.Output) {
+            $script:lastPostgresDockerError = $composeResult.Output
         }
     }
 
@@ -1375,8 +1483,9 @@ function Ensure-Postgres {
     if ($dockerStarted -and (Wait-ForService -TargetHost $PgHost -Port $Port -TimeoutSeconds 90)) {
         $script:postgresPort = [int]$Port
         $script:postgresStartedByScript = $true
-        $script:postgresStartMode = "docker"
-        Write-Host "Postgres started via Docker on ${PgHost}:${Port}" -ForegroundColor Green
+        $script:postgresStartMode = if ($script:lastPostgresContainerEngine -eq "docker-compose") { "docker-compose" } else { "docker" }
+        $postgresRuntimeLabel = if ($script:postgresStartMode -eq "docker-compose") { "Docker Compose" } else { "Docker" }
+        Write-Host "Postgres started via $postgresRuntimeLabel on ${PgHost}:${Port}" -ForegroundColor Green
         return
     }
 
@@ -1392,6 +1501,18 @@ function Ensure-Postgres {
 
 function Cleanup-StartedPostgres {
     if (-not $script:postgresStartedByScript) {
+        return
+    }
+
+    if ($script:postgresStartMode -eq "docker-compose") {
+        $composeStop = Invoke-DockerComposeCommand -Arguments @("stop", "postgres") -EnvironmentOverrides @{
+            "POSTGRES_CONTAINER_NAME" = $postgresContainerName
+        }
+        if ($composeStop.ExitCode -ne 0) {
+            if (Ensure-DockerCommand) {
+                try { docker stop $postgresContainerName *> $null } catch {}
+            }
+        }
         return
     }
 
@@ -1573,7 +1694,7 @@ try {
     New-Item -ItemType Directory -Path "backend\.runtime" -Force | Out-Null
     Set-Content -Path "backend\.runtime\database_url" -Value $env:DATABASE_URL -Encoding UTF8
 
-    & backend\venv\Scripts\python.exe .\scripts\infra\ensure_postgres_ready.py --database-url $env:DATABASE_URL
+    & backend\venv\Scripts\python.exe .\scripts\infra\ensure_postgres_ready.py --database-url $env:DATABASE_URL --retries 240 --retry-delay-seconds 0.5
     if ($LASTEXITCODE -ne 0) {
         throw "Postgres readiness validation failed"
     }
