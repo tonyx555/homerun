@@ -2992,8 +2992,15 @@ export type SettingsTransferCategory =
   | 'llm_configuration'
   | 'telegram_configuration'
 
+export interface BotTraderLiveWalletStateBundle {
+  runtime_states?: Array<Record<string, unknown>>
+  orders?: Array<Record<string, unknown>>
+  positions?: Array<Record<string, unknown>>
+}
+
 export interface BotTraderTradeStateBundle {
   orders: Array<Record<string, unknown>>
+  live_wallet_state?: BotTraderLiveWalletStateBundle
 }
 
 export interface BotTradersBundle {

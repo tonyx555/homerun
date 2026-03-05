@@ -79,6 +79,20 @@ async def test_import_settings_bundle_uses_bundle_categories_when_not_overridden
     assert response["results"][routes_settings.SettingsTransferCategory.BOT_TRADERS.value]["orders_imported"] == 0
     assert response["results"][routes_settings.SettingsTransferCategory.BOT_TRADERS.value]["positions_synced"] == 0
     assert response["results"][routes_settings.SettingsTransferCategory.BOT_TRADERS.value]["open_positions"] == 0
+    assert (
+        response["results"][routes_settings.SettingsTransferCategory.BOT_TRADERS.value][
+            "live_wallet_runtime_states_imported"
+        ]
+        == 0
+    )
+    assert response["results"][routes_settings.SettingsTransferCategory.BOT_TRADERS.value]["live_wallet_orders_imported"] == 0
+    assert (
+        response["results"][routes_settings.SettingsTransferCategory.BOT_TRADERS.value][
+            "live_wallet_positions_imported"
+        ]
+        == 0
+    )
+    assert response["results"][routes_settings.SettingsTransferCategory.BOT_TRADERS.value]["live_wallets_imported"] == 0
     import_traders_mock.assert_awaited_once()
 
 
@@ -120,7 +134,15 @@ async def test_import_traders_applies_trade_state(monkeypatch):
     monkeypatch.setattr(orchestrator_state, "create_trader", AsyncMock())
 
     import_trade_state_mock = AsyncMock(
-        return_value={"orders_imported": 4, "positions_synced": 1, "open_positions": 2}
+        return_value={
+            "orders_imported": 4,
+            "positions_synced": 1,
+            "open_positions": 2,
+            "live_wallet_runtime_states_imported": 1,
+            "live_wallet_orders_imported": 3,
+            "live_wallet_positions_imported": 2,
+            "live_wallets_imported": 1,
+        }
     )
     monkeypatch.setattr(routes_settings, "_import_trader_trade_state", import_trade_state_mock)
     monkeypatch.setattr(routes_settings, "_apply_orchestrator_control_import", AsyncMock(return_value=True))
@@ -145,6 +167,10 @@ async def test_import_traders_applies_trade_state(monkeypatch):
     assert result["orders_imported"] == 4
     assert result["positions_synced"] == 1
     assert result["open_positions"] == 2
+    assert result["live_wallet_runtime_states_imported"] == 1
+    assert result["live_wallet_orders_imported"] == 3
+    assert result["live_wallet_positions_imported"] == 2
+    assert result["live_wallets_imported"] == 1
     import_trade_state_mock.assert_awaited_once_with(
         session_obj,
         {"alpha": "trader_alpha"},
@@ -204,7 +230,43 @@ async def test_import_traders_skips_trade_state_when_absent(monkeypatch):
     assert result["orders_imported"] == 0
     assert result["positions_synced"] == 0
     assert result["open_positions"] == 0
+    assert result["live_wallet_runtime_states_imported"] == 0
+    assert result["live_wallet_orders_imported"] == 0
+    assert result["live_wallet_positions_imported"] == 0
+    assert result["live_wallets_imported"] == 0
     import_trade_state_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_import_trader_trade_state_imports_live_wallet_state_without_traders(monkeypatch):
+    import_live_wallet_state_mock = AsyncMock(
+        return_value={
+            "live_wallet_runtime_states_imported": 2,
+            "live_wallet_orders_imported": 5,
+            "live_wallet_positions_imported": 3,
+            "live_wallets_imported": 1,
+        }
+    )
+    monkeypatch.setattr(routes_settings, "_import_live_wallet_trade_state", import_live_wallet_state_mock)
+    session_obj = object()
+
+    result = await routes_settings._import_trader_trade_state(
+        session_obj,
+        {},
+        {"live_wallet_state": {"runtime_states": [{"wallet_address": "0xabc"}]}},
+    )
+
+    assert result["orders_imported"] == 0
+    assert result["positions_synced"] == 0
+    assert result["open_positions"] == 0
+    assert result["live_wallet_runtime_states_imported"] == 2
+    assert result["live_wallet_orders_imported"] == 5
+    assert result["live_wallet_positions_imported"] == 3
+    assert result["live_wallets_imported"] == 1
+    import_live_wallet_state_mock.assert_awaited_once_with(
+        session_obj,
+        {"runtime_states": [{"wallet_address": "0xabc"}]},
+    )
 
 
 @pytest.mark.asyncio

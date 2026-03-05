@@ -13,12 +13,15 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from typing import Any, Literal, Optional
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from config import settings as runtime_settings
 from models.database import (
     AsyncSessionLocal,
     AppSettings,
     DataSource,
+    LiveTradingOrder,
+    LiveTradingPosition,
+    LiveTradingRuntimeState,
     Strategy,
     StrategyVersion,
     TraderOrder,
@@ -892,6 +895,65 @@ def _serialize_trader_order_for_transfer(row: TraderOrder, trader_name: str) -> 
     }
 
 
+def _serialize_live_runtime_state_for_transfer(row: LiveTradingRuntimeState) -> dict[str, Any]:
+    return {
+        "id": str(row.id or ""),
+        "wallet_address": _coerce_string(row.wallet_address) or "",
+        "total_trades": int(row.total_trades or 0),
+        "winning_trades": int(row.winning_trades or 0),
+        "losing_trades": int(row.losing_trades or 0),
+        "total_volume": float(row.total_volume or 0.0),
+        "total_pnl": float(row.total_pnl or 0.0),
+        "daily_volume": float(row.daily_volume or 0.0),
+        "daily_pnl": float(row.daily_pnl or 0.0),
+        "open_positions": int(row.open_positions or 0),
+        "last_trade_at": row.last_trade_at.isoformat() if row.last_trade_at else None,
+        "daily_volume_reset_at": row.daily_volume_reset_at.isoformat() if row.daily_volume_reset_at else None,
+        "market_positions_json": _coerce_dict(row.market_positions_json),
+        "balance_signature_type": int(row.balance_signature_type) if row.balance_signature_type is not None else None,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+def _serialize_live_order_for_transfer(row: LiveTradingOrder) -> dict[str, Any]:
+    return {
+        "id": str(row.id or ""),
+        "wallet_address": _coerce_string(row.wallet_address) or "",
+        "clob_order_id": _coerce_string(row.clob_order_id),
+        "token_id": _coerce_string(row.token_id) or "",
+        "side": _coerce_string(row.side) or "BUY",
+        "price": float(row.price or 0.0),
+        "size": float(row.size or 0.0),
+        "order_type": _coerce_string(row.order_type) or "GTC",
+        "status": _coerce_string(row.status) or "pending",
+        "filled_size": float(row.filled_size or 0.0),
+        "average_fill_price": float(row.average_fill_price or 0.0),
+        "market_question": row.market_question,
+        "opportunity_id": _coerce_string(row.opportunity_id),
+        "error_message": row.error_message,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+def _serialize_live_position_for_transfer(row: LiveTradingPosition) -> dict[str, Any]:
+    return {
+        "id": str(row.id or ""),
+        "wallet_address": _coerce_string(row.wallet_address) or "",
+        "token_id": _coerce_string(row.token_id) or "",
+        "market_id": _coerce_string(row.market_id) or "",
+        "market_question": row.market_question,
+        "outcome": _coerce_string(row.outcome),
+        "size": float(row.size or 0.0),
+        "average_cost": float(row.average_cost or 0.0),
+        "current_price": float(row.current_price or 0.0),
+        "unrealized_pnl": float(row.unrealized_pnl or 0.0),
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
 def _serialize_orchestrator_control_for_transfer(row: TraderOrchestratorControl) -> dict[str, Any]:
     return {
         "is_enabled": bool(row.is_enabled),
@@ -1013,6 +1075,53 @@ async def _export_transfer_bundle(categories: list[str]) -> tuple[dict[str, Any]
                     if not trader_name:
                         continue
                     exported_orders.append(_serialize_trader_order_for_transfer(order_row, trader_name))
+
+            live_runtime_rows = (
+                (
+                    await session.execute(
+                        select(LiveTradingRuntimeState).order_by(
+                            LiveTradingRuntimeState.wallet_address.asc(),
+                            LiveTradingRuntimeState.updated_at.asc(),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            exported_live_runtime_states = [
+                _serialize_live_runtime_state_for_transfer(row) for row in live_runtime_rows
+            ]
+
+            live_order_rows = (
+                (
+                    await session.execute(
+                        select(LiveTradingOrder).order_by(
+                            LiveTradingOrder.wallet_address.asc(),
+                            LiveTradingOrder.created_at.asc(),
+                            LiveTradingOrder.id.asc(),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            exported_live_orders = [_serialize_live_order_for_transfer(row) for row in live_order_rows]
+
+            live_position_rows = (
+                (
+                    await session.execute(
+                        select(LiveTradingPosition).order_by(
+                            LiveTradingPosition.wallet_address.asc(),
+                            LiveTradingPosition.market_id.asc(),
+                            LiveTradingPosition.token_id.asc(),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            exported_live_positions = [_serialize_live_position_for_transfer(row) for row in live_position_rows]
+
             orchestrator_row = await session.get(TraderOrchestratorControl, "default")
             bundle[SettingsTransferCategory.BOT_TRADERS.value] = {
                 "traders": exported_traders,
@@ -1021,6 +1130,11 @@ async def _export_transfer_bundle(categories: list[str]) -> tuple[dict[str, Any]
                 ),
                 "trade_state": {
                     "orders": exported_orders,
+                    "live_wallet_state": {
+                        "runtime_states": exported_live_runtime_states,
+                        "orders": exported_live_orders,
+                        "positions": exported_live_positions,
+                    },
                 },
             }
             counts[SettingsTransferCategory.BOT_TRADERS.value] = len(exported_traders)
@@ -1451,6 +1565,228 @@ def _normalize_trader_order_payload(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _normalize_live_runtime_state_payload(raw: dict[str, Any]) -> dict[str, Any]:
+    wallet_address = str(raw.get("wallet_address") or "").strip().lower()
+    if not wallet_address:
+        raise ValueError("Live runtime state requires wallet_address.")
+
+    created_at = _coerce_datetime(raw.get("created_at")) or utcnow()
+    updated_at = _coerce_datetime(raw.get("updated_at")) or created_at
+    runtime_id = _coerce_string(raw.get("id")) or f"wallet:{wallet_address}"
+
+    balance_signature_type = None
+    if raw.get("balance_signature_type") is not None:
+        balance_signature_type = _coerce_int(raw.get("balance_signature_type"), 0)
+
+    return {
+        "id": runtime_id,
+        "wallet_address": wallet_address,
+        "total_trades": max(0, _coerce_int(raw.get("total_trades"), 0)),
+        "winning_trades": max(0, _coerce_int(raw.get("winning_trades"), 0)),
+        "losing_trades": max(0, _coerce_int(raw.get("losing_trades"), 0)),
+        "total_volume": float(_coerce_optional_float(raw.get("total_volume")) or 0.0),
+        "total_pnl": float(_coerce_optional_float(raw.get("total_pnl")) or 0.0),
+        "daily_volume": float(_coerce_optional_float(raw.get("daily_volume")) or 0.0),
+        "daily_pnl": float(_coerce_optional_float(raw.get("daily_pnl")) or 0.0),
+        "open_positions": max(0, _coerce_int(raw.get("open_positions"), 0)),
+        "last_trade_at": _coerce_datetime(raw.get("last_trade_at")),
+        "daily_volume_reset_at": _coerce_datetime(raw.get("daily_volume_reset_at")),
+        "market_positions_json": _coerce_dict(raw.get("market_positions_json")),
+        "balance_signature_type": balance_signature_type,
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
+
+
+def _normalize_live_order_payload(raw: dict[str, Any]) -> dict[str, Any]:
+    wallet_address = str(raw.get("wallet_address") or "").strip().lower()
+    if not wallet_address:
+        raise ValueError("Live order requires wallet_address.")
+
+    token_id = _coerce_string(raw.get("token_id"))
+    if not token_id:
+        raise ValueError("Live order requires token_id.")
+
+    created_at = _coerce_datetime(raw.get("created_at")) or utcnow()
+    updated_at = _coerce_datetime(raw.get("updated_at")) or created_at
+    order_id = _coerce_string(raw.get("id")) or uuid.uuid4().hex
+
+    return {
+        "id": order_id,
+        "wallet_address": wallet_address,
+        "clob_order_id": _coerce_string(raw.get("clob_order_id")),
+        "token_id": token_id,
+        "side": (_coerce_string(raw.get("side")) or "BUY").upper(),
+        "price": float(_coerce_optional_float(raw.get("price")) or 0.0),
+        "size": float(_coerce_optional_float(raw.get("size")) or 0.0),
+        "order_type": (_coerce_string(raw.get("order_type")) or "GTC").upper(),
+        "status": (_coerce_string(raw.get("status")) or "pending").lower(),
+        "filled_size": float(_coerce_optional_float(raw.get("filled_size")) or 0.0),
+        "average_fill_price": float(_coerce_optional_float(raw.get("average_fill_price")) or 0.0),
+        "market_question": _coerce_string(raw.get("market_question")),
+        "opportunity_id": _coerce_string(raw.get("opportunity_id")),
+        "error_message": _coerce_string(raw.get("error_message")),
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
+
+
+def _normalize_live_position_payload(raw: dict[str, Any]) -> dict[str, Any]:
+    wallet_address = str(raw.get("wallet_address") or "").strip().lower()
+    if not wallet_address:
+        raise ValueError("Live position requires wallet_address.")
+
+    token_id = _coerce_string(raw.get("token_id"))
+    if not token_id:
+        raise ValueError("Live position requires token_id.")
+
+    market_id = _coerce_string(raw.get("market_id")) or token_id
+    created_at = _coerce_datetime(raw.get("created_at")) or utcnow()
+    updated_at = _coerce_datetime(raw.get("updated_at")) or created_at
+    position_id = _coerce_string(raw.get("id")) or f"{wallet_address}:{token_id}"
+
+    return {
+        "id": position_id,
+        "wallet_address": wallet_address,
+        "token_id": token_id,
+        "market_id": market_id,
+        "market_question": _coerce_string(raw.get("market_question")),
+        "outcome": _coerce_string(raw.get("outcome")),
+        "size": float(_coerce_optional_float(raw.get("size")) or 0.0),
+        "average_cost": float(_coerce_optional_float(raw.get("average_cost")) or 0.0),
+        "current_price": float(_coerce_optional_float(raw.get("current_price")) or 0.0),
+        "unrealized_pnl": float(_coerce_optional_float(raw.get("unrealized_pnl")) or 0.0),
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
+
+
+async def _import_live_wallet_trade_state(session, payload: dict[str, Any]) -> dict[str, int]:
+    normalized_runtime_rows = [
+        _normalize_live_runtime_state_payload(item)
+        for item in _coerce_dict_list(payload.get("runtime_states"))
+    ]
+    normalized_order_rows = [
+        _normalize_live_order_payload(item)
+        for item in _coerce_dict_list(payload.get("orders"))
+    ]
+    normalized_position_rows = [
+        _normalize_live_position_payload(item)
+        for item in _coerce_dict_list(payload.get("positions"))
+    ]
+
+    runtime_by_id: dict[str, dict[str, Any]] = {}
+    for row in normalized_runtime_rows:
+        runtime_by_id[str(row["id"])] = row
+    order_by_id: dict[str, dict[str, Any]] = {}
+    for row in normalized_order_rows:
+        order_by_id[str(row["id"])] = row
+    positions_by_wallet_token: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in normalized_position_rows:
+        key = (str(row["wallet_address"]), str(row["token_id"]))
+        positions_by_wallet_token[key] = row
+
+    runtime_rows = list(runtime_by_id.values())
+    order_rows = list(order_by_id.values())
+    position_rows = list(positions_by_wallet_token.values())
+
+    wallet_addresses = {
+        str(wallet).strip().lower()
+        for wallet in (
+            [row["wallet_address"] for row in runtime_rows]
+            + [row["wallet_address"] for row in order_rows]
+            + [row["wallet_address"] for row in position_rows]
+        )
+        if str(wallet).strip()
+    }
+    if wallet_addresses:
+        wallets = tuple(sorted(wallet_addresses))
+        await session.execute(
+            delete(LiveTradingRuntimeState).where(
+                func.lower(func.coalesce(LiveTradingRuntimeState.wallet_address, "")).in_(wallets)
+            )
+        )
+        await session.execute(
+            delete(LiveTradingOrder).where(
+                func.lower(func.coalesce(LiveTradingOrder.wallet_address, "")).in_(wallets)
+            )
+        )
+        await session.execute(
+            delete(LiveTradingPosition).where(
+                func.lower(func.coalesce(LiveTradingPosition.wallet_address, "")).in_(wallets)
+            )
+        )
+
+    for row in runtime_rows:
+        session.add(
+            LiveTradingRuntimeState(
+                id=str(row["id"]),
+                wallet_address=str(row["wallet_address"]),
+                total_trades=int(row["total_trades"]),
+                winning_trades=int(row["winning_trades"]),
+                losing_trades=int(row["losing_trades"]),
+                total_volume=float(row["total_volume"]),
+                total_pnl=float(row["total_pnl"]),
+                daily_volume=float(row["daily_volume"]),
+                daily_pnl=float(row["daily_pnl"]),
+                open_positions=int(row["open_positions"]),
+                last_trade_at=row["last_trade_at"],
+                daily_volume_reset_at=row["daily_volume_reset_at"],
+                market_positions_json=_coerce_dict(row["market_positions_json"]),
+                balance_signature_type=row["balance_signature_type"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+        )
+
+    for row in order_rows:
+        session.add(
+            LiveTradingOrder(
+                id=str(row["id"]),
+                wallet_address=str(row["wallet_address"]),
+                clob_order_id=row["clob_order_id"],
+                token_id=str(row["token_id"]),
+                side=str(row["side"]),
+                price=float(row["price"]),
+                size=float(row["size"]),
+                order_type=str(row["order_type"]),
+                status=str(row["status"]),
+                filled_size=float(row["filled_size"]),
+                average_fill_price=float(row["average_fill_price"]),
+                market_question=row["market_question"],
+                opportunity_id=row["opportunity_id"],
+                error_message=row["error_message"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+        )
+
+    for row in position_rows:
+        session.add(
+            LiveTradingPosition(
+                id=str(row["id"]),
+                wallet_address=str(row["wallet_address"]),
+                token_id=str(row["token_id"]),
+                market_id=str(row["market_id"]),
+                market_question=row["market_question"],
+                outcome=row["outcome"],
+                size=float(row["size"]),
+                average_cost=float(row["average_cost"]),
+                current_price=float(row["current_price"]),
+                unrealized_pnl=float(row["unrealized_pnl"]),
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+        )
+
+    return {
+        "live_wallet_runtime_states_imported": len(runtime_rows),
+        "live_wallet_orders_imported": len(order_rows),
+        "live_wallet_positions_imported": len(position_rows),
+        "live_wallets_imported": len(wallet_addresses),
+    }
+
+
 async def _import_trader_trade_state(
     session,
     trader_ids_by_name: dict[str, str],
@@ -1458,12 +1794,37 @@ async def _import_trader_trade_state(
 ) -> dict[str, Any]:
     from services.trader_orchestrator_state import sync_trader_position_inventory
 
+    live_wallet_result = await _import_live_wallet_trade_state(
+        session,
+        _coerce_dict(trade_state_payload.get("live_wallet_state")),
+    )
+
     if not trader_ids_by_name:
-        return {"orders_imported": 0, "positions_synced": 0, "open_positions": 0}
+        return {
+            "orders_imported": 0,
+            "positions_synced": 0,
+            "open_positions": 0,
+            "live_wallet_runtime_states_imported": int(
+                live_wallet_result.get("live_wallet_runtime_states_imported") or 0
+            ),
+            "live_wallet_orders_imported": int(live_wallet_result.get("live_wallet_orders_imported") or 0),
+            "live_wallet_positions_imported": int(live_wallet_result.get("live_wallet_positions_imported") or 0),
+            "live_wallets_imported": int(live_wallet_result.get("live_wallets_imported") or 0),
+        }
 
     trader_ids = [trader_id for trader_id in trader_ids_by_name.values() if str(trader_id or "").strip()]
     if not trader_ids:
-        return {"orders_imported": 0, "positions_synced": 0, "open_positions": 0}
+        return {
+            "orders_imported": 0,
+            "positions_synced": 0,
+            "open_positions": 0,
+            "live_wallet_runtime_states_imported": int(
+                live_wallet_result.get("live_wallet_runtime_states_imported") or 0
+            ),
+            "live_wallet_orders_imported": int(live_wallet_result.get("live_wallet_orders_imported") or 0),
+            "live_wallet_positions_imported": int(live_wallet_result.get("live_wallet_positions_imported") or 0),
+            "live_wallets_imported": int(live_wallet_result.get("live_wallets_imported") or 0),
+        }
 
     await session.execute(delete(TraderPosition).where(TraderPosition.trader_id.in_(trader_ids)))
     await session.execute(delete(TraderOrder).where(TraderOrder.trader_id.in_(trader_ids)))
@@ -1531,6 +1892,10 @@ async def _import_trader_trade_state(
         "orders_imported": orders_imported,
         "positions_synced": positions_synced,
         "open_positions": open_positions,
+        "live_wallet_runtime_states_imported": int(live_wallet_result.get("live_wallet_runtime_states_imported") or 0),
+        "live_wallet_orders_imported": int(live_wallet_result.get("live_wallet_orders_imported") or 0),
+        "live_wallet_positions_imported": int(live_wallet_result.get("live_wallet_positions_imported") or 0),
+        "live_wallets_imported": int(live_wallet_result.get("live_wallets_imported") or 0),
     }
 
 
@@ -1823,7 +2188,15 @@ async def _import_traders(session, payload: Any) -> dict[str, Any]:
             raise ValueError(f"Trader '{imported_name}' is missing an id after import.")
         imported_trader_ids_by_name[str(imported_name).strip().lower()] = trader_id
 
-    trade_state_result = {"orders_imported": 0, "positions_synced": 0, "open_positions": 0}
+    trade_state_result = {
+        "orders_imported": 0,
+        "positions_synced": 0,
+        "open_positions": 0,
+        "live_wallet_runtime_states_imported": 0,
+        "live_wallet_orders_imported": 0,
+        "live_wallet_positions_imported": 0,
+        "live_wallets_imported": 0,
+    }
     if include_trade_state:
         trade_state_result = await _import_trader_trade_state(
             session,
@@ -1840,6 +2213,12 @@ async def _import_traders(session, payload: Any) -> dict[str, Any]:
         "orders_imported": int(trade_state_result.get("orders_imported") or 0),
         "positions_synced": int(trade_state_result.get("positions_synced") or 0),
         "open_positions": int(trade_state_result.get("open_positions") or 0),
+        "live_wallet_runtime_states_imported": int(
+            trade_state_result.get("live_wallet_runtime_states_imported") or 0
+        ),
+        "live_wallet_orders_imported": int(trade_state_result.get("live_wallet_orders_imported") or 0),
+        "live_wallet_positions_imported": int(trade_state_result.get("live_wallet_positions_imported") or 0),
+        "live_wallets_imported": int(trade_state_result.get("live_wallets_imported") or 0),
         "imported_names": imported_names,
     }
 
@@ -2267,6 +2646,14 @@ async def import_settings_bundle(request: SettingsImportRequest):
                     "orders_imported": int(trader_result.get("orders_imported") or 0),
                     "positions_synced": int(trader_result.get("positions_synced") or 0),
                     "open_positions": int(trader_result.get("open_positions") or 0),
+                    "live_wallet_runtime_states_imported": int(
+                        trader_result.get("live_wallet_runtime_states_imported") or 0
+                    ),
+                    "live_wallet_orders_imported": int(trader_result.get("live_wallet_orders_imported") or 0),
+                    "live_wallet_positions_imported": int(
+                        trader_result.get("live_wallet_positions_imported") or 0
+                    ),
+                    "live_wallets_imported": int(trader_result.get("live_wallets_imported") or 0),
                 }
 
             if settings_row is not None:
