@@ -45,6 +45,38 @@ $script:lastPostgresDockerPublishedPort = $null
 $script:lastPostgresDockerError = $null
 $script:databaseUrlWasProvided = [bool]$env:DATABASE_URL
 
+function Ensure-ConsoleViewport {
+    param(
+        [int]$MinCols = 140,
+        [int]$MinRows = 45,
+        [int]$MinBufferRows = 5000
+    )
+
+    try {
+        $rawUi = $Host.UI.RawUI
+        $maxWindow = $rawUi.MaxPhysicalWindowSize
+        if (-not $maxWindow) {
+            return
+        }
+
+        $targetCols = [Math]::Min([Math]::Max($rawUi.WindowSize.Width, $MinCols), $maxWindow.Width)
+        $targetRows = [Math]::Min([Math]::Max($rawUi.WindowSize.Height, $MinRows), $maxWindow.Height)
+
+        $targetBufferCols = [Math]::Max($rawUi.BufferSize.Width, $targetCols)
+        $targetBufferRows = [Math]::Max($rawUi.BufferSize.Height, [Math]::Max($MinBufferRows, $targetRows))
+
+        $rawUi.BufferSize = New-Object System.Management.Automation.Host.Size($targetBufferCols, $targetBufferRows)
+        $rawUi.WindowSize = New-Object System.Management.Automation.Host.Size($targetCols, $targetRows)
+    } catch {
+        try {
+            mode con cols=$MinCols lines=$MinRows *> $null
+        } catch {
+        }
+    }
+}
+
+Ensure-ConsoleViewport
+
 function Test-TcpPort {
     param(
         [string]$TargetHost,
@@ -1874,6 +1906,7 @@ try {
     }
 
     # Launch the TUI
+    Ensure-ConsoleViewport
     python tui.py @tuiArgs
 } finally {
     # Kill any remaining Homerun Python processes (workers, backend, etc.)
