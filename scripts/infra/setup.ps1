@@ -226,6 +226,76 @@ function Install-PortableRedisRuntime {
     }
 }
 
+function Remove-LegacyRedisRuntime {
+    $legacyRedisPath = Find-RedisServer
+    if (-not $legacyRedisPath) {
+        return
+    }
+
+    $legacyMajorVersion = Get-RedisServerMajorVersion -RedisServerPath $legacyRedisPath
+    if ($null -eq $legacyMajorVersion -or $legacyMajorVersion -ge 5) {
+        return
+    }
+
+    Write-Host "Legacy Redis runtime detected (major version $legacyMajorVersion). Removing conflicting legacy service/package..." -ForegroundColor Yellow
+
+    try {
+        $legacyService = Get-Service -Name "Redis" -ErrorAction SilentlyContinue
+        if ($legacyService -and $legacyService.Status -eq "Running") {
+            Stop-Service -Name "Redis" -Force -ErrorAction SilentlyContinue
+        }
+    } catch {
+    }
+
+    try {
+        sc.exe delete Redis *> $null
+    } catch {
+    }
+
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if ($winget) {
+        try {
+            & winget uninstall --id Redis.Redis --exact --silent --disable-interactivity --accept-source-agreements *> $null
+        } catch {
+        }
+    }
+
+    $choco = Get-Command choco -ErrorAction SilentlyContinue
+    if ($choco) {
+        try {
+            & choco uninstall redis-64 -y --no-progress *> $null
+        } catch {
+        }
+    }
+}
+
+function Show-WingetInstallerLogTail {
+    param([string]$WingetOutputLogPath)
+
+    if (-not (Test-Path $WingetOutputLogPath)) {
+        return
+    }
+
+    try {
+        $installerLogLine = Select-String -Path $WingetOutputLogPath -Pattern "Installer log is available at:" -SimpleMatch | Select-Object -Last 1
+        if (-not $installerLogLine) {
+            return
+        }
+
+        $parts = $installerLogLine.Line.Split(":", 2)
+        if ($parts.Count -lt 2) {
+            return
+        }
+        $installerLogPath = $parts[1].Trim()
+        if (-not $installerLogPath -or -not (Test-Path $installerLogPath)) {
+            return
+        }
+
+        Show-LogTail -Path $installerLogPath -Label "winget installer log"
+    } catch {
+    }
+}
+
 function Try-InstallMemuraiWithWinget {
     $winget = Get-Command winget -ErrorAction SilentlyContinue
     if (-not $winget) {
@@ -245,39 +315,13 @@ function Try-InstallMemuraiWithWinget {
         Write-Host "Winget Memurai install failed (exit code $exitCode)." -ForegroundColor Yellow
         Write-Host "Log: $logPath" -ForegroundColor Yellow
         Show-LogTail -Path $logPath -Label "winget output"
+        Show-WingetInstallerLogTail -WingetOutputLogPath $logPath
         return $false
     } catch {
         Write-Host "Winget Memurai install threw an exception: $($_.Exception.Message)" -ForegroundColor Yellow
         Write-Host "Log: $logPath" -ForegroundColor Yellow
         Show-LogTail -Path $logPath -Label "winget output"
-        return $false
-    }
-}
-
-function Try-InstallMemuraiWithChocolatey {
-    $choco = Get-Command choco -ErrorAction SilentlyContinue
-    if (-not $choco) {
-        return $false
-    }
-
-    $logDir = Get-InstallerLogDir
-    $logPath = Join-Path $logDir "memurai-choco-install.log"
-    Write-Host "Installing Memurai via Chocolatey..." -ForegroundColor Cyan
-    try {
-        & choco install memurai-developer -y --no-progress 2>&1 | Tee-Object -FilePath $logPath | Out-Null
-        $exitCode = $LASTEXITCODE
-        if ($exitCode -eq 0 -and (Test-RedisRuntimeAvailable)) {
-            Write-Host "Redis runtime installed via Chocolatey (memurai-developer)." -ForegroundColor Green
-            return $true
-        }
-        Write-Host "Chocolatey Memurai install failed (exit code $exitCode)." -ForegroundColor Yellow
-        Write-Host "Log: $logPath" -ForegroundColor Yellow
-        Show-LogTail -Path $logPath -Label "choco output"
-        return $false
-    } catch {
-        Write-Host "Chocolatey Memurai install threw an exception: $($_.Exception.Message)" -ForegroundColor Yellow
-        Write-Host "Log: $logPath" -ForegroundColor Yellow
-        Show-LogTail -Path $logPath -Label "choco output"
+        Show-WingetInstallerLogTail -WingetOutputLogPath $logPath
         return $false
     }
 }
@@ -298,11 +342,9 @@ function Ensure-RedisRuntime {
 
     Write-Host "Redis Streams-capable runtime missing. Attempting to install Memurai..." -ForegroundColor Cyan
 
-    if (Try-InstallMemuraiWithWinget) {
-        return $true
-    }
+    Remove-LegacyRedisRuntime
 
-    if (Try-InstallMemuraiWithChocolatey) {
+    if (Try-InstallMemuraiWithWinget) {
         return $true
     }
 
