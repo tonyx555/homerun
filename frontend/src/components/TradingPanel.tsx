@@ -317,7 +317,6 @@ type GlobalSettingsDraft = {
   minCooldownSeconds: string
   maxConsecutiveLossesCap: string
   maxOpenOrdersCap: string
-  maxOpenPositionsCap: string
   maxTradeNotionalUsdCap: string
   maxOrdersPerCycleCap: string
   enforceHaltOnConsecutiveLosses: boolean
@@ -546,6 +545,24 @@ function buildGlobalSettingsDraft(
   const marketContext = runtime.live_market_context || DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_market_context
   const providerHealth = runtime.live_provider_health || DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_provider_health
   const pendingTerminalStatuses = toStringList(pending.terminal_statuses)
+  const maxOpenPositions = Math.min(
+    Math.trunc(
+      clampNumber(
+        toNumber(liveExecutionSettings?.max_open_positions ?? DEFAULT_LIVE_EXECUTION_LIMITS.max_open_positions),
+        1,
+        100,
+        DEFAULT_LIVE_EXECUTION_LIMITS.max_open_positions,
+      )
+    ),
+    Math.trunc(
+      clampNumber(
+        toNumber(clamps.max_open_positions_cap ?? DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.max_open_positions_cap),
+        1,
+        1000,
+        DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.max_open_positions_cap,
+      )
+    ),
+  )
   return {
     runIntervalSeconds: String(config?.run_interval_seconds ?? 5),
     maxGrossExposureUsd: String(globalRisk.max_gross_exposure_usd ?? DEFAULT_ORCHESTRATOR_GLOBAL_RISK.max_gross_exposure_usd),
@@ -555,7 +572,7 @@ function buildGlobalSettingsDraft(
     maxDailyTradeVolumeUsd: String(
       liveExecutionSettings?.max_daily_trade_volume ?? DEFAULT_LIVE_EXECUTION_LIMITS.max_daily_trade_volume
     ),
-    maxOpenPositions: String(liveExecutionSettings?.max_open_positions ?? DEFAULT_LIVE_EXECUTION_LIMITS.max_open_positions),
+    maxOpenPositions: String(maxOpenPositions),
     maxSlippagePercent: String(
       liveExecutionSettings?.max_slippage_percent ?? DEFAULT_LIVE_EXECUTION_LIMITS.max_slippage_percent
     ),
@@ -576,9 +593,6 @@ function buildGlobalSettingsDraft(
       clamps.max_consecutive_losses_cap ?? DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.max_consecutive_losses_cap
     ),
     maxOpenOrdersCap: String(clamps.max_open_orders_cap ?? DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.max_open_orders_cap),
-    maxOpenPositionsCap: String(
-      clamps.max_open_positions_cap ?? DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.max_open_positions_cap
-    ),
     maxTradeNotionalUsdCap: String(
       clamps.max_trade_notional_usd_cap ?? DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.max_trade_notional_usd_cap
     ),
@@ -5255,14 +5269,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
           DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.max_open_orders_cap,
         )
       )
-      const maxOpenPositionsCap = Math.trunc(
-        clampNumber(
-          toNumber(globalSettingsDraft.maxOpenPositionsCap),
-          1,
-          1000,
-          DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.max_open_positions_cap,
-        )
-      )
       const maxTradeNotionalUsdCap = clampNumber(
         toNumber(globalSettingsDraft.maxTradeNotionalUsdCap),
         1,
@@ -5380,7 +5386,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
             min_cooldown_seconds: minCooldownSeconds,
             max_consecutive_losses_cap: maxConsecutiveLossesCap,
             max_open_orders_cap: maxOpenOrdersCap,
-            max_open_positions_cap: maxOpenPositionsCap,
+            max_open_positions_cap: maxOpenPositions,
             max_trade_notional_usd_cap: maxTradeNotionalUsdCap,
             max_orders_per_cycle_cap: maxOrdersPerCycleCap,
             enforce_halt_on_consecutive_losses: globalSettingsDraft.enforceHaltOnConsecutiveLosses,
@@ -10338,16 +10344,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                         min={1}
                         value={globalSettingsDraft.maxOpenOrdersCap}
                         onChange={(event) => setGlobalSettingsField('maxOpenOrdersCap', event.target.value)}
-                        className="mt-1"
-                      />
-                    </div>
-                    <div>
-                      <Label>Max Open Positions Cap</Label>
-                      <Input
-                        type="number"
-                        min={1}
-                        value={globalSettingsDraft.maxOpenPositionsCap}
-                        onChange={(event) => setGlobalSettingsField('maxOpenPositionsCap', event.target.value)}
                         className="mt-1"
                       />
                     </div>

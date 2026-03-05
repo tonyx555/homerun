@@ -69,7 +69,7 @@ POLYMARKET_WS_URL = settings.CLOB_WS_URL
 KALSHI_WS_URL = settings.KALSHI_WS_URL
 
 DEFAULT_STALE_TTL = float(settings.WS_PRICE_STALE_SECONDS)
-DEFAULT_HEARTBEAT_INTERVAL = 10.0  # seconds between keep-alive pings
+DEFAULT_HEARTBEAT_INTERVAL = max(1.0, float(settings.WS_HEARTBEAT_INTERVAL))  # seconds between keep-alive pings
 DEFAULT_HEARTBEAT_PONG_TIMEOUT = 12.0
 DEFAULT_HEARTBEAT_MAX_MISSES = 2
 DEFAULT_RECONNECT_BASE_DELAY = 1.0  # initial backoff delay in seconds
@@ -792,10 +792,6 @@ class PolymarketWSFeed:
             while True:
                 await asyncio.sleep(self._heartbeat_interval)
                 try:
-                    last_message_at = float(self.stats.last_message_at or 0.0)
-                    if last_message_at > 0 and (time.monotonic() - last_message_at) <= self._heartbeat_interval:
-                        consecutive_misses = 0
-                        continue
                     pong = await ws.ping()
                     start = time.monotonic()
                     await asyncio.wait_for(pong, timeout=self._heartbeat_pong_timeout)

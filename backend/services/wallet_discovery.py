@@ -94,6 +94,7 @@ POOL_FLAG_BLACKLISTED = "pool_blacklisted"
 _DB_RETRY_ATTEMPTS = 3
 _DB_RETRY_BASE_DELAY_SECONDS = 0.05
 _DB_RETRY_MAX_DELAY_SECONDS = 0.3
+_PG_INT4_MAX = 2_147_483_647
 
 
 def _is_retryable_db_error(exc: Exception) -> bool:
@@ -150,13 +151,20 @@ class WalletDiscoveryEngine:
         self._leaderboard_offsets: dict[str, int] = {}
 
     @staticmethod
-    def _coerce_int(value: Any, default: int, minimum: Optional[int] = None) -> int:
+    def _coerce_int(
+        value: Any,
+        default: int,
+        minimum: Optional[int] = None,
+        maximum: Optional[int] = None,
+    ) -> int:
         try:
             value_int = int(value)
         except (TypeError, ValueError):
             return default
         if minimum is not None and value_int < minimum:
             return minimum
+        if maximum is not None and value_int > maximum:
+            return maximum
         return value_int
 
     @staticmethod
@@ -558,8 +566,18 @@ class WalletDiscoveryEngine:
         closed_summary = self._summarize_closed_positions(closed_positions)
 
         if isinstance(pnl_snapshot, dict):
-            total_trades = int(self._to_float(pnl_snapshot.get("total_trades"), 0))
-            open_positions = int(self._to_float(pnl_snapshot.get("open_positions"), 0))
+            total_trades = self._coerce_int(
+                self._to_float(pnl_snapshot.get("total_trades"), 0),
+                0,
+                minimum=0,
+                maximum=_PG_INT4_MAX,
+            )
+            open_positions = self._coerce_int(
+                self._to_float(pnl_snapshot.get("open_positions"), 0),
+                0,
+                minimum=0,
+                maximum=_PG_INT4_MAX,
+            )
             total_invested = self._to_float(pnl_snapshot.get("total_invested"), 0.0)
             total_returned = self._to_float(pnl_snapshot.get("total_returned"), 0.0)
             realized_pnl = self._to_float(pnl_snapshot.get("realized_pnl"), 0.0)
@@ -578,8 +596,8 @@ class WalletDiscoveryEngine:
             stats["unrealized_pnl"] = unrealized_pnl
             stats["total_pnl"] = total_pnl
 
-        wins = int(closed_summary["wins"])
-        losses = int(closed_summary["losses"])
+        wins = self._coerce_int(closed_summary["wins"], 0, minimum=0, maximum=_PG_INT4_MAX)
+        losses = self._coerce_int(closed_summary["losses"], 0, minimum=0, maximum=_PG_INT4_MAX)
         closed_total = wins + losses
         if closed_total > 0:
             stats["wins"] = wins
@@ -610,8 +628,8 @@ class WalletDiscoveryEngine:
                 len(closed_summary["market_ids"]),
             )
 
-        days_active = max(int(stats.get("days_active", 0) or 0), 1)
-        total_trades = int(stats.get("total_trades", 0) or 0)
+        days_active = self._coerce_int(stats.get("days_active", 0), 1, minimum=1, maximum=_PG_INT4_MAX)
+        total_trades = self._coerce_int(stats.get("total_trades", 0), 0, minimum=0, maximum=_PG_INT4_MAX)
         total_invested = self._to_float(stats.get("total_invested"), 0.0)
         stats["trades_per_day"] = total_trades / days_active
         stats["avg_position_size"] = total_invested / total_trades if total_trades > 0 else 0.0
@@ -1727,6 +1745,19 @@ class WalletDiscoveryEngine:
     async def _upsert_wallet(self, data: dict):
         """Insert or update a DiscoveredWallet record."""
         address = data["address"]
+        int_fields = {
+            "total_trades",
+            "wins",
+            "losses",
+            "unique_markets",
+            "open_positions",
+            "days_active",
+            "rank_position",
+            "trades_1h",
+            "trades_24h",
+            "unique_markets_24h",
+            "insider_sample_size",
+        }
 
         for attempt in range(_DB_RETRY_ATTEMPTS):
             async with AsyncSessionLocal() as session:
@@ -1743,6 +1774,13 @@ class WalletDiscoveryEngine:
                     for key, value in data.items():
                         if key == "address":
                             continue
+                        if key in int_fields and value is not None:
+                            value = self._coerce_int(
+                                value,
+                                0,
+                                minimum=0,
+                                maximum=_PG_INT4_MAX,
+                            )
                         if isinstance(value, float) and (math.isinf(value) or math.isnan(value)):
                             value = None
                         if hasattr(wallet, key):

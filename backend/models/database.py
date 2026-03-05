@@ -3276,7 +3276,13 @@ _engine_kw.update(
 )
 _engine_kw["connect_args"] = {
     "timeout": float(max(1.0, float(settings.DATABASE_CONNECT_TIMEOUT_SECONDS))),
-    "command_timeout": float(max(5.0, float(settings.DATABASE_POOL_TIMEOUT_SECONDS))),
+    "command_timeout": float(
+        max(
+            5.0,
+            float(settings.DATABASE_POOL_TIMEOUT_SECONDS),
+            (float(settings.DATABASE_STATEMENT_TIMEOUT_MS) / 1000.0) + 5.0,
+        )
+    ),
     "server_settings": {
         "timezone": "UTC",
         "statement_timeout": str(max(1000, int(settings.DATABASE_STATEMENT_TIMEOUT_MS))),
@@ -3333,19 +3339,36 @@ def _on_invalidate(dbapi_connection, connection_record, exception):
     checkout_time = connection_record.info.get("checkout_time")
     checkout_task_name = connection_record.info.get("checkout_task_name", "unknown")
     checkout_task_coro = connection_record.info.get("checkout_task_coro", "unknown")
+    exception_name = type(exception).__name__ if exception else "None"
+    if exception_name == "CancelledError":
+        if checkout_time is not None:
+            elapsed = _time.monotonic() - checkout_time
+            _db_logger.debug(
+                "Connection invalidated after %.1fs checked out due to cancellation (task=%s, coro=%s)",
+                elapsed,
+                checkout_task_name,
+                checkout_task_coro,
+            )
+        else:
+            _db_logger.debug(
+                "Connection invalidated due to cancellation (task=%s, coro=%s)",
+                checkout_task_name,
+                checkout_task_coro,
+            )
+        return
     if checkout_time is not None:
         elapsed = _time.monotonic() - checkout_time
         _db_logger.warning(
             "Connection invalidated after %.1fs checked out (exception=%s, task=%s, coro=%s)",
             elapsed,
-            type(exception).__name__ if exception else "None",
+            exception_name,
             checkout_task_name,
             checkout_task_coro,
         )
         return
     _db_logger.warning(
         "Connection invalidated (exception=%s, task=%s, coro=%s)",
-        type(exception).__name__ if exception else "None",
+        exception_name,
         checkout_task_name,
         checkout_task_coro,
     )

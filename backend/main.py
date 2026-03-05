@@ -920,6 +920,7 @@ async def readiness_check():
 
 
 _tui_health_cache: Optional[dict] = None
+_tui_health_refresh_task: Optional[asyncio.Task] = None
 
 
 async def _tui_health_db_queries() -> dict:
@@ -1021,13 +1022,27 @@ async def tui_health_check():
     doesn't block the response and cause the TUI to flap OFFLINE/ONLINE.
     When the pool is busy the last successful result is served instead.
     """
-    global _tui_health_cache
+    global _tui_health_cache, _tui_health_refresh_task
     redis_healthy = await redis_streams.ping()
+    if _tui_health_refresh_task is not None and _tui_health_refresh_task.done():
+        try:
+            _tui_health_cache = _tui_health_refresh_task.result()
+        except Exception:
+            pass
+        finally:
+            _tui_health_refresh_task = None
+    if _tui_health_refresh_task is None:
+        _tui_health_refresh_task = asyncio.create_task(_tui_health_db_queries(), name="tui-health-db-queries")
     try:
-        db = await asyncio.wait_for(_tui_health_db_queries(), timeout=2.0)
+        db = await asyncio.wait_for(asyncio.shield(_tui_health_refresh_task), timeout=2.0)
         _tui_health_cache = db
-    except (asyncio.TimeoutError, Exception):
+    except asyncio.TimeoutError:
         db = _tui_health_cache or {"database": False}
+    except Exception:
+        _tui_health_refresh_task = None
+        db = _tui_health_cache or {"database": False}
+    else:
+        _tui_health_refresh_task = None
     return _build_tui_health_response(db, redis_healthy)
 
 
