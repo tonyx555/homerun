@@ -1498,7 +1498,6 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
                     <div className="grid grid-cols-2 gap-1.5 p-2">
                       <MetricPair label="Max Trade" value={formatUsd(toFiniteNumber(tradingStatus?.limits.max_trade_size_usd))} />
                       <MetricPair label="Max Daily" value={formatUsd(toFiniteNumber(tradingStatus?.limits.max_daily_volume))} />
-                      <MetricPair label="Max Open" value={`${toFiniteNumber(tradingStatus?.limits.max_open_positions)}`} />
                       <MetricPair label="Min Order" value={formatUsd(toFiniteNumber(tradingStatus?.limits.min_order_size_usd))} />
                       <MetricPair
                         label="Native Gas"

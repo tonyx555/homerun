@@ -329,7 +329,6 @@ async def test_place_sell_order_fails_before_submit_when_pre_submit_gate_fails(m
     monkeypatch.setattr(settings, "MIN_ORDER_SIZE_USD", 1.0)
     monkeypatch.setattr(settings, "MAX_TRADE_SIZE_USD", 10_000.0)
     monkeypatch.setattr(settings, "MAX_DAILY_TRADE_VOLUME", 10_000.0)
-    monkeypatch.setattr(settings, "MAX_OPEN_POSITIONS", 1000)
     monkeypatch.setattr(settings, "MAX_PER_MARKET_USD", 10_000.0)
     monkeypatch.setattr(
         live_execution_module.global_pause_state,
@@ -382,7 +381,6 @@ async def test_place_buy_order_fails_before_submit_when_pre_submit_gate_fails(mo
     monkeypatch.setattr(settings, "MIN_ORDER_SIZE_USD", 1.0)
     monkeypatch.setattr(settings, "MAX_TRADE_SIZE_USD", 10_000.0)
     monkeypatch.setattr(settings, "MAX_DAILY_TRADE_VOLUME", 10_000.0)
-    monkeypatch.setattr(settings, "MAX_OPEN_POSITIONS", 1000)
     monkeypatch.setattr(settings, "MAX_PER_MARKET_USD", 10_000.0)
     monkeypatch.setattr(
         live_execution_module.global_pause_state,

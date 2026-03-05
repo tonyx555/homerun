@@ -321,7 +321,6 @@ def live_execution_payload(settings: AppSettings) -> dict[str, Any]:
     return {
         "max_trade_size_usd": settings.max_trade_size_usd,
         "max_daily_trade_volume": settings.max_daily_trade_volume,
-        "max_open_positions": settings.max_open_positions,
         "max_slippage_percent": settings.max_slippage_percent,
         "btc_eth_hf_series_btc_15m": settings.btc_eth_hf_series_btc_15m,
         "btc_eth_hf_series_eth_15m": settings.btc_eth_hf_series_eth_15m,
@@ -720,7 +719,6 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
         trade = live_execution
         settings.max_trade_size_usd = trade.max_trade_size_usd
         settings.max_daily_trade_volume = trade.max_daily_trade_volume
-        settings.max_open_positions = trade.max_open_positions
         settings.max_slippage_percent = trade.max_slippage_percent
 
     if maintenance:

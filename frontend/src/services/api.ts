@@ -1291,7 +1291,6 @@ export interface TradingStatus {
   limits: {
     max_trade_size_usd: number
     max_daily_volume: number
-    max_open_positions: number
     min_order_size_usd: number
     max_slippage_percent: number
   }
@@ -2867,7 +2866,6 @@ export interface DiscoverySettings {
 export interface LiveExecutionSettingsConfig {
   max_trade_size_usd: number
   max_daily_trade_volume: number
-  max_open_positions: number
   max_slippage_percent: number
 }
 

@@ -2009,18 +2009,6 @@ class LiveExecutionService:
             orders = [order for order in orders if order.status == status]
         return orders[: max(1, int(limit))]
 
-    def _active_open_position_count(self) -> int:
-        count = 0
-        for position in self._positions.values():
-            size = safe_float(position.size, 0.0) or 0.0
-            if size <= 0.0:
-                continue
-            mark = safe_float(position.current_price)
-            if mark is not None and (mark <= 0.0 or mark >= 1.0):
-                continue
-            count += 1
-        return count
-
     def _validate_order(
         self,
         size_usd: Decimal,
@@ -2064,16 +2052,6 @@ class LiveExecutionService:
                 False,
                 f"Would exceed daily volume limit (${float(projected_daily_volume):.2f} > ${settings.MAX_DAILY_TRADE_VOLUME:.2f})",
             )
-
-        # Open-position cap is an entry-side guard only. Exit sells must remain
-        # executable even when the account is already at the cap.
-        if side == OrderSide.BUY:
-            active_open_positions = self._active_open_position_count()
-            if active_open_positions >= settings.MAX_OPEN_POSITIONS:
-                return (
-                    False,
-                    f"Maximum open positions ({settings.MAX_OPEN_POSITIONS}) reached",
-                )
 
         # Per-market position limit applies only to increased exposure.
         if token_id and side == OrderSide.BUY:

@@ -221,7 +221,6 @@ class Settings(BaseSettings):
     # Trading Safety Limits
     MAX_TRADE_SIZE_USD: float = 100.0  # Maximum single trade size
     MAX_DAILY_TRADE_VOLUME: float = 1000.0  # Maximum daily trading volume
-    MAX_OPEN_POSITIONS: int = 10  # Maximum concurrent open positions
     MIN_ORDER_SIZE_USD: float = 1.0  # Minimum order size
 
     # Order Settings
@@ -793,7 +792,6 @@ async def apply_search_filters():
         # Trading safety limits (used by live_execution_service order validation + /trader-orchestrator/live/status)
         ("MAX_TRADE_SIZE_USD", "max_trade_size_usd", 100.0),
         ("MAX_DAILY_TRADE_VOLUME", "max_daily_trade_volume", 1000.0),
-        ("MAX_OPEN_POSITIONS", "max_open_positions", 10),
         ("MAX_SLIPPAGE_PERCENT", "max_slippage_percent", 2.0),
     ]
 

@@ -611,7 +611,6 @@ async def get_trading_status():
         limits={
             "max_trade_size_usd": settings.MAX_TRADE_SIZE_USD,
             "max_daily_volume": settings.MAX_DAILY_TRADE_VOLUME,
-            "max_open_positions": settings.MAX_OPEN_POSITIONS,
             "min_order_size_usd": settings.MIN_ORDER_SIZE_USD,
             "max_slippage_percent": settings.MAX_SLIPPAGE_PERCENT,
         },

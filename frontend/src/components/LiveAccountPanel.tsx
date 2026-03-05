@@ -294,7 +294,6 @@ function PolymarketAccount() {
           ? [
               { label: 'Max Trade Size', value: formatUsd(toNumber(tradingStatus.limits.max_trade_size_usd)) },
               { label: 'Max Daily Volume', value: formatUsd(toNumber(tradingStatus.limits.max_daily_volume)) },
-              { label: 'Max Open Positions', value: `${toNumber(tradingStatus.limits.max_open_positions)}` },
               { label: 'Min Order Size', value: formatUsd(toNumber(tradingStatus.limits.min_order_size_usd)) },
               { label: 'Max Slippage', value: `${toNumber(tradingStatus.limits.max_slippage_percent)}%` },
               {

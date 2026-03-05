@@ -339,7 +339,6 @@ const DEFAULT_ORCHESTRATOR_GLOBAL_RISK = {
 const DEFAULT_LIVE_EXECUTION_LIMITS = {
   max_trade_size_usd: 100,
   max_daily_trade_volume: 1000,
-  max_open_positions: 10,
   max_slippage_percent: 2,
 } as const
 const DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME = {
@@ -534,7 +533,6 @@ function buildGlobalSettingsDraft(
   liveExecutionSettings: {
     max_trade_size_usd?: number | null
     max_daily_trade_volume?: number | null
-    max_open_positions?: number | null
     max_slippage_percent?: number | null
   } | null | undefined,
 ): GlobalSettingsDraft {
@@ -545,23 +543,13 @@ function buildGlobalSettingsDraft(
   const marketContext = runtime.live_market_context || DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_market_context
   const providerHealth = runtime.live_provider_health || DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_provider_health
   const pendingTerminalStatuses = toStringList(pending.terminal_statuses)
-  const maxOpenPositions = Math.min(
-    Math.trunc(
-      clampNumber(
-        toNumber(liveExecutionSettings?.max_open_positions ?? DEFAULT_LIVE_EXECUTION_LIMITS.max_open_positions),
-        1,
-        100,
-        DEFAULT_LIVE_EXECUTION_LIMITS.max_open_positions,
-      )
-    ),
-    Math.trunc(
-      clampNumber(
-        toNumber(clamps.max_open_positions_cap ?? DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.max_open_positions_cap),
-        1,
-        1000,
-        DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.max_open_positions_cap,
-      )
-    ),
+  const maxOpenPositions = Math.trunc(
+    clampNumber(
+      toNumber(clamps.max_open_positions_cap ?? DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.max_open_positions_cap),
+      1,
+      1000,
+      DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.max_open_positions_cap,
+    )
   )
   return {
     runIntervalSeconds: String(config?.run_interval_seconds ?? 5),
@@ -5357,8 +5345,8 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         clampNumber(
           toNumber(globalSettingsDraft.maxOpenPositions),
           1,
-          100,
-          DEFAULT_LIVE_EXECUTION_LIMITS.max_open_positions,
+          1000,
+          DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.max_open_positions_cap,
         )
       )
       const maxSlippagePercent = clampNumber(
@@ -5413,7 +5401,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
           live_execution: {
             max_trade_size_usd: maxTradeSizeUsd,
             max_daily_trade_volume: maxDailyTradeVolume,
-            max_open_positions: maxOpenPositions,
             max_slippage_percent: maxSlippagePercent,
           },
         }),

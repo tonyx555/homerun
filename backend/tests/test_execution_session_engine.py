@@ -307,7 +307,7 @@ async def test_execute_signal_skips_position_cap_failures_without_order_writes(m
                     status="failed",
                     notional_usd=0.0,
                     shares=0.0,
-                    error_message="Maximum open positions (10) reached",
+                    error_message="Per-market limit exceeded",
                 )
             ]
         ),
