@@ -436,6 +436,39 @@ function Invoke-DockerComposeCommand {
     return [pscustomobject]$result
 }
 
+function Test-ContainerNameConflict {
+    param(
+        [string]$Output,
+        [string]$ContainerName
+    )
+
+    if (-not $Output) {
+        return $false
+    }
+    $escapedName = [regex]::Escape($ContainerName)
+    return (($Output -match "(?i)already in use by container") -and ($Output -match "(?i)/?$escapedName"))
+}
+
+function Remove-ContainerIfExists {
+    param([string]$ContainerName)
+
+    $inspect = Invoke-DockerCommand -Arguments @("container", "inspect", $ContainerName)
+    if ($inspect.ExitCode -ne 0) {
+        return $true
+    }
+
+    $stop = Invoke-DockerCommand -Arguments @("stop", $ContainerName)
+    if ($stop.ExitCode -ne 0) {
+        $kill = Invoke-DockerCommand -Arguments @("kill", $ContainerName)
+        if ($kill.ExitCode -ne 0) {
+            return $false
+        }
+    }
+
+    $rm = Invoke-DockerCommand -Arguments @("rm", $ContainerName)
+    return ($rm.ExitCode -eq 0)
+}
+
 function Test-DockerRuntimeAvailable {
     $dockerInfo = Invoke-DockerCommand -Arguments @("info")
     return ($dockerInfo.ExitCode -eq 0)
@@ -653,6 +686,26 @@ function Start-RedisDocker {
             $script:redisDockerCreatedByScript = $true
             return $true
         }
+
+        if (Test-ContainerNameConflict -Output $composeResult.Output -ContainerName $ContainerName) {
+            if (Remove-ContainerIfExists -ContainerName $ContainerName) {
+                $composeRetry = Invoke-DockerComposeCommand `
+                    -Arguments @("up", "-d", "redis") `
+                    -EnvironmentOverrides @{
+                        "REDIS_HOST" = $RedisHost
+                        "REDIS_PORT" = "$RedisPort"
+                        "REDIS_IMAGE" = $Image
+                        "REDIS_CONTAINER_NAME" = $ContainerName
+                    }
+                if ($composeRetry.ExitCode -eq 0) {
+                    $script:lastRedisContainerEngine = "docker-compose"
+                    $script:redisDockerCreatedByScript = $true
+                    return $true
+                }
+            }
+        }
+
+        return $false
     }
 
     $inspectResult = Invoke-DockerCommand -Arguments @("container", "inspect", $ContainerName)
@@ -1009,7 +1062,8 @@ function Start-PostgresDocker {
         return $false
     }
 
-    if (Test-Path $script:dockerComposeFilePath) {
+    $composeAvailable = (Test-Path $script:dockerComposeFilePath) -and (Test-DockerComposeAvailable)
+    if ($composeAvailable) {
         $composeResult = Invoke-DockerComposeCommand `
             -Arguments @("up", "-d", "postgres") `
             -EnvironmentOverrides @{
@@ -1026,93 +1080,34 @@ function Start-PostgresDocker {
             $script:postgresDockerCreatedByScript = $true
             return $true
         }
-        if ($composeResult.Output) {
+
+        if (Test-ContainerNameConflict -Output $composeResult.Output -ContainerName $ContainerName) {
+            if (Remove-ContainerIfExists -ContainerName $ContainerName) {
+                $composeRetry = Invoke-DockerComposeCommand `
+                    -Arguments @("up", "-d", "postgres") `
+                    -EnvironmentOverrides @{
+                        "POSTGRES_HOST" = $PgHost
+                        "POSTGRES_PORT" = "$Port"
+                        "POSTGRES_DB" = $Db
+                        "POSTGRES_USER" = $User
+                        "POSTGRES_PASSWORD" = $Password
+                        "POSTGRES_IMAGE" = $Image
+                        "POSTGRES_CONTAINER_NAME" = $ContainerName
+                    }
+                if ($composeRetry.ExitCode -eq 0) {
+                    $script:lastPostgresContainerEngine = "docker-compose"
+                    $script:postgresDockerCreatedByScript = $true
+                    return $true
+                }
+                if ($composeRetry.Output) {
+                    $script:lastPostgresDockerError = $composeRetry.Output
+                }
+            }
+        } elseif ($composeResult.Output) {
             $script:lastPostgresDockerError = $composeResult.Output
         }
-    }
 
-    $containerExists = $false
-    $containerRunning = $false
-    $containerHostPort = $null
-    $inspectResult = Invoke-DockerCommand -Arguments @("container", "inspect", $ContainerName)
-    $containerExists = ($inspectResult.ExitCode -eq 0)
-
-    if ($containerExists) {
-        $runningResult = Invoke-DockerCommand -Arguments @("inspect", "-f", "{{.State.Running}}", $ContainerName)
-        if ($runningResult.ExitCode -eq 0) {
-            $runningText = ($runningResult.Output | Out-String).Trim().ToLowerInvariant()
-            $containerRunning = ($runningText -eq "true")
-        } else {
-            $containerRunning = $false
-        }
-
-        $hostPortResult = Invoke-DockerCommand -Arguments @("inspect", "-f", '{{with index .NetworkSettings.Ports "5432/tcp"}}{{(index . 0).HostPort}}{{end}}', $ContainerName)
-        if ($hostPortResult.ExitCode -eq 0) {
-            $containerHostPort = ($hostPortResult.Output | Out-String).Trim()
-            if ([string]::IsNullOrWhiteSpace($containerHostPort)) {
-                $containerHostPort = $null
-            }
-        } else {
-            $containerHostPort = $null
-        }
-
-        if ($containerHostPort -eq "$Port") {
-            if ($containerRunning) {
-                return $true
-            }
-
-            $startResult = Invoke-DockerCommand -Arguments @("start", $ContainerName)
-            if ($startResult.ExitCode -eq 0) {
-                return $true
-            }
-            if ($startResult.Output) {
-                $script:lastPostgresDockerError = $startResult.Output
-            } else {
-                $script:lastPostgresDockerError = "Failed to start existing container '$ContainerName' (exit code $($startResult.ExitCode))."
-            }
-        } else {
-            if ($containerHostPort) {
-                Write-Host "Existing Postgres container uses host port $containerHostPort. Recreating on required port $Port..." -ForegroundColor Yellow
-            } else {
-                Write-Host "Existing Postgres container has no expected port mapping. Recreating..." -ForegroundColor Yellow
-            }
-        }
-
-        if ($containerRunning) {
-            $null = Invoke-DockerCommand -Arguments @("stop", $ContainerName)
-        }
-
-        $removeResult = Invoke-DockerCommand -Arguments @("rm", $ContainerName)
-        if ($removeResult.ExitCode -ne 0) {
-            if ($removeResult.Output) {
-                $script:lastPostgresDockerError = $removeResult.Output
-            } else {
-                $script:lastPostgresDockerError = "Failed to remove existing container '$ContainerName' (exit code $($removeResult.ExitCode))."
-            }
-            return $false
-        }
-    }
-
-    if (Test-Path $script:dockerComposeFilePath) {
-        $composeRetry = Invoke-DockerComposeCommand `
-            -Arguments @("up", "-d", "postgres") `
-            -EnvironmentOverrides @{
-                "POSTGRES_HOST" = $PgHost
-                "POSTGRES_PORT" = "$Port"
-                "POSTGRES_DB" = $Db
-                "POSTGRES_USER" = $User
-                "POSTGRES_PASSWORD" = $Password
-                "POSTGRES_IMAGE" = $Image
-                "POSTGRES_CONTAINER_NAME" = $ContainerName
-            }
-        if ($composeRetry.ExitCode -eq 0) {
-            $script:lastPostgresContainerEngine = "docker-compose"
-            $script:postgresDockerCreatedByScript = $true
-            return $true
-        }
-        if ($composeRetry.Output) {
-            $script:lastPostgresDockerError = $composeRetry.Output
-        }
+        return $false
     }
 
     $imageInspect = Invoke-DockerCommand -Arguments @("image", "inspect", $Image)
