@@ -319,6 +319,48 @@ function Test-DockerRuntimeAvailable {
     }
 }
 
+function Get-DockerDesktopExePath {
+    $candidates = @(
+        "C:\Program Files\Docker\Docker\Docker Desktop.exe",
+        "C:\Program Files\Docker\Docker\Docker Desktop Installer.exe",
+        (Join-Path $env:LocalAppData "Programs\Docker\Docker\Docker Desktop.exe")
+    )
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path $candidate)) {
+            return $candidate
+        }
+    }
+    return $null
+}
+
+function Wait-ForDockerRuntime {
+    param([int]$TimeoutSeconds = 240)
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $desktopLaunched = $false
+    while ((Get-Date) -lt $deadline) {
+        if (Test-DockerRuntimeAvailable) {
+            return $true
+        }
+        try {
+            Start-Service -Name "com.docker.service" -ErrorAction SilentlyContinue
+        } catch {
+        }
+        if (-not $desktopLaunched) {
+            $desktopExe = Get-DockerDesktopExePath
+            if ($desktopExe) {
+                try {
+                    Start-Process -FilePath $desktopExe -WindowStyle Hidden | Out-Null
+                    $desktopLaunched = $true
+                } catch {
+                }
+            }
+        }
+        Start-Sleep -Seconds 3
+    }
+    return (Test-DockerRuntimeAvailable)
+}
+
 function Test-RedisRuntimeAvailable {
     if (Test-DockerRuntimeAvailable) { return $true }
     if (Find-MemuraiServer) { return $true }
@@ -1116,6 +1158,20 @@ function Ensure-Postgres {
         exit 1
     }
 
+    if (-not (Test-DockerRuntimeAvailable)) {
+        Write-Host "Docker runtime unavailable after bootstrap. Re-invoking setup postgres bootstrap..." -ForegroundColor Yellow
+        try {
+            & .\scripts\infra\setup.ps1 -PostgresOnly
+        } catch {
+        }
+        if (-not (Wait-ForDockerRuntime -TimeoutSeconds 120)) {
+            Write-Host "Failed to start Docker runtime automatically." -ForegroundColor Red
+            Write-Host "Homerun requires Docker Desktop for launcher-managed Postgres on Windows." -ForegroundColor Yellow
+            Write-Host "Enable virtualization (Hyper-V/WSL2) and rerun Homerun.bat." -ForegroundColor Yellow
+            exit 1
+        }
+    }
+
     Write-Host "Starting Postgres..." -ForegroundColor Cyan
 
     # Ensure a firewall allow rule exists for postgres.exe BEFORE starting.
@@ -1127,7 +1183,7 @@ function Ensure-Postgres {
     }
 
     $dockerStarted = $false
-    if (Test-DockerRuntimeAvailable) {
+    if (Wait-ForDockerRuntime -TimeoutSeconds 120) {
         $dockerStarted = Start-PostgresDocker -PgHost $PgHost -Port $Port -Db $Db -User $User -Password $Password -ContainerName $ContainerName -Image $Image -DataDir $DataDir
     }
     if ($dockerStarted -and (Wait-ForService -TargetHost $PgHost -Port $Port)) {
@@ -1138,21 +1194,8 @@ function Ensure-Postgres {
         return
     }
 
-    if (-not $dockerStarted) {
-        Write-Host "Docker Postgres unavailable; falling back to local Postgres tools." -ForegroundColor DarkYellow
-    }
-
-    $localStarted = Start-PostgresLocal -PgHost $PgHost -Port $Port -User $User -DataDir $DataDir
-    if ($localStarted -and (Wait-ForService -TargetHost $PgHost -Port $Port)) {
-        $script:postgresPort = [int]$Port
-        $script:postgresStartedByScript = $true
-        $script:postgresStartMode = "local"
-        Write-Host "Postgres started via local postgres on ${PgHost}:${Port}" -ForegroundColor Green
-        return
-    }
-
     Write-Host "Failed to start Postgres automatically." -ForegroundColor Red
-    Write-Host "Install Docker Desktop or PostgreSQL tools (initdb + pg_ctl), then rerun." -ForegroundColor Yellow
+    Write-Host "Docker runtime is required. Ensure Docker Desktop can start, then rerun." -ForegroundColor Yellow
     exit 1
 }
 

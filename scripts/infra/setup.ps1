@@ -169,6 +169,134 @@ function Test-DockerRuntimeAvailable {
     }
 }
 
+function Get-DockerDesktopExePath {
+    $candidates = @(
+        "C:\Program Files\Docker\Docker\Docker Desktop.exe",
+        "C:\Program Files\Docker\Docker\Docker Desktop Installer.exe",
+        (Join-Path $env:LocalAppData "Programs\Docker\Docker\Docker Desktop.exe")
+    )
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path $candidate)) {
+            return $candidate
+        }
+    }
+    return $null
+}
+
+function Wait-ForDockerRuntime {
+    param([int]$TimeoutSeconds = 240)
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $desktopLaunched = $false
+    while ((Get-Date) -lt $deadline) {
+        if (Test-DockerRuntimeAvailable) {
+            return $true
+        }
+        try {
+            Start-Service -Name "com.docker.service" -ErrorAction SilentlyContinue
+        } catch {
+        }
+        if (-not $desktopLaunched) {
+            $desktopExe = Get-DockerDesktopExePath
+            if ($desktopExe) {
+                try {
+                    Start-Process -FilePath $desktopExe -WindowStyle Hidden | Out-Null
+                    $desktopLaunched = $true
+                } catch {
+                }
+            }
+        }
+        Start-Sleep -Seconds 3
+    }
+    return (Test-DockerRuntimeAvailable)
+}
+
+function Try-InstallDockerWithWinget {
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if (-not $winget) {
+        return $false
+    }
+
+    $logDir = Get-InstallerLogDir
+    $logPath = Join-Path $logDir "docker-winget-install.log"
+    Write-Host "Installing Docker Desktop via winget..." -ForegroundColor Cyan
+    try {
+        & winget install --id Docker.DockerDesktop --exact --silent --disable-interactivity --accept-source-agreements --accept-package-agreements 2>&1 | Tee-Object -FilePath $logPath | Out-Null
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0 -and $exitCode -ne 3010) {
+            Write-Host "Winget Docker install failed (exit code $exitCode)." -ForegroundColor Yellow
+            Write-Host "Log: $logPath" -ForegroundColor Yellow
+            Show-LogTail -Path $logPath -Label "winget output"
+            return $false
+        }
+        if (Wait-ForDockerRuntime -TimeoutSeconds 300) {
+            Write-Host "Docker runtime installed via winget (Docker.DockerDesktop)." -ForegroundColor Green
+            return $true
+        }
+        Write-Host "Docker install completed but Docker runtime is still not ready." -ForegroundColor Yellow
+        Write-Host "Log: $logPath" -ForegroundColor Yellow
+        Show-LogTail -Path $logPath -Label "winget output"
+        return $false
+    } catch {
+        Write-Host "Winget Docker install threw an exception: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "Log: $logPath" -ForegroundColor Yellow
+        Show-LogTail -Path $logPath -Label "winget output"
+        return $false
+    }
+}
+
+function Try-InstallDockerWithChocolatey {
+    $choco = Get-Command choco -ErrorAction SilentlyContinue
+    if (-not $choco) {
+        return $false
+    }
+
+    $logDir = Get-InstallerLogDir
+    $logPath = Join-Path $logDir "docker-choco-install.log"
+    Write-Host "Installing Docker Desktop via Chocolatey..." -ForegroundColor Cyan
+    try {
+        & choco install docker-desktop -y --no-progress 2>&1 | Tee-Object -FilePath $logPath | Out-Null
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0) {
+            Write-Host "Chocolatey Docker install failed (exit code $exitCode)." -ForegroundColor Yellow
+            Write-Host "Log: $logPath" -ForegroundColor Yellow
+            Show-LogTail -Path $logPath -Label "choco output"
+            return $false
+        }
+        if (Wait-ForDockerRuntime -TimeoutSeconds 300) {
+            Write-Host "Docker runtime installed via Chocolatey (docker-desktop)." -ForegroundColor Green
+            return $true
+        }
+        Write-Host "Docker install completed but Docker runtime is still not ready." -ForegroundColor Yellow
+        Write-Host "Log: $logPath" -ForegroundColor Yellow
+        Show-LogTail -Path $logPath -Label "choco output"
+        return $false
+    } catch {
+        Write-Host "Chocolatey Docker install threw an exception: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "Log: $logPath" -ForegroundColor Yellow
+        Show-LogTail -Path $logPath -Label "choco output"
+        return $false
+    }
+}
+
+function Ensure-DockerRuntime {
+    if (Test-DockerRuntimeAvailable) {
+        return $true
+    }
+    if (Wait-ForDockerRuntime -TimeoutSeconds 45) {
+        return $true
+    }
+
+    Write-Host "Docker runtime missing. Attempting to install Docker Desktop..." -ForegroundColor Cyan
+    if (Try-InstallDockerWithWinget) {
+        return $true
+    }
+    if (Try-InstallDockerWithChocolatey) {
+        return $true
+    }
+    return $false
+}
+
 function Test-RedisRuntimeAvailable {
     if (Test-DockerRuntimeAvailable) { return $true }
     if (Find-MemuraiServer) { return $true }
@@ -367,12 +495,17 @@ function Test-PostgresRuntimeAvailable {
 }
 
 function Ensure-PostgresRuntime {
-    if (Test-PostgresRuntimeAvailable) {
-        Write-Host "Postgres runtime prerequisite found (docker or initdb+pg_ctl)." -ForegroundColor Green
+    if (Test-DockerRuntimeAvailable) {
+        Write-Host "Postgres runtime prerequisite found (docker)." -ForegroundColor Green
         return $true
     }
 
-    Write-Host "Postgres runtime prerequisite missing. Attempting to install..." -ForegroundColor Cyan
+    if (Ensure-DockerRuntime) {
+        Write-Host "Postgres runtime prerequisite found (docker)." -ForegroundColor Green
+        return $true
+    }
+
+    Write-Host "Docker runtime unavailable. Attempting PostgreSQL tools fallback..." -ForegroundColor Yellow
 
     $winget = Get-Command winget -ErrorAction SilentlyContinue
     if ($winget) {
@@ -405,7 +538,7 @@ function Ensure-PostgresRuntime {
     }
 
     Write-Host "Failed to auto-install Postgres runtime prerequisites." -ForegroundColor Red
-    Write-Host "Install Docker Desktop or PostgreSQL tools (initdb + pg_ctl), then rerun setup." -ForegroundColor Yellow
+    Write-Host "Install Docker Desktop (recommended) or PostgreSQL tools (initdb + pg_ctl), then rerun setup." -ForegroundColor Yellow
     return $false
 }
 
