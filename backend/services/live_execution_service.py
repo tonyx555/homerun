@@ -2065,12 +2065,15 @@ class LiveExecutionService:
                 f"Would exceed daily volume limit (${float(projected_daily_volume):.2f} > ${settings.MAX_DAILY_TRADE_VOLUME:.2f})",
             )
 
-        active_open_positions = self._active_open_position_count()
-        if active_open_positions >= settings.MAX_OPEN_POSITIONS:
-            return (
-                False,
-                f"Maximum open positions ({settings.MAX_OPEN_POSITIONS}) reached",
-            )
+        # Open-position cap is an entry-side guard only. Exit sells must remain
+        # executable even when the account is already at the cap.
+        if side == OrderSide.BUY:
+            active_open_positions = self._active_open_position_count()
+            if active_open_positions >= settings.MAX_OPEN_POSITIONS:
+                return (
+                    False,
+                    f"Maximum open positions ({settings.MAX_OPEN_POSITIONS}) reached",
+                )
 
         # Per-market position limit applies only to increased exposure.
         if token_id and side == OrderSide.BUY:

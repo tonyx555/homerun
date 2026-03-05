@@ -95,6 +95,7 @@ _DB_RETRY_ATTEMPTS = 3
 _DB_RETRY_BASE_DELAY_SECONDS = 0.05
 _DB_RETRY_MAX_DELAY_SECONDS = 0.3
 _PG_INT4_MAX = 2_147_483_647
+_NUMERIC_DEFAULT_ABS_MAX = 1_000_000_000.0
 
 
 def _is_retryable_db_error(exc: Exception) -> bool:
@@ -149,6 +150,7 @@ class WalletDiscoveryEngine:
         self._market_scan_offset: int = 0
         self._leaderboard_scan_cursor: int = 0
         self._leaderboard_offsets: dict[str, int] = {}
+        self._discovered_wallet_numeric_bounds: dict[str, float] | None = None
 
     @staticmethod
     def _coerce_int(
@@ -510,6 +512,65 @@ class WalletDiscoveryEngine:
             return float(value)
         except Exception:
             return default
+
+    @staticmethod
+    def _numeric_abs_limit(precision: Any, scale: Any) -> float:
+        try:
+            prec = int(precision)
+        except (TypeError, ValueError):
+            return _NUMERIC_DEFAULT_ABS_MAX
+        try:
+            scl = int(scale or 0)
+        except (TypeError, ValueError):
+            scl = 0
+        integer_digits = max(1, prec - max(0, scl))
+        if integer_digits > 18:
+            return 1_000_000_000_000_000_000.0
+        return float((10**integer_digits) - (10 ** (-max(0, scl))))
+
+    async def _load_discovered_wallet_numeric_bounds(self, session) -> dict[str, float]:
+        if self._discovered_wallet_numeric_bounds is not None:
+            return self._discovered_wallet_numeric_bounds
+        query = text(
+            """
+            SELECT column_name, numeric_precision, numeric_scale
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'discovered_wallets'
+              AND data_type IN ('numeric', 'decimal')
+            """
+        )
+        bounds: dict[str, float] = {}
+        try:
+            result = await session.execute(query)
+            for row in result:
+                mapping = row._mapping
+                column_name = str(mapping.get("column_name") or "").strip()
+                if not column_name:
+                    continue
+                bounds[column_name] = self._numeric_abs_limit(
+                    mapping.get("numeric_precision"),
+                    mapping.get("numeric_scale"),
+                )
+        except Exception:
+            bounds = {}
+        self._discovered_wallet_numeric_bounds = bounds
+        return bounds
+
+    @staticmethod
+    def _clamp_numeric_value(value: Any, abs_limit: float) -> Any:
+        if isinstance(value, bool):
+            return value
+        if not isinstance(value, (int, float)):
+            return value
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            return None
+        if numeric > abs_limit:
+            return abs_limit
+        if numeric < -abs_limit:
+            return -abs_limit
+        return numeric
 
     def _summarize_closed_positions(self, closed_positions: list[dict]) -> dict:
         wins = 0
@@ -1762,6 +1823,7 @@ class WalletDiscoveryEngine:
         for attempt in range(_DB_RETRY_ATTEMPTS):
             async with AsyncSessionLocal() as session:
                 try:
+                    numeric_bounds = await self._load_discovered_wallet_numeric_bounds(session)
                     wallet = await session.get(DiscoveredWallet, address)
 
                     if wallet is None:
@@ -1781,6 +1843,8 @@ class WalletDiscoveryEngine:
                                 minimum=0,
                                 maximum=_PG_INT4_MAX,
                             )
+                        elif key in numeric_bounds and value is not None:
+                            value = self._clamp_numeric_value(value, numeric_bounds[key])
                         if isinstance(value, float) and (math.isinf(value) or math.isnan(value)):
                             value = None
                         if hasattr(wallet, key):

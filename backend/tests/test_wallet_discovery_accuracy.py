@@ -16,6 +16,16 @@ from services.wallet_discovery import (  # noqa: E402
 
 
 class TestWalletDiscoveryAccuracy:
+    def test_numeric_abs_limit_respects_precision_and_scale(self):
+        engine = WalletDiscoveryEngine()
+        assert engine._numeric_abs_limit(8, 2) == pytest.approx(999999.99)
+        assert engine._numeric_abs_limit(None, None) == 1_000_000_000.0
+
+    def test_clamp_numeric_value_caps_out_of_range_values(self):
+        engine = WalletDiscoveryEngine()
+        assert engine._clamp_numeric_value(1500.0, 1000.0) == 1000.0
+        assert engine._clamp_numeric_value(float("inf"), 1000.0) is None
+
     def test_accuracy_first_stats_override_inconsistent_trade_defaults(self):
         engine = WalletDiscoveryEngine()
         base_stats = engine._empty_stats()

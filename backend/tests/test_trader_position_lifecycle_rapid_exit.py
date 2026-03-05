@@ -62,3 +62,10 @@ def test_strategy_hold_does_not_block_without_flag():
 def test_strategy_close_never_blocks_default_exit():
     decision = _ExitDecision("close", {"skip_default_exit": True})
     assert position_lifecycle._strategy_hold_blocks_default_exit(decision) is False
+
+
+def test_failed_exit_retry_delay_expands_for_vpn_proxy_errors():
+    delay = position_lifecycle._failed_exit_retry_delay_seconds(
+        "VPN check failed: Trading proxy unreachable: Invalid username/password"
+    )
+    assert delay == 90

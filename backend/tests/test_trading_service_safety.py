@@ -1,5 +1,6 @@
 import sys
 import types
+from decimal import Decimal
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -12,7 +13,7 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from config import settings
 import services.live_execution_service as live_execution_module
-from services.live_execution_service import Order, OrderSide, OrderStatus, LiveExecutionService
+from services.live_execution_service import Order, OrderSide, OrderStatus, Position, LiveExecutionService
 
 
 class _SequencedClient:
@@ -217,6 +218,40 @@ def test_order_cache_is_bounded():
 
     assert len(service._orders) == 3
     assert "open-1" in service._orders
+
+
+def test_position_cap_blocks_buys_but_allows_sells(monkeypatch):
+    _configure_limits(monkeypatch)
+    monkeypatch.setattr(settings, "MAX_OPEN_POSITIONS", 1)
+
+    service = LiveExecutionService()
+    service._initialized = True
+    service._client = _SequencedClient([True])
+    service._positions["token-existing"] = Position(
+        token_id="token-existing",
+        market_id="market-1",
+        market_question="Will this resolve YES?",
+        outcome="YES",
+        size=5.0,
+        average_cost=0.42,
+        current_price=0.5,
+    )
+
+    buy_ok, buy_error = service._validate_order(
+        size_usd=Decimal("5"),
+        side=OrderSide.BUY,
+        token_id="token-new",
+    )
+    assert buy_ok is False
+    assert "Maximum open positions" in buy_error
+
+    sell_ok, sell_error = service._validate_order(
+        size_usd=Decimal("5"),
+        side=OrderSide.SELL,
+        token_id="token-existing",
+    )
+    assert sell_ok is True
+    assert sell_error == ""
 
 
 @pytest.mark.asyncio

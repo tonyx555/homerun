@@ -20,6 +20,7 @@ Usage:
 
 import asyncio
 import httpx
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -34,6 +35,11 @@ _async_proxy_client: Optional[httpx.AsyncClient] = None
 _sync_client_signature: Optional[tuple[bool, Optional[str], bool, float]] = None
 _async_client_signature: Optional[tuple[bool, Optional[str], bool, float]] = None
 _clob_patch_signature: Optional[tuple[bool, Optional[str], bool, float]] = None
+_pre_trade_vpn_signature: Optional[tuple[bool, Optional[str], bool, float, bool]] = None
+_pre_trade_vpn_cache_result: Optional[tuple[bool, str]] = None
+_pre_trade_vpn_cache_until: float = 0.0
+_PRE_TRADE_VPN_CACHE_TTL_SUCCESS_SECONDS = 12.0
+_PRE_TRADE_VPN_CACHE_TTL_FAILURE_SECONDS = 45.0
 
 
 @dataclass
@@ -104,6 +110,11 @@ def _config_signature(cfg: ProxyConfig) -> tuple[bool, Optional[str], bool, floa
         bool(cfg.verify_ssl),
         float(cfg.timeout or 30.0),
     )
+
+
+def _vpn_signature(cfg: ProxyConfig) -> tuple[bool, Optional[str], bool, float, bool]:
+    base = _config_signature(cfg)
+    return (base[0], base[1], base[2], base[3], bool(cfg.require_vpn))
 
 
 def get_sync_proxy_client() -> httpx.Client:
@@ -231,7 +242,7 @@ def patch_clob_client_proxy() -> bool:
         return False
 
 
-async def verify_vpn_active() -> dict:
+async def verify_vpn_active(cfg: Optional[ProxyConfig] = None) -> dict:
     """
     Verify the VPN proxy is active by checking the external IP through the proxy
     vs. the direct connection. Returns status dict.
@@ -239,9 +250,10 @@ async def verify_vpn_active() -> dict:
     Always tests the stored proxy URL regardless of the enabled toggle so the
     user can verify connectivity before enabling the proxy for trading.
 
-    Loads fresh settings from the DB each time to pick up UI changes.
+    Loads fresh settings from the DB when cfg is not provided.
     """
-    cfg = await _load_config_from_db()
+    if cfg is None:
+        cfg = await _load_config_from_db()
 
     result = {
         "proxy_enabled": cfg.enabled,
@@ -258,34 +270,47 @@ async def verify_vpn_active() -> dict:
 
     ip_check_url = "https://api.ipify.org?format=json"
 
-    # Get direct IP
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as direct_client:
-            resp = await direct_client.get(ip_check_url)
-            result["direct_ip"] = resp.json().get("ip")
-    except Exception as e:
-        result["direct_ip_error"] = str(e)
+    async def _fetch_direct_ip() -> tuple[Optional[str], Optional[str]]:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as direct_client:
+                resp = await direct_client.get(ip_check_url)
+                return str(resp.json().get("ip") or ""), None
+        except Exception as exc:
+            return None, str(exc)
 
-    # Get proxy IP — use a temporary client with the stored URL directly
-    # so the test works even when the proxy toggle is off.
-    try:
-        async with httpx.AsyncClient(
-            proxy=cfg.proxy_url,
-            timeout=cfg.timeout,
-            verify=cfg.verify_ssl,
-        ) as test_client:
-            resp = await test_client.get(ip_check_url)
-            proxy_ip = resp.json().get("ip")
-            result["proxy_ip"] = proxy_ip
-            result["proxy_reachable"] = True
+    async def _fetch_proxy_ip() -> tuple[Optional[str], Optional[str]]:
+        try:
+            async with httpx.AsyncClient(
+                proxy=cfg.proxy_url,
+                timeout=cfg.timeout,
+                verify=cfg.verify_ssl,
+            ) as test_client:
+                resp = await test_client.get(ip_check_url)
+                return str(resp.json().get("ip") or ""), None
+        except Exception as exc:
+            return None, str(exc)
 
-            if result["direct_ip"] and proxy_ip:
-                result["vpn_active"] = result["direct_ip"] != proxy_ip
-            elif proxy_ip:
-                result["vpn_active"] = True
-    except Exception as e:
-        result["proxy_ip_error"] = str(e)
+    (direct_ip, direct_err), (proxy_ip, proxy_err) = await asyncio.gather(
+        _fetch_direct_ip(),
+        _fetch_proxy_ip(),
+    )
+    if direct_ip:
+        result["direct_ip"] = direct_ip
+    elif direct_err:
+        result["direct_ip_error"] = direct_err
+
+    if proxy_ip:
+        result["proxy_ip"] = proxy_ip
+        result["proxy_reachable"] = True
+    elif proxy_err:
+        result["proxy_ip_error"] = proxy_err
         result["proxy_reachable"] = False
+
+    if result["proxy_reachable"] and result["proxy_ip"]:
+        if result["direct_ip"]:
+            result["vpn_active"] = result["direct_ip"] != result["proxy_ip"]
+        else:
+            result["vpn_active"] = True
 
     return result
 
@@ -307,18 +332,34 @@ async def pre_trade_vpn_check() -> tuple[bool, str]:
     if not cfg.require_vpn:
         return True, "VPN verification not required"
 
-    status = await verify_vpn_active()
+    signature = _vpn_signature(cfg)
+    now = time.monotonic()
+    global _pre_trade_vpn_signature, _pre_trade_vpn_cache_result, _pre_trade_vpn_cache_until
+    if (
+        _pre_trade_vpn_cache_result is not None
+        and _pre_trade_vpn_signature == signature
+        and now < _pre_trade_vpn_cache_until
+    ):
+        return _pre_trade_vpn_cache_result
 
+    status = await verify_vpn_active(cfg)
     if not status["proxy_reachable"]:
-        return (
+        result = (
             False,
             f"Trading proxy unreachable: {status.get('proxy_ip_error', 'unknown error')}",
         )
+    elif not status["vpn_active"]:
+        result = (False, "VPN not active: proxy IP matches direct IP")
+    else:
+        result = (True, f"VPN active, trading through {status['proxy_ip']}")
 
-    if not status["vpn_active"]:
-        return False, "VPN not active: proxy IP matches direct IP"
-
-    return True, f"VPN active, trading through {status['proxy_ip']}"
+    ttl_seconds = (
+        _PRE_TRADE_VPN_CACHE_TTL_SUCCESS_SECONDS if result[0] else _PRE_TRADE_VPN_CACHE_TTL_FAILURE_SECONDS
+    )
+    _pre_trade_vpn_signature = signature
+    _pre_trade_vpn_cache_result = result
+    _pre_trade_vpn_cache_until = now + ttl_seconds
+    return result
 
 
 async def reload_proxy_settings():
@@ -328,6 +369,10 @@ async def reload_proxy_settings():
     Called by the settings API after a user updates proxy config.
     """
     await close()
+    global _pre_trade_vpn_signature, _pre_trade_vpn_cache_result, _pre_trade_vpn_cache_until
+    _pre_trade_vpn_signature = None
+    _pre_trade_vpn_cache_result = None
+    _pre_trade_vpn_cache_until = 0.0
     await _load_config_from_db()
     cfg = _get_config()
     patched = patch_clob_client_proxy()

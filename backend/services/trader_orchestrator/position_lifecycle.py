@@ -93,6 +93,12 @@ def _failed_exit_retry_delay_seconds(last_error: Any) -> int:
     if "not enough balance / allowance" in error_text or "allowance" in error_text:
         return 8
     if (
+        "vpn check failed" in error_text
+        or "trading proxy unreachable" in error_text
+        or "invalid username/password" in error_text
+    ):
+        return 90
+    if (
         "below minimum" in error_text
         or "lower than minimum" in error_text
         or "exit_notional_below_min" in error_text
