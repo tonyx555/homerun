@@ -151,13 +151,46 @@ function Find-MemuraiServer {
     return $null
 }
 
-function Test-DockerRuntimeAvailable {
-    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+function Get-DockerCliPath {
+    $cmd = Get-Command docker -ErrorAction SilentlyContinue
+    if ($cmd) {
+        return $cmd.Source
+    }
+
+    $candidates = @(
+        (Join-Path $env:ProgramFiles "Docker\Docker\resources\bin\docker.exe"),
+        (Join-Path ${env:ProgramFiles(x86)} "Docker\Docker\resources\bin\docker.exe"),
+        (Join-Path $env:LocalAppData "Programs\Docker\Docker\resources\bin\docker.exe")
+    )
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path $candidate)) {
+            return $candidate
+        }
+    }
+
+    return $null
+}
+
+function Ensure-DockerCommand {
+    if (Get-Command docker -ErrorAction SilentlyContinue) {
+        return $true
+    }
+
+    $dockerPath = Get-DockerCliPath
+    if (-not $dockerPath) {
         return $false
     }
 
-    $dockerDesktopService = Get-Service -Name "com.docker.service" -ErrorAction SilentlyContinue
-    if ($dockerDesktopService -and $dockerDesktopService.Status -ne "Running") {
+    try {
+        Set-Alias -Name docker -Value $dockerPath -Scope Script -Force
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Test-DockerRuntimeAvailable {
+    if (-not (Ensure-DockerCommand)) {
         return $false
     }
 
