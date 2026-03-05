@@ -41,6 +41,7 @@ $script:postgresStartedByScript = $false
 $script:postgresStartMode = ""
 $script:postgresDockerCreatedByScript = $false
 $script:lastPostgresContainerEngine = "docker"
+$script:lastPostgresDockerPublishedPort = $null
 $script:lastPostgresDockerError = $null
 $script:databaseUrlWasProvided = [bool]$env:DATABASE_URL
 
@@ -467,6 +468,55 @@ function Remove-ContainerIfExists {
 
     $rm = Invoke-DockerCommand -Arguments @("rm", $ContainerName)
     return ($rm.ExitCode -eq 0)
+}
+
+function Get-DockerPublishedHostPort {
+    param(
+        [string]$ContainerName,
+        [string]$ContainerPort
+    )
+
+    if (-not (Ensure-DockerCommand)) {
+        return $null
+    }
+
+    $portResult = Invoke-DockerCommand -Arguments @("port", $ContainerName, $ContainerPort)
+    if ($portResult.ExitCode -ne 0) {
+        return $null
+    }
+
+    $output = ($portResult.Output | Out-String).Trim()
+    if (-not $output) {
+        return $null
+    }
+
+    foreach ($line in ($output -split "`r?`n")) {
+        $match = [regex]::Match(($line | Out-String).Trim(), ':(\d+)\s*$')
+        if ($match.Success) {
+            return [int]$match.Groups[1].Value
+        }
+    }
+
+    return $null
+}
+
+function Wait-ForDockerPublishedHostPort {
+    param(
+        [string]$ContainerName,
+        [string]$ContainerPort,
+        [int]$TimeoutSeconds = 20
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        $publishedPort = Get-DockerPublishedHostPort -ContainerName $ContainerName -ContainerPort $ContainerPort
+        if ($publishedPort) {
+            return [int]$publishedPort
+        }
+        Start-Sleep -Milliseconds 500
+    }
+
+    return $null
 }
 
 function Test-DockerRuntimeAvailable {
@@ -1033,9 +1083,9 @@ function Show-PostgresDockerDiagnostics {
         Write-Host "Postgres container status: $($statusResult.Output)" -ForegroundColor Yellow
     }
 
-    $hostPortResult = Invoke-DockerCommand -Arguments @("inspect", "-f", '{{with index .NetworkSettings.Ports "5432/tcp"}}{{(index . 0).HostPort}}{{end}}', $ContainerName)
-    if ($hostPortResult.ExitCode -eq 0 -and $hostPortResult.Output) {
-        Write-Host "Postgres container published port: $($hostPortResult.Output)" -ForegroundColor Yellow
+    $publishedPort = Get-DockerPublishedHostPort -ContainerName $ContainerName -ContainerPort "5432/tcp"
+    if ($publishedPort) {
+        Write-Host "Postgres container published port: $publishedPort" -ForegroundColor Yellow
     }
 
     $logsResult = Invoke-DockerCommand -Arguments @("logs", "--tail", "40", $ContainerName)
@@ -1060,6 +1110,7 @@ function Start-PostgresDocker {
     )
 
     $script:lastPostgresDockerError = $null
+    $script:lastPostgresDockerPublishedPort = $null
     $script:lastPostgresContainerEngine = "docker"
 
     if (-not (Ensure-DockerCommand)) {
@@ -1089,12 +1140,19 @@ function Start-PostgresDocker {
         if ($composeResult.ExitCode -eq 0) {
             $script:lastPostgresContainerEngine = "docker-compose"
             $script:postgresDockerCreatedByScript = $true
+            $publishedPort = Wait-ForDockerPublishedHostPort -ContainerName $ContainerName -ContainerPort "5432/tcp" -TimeoutSeconds 30
+            if ($publishedPort) {
+                $script:lastPostgresDockerPublishedPort = [int]$publishedPort
+            } else {
+                $script:lastPostgresDockerPublishedPort = [int]$Port
+            }
             return $true
         }
 
         if (Test-PostgresDockerListenerOwned -ContainerName $ContainerName -Port $Port) {
             $script:lastPostgresContainerEngine = "docker-compose"
             $script:postgresDockerCreatedByScript = $true
+            $script:lastPostgresDockerPublishedPort = [int]$Port
             return $true
         }
 
@@ -1114,11 +1172,18 @@ function Start-PostgresDocker {
                 if ($composeRetry.ExitCode -eq 0) {
                     $script:lastPostgresContainerEngine = "docker-compose"
                     $script:postgresDockerCreatedByScript = $true
+                    $publishedPort = Wait-ForDockerPublishedHostPort -ContainerName $ContainerName -ContainerPort "5432/tcp" -TimeoutSeconds 30
+                    if ($publishedPort) {
+                        $script:lastPostgresDockerPublishedPort = [int]$publishedPort
+                    } else {
+                        $script:lastPostgresDockerPublishedPort = [int]$Port
+                    }
                     return $true
                 }
                 if (Test-PostgresDockerListenerOwned -ContainerName $ContainerName -Port $Port) {
                     $script:lastPostgresContainerEngine = "docker-compose"
                     $script:postgresDockerCreatedByScript = $true
+                    $script:lastPostgresDockerPublishedPort = [int]$Port
                     return $true
                 }
                 if ($composeRetry.Output) {
@@ -1127,6 +1192,20 @@ function Start-PostgresDocker {
             }
         } elseif ($composeResult.Output) {
             $script:lastPostgresDockerError = $composeResult.Output
+        }
+
+        $runningResult = Invoke-DockerCommand -Arguments @("inspect", "-f", "{{.State.Running}}", $ContainerName)
+        if ($runningResult.ExitCode -eq 0) {
+            $isRunning = ((($runningResult.Output | Out-String).Trim().ToLowerInvariant()) -eq "true")
+            if ($isRunning) {
+                $publishedPort = Wait-ForDockerPublishedHostPort -ContainerName $ContainerName -ContainerPort "5432/tcp" -TimeoutSeconds 20
+                if ($publishedPort) {
+                    $script:lastPostgresContainerEngine = "docker-compose"
+                    $script:postgresDockerCreatedByScript = $true
+                    $script:lastPostgresDockerPublishedPort = [int]$publishedPort
+                    return $true
+                }
+            }
         }
 
         return $false
@@ -1166,6 +1245,7 @@ function Start-PostgresDocker {
     )
     if ($runResult.ExitCode -eq 0) {
         $script:postgresDockerCreatedByScript = $true
+        $script:lastPostgresDockerPublishedPort = [int]$Port
         return $true
     }
     if ($runResult.Output) {
@@ -1355,11 +1435,11 @@ function Test-RedisDockerListenerOwned {
         return $false
     }
 
-    $hostPortResult = Invoke-DockerCommand -Arguments @("inspect", "-f", '{{with index .NetworkSettings.Ports "6379/tcp"}}{{(index . 0).HostPort}}{{end}}', $ContainerName)
-    if ($hostPortResult.ExitCode -ne 0) {
+    $publishedPort = Get-DockerPublishedHostPort -ContainerName $ContainerName -ContainerPort "6379/tcp"
+    if (-not $publishedPort) {
         return $false
     }
-    return ((($hostPortResult.Output | Out-String).Trim()) -eq "$Port")
+    return ([int]$publishedPort -eq [int]$Port)
 }
 
 function Test-PostgresDockerListenerOwned {
@@ -1385,11 +1465,11 @@ function Test-PostgresDockerListenerOwned {
         return $false
     }
 
-    $hostPortResult = Invoke-DockerCommand -Arguments @("inspect", "-f", '{{with index .NetworkSettings.Ports "5432/tcp"}}{{(index . 0).HostPort}}{{end}}', $ContainerName)
-    if ($hostPortResult.ExitCode -ne 0) {
+    $publishedPort = Get-DockerPublishedHostPort -ContainerName $ContainerName -ContainerPort "5432/tcp"
+    if (-not $publishedPort) {
         return $false
     }
-    return ((($hostPortResult.Output | Out-String).Trim()) -eq "$Port")
+    return ([int]$publishedPort -eq [int]$Port)
 }
 
 function Test-LocalPostgresListenerOwned {
@@ -1550,12 +1630,17 @@ function Ensure-Postgres {
     if (Wait-ForDockerRuntime -TimeoutSeconds 120) {
         $dockerStarted = Start-PostgresDocker -PgHost $PgHost -Port $Port -Db $Db -User $User -Password $Password -ContainerName $ContainerName -Image $Image -DataDir $DataDir
     }
-    if ($dockerStarted -and (Wait-ForService -TargetHost $PgHost -Port $Port -TimeoutSeconds 90)) {
-        $script:postgresPort = [int]$Port
+    $resolvedDockerPort = if ($script:lastPostgresDockerPublishedPort) { [int]$script:lastPostgresDockerPublishedPort } else { [int]$Port }
+    if ($dockerStarted -and (Wait-ForService -TargetHost $PgHost -Port $resolvedDockerPort -TimeoutSeconds 90)) {
+        $script:postgresPort = [int]$resolvedDockerPort
         $script:postgresStartedByScript = $true
         $script:postgresStartMode = if ($script:lastPostgresContainerEngine -eq "docker-compose") { "docker-compose" } else { "docker" }
         $postgresRuntimeLabel = if ($script:postgresStartMode -eq "docker-compose") { "Docker Compose" } else { "Docker" }
-        Write-Host "Postgres started via $postgresRuntimeLabel on ${PgHost}:${Port}" -ForegroundColor Green
+        if ($resolvedDockerPort -ne $Port) {
+            Write-Host "Postgres started via $postgresRuntimeLabel on ${PgHost}:${resolvedDockerPort} (requested ${Port})" -ForegroundColor Green
+        } else {
+            Write-Host "Postgres started via $postgresRuntimeLabel on ${PgHost}:${resolvedDockerPort}" -ForegroundColor Green
+        }
         return
     }
 
@@ -1565,7 +1650,7 @@ function Ensure-Postgres {
     Show-PostgresDockerDiagnostics -ContainerName $ContainerName
 
     Write-Host "Failed to start Postgres automatically." -ForegroundColor Red
-    Write-Host "Launcher could not confirm Postgres is reachable on ${PgHost}:${Port}." -ForegroundColor Yellow
+    Write-Host "Launcher could not confirm Postgres is reachable on ${PgHost}:${resolvedDockerPort}." -ForegroundColor Yellow
     Write-Host "Resolve the connectivity issue shown above, then rerun Homerun.bat." -ForegroundColor Yellow
     exit 1
 }
