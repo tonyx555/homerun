@@ -37,6 +37,7 @@ $script:redisDockerCreatedByScript = $false
 $script:postgresStartedByScript = $false
 $script:postgresStartMode = ""
 $script:postgresDockerCreatedByScript = $false
+$script:lastPostgresDockerError = $null
 $script:databaseUrlWasProvided = [bool]$env:DATABASE_URL
 
 function Test-TcpPort {
@@ -105,10 +106,12 @@ function Test-NpcapLoopbackInterference {
 function Wait-ForService {
     param(
         [string]$TargetHost,
-        [int]$Port
+        [int]$Port,
+        [int]$TimeoutSeconds = 10
     )
 
-    for ($i = 0; $i -lt 40; $i++) {
+    $attempts = [Math]::Max(1, [int]([Math]::Ceiling(($TimeoutSeconds * 1000) / 250)))
+    for ($i = 0; $i -lt $attempts; $i++) {
         if (Test-TcpPort -TargetHost $TargetHost -Port $Port) {
             return $true
         }
@@ -831,6 +834,41 @@ function Ensure-PostgresRuntime {
     }
 }
 
+function Show-PostgresDockerDiagnostics {
+    param([string]$ContainerName)
+
+    if (-not (Ensure-DockerCommand)) {
+        return
+    }
+
+    try {
+        $status = (docker inspect -f "{{.State.Status}}" $ContainerName 2>$null | Out-String).Trim()
+        if ($status) {
+            Write-Host "Postgres container status: $status" -ForegroundColor Yellow
+        }
+    } catch {
+    }
+
+    try {
+        $hostPort = (docker inspect -f "{{with index .NetworkSettings.Ports \"5432/tcp\"}}{{(index . 0).HostPort}}{{end}}" $ContainerName 2>$null | Out-String).Trim()
+        if ($hostPort) {
+            Write-Host "Postgres container published port: $hostPort" -ForegroundColor Yellow
+        }
+    } catch {
+    }
+
+    try {
+        $logs = (docker logs --tail 40 $ContainerName 2>&1 | Out-String).Trim()
+        if ($logs) {
+            Write-Host "Postgres container logs (tail):" -ForegroundColor Yellow
+            $logs -split "`r?`n" | ForEach-Object {
+                Write-Host "  $_" -ForegroundColor DarkYellow
+            }
+        }
+    } catch {
+    }
+}
+
 function Start-PostgresDocker {
     param(
         [string]$PgHost,
@@ -843,34 +881,106 @@ function Start-PostgresDocker {
         [string]$DataDir
     )
 
+    $script:lastPostgresDockerError = $null
+
     if (-not (Ensure-DockerCommand)) {
+        $script:lastPostgresDockerError = "Docker CLI unavailable in current shell."
         return $false
     }
 
     try {
         docker info *> $null
-        if ($LASTEXITCODE -ne 0) { return $false }
+        if ($LASTEXITCODE -ne 0) {
+            $script:lastPostgresDockerError = "docker info returned exit code $LASTEXITCODE."
+            return $false
+        }
     } catch {
+        $script:lastPostgresDockerError = "docker info failed: $($_.Exception.Message)"
         return $false
     }
 
+    $containerExists = $false
+    $containerRunning = $false
+    $containerHostPort = $null
     try {
         docker container inspect $ContainerName *> $null
-        if ($LASTEXITCODE -eq 0) {
-            docker start $ContainerName *> $null
-            return ($LASTEXITCODE -eq 0)
-        }
+        $containerExists = ($LASTEXITCODE -eq 0)
     } catch {
+        $containerExists = $false
+    }
+
+    if ($containerExists) {
+        try {
+            $runningText = (docker inspect -f "{{.State.Running}}" $ContainerName 2>$null | Out-String).Trim().ToLowerInvariant()
+            $containerRunning = ($runningText -eq "true")
+        } catch {
+            $containerRunning = $false
+        }
+
+        try {
+            $containerHostPort = (docker inspect -f "{{with index .NetworkSettings.Ports \"5432/tcp\"}}{{(index . 0).HostPort}}{{end}}" $ContainerName 2>$null | Out-String).Trim()
+            if ([string]::IsNullOrWhiteSpace($containerHostPort)) {
+                $containerHostPort = $null
+            }
+        } catch {
+            $containerHostPort = $null
+        }
+
+        if ($containerHostPort -eq "$Port") {
+            if ($containerRunning) {
+                return $true
+            }
+
+            try {
+                docker start $ContainerName *> $null
+                if ($LASTEXITCODE -eq 0) {
+                    return $true
+                }
+                $script:lastPostgresDockerError = "Failed to start existing container '$ContainerName' (exit code $LASTEXITCODE)."
+            } catch {
+                $script:lastPostgresDockerError = "Failed to start existing container '$ContainerName': $($_.Exception.Message)"
+            }
+        } else {
+            if ($containerHostPort) {
+                Write-Host "Existing Postgres container uses host port $containerHostPort. Recreating on required port $Port..." -ForegroundColor Yellow
+            } else {
+                Write-Host "Existing Postgres container has no expected port mapping. Recreating..." -ForegroundColor Yellow
+            }
+        }
+
+        if ($containerRunning) {
+            try {
+                docker stop $ContainerName *> $null
+            } catch {
+            }
+        }
+
+        try {
+            docker rm $ContainerName *> $null
+            if ($LASTEXITCODE -ne 0) {
+                $script:lastPostgresDockerError = "Failed to remove existing container '$ContainerName' (exit code $LASTEXITCODE)."
+                return $false
+            }
+        } catch {
+            $script:lastPostgresDockerError = "Failed to remove existing container '$ContainerName': $($_.Exception.Message)"
+            return $false
+        }
     }
 
     try {
         New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
-        docker run --name $ContainerName --detach --publish "${PgHost}:${Port}:5432" --env "POSTGRES_DB=$Db" --env "POSTGRES_USER=$User" --env "POSTGRES_PASSWORD=$Password" --volume "${DataDir}:/var/lib/postgresql/data" $Image *> $null
+        $runOutput = (docker run --name $ContainerName --detach --publish "${PgHost}:${Port}:5432" --env "POSTGRES_DB=$Db" --env "POSTGRES_USER=$User" --env "POSTGRES_PASSWORD=$Password" --volume "${DataDir}:/var/lib/postgresql/data" $Image 2>&1 | Out-String).Trim()
         if ($LASTEXITCODE -eq 0) {
             $script:postgresDockerCreatedByScript = $true
             return $true
         }
+        if ($runOutput) {
+            $script:lastPostgresDockerError = $runOutput
+        } else {
+            $script:lastPostgresDockerError = "docker run failed with exit code $LASTEXITCODE."
+        }
     } catch {
+        $script:lastPostgresDockerError = "docker run exception: $($_.Exception.Message)"
     }
 
     return $false
@@ -1219,13 +1329,18 @@ function Ensure-Postgres {
     if (Wait-ForDockerRuntime -TimeoutSeconds 120) {
         $dockerStarted = Start-PostgresDocker -PgHost $PgHost -Port $Port -Db $Db -User $User -Password $Password -ContainerName $ContainerName -Image $Image -DataDir $DataDir
     }
-    if ($dockerStarted -and (Wait-ForService -TargetHost $PgHost -Port $Port)) {
+    if ($dockerStarted -and (Wait-ForService -TargetHost $PgHost -Port $Port -TimeoutSeconds 90)) {
         $script:postgresPort = [int]$Port
         $script:postgresStartedByScript = $true
         $script:postgresStartMode = "docker"
         Write-Host "Postgres started via Docker on ${PgHost}:${Port}" -ForegroundColor Green
         return
     }
+
+    if ($script:lastPostgresDockerError) {
+        Write-Host "Docker Postgres startup error: $script:lastPostgresDockerError" -ForegroundColor Yellow
+    }
+    Show-PostgresDockerDiagnostics -ContainerName $ContainerName
 
     Write-Host "Failed to start Postgres automatically." -ForegroundColor Red
     Write-Host "Docker runtime is required. Ensure Docker Desktop can start, then rerun." -ForegroundColor Yellow
