@@ -14,9 +14,6 @@ from pathlib import Path
 from typing import Optional
 from sqlalchemy import select
 
-if sys.platform == "win32" and hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
 # Keep native ML/linear algebra threading conservative for long-running
 # backend and worker workloads on macOS.
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -174,6 +171,17 @@ async def lifespan(app: FastAPI):
     )
     loop = asyncio.get_running_loop()
     loop.set_default_executor(cpu_executor)
+
+    def _global_exception_handler(loop_ref, context):
+        exc = context.get("exception")
+        message = context.get("message", "Unhandled asyncio exception")
+        if exc is not None:
+            logger.error("Unhandled asyncio exception: %s", message, exc_info=exc)
+        else:
+            logger.error("Unhandled asyncio exception: %s", message)
+
+    loop.set_exception_handler(_global_exception_handler)
+
     logger.info(
         "Thread pool executor configured",
         max_workers=max(cpu_count * 2 + 8, 16),
