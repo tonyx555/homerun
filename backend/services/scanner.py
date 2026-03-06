@@ -14,7 +14,7 @@ from config import settings
 from interfaces import MarketDataProvider
 from models import Opportunity, OpportunityFilter
 from models.opportunity import AIAnalysis, MispricingType
-from models.database import AsyncSessionLocal, ScannerSettings, OpportunityJudgment, ScannerSnapshot
+from models.database import AsyncSessionLocal, ScannerSettings, ScannerSnapshot
 from services.strategy_loader import strategy_loader
 from services.opportunity_strategy_catalog import ensure_system_opportunity_strategies_seeded
 from services.strategy_sdk import StrategySDK
