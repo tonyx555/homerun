@@ -1882,7 +1882,7 @@ class TelegramNotifier:
                 event_type="trader_paused",
                 source="telegram",
                 operator=operator,
-                message=f"Trader paused via Telegram",
+                message="Trader paused via Telegram",
             )
         return f"⏸️ Trader '{_escape_md(trader_name or query)}' paused\\."
 
@@ -1900,7 +1900,7 @@ class TelegramNotifier:
                 event_type="trader_resumed",
                 source="telegram",
                 operator=operator,
-                message=f"Trader resumed via Telegram",
+                message="Trader resumed via Telegram",
             )
         return f"▶️ Trader '{_escape_md(trader_name or query)}' resumed\\."
 

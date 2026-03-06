@@ -1,6 +1,5 @@
 import sys
 import types
-from decimal import Decimal
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -13,7 +12,7 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from config import settings
 import services.live_execution_service as live_execution_module
-from services.live_execution_service import Order, OrderSide, OrderStatus, Position, LiveExecutionService
+from services.live_execution_service import Order, OrderSide, OrderStatus, LiveExecutionService
 
 
 class _SequencedClient:
