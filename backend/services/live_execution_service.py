@@ -287,6 +287,7 @@ class LiveExecutionService:
             100,
             int(getattr(settings, "TRADING_MARKET_POSITION_LIMIT", 5000)),
         )
+        self._background_tasks: set[asyncio.Task] = set()
 
     def _get_stats_lock(self) -> asyncio.Lock:
         if self._stats_lock is None:
@@ -615,10 +616,11 @@ class LiveExecutionService:
             data_api_base = str(getattr(settings, "DATA_API_URL", "") or "").rstrip("/")
             if not data_api_base:
                 return None
-            response = httpx.get(
+            if not hasattr(self, "_data_api_client") or self._data_api_client is None or self._data_api_client.is_closed:
+                self._data_api_client = httpx.Client(timeout=8.0, follow_redirects=True)
+            response = self._data_api_client.get(
                 f"{data_api_base}/profile",
                 params={"address": eoa_address},
-                timeout=8.0,
             )
             if response.status_code != 200:
                 return None
@@ -1509,7 +1511,9 @@ class LiveExecutionService:
             self._sync_stats_from_decimals()
             try:
                 loop = asyncio.get_running_loop()
-                loop.create_task(self._persist_runtime_state())
+                task = loop.create_task(self._persist_runtime_state())
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
             except RuntimeError:
                 pass
 
@@ -2918,7 +2922,9 @@ class LiveExecutionService:
                 f"Position has EXPOSURE RISK!"
             )
             # Auto-reconcile: unwind filled legs from failed arbitrage
-            asyncio.create_task(self._auto_reconcile(orders, valid_positions, failed_count))
+            task = asyncio.create_task(self._auto_reconcile(orders, valid_positions, failed_count))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
         return orders
 

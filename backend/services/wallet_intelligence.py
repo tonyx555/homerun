@@ -473,15 +473,15 @@ class ConfluenceDetector:
         addresses: list[str],
         cutoff: datetime,
     ) -> dict[tuple[str, str], float]:
-        """Fetch conflicting notional for all market/side pairs in one session."""
+        """Fetch conflicting notional for all market/side pairs, one session per candidate."""
         if not candidates or not addresses:
             return {}
         result_map: dict[tuple[str, str], float] = {}
-        async with AsyncSessionLocal() as session:
-            for market_id, side in candidates:
-                opposite = "SELL" if side == "BUY" else "BUY"
-                opposite_sides = [opposite, "YES" if opposite == "BUY" else "NO"]
-                total = 0.0
+        for market_id, side in candidates:
+            opposite = "SELL" if side == "BUY" else "BUY"
+            opposite_sides = [opposite, "YES" if opposite == "BUY" else "NO"]
+            total = 0.0
+            async with AsyncSessionLocal() as session:
                 for address_chunk in _iter_chunks(addresses):
                     result = await session.execute(
                         select(func.sum(WalletActivityRollup.notional)).where(
@@ -492,7 +492,7 @@ class ConfluenceDetector:
                         )
                     )
                     total += float(result.scalar() or 0.0)
-                result_map[(market_id, side)] = total
+            result_map[(market_id, side)] = total
         return result_map
 
     async def _batch_resolve_market_context(self, market_ids: list[str]) -> dict[str, dict]:
@@ -1307,23 +1307,30 @@ class WalletTagger:
             result = await session.execute(select(DiscoveredWallet))
             wallets = list(result.scalars().all())
 
-        tagged_count = 0
+        BATCH_SIZE = 200
+        dirty: list[tuple[str, list]] = []
         for wallet in wallets:
             try:
                 tags = await self.auto_tag_wallet(wallet)
                 if tags != (wallet.tags or []):
-                    async with AsyncSessionLocal() as session:
-                        await session.execute(
-                            update(DiscoveredWallet).where(DiscoveredWallet.address == wallet.address).values(tags=tags)
-                        )
-                        await session.commit()
-                    tagged_count += 1
+                    dirty.append((wallet.address, tags))
             except Exception as e:
                 logger.debug(
                     "Failed to tag wallet",
                     wallet=wallet.address,
                     error=str(e),
                 )
+
+        tagged_count = 0
+        for i in range(0, len(dirty), BATCH_SIZE):
+            batch = dirty[i : i + BATCH_SIZE]
+            async with AsyncSessionLocal() as session:
+                for address, tags in batch:
+                    await session.execute(
+                        update(DiscoveredWallet).where(DiscoveredWallet.address == address).values(tags=tags)
+                    )
+                await session.commit()
+                tagged_count += len(batch)
 
         logger.info(
             "Wallet auto-tagging complete",

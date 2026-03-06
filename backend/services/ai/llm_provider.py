@@ -514,6 +514,12 @@ class OpenAIProvider(BaseLLMProvider):
         if structured_output_format not in {"json_schema", "json_object", "text"}:
             raise ValueError("structured_output_format must be one of: 'json_schema', 'json_object', 'text'")
         self._structured_output_format = structured_output_format
+        self._shared_client: Optional[httpx.AsyncClient] = None
+
+    def _get_shared_client(self, timeout: float = 120.0) -> httpx.AsyncClient:
+        if self._shared_client is None or self._shared_client.is_closed:
+            self._shared_client = httpx.AsyncClient(timeout=timeout)
+        return self._shared_client
 
     def _build_headers(self) -> dict[str, str]:
         """Build HTTP headers for OpenAI API requests."""
@@ -680,11 +686,11 @@ class OpenAIProvider(BaseLLMProvider):
     async def list_models(self) -> list[dict[str, str]]:
         """Fetch available models from the OpenAI API."""
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(
-                    f"{self.base_url}/models",
-                    headers=self._build_headers(),
-                )
+            client = self._get_shared_client(timeout=30.0)
+            response = await client.get(
+                f"{self.base_url}/models",
+                headers=self._build_headers(),
+            )
             if response.status_code != 200:
                 logger.warning("Failed to list OpenAI models: %s", response.text[:200])
                 return []
@@ -733,14 +739,14 @@ class OpenAIProvider(BaseLLMProvider):
         if tools:
             payload["tools"] = self._format_tools(tools)
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await _retry_with_backoff(
-                lambda: client.post(
-                    f"{self.base_url}/chat/completions",
-                    headers=self._build_headers(),
-                    json=payload,
-                )
+        client = self._get_shared_client(timeout=120.0)
+        response = await _retry_with_backoff(
+            lambda: client.post(
+                f"{self.base_url}/chat/completions",
+                headers=self._build_headers(),
+                json=payload,
             )
+        )
 
         latency_ms = int(time.time() * 1000) - start_ms
         data = _safe_response_json(response)
@@ -813,18 +819,18 @@ class OpenAIProvider(BaseLLMProvider):
             "response_format": self._build_structured_response_format(schema, model),
         }
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await _retry_with_backoff(
-                lambda: client.post(
-                    f"{self.base_url}/chat/completions",
-                    headers=self._build_headers(),
-                    json=payload,
-                )
+        client = self._get_shared_client(timeout=120.0)
+        response = await _retry_with_backoff(
+            lambda: client.post(
+                f"{self.base_url}/chat/completions",
+                headers=self._build_headers(),
+                json=payload,
             )
-            data = _safe_response_json(response)
-            if response.status_code != 200:
-                error_msg = _extract_error_message(data, response.text)
-                raise RuntimeError(f"OpenAI API error ({response.status_code}): {error_msg}")
+        )
+        data = _safe_response_json(response)
+        if response.status_code != 200:
+            error_msg = _extract_error_message(data, response.text)
+            raise RuntimeError(f"OpenAI API error ({response.status_code}): {error_msg}")
 
         try:
             content = data["choices"][0]["message"].get("content", "")
@@ -859,6 +865,12 @@ class AnthropicProvider(BaseLLMProvider):
         """
         self.api_key = api_key
         self.base_url = "https://api.anthropic.com/v1"
+        self._shared_client: Optional[httpx.AsyncClient] = None
+
+    def _get_shared_client(self, timeout: float = 120.0) -> httpx.AsyncClient:
+        if self._shared_client is None or self._shared_client.is_closed:
+            self._shared_client = httpx.AsyncClient(timeout=timeout)
+        return self._shared_client
 
     def _build_headers(self) -> dict[str, str]:
         """Build HTTP headers for Anthropic API requests."""
@@ -971,11 +983,11 @@ class AnthropicProvider(BaseLLMProvider):
     async def list_models(self) -> list[dict[str, str]]:
         """Fetch available models from the Anthropic API."""
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(
-                    f"{self.base_url}/models",
-                    headers=self._build_headers(),
-                )
+            client = self._get_shared_client(timeout=30.0)
+            response = await client.get(
+                f"{self.base_url}/models",
+                headers=self._build_headers(),
+            )
             if response.status_code != 200:
                 logger.warning("Failed to list Anthropic models: %s", response.text[:200])
                 return []
@@ -1026,14 +1038,14 @@ class AnthropicProvider(BaseLLMProvider):
         if tools:
             payload["tools"] = self._format_tools(tools)
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await _retry_with_backoff(
-                lambda: client.post(
-                    f"{self.base_url}/messages",
-                    headers=self._build_headers(),
-                    json=payload,
-                )
+        client = self._get_shared_client(timeout=120.0)
+        response = await _retry_with_backoff(
+            lambda: client.post(
+                f"{self.base_url}/messages",
+                headers=self._build_headers(),
+                json=payload,
             )
+        )
 
         latency_ms = int(time.time() * 1000) - start_ms
         data = _safe_response_json(response)
@@ -1150,6 +1162,12 @@ class GoogleProvider(BaseLLMProvider):
         """
         self.api_key = api_key
         self.base_url = "https://generativelanguage.googleapis.com/v1beta"
+        self._shared_client: Optional[httpx.AsyncClient] = None
+
+    def _get_shared_client(self, timeout: float = 120.0) -> httpx.AsyncClient:
+        if self._shared_client is None or self._shared_client.is_closed:
+            self._shared_client = httpx.AsyncClient(timeout=timeout)
+        return self._shared_client
 
     def _format_contents(self, messages: list[LLMMessage]) -> tuple[Optional[dict], list[dict]]:
         """Convert LLMMessage objects to Gemini API format.
@@ -1246,8 +1264,8 @@ class GoogleProvider(BaseLLMProvider):
         """Fetch available models from the Google Gemini API."""
         try:
             url = f"{self.base_url}/models?key={self.api_key}"
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(url)
+            client = self._get_shared_client(timeout=30.0)
+            response = await client.get(url)
             if response.status_code != 200:
                 logger.warning("Failed to list Google models: %s", response.text[:200])
                 return []
@@ -1306,14 +1324,14 @@ class GoogleProvider(BaseLLMProvider):
 
         url = f"{self.base_url}/models/{model}:generateContent?key={self.api_key}"
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await _retry_with_backoff(
-                lambda: client.post(
-                    url,
-                    headers={"Content-Type": "application/json"},
-                    json=payload,
-                )
+        client = self._get_shared_client(timeout=120.0)
+        response = await _retry_with_backoff(
+            lambda: client.post(
+                url,
+                headers={"Content-Type": "application/json"},
+                json=payload,
             )
+        )
 
         latency_ms = int(time.time() * 1000) - start_ms
         data = _safe_response_json(response)
@@ -1408,14 +1426,14 @@ class GoogleProvider(BaseLLMProvider):
 
         url = f"{self.base_url}/models/{model}:generateContent?key={self.api_key}"
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await _retry_with_backoff(
-                lambda: client.post(
-                    url,
-                    headers={"Content-Type": "application/json"},
-                    json=payload,
-                )
+        client = self._get_shared_client(timeout=120.0)
+        response = await _retry_with_backoff(
+            lambda: client.post(
+                url,
+                headers={"Content-Type": "application/json"},
+                json=payload,
             )
+        )
 
         data = _safe_response_json(response)
 
@@ -1611,6 +1629,12 @@ class OllamaProvider(BaseLLMProvider):
             base_url=self.base_url,
             model_prefixes=None,
         )
+        self._shared_client: Optional[httpx.AsyncClient] = None
+
+    def _get_shared_client(self, timeout: float = 120.0) -> httpx.AsyncClient:
+        if self._shared_client is None or self._shared_client.is_closed:
+            self._shared_client = httpx.AsyncClient(timeout=timeout)
+        return self._shared_client
 
     async def list_models(self) -> list[dict[str, str]]:
         """Fetch available models from Ollama."""
@@ -1620,8 +1644,8 @@ class OllamaProvider(BaseLLMProvider):
 
         # Fallback to Ollama native API for older builds without /v1/models.
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(f"{self._native_base_url}/api/tags")
+            client = self._get_shared_client(timeout=30.0)
+            response = await client.get(f"{self._native_base_url}/api/tags")
             if response.status_code != 200:
                 logger.warning("Failed to list Ollama models: %s", response.text[:200])
                 return []
@@ -1687,14 +1711,14 @@ class OllamaProvider(BaseLLMProvider):
             "options": {"temperature": temperature},
         }
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await _retry_with_backoff(
-                lambda: client.post(
-                    f"{self._native_base_url}/api/chat",
-                    headers={"Content-Type": "application/json"},
-                    json=payload,
-                )
+        client = self._get_shared_client(timeout=120.0)
+        response = await _retry_with_backoff(
+            lambda: client.post(
+                f"{self._native_base_url}/api/chat",
+                headers={"Content-Type": "application/json"},
+                json=payload,
             )
+        )
 
         data = _safe_response_json(response)
         if response.status_code != 200:
@@ -1780,14 +1804,14 @@ class LMStudioProvider(BaseLLMProvider):
             ),
         }
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await _retry_with_backoff(
-                lambda: client.post(
-                    f"{self.base_url}/chat/completions",
-                    headers=self._delegate._build_headers(),
-                    json=payload,
-                )
+        client = self._delegate._get_shared_client(timeout=120.0)
+        response = await _retry_with_backoff(
+            lambda: client.post(
+                f"{self.base_url}/chat/completions",
+                headers=self._delegate._build_headers(),
+                json=payload,
             )
+        )
 
         data = _safe_response_json(response)
         if response.status_code != 200:

@@ -206,36 +206,39 @@ async def _run_loop() -> None:
             raise
         except Exception as exc:
             logger.exception("Discovery cycle failed: %s", exc)
-            async with AsyncSessionLocal() as session:
-                await clear_discovery_run_request(session)
-                await write_discovery_snapshot(
-                    session,
-                    {
-                        "running": True,
-                        "enabled": not paused,
-                        "run_interval_minutes": interval_minutes,
-                        "last_run_at": datetime.now(timezone.utc).isoformat(),
-                        "current_activity": f"Last discovery run error: {exc}",
-                        "wallets_discovered_last_run": wallet_discovery._wallets_discovered_last_run,
-                        "wallets_analyzed_last_run": wallet_discovery._wallets_analyzed_last_run,
-                    },
-                )
-                await write_worker_snapshot(
-                    session,
-                    "discovery",
-                    running=True,
-                    enabled=not paused,
-                    current_activity=f"Last discovery run error: {exc}",
-                    interval_seconds=interval_minutes * 60,
-                    last_run_at=datetime.now(timezone.utc).replace(tzinfo=None),
-                    last_error=str(exc),
-                    stats={
-                        "wallets_discovered_last_run": wallet_discovery._wallets_discovered_last_run,
-                        "wallets_analyzed_last_run": wallet_discovery._wallets_analyzed_last_run,
-                        "priority_backlog_mode": priority_backlog_mode,
-                        "priority_backlog_count": priority_backlog_count,
-                    },
-                )
+            try:
+                async with AsyncSessionLocal() as session:
+                    await clear_discovery_run_request(session)
+                    await write_discovery_snapshot(
+                        session,
+                        {
+                            "running": True,
+                            "enabled": not paused,
+                            "run_interval_minutes": interval_minutes,
+                            "last_run_at": datetime.now(timezone.utc).isoformat(),
+                            "current_activity": f"Last discovery run error: {exc}",
+                            "wallets_discovered_last_run": wallet_discovery._wallets_discovered_last_run,
+                            "wallets_analyzed_last_run": wallet_discovery._wallets_analyzed_last_run,
+                        },
+                    )
+                    await write_worker_snapshot(
+                        session,
+                        "discovery",
+                        running=True,
+                        enabled=not paused,
+                        current_activity=f"Last discovery run error: {exc}",
+                        interval_seconds=interval_minutes * 60,
+                        last_run_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                        last_error=str(exc),
+                        stats={
+                            "wallets_discovered_last_run": wallet_discovery._wallets_discovered_last_run,
+                            "wallets_analyzed_last_run": wallet_discovery._wallets_analyzed_last_run,
+                            "priority_backlog_mode": priority_backlog_mode,
+                            "priority_backlog_count": priority_backlog_count,
+                        },
+                    )
+            except Exception as snapshot_exc:
+                logger.warning("Discovery error snapshot write also failed: %s", snapshot_exc)
             next_scheduled_run_at = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(
                 minutes=interval_minutes
             )

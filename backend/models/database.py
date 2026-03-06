@@ -20,6 +20,7 @@ from pathlib import Path
 import logging as _logging
 import enum
 import asyncio
+import os as _os
 import time as _time
 
 from config import settings
@@ -167,6 +168,46 @@ class RetryableAsyncSession(AsyncSession):
             await super().invalidate()
         except Exception:
             pass
+
+    def __del__(self) -> None:
+        """Last-resort safety net: if GC is collecting this session without
+        a prior close(), schedule an async cleanup on the running loop so
+        the underlying connection is returned to the pool (or invalidated)
+        instead of being silently leaked.
+        """
+        # sync_session is None once properly closed — skip if already clean.
+        sync = getattr(self, "sync_session", None)
+        if sync is None:
+            return
+        # Only act if the sync session still holds a connection.
+        # SQLAlchemy 2.x stores the active connection in _connection.
+        if not getattr(sync, "_connection", None):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No event loop — force-close the sync session directly.
+            try:
+                sync.close()
+            except Exception:
+                pass
+            return
+        if loop.is_closed():
+            try:
+                sync.close()
+            except Exception:
+                pass
+            return
+        # Schedule async cleanup on the running loop.  _fire_and_forget
+        # stores a strong reference so the task survives GC.
+        try:
+            loop.call_soon_threadsafe(self._fire_and_forget, self._do_close_or_invalidate())
+        except RuntimeError:
+            # Loop may have been closed between the check and the call.
+            try:
+                sync.close()
+            except Exception:
+                pass
 
     async def _reset_after_failed_commit(self) -> None:
         try:
@@ -3265,10 +3306,25 @@ _database_url = str(settings.DATABASE_URL or "").strip().lower()
 if not _database_url.startswith("postgresql"):
     raise ValueError(f"DATABASE_URL must use PostgreSQL; got {settings.DATABASE_URL!r}")
 
+# Worker subprocesses need much smaller pools.  The main backend handles
+# API requests, WebSockets, and in-process services that benefit from a
+# larger pool.  Each of the 14 worker processes only runs one loop and
+# rarely needs more than 1-2 concurrent connections.  Using the full
+# pool_size=20 per worker would demand 15×50=750 connections against
+# Postgres (default max_connections=100), causing connection refusals
+# that crash the entire system.
+_is_worker = _os.environ.get("HOMERUN_PROCESS_ROLE") == "worker"
+if _is_worker:
+    _pool_size = max(1, int(settings.DATABASE_WORKER_POOL_SIZE))
+    _max_overflow = max(0, int(settings.DATABASE_WORKER_MAX_OVERFLOW))
+else:
+    _pool_size = max(1, int(settings.DATABASE_POOL_SIZE))
+    _max_overflow = max(0, int(settings.DATABASE_MAX_OVERFLOW))
+
 _engine_kw.update(
     {
-        "pool_size": max(1, int(settings.DATABASE_POOL_SIZE)),
-        "max_overflow": max(0, int(settings.DATABASE_MAX_OVERFLOW)),
+        "pool_size": _pool_size,
+        "max_overflow": _max_overflow,
         "pool_timeout": max(1, int(settings.DATABASE_POOL_TIMEOUT_SECONDS)),
         "pool_recycle": max(30, int(settings.DATABASE_POOL_RECYCLE_SECONDS)),
         "pool_use_lifo": True,
@@ -3293,6 +3349,12 @@ _engine_kw["connect_args"] = {
 async_engine = create_async_engine(settings.DATABASE_URL, **_engine_kw)
 
 _db_logger = _logging.getLogger("homerun.db.pool")
+_db_logger.info(
+    "Connection pool created (role=%s, pool_size=%d, max_overflow=%d)",
+    "worker" if _is_worker else "main",
+    _pool_size,
+    _max_overflow,
+)
 
 
 def _pool_task_context() -> tuple[str, str]:

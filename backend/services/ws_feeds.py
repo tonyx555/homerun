@@ -306,6 +306,7 @@ class PriceCache:
         with self._lock:
             self._entries.pop(token_id, None)
             self._history.pop(token_id, None)
+            self._trades.pop(token_id, None)
 
     def add_on_trade_callback(self, callback: Callable) -> None:
         """Register a callback invoked on each trade. Receives (token_id, TradeRecord)."""
@@ -703,6 +704,20 @@ class PolymarketWSFeed:
                 if not self._stop_event.is_set():
                     self._reconnect_attempt += 1
                     self.stats.reconnections += 1
+                    delay = min(
+                        self._reconnect_base_delay * (DEFAULT_RECONNECT_MULTIPLIER ** (self._reconnect_attempt - 1)),
+                        self._reconnect_max_delay,
+                    )
+                    logger.info(
+                        "Polymarket WS server closed connection; reconnecting",
+                        delay=round(delay, 1),
+                        attempt=self._reconnect_attempt,
+                    )
+                    try:
+                        await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
+                        break
+                    except asyncio.TimeoutError:
+                        pass
                     continue
                 break
 
@@ -718,23 +733,11 @@ class PolymarketWSFeed:
         ) as ws:
             self._ws = ws
             self._state = ConnectionState.CONNECTED
-            self.stats.connection_uptime_start = time.monotonic()
+            connect_time = time.monotonic()
+            self.stats.connection_uptime_start = connect_time
+            reconnect_at_connect = self._reconnect_attempt
 
-            # Reset failure counters immediately on successful connect so
-            # downstream health logic sees a healthy feed right away, not
-            # only after the first message arrives (which can be delayed in
-            # low-traffic periods).
-            if self._reconnect_attempt > 0:
-                was_failing = self.stats.consecutive_failures >= MAX_RECONNECT_ATTEMPTS
-                self._reconnect_attempt = 0
-                self.stats.consecutive_failures = 0
-                if was_failing and self.on_recovery:
-                    try:
-                        await self.on_recovery()
-                    except Exception:
-                        logger.exception("on_recovery callback error")
-
-            logger.info("Polymarket WS connected", url=self._ws_url)
+            logger.info("Polymarket WS connected", url=self._ws_url, attempt=reconnect_at_connect)
 
             # Re-subscribe to everything tracked
             async with self._sub_lock:
@@ -751,6 +754,21 @@ class PolymarketWSFeed:
                     recv_time = time.monotonic()
                     self.stats.messages_received += 1
                     self.stats.last_message_at = recv_time
+
+                    # Reset failure counters only after the connection has
+                    # been stable for 30s.  Resetting immediately on connect
+                    # (as the old code did) prevents backoff from escalating
+                    # when the server drops connections every 10-30 seconds.
+                    if reconnect_at_connect > 0 and (recv_time - connect_time) >= 30.0:
+                        was_failing = self.stats.consecutive_failures >= MAX_RECONNECT_ATTEMPTS
+                        self._reconnect_attempt = 0
+                        self.stats.consecutive_failures = 0
+                        reconnect_at_connect = 0
+                        if was_failing and self.on_recovery:
+                            try:
+                                await self.on_recovery()
+                            except Exception:
+                                logger.exception("on_recovery callback error")
 
                     try:
                         data = json.loads(raw)
@@ -1296,6 +1314,7 @@ class FeedManager:
         self._redis_update_lock = asyncio.Lock()
         self._redis_flush_task: Optional[asyncio.Task] = None
         self._redis_flush_interval_seconds: float = max(0.01, float(settings.WS_REDIS_FLUSH_INTERVAL_SECONDS))
+        self._dispatch_tasks: set[asyncio.Task] = set()
         self._cache.add_on_change_callback(self._on_price_change)
         self._cache.add_on_trade_callback(self._on_trade)
         self._cache.add_on_update_callback(self._on_price_update)
@@ -1408,7 +1427,9 @@ class FeedManager:
                 new_price=new_mid,
             )
             loop = asyncio.get_running_loop()
-            loop.create_task(event_dispatcher.dispatch(event))
+            task = loop.create_task(event_dispatcher.dispatch(event))
+            self._dispatch_tasks.add(task)
+            task.add_done_callback(self._dispatch_tasks.discard)
         except RuntimeError:
             pass  # No running event loop
 
@@ -1432,7 +1453,9 @@ class FeedManager:
                 },
             )
             loop = asyncio.get_running_loop()
-            loop.create_task(event_dispatcher.dispatch(event))
+            task = loop.create_task(event_dispatcher.dispatch(event))
+            self._dispatch_tasks.add(task)
+            task.add_done_callback(self._dispatch_tasks.discard)
         except RuntimeError:
             pass  # No running event loop
 

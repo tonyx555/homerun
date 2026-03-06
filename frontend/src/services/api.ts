@@ -2712,6 +2712,20 @@ export interface DatabaseFlushResponse {
   message: string
 }
 
+export interface TableBloatEntry {
+  table: string
+  live_tuples: number
+  dead_tuples: number
+  dead_pct: number
+  total_bytes: number
+  table_bytes: number
+  index_bytes: number
+  last_vacuum: string | null
+  last_autovacuum: string | null
+  last_analyze: string | null
+  last_autoanalyze: string | null
+}
+
 export interface DatabaseMaintenanceStats {
   db_size_bytes: number | null
   total_rows: number | null
@@ -2736,6 +2750,7 @@ export interface DatabaseMaintenanceStats {
     oldest_trade: string | null
     newest_trade: string | null
   }
+  table_bloat?: TableBloatEntry[] | null
 }
 
 export const flushDatabaseData = async (target: DatabaseFlushTarget): Promise<DatabaseFlushResponse> => {
@@ -2750,6 +2765,16 @@ export const getDatabaseMaintenanceStats = async (): Promise<DatabaseMaintenance
   const { data } = await api.get('/maintenance/stats')
   const payload = unwrapApiData(data)
   return payload.stats as DatabaseMaintenanceStats
+}
+
+export const runVacuumAnalyze = async (full: boolean = false): Promise<Record<string, unknown>> => {
+  const { data } = await api.post('/maintenance/vacuum', null, { params: { full } })
+  return unwrapApiData(data)
+}
+
+export const runReindexTables = async (): Promise<Record<string, unknown>> => {
+  const { data } = await api.post('/maintenance/reindex')
+  return unwrapApiData(data)
 }
 
 export const setWorkerInterval = async (worker: string, intervalSeconds: number) => {

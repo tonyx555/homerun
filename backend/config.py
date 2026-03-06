@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     WS_PRICE_STALE_SECONDS: float = 30.0  # UI/discovery staleness budget for cached prices
     WS_EXECUTION_PRICE_STALE_SECONDS: float = 0.1  # Trader execution staleness budget for cached prices
     EXECUTION_MARKET_DATA_MAX_AGE_MS: int = 100  # Hard freshness gate before trader decisions
-    WS_HEARTBEAT_INTERVAL: float = 15.0  # Ping interval to keep connection alive
+    WS_HEARTBEAT_INTERVAL: float = 5.0  # Ping interval to keep connection alive
     WS_REDIS_FLUSH_INTERVAL_SECONDS: float = 0.025  # Redis hot-cache flush cadence for live prices
     WS_STRICT_CONTEXT_WARMUP_SECONDS: float = 0.75  # Strict context WS subscribe warmup before evaluation
     SCANNER_STRICT_WS_MAX_AGE_MS: int = 30000  # WS-only max age for scanner-source strict execution
@@ -143,8 +143,10 @@ class Settings(BaseSettings):
 
     # Database
     DATABASE_URL: str = _default_database_url()
-    DATABASE_POOL_SIZE: int = 10
-    DATABASE_MAX_OVERFLOW: int = 15
+    DATABASE_POOL_SIZE: int = 20
+    DATABASE_MAX_OVERFLOW: int = 30
+    DATABASE_WORKER_POOL_SIZE: int = 2
+    DATABASE_WORKER_MAX_OVERFLOW: int = 3
     DATABASE_POOL_TIMEOUT_SECONDS: int = 30
     DATABASE_POOL_RECYCLE_SECONDS: int = 300
     DATABASE_CONNECT_TIMEOUT_SECONDS: float = 8.0

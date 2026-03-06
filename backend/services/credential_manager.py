@@ -70,6 +70,7 @@ class ClobCredentials:
 class CredentialManager:
     def __init__(self):
         self._cached_creds: dict[str, ClobCredentials] = {}  # address -> creds
+        self._shared_client = None
 
     def _get_wallet_address(self, private_key: str) -> str:
         """Derive wallet address from private key."""
@@ -158,6 +159,10 @@ class CredentialManager:
 
         import httpx
 
+        if self._shared_client is None or self._shared_client.is_closed:
+            self._shared_client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
+        client = self._shared_client
+
         headers = {
             "POLY_ADDRESS": address,
             "POLY_SIGNATURE": signature,
@@ -165,49 +170,48 @@ class CredentialManager:
             "POLY_NONCE": str(nonce),
         }
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            # Try to create new API key
-            try:
-                resp = await client.post(
-                    f"{clob_url}/auth/api-key",
-                    headers=headers,
+        # Try to create new API key
+        try:
+            resp = await client.post(
+                f"{clob_url}/auth/api-key",
+                headers=headers,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                creds = ClobCredentials(
+                    api_key=data["apiKey"],
+                    api_secret=data["secret"],
+                    api_passphrase=data["passphrase"],
+                    wallet_address=address,
                 )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    creds = ClobCredentials(
-                        api_key=data["apiKey"],
-                        api_secret=data["secret"],
-                        api_passphrase=data["passphrase"],
-                        wallet_address=address,
-                    )
-                    await self._save_to_db(creds)
-                    self._cached_creds[address.lower()] = creds
-                    logger.info("Generated new CLOB credentials", address=address)
-                    return creds
-            except Exception as e:
-                logger.warning("Failed to create API key, trying derive", error=str(e))
+                await self._save_to_db(creds)
+                self._cached_creds[address.lower()] = creds
+                logger.info("Generated new CLOB credentials", address=address)
+                return creds
+        except Exception as e:
+            logger.warning("Failed to create API key, trying derive", error=str(e))
 
-            # Fallback: derive existing credentials
-            try:
-                resp = await client.get(
-                    f"{clob_url}/auth/derive-api-key",
-                    headers=headers,
+        # Fallback: derive existing credentials
+        try:
+            resp = await client.get(
+                f"{clob_url}/auth/derive-api-key",
+                headers=headers,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                creds = ClobCredentials(
+                    api_key=data["apiKey"],
+                    api_secret=data["secret"],
+                    api_passphrase=data["passphrase"],
+                    wallet_address=address,
                 )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    creds = ClobCredentials(
-                        api_key=data["apiKey"],
-                        api_secret=data["secret"],
-                        api_passphrase=data["passphrase"],
-                        wallet_address=address,
-                    )
-                    await self._save_to_db(creds)
-                    self._cached_creds[address.lower()] = creds
-                    logger.info("Derived existing CLOB credentials", address=address)
-                    return creds
-            except Exception as e:
-                logger.error("Failed to derive API key", error=str(e))
-                raise RuntimeError(f"Could not generate or derive CLOB credentials: {e}")
+                await self._save_to_db(creds)
+                self._cached_creds[address.lower()] = creds
+                logger.info("Derived existing CLOB credentials", address=address)
+                return creds
+        except Exception as e:
+            logger.error("Failed to derive API key", error=str(e))
+            raise RuntimeError(f"Could not generate or derive CLOB credentials: {e}")
 
         raise RuntimeError("Failed to obtain CLOB API credentials")
 

@@ -79,7 +79,7 @@ class TailEndCarryStrategy(BaseStrategy):
         "min_repricing_buffer": 0.015,
         "repricing_weight": 0.45,
         "max_opportunities": 120,
-        "exclude_market_keywords": "",
+        "exclude_market_keywords": "bitcoin,ethereum,lol:,win on,counter-strike",
         "panic_drop_threshold": 0.08,
         "panic_window_points": 6,
         "panic_recovery_ratio_max": 0.20,
@@ -260,7 +260,7 @@ class TailEndCarryStrategy(BaseStrategy):
         max_probability = clamp(safe_float(cfg.get("max_probability"), 0.999), min_probability + 0.005, 0.999)
         min_upside_percent = clamp(safe_float(cfg.get("min_upside_percent"), 10.0), 10.0, 100.0)
         min_days = max(0.0, safe_float(cfg.get("min_days_to_resolution"), 0.01))
-        max_days = max(min_days + 0.005, safe_float(cfg.get("max_days_to_resolution"), 2.0))
+        max_days = max(min_days + 0.005, safe_float(cfg.get("max_days_to_resolution"), 1.0))
         min_liquidity = max(100.0, safe_float(cfg.get("min_liquidity"), 3500.0))
         max_spread = clamp(safe_float(cfg.get("max_spread"), 0.05), 0.005, 0.20)
         min_repricing_buffer = clamp(safe_float(cfg.get("min_repricing_buffer"), 0.015), 0.005, 0.10)
@@ -417,7 +417,7 @@ class TailEndCarryStrategy(BaseStrategy):
         max_entry = clamp(to_float(params.get("max_entry_price", 0.999), 0.999), min_entry, 0.999)
         min_upside_percent = clamp(to_float(params.get("min_upside_percent", 10.0), 10.0), 10.0, 100.0)
         min_days = max(0.0, to_float(params.get("min_days_to_resolution", 0.01), 0.01))
-        max_days = max(min_days + 0.005, to_float(params.get("max_days_to_resolution", 2.0), 2.0))
+        max_days = max(min_days + 0.005, to_float(params.get("max_days_to_resolution", 1.0), 1.0))
 
         excluded_keywords = self._normalize_excluded_keywords(
             params.get("exclude_market_keywords", self.config.get("exclude_market_keywords", ""))
@@ -493,7 +493,7 @@ class TailEndCarryStrategy(BaseStrategy):
         """Tail carry: edge*0.55 + conf*28 + entry*6 - risk*9 + time_bonus."""
         entry_price = float(payload.get("_entry_price", 0) or 0)
         dtr = payload.get("_dtr")
-        max_days = float(payload.get("_max_days", 7.0) or 7.0)
+        max_days = float(payload.get("_max_days", 1.0) or 1.0)
 
         score = (edge * 0.55) + (confidence * 28.0) + (entry_price * 6.0) - (risk_score * 9.0)
         if dtr is not None:

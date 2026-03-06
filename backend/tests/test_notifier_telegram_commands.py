@@ -24,6 +24,7 @@ async def test_handle_telegram_command_autotrader_on_dispatches_start(monkeypatc
     response = await notifier._handle_telegram_command(
         text="/autotrader on shadow",
         operator="telegram:test",
+        chat_id="12345",
     )
 
     assert response == "start-ok"
@@ -45,6 +46,7 @@ async def test_handle_telegram_command_autotrader_off_dispatches_stop(monkeypatc
     response = await notifier._handle_telegram_command(
         text="/autotrader off",
         operator="telegram:test",
+        chat_id="12345",
     )
 
     assert response == "stop-ok"
@@ -63,6 +65,7 @@ async def test_handle_telegram_command_on_alias_dispatches_start(monkeypatch):
     response = await notifier._handle_telegram_command(
         text="/on shadow",
         operator="telegram:test",
+        chat_id="12345",
     )
 
     assert response == "start-ok"
@@ -80,6 +83,7 @@ async def test_handle_telegram_command_autotrader_requires_valid_action():
     response = await notifier._handle_telegram_command(
         text="/autotrader maybe",
         operator="telegram:test",
+        chat_id="12345",
     )
 
     assert response == "Usage: `/autotrader on [shadow|live]` or `/autotrader off`\\."

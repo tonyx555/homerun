@@ -1371,6 +1371,7 @@ host all all ::1/128 trust
 
             Add-Content -Path (Join-Path $DataDir "postgresql.conf") -Value "listen_addresses = '$PgHost'"
             Add-Content -Path (Join-Path $DataDir "postgresql.conf") -Value "port = $Port"
+            Add-Content -Path (Join-Path $DataDir "postgresql.conf") -Value "max_connections = 200"
         } catch {
             return $false
         }

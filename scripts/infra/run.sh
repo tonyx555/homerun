@@ -369,6 +369,7 @@ HBA
         {
             echo "listen_addresses = '${POSTGRES_HOST}'"
             echo "port = ${POSTGRES_PORT}"
+            echo "max_connections = 200"
         } >> "$POSTGRES_DATA_DIR/postgresql.conf"
     fi
 

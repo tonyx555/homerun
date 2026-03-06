@@ -38,6 +38,7 @@ class OpportunityRecorder:
         # In-memory set of IDs already persisted in this process lifetime,
         # used to skip unnecessary DB round-trips on hot path.
         self._known_ids: set[str] = set()
+        self._known_ids_max_size: int = 50_000
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -105,6 +106,12 @@ class OpportunityRecorder:
 
                 if new_count:
                     await session.commit()
+
+                if len(self._known_ids) > self._known_ids_max_size:
+                    excess = len(self._known_ids) - self._known_ids_max_size // 2
+                    it = iter(self._known_ids)
+                    to_remove = [next(it) for _ in range(excess)]
+                    self._known_ids.difference_update(to_remove)
 
         except Exception:
             logger.error("Failed to record opportunities", exc_info=True)

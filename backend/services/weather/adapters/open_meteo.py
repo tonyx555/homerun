@@ -169,6 +169,16 @@ class OpenMeteoWeatherAdapter(WeatherModelAdapter):
         ] = {}
         self._model_inflight: dict[tuple[Any, ...], asyncio.Task[float]] = {}
         self._nws_inflight: dict[tuple[Any, ...], asyncio.Task[Optional[float]]] = {}
+        self._shared_client: httpx.AsyncClient | None = None
+
+    def _get_shared_client(self) -> httpx.AsyncClient:
+        if self._shared_client is None or self._shared_client.is_closed:
+            self._shared_client = httpx.AsyncClient(
+                timeout=self._timeout,
+                follow_redirects=True,
+                headers={"User-Agent": "homerun-weather-workflow/1.0"},
+            )
+        return self._shared_client
 
     def _get_cache_lock(self) -> asyncio.Lock:
         if self._cache_lock is None:
@@ -183,36 +193,31 @@ class OpenMeteoWeatherAdapter(WeatherModelAdapter):
 
     async def forecast_probability(self, contract: WeatherForecastInput) -> WeatherForecastResult:
         try:
-            headers = {"User-Agent": "homerun-weather-workflow/1.0"}
-            async with httpx.AsyncClient(
-                timeout=self._timeout,
-                follow_redirects=True,
-                headers=headers,
-            ) as client:
-                lat, lon, resolved_name, country_code, tz_name = await self._resolve_location(client, contract.location)
+            client = self._get_shared_client()
+            lat, lon, resolved_name, country_code, tz_name = await self._resolve_location(client, contract.location)
 
-                model_tasks = [
-                    self._fetch_model_value(
-                        client=client,
-                        lat=lat,
-                        lon=lon,
-                        target_time=contract.target_time,
-                        metric=contract.metric,
-                        model=model,
-                    )
-                    for model in OPEN_METEO_MODELS
-                ]
-                model_results = await asyncio.gather(*model_tasks, return_exceptions=True)
+            model_tasks = [
+                self._fetch_model_value(
+                    client=client,
+                    lat=lat,
+                    lon=lon,
+                    target_time=contract.target_time,
+                    metric=contract.metric,
+                    model=model,
+                )
+                for model in OPEN_METEO_MODELS
+            ]
+            model_results = await asyncio.gather(*model_tasks, return_exceptions=True)
 
-                nws_value_c: Optional[float] = None
-                if country_code and country_code.upper() in {"US", "USA", "PR"} and contract.metric.startswith("temp"):
-                    nws_value_c = await self._fetch_nws_temperature_c(
-                        client=client,
-                        lat=lat,
-                        lon=lon,
-                        target_time=contract.target_time,
-                        metric=contract.metric,
-                    )
+            nws_value_c: Optional[float] = None
+            if country_code and country_code.upper() in {"US", "USA", "PR"} and contract.metric.startswith("temp"):
+                nws_value_c = await self._fetch_nws_temperature_c(
+                    client=client,
+                    lat=lat,
+                    lon=lon,
+                    target_time=contract.target_time,
+                    metric=contract.metric,
+                )
 
             # Fetch ensemble members (non-blocking, degrades gracefully)
             ensemble_hourly, ensemble_daily_max = await self.fetch_ensemble_members(
@@ -668,94 +673,89 @@ class OpenMeteoWeatherAdapter(WeatherModelAdapter):
         - ensemble_daily_max: per-member daily max on target date (for temp_max contracts)
         """
         try:
-            headers = {"User-Agent": "homerun-weather-workflow/1.0"}
-            async with httpx.AsyncClient(
-                timeout=self._timeout,
-                follow_redirects=True,
-                headers=headers,
-            ) as client:
-                lat, lon, _, _, _ = await self._resolve_location(client, location)
-                target_utc = (
-                    target_time.astimezone(timezone.utc)
-                    if target_time.tzinfo is not None
-                    else target_time.replace(tzinfo=timezone.utc)
-                )
-                date_str = target_utc.strftime("%Y-%m-%d")
+            client = self._get_shared_client()
+            lat, lon, _, _, _ = await self._resolve_location(client, location)
+            target_utc = (
+                target_time.astimezone(timezone.utc)
+                if target_time.tzinfo is not None
+                else target_time.replace(tzinfo=timezone.utc)
+            )
+            date_str = target_utc.strftime("%Y-%m-%d")
 
-                params: dict[str, Any] = {
-                    "latitude": lat,
-                    "longitude": lon,
-                    "start_date": date_str,
-                    "end_date": date_str,
-                    "timezone": "UTC",
-                    "models": "gfs_ensemble_025",
-                    "hourly": "temperature_2m",
-                }
-                resp = await client.get(self.ENSEMBLE_URL, params=params)
-                resp.raise_for_status()
-                payload = resp.json() or {}
+            params: dict[str, Any] = {
+                "latitude": lat,
+                "longitude": lon,
+                "start_date": date_str,
+                "end_date": date_str,
+                "timezone": "UTC",
+                "models": "gfs_ensemble_025",
+                "hourly": "temperature_2m",
+            }
+            resp = await client.get(self.ENSEMBLE_URL, params=params)
+            resp.raise_for_status()
+            payload = resp.json() or {}
 
-                hourly = payload.get("hourly") or {}
-                times = hourly.get("time") or []
-                temp_data = hourly.get("temperature_2m") or []
+            hourly = payload.get("hourly") or {}
+            times = hourly.get("time") or []
+            temp_data = hourly.get("temperature_2m") or []
 
-                if not times or not temp_data:
-                    return [], []
+            if not times or not temp_data:
+                return [], []
 
-                # temp_data is a list of lists: one list per ensemble member,
-                # OR a flat list if only one member. The Open-Meteo ensemble API
-                # returns per-member arrays when multiple members exist.
-                # Detect structure: if first element is a list, it's member-based.
-                if temp_data and isinstance(temp_data[0], list):
-                    # Each element is a member's time series
-                    members = temp_data
-                else:
-                    # Flat array = single member (unusual, treat as 1 member)
-                    members = [temp_data]
+            # temp_data is a list of lists: one list per ensemble member,
+            # OR a flat list if only one member. The Open-Meteo ensemble API
+            # returns per-member arrays when multiple members exist.
+            # Detect structure: if first element is a list, it's member-based.
+            if temp_data and isinstance(temp_data[0], list):
+                # Each element is a member's time series
+                members = temp_data
+            else:
+                # Flat array = single member (unusual, treat as 1 member)
+                members = [temp_data]
 
-                # Find closest hour index to target time
-                target_epoch = int(target_utc.timestamp())
-                best_i = 0
-                best_diff = None
-                for i, ts in enumerate(times):
-                    try:
-                        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-                        diff = abs(int(dt.timestamp()) - target_epoch)
-                    except Exception:
-                        continue
-                    if best_diff is None or diff < best_diff:
-                        best_diff = diff
-                        best_i = i
+            # Find closest hour index to target time
+            target_epoch = int(target_utc.timestamp())
+            best_i = 0
+            best_diff = None
+            for i, ts in enumerate(times):
+                try:
+                    dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+                    diff = abs(int(dt.timestamp()) - target_epoch)
+                except Exception:
+                    continue
+                if best_diff is None or diff < best_diff:
+                    best_diff = diff
+                    best_i = i
 
-                # Extract per-member value at closest hour
-                ensemble_hourly: list[float] = []
+            # Extract per-member value at closest hour
+            ensemble_hourly: list[float] = []
+            for member_series in members:
+                if best_i < len(member_series) and member_series[best_i] is not None:
+                    ensemble_hourly.append(float(member_series[best_i]))
+
+            # Compute per-member daily max across all hours on target day
+            ensemble_daily_max: list[float] = []
+            target_date = target_utc.date()
+            day_indices: list[int] = []
+            for i, ts in enumerate(times):
+                try:
+                    dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+                    if dt.date() == target_date:
+                        day_indices.append(i)
+                except Exception:
+                    continue
+
+            if day_indices:
                 for member_series in members:
-                    if best_i < len(member_series) and member_series[best_i] is not None:
-                        ensemble_hourly.append(float(member_series[best_i]))
+                    day_vals = [
+                        float(member_series[i])
+                        for i in day_indices
+                        if i < len(member_series) and member_series[i] is not None
+                    ]
+                    if day_vals:
+                        ensemble_daily_max.append(max(day_vals))
 
-                # Compute per-member daily max across all hours on target day
-                ensemble_daily_max: list[float] = []
-                target_date = target_utc.date()
-                day_indices: list[int] = []
-                for i, ts in enumerate(times):
-                    try:
-                        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-                        if dt.date() == target_date:
-                            day_indices.append(i)
-                    except Exception:
-                        continue
-
-                if day_indices:
-                    for member_series in members:
-                        day_vals = [
-                            float(member_series[i])
-                            for i in day_indices
-                            if i < len(member_series) and member_series[i] is not None
-                        ]
-                        if day_vals:
-                            ensemble_daily_max.append(max(day_vals))
-
-                return ensemble_hourly, ensemble_daily_max
+            return ensemble_hourly, ensemble_daily_max
 
         except Exception:
             return [], []

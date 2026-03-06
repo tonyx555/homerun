@@ -34,7 +34,9 @@ class PolymarketClient:
         self._client: Optional[httpx.AsyncClient] = None
         self._trading_client: Optional[httpx.AsyncClient] = None  # Proxy-aware for trading
         self._market_cache: dict[str, dict] = {}  # condition_id -> {question, slug}
+        self._market_cache_max_size: int = 20_000
         self._username_cache: dict[str, str] = {}  # address (lowercase) -> username
+        self._username_cache_max_size: int = 10_000
         self._persistent_cache = None  # Lazy-loaded MarketCacheService
         self._closed_positions_warning_cooldown_until: float = 0.0
         self._network_error_last_log_at: float = 0.0
@@ -489,8 +491,23 @@ class PolymarketClient:
                 except Exception:
                     pass
 
+    def _trim_caches(self) -> None:
+        """Evict oldest entries when in-memory caches exceed their size caps."""
+        if len(self._market_cache) > self._market_cache_max_size:
+            # Keep the most recently added half -- dict preserves insertion order
+            excess = len(self._market_cache) - self._market_cache_max_size // 2
+            keys_to_drop = list(self._market_cache.keys())[:excess]
+            for k in keys_to_drop:
+                del self._market_cache[k]
+        if len(self._username_cache) > self._username_cache_max_size:
+            excess = len(self._username_cache) - self._username_cache_max_size // 2
+            keys_to_drop = list(self._username_cache.keys())[:excess]
+            for k in keys_to_drop:
+                del self._username_cache[k]
+
     async def get_market_by_condition_id(self, condition_id: str, **kwargs) -> Optional[dict]:
         """Look up a market by condition_id, using cache when available."""
+        self._trim_caches()
         requested = self._normalize_identifier(condition_id)
         force_refresh = bool(kwargs.get("force_refresh", False))
         if not force_refresh:

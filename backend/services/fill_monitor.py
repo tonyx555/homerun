@@ -87,7 +87,7 @@ class FillMonitor:
         )
         # Register with wallet WS monitor for real-time fill detection
         self._register_ws_monitor()
-        asyncio.create_task(self._poll_loop())
+        self._poll_task = asyncio.create_task(self._poll_loop())
 
     def _register_ws_monitor(self):
         """Hook into the wallet WS monitor so fills on our wallet are instant."""

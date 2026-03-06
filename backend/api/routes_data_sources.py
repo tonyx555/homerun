@@ -454,6 +454,8 @@ async def get_data_source_docs():
                 },
             },
             "helpers": {
+                "http_client": "Property returning a shared, connection-pooled httpx.AsyncClient (never closed per-call)",
+                "_http_session()": "Async context manager yielding the shared http_client (drop-in for 'async with httpx.AsyncClient(...) as client:')",
                 "_http_get_json": "async _http_get_json(url, params=None, headers=None, timeout=30.0, default=None)",
                 "_http_get_text": "async _http_get_text(url, params=None, headers=None, timeout=30.0, default='')",
                 "_fetch_rss": "async _fetch_rss(url, timeout=30.0) -> (feed_title, entries)",
@@ -693,14 +695,13 @@ async def get_data_source_docs():
             "async_http_source": {
                 "description": "Async fetch with transform normalization and geotagging.",
                 "source_code": (
-                    "import httpx\n"
                     "from services.data_source_sdk import BaseDataSource\n\n"
                     "class ApiFeedSource(BaseDataSource):\n"
                     "    name = 'API Feed Source'\n"
                     "    description = 'Fetches upstream feed and normalizes rows'\n"
                     "    default_config = {'url': 'https://example.com/feed', 'limit': 100}\n\n"
                     "    async def fetch_async(self):\n"
-                    "        async with httpx.AsyncClient(timeout=15.0) as client:\n"
+                    "        async with self._http_session() as client:\n"
                     "            response = await client.get(self.config['url'])\n"
                     "            response.raise_for_status()\n"
                     "            data = response.json()\n"

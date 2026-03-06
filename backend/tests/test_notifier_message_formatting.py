@@ -176,11 +176,16 @@ async def test_status_message_has_daily_and_realized_usd_breakdown(monkeypatch):
             }
         ),
     )
+    monkeypatch.setattr(
+        notifier_module,
+        "get_gross_exposure",
+        AsyncMock(return_value=500.0),
+    )
 
     message = await notifier._telegram_status_message()
     plain = message.replace("\\", "").replace("*", "")
 
-    assert "Daily: -$12.30" in plain
-    assert "24h Won: $20.00" in plain
-    assert "24h Lost: $8.50" in plain
-    assert "24h Net: +$11.50" in plain
+    assert "-$12.30" in plain
+    assert "$20.00" in plain
+    assert "$8.50" in plain
+    assert "+$11.50" in plain

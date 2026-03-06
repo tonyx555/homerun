@@ -21,16 +21,25 @@ from models.database import (
     TraderOrder,
     TraderOrchestratorControl,
     TraderOrchestratorSnapshot,
+    TraderPosition,
 )
 from services.pause_state import global_pause_state
 from services.trader_orchestrator_state import (
+    OPEN_ORDER_STATUSES,
     ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS,
     arm_live_start,
+    cleanup_trader_open_orders,
     consume_live_arm_token,
     create_live_preflight,
     create_trader_event,
+    get_daily_realized_pnl,
+    get_gross_exposure,
+    get_trader,
+    list_traders,
     read_orchestrator_control,
     read_orchestrator_snapshot,
+    set_trader_paused,
+    sync_trader_position_inventory,
     update_orchestrator_control,
     write_orchestrator_snapshot,
 )
@@ -52,6 +61,9 @@ CLOSE_ALERT_BATCH_LIMIT = 10
 TELEGRAM_UPDATE_DRAIN_LIMIT = 50
 REALIZED_ORDER_STATUSES = {"resolved_win", "resolved_loss", "closed_win", "closed_loss", "win", "loss"}
 ISSUE_ORDER_STATUSES = {"failed", "rejected", "cancelled", "error"}
+ACTIVE_POSITION_STATUS = "open"
+AI_CHAT_MAX_HISTORY = 20
+AI_CHAT_MAX_TOKENS = 1024
 
 
 def _escape_md(text: str) -> str:
@@ -114,6 +126,52 @@ def _compact_join(parts: list[str], *, max_items: int) -> str:
     if overflow > 0:
         selected.append(f"+{overflow} more")
     return " · ".join(selected)
+
+
+def _mono(text: str) -> str:
+    """Wrap text in monospace code block for Telegram MarkdownV2."""
+    return f"```\n{text}\n```"
+
+
+def _pad_right(text: str, width: int) -> str:
+    return text + " " * max(0, width - len(text))
+
+
+def _pad_left(text: str, width: int) -> str:
+    return " " * max(0, width - len(text)) + text
+
+
+def _build_table(headers: list[str], rows: list[list[str]], align: list[str] | None = None) -> str:
+    """Build a fixed-width text table for monospace display.
+
+    align: list of 'l' or 'r' per column. Defaults to left for all.
+    """
+    if not rows:
+        return "(empty)"
+    col_count = len(headers)
+    if align is None:
+        align = ["l"] * col_count
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row[:col_count]):
+            widths[i] = max(widths[i], len(cell))
+    separator = "+" + "+".join("-" * (w + 2) for w in widths) + "+"
+
+    def _fmt_row(cells: list[str]) -> str:
+        parts = []
+        for i, cell in enumerate(cells[:col_count]):
+            w = widths[i]
+            if i < len(align) and align[i] == "r":
+                parts.append(f" {_pad_left(cell, w)} ")
+            else:
+                parts.append(f" {_pad_right(cell, w)} ")
+        return "|" + "|".join(parts) + "|"
+
+    lines = [separator, _fmt_row(headers), separator]
+    for row in rows:
+        lines.append(_fmt_row(row))
+    lines.append(separator)
+    return "\n".join(lines)
 
 
 def _normalize_mode(value: Any) -> str:
@@ -182,6 +240,8 @@ class TelegramNotifier:
         self._telegram_update_offset: Optional[int] = None
         self._close_alert_markers: dict[str, str] = {}
         self._ws_alert_sent: bool = False
+
+        self._ai_chat_histories: dict[str, list[dict[str, str]]] = {}
 
     async def start(self) -> None:
         """Initialize notifier runtime and start background workers."""
@@ -1214,14 +1274,14 @@ class TelegramNotifier:
                 operator = f"telegram:{sender_id}"
 
         try:
-            response = await self._handle_telegram_command(text=text, operator=operator)
+            response = await self._handle_telegram_command(text=text, operator=operator, chat_id=chat_id)
         except Exception as exc:
             logger.error("Telegram command processing failed", exc_info=exc)
             response = "❌ Telegram command failed\\.\nPlease retry or check backend logs\\."
         if response:
             await self._enqueue(response)
 
-    async def _handle_telegram_command(self, *, text: str, operator: str) -> str:
+    async def _handle_telegram_command(self, *, text: str, operator: str, chat_id: str) -> str:
         stripped = str(text or "").strip()
         if not stripped:
             return ""
@@ -1273,6 +1333,49 @@ class TelegramNotifier:
             if toggle in {"off", "0", "false", "disable", "disabled"}:
                 return await self._telegram_set_kill_switch(enabled=False, operator=operator)
             return "Usage: `/killswitch on` or `/killswitch off`\\."
+        if command in {"/traders", "traders"}:
+            return await self._telegram_traders_message()
+        if command in {"/trader", "trader"}:
+            if not args:
+                return "Usage: `/trader <name or id>`"
+            return await self._telegram_trader_detail_message(query=" ".join(args))
+        if command in {"/orders", "orders"}:
+            limit_arg = args[0] if args else None
+            return await self._telegram_orders_message(limit_arg=limit_arg)
+        if command in {"/positions", "positions"}:
+            return await self._telegram_positions_message()
+        if command in {"/exposure", "exposure"}:
+            return await self._telegram_exposure_message()
+        if command in {"/pause"}:
+            if not args:
+                return "Usage: `/pause <trader name or id>`"
+            return await self._telegram_pause_trader(query=" ".join(args), operator=operator)
+        if command in {"/resume"}:
+            if not args:
+                return "Usage: `/resume <trader name or id>`"
+            return await self._telegram_resume_trader(query=" ".join(args), operator=operator)
+        if command in {"/close"}:
+            if not args:
+                return "Usage: `/close <trader name or id>` \\- closes all open positions for the trader"
+            return await self._telegram_close_trader_positions(query=" ".join(args), operator=operator)
+        if command in {"/sell", "/cancel"}:
+            if not args:
+                return "Usage: `/sell <order_id>` \\- cancel/close an open order"
+            return await self._telegram_sell_order(order_id=args[0], operator=operator)
+        if command in {"/ask", "ask"}:
+            if not args:
+                return "Usage: `/ask <question>` \\- ask AI about your traders and data"
+            return await self._telegram_ai_chat(
+                message=" ".join(args),
+                chat_id=chat_id,
+            )
+        if command in {"/clear"}:
+            self._ai_chat_histories.pop(chat_id, None)
+            return _escape_md("Chat history cleared.")
+
+        # If not a recognized command, route to AI chat
+        if not head.startswith("/"):
+            return await self._telegram_ai_chat(message=stripped, chat_id=chat_id)
 
         return "Unknown command\\.\nUse `/help` for available Telegram commands\\."
 
@@ -1291,12 +1394,31 @@ class TelegramNotifier:
             [
                 f"🤖 {_bold('Homerun Telegram Commands')}",
                 "",
-                "`/status` \\- show orchestrator state and core metrics",
-                "`/performance [hours]` \\- timeline summary for the last N hours \\(default 24\\)",
-                "`/autotrader on|off` \\- quick autotrader power toggle",
+                _bold("Status & Monitoring"),
+                "`/status` \\- orchestrator state and metrics",
+                "`/traders` \\- list all traders with status",
+                "`/trader <name>` \\- detailed trader view",
+                "`/orders [N]` \\- recent orders \\(default 10\\)",
+                "`/positions` \\- all open positions",
+                "`/exposure` \\- gross exposure breakdown",
+                "`/performance [hours]` \\- timeline summary \\(default 24h\\)",
+                "",
+                _bold("Orchestrator Control"),
                 "`/start [shadow|live]` \\- start autotrader",
                 "`/stop` \\- stop autotrader",
-                "`/killswitch on|off` \\- toggle orchestrator kill switch",
+                "`/autotrader on|off` \\- quick power toggle",
+                "`/killswitch on|off` \\- emergency kill switch",
+                "",
+                _bold("Trader Control"),
+                "`/pause <trader>` \\- pause a trader",
+                "`/resume <trader>` \\- resume a trader",
+                "`/close <trader>` \\- close all open positions",
+                "`/sell <order_id>` \\- cancel/close an order",
+                "",
+                _bold("AI Chat"),
+                "`/ask <question>` \\- ask AI about your data",
+                "Or just type a message to chat with AI",
+                "`/clear` \\- reset AI chat history",
             ]
         )
 
@@ -1318,6 +1440,7 @@ class TelegramNotifier:
                     .group_by(TraderOrder.status)
                 )
             ).all()
+            exposure = await get_gross_exposure(session)
 
         realized_won = 0.0
         realized_lost = 0.0
@@ -1342,18 +1465,23 @@ class TelegramNotifier:
         open_orders = int(snapshot.get("open_orders", 0) or 0)
         daily_pnl = float(snapshot.get("daily_pnl", 0.0) or 0.0)
         last_run = self._format_utc_timestamp(snapshot.get("last_run_at"))
-        updated_at = self._format_utc_timestamp(snapshot.get("updated_at"))
 
-        lines = [
-            f"📊 {_bold('Autotrader Status')} · {_escape_md(state)}\\/{_escape_md('running' if running else 'idle')} · {_escape_md(mode)}",
-            f"{_bold('Kill:')} {_escape_md('ON' if kill_switch else 'OFF')} · {_bold('Traders:')} {_escape_md(str(traders_running))}/{_escape_md(str(traders_total))}",
-            f"{_bold('Decisions:')} {_escape_md(str(decisions_count))} · {_bold('Orders:')} {_escape_md(str(orders_count))} \\({_escape_md(str(open_orders))} open\\)",
-            f"{_bold('Daily:')} {_escape_md(_format_signed_money(daily_pnl))} · {_bold('24h Won:')} {_escape_md(_format_money(realized_won))}",
-            f"{_bold('24h Lost:')} {_escape_md(_format_money(realized_lost))} · {_bold('24h Net:')} {_escape_md(_format_signed_money(realized_24h))}",
-            f"{_bold('Last Run:')} {_escape_md(last_run)}",
-            f"{_bold('Snapshot:')} {_escape_md(updated_at)}",
+        table_rows = [
+            ["State", f"{state} / {'running' if running else 'idle'}"],
+            ["Mode", mode],
+            ["Kill Switch", "ON" if kill_switch else "OFF"],
+            ["Traders", f"{traders_running}/{traders_total}"],
+            ["Decisions", str(decisions_count)],
+            ["Orders", f"{orders_count} ({open_orders} open)"],
+            ["Exposure", _format_money(exposure)],
+            ["Daily PnL", _format_signed_money(daily_pnl)],
+            ["24h Won", _format_money(realized_won)],
+            ["24h Lost", _format_money(realized_lost)],
+            ["24h Net", _format_signed_money(realized_24h)],
+            ["Last Run", last_run],
         ]
-        return "\n".join(lines)
+        table = _build_table(["Metric", "Value"], table_rows)
+        return f"📊 {_bold('Autotrader Status')}\n{_mono(table)}"
 
     async def _telegram_performance_message(self, *, hours_arg: Optional[str]) -> str:
         hours = _clamp_int(hours_arg, 1, 168, 24)
@@ -1521,6 +1649,547 @@ class TelegramNotifier:
         if enabled:
             return "⛔ Kill switch enabled\\."
         return "✅ Kill switch disabled\\."
+
+    async def _resolve_trader(self, session, query: str) -> tuple[str | None, str | None]:
+        """Resolve a trader by name substring or ID prefix. Returns (trader_id, trader_name) or (None, None)."""
+        q = query.strip().lower()
+        traders = await list_traders(session)
+        exact = [t for t in traders if t["name"].lower() == q or t["id"] == q]
+        if exact:
+            return exact[0]["id"], exact[0]["name"]
+        partial = [t for t in traders if q in t["name"].lower() or t["id"].startswith(q)]
+        if len(partial) == 1:
+            return partial[0]["id"], partial[0]["name"]
+        if len(partial) > 1:
+            return None, None
+        return None, None
+
+    async def _telegram_traders_message(self) -> str:
+        async with AsyncSessionLocal() as session:
+            traders = await list_traders(session)
+
+        if not traders:
+            return _escape_md("No traders configured.")
+
+        rows = []
+        for t in traders:
+            name = _truncate_text(t["name"], 18)
+            mode = t.get("mode", "?").upper()[:3]
+            enabled = "ON" if t.get("is_enabled") else "OFF"
+            paused = "PAUSED" if t.get("is_paused") else "ACTIVE"
+            status = f"{enabled}/{paused}"
+            interval = str(t.get("interval_seconds", "?")) + "s"
+            rows.append([name, mode, status, interval])
+
+        table = _build_table(["Name", "Mod", "Status", "Intv"], rows)
+        return f"📋 {_bold('Traders')}\n{_mono(table)}"
+
+    async def _telegram_trader_detail_message(self, *, query: str) -> str:
+        async with AsyncSessionLocal() as session:
+            trader_id, trader_name = await self._resolve_trader(session, query)
+            if trader_id is None:
+                traders = await list_traders(session)
+                partial = [t for t in traders if query.lower() in t["name"].lower()]
+                if len(partial) > 1:
+                    names = ", ".join(t["name"] for t in partial[:5])
+                    return f"Multiple traders match '{_escape_md(query)}': {_escape_md(names)}\\.\nBe more specific\\."
+                return f"Trader '{_escape_md(query)}' not found\\."
+
+            trader = await get_trader(session, trader_id)
+            if not trader:
+                return f"Trader '{_escape_md(query)}' not found\\."
+
+            daily_pnl = await get_daily_realized_pnl(session, trader_id=trader_id)
+
+            open_positions = (
+                await session.execute(
+                    select(func.count(TraderPosition.id))
+                    .where(
+                        TraderPosition.trader_id == trader_id,
+                        func.lower(func.coalesce(TraderPosition.status, "")) == ACTIVE_POSITION_STATUS,
+                    )
+                )
+            ).scalar() or 0
+
+            open_orders_count = (
+                await session.execute(
+                    select(func.count(TraderOrder.id))
+                    .where(
+                        TraderOrder.trader_id == trader_id,
+                        func.lower(func.coalesce(TraderOrder.status, "")).in_(tuple(OPEN_ORDER_STATUSES)),
+                    )
+                )
+            ).scalar() or 0
+
+            total_orders = (
+                await session.execute(
+                    select(func.count(TraderOrder.id))
+                    .where(TraderOrder.trader_id == trader_id)
+                )
+            ).scalar() or 0
+
+        enabled = "ON" if trader.get("is_enabled") else "OFF"
+        paused = "PAUSED" if trader.get("is_paused") else "ACTIVE"
+        mode = str(trader.get("mode", "shadow")).upper()
+        interval = trader.get("interval_seconds", "?")
+        last_run = self._format_utc_timestamp(trader.get("last_run_at"))
+        risk = trader.get("risk_limits", {})
+
+        detail_rows = [
+            ["Status", f"{enabled} / {paused}"],
+            ["Mode", mode],
+            ["Interval", f"{interval}s"],
+            ["Open Positions", str(open_positions)],
+            ["Open Orders", str(open_orders_count)],
+            ["Total Orders", str(total_orders)],
+            ["Daily PnL", _format_signed_money(daily_pnl)],
+            ["Last Run", last_run],
+        ]
+        if risk.get("max_daily_loss_usd"):
+            detail_rows.append(["Max Daily Loss", _format_money(risk["max_daily_loss_usd"])])
+        if risk.get("max_trade_notional_usd"):
+            detail_rows.append(["Max Notional", _format_money(risk["max_trade_notional_usd"])])
+
+        table = _build_table(["Field", "Value"], detail_rows)
+        return f"🔍 {_bold(_escape_md(trader.get('name', trader_id)))}\n{_mono(table)}"
+
+    async def _telegram_orders_message(self, *, limit_arg: str | None) -> str:
+        limit = _clamp_int(limit_arg, 1, 30, 10)
+        async with AsyncSessionLocal() as session:
+            rows = (
+                await session.execute(
+                    select(TraderOrder)
+                    .order_by(TraderOrder.created_at.desc())
+                    .limit(limit)
+                )
+            ).scalars().all()
+
+            if not rows:
+                return _escape_md("No orders found.")
+
+            trader_ids = {str(r.trader_id) for r in rows if r.trader_id}
+            names = await self._load_trader_name_map(session, trader_ids)
+
+        table_rows = []
+        for r in rows:
+            trader = _truncate_text(names.get(str(r.trader_id), str(r.trader_id)[:8] if r.trader_id else "?"), 10)
+            status = str(r.status or "?").upper()[:8]
+            market = _truncate_text(r.market_question or r.market_id or "?", 22)
+            notional = _format_money(float(r.notional_usd or 0))
+            pnl = _format_signed_money(float(r.actual_profit or 0)) if r.actual_profit is not None else "-"
+            oid = str(r.id)[:8]
+            table_rows.append([oid, trader, status, notional, pnl, market])
+
+        table = _build_table(
+            ["ID", "Trader", "Status", "Notional", "PnL", "Market"],
+            table_rows,
+            align=["l", "l", "l", "r", "r", "l"],
+        )
+        return f"📋 {_bold(f'Recent Orders ({len(rows)})')}\n{_mono(table)}"
+
+    async def _telegram_positions_message(self) -> str:
+        async with AsyncSessionLocal() as session:
+            positions = (
+                await session.execute(
+                    select(TraderPosition)
+                    .where(func.lower(func.coalesce(TraderPosition.status, "")) == ACTIVE_POSITION_STATUS)
+                    .order_by(TraderPosition.total_notional_usd.desc())
+                    .limit(30)
+                )
+            ).scalars().all()
+
+            if not positions:
+                return _escape_md("No open positions.")
+
+            trader_ids = {str(p.trader_id) for p in positions if p.trader_id}
+            names = await self._load_trader_name_map(session, trader_ids)
+
+        table_rows = []
+        total_notional = 0.0
+        for p in positions:
+            trader = _truncate_text(names.get(str(p.trader_id), str(p.trader_id)[:8] if p.trader_id else "?"), 10)
+            market = _truncate_text(p.market_question or p.market_id or "?", 24)
+            direction = str(p.direction or "?").upper()[:6]
+            mode = str(p.mode or "?").upper()[:3]
+            notional = _format_money(float(p.total_notional_usd or 0))
+            total_notional += float(p.total_notional_usd or 0)
+            orders = str(p.open_order_count or 0)
+            table_rows.append([trader, direction, mode, notional, orders, market])
+
+        table = _build_table(
+            ["Trader", "Dir", "Mod", "Notional", "#", "Market"],
+            table_rows,
+            align=["l", "l", "l", "r", "r", "l"],
+        )
+        footer = f"Total: {_format_money(total_notional)} across {len(positions)} positions"
+        return f"📊 {_bold('Open Positions')}\n{_mono(table)}\n{_escape_md(footer)}"
+
+    async def _telegram_exposure_message(self) -> str:
+        async with AsyncSessionLocal() as session:
+            total_exposure = await get_gross_exposure(session)
+            shadow_exposure = await get_gross_exposure(session, mode="shadow")
+            live_exposure = await get_gross_exposure(session, mode="live")
+            daily_pnl = await get_daily_realized_pnl(session)
+
+            trader_exposure_rows = (
+                await session.execute(
+                    select(
+                        TraderOrder.trader_id,
+                        func.coalesce(func.sum(TraderOrder.notional_usd), 0.0),
+                        func.count(TraderOrder.id),
+                    )
+                    .where(func.lower(func.coalesce(TraderOrder.status, "")).in_(tuple(OPEN_ORDER_STATUSES)))
+                    .group_by(TraderOrder.trader_id)
+                    .order_by(func.coalesce(func.sum(TraderOrder.notional_usd), 0.0).desc())
+                    .limit(15)
+                )
+            ).all()
+
+            trader_ids = {str(r[0]) for r in trader_exposure_rows if r[0]}
+            names = await self._load_trader_name_map(session, trader_ids)
+
+        summary_rows = [
+            ["Total Exposure", _format_money(total_exposure)],
+            ["Shadow", _format_money(shadow_exposure)],
+            ["Live", _format_money(live_exposure)],
+            ["Daily PnL", _format_signed_money(daily_pnl)],
+        ]
+        summary = _build_table(["Metric", "Value"], summary_rows)
+
+        if trader_exposure_rows:
+            per_trader_rows = []
+            for r in trader_exposure_rows:
+                name = _truncate_text(names.get(str(r[0]), str(r[0])[:8] if r[0] else "?"), 16)
+                exp = _format_money(float(r[1] or 0))
+                count = str(int(r[2] or 0))
+                per_trader_rows.append([name, exp, count])
+            per_trader = _build_table(["Trader", "Exposure", "Orders"], per_trader_rows, align=["l", "r", "r"])
+            return f"💰 {_bold('Exposure')}\n{_mono(summary)}\n{_bold('Per Trader')}\n{_mono(per_trader)}"
+
+        return f"💰 {_bold('Exposure')}\n{_mono(summary)}"
+
+    async def _telegram_pause_trader(self, *, query: str, operator: str) -> str:
+        async with AsyncSessionLocal() as session:
+            trader_id, trader_name = await self._resolve_trader(session, query)
+            if trader_id is None:
+                return f"Trader '{_escape_md(query)}' not found or ambiguous\\."
+            result = await set_trader_paused(session, trader_id, True)
+            if result is None:
+                return f"Trader '{_escape_md(query)}' not found\\."
+            await create_trader_event(
+                session,
+                trader_id=trader_id,
+                event_type="trader_paused",
+                source="telegram",
+                operator=operator,
+                message=f"Trader paused via Telegram",
+            )
+        return f"⏸️ Trader '{_escape_md(trader_name or query)}' paused\\."
+
+    async def _telegram_resume_trader(self, *, query: str, operator: str) -> str:
+        async with AsyncSessionLocal() as session:
+            trader_id, trader_name = await self._resolve_trader(session, query)
+            if trader_id is None:
+                return f"Trader '{_escape_md(query)}' not found or ambiguous\\."
+            result = await set_trader_paused(session, trader_id, False)
+            if result is None:
+                return f"Trader '{_escape_md(query)}' not found\\."
+            await create_trader_event(
+                session,
+                trader_id=trader_id,
+                event_type="trader_resumed",
+                source="telegram",
+                operator=operator,
+                message=f"Trader resumed via Telegram",
+            )
+        return f"▶️ Trader '{_escape_md(trader_name or query)}' resumed\\."
+
+    async def _telegram_close_trader_positions(self, *, query: str, operator: str) -> str:
+        async with AsyncSessionLocal() as session:
+            trader_id, trader_name = await self._resolve_trader(session, query)
+            if trader_id is None:
+                return f"Trader '{_escape_md(query)}' not found or ambiguous\\."
+
+            result = await cleanup_trader_open_orders(
+                session,
+                trader_id=trader_id,
+                scope="all",
+                target_status="cancelled",
+                reason="closed via Telegram",
+            )
+            updated = int(result.get("updated", 0))
+            matched = int(result.get("matched", 0))
+            by_mode = result.get("by_mode", {})
+            await sync_trader_position_inventory(session, trader_id=trader_id)
+            await create_trader_event(
+                session,
+                trader_id=trader_id,
+                event_type="trader_positions_cleanup",
+                severity="warn",
+                source="telegram",
+                operator=operator,
+                message=f"All positions closed via Telegram: {updated}/{matched}",
+                payload=result,
+            )
+
+        mode_detail = ""
+        shadow_count = int(by_mode.get("shadow", 0))
+        live_count = int(by_mode.get("live", 0))
+        if shadow_count or live_count:
+            mode_detail = f"\nShadow: {_escape_md(str(shadow_count))} · Live: {_escape_md(str(live_count))}"
+
+        return (
+            f"🗑️ Trader '{_escape_md(trader_name or query)}'\n"
+            f"Matched: {_escape_md(str(matched))} · Closed: {_escape_md(str(updated))}"
+            f"{mode_detail}"
+        )
+
+    async def _telegram_sell_order(self, *, order_id: str, operator: str) -> str:
+        oid = order_id.strip()
+        async with AsyncSessionLocal() as session:
+            # Try exact match first, then prefix match
+            order = (
+                await session.execute(
+                    select(TraderOrder).where(TraderOrder.id == oid)
+                )
+            ).scalar_one_or_none()
+
+            if order is None:
+                candidates = (
+                    await session.execute(
+                        select(TraderOrder)
+                        .where(TraderOrder.id.startswith(oid))
+                        .limit(5)
+                    )
+                ).scalars().all()
+                if len(candidates) == 1:
+                    order = candidates[0]
+                elif len(candidates) > 1:
+                    ids = ", ".join(str(c.id)[:12] for c in candidates)
+                    return f"Ambiguous order ID\\. Matches: {_escape_md(ids)}"
+                else:
+                    return f"Order '{_escape_md(oid)}' not found\\."
+
+            current_status = str(order.status or "").lower()
+            if current_status not in OPEN_ORDER_STATUSES:
+                return f"Order {_escape_md(str(order.id)[:12])} is already {_escape_md(current_status.upper())}\\. Cannot close\\."
+
+            order_mode = _normalize_mode(order.mode)
+            provider_cancelled = False
+
+            # For live orders, attempt provider-side cancel first
+            if order_mode == "live":
+                payload = order.payload_json if isinstance(order.payload_json, dict) else {}
+                cancel_targets = []
+                clob_id = str(payload.get("provider_clob_order_id") or "").strip()
+                prov_id = str(payload.get("provider_order_id") or "").strip()
+                if clob_id:
+                    cancel_targets.append(clob_id)
+                if prov_id and prov_id not in cancel_targets:
+                    cancel_targets.append(prov_id)
+                if cancel_targets:
+                    try:
+                        from services.trader_orchestrator.order_manager import cancel_live_provider_order
+                        for target in cancel_targets:
+                            if await cancel_live_provider_order(target):
+                                provider_cancelled = True
+                                break
+                    except Exception as exc:
+                        logger.warning("Provider cancel failed for order", order_id=order.id, exc_info=exc)
+
+            order.status = "cancelled"
+            order.reason = f"Cancelled via Telegram by {operator}"
+            order.updated_at = utcnow().replace(tzinfo=None)
+            await session.commit()
+
+            trader_name = "?"
+            if order.trader_id:
+                names = await self._load_trader_name_map(session, {str(order.trader_id)})
+                trader_name = names.get(str(order.trader_id), str(order.trader_id)[:8])
+
+            market = _truncate_text(order.market_question or order.market_id or "?", 40)
+
+            await create_trader_event(
+                session,
+                trader_id=order.trader_id,
+                event_type="order_cancelled",
+                source="telegram",
+                operator=operator,
+                message=f"Order {order.id} cancelled via Telegram",
+                payload={
+                    "order_id": order.id,
+                    "mode": order_mode,
+                    "provider_cancelled": provider_cancelled,
+                },
+            )
+
+        provider_note = ""
+        if order_mode == "live":
+            provider_note = f"\n{_bold('Provider:')} {_escape_md('cancelled' if provider_cancelled else 'cancel failed — check manually')}"
+
+        return (
+            f"✅ Order cancelled\n"
+            f"{_bold('ID:')} {_escape_md(str(order.id)[:12])}\n"
+            f"{_bold('Trader:')} {_escape_md(trader_name)}\n"
+            f"{_bold('Mode:')} {_escape_md(order_mode.upper())}\n"
+            f"{_bold('Market:')} {_escape_md(market)}"
+            f"{provider_note}"
+        )
+
+    async def _telegram_ai_chat(self, *, message: str, chat_id: str) -> str:
+        try:
+            from services.ai import get_llm_manager
+            from services.ai.llm_provider import LLMMessage
+        except Exception:
+            return _escape_md("AI is not available. Check AI provider configuration.")
+
+        try:
+            manager = get_llm_manager()
+        except Exception:
+            return _escape_md("AI is not initialized. Check AI provider configuration.")
+
+        if not manager.is_available():
+            return _escape_md("No AI provider configured. Set up an API key in Settings.")
+
+        context_text = await self._build_ai_context()
+
+        system_prompt = (
+            "You are the Homerun AI assistant, accessible via Telegram. Homerun is a prediction market "
+            "arbitrage platform that scans Polymarket and Kalshi for mispricings.\n\n"
+            "You have access to the current system state below. Answer the user's questions about traders, "
+            "positions, orders, P&L, and strategy performance. Be concise — your responses will be displayed "
+            "on a small mobile screen. Use short sentences and bullet points. Do NOT use markdown formatting "
+            "like bold, italic, or links — just plain text. Numbers should use $ signs and commas. "
+            "Keep responses under 600 characters when possible.\n\n"
+            f"=== CURRENT SYSTEM STATE ===\n{context_text}"
+        )
+
+        history = self._ai_chat_histories.get(chat_id, [])
+        messages = [LLMMessage(role="system", content=system_prompt)]
+        for msg in history[-AI_CHAT_MAX_HISTORY:]:
+            messages.append(LLMMessage(role=msg["role"], content=msg["content"]))
+        messages.append(LLMMessage(role="user", content=message))
+
+        try:
+            response = await manager.chat(
+                messages=messages,
+                max_tokens=AI_CHAT_MAX_TOKENS,
+                purpose="telegram_chat",
+            )
+        except Exception as exc:
+            logger.error("AI chat failed", exc_info=exc)
+            return _escape_md("AI request failed. Please try again.")
+
+        answer = response.content.strip()
+        if not answer:
+            return _escape_md("AI returned an empty response.")
+
+        if chat_id not in self._ai_chat_histories:
+            self._ai_chat_histories[chat_id] = []
+        self._ai_chat_histories[chat_id].append({"role": "user", "content": message})
+        self._ai_chat_histories[chat_id].append({"role": "assistant", "content": answer})
+
+        # Keep history bounded
+        if len(self._ai_chat_histories[chat_id]) > AI_CHAT_MAX_HISTORY * 2:
+            self._ai_chat_histories[chat_id] = self._ai_chat_histories[chat_id][-AI_CHAT_MAX_HISTORY * 2:]
+
+        return _escape_md(answer)
+
+    async def _build_ai_context(self) -> str:
+        """Build a text summary of the current system state for AI context."""
+        parts = []
+        try:
+            async with AsyncSessionLocal() as session:
+                control = await read_orchestrator_control(session)
+                snapshot = await read_orchestrator_snapshot(session)
+
+                enabled = bool(control.get("is_enabled", False))
+                paused = bool(control.get("is_paused", True))
+                state = "ACTIVE" if enabled and not paused else "PAUSED"
+                mode = str(control.get("mode", "shadow")).upper()
+                kill_switch = bool(control.get("kill_switch", False))
+                traders_running = int(snapshot.get("traders_running", 0) or 0)
+                traders_total = int(snapshot.get("traders_total", 0) or 0)
+                daily_pnl = float(snapshot.get("daily_pnl", 0.0) or 0.0)
+                open_orders_snap = int(snapshot.get("open_orders", 0) or 0)
+
+                parts.append(
+                    f"Orchestrator: {state}, Mode: {mode}, Kill Switch: {'ON' if kill_switch else 'OFF'}, "
+                    f"Traders: {traders_running}/{traders_total}, Daily PnL: {_format_signed_money(daily_pnl)}, "
+                    f"Open Orders: {open_orders_snap}"
+                )
+
+                traders = await list_traders(session)
+                if traders:
+                    trader_lines = []
+                    for t in traders:
+                        t_enabled = "ON" if t.get("is_enabled") else "OFF"
+                        t_paused = "PAUSED" if t.get("is_paused") else "ACTIVE"
+                        t_mode = str(t.get("mode", "?")).upper()
+                        t_interval = t.get("interval_seconds", "?")
+                        trader_lines.append(
+                            f"  - {t['name']} (ID: {t['id'][:12]}): {t_enabled}/{t_paused}, "
+                            f"Mode: {t_mode}, Interval: {t_interval}s"
+                        )
+                    parts.append("Traders:\n" + "\n".join(trader_lines))
+
+                exposure = await get_gross_exposure(session)
+                daily_realized = await get_daily_realized_pnl(session)
+                parts.append(f"Gross Exposure: {_format_money(exposure)}, Daily Realized PnL: {_format_signed_money(daily_realized)}")
+
+                positions = (
+                    await session.execute(
+                        select(TraderPosition)
+                        .where(func.lower(func.coalesce(TraderPosition.status, "")) == ACTIVE_POSITION_STATUS)
+                        .order_by(TraderPosition.total_notional_usd.desc())
+                        .limit(20)
+                    )
+                ).scalars().all()
+
+                if positions:
+                    trader_ids = {str(p.trader_id) for p in positions if p.trader_id}
+                    names = await self._load_trader_name_map(session, trader_ids)
+                    pos_lines = []
+                    for p in positions:
+                        tname = names.get(str(p.trader_id), str(p.trader_id)[:8] if p.trader_id else "?")
+                        mkt = _truncate_text(p.market_question or p.market_id or "?", 50)
+                        pos_lines.append(
+                            f"  - {tname}: {str(p.direction or '?').upper()} on \"{mkt}\", "
+                            f"Notional: {_format_money(float(p.total_notional_usd or 0))}, "
+                            f"Mode: {str(p.mode or '?').upper()}, Orders: {p.open_order_count or 0}"
+                        )
+                    parts.append(f"Open Positions ({len(positions)}):\n" + "\n".join(pos_lines))
+                else:
+                    parts.append("Open Positions: None")
+
+                recent_orders = (
+                    await session.execute(
+                        select(TraderOrder)
+                        .order_by(TraderOrder.created_at.desc())
+                        .limit(10)
+                    )
+                ).scalars().all()
+
+                if recent_orders:
+                    order_trader_ids = {str(r.trader_id) for r in recent_orders if r.trader_id}
+                    order_names = await self._load_trader_name_map(session, order_trader_ids)
+                    order_lines = []
+                    for r in recent_orders:
+                        tname = order_names.get(str(r.trader_id), str(r.trader_id)[:8] if r.trader_id else "?")
+                        mkt = _truncate_text(r.market_question or r.market_id or "?", 40)
+                        pnl_str = _format_signed_money(float(r.actual_profit)) if r.actual_profit is not None else "pending"
+                        created = _to_utc(r.created_at).strftime("%H:%M") if r.created_at else "?"
+                        order_lines.append(
+                            f"  - [{str(r.id)[:8]}] {tname}: {str(r.status or '?').upper()}, "
+                            f"${float(r.notional_usd or 0):,.2f}, PnL: {pnl_str}, Market: \"{mkt}\", At: {created}"
+                        )
+                    parts.append(f"Recent Orders ({len(recent_orders)}):\n" + "\n".join(order_lines))
+
+        except Exception as exc:
+            logger.error("Failed to build AI context", exc_info=exc)
+            parts.append("(Error loading system state)")
+
+        return "\n\n".join(parts)
 
     def _can_send_now(self) -> bool:
         now = time.monotonic()

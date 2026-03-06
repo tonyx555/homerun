@@ -391,15 +391,12 @@ def _ensure_startup_terminal_size() -> None:
         return
     if sys.platform == "win32":
         if os.environ.get("WT_SESSION"):
-            # Windows Terminal manages its own window size.  MoveWindow
-            # targets the hidden conhost handle and inflating the buffer
-            # beyond the visible area breaks rendering.  Sync the console
-            # buffer to the actual visible size so they match exactly.
-            try:
-                current = shutil.get_terminal_size(fallback=(80, 24))
-                _resize_windows_console(current.columns, current.lines)
-            except Exception:
-                pass
+            # Windows Terminal manages its own window size; do nothing.
+            # Running ``mode con:`` here would resize the console buffer
+            # *before* Textual opens its alt screen, which can desync
+            # the buffer dimensions from the actual viewport and cause
+            # the initial render to use wrong sizes.  The post-mount
+            # _force_windows_resize cascade handles correct sizing.
             return
         # Classic cmd.exe / PowerShell console host: MoveWindow positions the
         # physical window; mode-con resizes both buffer and window.
@@ -1259,40 +1256,34 @@ class HomerunApp(App):
         self.set_interval(LOG_FLUSH_MS / 1000.0, self._flush_log_buffer)
         # Check scroll state less frequently (not on_idle which fires constantly)
         self.set_interval(0.5, self._check_scroll_follow)
-        # Windows: after Textual starts, inject a synthetic resize event
-        # into the console input buffer.  This goes through the exact same
-        # path as a manual resize (EventMonitor → Resize → Screen relayout).
+        # Windows: Textual's Windows driver never sends an initial Resize event
+        # (the Linux driver does via send_size_event()).  The first render uses
+        # dimensions from Rich's Console.size fallback which can be wrong
+        # (reports buffer height, not viewport height).  Fire a cascade of
+        # forced resizes to ensure the layout converges on the real viewport
+        # size once the widget tree is fully composed.
         if sys.platform == "win32":
-            self.set_timer(0.3, self._inject_windows_resize_event)
+            for delay in (0.1, 0.3, 0.8):
+                self.set_timer(delay, self._force_windows_resize)
 
-    def _inject_windows_resize_event(self) -> None:
-        """Inject a WINDOW_BUFFER_SIZE_EVENT into the console input buffer.
+    def _force_windows_resize(self) -> None:
+        """Read the real console viewport size and force a layout refresh.
 
-        On Windows, Textual's initial render can use stale dimensions
-        because:
-          1. ``mode con:`` ran before ``app.run()`` and the alt screen
-             buffer may have initialised with different dimensions.
-          2. ``enable_application_mode()`` stripped ``ENABLE_WINDOW_INPUT``
-             so no resize event was delivered (we monkey-patch it back,
-             but the initial render still has the wrong size).
+        Textual's Windows driver never sends an initial Resize event
+        (unlike the Linux driver which calls send_size_event() at start).
+        The first render falls back to Rich's Console.size which can
+        return the screen *buffer* height instead of the visible *viewport*
+        height, causing a wildly wrong layout.
 
-        Injecting a real ``WINDOW_BUFFER_SIZE_EVENT`` via ``WriteConsoleInputW``
-        makes Textual's ``EventMonitor`` thread see it on the next poll
-        iteration — exactly the same code-path as a manual resize.
+        This reads the actual viewport rectangle via
+        GetConsoleScreenBufferInfo.srWindow, sets App._size directly,
+        and triggers a full layout refresh.
         """
         try:
-            import ctypes
-            import ctypes.wintypes
+            from textual.geometry import Size as TextualSize
 
             kernel32 = ctypes.windll.kernel32
 
-            kernel32.GetStdHandle.restype = ctypes.wintypes.HANDLE
-            kernel32.GetStdHandle.argtypes = [ctypes.wintypes.DWORD]
-
-            hOut = kernel32.GetStdHandle(-11 & 0xFFFFFFFF)  # STD_OUTPUT_HANDLE
-            hIn = kernel32.GetStdHandle(-10 & 0xFFFFFFFF)   # STD_INPUT_HANDLE
-
-            # --- Read actual viewport size from the console ---
             class COORD(ctypes.Structure):
                 _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
 
@@ -1313,6 +1304,10 @@ class HomerunApp(App):
                     ("dwMaximumWindowSize", COORD),
                 ]
 
+            kernel32.GetStdHandle.restype = ctypes.wintypes.HANDLE
+            kernel32.GetStdHandle.argtypes = [ctypes.wintypes.DWORD]
+            hOut = kernel32.GetStdHandle(-11 & 0xFFFFFFFF)  # STD_OUTPUT_HANDLE
+
             csbi = CONSOLE_SCREEN_BUFFER_INFO()
             if not kernel32.GetConsoleScreenBufferInfo(hOut, ctypes.byref(csbi)):
                 return
@@ -1320,47 +1315,16 @@ class HomerunApp(App):
             width = csbi.srWindow.Right - csbi.srWindow.Left + 1
             height = csbi.srWindow.Bottom - csbi.srWindow.Top + 1
 
-            # --- Also ensure ENABLE_WINDOW_INPUT is set (belt-and-suspenders) ---
-            mode = ctypes.wintypes.DWORD()
-            kernel32.GetConsoleMode(hIn, ctypes.byref(mode))
-            if not (mode.value & 0x0008):  # ENABLE_WINDOW_INPUT
-                kernel32.SetConsoleMode(hIn, mode.value | 0x0008)
+            if width < 10 or height < 5:
+                return
 
-            # --- Build an INPUT_RECORD with WINDOW_BUFFER_SIZE_EVENT ---
-            WINDOW_BUFFER_SIZE_EVENT = 0x0004
+            size = TextualSize(width, height)
+            if self._size == size:
+                return
 
-            class WINDOW_BUFFER_SIZE_RECORD(ctypes.Structure):
-                _fields_ = [("dwSize", COORD)]
-
-            class _EventUnion(ctypes.Union):
-                _fields_ = [
-                    ("WindowBufferSizeEvent", WINDOW_BUFFER_SIZE_RECORD),
-                    ("_padding", ctypes.c_byte * 16),
-                ]
-
-            class INPUT_RECORD(ctypes.Structure):
-                _fields_ = [
-                    ("EventType", ctypes.wintypes.WORD),
-                    ("Event", _EventUnion),
-                ]
-
-            record = INPUT_RECORD()
-            record.EventType = WINDOW_BUFFER_SIZE_EVENT
-            record.Event.WindowBufferSizeEvent.dwSize.X = width
-            record.Event.WindowBufferSizeEvent.dwSize.Y = height
-
-            kernel32.WriteConsoleInputW.restype = ctypes.wintypes.BOOL
-            kernel32.WriteConsoleInputW.argtypes = [
-                ctypes.wintypes.HANDLE,
-                ctypes.c_void_p,
-                ctypes.wintypes.DWORD,
-                ctypes.POINTER(ctypes.wintypes.DWORD),
-            ]
-
-            written = ctypes.wintypes.DWORD(0)
-            kernel32.WriteConsoleInputW(
-                hIn, ctypes.byref(record), 1, ctypes.byref(written)
-            )
+            self._size = size
+            self.screen._screen_resized(size)
+            self.refresh(layout=True)
         except Exception:
             pass
 
@@ -2733,6 +2697,51 @@ def main() -> None:
             return restore
 
         _tw32.enable_application_mode = _patched_enable_application_mode
+
+        # ------------------------------------------------------------------
+        # Monkey-patch EventMonitor.on_size_change to read the viewport
+        # dimensions from GetConsoleScreenBufferInfo.srWindow instead of
+        # trusting WINDOW_BUFFER_SIZE_RECORD.dwSize.  The dwSize field
+        # reports the *buffer* dimensions which can differ from the visible
+        # viewport (e.g., when a scrollback buffer is taller than the window).
+        # ------------------------------------------------------------------
+        _OriginalEventMonitor = _tw32.EventMonitor
+
+        class _PatchedEventMonitor(_OriginalEventMonitor):
+            def on_size_change(self, width: int, height: int) -> None:
+                try:
+                    import ctypes as _ct
+                    import ctypes.wintypes as _wt
+
+                    class _COORD(_ct.Structure):
+                        _fields_ = [("X", _ct.c_short), ("Y", _ct.c_short)]
+
+                    class _SMALL_RECT(_ct.Structure):
+                        _fields_ = [
+                            ("Left", _ct.c_short), ("Top", _ct.c_short),
+                            ("Right", _ct.c_short), ("Bottom", _ct.c_short),
+                        ]
+
+                    class _CSBI(_ct.Structure):
+                        _fields_ = [
+                            ("dwSize", _COORD), ("dwCursorPosition", _COORD),
+                            ("wAttributes", _ct.c_ushort), ("srWindow", _SMALL_RECT),
+                            ("dwMaximumWindowSize", _COORD),
+                        ]
+
+                    k32 = _ct.windll.kernel32
+                    k32.GetStdHandle.restype = _wt.HANDLE
+                    k32.GetStdHandle.argtypes = [_wt.DWORD]
+                    h = k32.GetStdHandle(0xFFFFFFF5)  # STD_OUTPUT_HANDLE
+                    csbi = _CSBI()
+                    if k32.GetConsoleScreenBufferInfo(h, _ct.byref(csbi)):
+                        width = csbi.srWindow.Right - csbi.srWindow.Left + 1
+                        height = csbi.srWindow.Bottom - csbi.srWindow.Top + 1
+                except Exception:
+                    pass
+                super().on_size_change(width, height)
+
+        _tw32.EventMonitor = _PatchedEventMonitor
 
     app = HomerunApp()
     app.run()

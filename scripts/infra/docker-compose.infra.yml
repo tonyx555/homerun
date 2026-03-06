@@ -9,6 +9,7 @@ services:
   postgres:
     image: ${POSTGRES_IMAGE:-postgres:16-alpine}
     container_name: ${POSTGRES_CONTAINER_NAME:-homerun-postgres}
+    command: ["postgres", "-c", "max_connections=200"]
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-homerun}
       POSTGRES_USER: ${POSTGRES_USER:-homerun}

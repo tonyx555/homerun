@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from utils.utcnow import utcnow, utcfromtimestamp
 from typing import Any, Optional
 
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, or_, update as sa_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from models.database import (
@@ -715,6 +715,7 @@ class SmartWalletPoolService:
         """
         safe_limit = max(1, int(limit))
 
+        # --- Phase 1: read signals (short DB session) ---
         async with AsyncSessionLocal() as session:
             result = await session.execute(
                 select(MarketConfluenceSignal)
@@ -726,122 +727,135 @@ class SmartWalletPoolService:
                 .limit(max(safe_limit * 6, safe_limit + 50))
             )
             raw = list(result.scalars().all())
-            deduped: list[MarketConfluenceSignal] = []
-            seen_keys: set[str] = set()
-            for signal in raw:
-                market_id = str(signal.market_id or "").strip().lower()
-                outcome = str(signal.outcome or "").strip().upper()
-                if not market_id:
-                    continue
-                dedupe_key = f"{market_id}|{outcome}"
-                if dedupe_key in seen_keys:
-                    continue
-                seen_keys.add(dedupe_key)
-                deduped.append(signal)
+            # Expunge so objects are usable after session closes
+            for obj in raw:
+                session.expunge(obj)
 
-            signals = list(deduped)
-            if signals:
-                await self._refresh_signal_market_metadata(session=session, signals=signals)
+        deduped: list[MarketConfluenceSignal] = []
+        seen_keys: set[str] = set()
+        for signal in raw:
+            market_id = str(signal.market_id or "").strip().lower()
+            outcome = str(signal.outcome or "").strip().upper()
+            if not market_id:
+                continue
+            dedupe_key = f"{market_id}|{outcome}"
+            if dedupe_key in seen_keys:
+                continue
+            seen_keys.add(dedupe_key)
+            deduped.append(signal)
 
-            addresses = {addr.lower() for s in signals for addr in (s.wallets or []) if isinstance(addr, str)}
-            profiles: dict[str, dict[str, Any]] = {}
-            for address_chunk in _iter_chunks(list(addresses)):
-                profile_rows = await session.execute(
-                    select(DiscoveredWallet).where(DiscoveredWallet.address.in_(address_chunk))
-                )
-                for w in profile_rows.scalars().all():
-                    profiles[w.address] = {
-                        "address": w.address,
-                        "username": w.username,
-                        "rank_score": w.rank_score or 0.0,
-                        "composite_score": w.composite_score or 0.0,
-                        "quality_score": w.quality_score or 0.0,
-                        "activity_score": w.activity_score or 0.0,
-                    }
+        signals = list(deduped)
 
-            question_market_ids: dict[str, set[str]] = {}
-            for s in signals:
-                question_norm = str(s.market_question or "").strip().lower()
-                market_id_norm = str(s.market_id or "").strip().lower()
-                if question_norm and market_id_norm:
-                    question_market_ids.setdefault(question_norm, set()).add(market_id_norm)
+        # --- Phase 2: HTTP metadata refresh (no session held; method manages its own) ---
+        if signals:
+            await self._refresh_signal_market_metadata(signals=signals)
 
-            output: list[dict] = []
-            unknown_tier_rows = 0
-            known_tiers = {"watch", "low", "medium", "mid", "high", "extreme"}
-            for s in signals:
-                top_wallets = []
-                for address in (s.wallets or [])[:8]:
-                    profile = profiles.get(address.lower())
-                    if profile:
-                        top_wallets.append(profile)
+        # --- Phase 3: read wallet profiles (short DB session) ---
+        addresses = {addr.lower() for s in signals for addr in (s.wallets or []) if isinstance(addr, str)}
+        profiles: dict[str, dict[str, Any]] = {}
+        if addresses:
+            async with AsyncSessionLocal() as session:
+                for address_chunk in _iter_chunks(list(addresses)):
+                    profile_rows = await session.execute(
+                        select(DiscoveredWallet).where(DiscoveredWallet.address.in_(address_chunk))
+                    )
+                    for w in profile_rows.scalars().all():
+                        profiles[w.address] = {
+                            "address": w.address,
+                            "username": w.username,
+                            "rank_score": w.rank_score or 0.0,
+                            "composite_score": w.composite_score or 0.0,
+                            "quality_score": w.quality_score or 0.0,
+                            "activity_score": w.activity_score or 0.0,
+                        }
 
-                market_question = str(s.market_question or "").strip()
-                question_norm = market_question.lower()
-                distinct_market_count = len(question_market_ids.get(question_norm, set()))
-                if market_question and distinct_market_count >= SIGNAL_DUPLICATE_QUESTION_THRESHOLD:
-                    market_question = f"Market {s.market_id}"
-                if not market_question:
-                    market_question = f"Market {s.market_id}"
+        question_market_ids: dict[str, set[str]] = {}
+        for s in signals:
+            question_norm = str(s.market_question or "").strip().lower()
+            market_id_norm = str(s.market_id or "").strip().lower()
+            if question_norm and market_id_norm:
+                question_market_ids.setdefault(question_norm, set()).add(market_id_norm)
 
-                tier_raw = str(s.tier or "").strip().lower()
-                if tier_raw and tier_raw not in known_tiers:
-                    unknown_tier_rows += 1
-                tier = StrategySDK.normalize_trader_tier(s.tier, default="low")
+        output: list[dict] = []
+        unknown_tier_rows = 0
+        known_tiers = {"watch", "low", "medium", "mid", "high", "extreme"}
+        for s in signals:
+            top_wallets = []
+            for address in (s.wallets or [])[:8]:
+                profile = profiles.get(address.lower())
+                if profile:
+                    top_wallets.append(profile)
 
-                output.append(
-                    {
-                        "id": s.id,
-                        "market_id": s.market_id,
-                        "market_question": market_question,
-                        "market_slug": s.market_slug,
-                        "signal_type": s.signal_type,
-                        "outcome": s.outcome,
-                        "tier": tier,
-                        "tier_raw": s.tier,
-                        "conviction_score": s.conviction_score or 0.0,
-                        "strength": s.strength or 0.0,
-                        "wallet_count": s.wallet_count or 0,
-                        "cluster_adjusted_wallet_count": s.cluster_adjusted_wallet_count or 0,
-                        "unique_core_wallets": s.unique_core_wallets or 0,
-                        "weighted_wallet_score": s.weighted_wallet_score or 0.0,
-                        "window_minutes": s.window_minutes or 60,
-                        "avg_entry_price": s.avg_entry_price,
-                        "total_size": s.total_size,
-                        "net_notional": s.net_notional,
-                        "conflicting_notional": s.conflicting_notional,
-                        "market_liquidity": s.market_liquidity,
-                        "market_volume_24h": s.market_volume_24h,
-                        "first_seen_at": s.first_seen_at.isoformat() if s.first_seen_at else None,
-                        "last_seen_at": s.last_seen_at.isoformat() if s.last_seen_at else None,
-                        "detected_at": (
-                            s.detected_at.isoformat()
-                            if s.detected_at
-                            else (s.last_seen_at.isoformat() if s.last_seen_at else utcnow().isoformat())
-                        ),
-                        "is_active": bool(s.is_active),
-                        "is_tradeable": bool(s.is_active),
-                        "wallets": s.wallets or [],
-                        "top_wallets": top_wallets,
-                    }
-                )
-            for row in output:
-                row["side"] = StrategySDK.infer_trader_side(row)
+            market_question = str(s.market_question or "").strip()
+            question_norm = market_question.lower()
+            distinct_market_count = len(question_market_ids.get(question_norm, set()))
+            if market_question and distinct_market_count >= SIGNAL_DUPLICATE_QUESTION_THRESHOLD:
+                market_question = f"Market {s.market_id}"
+            if not market_question:
+                market_question = f"Market {s.market_id}"
 
-            self._stats["firehose_rows_raw"] = len(raw)
-            self._stats["firehose_rows_deduped"] = len(signals)
-            self._stats["firehose_rows_normalized"] = len(output)
-            self._stats["firehose_rows_unknown_tier"] = int(unknown_tier_rows)
+            tier_raw = str(s.tier or "").strip().lower()
+            if tier_raw and tier_raw not in known_tiers:
+                unknown_tier_rows += 1
+            tier = StrategySDK.normalize_trader_tier(s.tier, default="low")
+
+            output.append(
+                {
+                    "id": s.id,
+                    "market_id": s.market_id,
+                    "market_question": market_question,
+                    "market_slug": s.market_slug,
+                    "signal_type": s.signal_type,
+                    "outcome": s.outcome,
+                    "tier": tier,
+                    "tier_raw": s.tier,
+                    "conviction_score": s.conviction_score or 0.0,
+                    "strength": s.strength or 0.0,
+                    "wallet_count": s.wallet_count or 0,
+                    "cluster_adjusted_wallet_count": s.cluster_adjusted_wallet_count or 0,
+                    "unique_core_wallets": s.unique_core_wallets or 0,
+                    "weighted_wallet_score": s.weighted_wallet_score or 0.0,
+                    "window_minutes": s.window_minutes or 60,
+                    "avg_entry_price": s.avg_entry_price,
+                    "total_size": s.total_size,
+                    "net_notional": s.net_notional,
+                    "conflicting_notional": s.conflicting_notional,
+                    "market_liquidity": s.market_liquidity,
+                    "market_volume_24h": s.market_volume_24h,
+                    "first_seen_at": s.first_seen_at.isoformat() if s.first_seen_at else None,
+                    "last_seen_at": s.last_seen_at.isoformat() if s.last_seen_at else None,
+                    "detected_at": (
+                        s.detected_at.isoformat()
+                        if s.detected_at
+                        else (s.last_seen_at.isoformat() if s.last_seen_at else utcnow().isoformat())
+                    ),
+                    "is_active": bool(s.is_active),
+                    "is_tradeable": bool(s.is_active),
+                    "wallets": s.wallets or [],
+                    "top_wallets": top_wallets,
+                }
+            )
+        for row in output:
+            row["side"] = StrategySDK.infer_trader_side(row)
+
+        self._stats["firehose_rows_raw"] = len(raw)
+        self._stats["firehose_rows_deduped"] = len(signals)
+        self._stats["firehose_rows_normalized"] = len(output)
+        self._stats["firehose_rows_unknown_tier"] = int(unknown_tier_rows)
 
         return output[:safe_limit]
 
     async def _refresh_signal_market_metadata(
         self,
         *,
-        session,
         signals: list[MarketConfluenceSignal],
     ) -> int:
-        """Refresh suspect signal market metadata to self-heal stale DB rows."""
+        """Refresh suspect signal market metadata to self-heal stale DB rows.
+
+        This method makes HTTP calls to the Polymarket API, so it must NOT
+        be called inside an open DB session.  It opens its own short-lived
+        session only for the final commit of updated rows.
+        """
         if not signals:
             return 0
 
@@ -876,7 +890,8 @@ class SmartWalletPoolService:
         if not candidates:
             return 0
 
-        updated = 0
+        # Collect updates from HTTP calls (no DB session held)
+        updates: list[tuple[str, dict]] = []  # (signal_id, {field: value})
         for signal in candidates:
             market_id = str(signal.market_id or "")
             question_before = str(signal.market_question or "").strip()
@@ -894,28 +909,33 @@ class SmartWalletPoolService:
 
             if not info:
                 if duplicate_question and (signal.market_question is not None or signal.market_slug is not None):
-                    # Clear obviously poisoned metadata so fallback rendering can kick in.
-                    signal.market_question = None
-                    signal.market_slug = None
-                    updated += 1
+                    updates.append((signal.id, {"market_question": None, "market_slug": None}))
                 continue
 
             new_question = str(info.get("question") or "").strip()
             new_slug = str(info.get("event_slug") or info.get("slug") or "").strip()
-            changed = False
+            patch: dict = {}
             if new_question and new_question != str(signal.market_question or "").strip():
-                signal.market_question = new_question
-                changed = True
+                patch["market_question"] = new_question
             if new_slug and new_slug != str(signal.market_slug or "").strip():
-                signal.market_slug = new_slug
-                changed = True
-            if changed:
-                updated += 1
+                patch["market_slug"] = new_slug
+            if patch:
+                updates.append((signal.id, patch))
 
-        if updated:
+        if not updates:
+            return 0
+
+        # Apply updates in a short-lived DB session
+        async with AsyncSessionLocal() as session:
+            for signal_id, patch in updates:
+                await session.execute(
+                    sa_update(MarketConfluenceSignal)
+                    .where(MarketConfluenceSignal.id == signal_id)
+                    .values(**patch)
+                )
             await session.commit()
-            logger.info("Refreshed stale confluence market metadata", signals_updated=updated)
-        return updated
+        logger.info("Refreshed stale confluence market metadata", signals_updated=len(updates))
+        return len(updates)
 
     # ------------------------------------------------------------------
     # Candidate collection
@@ -1451,12 +1471,19 @@ class SmartWalletPoolService:
             return inserted_total
 
     def _trim_activity_cache(self, now: datetime):
-        if len(self._activity_cache) < 50_000:
+        if len(self._activity_cache) < 10_000:
             return
         cutoff = now - timedelta(hours=24)
         stale = [k for k, t in self._activity_cache.items() if t < cutoff]
         for key in stale:
             self._activity_cache.pop(key, None)
+
+        # Also prune the signal market refresh tracker
+        if len(self._signal_market_refresh_at) > 5_000:
+            refresh_cutoff = now - timedelta(hours=12)
+            stale_refresh = [k for k, t in self._signal_market_refresh_at.items() if t < refresh_cutoff]
+            for key in stale_refresh:
+                self._signal_market_refresh_at.pop(key, None)
 
     async def _refresh_metrics_and_apply_pool(self, now: datetime) -> float:
         cutoff_1h = now - timedelta(hours=1)
@@ -1516,6 +1543,25 @@ class SmartWalletPoolService:
         tier_hint: dict[str, str] = {}
         eligibility_blockers: dict[str, list[dict[str, str]]] = {}
         eligible_addresses: set[str] = set()
+
+        # Snapshot mutable fields before computation so we can detect
+        # which wallets actually changed and avoid merging unchanged rows.
+        # This prevents ~33K dead tuples per recompute cycle.
+        _snapshots: dict[str, tuple] = {}
+        for wallet in wallets:
+            _snapshots[wallet.address] = (
+                wallet.trades_1h,
+                wallet.trades_24h,
+                wallet.unique_markets_24h,
+                wallet.last_trade_at,
+                wallet.quality_score,
+                wallet.activity_score,
+                wallet.stability_score,
+                wallet.composite_score,
+                wallet.in_top_pool,
+                wallet.pool_tier,
+                wallet.pool_membership_reason,
+            )
 
         for wallet in wallets:
             row_24 = map_24h.get(wallet.address, {})
@@ -1795,7 +1841,7 @@ class SmartWalletPoolService:
                 status = "eligible"
             if wallet.in_top_pool:
                 status = "eligible"
-            source_flags[POOL_SELECTION_META_KEY] = {
+            new_meta = {
                 "version": POOL_SELECTION_META_VERSION,
                 "quality_gate_version": QUALITY_GATE_VERSION,
                 "recompute_mode": self._recompute_mode,
@@ -1829,15 +1875,63 @@ class SmartWalletPoolService:
                     if wallet.last_trade_at
                     else None
                 ),
-                "updated_at": now.isoformat(),
             }
+            # Compare new meta against old (excluding updated_at which changes every run).
+            old_meta = source_flags.get(POOL_SELECTION_META_KEY, {})
+            old_meta_comparable = {k: v for k, v in old_meta.items() if k != "updated_at"} if isinstance(old_meta, dict) else {}
+            if new_meta != old_meta_comparable:
+                new_meta["updated_at"] = now.isoformat()
+            else:
+                # Preserve old updated_at when nothing meaningful changed.
+                new_meta["updated_at"] = old_meta.get("updated_at", now.isoformat())
+            source_flags[POOL_SELECTION_META_KEY] = new_meta
             wallet.source_flags = source_flags
 
-        # -- Phase 3: Write modified wallets back (short-lived session) --
-        async with AsyncSessionLocal() as session:
-            for wallet in wallets:
-                await session.merge(wallet)
-            await session.commit()
+        # -- Phase 3: Write only dirty wallets back (short-lived session) --
+        # We know meta changed if updated_at was freshly stamped (== now).
+        now_iso = now.isoformat()
+        dirty_wallets: list[DiscoveredWallet] = []
+        for wallet in wallets:
+            snap = _snapshots.get(wallet.address)
+            if snap is None:
+                dirty_wallets.append(wallet)
+                continue
+            current = (
+                wallet.trades_1h,
+                wallet.trades_24h,
+                wallet.unique_markets_24h,
+                wallet.last_trade_at,
+                wallet.quality_score,
+                wallet.activity_score,
+                wallet.stability_score,
+                wallet.composite_score,
+                wallet.in_top_pool,
+                wallet.pool_tier,
+                wallet.pool_membership_reason,
+            )
+            if current != snap:
+                dirty_wallets.append(wallet)
+                continue
+            # source_flags meta: if updated_at was freshly stamped, the meta changed.
+            meta = (wallet.source_flags or {}).get(POOL_SELECTION_META_KEY, {})
+            if meta.get("updated_at") == now_iso:
+                dirty_wallets.append(wallet)
+
+        MERGE_BATCH_SIZE = 200
+        for i in range(0, len(dirty_wallets), MERGE_BATCH_SIZE):
+            batch = dirty_wallets[i : i + MERGE_BATCH_SIZE]
+            async with AsyncSessionLocal() as session:
+                for wallet in batch:
+                    await session.merge(wallet)
+                await session.commit()
+
+        if len(dirty_wallets) < len(wallets):
+            logger.info(
+                "Pool recompute dirty-write optimization",
+                total_wallets=len(wallets),
+                dirty_wallets=len(dirty_wallets),
+                skipped=len(wallets) - len(dirty_wallets),
+            )
 
         await self._sync_ws_membership(final_pool)
         return churn_rate

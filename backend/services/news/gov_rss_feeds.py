@@ -21,6 +21,19 @@ logger = logging.getLogger(__name__)
 _HTTP_TIMEOUT = 15
 _USER_AGENT = "Mozilla/5.0 (compatible; Homerun/2.0)"
 
+_shared_http_client: httpx.AsyncClient | None = None
+
+
+def _get_shared_http_client() -> httpx.AsyncClient:
+    global _shared_http_client
+    if _shared_http_client is None or _shared_http_client.is_closed:
+        _shared_http_client = httpx.AsyncClient(
+            timeout=_HTTP_TIMEOUT,
+            follow_redirects=True,
+            headers={"User-Agent": _USER_AGENT},
+        )
+    return _shared_http_client
+
 
 @dataclass
 class GovArticle:
@@ -167,63 +180,59 @@ class GovRSSFeedService:
         country_iso3 = str(feed_info.get("country_iso3") or "USA").strip().upper()
 
         try:
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-                resp = await client.get(
-                    url,
-                    headers={"User-Agent": _USER_AGENT},
-                    follow_redirects=True,
+            client = _get_shared_http_client()
+            resp = await client.get(url)
+            if resp.status_code != 200:
+                self._failed_feeds += 1
+                self._last_errors.append(f"{name}: HTTP {resp.status_code}")
+                return []
+
+            root = ElementTree.fromstring(resp.text)
+            articles: list[GovArticle] = []
+
+            items = root.findall(".//item")
+            if not items:
+                items = root.findall(".//{http://www.w3.org/2005/Atom}entry")
+
+            for item in items[:20]:
+                title = (
+                    item.findtext("title", "").strip()
+                    or item.findtext("{http://www.w3.org/2005/Atom}title", "").strip()
                 )
-                if resp.status_code != 200:
-                    self._failed_feeds += 1
-                    self._last_errors.append(f"{name}: HTTP {resp.status_code}")
-                    return []
+                link = item.findtext("link", "").strip()
+                if not link:
+                    atom_link = item.find("{http://www.w3.org/2005/Atom}link")
+                    if atom_link is not None:
+                        link = atom_link.get("href", "")
+                pub_date = (
+                    item.findtext("pubDate", "").strip()
+                    or item.findtext("{http://www.w3.org/2005/Atom}published", "").strip()
+                    or item.findtext("{http://www.w3.org/2005/Atom}updated", "").strip()
+                )
+                description = (
+                    item.findtext("description", "").strip()
+                    or item.findtext("{http://www.w3.org/2005/Atom}summary", "").strip()
+                )
 
-                root = ElementTree.fromstring(resp.text)
-                articles: list[GovArticle] = []
+                if not link or not title:
+                    continue
 
-                items = root.findall(".//item")
-                if not items:
-                    items = root.findall(".//{http://www.w3.org/2005/Atom}entry")
-
-                for item in items[:20]:
-                    title = (
-                        item.findtext("title", "").strip()
-                        or item.findtext("{http://www.w3.org/2005/Atom}title", "").strip()
+                article_id = hashlib.sha256(link.encode()).hexdigest()[:16]
+                articles.append(
+                    GovArticle(
+                        article_id=article_id,
+                        title=title,
+                        url=link,
+                        source=name,
+                        agency=agency,
+                        priority=priority,
+                        country_iso3=country_iso3,
+                        published=_parse_date(pub_date),
+                        summary=_strip_html(description)[:500] if description else "",
                     )
-                    link = item.findtext("link", "").strip()
-                    if not link:
-                        atom_link = item.find("{http://www.w3.org/2005/Atom}link")
-                        if atom_link is not None:
-                            link = atom_link.get("href", "")
-                    pub_date = (
-                        item.findtext("pubDate", "").strip()
-                        or item.findtext("{http://www.w3.org/2005/Atom}published", "").strip()
-                        or item.findtext("{http://www.w3.org/2005/Atom}updated", "").strip()
-                    )
-                    description = (
-                        item.findtext("description", "").strip()
-                        or item.findtext("{http://www.w3.org/2005/Atom}summary", "").strip()
-                    )
+                )
 
-                    if not link or not title:
-                        continue
-
-                    article_id = hashlib.sha256(link.encode()).hexdigest()[:16]
-                    articles.append(
-                        GovArticle(
-                            article_id=article_id,
-                            title=title,
-                            url=link,
-                            source=name,
-                            agency=agency,
-                            priority=priority,
-                            country_iso3=country_iso3,
-                            published=_parse_date(pub_date),
-                            summary=_strip_html(description)[:500] if description else "",
-                        )
-                    )
-
-                return articles
+            return articles
 
         except Exception as exc:
             logger.debug("RSS fetch failed for '%s' (%s): %s", name, url, exc)

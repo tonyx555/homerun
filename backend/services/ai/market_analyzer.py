@@ -37,6 +37,22 @@ CLOB_API_URL = "https://clob.polymarket.com"
 
 _HTTP_TIMEOUT = 15  # seconds
 
+# ---------------------------------------------------------------------------
+# Shared HTTP client (connection-pooled, reused across calls)
+# ---------------------------------------------------------------------------
+
+_shared_http_client: httpx.AsyncClient | None = None
+
+
+def _get_shared_http_client() -> httpx.AsyncClient:
+    global _shared_http_client
+    if _shared_http_client is None or _shared_http_client.is_closed:
+        _shared_http_client = httpx.AsyncClient(
+            timeout=_HTTP_TIMEOUT,
+            follow_redirects=True,
+        )
+    return _shared_http_client
+
 
 # ---------------------------------------------------------------------------
 # Lazy imports for sibling modules that may not exist yet
@@ -316,53 +332,53 @@ class MarketAnalyzer:
         """Fetch market details from the Polymarket Gamma API."""
         try:
             market_id = args["market_id"]
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-                resp = await client.get(
-                    f"{GAMMA_API_URL}/markets/{market_id}",
+            client = _get_shared_http_client()
+            resp = await client.get(
+                f"{GAMMA_API_URL}/markets/{market_id}",
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return {
+                    "question": data.get("question", ""),
+                    "description": data.get("description", ""),
+                    "resolution_source": data.get("resolutionSource", ""),
+                    "end_date": data.get("endDate", ""),
+                    "outcomes": data.get("outcomes", []),
+                    "outcome_prices": data.get("outcomePrices", []),
+                    "volume": data.get("volume", 0),
+                    "liquidity": data.get("liquidity", 0),
+                    "active": data.get("active", False),
+                    "closed": data.get("closed", False),
+                    "condition_id": data.get("conditionId", ""),
+                    "slug": data.get("slug", ""),
+                }
+
+            # Market ID might be a condition_id; search by that instead
+            if resp.status_code == 404:
+                resp2 = await client.get(
+                    f"{GAMMA_API_URL}/markets",
+                    params={"condition_id": market_id, "limit": 1},
                 )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    return {
-                        "question": data.get("question", ""),
-                        "description": data.get("description", ""),
-                        "resolution_source": data.get("resolutionSource", ""),
-                        "end_date": data.get("endDate", ""),
-                        "outcomes": data.get("outcomes", []),
-                        "outcome_prices": data.get("outcomePrices", []),
-                        "volume": data.get("volume", 0),
-                        "liquidity": data.get("liquidity", 0),
-                        "active": data.get("active", False),
-                        "closed": data.get("closed", False),
-                        "condition_id": data.get("conditionId", ""),
-                        "slug": data.get("slug", ""),
-                    }
+                if resp2.status_code == 200:
+                    results = resp2.json()
+                    if results:
+                        data = results[0]
+                        return {
+                            "question": data.get("question", ""),
+                            "description": data.get("description", ""),
+                            "resolution_source": data.get("resolutionSource", ""),
+                            "end_date": data.get("endDate", ""),
+                            "outcomes": data.get("outcomes", []),
+                            "outcome_prices": data.get("outcomePrices", []),
+                            "volume": data.get("volume", 0),
+                            "liquidity": data.get("liquidity", 0),
+                            "active": data.get("active", False),
+                            "closed": data.get("closed", False),
+                            "condition_id": data.get("conditionId", ""),
+                            "slug": data.get("slug", ""),
+                        }
 
-                # Market ID might be a condition_id; search by that instead
-                if resp.status_code == 404:
-                    resp2 = await client.get(
-                        f"{GAMMA_API_URL}/markets",
-                        params={"condition_id": market_id, "limit": 1},
-                    )
-                    if resp2.status_code == 200:
-                        results = resp2.json()
-                        if results:
-                            data = results[0]
-                            return {
-                                "question": data.get("question", ""),
-                                "description": data.get("description", ""),
-                                "resolution_source": data.get("resolutionSource", ""),
-                                "end_date": data.get("endDate", ""),
-                                "outcomes": data.get("outcomes", []),
-                                "outcome_prices": data.get("outcomePrices", []),
-                                "volume": data.get("volume", 0),
-                                "liquidity": data.get("liquidity", 0),
-                                "active": data.get("active", False),
-                                "closed": data.get("closed", False),
-                                "condition_id": data.get("conditionId", ""),
-                                "slug": data.get("slug", ""),
-                            }
-
-                return {"error": f"Market not found (HTTP {resp.status_code})"}
+            return {"error": f"Market not found (HTTP {resp.status_code})"}
 
         except Exception as exc:
             logger.error("get_market_details failed: %s", exc)
@@ -418,48 +434,48 @@ class MarketAnalyzer:
         """Check order book depth via the Polymarket CLOB API."""
         try:
             token_id = args["token_id"]
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-                resp = await client.get(
-                    f"{CLOB_API_URL}/book",
-                    params={"token_id": token_id},
-                )
-                if resp.status_code != 200:
-                    return {"error": f"Order book request failed (HTTP {resp.status_code})"}
+            client = _get_shared_http_client()
+            resp = await client.get(
+                f"{CLOB_API_URL}/book",
+                params={"token_id": token_id},
+            )
+            if resp.status_code != 200:
+                return {"error": f"Order book request failed (HTTP {resp.status_code})"}
 
-                book = resp.json()
-                bids = book.get("bids", [])
-                asks = book.get("asks", [])
+            book = resp.json()
+            bids = book.get("bids", [])
+            asks = book.get("asks", [])
 
-                # Parse and summarize the order book
-                bid_levels = [
-                    {"price": float(b["price"]), "size": float(b["size"])}
-                    for b in bids[:10]  # Top 10 levels
-                ]
-                ask_levels = [{"price": float(a["price"]), "size": float(a["size"])} for a in asks[:10]]
+            # Parse and summarize the order book
+            bid_levels = [
+                {"price": float(b["price"]), "size": float(b["size"])}
+                for b in bids[:10]  # Top 10 levels
+            ]
+            ask_levels = [{"price": float(a["price"]), "size": float(a["size"])} for a in asks[:10]]
 
-                # Calculate key metrics
-                best_bid = max((b["price"] for b in bid_levels), default=0.0)
-                best_ask = min((a["price"] for a in ask_levels), default=1.0)
-                spread = best_ask - best_bid if best_ask > best_bid else 0.0
-                mid_price = (best_bid + best_ask) / 2 if (best_bid + best_ask) > 0 else 0.0
+            # Calculate key metrics
+            best_bid = max((b["price"] for b in bid_levels), default=0.0)
+            best_ask = min((a["price"] for a in ask_levels), default=1.0)
+            spread = best_ask - best_bid if best_ask > best_bid else 0.0
+            mid_price = (best_bid + best_ask) / 2 if (best_bid + best_ask) > 0 else 0.0
 
-                total_bid_liquidity = sum(b["price"] * b["size"] for b in bid_levels)
-                total_ask_liquidity = sum(a["price"] * a["size"] for a in ask_levels)
+            total_bid_liquidity = sum(b["price"] * b["size"] for b in bid_levels)
+            total_ask_liquidity = sum(a["price"] * a["size"] for a in ask_levels)
 
-                return {
-                    "token_id": token_id,
-                    "best_bid": best_bid,
-                    "best_ask": best_ask,
-                    "spread": round(spread, 4),
-                    "spread_percent": round(spread / mid_price * 100, 2) if mid_price > 0 else 0.0,
-                    "mid_price": round(mid_price, 4),
-                    "bid_levels": bid_levels[:5],  # Return top 5 for context
-                    "ask_levels": ask_levels[:5],
-                    "total_bid_liquidity_usd": round(total_bid_liquidity, 2),
-                    "total_ask_liquidity_usd": round(total_ask_liquidity, 2),
-                    "bid_depth": len(bids),
-                    "ask_depth": len(asks),
-                }
+            return {
+                "token_id": token_id,
+                "best_bid": best_bid,
+                "best_ask": best_ask,
+                "spread": round(spread, 4),
+                "spread_percent": round(spread / mid_price * 100, 2) if mid_price > 0 else 0.0,
+                "mid_price": round(mid_price, 4),
+                "bid_levels": bid_levels[:5],  # Return top 5 for context
+                "ask_levels": ask_levels[:5],
+                "total_bid_liquidity_usd": round(total_bid_liquidity, 2),
+                "total_ask_liquidity_usd": round(total_ask_liquidity, 2),
+                "bid_depth": len(bids),
+                "ask_depth": len(asks),
+            }
 
         except Exception as exc:
             logger.error("check_orderbook failed: %s", exc)
@@ -473,57 +489,57 @@ class MarketAnalyzer:
 
             results: list[dict] = []
 
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-                # Strategy 1: Look up markets by event ID
-                if event_id:
-                    resp = await client.get(
-                        f"{GAMMA_API_URL}/markets",
-                        params={"event_id": event_id, "limit": 20},
-                    )
-                    if resp.status_code == 200:
-                        for m in resp.json():
-                            results.append(
-                                {
-                                    "condition_id": m.get("conditionId", ""),
-                                    "question": m.get("question", ""),
-                                    "outcome_prices": m.get("outcomePrices", []),
-                                    "volume": m.get("volume", 0),
-                                    "liquidity": m.get("liquidity", 0),
-                                    "active": m.get("active", False),
-                                    "slug": m.get("slug", ""),
-                                }
-                            )
+            client = _get_shared_http_client()
+            # Strategy 1: Look up markets by event ID
+            if event_id:
+                resp = await client.get(
+                    f"{GAMMA_API_URL}/markets",
+                    params={"event_id": event_id, "limit": 20},
+                )
+                if resp.status_code == 200:
+                    for m in resp.json():
+                        results.append(
+                            {
+                                "condition_id": m.get("conditionId", ""),
+                                "question": m.get("question", ""),
+                                "outcome_prices": m.get("outcomePrices", []),
+                                "volume": m.get("volume", 0),
+                                "liquidity": m.get("liquidity", 0),
+                                "active": m.get("active", False),
+                                "slug": m.get("slug", ""),
+                            }
+                        )
 
-                # Strategy 2: Text search for related markets
-                if search_query:
-                    resp = await client.get(
-                        f"{GAMMA_API_URL}/markets",
-                        params={
-                            "active": "true",
-                            "closed": "false",
-                            "limit": 10,
-                        },
-                    )
-                    if resp.status_code == 200:
-                        query_lower = search_query.lower()
-                        # Filter by keyword match in question
-                        query_words = query_lower.split()
-                        for m in resp.json():
-                            question_lower = m.get("question", "").lower()
-                            # Check if any significant query word appears
-                            if any(word in question_lower for word in query_words if len(word) > 3):
-                                entry = {
-                                    "condition_id": m.get("conditionId", ""),
-                                    "question": m.get("question", ""),
-                                    "outcome_prices": m.get("outcomePrices", []),
-                                    "volume": m.get("volume", 0),
-                                    "liquidity": m.get("liquidity", 0),
-                                    "active": m.get("active", False),
-                                    "slug": m.get("slug", ""),
-                                }
-                                # Avoid duplicates
-                                if entry["condition_id"] not in {r["condition_id"] for r in results}:
-                                    results.append(entry)
+            # Strategy 2: Text search for related markets
+            if search_query:
+                resp = await client.get(
+                    f"{GAMMA_API_URL}/markets",
+                    params={
+                        "active": "true",
+                        "closed": "false",
+                        "limit": 10,
+                    },
+                )
+                if resp.status_code == 200:
+                    query_lower = search_query.lower()
+                    # Filter by keyword match in question
+                    query_words = query_lower.split()
+                    for m in resp.json():
+                        question_lower = m.get("question", "").lower()
+                        # Check if any significant query word appears
+                        if any(word in question_lower for word in query_words if len(word) > 3):
+                            entry = {
+                                "condition_id": m.get("conditionId", ""),
+                                "question": m.get("question", ""),
+                                "outcome_prices": m.get("outcomePrices", []),
+                                "volume": m.get("volume", 0),
+                                "liquidity": m.get("liquidity", 0),
+                                "active": m.get("active", False),
+                                "slug": m.get("slug", ""),
+                            }
+                            # Avoid duplicates
+                            if entry["condition_id"] not in {r["condition_id"] for r in results}:
+                                results.append(entry)
 
             if not results:
                 return {
@@ -682,39 +698,39 @@ class MarketAnalyzer:
             encoded_query = urllib.parse.quote(query)
             url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en-US&gl=US&ceid=US:en"
 
-            async with httpx.AsyncClient(timeout=10) as client:
-                response = await client.get(
-                    url,
-                    headers={"User-Agent": "Mozilla/5.0"},
-                )
-                if response.status_code != 200:
-                    return {
-                        "articles": [],
-                        "error": f"RSS fetch failed (HTTP {response.status_code})",
-                    }
-
-                root = ElementTree.fromstring(response.text)
-                articles = []
-                for item in root.findall(".//item")[:max_results]:
-                    articles.append(
-                        {
-                            "title": item.findtext("title", ""),
-                            "url": item.findtext("link", ""),
-                            "published": item.findtext("pubDate", ""),
-                            "source": item.findtext("source", ""),
-                        }
-                    )
-
+            client = _get_shared_http_client()
+            response = await client.get(
+                url,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            if response.status_code != 200:
                 return {
-                    "query": query,
-                    "articles": articles,
-                    "sentiment": {
-                        "overall": "unknown",
-                        "score": 0.0,
-                        "confidence": 0.0,
-                    },
-                    "note": "Basic RSS fetch only -- no LLM sentiment analysis",
+                    "articles": [],
+                    "error": f"RSS fetch failed (HTTP {response.status_code})",
                 }
+
+            root = ElementTree.fromstring(response.text)
+            articles = []
+            for item in root.findall(".//item")[:max_results]:
+                articles.append(
+                    {
+                        "title": item.findtext("title", ""),
+                        "url": item.findtext("link", ""),
+                        "published": item.findtext("pubDate", ""),
+                        "source": item.findtext("source", ""),
+                    }
+                )
+
+            return {
+                "query": query,
+                "articles": articles,
+                "sentiment": {
+                    "overall": "unknown",
+                    "score": 0.0,
+                    "confidence": 0.0,
+                },
+                "note": "Basic RSS fetch only -- no LLM sentiment analysis",
+            }
 
         except Exception as exc:
             logger.error("Basic news search failed: %s", exc)

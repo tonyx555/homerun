@@ -34,6 +34,23 @@ _DEFAULT_MAX_ARTICLES = 5
 _USER_AGENT = "Mozilla/5.0 (compatible; Homerun/1.0)"
 
 # ---------------------------------------------------------------------------
+# Shared HTTP client (connection-pooled, reused across calls)
+# ---------------------------------------------------------------------------
+
+_shared_http_client: httpx.AsyncClient | None = None
+
+
+def _get_shared_http_client() -> httpx.AsyncClient:
+    global _shared_http_client
+    if _shared_http_client is None or _shared_http_client.is_closed:
+        _shared_http_client = httpx.AsyncClient(
+            timeout=_HTTP_TIMEOUT,
+            follow_redirects=True,
+            headers={"User-Agent": _USER_AGENT},
+        )
+    return _shared_http_client
+
+# ---------------------------------------------------------------------------
 # Structured output schema for sentiment analysis
 # ---------------------------------------------------------------------------
 
@@ -396,53 +413,50 @@ class NewsSentimentAnalyzer:
             encoded_query = urllib.parse.quote(query)
             url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en-US&gl=US&ceid=US:en"
 
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-                response = await client.get(
-                    url,
-                    headers={"User-Agent": _USER_AGENT},
-                )
-                if response.status_code != 200:
-                    logger.warning(
-                        "Google News RSS returned HTTP %d for query '%s'",
-                        response.status_code,
-                        query,
-                    )
-                    return []
-
-                root = ElementTree.fromstring(response.text)
-                articles: list[dict] = []
-
-                for item in root.findall(".//item")[:max_results]:
-                    title = item.findtext("title", "").strip()
-                    link = item.findtext("link", "").strip()
-                    pub_date = item.findtext("pubDate", "").strip()
-                    source = item.findtext("source", "").strip()
-
-                    # Google News RSS sometimes includes the source in
-                    # the title as "Title - Source". Extract it.
-                    source_from_title = ""
-                    if " - " in title and not source:
-                        parts = title.rsplit(" - ", 1)
-                        if len(parts) == 2:
-                            title = parts[0].strip()
-                            source_from_title = parts[1].strip()
-
-                    articles.append(
-                        {
-                            "title": title,
-                            "url": link,
-                            "published": pub_date,
-                            "source": source or source_from_title,
-                            "summary": "",  # RSS doesn't include summaries
-                        }
-                    )
-
-                logger.debug(
-                    "Fetched %d articles from Google News RSS for '%s'",
-                    len(articles),
+            client = _get_shared_http_client()
+            response = await client.get(url)
+            if response.status_code != 200:
+                logger.warning(
+                    "Google News RSS returned HTTP %d for query '%s'",
+                    response.status_code,
                     query,
                 )
-                return articles
+                return []
+
+            root = ElementTree.fromstring(response.text)
+            articles: list[dict] = []
+
+            for item in root.findall(".//item")[:max_results]:
+                title = item.findtext("title", "").strip()
+                link = item.findtext("link", "").strip()
+                pub_date = item.findtext("pubDate", "").strip()
+                source = item.findtext("source", "").strip()
+
+                # Google News RSS sometimes includes the source in
+                # the title as "Title - Source". Extract it.
+                source_from_title = ""
+                if " - " in title and not source:
+                    parts = title.rsplit(" - ", 1)
+                    if len(parts) == 2:
+                        title = parts[0].strip()
+                        source_from_title = parts[1].strip()
+
+                articles.append(
+                    {
+                        "title": title,
+                        "url": link,
+                        "published": pub_date,
+                        "source": source or source_from_title,
+                        "summary": "",  # RSS doesn't include summaries
+                    }
+                )
+
+            logger.debug(
+                "Fetched %d articles from Google News RSS for '%s'",
+                len(articles),
+                query,
+            )
+            return articles
 
         except ElementTree.ParseError as exc:
             logger.error("Failed to parse Google News RSS XML: %s", exc)
@@ -480,38 +494,35 @@ class NewsSentimentAnalyzer:
             encoded = urllib.parse.quote(poly_query)
             url = f"https://news.google.com/rss/search?q={encoded}&hl=en-US&gl=US&ceid=US:en"
 
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-                response = await client.get(
-                    url,
-                    headers={"User-Agent": _USER_AGENT},
+            client = _get_shared_http_client()
+            response = await client.get(url)
+            if response.status_code != 200:
+                return []
+
+            root = ElementTree.fromstring(response.text)
+
+            for item in root.findall(".//item")[:max_results]:
+                title = item.findtext("title", "").strip()
+                link = item.findtext("link", "").strip()
+                pub_date = item.findtext("pubDate", "").strip()
+                source = item.findtext("source", "").strip()
+
+                source_from_title = ""
+                if " - " in title and not source:
+                    parts = title.rsplit(" - ", 1)
+                    if len(parts) == 2:
+                        title = parts[0].strip()
+                        source_from_title = parts[1].strip()
+
+                articles.append(
+                    {
+                        "title": title,
+                        "url": link,
+                        "published": pub_date,
+                        "source": source or source_from_title,
+                        "summary": "",
+                    }
                 )
-                if response.status_code != 200:
-                    return []
-
-                root = ElementTree.fromstring(response.text)
-
-                for item in root.findall(".//item")[:max_results]:
-                    title = item.findtext("title", "").strip()
-                    link = item.findtext("link", "").strip()
-                    pub_date = item.findtext("pubDate", "").strip()
-                    source = item.findtext("source", "").strip()
-
-                    source_from_title = ""
-                    if " - " in title and not source:
-                        parts = title.rsplit(" - ", 1)
-                        if len(parts) == 2:
-                            title = parts[0].strip()
-                            source_from_title = parts[1].strip()
-
-                    articles.append(
-                        {
-                            "title": title,
-                            "url": link,
-                            "published": pub_date,
-                            "source": source or source_from_title,
-                            "summary": "",
-                        }
-                    )
 
         except Exception as exc:
             logger.debug("Polymarket news fetch failed (non-critical): %s", exc)

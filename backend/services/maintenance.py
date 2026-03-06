@@ -5,6 +5,7 @@ Handles cleanup of old trades, expiration of stale data, and database maintenanc
 """
 
 import asyncio
+import time
 from datetime import timedelta
 from typing import Optional
 from utils.utcnow import utcnow
@@ -22,6 +23,7 @@ from models.database import (
     TradeStatus,
     AsyncSessionLocal,
     AppSettings,
+    async_engine,
 )
 from services.market_cache import market_cache_service
 from utils.logger import get_logger
@@ -133,6 +135,7 @@ class MaintenanceService:
             db_size_bytes: int | None = None
             total_rows: int | None = None
             estimated_total_rows: int | None = None
+            table_bloat: list[dict] | None = None
             bind = session.get_bind()
             if bind is not None and bind.dialect.name == "postgresql":
                 db_size_result = await session.execute(select(func.pg_database_size(func.current_database())))
@@ -171,6 +174,48 @@ WHERE schemaname = 'public'
                 )
                 total_rows_value = exact_total_rows_result.scalar()
                 total_rows = int(total_rows_value) if total_rows_value is not None else 0
+
+                # Dead tuple / bloat stats per table
+                bloat_result = await session.execute(
+                    text(
+                        """
+SELECT
+    relname AS table_name,
+    n_live_tup::bigint AS live_tuples,
+    n_dead_tup::bigint AS dead_tuples,
+    CASE WHEN n_live_tup > 0
+         THEN round(100.0 * n_dead_tup / n_live_tup, 1)
+         ELSE 0 END AS dead_pct,
+    pg_total_relation_size(relid) AS total_bytes,
+    pg_table_size(relid) AS table_bytes,
+    pg_indexes_size(relid) AS index_bytes,
+    last_vacuum,
+    last_autovacuum,
+    last_analyze,
+    last_autoanalyze
+FROM pg_stat_user_tables
+WHERE schemaname = 'public'
+ORDER BY n_dead_tup DESC
+LIMIT 20
+"""
+                    )
+                )
+                table_bloat = [
+                    {
+                        "table": row.table_name,
+                        "live_tuples": row.live_tuples,
+                        "dead_tuples": row.dead_tuples,
+                        "dead_pct": float(row.dead_pct),
+                        "total_bytes": row.total_bytes,
+                        "table_bytes": row.table_bytes,
+                        "index_bytes": row.index_bytes,
+                        "last_vacuum": row.last_vacuum.isoformat() if row.last_vacuum else None,
+                        "last_autovacuum": row.last_autovacuum.isoformat() if row.last_autovacuum else None,
+                        "last_analyze": row.last_analyze.isoformat() if row.last_analyze else None,
+                        "last_autoanalyze": row.last_autoanalyze.isoformat() if row.last_autoanalyze else None,
+                    }
+                    for row in bloat_result
+                ]
 
             # Count simulation trades by status
             trade_counts = {}
@@ -242,6 +287,7 @@ WHERE schemaname = 'public'
                     "oldest_trade": oldest_trade_at.isoformat() if oldest_trade_at else None,
                     "newest_trade": newest_trade_at.isoformat() if newest_trade_at else None,
                 },
+                "table_bloat": table_bloat,
             }
 
     async def cleanup_resolved_trades(
@@ -861,6 +907,166 @@ RETURNING target.id
                 "statuses": [s.value for s in statuses],
             }
 
+    # ------------------------------------------------------------------
+    # PostgreSQL-level maintenance (VACUUM, ANALYZE, REINDEX)
+    # ------------------------------------------------------------------
+
+    # High-churn tables that accumulate dead tuples rapidly.
+    _HIGH_CHURN_TABLES: list[str] = [
+        "market_catalog",
+        "discovered_wallets",
+        "simulation_trades",
+        "simulation_positions",
+        "opportunity_history",
+        "opportunity_events",
+        "opportunity_states",
+        "trade_signal_emissions",
+        "wallet_activity_rollups",
+        "wallet_trades",
+        "cached_markets",
+        "scanner_snapshots",
+        "data_source_records",
+    ]
+
+    async def vacuum_analyze(self, full: bool = False) -> dict:
+        """Run VACUUM (ANALYZE) on high-churn tables to reclaim dead tuples.
+
+        VACUUM cannot run inside a transaction, so we acquire a raw
+        connection and set isolation_level to AUTOCOMMIT.
+
+        Args:
+            full: If True, run VACUUM FULL (rewrites table, reclaims disk,
+                  but takes an exclusive lock). Default False uses regular
+                  VACUUM which is non-blocking.
+
+        Returns:
+            Dict with per-table timing and overall summary.
+        """
+        mode = "VACUUM FULL ANALYZE" if full else "VACUUM ANALYZE"
+        results: dict[str, dict] = {}
+        total_start = time.monotonic()
+        tables_processed = 0
+        tables_skipped = 0
+
+        # Discover which of our target tables actually exist
+        existing_tables: set[str] = set()
+        async with AsyncSessionLocal() as session:
+            bind = session.get_bind()
+            if bind is None or bind.dialect.name != "postgresql":
+                return {"status": "skipped", "reason": "not_postgresql"}
+
+            rows = await session.execute(
+                text("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+            )
+            existing_tables = {r[0] for r in rows}
+
+        tables_to_vacuum = [t for t in self._HIGH_CHURN_TABLES if t in existing_tables]
+        if not tables_to_vacuum:
+            return {"status": "skipped", "reason": "no_matching_tables"}
+
+        logger.info("Starting PostgreSQL maintenance", mode=mode, tables=len(tables_to_vacuum))
+
+        # VACUUM cannot run inside a transaction. Use AUTOCOMMIT isolation.
+        async with async_engine.connect() as conn:
+            autocommit_conn = await conn.execution_options(isolation_level="AUTOCOMMIT")
+            for table_name in tables_to_vacuum:
+                t0 = time.monotonic()
+                try:
+                    await autocommit_conn.execute(text(f"{mode} {table_name}"))
+                    elapsed = round(time.monotonic() - t0, 2)
+                    results[table_name] = {"status": "ok", "seconds": elapsed}
+                    tables_processed += 1
+                    logger.info("Vacuumed table", table=table_name, mode=mode, seconds=elapsed)
+                except Exception as exc:
+                    elapsed = round(time.monotonic() - t0, 2)
+                    results[table_name] = {"status": "error", "error": str(exc), "seconds": elapsed}
+                    tables_skipped += 1
+                    logger.warning("VACUUM failed for table", table=table_name, error=str(exc))
+
+        total_elapsed = round(time.monotonic() - total_start, 2)
+        logger.info(
+            "PostgreSQL maintenance completed",
+            mode=mode,
+            tables_processed=tables_processed,
+            tables_skipped=tables_skipped,
+            total_seconds=total_elapsed,
+        )
+
+        return {
+            "status": "completed",
+            "mode": mode,
+            "tables_processed": tables_processed,
+            "tables_skipped": tables_skipped,
+            "total_seconds": total_elapsed,
+            "tables": results,
+        }
+
+    async def reindex_tables(self) -> dict:
+        """Run REINDEX on high-churn tables to rebuild bloated indexes.
+
+        Index bloat is not fixed by regular VACUUM — only VACUUM FULL
+        or REINDEX can reclaim index space. REINDEX takes a lock on
+        each index while rebuilding but is faster than VACUUM FULL
+        because it only rebuilds indexes, not the whole table.
+
+        Returns:
+            Dict with per-table timing and overall summary.
+        """
+        results: dict[str, dict] = {}
+        total_start = time.monotonic()
+        tables_processed = 0
+        tables_skipped = 0
+
+        existing_tables: set[str] = set()
+        async with AsyncSessionLocal() as session:
+            bind = session.get_bind()
+            if bind is None or bind.dialect.name != "postgresql":
+                return {"status": "skipped", "reason": "not_postgresql"}
+
+            rows = await session.execute(
+                text("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+            )
+            existing_tables = {r[0] for r in rows}
+
+        tables_to_reindex = [t for t in self._HIGH_CHURN_TABLES if t in existing_tables]
+        if not tables_to_reindex:
+            return {"status": "skipped", "reason": "no_matching_tables"}
+
+        logger.info("Starting REINDEX", tables=len(tables_to_reindex))
+
+        async with async_engine.connect() as conn:
+            autocommit_conn = await conn.execution_options(isolation_level="AUTOCOMMIT")
+            for table_name in tables_to_reindex:
+                t0 = time.monotonic()
+                try:
+                    await autocommit_conn.execute(text(f"REINDEX TABLE {table_name}"))
+                    elapsed = round(time.monotonic() - t0, 2)
+                    results[table_name] = {"status": "ok", "seconds": elapsed}
+                    tables_processed += 1
+                    logger.info("Reindexed table", table=table_name, seconds=elapsed)
+                except Exception as exc:
+                    elapsed = round(time.monotonic() - t0, 2)
+                    results[table_name] = {"status": "error", "error": str(exc), "seconds": elapsed}
+                    tables_skipped += 1
+                    logger.warning("REINDEX failed for table", table=table_name, error=str(exc))
+
+        total_elapsed = round(time.monotonic() - total_start, 2)
+        logger.info(
+            "REINDEX completed",
+            tables_processed=tables_processed,
+            tables_skipped=tables_skipped,
+            total_seconds=total_elapsed,
+        )
+
+        return {
+            "status": "completed",
+            "mode": "REINDEX",
+            "tables_processed": tables_processed,
+            "tables_skipped": tables_skipped,
+            "total_seconds": total_elapsed,
+            "tables": results,
+        }
+
     async def full_cleanup(
         self,
         resolved_trade_days: int = DEFAULT_RESOLVED_TRADE_AGE,
@@ -1000,6 +1206,13 @@ RETURNING target.id
         except Exception as e:
             logger.warning("Market cache cleanup failed during full maintenance run", error=str(e))
             results["market_cache"] = {"status": "error", "error": str(e)}
+
+        # 12. VACUUM ANALYZE high-churn tables to reclaim dead tuples
+        try:
+            results["vacuum_analyze"] = await self.vacuum_analyze(full=False)
+        except Exception as e:
+            logger.warning("VACUUM ANALYZE failed during full maintenance run", error=str(e))
+            results["vacuum_analyze"] = {"status": "error", "error": str(e)}
 
         logger.info("Full database cleanup completed", results=results)
 

@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from utils.utcnow import utcnow
 
 from services.maintenance import maintenance_service
+from models.database import async_engine
 from models.database import (
     ExecutionSession,
     ExecutionSessionEvent,
@@ -714,3 +715,64 @@ async def reset_all_trades(
     except Exception as e:
         logger.error("Failed to reset trades", error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/vacuum")
+async def vacuum_analyze(
+    full: bool = Query(
+        default=False,
+        description="Run VACUUM FULL (rewrites tables, reclaims disk, takes exclusive lock). Default is regular VACUUM.",
+    ),
+):
+    """
+    Run VACUUM ANALYZE on high-churn tables.
+
+    Regular VACUUM (default) reclaims dead tuples without locking tables.
+    VACUUM FULL rewrites the entire table to reclaim maximum disk space
+    but takes an exclusive lock — avoid during active trading.
+    """
+    try:
+        result = await maintenance_service.vacuum_analyze(full=full)
+        return {
+            "status": "success",
+            "timestamp": utcnow().isoformat(),
+            **result,
+        }
+    except Exception as e:
+        logger.error("VACUUM ANALYZE failed", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/reindex")
+async def reindex_tables():
+    """
+    Rebuild indexes on high-churn tables to reclaim bloated index space.
+
+    Regular VACUUM does not fix index bloat. REINDEX rebuilds each index
+    from scratch, reclaiming disk space. Takes a short lock on each index
+    while rebuilding but is much faster than VACUUM FULL.
+    """
+    try:
+        result = await maintenance_service.reindex_tables()
+        return {
+            "status": "success",
+            "timestamp": utcnow().isoformat(),
+            **result,
+        }
+    except Exception as e:
+        logger.error("REINDEX failed", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/pool-status")
+async def pool_status():
+    """Return connection pool diagnostics."""
+    pool = async_engine.pool
+    return {
+        "pool_size": pool.size(),
+        "checked_in": pool.checkedin(),
+        "checked_out": pool.checkedout(),
+        "overflow": pool.overflow(),
+        "invalid": pool.status(),
+        "timeout": pool.timeout(),
+    }

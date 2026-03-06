@@ -38,6 +38,7 @@ from services.trader_orchestrator_state import (
     create_trader_order,
     get_execution_session_detail,
     list_active_execution_sessions,
+    sync_trader_position_inventory,
     update_execution_leg,
     update_execution_session_status,
 )
@@ -1081,7 +1082,29 @@ class ExecutionSessionEngine:
             return True
 
         now = utcnow()
+
+        # Batch-fetch live provider snapshots so we have up-to-date fill data
+        # before deciding whether each order was filled or not.  Without this,
+        # a session timeout can race with provider reconciliation and treat a
+        # 99%-filled order as unfilled/cancelled.
+        clob_ids_to_fetch: set[str] = set()
+        for order in detail.get("orders", []):
+            clob_id = str(order.get("provider_clob_order_id") or "").strip()
+            if clob_id:
+                clob_ids_to_fetch.add(clob_id)
+        provider_snapshots: dict[str, dict[str, Any]] = {}
+        if clob_ids_to_fetch:
+            try:
+                provider_snapshots = await live_execution_service.get_order_snapshots_by_clob_ids(
+                    sorted(clob_ids_to_fetch)
+                )
+            except Exception:
+                provider_snapshots = {}
+
         updated_trader_orders: list[TraderOrder] = []
+        filled_leg_ids: set[str] = set()
+        total_orders_processed = 0
+        total_orders_filled = 0
         for order in detail.get("orders", []):
             status_key = str(order.get("status") or "").strip().lower()
             if status_key not in {"open", "submitted"}:
@@ -1108,8 +1131,34 @@ class ExecutionSessionEngine:
 
             if trader_order is None:
                 continue
+            total_orders_processed += 1
             payload = dict(trader_order.payload_json or {})
-            filled_notional_usd, _, _ = _extract_live_fill_metrics(payload)
+
+            # Merge live provider snapshot into payload so _extract_live_fill_metrics
+            # sees the latest fill data even if reconciliation hasn't written it yet.
+            snapshot = provider_snapshots.get(provider_clob_order_id) if provider_clob_order_id else None
+            if isinstance(snapshot, dict):
+                existing_recon = payload.get("provider_reconciliation")
+                if not isinstance(existing_recon, dict):
+                    existing_recon = {}
+                existing_recon = dict(existing_recon)
+                existing_recon["snapshot"] = snapshot
+                filled_size_snap = max(0.0, safe_float(snapshot.get("filled_size"), 0.0) or 0.0)
+                avg_price_snap = safe_float(snapshot.get("average_fill_price"))
+                filled_notional_snap = max(0.0, safe_float(snapshot.get("filled_notional_usd"), 0.0) or 0.0)
+                if filled_notional_snap <= 0.0 and filled_size_snap > 0.0:
+                    ref_price = avg_price_snap if avg_price_snap and avg_price_snap > 0 else safe_float(snapshot.get("limit_price"))
+                    if ref_price and ref_price > 0:
+                        filled_notional_snap = filled_size_snap * ref_price
+                if filled_size_snap > 0.0:
+                    existing_recon["filled_size"] = filled_size_snap
+                if avg_price_snap is not None and avg_price_snap > 0:
+                    existing_recon["average_fill_price"] = avg_price_snap
+                if filled_notional_snap > 0.0:
+                    existing_recon["filled_notional_usd"] = filled_notional_snap
+                payload["provider_reconciliation"] = existing_recon
+
+            filled_notional_usd, filled_shares, avg_fill_price = _extract_live_fill_metrics(payload)
             has_fill = filled_notional_usd > 0.0
             if has_fill:
                 next_status = "executed"
@@ -1118,8 +1167,14 @@ class ExecutionSessionEngine:
                     next_notional = max(0.0, abs(safe_float(trader_order.notional_usd, 0.0) or 0.0))
                 trader_order.status = next_status
                 trader_order.notional_usd = float(next_notional)
+                if avg_fill_price is not None and avg_fill_price > 0:
+                    trader_order.effective_price = float(avg_fill_price)
                 if trader_order.executed_at is None and next_notional > 0.0:
                     trader_order.executed_at = now
+                total_orders_filled += 1
+                leg_id = str(order.get("leg_id") or "").strip()
+                if leg_id:
+                    filled_leg_ids.add(leg_id)
             else:
                 next_status = "cancelled"
                 trader_order.status = next_status
@@ -1148,34 +1203,53 @@ class ExecutionSessionEngine:
                     trader_order.reason = f"session:{terminal_key}:{reason}"
             updated_trader_orders.append(trader_order)
 
+        any_filled = total_orders_filled > 0
+        all_filled = total_orders_processed > 0 and total_orders_filled >= total_orders_processed
+
         for leg in detail.get("legs", []):
             leg_status = str(leg.get("status") or "").strip().lower()
             if leg_status in {"completed", "failed", "cancelled", "expired"}:
                 continue
-            await update_execution_leg(
-                self.db,
-                leg_row_id=str(leg["id"]),
-                status="cancelled",
-                last_error=reason,
-                commit=False,
-            )
+            leg_id = str(leg.get("id") or "").strip()
+            if leg_id in filled_leg_ids:
+                await update_execution_leg(
+                    self.db,
+                    leg_row_id=leg_id,
+                    status="completed",
+                    commit=False,
+                )
+            else:
+                await update_execution_leg(
+                    self.db,
+                    leg_row_id=leg_id,
+                    status="cancelled",
+                    last_error=reason,
+                    commit=False,
+                )
 
+        effective_session_status = "completed" if all_filled else terminal_key
         await update_execution_session_status(
             self.db,
             session_id=session_id,
-            status=terminal_key,
-            error_message=reason,
+            status=effective_session_status,
+            error_message=None if all_filled else reason,
             commit=False,
         )
+        # Any fill (even partial) means we hold a real position that must be
+        # managed by the position lifecycle.  Mark the signal "executed" so the
+        # downstream exit/P&L tracking picks it up.
         signal_id = str(session_view.get("signal_id") or "").strip()
         if signal_id:
             await set_trade_signal_status(
                 self.db,
                 signal_id=signal_id,
-                status="failed",
+                status="executed" if any_filled else "failed",
                 commit=False,
             )
-        if terminal_key == "expired":
+        if all_filled:
+            event_type = "session_completed"
+            event_severity = "info"
+        elif terminal_key == "expired":
             event_type = "session_expired"
             event_severity = "warn"
         elif terminal_key == "failed":
@@ -1193,6 +1267,22 @@ class ExecutionSessionEngine:
             commit=False,
         )
         await self.db.commit()
+
+        # Trigger position inventory sync so filled orders are immediately
+        # visible to the position lifecycle for exit management, rather than
+        # waiting for the next worker loop iteration.
+        if any_filled:
+            trader_id = str(session_view.get("trader_id") or "").strip()
+            if trader_id:
+                try:
+                    await sync_trader_position_inventory(
+                        self.db,
+                        trader_id=trader_id,
+                        mode=str(session_view.get("mode") or ""),
+                    )
+                except Exception:
+                    pass
+
         for row in updated_trader_orders:
             try:
                 await event_bus.publish("trader_order", _serialize_order(row))

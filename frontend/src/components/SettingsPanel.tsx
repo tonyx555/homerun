@@ -37,6 +37,8 @@ import {
   testTradingProxy,
   flushDatabaseData,
   getDatabaseMaintenanceStats,
+  runVacuumAnalyze,
+  runReindexTables,
   getLLMModels,
   refreshLLMModels,
   exportSettingsBundle,
@@ -482,6 +484,44 @@ export default function SettingsPanel({
     },
     onSettled: () => {
       setActiveFlushTarget(null)
+    },
+  })
+
+  const vacuumMutation = useMutation({
+    mutationFn: (full: boolean) => runVacuumAnalyze(full),
+    onSuccess: (data: any) => {
+      queryClient.invalidateQueries({ queryKey: ['maintenance-stats'] })
+      const processed = data?.tables_processed ?? 0
+      const secs = data?.total_seconds ?? '?'
+      setSaveMessage({
+        type: 'success',
+        text: `VACUUM ANALYZE completed: ${processed} tables in ${secs}s.`,
+      })
+      setTimeout(() => setSaveMessage(null), 5000)
+    },
+    onError: (error: any) => {
+      const detail = error?.response?.data?.detail
+      setSaveMessage({ type: 'error', text: detail || error?.message || 'VACUUM ANALYZE failed' })
+      setTimeout(() => setSaveMessage(null), 7000)
+    },
+  })
+
+  const reindexMutation = useMutation({
+    mutationFn: () => runReindexTables(),
+    onSuccess: (data: any) => {
+      queryClient.invalidateQueries({ queryKey: ['maintenance-stats'] })
+      const processed = data?.tables_processed ?? 0
+      const secs = data?.total_seconds ?? '?'
+      setSaveMessage({
+        type: 'success',
+        text: `REINDEX completed: ${processed} tables in ${secs}s.`,
+      })
+      setTimeout(() => setSaveMessage(null), 5000)
+    },
+    onError: (error: any) => {
+      const detail = error?.response?.data?.detail
+      setSaveMessage({ type: 'error', text: detail || error?.message || 'REINDEX failed' })
+      setTimeout(() => setSaveMessage(null), 7000)
     },
   })
 
@@ -1905,6 +1945,123 @@ export default function SettingsPanel({
                             )}
                           </CardContent>
                         </Card>
+
+                        {/* Dead Tuple / Bloat Stats */}
+                        {maintenanceStatsQuery.data?.table_bloat && maintenanceStatsQuery.data.table_bloat.length > 0 && (() => {
+                          const bloat = maintenanceStatsQuery.data!.table_bloat!
+                          const totalDead = bloat.reduce((s, t) => s + t.dead_tuples, 0)
+                          const totalLive = bloat.reduce((s, t) => s + t.live_tuples, 0)
+                          const totalIndexBytes = bloat.reduce((s, t) => s + (t.index_bytes ?? 0), 0)
+                          const totalTableBytes = bloat.reduce((s, t) => s + (t.table_bytes ?? 0), 0)
+                          const bloatedTables = bloat.filter(t => t.dead_tuples > 1000)
+                          const indexHeavyTables = bloat.filter(t => t.index_bytes > 0 && t.table_bytes > 0 && t.index_bytes > t.table_bytes * 5)
+                          const fmtBytes = (b: number) => b >= 1073741824 ? `${(b / 1073741824).toFixed(1)} GB` : b >= 1048576 ? `${(b / 1048576).toFixed(0)} MB` : `${(b / 1024).toFixed(0)} KB`
+                          const anyMutationPending = vacuumMutation.isPending || reindexMutation.isPending
+                          return (
+                            <Card className={cn('bg-muted', totalDead > 100000 && 'border-amber-500/30')}>
+                              <CardContent className="p-3 space-y-2">
+                                <div className="flex items-center justify-between">
+                                  <div>
+                                    <p className="font-medium text-sm">Dead Tuples & Index Bloat</p>
+                                    <p className="text-xs text-muted-foreground">
+                                      {totalDead.toLocaleString()} dead / {totalLive.toLocaleString()} live
+                                      {totalLive > 0 && ` (${(100 * totalDead / totalLive).toFixed(1)}%)`}
+                                      {totalIndexBytes > 0 && totalTableBytes > 0 && (
+                                        <span className={cn('ml-2', totalIndexBytes > totalTableBytes * 3 && 'text-amber-400')}>
+                                          Idx: {fmtBytes(totalIndexBytes)} / Data: {fmtBytes(totalTableBytes)}
+                                        </span>
+                                      )}
+                                    </p>
+                                  </div>
+                                  <div className="flex items-center gap-1">
+                                    <Button
+                                      type="button"
+                                      variant="outline"
+                                      size="sm"
+                                      className="h-7 px-2 text-xs"
+                                      onClick={() => vacuumMutation.mutate(false)}
+                                      disabled={anyMutationPending}
+                                      title="Reclaim dead tuples (non-blocking)"
+                                    >
+                                      {vacuumMutation.isPending && !vacuumMutation.variables
+                                        ? <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                                        : <RefreshCw className="w-3 h-3 mr-1" />}
+                                      Vacuum
+                                    </Button>
+                                    <Button
+                                      type="button"
+                                      variant="outline"
+                                      size="sm"
+                                      className="h-7 px-2 text-xs border-amber-500/40 text-amber-400 hover:bg-amber-500/10"
+                                      onClick={() => vacuumMutation.mutate(true)}
+                                      disabled={anyMutationPending}
+                                      title="Rewrites tables to reclaim disk. Takes exclusive lock — avoid during active trading."
+                                    >
+                                      {vacuumMutation.isPending && vacuumMutation.variables
+                                        ? <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                                        : <RefreshCw className="w-3 h-3 mr-1" />}
+                                      Full
+                                    </Button>
+                                    <Button
+                                      type="button"
+                                      variant="outline"
+                                      size="sm"
+                                      className="h-7 px-2 text-xs"
+                                      onClick={() => reindexMutation.mutate()}
+                                      disabled={anyMutationPending}
+                                      title="Rebuild bloated indexes to reclaim disk space"
+                                    >
+                                      {reindexMutation.isPending
+                                        ? <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                                        : <Database className="w-3 h-3 mr-1" />}
+                                      Reindex
+                                    </Button>
+                                  </div>
+                                </div>
+
+                                {bloatedTables.length > 0 && (
+                                  <div className="max-h-36 overflow-y-auto text-[11px] space-y-0.5">
+                                    {bloatedTables.map(t => {
+                                      const indexBloated = t.index_bytes > 0 && t.table_bytes > 0 && t.index_bytes > t.table_bytes * 5
+                                      return (
+                                        <div key={t.table} className="flex justify-between items-center py-0.5 border-b border-border/20 last:border-0">
+                                          <span className="font-mono text-muted-foreground truncate mr-2">{t.table}</span>
+                                          <div className="flex items-center gap-2">
+                                            {indexBloated && (
+                                              <span className="whitespace-nowrap tabular-nums text-amber-400" title={`Index: ${fmtBytes(t.index_bytes)} vs Data: ${fmtBytes(t.table_bytes)}`}>
+                                                idx {fmtBytes(t.index_bytes)}
+                                              </span>
+                                            )}
+                                            <span className={cn(
+                                              'whitespace-nowrap tabular-nums',
+                                              t.dead_pct > 50 ? 'text-red-400' : t.dead_pct > 10 ? 'text-amber-400' : 'text-muted-foreground',
+                                            )}>
+                                              {t.dead_tuples.toLocaleString()} dead ({t.dead_pct}%)
+                                            </span>
+                                          </div>
+                                        </div>
+                                      )
+                                    })}
+                                  </div>
+                                )}
+
+                                {indexHeavyTables.length > 0 && bloatedTables.length === 0 && (
+                                  <div className="max-h-36 overflow-y-auto text-[11px] space-y-0.5">
+                                    <p className="text-[10px] text-amber-400/80 mb-1">Tables with bloated indexes (index &gt; 5x data):</p>
+                                    {indexHeavyTables.map(t => (
+                                      <div key={t.table} className="flex justify-between items-center py-0.5 border-b border-border/20 last:border-0">
+                                        <span className="font-mono text-muted-foreground truncate mr-2">{t.table}</span>
+                                        <span className="whitespace-nowrap tabular-nums text-amber-400">
+                                          idx {fmtBytes(t.index_bytes)} / data {fmtBytes(t.table_bytes)}
+                                        </span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </CardContent>
+                            </Card>
+                          )
+                        })()}
 
                         <Card className="bg-muted">
                           <CardContent className="flex items-center justify-between p-3">

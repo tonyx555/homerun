@@ -39,6 +39,15 @@ _PRICE_TO_BEAT_429_RETRY_SECONDS = 300.0
 _PRICE_TO_BEAT_API_GLOBAL_COOLDOWN_SECONDS = 60.0
 _PRICE_TO_BEAT_DELAYED_HISTORY_MAX_SECONDS = 300.0
 
+_shared_sync_client: httpx.Client | None = None
+
+
+def _get_shared_sync_client() -> httpx.Client:
+    global _shared_sync_client
+    if _shared_sync_client is None or _shared_sync_client.is_closed:
+        _shared_sync_client = httpx.Client(timeout=_GAMMA_FETCH_TIMEOUT_SECONDS)
+    return _shared_sync_client
+
 # ---------------------------------------------------------------------------
 # Types
 # ---------------------------------------------------------------------------
@@ -393,127 +402,115 @@ class CryptoService:
             return None
 
         try:
-            with httpx.Client(timeout=_GAMMA_FETCH_TIMEOUT_SECONDS) as client:
-                resp = client.get(
-                    f"{self._gamma_url}/events",
-                    params={
-                        "series_id": series_id,
-                        "active": "true",
-                        "closed": "false",
-                        # Exclude stale unresolved history and walk forward from now
-                        # so the first row is live/nearest-upcoming.
-                        "end_date_min": now_iso,
-                        "order": "endDate",
-                        "ascending": "true",
-                        "limit": 8,
-                    },
+            client = _get_shared_sync_client()
+            resp = client.get(
+                f"{self._gamma_url}/events",
+                params={
+                    "series_id": series_id,
+                    "active": "true",
+                    "closed": "false",
+                    "end_date_min": now_iso,
+                    "order": "endDate",
+                    "ascending": "true",
+                    "limit": 8,
+                },
+            )
+            if resp.status_code != 200:
+                logger.debug(
+                    "CryptoService: series_id=%s returned %s",
+                    series_id,
+                    resp.status_code,
                 )
-                if resp.status_code != 200:
-                    logger.debug(
-                        "CryptoService: series_id=%s returned %s",
-                        series_id,
-                        resp.status_code,
-                    )
-                    return None
+                return None
 
-                events = resp.json()
-                if not isinstance(events, list):
-                    return None
+            events = resp.json()
+            if not isinstance(events, list):
+                return None
 
-                # Extract series-level stats (24h volume, liquidity)
-                series_vol_24h = 0.0
-                series_liq = 0.0
-                if events:
-                    series_data = events[0].get("series") or [{}]
-                    if series_data and isinstance(series_data, list):
-                        s = series_data[0] if series_data else {}
-                        series_vol_24h = _parse_float(s.get("volume24hr")) or 0.0
-                        series_liq = _parse_float(s.get("liquidity")) or 0.0
+            series_vol_24h = 0.0
+            series_liq = 0.0
+            if events:
+                series_data = events[0].get("series") or [{}]
+                if series_data and isinstance(series_data, list):
+                    s = series_data[0] if series_data else {}
+                    series_vol_24h = _parse_float(s.get("volume24hr")) or 0.0
+                    series_liq = _parse_float(s.get("liquidity")) or 0.0
 
-                # Sort events by end time, pick live + upcoming
-                sorted_events = self._sort_events_by_time(events)
-                if not sorted_events:
-                    return None
+            sorted_events = self._sort_events_by_time(events)
+            if not sorted_events:
+                return None
 
-                # First event = currently live (or soonest upcoming)
-                current_event = sorted_events[0]
-                upcoming_events = sorted_events[1:4]  # Next 3 upcoming
+            current_event = sorted_events[0]
+            upcoming_events = sorted_events[1:4]
 
-                # Build the primary (current) market
-                mkt_list = current_event.get("markets", [])
-                if not mkt_list:
-                    return None
-                mkt = mkt_list[0]
-                up_price, down_price = _parse_outcome_prices(mkt)
-                outcomes = _parse_json_list(mkt.get("outcomes"))
-                up_idx, down_idx = _resolve_binary_outcome_indexes(outcomes)
-                clob_ids = [
-                    str(token).strip() for token in _parse_json_list(mkt.get("clobTokenIds")) if str(token).strip()
-                ]
+            mkt_list = current_event.get("markets", [])
+            if not mkt_list:
+                return None
+            mkt = mkt_list[0]
+            up_price, down_price = _parse_outcome_prices(mkt)
+            outcomes = _parse_json_list(mkt.get("outcomes"))
+            up_idx, down_idx = _resolve_binary_outcome_indexes(outcomes)
+            clob_ids = [
+                str(token).strip() for token in _parse_json_list(mkt.get("clobTokenIds")) if str(token).strip()
+            ]
 
-                best_bid = _coerce_probability(mkt.get("bestBid"))
-                best_ask = _coerce_probability(mkt.get("bestAsk"))
+            best_bid = _coerce_probability(mkt.get("bestBid"))
+            best_ask = _coerce_probability(mkt.get("bestAsk"))
 
-                # NOTE: Real-time CLOB prices are overlaid by the crypto_worker
-                # via WS feed cache (_overlay_ws_prices_on_market_row). We
-                # intentionally skip per-token CLOB HTTP calls here to keep
-                # each series fetch to a single Gamma API round-trip (~200ms).
-
-                # Build upcoming market summaries
-                upcoming = []
-                for evt in upcoming_events:
-                    emkts = evt.get("markets", [])
-                    if not emkts:
-                        continue
-                    em = emkts[0]
-                    e_up, e_down = _parse_outcome_prices(em)
-                    upcoming.append(
-                        {
-                            "id": str(em.get("id", "")),
-                            "slug": em.get("slug", ""),
-                            "event_title": evt.get("title", ""),
-                            "start_time": evt.get("startTime") or em.get("eventStartTime"),
-                            "end_time": em.get("endDate"),
-                            "up_price": e_up,
-                            "down_price": e_down,
-                            "best_bid": _parse_float(em.get("bestBid")),
-                            "best_ask": _parse_float(em.get("bestAsk")),
-                            "liquidity": _parse_float(em.get("liquidityNum"))
-                            or _parse_float(em.get("liquidity"))
-                            or 0.0,
-                            "volume": _parse_float(em.get("volumeNum")) or _parse_float(em.get("volume")) or 0.0,
-                        }
-                    )
-
-                return CryptoMarket(
-                    id=str(mkt.get("id", "")),
-                    condition_id=mkt.get("conditionId", mkt.get("condition_id", "")),
-                    slug=mkt.get("slug", ""),
-                    question=mkt.get("question", ""),
-                    asset=asset,
-                    timeframe=timeframe,
-                    start_time=current_event.get("startTime") or mkt.get("eventStartTime"),
-                    end_time=mkt.get("endDate"),
-                    up_price=up_price,
-                    down_price=down_price,
-                    best_bid=best_bid,
-                    best_ask=best_ask,
-                    spread=_parse_float(mkt.get("spread")),
-                    liquidity=_parse_float(mkt.get("liquidityNum")) or _parse_float(mkt.get("liquidity")) or 0.0,
-                    volume=_parse_float(mkt.get("volumeNum")) or _parse_float(mkt.get("volume")) or 0.0,
-                    volume_24h=_parse_float(mkt.get("volume24hr")) or 0.0,
-                    series_volume_24h=series_vol_24h,
-                    series_liquidity=series_liq,
-                    last_trade_price=_parse_float(mkt.get("lastTradePrice")),
-                    clob_token_ids=clob_ids,
-                    up_token_index=up_idx,
-                    down_token_index=down_idx,
-                    fees_enabled=mkt.get("feesEnabled", False),
-                    event_slug=current_event.get("slug", ""),
-                    event_title=current_event.get("title", ""),
-                    is_current=True,
-                    upcoming_markets=upcoming,
+            upcoming = []
+            for evt in upcoming_events:
+                emkts = evt.get("markets", [])
+                if not emkts:
+                    continue
+                em = emkts[0]
+                e_up, e_down = _parse_outcome_prices(em)
+                upcoming.append(
+                    {
+                        "id": str(em.get("id", "")),
+                        "slug": em.get("slug", ""),
+                        "event_title": evt.get("title", ""),
+                        "start_time": evt.get("startTime") or em.get("eventStartTime"),
+                        "end_time": em.get("endDate"),
+                        "up_price": e_up,
+                        "down_price": e_down,
+                        "best_bid": _parse_float(em.get("bestBid")),
+                        "best_ask": _parse_float(em.get("bestAsk")),
+                        "liquidity": _parse_float(em.get("liquidityNum"))
+                        or _parse_float(em.get("liquidity"))
+                        or 0.0,
+                        "volume": _parse_float(em.get("volumeNum")) or _parse_float(em.get("volume")) or 0.0,
+                    }
                 )
+
+            return CryptoMarket(
+                id=str(mkt.get("id", "")),
+                condition_id=mkt.get("conditionId", mkt.get("condition_id", "")),
+                slug=mkt.get("slug", ""),
+                question=mkt.get("question", ""),
+                asset=asset,
+                timeframe=timeframe,
+                start_time=current_event.get("startTime") or mkt.get("eventStartTime"),
+                end_time=mkt.get("endDate"),
+                up_price=up_price,
+                down_price=down_price,
+                best_bid=best_bid,
+                best_ask=best_ask,
+                spread=_parse_float(mkt.get("spread")),
+                liquidity=_parse_float(mkt.get("liquidityNum")) or _parse_float(mkt.get("liquidity")) or 0.0,
+                volume=_parse_float(mkt.get("volumeNum")) or _parse_float(mkt.get("volume")) or 0.0,
+                volume_24h=_parse_float(mkt.get("volume24hr")) or 0.0,
+                series_volume_24h=series_vol_24h,
+                series_liquidity=series_liq,
+                last_trade_price=_parse_float(mkt.get("lastTradePrice")),
+                clob_token_ids=clob_ids,
+                up_token_index=up_idx,
+                down_token_index=down_idx,
+                fees_enabled=mkt.get("feesEnabled", False),
+                event_slug=current_event.get("slug", ""),
+                event_title=current_event.get("title", ""),
+                is_current=True,
+                upcoming_markets=upcoming,
+            )
         except Exception as e:
             logger.debug("CryptoService: series_id=%s failed: %s", series_id, e)
             return None
@@ -777,148 +774,134 @@ class CryptoService:
         except Exception:
             pass
 
-        api_client = None
-        try:
-            api_client = httpx.Client(timeout=_CRYPTO_PRICE_TO_BEAT_TIMEOUT_SECONDS)
-        except Exception:
-            api_client = None
+        api_client = _get_shared_sync_client()
 
-        try:
-            for m in markets:
-                slug = m.slug
-                if not slug:
+        for m in markets:
+            slug = m.slug
+            if not slug:
+                continue
+            if slug in self._price_to_beat and self._price_to_beat[slug] is not None:
+                continue
+
+            if not m.start_time:
+                continue
+
+            try:
+                start_dt = datetime.fromisoformat(str(m.start_time).replace("Z", "+00:00"))
+                if start_dt.tzinfo is None:
+                    start_dt = start_dt.replace(tzinfo=timezone.utc)
+            except (ValueError, AttributeError):
+                continue
+
+            start_ts = start_dt.timestamp()
+            start_iso = start_dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+            now = time.time()
+            if now < start_ts:
+                continue
+
+            elapsed = now - start_ts
+            retry_after = float(self._price_to_beat_retry_after.get(slug) or 0.0)
+            if now < retry_after:
+                continue
+
+            if now >= self._price_to_beat_api_cooldown_until:
+                ptb_api, api_status = self._fetch_price_to_beat_from_crypto_api(
+                    api_client,
+                    m,
+                    event_start_time=start_iso,
+                )
+                if ptb_api is not None:
+                    self._price_to_beat[slug] = ptb_api
+                    self._price_to_beat_retry_after.pop(slug, None)
+                    logger.info(
+                        f"CryptoService: price to beat for {m.asset} ({slug}): "
+                        f"${ptb_api:,.2f} (api, {elapsed:.0f}s after start)"
+                    )
                     continue
-                # Already found for this slug?
-                if slug in self._price_to_beat and self._price_to_beat[slug] is not None:
-                    continue
-
-                if not m.start_time:
-                    continue
-
-                try:
-                    start_dt = datetime.fromisoformat(str(m.start_time).replace("Z", "+00:00"))
-                    if start_dt.tzinfo is None:
-                        start_dt = start_dt.replace(tzinfo=timezone.utc)
-                except (ValueError, AttributeError):
-                    continue
-
-                start_ts = start_dt.timestamp()
-                start_iso = start_dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-                now = time.time()
-                # Only look up if the market has started
-                if now < start_ts:
-                    continue
-
-                elapsed = now - start_ts
-                retry_after = float(self._price_to_beat_retry_after.get(slug) or 0.0)
-                if now < retry_after:
-                    continue
-
-                if api_client is not None:
-                    if now >= self._price_to_beat_api_cooldown_until:
-                        ptb_api, api_status = self._fetch_price_to_beat_from_crypto_api(
-                            api_client,
-                            m,
-                            event_start_time=start_iso,
+                if api_status == 429:
+                    previous_cooldown = self._price_to_beat_api_cooldown_until
+                    self._price_to_beat_api_cooldown_until = max(
+                        self._price_to_beat_api_cooldown_until,
+                        now + _PRICE_TO_BEAT_API_GLOBAL_COOLDOWN_SECONDS,
+                    )
+                    self._price_to_beat_retry_after[slug] = max(
+                        float(self._price_to_beat_retry_after.get(slug) or 0.0),
+                        now + _PRICE_TO_BEAT_429_RETRY_SECONDS,
+                    )
+                    if self._price_to_beat_api_cooldown_until > previous_cooldown:
+                        logger.warning(
+                            "CryptoService: crypto-price API rate limited; backing off",
+                            slug=slug,
+                            asset=m.asset,
+                            retry_after_seconds=round(
+                                self._price_to_beat_api_cooldown_until - now,
+                                1,
+                            ),
                         )
-                        if ptb_api is not None:
-                            self._price_to_beat[slug] = ptb_api
-                            self._price_to_beat_retry_after.pop(slug, None)
-                            logger.info(
-                                f"CryptoService: price to beat for {m.asset} ({slug}): "
-                                f"${ptb_api:,.2f} (api, {elapsed:.0f}s after start)"
-                            )
-                            continue
-                        if api_status == 429:
-                            previous_cooldown = self._price_to_beat_api_cooldown_until
-                            self._price_to_beat_api_cooldown_until = max(
-                                self._price_to_beat_api_cooldown_until,
-                                now + _PRICE_TO_BEAT_API_GLOBAL_COOLDOWN_SECONDS,
-                            )
-                            self._price_to_beat_retry_after[slug] = max(
-                                float(self._price_to_beat_retry_after.get(slug) or 0.0),
-                                now + _PRICE_TO_BEAT_429_RETRY_SECONDS,
-                            )
-                            if self._price_to_beat_api_cooldown_until > previous_cooldown:
-                                logger.warning(
-                                    "CryptoService: crypto-price API rate limited; backing off",
-                                    slug=slug,
-                                    asset=m.asset,
-                                    retry_after_seconds=round(
-                                        self._price_to_beat_api_cooldown_until - now,
-                                        1,
-                                    ),
-                                )
-                        elif api_status is not None and api_status >= 500:
-                            self._price_to_beat_retry_after[slug] = max(
-                                float(self._price_to_beat_retry_after.get(slug) or 0.0),
-                                now + _PRICE_TO_BEAT_RETRY_SECONDS,
-                            )
-                        elif api_status is not None:
-                            self._price_to_beat_retry_after[slug] = max(
-                                float(self._price_to_beat_retry_after.get(slug) or 0.0),
-                                now + (_PRICE_TO_BEAT_RETRY_SECONDS / 2.0),
-                            )
-
-                if feed is None:
+                elif api_status is not None and api_status >= 500:
                     self._price_to_beat_retry_after[slug] = max(
                         float(self._price_to_beat_retry_after.get(slug) or 0.0),
                         now + _PRICE_TO_BEAT_RETRY_SECONDS,
                     )
-                    continue
-
-                # Look up the Chainlink price at eventStartTime from history
-                ptb = feed.get_price_at_time(m.asset, start_ts)
-                if ptb is None and hasattr(feed, "get_price_at_or_after_time"):
-                    ptb = feed.get_price_at_or_after_time(
-                        m.asset,
-                        start_ts,
-                        max_delay_seconds=_PRICE_TO_BEAT_DELAYED_HISTORY_MAX_SECONDS,
+                elif api_status is not None:
+                    self._price_to_beat_retry_after[slug] = max(
+                        float(self._price_to_beat_retry_after.get(slug) or 0.0),
+                        now + (_PRICE_TO_BEAT_RETRY_SECONDS / 2.0),
                     )
-                if ptb is not None:
-                    self._price_to_beat[slug] = ptb
-                    self._price_to_beat_retry_after.pop(slug, None)
-                    logger.info(
-                        f"CryptoService: price to beat for {m.asset} ({slug}): "
-                        f"${ptb:,.2f} (from history, {elapsed:.0f}s after start)"
-                    )
-                    continue
 
-                # No history available -- try current price if within 10s of start
-                if elapsed <= 10:
-                    oracle = feed.get_price(m.asset)
-                    if oracle and oracle.price:
-                        self._price_to_beat[slug] = oracle.price
-                        self._price_to_beat_retry_after.pop(slug, None)
-                        logger.info(
-                            f"CryptoService: price to beat for {m.asset} ({slug}): "
-                            f"${oracle.price:,.2f} (live, {elapsed:.1f}s after start)"
-                        )
-                        continue
-
-                if api_client is not None:
-                    binance_open = self._fetch_price_to_beat_from_binance_kline(
-                        api_client,
-                        m,
-                        start_timestamp_ms=int(start_ts * 1000.0),
-                    )
-                    if binance_open is not None:
-                        self._price_to_beat[slug] = binance_open
-                        self._price_to_beat_retry_after.pop(slug, None)
-                        logger.info(
-                            f"CryptoService: price to beat for {m.asset} ({slug}): "
-                            f"${binance_open:,.2f} (binance-1m-open, {elapsed:.0f}s after start)"
-                        )
-                        continue
-
+            if feed is None:
                 self._price_to_beat_retry_after[slug] = max(
                     float(self._price_to_beat_retry_after.get(slug) or 0.0),
                     now + _PRICE_TO_BEAT_RETRY_SECONDS,
                 )
-        finally:
-            if api_client is not None:
-                api_client.close()
+                continue
+
+            ptb = feed.get_price_at_time(m.asset, start_ts)
+            if ptb is None and hasattr(feed, "get_price_at_or_after_time"):
+                ptb = feed.get_price_at_or_after_time(
+                    m.asset,
+                    start_ts,
+                    max_delay_seconds=_PRICE_TO_BEAT_DELAYED_HISTORY_MAX_SECONDS,
+                )
+            if ptb is not None:
+                self._price_to_beat[slug] = ptb
+                self._price_to_beat_retry_after.pop(slug, None)
+                logger.info(
+                    f"CryptoService: price to beat for {m.asset} ({slug}): "
+                    f"${ptb:,.2f} (from history, {elapsed:.0f}s after start)"
+                )
+                continue
+
+            if elapsed <= 10:
+                oracle = feed.get_price(m.asset)
+                if oracle and oracle.price:
+                    self._price_to_beat[slug] = oracle.price
+                    self._price_to_beat_retry_after.pop(slug, None)
+                    logger.info(
+                        f"CryptoService: price to beat for {m.asset} ({slug}): "
+                        f"${oracle.price:,.2f} (live, {elapsed:.1f}s after start)"
+                    )
+                    continue
+
+            binance_open = self._fetch_price_to_beat_from_binance_kline(
+                api_client,
+                m,
+                start_timestamp_ms=int(start_ts * 1000.0),
+            )
+            if binance_open is not None:
+                self._price_to_beat[slug] = binance_open
+                self._price_to_beat_retry_after.pop(slug, None)
+                logger.info(
+                    f"CryptoService: price to beat for {m.asset} ({slug}): "
+                    f"${binance_open:,.2f} (binance-1m-open, {elapsed:.0f}s after start)"
+                )
+                continue
+
+            self._price_to_beat_retry_after[slug] = max(
+                float(self._price_to_beat_retry_after.get(slug) or 0.0),
+                now + _PRICE_TO_BEAT_RETRY_SECONDS,
+            )
 
         # Clean up old entries
         active_slugs = {m.slug for m in markets}

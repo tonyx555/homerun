@@ -2235,6 +2235,7 @@ class _CryptoMarketFetcher:
         self._ttl = ttl_seconds
         self._markets: list[Market] = []
         self._last_fetch: float = 0.0
+        self._shared_client = None
 
     @property
     def is_stale(self) -> bool:
@@ -2378,60 +2379,62 @@ class _CryptoMarketFetcher:
         try:
             series = _get_crypto_series()
             now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-            with httpx.Client(timeout=10.0) as client:
-                for series_id, asset, timeframe in series:
-                    try:
-                        resp = client.get(
-                            f"{self._gamma_url}/events",
-                            params={
-                                "series_id": series_id,
-                                "active": "true",
-                                "closed": "false",
-                                # Exclude stale unresolved history and walk forward
-                                # from now for live/nearest-upcoming selection.
-                                "end_date_min": now_iso,
-                                "order": "endDate",
-                                "ascending": "true",
-                                "limit": 10,
-                            },
-                        )
-                        if resp.status_code != 200:
-                            logger.debug(
-                                "BtcEthHighFreq: Gamma series_id=%s returned %s",
-                                series_id,
-                                resp.status_code,
-                            )
-                            continue
-
-                        events = resp.json()
-                        if not isinstance(events, list):
-                            continue
-
-                        # Pick live + upcoming events
-                        selected = self._pick_live_and_upcoming(events)
-
-                        for event_data in selected:
-                            for mkt_data in event_data.get("markets", []):
-                                mid = _market_id(mkt_data)
-                                if mid and mid not in seen_ids:
-                                    try:
-                                        m = Market.from_gamma_response(mkt_data)
-                                        all_markets.append(m)
-                                        seen_ids.add(mid)
-                                    except Exception as e:
-                                        logger.debug(
-                                            "BtcEthHighFreq: failed to parse market %s: %s",
-                                            mid,
-                                            e,
-                                        )
-
-                        time.sleep(0.05)  # Rate limit between series
-                    except Exception as e:
+            if self._shared_client is None or self._shared_client.is_closed:
+                self._shared_client = httpx.Client(timeout=10.0, follow_redirects=True)
+            client = self._shared_client
+            for series_id, asset, timeframe in series:
+                try:
+                    resp = client.get(
+                        f"{self._gamma_url}/events",
+                        params={
+                            "series_id": series_id,
+                            "active": "true",
+                            "closed": "false",
+                            # Exclude stale unresolved history and walk forward
+                            # from now for live/nearest-upcoming selection.
+                            "end_date_min": now_iso,
+                            "order": "endDate",
+                            "ascending": "true",
+                            "limit": 10,
+                        },
+                    )
+                    if resp.status_code != 200:
                         logger.debug(
-                            "BtcEthHighFreq: series_id=%s fetch failed: %s",
+                            "BtcEthHighFreq: Gamma series_id=%s returned %s",
                             series_id,
-                            e,
+                            resp.status_code,
                         )
+                        continue
+
+                    events = resp.json()
+                    if not isinstance(events, list):
+                        continue
+
+                    # Pick live + upcoming events
+                    selected = self._pick_live_and_upcoming(events)
+
+                    for event_data in selected:
+                        for mkt_data in event_data.get("markets", []):
+                            mid = _market_id(mkt_data)
+                            if mid and mid not in seen_ids:
+                                try:
+                                    m = Market.from_gamma_response(mkt_data)
+                                    all_markets.append(m)
+                                    seen_ids.add(mid)
+                                except Exception as e:
+                                    logger.debug(
+                                        "BtcEthHighFreq: failed to parse market %s: %s",
+                                        mid,
+                                        e,
+                                    )
+
+                    time.sleep(0.05)  # Rate limit between series
+                except Exception as e:
+                    logger.debug(
+                        "BtcEthHighFreq: series_id=%s fetch failed: %s",
+                        series_id,
+                        e,
+                    )
 
         except Exception as exc:
             logger.warning(

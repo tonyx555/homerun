@@ -27,6 +27,14 @@ try:
     import httpx
 
     HTTPX_AVAILABLE = True
+    _shared_http_client: httpx.AsyncClient | None = None
+
+    def _get_shared_http_client(timeout: float = 30.0) -> httpx.AsyncClient:
+        global _shared_http_client
+        if _shared_http_client is None or _shared_http_client.is_closed:
+            _shared_http_client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
+        return _shared_http_client
+
 except ImportError:
     HTTPX_AVAILABLE = False
 
@@ -324,52 +332,52 @@ Return valid JSON only:
 
     async def _call_llm(self, prompt: str) -> str:
         """Call LLM API."""
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            if self.backend == "ollama":
-                response = await client.post(
-                    self.api_url,
-                    json={
-                        "model": self.model,
-                        "prompt": prompt,
-                        "stream": False,
-                        "format": "json",
-                    },
-                )
-                if response.status_code == 200:
-                    return response.json().get("response", "{}")
+        client = _get_shared_http_client(timeout=self.timeout)
+        if self.backend == "ollama":
+            response = await client.post(
+                self.api_url,
+                json={
+                    "model": self.model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "format": "json",
+                },
+            )
+            if response.status_code == 200:
+                return response.json().get("response", "{}")
 
-            elif self.backend == "openai":
-                response = await client.post(
-                    self.api_url,
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": self.model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "response_format": {"type": "json_object"},
-                    },
-                )
-                if response.status_code == 200:
-                    return response.json()["choices"][0]["message"]["content"]
+        elif self.backend == "openai":
+            response = await client.post(
+                self.api_url,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": self.model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "response_format": {"type": "json_object"},
+                },
+            )
+            if response.status_code == 200:
+                return response.json()["choices"][0]["message"]["content"]
 
-            elif self.backend == "anthropic":
-                response = await client.post(
-                    self.api_url,
-                    headers={
-                        "x-api-key": self.api_key,
-                        "anthropic-version": "2023-06-01",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": self.model,
-                        "max_tokens": 1024,
-                        "messages": [{"role": "user", "content": prompt}],
-                    },
-                )
-                if response.status_code == 200:
-                    return response.json()["content"][0]["text"]
+        elif self.backend == "anthropic":
+            response = await client.post(
+                self.api_url,
+                headers={
+                    "x-api-key": self.api_key,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": self.model,
+                    "max_tokens": 1024,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+            if response.status_code == 200:
+                return response.json()["content"][0]["text"]
 
         return "{}"
 

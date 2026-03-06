@@ -103,6 +103,9 @@ class ArbitrageScanner:
         # Track the running AI scoring task so we can cancel it on pause
         self._ai_scoring_task: Optional[asyncio.Task] = None
 
+        # Strong references for fire-and-forget background tasks to prevent GC
+        self._background_tasks: set[asyncio.Task] = set()
+
         # Auto AI scoring: when False (default), the scanner does NOT
         # automatically score all opportunities with LLM after each scan.
         # Manual per-opportunity analysis (via the Analyze button) still works.
@@ -961,6 +964,7 @@ class ArbitrageScanner:
             for market_id, ts in self._market_history_backfill_attempt_ms.items()
             if market_id in active_with_aliases
         }
+        self._prioritizer.cleanup_stale()
 
     @staticmethod
     def _price_timestamp(raw: Optional[dict]) -> Optional[float]:
@@ -2426,7 +2430,9 @@ class ArbitrageScanner:
 
             # Fire background news prefetch if enabled
             if settings.NEWS_EDGE_ENABLED:
-                asyncio.create_task(self._prefetch_news_matches(events, markets, prices))
+                t = asyncio.create_task(self._prefetch_news_matches(events, markets, prices))
+                self._background_tasks.add(t)
+                t.add_done_callback(self._background_tasks.discard)
 
             print(
                 f"[{utcnow().isoformat()}] Catalog refresh complete: "
@@ -2952,7 +2958,7 @@ class ArbitrageScanner:
                     if report.passed:
                         fast_filtered.append(opp)
                 fast_opportunities = fast_filtered
-                self._quality_reports.update(fast_quality_reports)
+                self._quality_reports = fast_quality_reports
                 fast_opportunities.sort(key=lambda x: x.roi_percent, reverse=True)
                 fast_opportunities = self._apply_opportunity_caps(fast_opportunities)
 
@@ -3205,7 +3211,7 @@ class ArbitrageScanner:
                 async with self._scan_lock:
                     self._cached_prices.update(full_snapshot_prices)
                     self._update_market_price_history(chunk_markets, full_snapshot_prices, now)
-                    self._quality_reports.update(full_quality_reports)
+                    self._quality_reports = full_quality_reports
                     self._last_full_snapshot_strategy_opportunity_count = len(full_filtered)
                     self._full_snapshot_cycle_total_markets = universe_count
                     self._full_snapshot_cycle_processed_markets = processed_markets
@@ -3915,8 +3921,10 @@ class ArbitrageScanner:
         # Kick off an immediate catalog refresh + scan in the background so
         # this method returns quickly and doesn't block the API response.
         if self._running:
-            asyncio.create_task(self.refresh_catalog())
-            asyncio.create_task(self.scan_fast())
+            for coro in (self.refresh_catalog(), self.scan_fast()):
+                task = asyncio.create_task(coro)
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
 
     async def pause(self):
         """Pause all background services (scanner, trader orchestrator, wallet tracker, discovery, etc.)."""
@@ -3939,7 +3947,11 @@ class ArbitrageScanner:
             self._ai_scoring_task.cancel()
             try:
                 await self._ai_scoring_task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
+                # Re-raise only if *we* were cancelled (not just the child task).
+                if asyncio.current_task() and asyncio.current_task().cancelled():
+                    raise
+            except Exception:
                 pass
             print("  AI scoring task cancelled")
 

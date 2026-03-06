@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import math
 from datetime import datetime, timezone
 import re
 from time import mktime
-from typing import Any
+from typing import Any, AsyncIterator
 import uuid
 
 import feedparser
@@ -28,6 +29,15 @@ _SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{1,48}[a-z0-9]$")
 _SOURCE_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 _ALLOWED_SOURCE_KINDS = {"python", "rss", "rest_api", "twitter"}
 _TEMPLATED_SOURCE_KINDS = {"rss", "rest_api", "twitter"}
+
+_shared_http_client: httpx.AsyncClient | None = None
+
+
+def _get_shared_http_client() -> httpx.AsyncClient:
+    global _shared_http_client
+    if _shared_http_client is None or _shared_http_client.is_closed:
+        _shared_http_client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
+    return _shared_http_client
 _RETENTION_BOUNDS: dict[str, tuple[int, int]] = {
     "max_records": (1, 250_000),
     "max_age_days": (1, 3650),
@@ -272,6 +282,32 @@ class BaseDataSource:
     def __init__(self) -> None:
         self.config: dict[str, Any] = dict(self.default_config)
 
+    @property
+    def http_client(self) -> httpx.AsyncClient:
+        """Shared async HTTP client for all data source network calls.
+
+        Returns a process-wide ``httpx.AsyncClient`` with connection pooling,
+        30s default timeout, and automatic redirect following.  Use this
+        instead of creating per-call ``httpx.AsyncClient`` instances::
+
+            resp = await self.http_client.get("https://api.example.com/data")
+        """
+        return _get_shared_http_client()
+
+    @contextlib.asynccontextmanager
+    async def _http_session(self, **kwargs: Any) -> AsyncIterator[httpx.AsyncClient]:
+        """Async context manager that yields the shared HTTP client.
+
+        Drop-in replacement for ``async with httpx.AsyncClient(...) as client:``
+        that reuses the process-wide connection pool instead of creating (and
+        tearing down) a new one each call.  Any keyword arguments are ignored
+        so existing call sites keep compiling::
+
+            async with self._http_session(timeout=30.0) as client:
+                resp = await client.get(url)
+        """
+        yield _get_shared_http_client()
+
     def configure(self, config: dict[str, Any] | None) -> None:
         merged = dict(self.default_config)
         if config:
@@ -431,15 +467,15 @@ class BaseDataSource:
         if not target:
             return default
         try:
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-                response = await client.get(target, params=params, headers=headers)
-                if response.status_code == 429:
-                    return default
-                response.raise_for_status()
-                try:
-                    return response.json()
-                except Exception:
-                    return default
+            client = _get_shared_http_client()
+            response = await client.get(target, params=params, headers=headers, timeout=timeout)
+            if response.status_code == 429:
+                return default
+            response.raise_for_status()
+            try:
+                return response.json()
+            except Exception:
+                return default
         except Exception:
             return default
 
@@ -456,12 +492,12 @@ class BaseDataSource:
         if not target:
             return default
         try:
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-                response = await client.get(target, params=params, headers=headers)
-                if response.status_code == 429:
-                    return default
-                response.raise_for_status()
-                return response.text
+            client = _get_shared_http_client()
+            response = await client.get(target, params=params, headers=headers, timeout=timeout)
+            if response.status_code == 429:
+                return default
+            response.raise_for_status()
+            return response.text
         except Exception:
             return default
 

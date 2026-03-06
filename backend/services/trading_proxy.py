@@ -280,6 +280,7 @@ async def verify_vpn_active(cfg: Optional[ProxyConfig] = None) -> dict:
 
     async def _fetch_proxy_ip() -> tuple[Optional[str], Optional[str]]:
         try:
+            # Intentionally ephemeral: proxy URL/SSL config may change between checks
             async with httpx.AsyncClient(
                 proxy=cfg.proxy_url,
                 timeout=cfg.timeout,

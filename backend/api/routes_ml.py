@@ -201,6 +201,9 @@ async def delete_all_data(confirm: bool = Query(False)):
 # ── Training endpoints ────────────────────────────────────────────────────
 
 
+_training_tasks: set[asyncio.Task] = set()
+
+
 @router.post("/train")
 async def start_training(body: TrainRequest):
     """Start an ML training job (async).  Returns job ID for polling."""
@@ -219,8 +222,9 @@ async def start_training(body: TrainRequest):
         session.add(job)
         await session.commit()
 
-    # Launch training in background
-    asyncio.create_task(
+    # Launch training in background — hold a strong reference so
+    # the task isn't GC'd (which would leak DB connections).
+    task = asyncio.create_task(
         run_training_job(
             job_id=job_id,
             model_type=body.model_type,
@@ -230,6 +234,8 @@ async def start_training(body: TrainRequest):
             days_lookback=body.days_lookback,
         )
     )
+    _training_tasks.add(task)
+    task.add_done_callback(_training_tasks.discard)
 
     return {"job_id": job_id, "status": "queued"}
 

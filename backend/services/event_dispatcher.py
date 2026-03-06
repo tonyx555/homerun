@@ -152,6 +152,7 @@ class EventDispatcher:
         else:
             self._fail_on_unowned_remote = strict_override.strip().lower() in {"1", "true", "yes", "on"}
         self._timed_out_handler_tasks: set[asyncio.Task[Any]] = set()
+        self._force_kill_tasks: set[asyncio.Task[Any]] = set()
 
     def _consume_timed_out_handler_result(
         self,
@@ -184,6 +185,21 @@ class EventDispatcher:
         timeout_seconds: float,
     ) -> None:
         self._timed_out_handler_tasks.add(task)
+
+        async def _force_kill() -> None:
+            """Give the runaway handler 10s more, then hard-cancel again."""
+            await asyncio.sleep(10)
+            if not task.done():
+                task.cancel()
+                logger.warning(
+                    "Force-cancelled runaway handler task",
+                    strategy=strategy,
+                    event_type=event_type,
+                )
+
+        kill_task = asyncio.create_task(_force_kill(), name=f"force-kill-{strategy}")
+        self._force_kill_tasks.add(kill_task)
+        kill_task.add_done_callback(self._force_kill_tasks.discard)
         task.add_done_callback(
             lambda done_task: self._consume_timed_out_handler_result(
                 done_task,
@@ -273,10 +289,13 @@ class EventDispatcher:
                 self._consume_timed_out_handler_result(done_task)
             if pending:
                 logger.warning(
-                    "Timed-out strategy handlers still pending during shutdown",
+                    "Timed-out strategy handlers still pending during shutdown; cancelling force-kill tasks",
                     tasks=len(pending),
                     shutdown_grace_seconds=shutdown_grace_seconds,
                 )
+        for kill_task in list(self._force_kill_tasks):
+            kill_task.cancel()
+        self._force_kill_tasks.clear()
 
     async def dispatch(
         self,
@@ -405,6 +424,23 @@ class EventDispatcher:
                     cancel_grace_seconds=self._handler_cancel_grace_seconds,
                 )
                 return []
+        except asyncio.CancelledError:
+            # Parent (_dispatch_local / gather) was cancelled — ensure the
+            # handler task is cleaned up so it doesn't leak a DB connection.
+            if not handler_task.done():
+                handler_task.cancel()
+                try:
+                    await asyncio.shield(asyncio.wait({handler_task}, timeout=2.0))
+                except (asyncio.CancelledError, Exception):
+                    pass
+                if not handler_task.done():
+                    self._track_timed_out_handler_task(
+                        handler_task,
+                        strategy=slug,
+                        event_type=event.event_type,
+                        timeout_seconds=timeout_seconds,
+                    )
+            raise
         except Exception as exc:
             logger.warning(
                 "Strategy event handler failed",
@@ -561,6 +597,14 @@ class EventDispatcher:
                         signals_bridged=int(emitted),
                         bridge_owner=bridge_policy.owner,
                     )
+                except asyncio.CancelledError:
+                    logger.warning(
+                        "Remote DataEvent signal bridge cancelled during shutdown",
+                        event_type=event.event_type,
+                        source=bridge_source,
+                        opportunities=len(opportunities),
+                    )
+                    raise
                 except Exception as exc:
                     logger.warning(
                         "Remote DataEvent signal bridge failed",

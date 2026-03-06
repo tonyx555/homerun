@@ -480,6 +480,7 @@ class _KalshiMarketCache:
         self._last_fetch: float = 0.0
         self._read_cooldown_until: float = 0.0
         self._read_429_warning_cooldown_until: float = 0.0
+        self._shared_client: httpx.Client | None = None
 
     @property
     def is_stale(self) -> bool:
@@ -581,82 +582,85 @@ class _KalshiMarketCache:
         max_pages = 30
 
         try:
-            with httpx.Client(
-                timeout=30.0,
-                headers={
-                    "Accept": "application/json",
-                    "User-Agent": "homerun-arb-scanner/1.0",
-                },
-            ) as client:
-                for page in range(max_pages):
-                    params: dict = {"limit": 200, "status": "open"}
-                    if cursor:
-                        params["cursor"] = cursor
+            if self._shared_client is None or self._shared_client.is_closed:
+                self._shared_client = httpx.Client(
+                    timeout=30.0,
+                    follow_redirects=True,
+                    headers={
+                        "Accept": "application/json",
+                        "User-Agent": "homerun-arb-scanner/1.0",
+                    },
+                )
+            client = self._shared_client
+            for page in range(max_pages):
+                params: dict = {"limit": 200, "status": "open"}
+                if cursor:
+                    params["cursor"] = cursor
 
-                    # Rate limit: pause between pages to avoid 429
-                    if page > 0:
-                        time.sleep(0.35)
+                # Rate limit: pause between pages to avoid 429
+                if page > 0:
+                    time.sleep(0.35)
 
-                    data = None
-                    max_retries = 3
-                    for attempt in range(max_retries + 1):
-                        try:
-                            now = time.monotonic()
-                            if now < self._read_cooldown_until:
-                                time.sleep(self._read_cooldown_until - now)
-                            resp = client.get(f"{self._api_url}/markets", params=params)
-                            if resp.status_code == 429 and attempt < max_retries:
-                                backoff = 2**attempt  # 1s, 2s, 4s
-                                retry_after = resp.headers.get("Retry-After")
-                                if retry_after:
-                                    try:
-                                        backoff = max(backoff, float(retry_after))
-                                    except ValueError:
-                                        pass
-                                self._read_cooldown_until = max(
-                                    self._read_cooldown_until,
-                                    time.monotonic() + backoff,
+                data = None
+                max_retries = 3
+                for attempt in range(max_retries + 1):
+                    try:
+                        now = time.monotonic()
+                        if now < self._read_cooldown_until:
+                            time.sleep(self._read_cooldown_until - now)
+                        resp = client.get(f"{self._api_url}/markets", params=params)
+                        if resp.status_code == 429 and attempt < max_retries:
+                            backoff = 2**attempt  # 1s, 2s, 4s
+                            retry_after = resp.headers.get("Retry-After")
+                            if retry_after:
+                                try:
+                                    backoff = max(backoff, float(retry_after))
+                                except ValueError:
+                                    pass
+                            self._read_cooldown_until = max(
+                                self._read_cooldown_until,
+                                time.monotonic() + backoff,
+                            )
+                            if time.monotonic() >= self._read_429_warning_cooldown_until:
+                                logger.warning(
+                                    "Kalshi markets 429, retrying",
+                                    attempt=attempt + 1,
+                                    backoff_seconds=backoff,
                                 )
-                                if time.monotonic() >= self._read_429_warning_cooldown_until:
-                                    logger.warning(
-                                        "Kalshi markets 429, retrying",
-                                        attempt=attempt + 1,
-                                        backoff_seconds=backoff,
-                                    )
-                                    self._read_429_warning_cooldown_until = time.monotonic() + 30.0
-                                time.sleep(backoff)
-                                continue
-                            resp.raise_for_status()
-                            data = resp.json()
-                            break
-                        except httpx.HTTPStatusError as exc:
-                            logger.warning(
-                                "Kalshi markets HTTP error",
-                                status=exc.response.status_code,
-                            )
-                            break
-                        except Exception as exc:
-                            logger.warning(
-                                "Kalshi markets request failed",
-                                error=str(exc),
-                            )
-                            break
-
-                    if data is None:
+                                self._read_429_warning_cooldown_until = time.monotonic() + 30.0
+                            time.sleep(backoff)
+                            continue
+                        resp.raise_for_status()
+                        data = resp.json()
+                        break
+                    except httpx.HTTPStatusError as exc:
+                        logger.warning(
+                            "Kalshi markets HTTP error",
+                            status=exc.response.status_code,
+                        )
+                        break
+                    except Exception as exc:
+                        logger.warning(
+                            "Kalshi markets request failed",
+                            error=str(exc),
+                        )
                         break
 
-                    raw_markets = data.get("markets", [])
-                    if not raw_markets:
-                        break
+                if data is None:
+                    break
 
-                    for m_data in raw_markets:
-                        parsed = self._parse_kalshi_market(m_data)
-                        if parsed is not None:
-                            all_markets.append(parsed)
+                raw_markets = data.get("markets", [])
+                if not raw_markets:
+                    break
 
-                    cursor = data.get("cursor") or None
-                    if cursor is None:
-                        break
+                for m_data in raw_markets:
+                    parsed = self._parse_kalshi_market(m_data)
+                    if parsed is not None:
+                        all_markets.append(parsed)
+
+                cursor = data.get("cursor") or None
+                if cursor is None:
+                    break
 
         except Exception as exc:
             logger.warning("Kalshi client creation failed", error=str(exc))

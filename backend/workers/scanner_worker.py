@@ -356,10 +356,13 @@ async def _run_scan_loop() -> None:
                 except Exception as exc:
                     logger.warning("Scanner heavy-lane degrade expiry check failed: %s", exc)
                 control = await read_scanner_control(session)
-                try:
-                    await apply_runtime_settings_overrides()
-                except Exception as exc:
-                    logger.warning("Failed to refresh scanner runtime settings from DB: %s", exc)
+
+            try:
+                await apply_runtime_settings_overrides()
+            except Exception as exc:
+                logger.warning("Failed to refresh scanner runtime settings from DB: %s", exc)
+
+            async with AsyncSessionLocal() as session:
                 try:
                     await refresh_strategy_runtime_if_needed(
                         session,

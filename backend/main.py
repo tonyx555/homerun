@@ -203,13 +203,15 @@ async def lifespan(app: FastAPI):
         return dt.astimezone(timezone.utc)
 
     async def _spawn_worker_process(module_name: str) -> asyncio.subprocess.Process:
+        worker_env = os.environ.copy()
+        worker_env["HOMERUN_PROCESS_ROLE"] = "worker"
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "-m",
             "workers.runner",
             module_name,
             cwd=str(Path(__file__).resolve().parent),
-            env=os.environ.copy(),
+            env=worker_env,
         )
         logger.info(
             "Worker process started",

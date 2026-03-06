@@ -1053,21 +1053,19 @@ function formatRelativeAge(value: string | null | undefined): string {
 function computeOrderDynamicEdgePercent(params: {
   status: string
   edgePercent: number
-  fillPrice: number
-  markPrice: number
+  unrealizedPnl: number | null
   realizedPnl: number
   filledNotional: number
 }): number {
   const {
     status,
     edgePercent,
-    fillPrice,
-    markPrice,
+    unrealizedPnl,
     realizedPnl,
     filledNotional,
   } = params
-  if (OPEN_ORDER_STATUSES.has(status) && fillPrice > 0 && markPrice > 0) {
-    return ((markPrice - fillPrice) / fillPrice) * 100
+  if (OPEN_ORDER_STATUSES.has(status) && unrealizedPnl !== null && filledNotional > 0) {
+    return (unrealizedPnl / filledNotional) * 100
   }
   if (RESOLVED_ORDER_STATUSES.has(status) && filledNotional > 0) {
     return (realizedPnl / filledNotional) * 100
@@ -2765,20 +2763,11 @@ function buildPositionBookRows(
     }
     const notional = Math.abs(toNumber(order.notional_usd))
     const px = toNumber(order.effective_price ?? order.entry_price)
-    const providerReconciliation = isRecord(orderPayload.provider_reconciliation) ? orderPayload.provider_reconciliation : {}
-    const providerSnapshot = isRecord(orderPayload.provider_position_snapshot) ? orderPayload.provider_position_snapshot : {}
-    const fillPx = toNumber(
-      order.average_fill_price
-      ?? providerReconciliation.average_fill_price
-      ?? providerSnapshot.average_fill_price
-      ?? px
-    )
     const pnl = toNumber(order.actual_profit)
     const edge = computeOrderDynamicEdgePercent({
       status,
       edgePercent: toNumber(order.edge_percent),
-      fillPrice: fillPx,
-      markPrice: markPrice,
+      unrealizedPnl: unrealizedPnl,
       realizedPnl: pnl,
       filledNotional,
     })
@@ -6469,8 +6458,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       const dynamicEdgePercent = computeOrderDynamicEdgePercent({
         status,
         edgePercent: toNumber(order.edge_percent),
-        fillPrice: fillPx,
-        markPrice: markPx,
+        unrealizedPnl: unrealized,
         realizedPnl: pnl,
         filledNotional,
       })
@@ -8275,10 +8263,9 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                         {filteredAllTradeHistory.length === 0 ? (
                           <div className="h-full flex items-center justify-center text-sm text-muted-foreground">No trades matching filters.</div>
                         ) : (
-                          <ScrollArea className="h-full min-h-0 rounded-md border border-border/60 bg-card/80">
-                            <div className="w-full overflow-x-auto">
+                          <div className="h-full min-h-0 overflow-auto rounded-md border border-border/60 bg-card/80">
                             <Table className="w-full table-fixed">
-                              <TableHeader>
+                              <TableHeader className="sticky top-0 z-10 bg-background/95 backdrop-blur-sm">
                                 <TableRow>
                                   <TableHead className="w-[32%] text-[10px]">Market</TableHead>
                                   <TableHead className="w-[6%] text-[10px]">Dir</TableHead>
@@ -8361,14 +8348,13 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                       requestedNotionalFallback: Math.abs(toNumber(order.notional_usd)),
                                     }
                                   )
-                                  const dynamicEdgePercent = computeOrderDynamicEdgePercent({
-                                    status,
-                                    edgePercent: toNumber(order.edge_percent),
-                                    fillPrice: fillPx,
-                                    markPrice: markPx,
-                                    realizedPnl: pnl,
-                                    filledNotional,
-                                  })
+                                   const dynamicEdgePercent = computeOrderDynamicEdgePercent({
+                                     status,
+                                     edgePercent: toNumber(order.edge_percent),
+                                     unrealizedPnl: unrealized,
+                                     realizedPnl: pnl,
+                                     filledNotional,
+                                   })
                                   const exitProgressPercent = computePendingExitProgressPercent(pendingExit as Record<string, unknown>)
                                   const linkedDecisionId = String(order.decision_id || '').trim()
                                   const signalPayload = linkedDecisionId
@@ -8528,8 +8514,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                 })}
                               </TableBody>
                             </Table>
-                            </div>
-                          </ScrollArea>
+                          </div>
                         )}
                       </div>
                     </div>
@@ -8626,10 +8611,9 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                         {filteredAllPositionBook.length === 0 ? (
                           <div className="h-full flex items-center justify-center text-sm text-muted-foreground">No positions matching filters.</div>
                         ) : (
-                          <ScrollArea className="h-full min-h-0 rounded-md border border-border/60 bg-card/80">
-                            <div className="w-full overflow-x-auto">
+                          <div className="h-full min-h-0 overflow-auto rounded-md border border-border/60 bg-card/80">
                             <Table className="min-w-[1240px]">
-                              <TableHeader>
+                              <TableHeader className="sticky top-0 z-10 bg-background/95 backdrop-blur-sm">
                                 <TableRow>
                                   <TableHead className="text-[11px]">Market</TableHead>
                                   <TableHead className="text-[11px]">L</TableHead>
@@ -8727,8 +8711,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                 })}
                               </TableBody>
                             </Table>
-                            </div>
-                          </ScrollArea>
+                          </div>
                         )}
                       </div>
                     </div>
@@ -9039,10 +9022,9 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                       {selectedTradeRows.length === 0 ? (
                         <div className="h-full flex items-center justify-center text-sm text-muted-foreground">No trades matching filters.</div>
                       ) : (
-                        <ScrollArea className="h-full min-h-0">
-                          <div className="w-full overflow-x-auto">
+                        <div className="h-full min-h-0 overflow-auto">
                           <Table className="w-full table-fixed">
-                            <TableHeader>
+                            <TableHeader className="sticky top-0 z-10 bg-background/95 backdrop-blur-sm">
                               <TableRow>
                                 <TableHead className="w-[32%] text-[10px]">Market</TableHead>
                                 <TableHead className="w-[6%] text-[10px]">Dir</TableHead>
@@ -9246,8 +9228,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                               })}
                             </TableBody>
                           </Table>
-                          </div>
-                        </ScrollArea>
+                        </div>
                       )}
                     </div>
                   </div>
@@ -9793,9 +9774,9 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                     <div className="flex-1 min-h-0 grid gap-2 xl:grid-cols-2">
                       <div className="min-h-0 rounded-md border border-border/60 bg-card/60">
                         <div className="px-2 py-1 border-b border-border/50 text-[10px] uppercase tracking-wider text-muted-foreground">Timeframe Performance</div>
-                        <ScrollArea className="h-[32%] min-h-[150px]">
+                        <div className="h-[32%] min-h-[150px] overflow-auto">
                           <Table>
-                            <TableHeader>
+                            <TableHeader className="sticky top-0 z-10 bg-background/95 backdrop-blur-sm">
                               <TableRow>
                                 <TableHead className="text-[10px]">Timeframe</TableHead>
                                 <TableHead className="text-[10px] text-right">P&amp;L</TableHead>
@@ -9820,11 +9801,11 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                               ))}
                             </TableBody>
                           </Table>
-                        </ScrollArea>
+                        </div>
                         <div className="px-2 py-1 border-y border-border/50 text-[10px] uppercase tracking-wider text-muted-foreground">Mode Performance</div>
-                        <ScrollArea className="h-[32%] min-h-[150px]">
+                        <div className="h-[32%] min-h-[150px] overflow-auto">
                           <Table>
-                            <TableHeader>
+                            <TableHeader className="sticky top-0 z-10 bg-background/95 backdrop-blur-sm">
                               <TableRow>
                                 <TableHead className="text-[10px]">Mode</TableHead>
                                 <TableHead className="text-[10px] text-right">P&amp;L</TableHead>
@@ -9849,11 +9830,11 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                               ))}
                             </TableBody>
                           </Table>
-                        </ScrollArea>
+                        </div>
                         <div className="px-2 py-1 border-y border-border/50 text-[10px] uppercase tracking-wider text-muted-foreground">Mode + Timeframe</div>
-                        <ScrollArea className="h-[32%] min-h-[150px]">
+                        <div className="h-[32%] min-h-[150px] overflow-auto">
                           <Table>
-                            <TableHeader>
+                            <TableHeader className="sticky top-0 z-10 bg-background/95 backdrop-blur-sm">
                               <TableRow>
                                 <TableHead className="text-[10px]">Bucket</TableHead>
                                 <TableHead className="text-[10px] text-right">P&amp;L</TableHead>
@@ -9874,14 +9855,14 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                               ))}
                             </TableBody>
                           </Table>
-                        </ScrollArea>
+                        </div>
                       </div>
 
                       <div className="min-h-0 rounded-md border border-border/60 bg-card/60">
                         <div className="px-2 py-1 border-b border-border/50 text-[10px] uppercase tracking-wider text-muted-foreground">Strategy Performance</div>
-                        <ScrollArea className="h-[49%] min-h-[220px]">
+                        <div className="h-[49%] min-h-[220px] overflow-auto">
                           <Table>
-                            <TableHeader>
+                            <TableHeader className="sticky top-0 z-10 bg-background/95 backdrop-blur-sm">
                               <TableRow>
                                 <TableHead className="text-[10px]">Strategy</TableHead>
                                 <TableHead className="text-[10px] text-right">P&amp;L</TableHead>
@@ -9907,11 +9888,11 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                               ))}
                             </TableBody>
                           </Table>
-                        </ScrollArea>
+                        </div>
                         <div className="px-2 py-1 border-y border-border/50 text-[10px] uppercase tracking-wider text-muted-foreground">Sub-Strategy Performance</div>
-                        <ScrollArea className="h-[49%] min-h-[220px]">
+                        <div className="h-[49%] min-h-[220px] overflow-auto">
                           <Table>
-                            <TableHeader>
+                            <TableHeader className="sticky top-0 z-10 bg-background/95 backdrop-blur-sm">
                               <TableRow>
                                 <TableHead className="text-[10px]">Sub-Strategy</TableHead>
                                 <TableHead className="text-[10px] text-right">P&amp;L</TableHead>
@@ -9936,7 +9917,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                               ))}
                             </TableBody>
                           </Table>
-                        </ScrollArea>
+                        </div>
                       </div>
                     </div>
                   </div>

@@ -31,6 +31,7 @@ class EventBus:
         self._cursor_lock = asyncio.Lock()
         self._running = False
         self._last_stream_id = "$"
+        self._dispatch_tasks: set[asyncio.Task] = set()
 
     def subscribe(self, event_type: str, callback: EventCallback) -> None:
         self._subscribers.setdefault(event_type, []).append(callback)
@@ -96,7 +97,9 @@ class EventBus:
             return
         for cb in callbacks:
             try:
-                asyncio.create_task(_safe_invoke(cb, event_type, data))
+                task = asyncio.create_task(_safe_invoke(cb, event_type, data))
+                self._dispatch_tasks.add(task)
+                task.add_done_callback(self._dispatch_tasks.discard)
             except Exception:
                 logger.debug(
                     "Failed to schedule event callback",

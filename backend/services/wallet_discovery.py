@@ -1796,11 +1796,11 @@ class WalletDiscoveryEngine:
 
         to_remove = [wallet.address for wallet in removable[:remove_count]]
         removed = 0
-        async with AsyncSessionLocal() as session:
-            for chunk in self._chunked(to_remove, maintenance_batch):
+        for chunk in self._chunked(to_remove, maintenance_batch):
+            async with AsyncSessionLocal() as session:
                 result = await session.execute(delete(DiscoveredWallet).where(DiscoveredWallet.address.in_(chunk)))
                 removed += int(result.rowcount or 0)
-            await session.commit()
+                await session.commit()
         return removed
 
     async def _upsert_wallet(self, data: dict):
@@ -1881,31 +1881,61 @@ class WalletDiscoveryEngine:
     async def refresh_leaderboard(self):
         """
         Recalculate rank_position for all discovered wallets based
-        on rank_score descending.
+        on rank_score descending.  Uses batched updates to avoid
+        holding row locks across the entire table in a single
+        statement (which causes deadlocks with recompute_pool and
+        exceeds statement_timeout on large catalogs).
         """
+        BATCH_SIZE = 500
+
+        # Phase 1: Read addresses + current rank_position (lightweight query).
         async with AsyncSessionLocal() as session:
-            total_wallets = int((await session.execute(select(func.count(DiscoveredWallet.address)))).scalar() or 0)
-            await session.execute(
-                text(
-                    """
-                    WITH ranked AS (
-                        SELECT
-                            address,
-                            ROW_NUMBER() OVER (ORDER BY rank_score DESC NULLS LAST, address ASC) AS next_rank
-                        FROM discovered_wallets
+            rows = (
+                await session.execute(
+                    select(
+                        DiscoveredWallet.address,
+                        DiscoveredWallet.rank_score,
+                        DiscoveredWallet.rank_position,
+                    ).order_by(
+                        DiscoveredWallet.rank_score.desc().nullslast(),
+                        DiscoveredWallet.address.asc(),
                     )
-                    UPDATE discovered_wallets AS d
-                    SET rank_position = ranked.next_rank
-                    FROM ranked
-                    WHERE d.address = ranked.address
-                    """
                 )
-            )
-            await session.commit()
+            ).all()
+
+        # Phase 2: Compute new ranks in Python (no DB connection held).
+        dirty: list[tuple[str, int]] = []
+        for new_rank, (address, _score, old_rank) in enumerate(rows, start=1):
+            if old_rank != new_rank:
+                dirty.append((address, new_rank))
+
+        # Phase 3: Write changed ranks in small batches.
+        updated = 0
+        for i in range(0, len(dirty), BATCH_SIZE):
+            batch = dirty[i : i + BATCH_SIZE]
+            async with AsyncSessionLocal() as session:
+                await session.execute(
+                    text(
+                        """
+                        UPDATE discovered_wallets AS d
+                        SET rank_position = v.new_rank
+                        FROM (SELECT unnest(:addrs) AS address,
+                                     unnest(:ranks) AS new_rank) AS v
+                        WHERE d.address = v.address
+                        """
+                    ),
+                    {
+                        "addrs": [addr for addr, _ in batch],
+                        "ranks": [rank for _, rank in batch],
+                    },
+                )
+                await session.commit()
+                updated += len(batch)
 
         logger.info(
             "Leaderboard refreshed",
-            total_wallets=total_wallets,
+            total_wallets=len(rows),
+            updated=updated,
         )
 
     @staticmethod
