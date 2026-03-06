@@ -2379,16 +2379,20 @@ class ArbitrageScanner:
                 prices = await self._snapshot_ws_prices(all_token_ids)
                 print(f"  Loaded prices for {len(prices)}/{len(all_token_ids)} tokens from Redis")
                 print(f"  [timing] Price load: {_time.monotonic() - _phase_t:.1f}s")
-            self._apply_live_prices_to_markets(markets, prices)
+            # Phase 4 — Update in-memory caches (offloaded to thread)
+            def _update_caches_after_catalog(scanner, evts, mkts, prc, ts):
+                scanner._apply_live_prices_to_markets(mkts, prc)
+                scanner._cached_events = list(evts)
+                scanner._cached_markets = list(mkts)
+                scanner._cached_prices = dict(prc)
+                scanner._remember_market_tokens(mkts)
+                scanner._rebuild_realtime_graph(evts, mkts)
+                scanner._trim_runtime_market_caches({str(getattr(m, "id", "") or "") for m in mkts})
+                scanner._update_market_price_history(mkts, prc, ts)
 
-            # Phase 4 — Update in-memory caches
-            self._cached_events = list(events)
-            self._cached_markets = list(markets)
-            self._cached_prices = dict(prices)
-            self._remember_market_tokens(markets)
-            self._rebuild_realtime_graph(events, markets)
-            self._trim_runtime_market_caches({str(getattr(m, "id", "") or "") for m in markets})
-            self._update_market_price_history(markets, prices, now)
+            await asyncio.get_running_loop().run_in_executor(
+                None, _update_caches_after_catalog, self, events, markets, prices, now
+            )
 
             # Phase 5 — Subscribe WS feeds to active tokens
             if settings.WS_FEED_ENABLED:
@@ -2607,22 +2611,33 @@ class ArbitrageScanner:
                 event.markets = linked_markets
 
         merged_events = list(event_map.values())
-        merged_events, merged_markets = self._prune_active_catalog(merged_events, merged_markets, now)
-        merged_events, merged_markets = self._enforce_catalog_caps(merged_events, merged_markets)
+        def _prune_and_cap(scanner, evts, mkts, ts):
+            evts, mkts = scanner._prune_active_catalog(evts, mkts, ts)
+            evts, mkts = scanner._enforce_catalog_caps(evts, mkts)
+            return evts, mkts
+
+        merged_events, merged_markets = await asyncio.get_running_loop().run_in_executor(
+            None, _prune_and_cap, self, merged_events, merged_markets, now
+        )
 
         all_token_ids = self._collect_live_token_ids(merged_markets)
         prices: dict[str, dict] = {}
         if all_token_ids:
             prices = await self._snapshot_ws_prices(all_token_ids)
-        self._apply_live_prices_to_markets(merged_markets, prices)
 
-        self._cached_events = list(merged_events)
-        self._cached_markets = list(merged_markets)
-        self._cached_prices = dict(prices)
-        self._remember_market_tokens(merged_markets)
-        self._rebuild_realtime_graph(merged_events, merged_markets)
-        self._trim_runtime_market_caches({str(getattr(m, "id", "") or "") for m in merged_markets})
-        self._update_market_price_history(merged_markets, prices, now)
+        def _update_incremental_caches(scanner, evts, mkts, prc, ts):
+            scanner._apply_live_prices_to_markets(mkts, prc)
+            scanner._cached_events = list(evts)
+            scanner._cached_markets = list(mkts)
+            scanner._cached_prices = dict(prc)
+            scanner._remember_market_tokens(mkts)
+            scanner._rebuild_realtime_graph(evts, mkts)
+            scanner._trim_runtime_market_caches({str(getattr(m, "id", "") or "") for m in mkts})
+            scanner._update_market_price_history(mkts, prc, ts)
+
+        await asyncio.get_running_loop().run_in_executor(
+            None, _update_incremental_caches, self, merged_events, merged_markets, prices, now
+        )
 
         if settings.WS_FEED_ENABLED:
             try:
@@ -2693,14 +2708,20 @@ class ArbitrageScanner:
                 return 0
 
         now = datetime.now(timezone.utc)
-        events, markets = self._prune_active_catalog(events, markets, now)
-        events, markets = self._enforce_catalog_caps(events, markets)
 
-        self._cached_events = events
-        self._cached_markets = markets
-        self._remember_market_tokens(markets)
-        self._rebuild_realtime_graph(events, markets)
-        self._trim_runtime_market_caches({str(getattr(m, "id", "") or "") for m in markets})
+        def _hydrate_sync(scanner, evts, mkts, ts):
+            evts, mkts = scanner._prune_active_catalog(evts, mkts, ts)
+            evts, mkts = scanner._enforce_catalog_caps(evts, mkts)
+            scanner._cached_events = evts
+            scanner._cached_markets = mkts
+            scanner._remember_market_tokens(mkts)
+            scanner._rebuild_realtime_graph(evts, mkts)
+            scanner._trim_runtime_market_caches({str(getattr(m, "id", "") or "") for m in mkts})
+            return evts, mkts
+
+        events, markets = await asyncio.get_running_loop().run_in_executor(
+            None, _hydrate_sync, self, events, markets, now
+        )
 
         if catalog_age:
             self._last_catalog_refresh = catalog_age
@@ -2758,23 +2779,29 @@ class ArbitrageScanner:
 
                 cached_market_ids = {m.id for m in self._cached_markets}
                 truly_new = [m for m in new_markets if m.id not in cached_market_ids and self._is_market_active(m, now)]
+                loop = asyncio.get_running_loop()
+
                 if truly_new:
                     self._cached_markets.extend(truly_new)
-                    self._cached_events, self._cached_markets = self._prune_active_catalog(
-                        self._cached_events,
-                        self._cached_markets,
-                        now,
-                    )
-                    self._cached_events, self._cached_markets = self._enforce_catalog_caps(
-                        self._cached_events,
-                        self._cached_markets,
-                    )
-                    print(f"  Added {len(truly_new)} brand-new markets to cache")
-                    self._remember_market_tokens(self._cached_markets)
-                    self._rebuild_realtime_graph(self._cached_events, self._cached_markets)
-                    self._trim_runtime_market_caches({str(getattr(m, "id", "") or "") for m in self._cached_markets})
 
-                loop = asyncio.get_running_loop()
+                    def _refresh_catalog_after_new_markets(scanner, ts):
+                        scanner._cached_events, scanner._cached_markets = scanner._prune_active_catalog(
+                            scanner._cached_events,
+                            scanner._cached_markets,
+                            ts,
+                        )
+                        scanner._cached_events, scanner._cached_markets = scanner._enforce_catalog_caps(
+                            scanner._cached_events,
+                            scanner._cached_markets,
+                        )
+                        scanner._remember_market_tokens(scanner._cached_markets)
+                        scanner._rebuild_realtime_graph(scanner._cached_events, scanner._cached_markets)
+                        scanner._trim_runtime_market_caches(
+                            {str(getattr(m, "id", "") or "") for m in scanner._cached_markets}
+                        )
+
+                    await loop.run_in_executor(None, _refresh_catalog_after_new_markets, self, now)
+                    print(f"  Added {len(truly_new)} brand-new markets to cache")
 
                 affected_market_ids: list[str] = []
                 candidate_markets: list = []
@@ -2865,8 +2892,12 @@ class ArbitrageScanner:
 
                 merged_prices = dict(live_prices)
                 self._cached_prices.update(live_prices)
-                self._apply_live_prices_to_markets(candidate_markets, merged_prices)
-                self._update_market_price_history(candidate_markets, merged_prices, now)
+
+                def _apply_prices_and_history(scanner, mkts, prices, ts):
+                    scanner._apply_live_prices_to_markets(mkts, prices)
+                    scanner._update_market_price_history(mkts, prices, ts)
+
+                await loop.run_in_executor(None, _apply_prices_and_history, self, candidate_markets, merged_prices, now)
 
                 changed_markets = await loop.run_in_executor(
                     None, self._prioritizer.get_changed_markets, candidate_markets
@@ -2977,7 +3008,9 @@ class ArbitrageScanner:
 
                 if fast_opportunities:
                     await self._attach_ai_judgments(fast_opportunities)
-                    self._opportunities = self._merge_opportunities(fast_opportunities)
+                    self._opportunities = await loop.run_in_executor(
+                        None, self._merge_opportunities, fast_opportunities
+                    )
 
                 self._opportunities = await self.refresh_opportunity_prices(
                     self._opportunities,
@@ -3225,7 +3258,9 @@ class ArbitrageScanner:
                     elif chunk_start == 0:
                         self._full_snapshot_cycle_completed_at = None
                     if full_filtered:
-                        self._opportunities = self._merge_opportunities(full_filtered)
+                        self._opportunities = await asyncio.get_running_loop().run_in_executor(
+                            None, self._merge_opportunities, full_filtered
+                        )
                     opportunities_snapshot = [_clone_model(opp) for opp in self._opportunities]
 
                 refreshed_opportunities = await self.refresh_opportunity_prices(

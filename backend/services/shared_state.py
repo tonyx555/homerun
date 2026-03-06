@@ -165,7 +165,7 @@ async def write_scanner_snapshot(
     elif last_scan is None:
         last_scan = utcnow()
 
-    payload, skipped = _serialize_opportunity_payload(opportunities)
+    payload, skipped = await asyncio.to_thread(_serialize_opportunity_payload, opportunities)
     if skipped:
         logger.warning(
             "Skipped %d/%d opportunities while writing scanner snapshot",
@@ -322,22 +322,26 @@ async def write_traders_snapshot(
     elif last_scan is None:
         last_scan = utcnow()
 
-    payload: list[dict[str, Any]] = []
-    skipped = 0
-    for o in opportunities:
-        try:
-            item = (
-                o.model_dump(mode="json")
-                if hasattr(o, "model_dump")
-                else Opportunity.model_validate(o).model_dump(mode="json")
-            )
-            if isinstance(item.get("strategy_context"), dict):
-                item["strategy_context"]["source_key"] = "traders"
-            else:
-                item["strategy_context"] = {"source_key": "traders"}
-            payload.append(item)
-        except Exception:
-            skipped += 1
+    def _serialize_traders_payload() -> tuple[list[dict[str, Any]], int]:
+        out: list[dict[str, Any]] = []
+        skip = 0
+        for o in opportunities:
+            try:
+                item = (
+                    o.model_dump(mode="json")
+                    if hasattr(o, "model_dump")
+                    else Opportunity.model_validate(o).model_dump(mode="json")
+                )
+                if isinstance(item.get("strategy_context"), dict):
+                    item["strategy_context"]["source_key"] = "traders"
+                else:
+                    item["strategy_context"] = {"source_key": "traders"}
+                out.append(item)
+            except Exception:
+                skip += 1
+        return out, skip
+
+    payload, skipped = await asyncio.to_thread(_serialize_traders_payload)
 
     result = await session.execute(select(ScannerSnapshot).where(ScannerSnapshot.id == TRADERS_SNAPSHOT_ID))
     row = result.scalar_one_or_none()
@@ -385,7 +389,7 @@ async def enqueue_scanner_batch(
     batch_kind: str = "scan_cycle",
 ) -> str | None:
     """Enqueue a scanner detection batch for aggregation worker processing."""
-    payload, skipped = _serialize_opportunity_payload(opportunities)
+    payload, skipped = await asyncio.to_thread(_serialize_opportunity_payload, opportunities)
     if skipped:
         logger.warning(
             "Skipped %d/%d opportunities while enqueueing scanner batch",
@@ -529,7 +533,7 @@ async def enqueue_strategy_dead_letter_batch(
     error: str,
 ) -> str | None:
     """Enqueue failed strategy opportunities into dedicated dead-letter queue."""
-    payload, skipped = _serialize_opportunity_payload(opportunities)
+    payload, skipped = await asyncio.to_thread(_serialize_opportunity_payload, opportunities)
     if skipped:
         logger.warning(
             "Skipped %d/%d opportunities while enqueueing strategy dead-letter batch",
@@ -917,27 +921,33 @@ async def read_scanner_snapshot(
     if row is None:
         return [], _default_status()
 
-    opportunities: list[Opportunity] = []
+    raw_opps = list(row.opportunities_json or [])
     market_history = row.market_history_json if isinstance(row.market_history_json, dict) else {}
-    for d in row.opportunities_json or []:
-        try:
-            opp = Opportunity.model_validate(d)
-            for market in opp.markets:
-                candidates = (
-                    str(market.get("id", "") or "").strip(),
-                    str(market.get("condition_id", "") or "").strip(),
-                    str(market.get("conditionId", "") or "").strip(),
-                )
-                for candidate in candidates:
-                    if not candidate:
-                        continue
-                    history = market_history.get(candidate)
-                    if isinstance(history, list) and len(history) >= 2:
-                        market["price_history"] = history
-                        break
-            opportunities.append(opp)
-        except Exception as e:
-            logger.debug("Skip invalid opportunity row: %s", e)
+
+    def _deserialize_opportunities() -> list[Opportunity]:
+        out: list[Opportunity] = []
+        for d in raw_opps:
+            try:
+                opp = Opportunity.model_validate(d)
+                for market in opp.markets:
+                    candidates = (
+                        str(market.get("id", "") or "").strip(),
+                        str(market.get("condition_id", "") or "").strip(),
+                        str(market.get("conditionId", "") or "").strip(),
+                    )
+                    for candidate in candidates:
+                        if not candidate:
+                            continue
+                        history = market_history.get(candidate)
+                        if isinstance(history, list) and len(history) >= 2:
+                            market["price_history"] = history
+                            break
+                out.append(opp)
+            except Exception:
+                pass
+        return out
+
+    opportunities = await asyncio.to_thread(_deserialize_opportunities)
 
     tiered = row.tiered_scanning_json if isinstance(row.tiered_scanning_json, dict) else {}
     status = {
