@@ -17,6 +17,7 @@ from models.database import (
     AsyncSessionLocal,
     DiscoveredWallet,
     TradeSignal,
+    TraderDecision,
     TraderSignalConsumption,
     TraderOrder,
     TrackedWallet,
@@ -140,6 +141,24 @@ async def create_trader_decision(session, *, trader_id, signal, strategy_key, st
         decision=decision, reason=reason, score=score, trace_id=trace_id,
         checks_summary=checks_summary, risk_snapshot=risk_snapshot, payload=payload,
     )
+    # Write the decision row into the DB session so that any execution_sessions
+    # INSERT in the same transaction can satisfy the FK on decision_id.
+    session.add(TraderDecision(
+        id=row_id,
+        trader_id=trader_id,
+        signal_id=str(signal.id),
+        source=str(getattr(signal, "source", "")),
+        strategy_key=str(strategy_key),
+        strategy_version=int(strategy_version) if strategy_version is not None else None,
+        decision=str(decision),
+        reason=reason,
+        score=score,
+        trace_id=trace_id,
+        checks_summary_json=checks_summary or {},
+        risk_snapshot_json=risk_snapshot or {},
+        payload_json=payload or {},
+        created_at=utcnow(),
+    ))
     return _DecisionStub(row_id)
 
 
@@ -4542,7 +4561,13 @@ async def _run_trader_once(
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
-                    await session.rollback()
+                    try:
+                        await session.rollback()
+                    except Exception:
+                        logger.warning(
+                            "Trader %s session rollback failed after signal %s error; session may be invalidated",
+                            trader_id, signal_id,
+                        )
                     logger.exception(
                         "Trader %s failed to process signal %s",
                         trader_id,
@@ -4553,86 +4578,97 @@ async def _run_trader_once(
                     strategy_for_error = resolved_strategy_key or strategy_key or "unknown_strategy"
                     strategy_version_for_error = resolved_strategy_version
                     failure_reason = f"Signal processing failed ({error_type})"
-                    decision_row = await create_trader_decision(
-                        session,
-                        trader_id=trader_id,
-                        signal=signal,
-                        strategy_key=strategy_for_error,
-                        strategy_version=strategy_version_for_error,
-                        decision="failed",
-                        reason=failure_reason,
-                        score=0.0,
-                        checks_summary={"count": 0},
-                        risk_snapshot={},
-                        payload={
-                            "source_key": signal_source,
-                            "source_config": source_config or {},
-                            "error_type": error_type,
-                            "error_message": error_message,
-                        },
-                        commit=False,
-                    )
-                    decisions_written += 1
-                    if experiment_row is not None:
-                        await upsert_strategy_experiment_assignment(
+                    try:
+                        decision_row = await create_trader_decision(
                             session,
-                            experiment_id=str(experiment_row.id),
                             trader_id=trader_id,
-                            signal_id=signal_id,
-                            source_key=signal_source,
+                            signal=signal,
                             strategy_key=strategy_for_error,
-                            strategy_version=int(strategy_version_for_error or experiment_row.control_version or 1),
-                            assignment_group=str(assignment_group or "control"),
-                            decision_id=decision_row.id,
+                            strategy_version=strategy_version_for_error,
+                            decision="failed",
+                            reason=failure_reason,
+                            score=0.0,
+                            checks_summary={"count": 0},
+                            risk_snapshot={},
                             payload={
-                                "sample_pct": assignment_sample_pct,
-                                "assignment_source": assignment_source,
+                                "source_key": signal_source,
+                                "source_config": source_config or {},
                                 "error_type": error_type,
+                                "error_message": error_message,
                             },
                             commit=False,
                         )
-                    await set_trade_signal_status(
-                        session,
-                        signal_id=signal_id,
-                        status="failed",
-                        commit=False,
-                    )
-                    await record_signal_consumption(
-                        session,
-                        trader_id=trader_id,
-                        signal_id=signal_id,
-                        decision_id=decision_row.id,
-                        outcome="failed",
-                        reason=failure_reason,
-                        payload={
-                            "error_type": error_type,
-                            "error_message": error_message,
-                        },
-                        commit=False,
-                    )
-                    await upsert_trader_signal_cursor(
-                        session,
-                        trader_id=trader_id,
-                        last_signal_created_at=_signal_cursor_timestamp(signal),
-                        last_signal_id=signal_id,
-                        commit=False,
-                    )
-                    await create_trader_event(
-                        session,
-                        trader_id=trader_id,
-                        event_type="decision_error",
-                        severity="warn",
-                        source=signal_source,
-                        message="Signal processing failed; advanced cursor to avoid hard loop.",
-                        payload={
-                            "signal_id": signal_id,
-                            "decision_id": decision_row.id,
-                            "error_type": error_type,
-                            "error_message": error_message,
-                        },
-                        commit=False,
-                    )
-                    await _commit_with_retry(session)
+                        decisions_written += 1
+                        if experiment_row is not None:
+                            await upsert_strategy_experiment_assignment(
+                                session,
+                                experiment_id=str(experiment_row.id),
+                                trader_id=trader_id,
+                                signal_id=signal_id,
+                                source_key=signal_source,
+                                strategy_key=strategy_for_error,
+                                strategy_version=int(strategy_version_for_error or experiment_row.control_version or 1),
+                                assignment_group=str(assignment_group or "control"),
+                                decision_id=decision_row.id,
+                                payload={
+                                    "sample_pct": assignment_sample_pct,
+                                    "assignment_source": assignment_source,
+                                    "error_type": error_type,
+                                },
+                                commit=False,
+                            )
+                        await set_trade_signal_status(
+                            session,
+                            signal_id=signal_id,
+                            status="failed",
+                            commit=False,
+                        )
+                        await record_signal_consumption(
+                            session,
+                            trader_id=trader_id,
+                            signal_id=signal_id,
+                            decision_id=decision_row.id,
+                            outcome="failed",
+                            reason=failure_reason,
+                            payload={
+                                "error_type": error_type,
+                                "error_message": error_message,
+                            },
+                            commit=False,
+                        )
+                        await upsert_trader_signal_cursor(
+                            session,
+                            trader_id=trader_id,
+                            last_signal_created_at=_signal_cursor_timestamp(signal),
+                            last_signal_id=signal_id,
+                            commit=False,
+                        )
+                        await create_trader_event(
+                            session,
+                            trader_id=trader_id,
+                            event_type="decision_error",
+                            severity="warn",
+                            source=signal_source,
+                            message="Signal processing failed; advanced cursor to avoid hard loop.",
+                            payload={
+                                "signal_id": signal_id,
+                                "decision_id": decision_row.id,
+                                "error_type": error_type,
+                                "error_message": error_message,
+                            },
+                            commit=False,
+                        )
+                        await _commit_with_retry(session)
+                    except Exception as recovery_exc:
+                        logger.warning(
+                            "Trader %s failed to record error decision for signal %s: %s",
+                            trader_id, signal_id, recovery_exc,
+                        )
+                        # Buffer the failure via hot state as a last resort
+                        await hot_state.buffer_signal_consumption(
+                            trader_id=trader_id, signal_id=signal_id,
+                            outcome="failed", reason=failure_reason,
+                        )
                     cursor_created_at = _signal_cursor_timestamp(signal)
                     cursor_signal_id = signal_id
                     processed_signals += 1

@@ -877,7 +877,7 @@ async def flush_audit_buffer() -> int:
             for entry in batch:
                 try:
                     if entry.kind == "decision":
-                        _flush_decision(session, entry.payload)
+                        await _flush_decision(session, entry.payload)
                     elif entry.kind == "decision_checks":
                         _flush_decision_checks(session, entry.payload)
                     elif entry.kind == "consumption":
@@ -898,8 +898,11 @@ async def flush_audit_buffer() -> int:
     return flushed
 
 
-def _flush_decision(session: AsyncSession, p: dict[str, Any]) -> None:
-    session.add(
+async def _flush_decision(session: AsyncSession, p: dict[str, Any]) -> None:
+    # Use merge() instead of add() so that decisions already written
+    # to Postgres by the worker's own DB session are handled as no-ops
+    # rather than raising a duplicate-key IntegrityError.
+    await session.merge(
         TraderDecision(
             id=p["id"],
             trader_id=p["trader_id"],

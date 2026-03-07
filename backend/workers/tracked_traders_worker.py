@@ -60,6 +60,15 @@ _T = TypeVar("_T")
 # explicit cancel + grace avoids that.
 _CANCEL_GRACE_SECONDS = 5.0
 
+# Hold strong references to abandoned tasks so they can finish their DB
+# session cleanup naturally instead of being GC'd mid-flight (which causes
+# the SAWarning "connection was garbage collected" leak).
+_abandoned_tasks: set[asyncio.Task] = set()
+
+
+def _discard_abandoned(task: asyncio.Task) -> None:
+    _abandoned_tasks.discard(task)
+
 
 async def _graceful_timeout(coro, *, timeout: float, label: str):
     """Run *coro* with a timeout, but give it a grace period to clean up.
@@ -72,7 +81,9 @@ async def _graceful_timeout(coro, *, timeout: float, label: str):
          coroutine can complete.
       4. Raise ``asyncio.TimeoutError`` to the caller.
 
-    This prevents the GC "clean up" SAWarning on asyncpg connections.
+    If the task still hasn't finished after the grace period, it is kept
+    alive in ``_abandoned_tasks`` so it can complete and return its DB
+    connection to the pool, rather than being GC'd.
     """
     task = asyncio.create_task(coro)
     done, _ = await asyncio.wait({task}, timeout=timeout)
@@ -89,8 +100,11 @@ async def _graceful_timeout(coro, *, timeout: float, label: str):
         except (asyncio.CancelledError, Exception):
             pass
     else:
+        # Keep the task alive so its session __aexit__ can still fire.
+        _abandoned_tasks.add(task)
+        task.add_done_callback(_discard_abandoned)
         logger.warning(
-            "%s: task did not finish within %ss cancel-grace; abandoning",
+            "%s: task did not finish within %ss cancel-grace; holding reference until completion",
             label,
             _CANCEL_GRACE_SECONDS,
         )
@@ -520,28 +534,34 @@ async def _run_loop() -> None:
                 except Exception as exc:
                     logger.warning("Sparkline backfill for trader opps failed: %s", exc)
 
-            async with AsyncSessionLocal() as session:
-                emitted = await bridge_opportunities_to_signals(
-                    session,
-                    deduped_opportunities,
-                    source="traders",
-                    sweep_missing=True,
-                    refresh_prices=False,
-                )
-                await shared_state.write_traders_snapshot(
-                    session,
-                    deduped_opportunities,
-                    {
-                        "running": True,
-                        "enabled": True,
-                        "interval_seconds": interval,
-                        "last_scan": cycle_started.isoformat(),
-                        "current_activity": "Tracked traders strategy cycle complete.",
-                        "strategies": strategies_used,
-                    },
-                )
-                if requested:
-                    await clear_worker_run_request(session, worker_name)
+            async def _bridge_and_snapshot() -> int:
+                async with AsyncSessionLocal() as session:
+                    _emitted = await bridge_opportunities_to_signals(
+                        session,
+                        deduped_opportunities,
+                        source="traders",
+                        sweep_missing=True,
+                        refresh_prices=False,
+                    )
+                    await shared_state.write_traders_snapshot(
+                        session,
+                        deduped_opportunities,
+                        {
+                            "running": True,
+                            "enabled": True,
+                            "interval_seconds": interval,
+                            "last_scan": cycle_started.isoformat(),
+                            "current_activity": "Tracked traders strategy cycle complete.",
+                            "strategies": strategies_used,
+                        },
+                    )
+                    if requested:
+                        await clear_worker_run_request(session, worker_name)
+                    return _emitted
+
+            emitted = await _run_with_retryable_db_retries(
+                "bridge_and_snapshot", _bridge_and_snapshot,
+            )
 
             maintenance_now = utcnow()
             if requested or maintenance_now >= next_full_intelligence:
@@ -626,29 +646,38 @@ async def _run_loop() -> None:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.exception("Tracked-traders worker cycle failed: %s", exc)
-            async with AsyncSessionLocal() as session:
-                if requested:
-                    await clear_worker_run_request(session, worker_name)
-                await write_worker_snapshot(
-                    session,
-                    worker_name,
-                    running=True,
-                    enabled=True,
-                    current_activity=f"Last tracked-traders cycle error: {exc}",
-                    interval_seconds=interval,
-                    last_run_at=cycle_started,
-                    last_error=str(exc),
-                    stats={
-                        "pool_size": 0,
-                        "active_signals": confluence_count,
-                        "signals_emitted_last_run": int(emitted),
-                        "confluence_high_extreme": confluence_count,
-                        "confluence_scanned": int(confluence_scanned),
-                        "confluence_executable": int(confluence_count),
-                        "insider_wallets_flagged": int(insider_flagged),
-                    },
+            if _is_retryable_db_error(exc):
+                logger.warning(
+                    "Tracked-traders worker cycle hit retryable DB error; will retry next cycle",
+                    exc_info=exc,
                 )
+            else:
+                logger.exception("Tracked-traders worker cycle failed: %s", exc)
+            try:
+                async with AsyncSessionLocal() as session:
+                    if requested:
+                        await clear_worker_run_request(session, worker_name)
+                    await write_worker_snapshot(
+                        session,
+                        worker_name,
+                        running=True,
+                        enabled=True,
+                        current_activity=f"Last tracked-traders cycle error: {exc}",
+                        interval_seconds=interval,
+                        last_run_at=cycle_started,
+                        last_error=str(exc),
+                        stats={
+                            "pool_size": 0,
+                            "active_signals": confluence_count,
+                            "signals_emitted_last_run": int(emitted),
+                            "confluence_high_extreme": confluence_count,
+                            "confluence_scanned": int(confluence_scanned),
+                            "confluence_executable": int(confluence_count),
+                            "insider_wallets_flagged": int(insider_flagged),
+                        },
+                    )
+            except Exception as snapshot_exc:
+                logger.warning("Failed to write error snapshot: %s", snapshot_exc)
 
         await asyncio.sleep(interval)
 

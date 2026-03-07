@@ -35,6 +35,7 @@ class _FakeClient:
         self._midpoint_by_token = midpoint_by_token or {}
         self._price_by_token_side = price_by_token_side or {}
         self.calls: list[tuple[str, dict]] = []
+        self.is_closed = False
 
     def __enter__(self):
         return self
@@ -73,6 +74,7 @@ class _FakePriceToBeatClient:
         self._status_code = status_code
         self._responses_by_url = responses_by_url or {}
         self.calls: list[tuple[str, dict]] = []
+        self.is_closed = False
 
     def __enter__(self):
         return self
@@ -126,7 +128,7 @@ def _event(slug: str, end_date: str) -> dict:
 def test_fetch_all_requests_events_sorted_by_latest_end_date(monkeypatch):
     fake_events = [_event("btc-updown-5m-test", "2099-01-01T00:05:00Z")]
     fake_client = _FakeClient(fake_events)
-    monkeypatch.setattr(crypto_service.httpx, "Client", lambda timeout=10.0: fake_client)
+    monkeypatch.setattr(crypto_service, "_get_shared_sync_client", lambda: fake_client)
     monkeypatch.setattr(crypto_service, "_get_series_configs", lambda: [("10684", "BTC", "5min")])
 
     svc = crypto_service.CryptoService(gamma_url="https://gamma-api.polymarket.com")
@@ -149,7 +151,7 @@ def test_fetch_all_requests_events_sorted_by_latest_end_date(monkeypatch):
 def test_fetch_all_keeps_gamma_prices_and_skips_clob_http_on_hot_path(monkeypatch):
     fake_events = [_event("btc-updown-5m-test", "2099-01-01T00:05:00Z")]
     fake_client = _FakeClient(fake_events)
-    monkeypatch.setattr(crypto_service.httpx, "Client", lambda timeout=10.0: fake_client)
+    monkeypatch.setattr(crypto_service, "_get_shared_sync_client", lambda: fake_client)
     monkeypatch.setattr(crypto_service, "_get_series_configs", lambda: [("10684", "BTC", "5min")])
 
     svc = crypto_service.CryptoService(gamma_url="https://gamma-api.polymarket.com")
@@ -185,7 +187,7 @@ def test_update_price_to_beat_uses_crypto_price_api_for_cold_start(monkeypatch):
             return None
 
     fake_client = _FakePriceToBeatClient(response_data={"openPrice": 71234.56})
-    monkeypatch.setattr(crypto_service.httpx, "Client", lambda timeout=2.0: fake_client)
+    monkeypatch.setattr(crypto_service, "_get_shared_sync_client", lambda: fake_client)
     monkeypatch.setattr("services.chainlink_feed.get_chainlink_feed", lambda: _Feed())
 
     svc = crypto_service.CryptoService()
@@ -221,7 +223,7 @@ def test_update_price_to_beat_falls_back_to_chainlink_history_when_api_missing(m
             return None
 
     fake_client = _FakePriceToBeatClient(response_data={"openPrice": None}, status_code=500)
-    monkeypatch.setattr(crypto_service.httpx, "Client", lambda timeout=2.0: fake_client)
+    monkeypatch.setattr(crypto_service, "_get_shared_sync_client", lambda: fake_client)
     monkeypatch.setattr("services.chainlink_feed.get_chainlink_feed", lambda: _Feed())
 
     svc = crypto_service.CryptoService()
@@ -255,7 +257,7 @@ def test_update_price_to_beat_uses_delayed_chainlink_history_when_exact_point_mi
             return None
 
     fake_client = _FakePriceToBeatClient(response_data={"openPrice": None}, status_code=500)
-    monkeypatch.setattr(crypto_service.httpx, "Client", lambda timeout=2.0: fake_client)
+    monkeypatch.setattr(crypto_service, "_get_shared_sync_client", lambda: fake_client)
     monkeypatch.setattr("services.chainlink_feed.get_chainlink_feed", lambda: _Feed())
 
     svc = crypto_service.CryptoService()
@@ -296,7 +298,7 @@ def test_update_price_to_beat_uses_binance_kline_when_api_rate_limited(monkeypat
         }
     )
 
-    monkeypatch.setattr(crypto_service.httpx, "Client", lambda timeout=2.0: fake_client)
+    monkeypatch.setattr(crypto_service, "_get_shared_sync_client", lambda: fake_client)
     monkeypatch.setattr("services.chainlink_feed.get_chainlink_feed", lambda: _Feed())
     monkeypatch.setattr(crypto_service.time, "time", lambda: base_now)
 
@@ -337,7 +339,7 @@ def test_update_price_to_beat_does_not_requery_every_cycle_when_unresolved(monke
         }
     )
 
-    monkeypatch.setattr(crypto_service.httpx, "Client", lambda timeout=2.0: fake_client)
+    monkeypatch.setattr(crypto_service, "_get_shared_sync_client", lambda: fake_client)
     monkeypatch.setattr("services.chainlink_feed.get_chainlink_feed", lambda: _Feed())
     monkeypatch.setattr(crypto_service.time, "time", lambda: base_now)
 
