@@ -191,12 +191,19 @@ def _collect_catalog_index(markets: list) -> tuple[set[str], dict[str, tuple[str
     token_ids: set[str] = set()
     market_tokens: dict[str, tuple[str, str]] = {}
     for market in markets:
-        condition_id = _normalize_market_id(getattr(market, "condition_id", None))
-        market_row_id = _normalize_market_id(getattr(market, "id", None))
+        if isinstance(market, dict):
+            condition_id_raw = market.get("condition_id")
+            market_row_id_raw = market.get("id")
+            raw_tokens = list(market.get("clob_token_ids") or [])
+        else:
+            condition_id_raw = getattr(market, "condition_id", None)
+            market_row_id_raw = getattr(market, "id", None)
+            raw_tokens = list(getattr(market, "clob_token_ids", None) or [])
+        condition_id = _normalize_market_id(condition_id_raw)
+        market_row_id = _normalize_market_id(market_row_id_raw)
         market_keys = {key for key in (condition_id, market_row_id) if key}
         if not market_keys:
             continue
-        raw_tokens = list(getattr(market, "clob_token_ids", None) or [])
         clean_tokens = [_normalize_token_id(token) for token in raw_tokens if _normalize_token_id(token)]
         if len(clean_tokens) < 2:
             continue
@@ -514,6 +521,8 @@ async def _run_loop() -> None:
     crypto_live_tokens: set[str] = set()
     desired_tokens: set[str] = set()
     market_tokens: dict[str, tuple[str, str]] = {}
+    catalog_updated_at: datetime | None = None
+    catalog_market_count = 0
     tracked_market_tokens: dict[str, tuple[str, str]] = {}
     subscribed_poly_tokens: set[str] = set()
     subscribed_kalshi_tickers: set[str] = set()
@@ -830,12 +839,43 @@ async def _run_loop() -> None:
 
             try:
                 async with AsyncSessionLocal() as session:
-                    _, markets, metadata = await read_market_catalog(session)
-                    catalog_tokens, market_tokens = _collect_catalog_index(markets)
+                    _, _, metadata = await read_market_catalog(
+                        session,
+                        include_events=False,
+                        include_markets=False,
+                        validate=False,
+                    )
+                metadata_updated_at = metadata.get("updated_at")
+                metadata_market_count = int(metadata.get("market_count") or 0)
+                refresh_catalog_snapshot = not market_tokens
+                if not refresh_catalog_snapshot and metadata_updated_at is not None:
+                    refresh_catalog_snapshot = metadata_updated_at != catalog_updated_at
+                if not refresh_catalog_snapshot and metadata_market_count > 0:
+                    refresh_catalog_snapshot = metadata_market_count != catalog_market_count
+
+                if refresh_catalog_snapshot:
+                    async with AsyncSessionLocal() as session:
+                        _, markets_payload, metadata = await read_market_catalog(
+                            session,
+                            include_events=False,
+                            include_markets=True,
+                            validate=False,
+                        )
+                    catalog_tokens, market_tokens = _collect_catalog_index(markets_payload)
+                    catalog_updated_at = metadata.get("updated_at")
+                    catalog_market_count = len(markets_payload)
+                elif metadata_updated_at is not None:
+                    catalog_updated_at = metadata_updated_at
+                    if metadata_market_count > 0:
+                        catalog_market_count = metadata_market_count
+
+                async with AsyncSessionLocal() as session:
                     critical_universe = await _collect_trader_critical_universe(
                         session,
                         market_tokens=market_tokens,
                     )
+
+                async with AsyncSessionLocal() as session:
                     await clear_worker_run_request(session, worker_name)
 
                 critical_tokens = set(critical_universe.get("critical_tokens") or [])
@@ -851,7 +891,7 @@ async def _run_loop() -> None:
                 state["held_markets"] = len(critical_universe.get("held_market_ids") or [])
                 state["evaluation_markets"] = len(critical_universe.get("evaluation_market_ids") or [])
                 state["evaluation_signals"] = int(critical_universe.get("evaluation_signals_count") or 0)
-                state["catalog_markets"] = int(metadata.get("market_count") or len(markets) or 0)
+                state["catalog_markets"] = int(metadata.get("market_count") or catalog_market_count or 0)
                 state["catalog_tokens"] = len(catalog_tokens)
                 crypto_live_tokens = await _collect_crypto_live_tokens()
                 state["crypto_live_tokens"] = len(crypto_live_tokens)

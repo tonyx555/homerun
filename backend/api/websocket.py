@@ -235,7 +235,12 @@ async def _get_market_token_cache() -> dict[str, tuple[str, str]]:
             return _market_token_cache
 
         async with AsyncSessionLocal() as session:
-            _, markets, metadata = await shared_state.read_market_catalog(session)
+            _, _, metadata = await shared_state.read_market_catalog(
+                session,
+                include_events=False,
+                include_markets=False,
+                validate=False,
+            )
         updated_at = metadata.get("updated_at")
         if (
             _market_token_cache
@@ -246,12 +251,24 @@ async def _get_market_token_cache() -> dict[str, tuple[str, str]]:
             _market_token_cache_loaded_at_mono = now_mono
             return _market_token_cache
 
+        async with AsyncSessionLocal() as session:
+            _, markets, metadata = await shared_state.read_market_catalog(
+                session,
+                include_events=False,
+                include_markets=True,
+                validate=False,
+            )
+
         rebuilt: dict[str, tuple[str, str]] = {}
         for market in markets:
-            market_id = str(getattr(market, "condition_id", None) or getattr(market, "id", None) or "").strip().lower()
+            if isinstance(market, dict):
+                market_id = str(market.get("condition_id") or market.get("id") or "").strip().lower()
+                raw_tokens = list(market.get("clob_token_ids") or [])
+            else:
+                market_id = str(getattr(market, "condition_id", None) or getattr(market, "id", None) or "").strip().lower()
+                raw_tokens = list(getattr(market, "clob_token_ids", None) or [])
             if not market_id:
                 continue
-            raw_tokens = list(getattr(market, "clob_token_ids", None) or [])
             clean_tokens = [str(token or "").strip() for token in raw_tokens if str(token or "").strip()]
             if len(clean_tokens) < 2:
                 continue

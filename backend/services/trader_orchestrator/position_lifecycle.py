@@ -1111,7 +1111,7 @@ async def _load_execution_wallet_recent_sell_trades_by_token() -> dict[str, dict
     if not wallet:
         return {}
     try:
-        trades = await polymarket_client.get_wallet_trades(wallet, limit=250)
+        trades = await polymarket_client.get_wallet_trades(wallet, limit=1500)
     except Exception:
         return {}
     if not isinstance(trades, list):

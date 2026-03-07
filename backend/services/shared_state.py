@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -235,55 +235,101 @@ async def write_market_catalog(
         except Exception:
             pass
 
-    result = await session.execute(select(MarketCatalog).where(MarketCatalog.id == CATALOG_ID))
-    row = result.scalar_one_or_none()
-    if row is None:
-        row = MarketCatalog(id=CATALOG_ID)
-        session.add(row)
+    updated_at = utcnow()
+    values = {
+        "updated_at": updated_at,
+        "events_json": events_payload,
+        "markets_json": markets_payload,
+        "event_count": len(events_payload),
+        "market_count": len(markets_payload),
+        "fetch_duration_seconds": duration_seconds,
+        "error": error,
+    }
 
-    row.updated_at = utcnow()
-    row.events_json = events_payload
-    row.markets_json = markets_payload
-    row.event_count = len(events_payload)
-    row.market_count = len(markets_payload)
-    row.fetch_duration_seconds = duration_seconds
-    row.error = error
+    update_result = await session.execute(
+        update(MarketCatalog).where(MarketCatalog.id == CATALOG_ID).values(**values)
+    )
+    if int(update_result.rowcount or 0) == 0:
+        session.add(MarketCatalog(id=CATALOG_ID, **values))
     await _commit_with_retry(session)
 
 
 async def read_market_catalog(
     session: AsyncSession,
+    *,
+    include_events: bool = True,
+    include_markets: bool = True,
+    validate: bool = True,
 ) -> tuple[list, list, dict[str, Any]]:
     """Read persisted market catalog. Returns (events, markets, metadata)."""
     from models.database import MarketCatalog
     from models.market import Event, Market
 
-    result = await session.execute(select(MarketCatalog).where(MarketCatalog.id == CATALOG_ID))
-    row = result.scalar_one_or_none()
+    columns = [
+        MarketCatalog.updated_at,
+        MarketCatalog.event_count,
+        MarketCatalog.market_count,
+        MarketCatalog.fetch_duration_seconds,
+        MarketCatalog.error,
+    ]
+    if include_events:
+        columns.append(MarketCatalog.events_json)
+    if include_markets:
+        columns.append(MarketCatalog.markets_json)
+
+    stmt = select(*columns).where(MarketCatalog.id == CATALOG_ID)
+    row = (await session.execute(stmt)).one_or_none()
     if row is None:
         return [], [], {"updated_at": None, "error": None}
 
-    events = []
-    for d in row.events_json or []:
-        try:
-            events.append(Event.model_validate(d))
-        except Exception:
-            pass
+    row_map = row._mapping
+    updated_at = row_map.get("updated_at")
+    event_count = row_map.get("event_count")
+    market_count = row_map.get("market_count")
+    fetch_duration_seconds = row_map.get("fetch_duration_seconds")
+    error = row_map.get("error")
+    events_raw = row_map.get("events_json") if include_events else []
+    markets_raw = row_map.get("markets_json") if include_markets else []
 
-    markets = []
-    for d in row.markets_json or []:
-        try:
-            markets.append(Market.model_validate(d))
-        except Exception:
-            pass
+    events_payload = list(events_raw or []) if include_events and isinstance(events_raw, list) else []
+    markets_payload = list(markets_raw or []) if include_markets and isinstance(markets_raw, list) else []
 
     metadata: dict[str, Any] = {
-        "updated_at": row.updated_at,
-        "event_count": row.event_count,
-        "market_count": row.market_count,
-        "fetch_duration_seconds": row.fetch_duration_seconds,
-        "error": row.error,
+        "updated_at": updated_at,
+        "event_count": event_count,
+        "market_count": market_count,
+        "fetch_duration_seconds": fetch_duration_seconds,
+        "error": error,
     }
+
+    try:
+        if session.in_transaction():
+            await session.rollback()
+    except Exception:
+        pass
+
+    if not validate:
+        return events_payload, markets_payload, metadata
+
+    def _deserialize_payload() -> tuple[list, list]:
+        events = []
+        if include_events:
+            for d in events_payload:
+                try:
+                    events.append(Event.model_validate(d))
+                except Exception:
+                    pass
+
+        markets = []
+        if include_markets:
+            for d in markets_payload:
+                try:
+                    markets.append(Market.model_validate(d))
+                except Exception:
+                    pass
+        return events, markets
+
+    events, markets = await asyncio.to_thread(_deserialize_payload)
     return events, markets, metadata
 
 

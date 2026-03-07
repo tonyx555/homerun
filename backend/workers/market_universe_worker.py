@@ -38,13 +38,20 @@ _MAX_CONSECUTIVE_DB_FAILURES = 3
 
 async def _read_catalog_stats() -> dict[str, Any]:
     async with AsyncSessionLocal() as session:
-        _, markets, metadata = await read_market_catalog(session)
+        _, markets, metadata = await read_market_catalog(
+            session,
+            include_events=False,
+            validate=False,
+        )
         scanner_status = await read_scanner_status(session, include_opportunity_count=False)
 
     token_ids: list[str] = []
     market_token_pairs: list[tuple[str, str]] = []
     for market in markets:
-        raw_tokens = list(getattr(market, "clob_token_ids", None) or [])
+        if isinstance(market, dict):
+            raw_tokens = list(market.get("clob_token_ids") or [])
+        else:
+            raw_tokens = list(getattr(market, "clob_token_ids", None) or [])
         clean_tokens = [str(token_id or "").strip() for token_id in raw_tokens if str(token_id or "").strip()]
         if len(clean_tokens) < 2:
             continue

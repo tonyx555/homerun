@@ -44,6 +44,7 @@ from services.trader_orchestrator_state import (
     list_trader_templates,
     list_traders,
     read_orchestrator_control,
+    reconcile_live_provider_orders,
     request_trader_run,
     set_trader_paused,
     sync_trader_position_inventory,
@@ -57,6 +58,7 @@ router = APIRouter(prefix="/traders", tags=["Traders"])
 _LOSS_STREAK_RESET_AT_KEY = "loss_streak_reset_at"
 _LOSS_STREAK_RESET_REASON_KEY = "loss_streak_reset_reason"
 logger = get_logger(__name__)
+_LIVE_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
 
 
 class TraderSourceConfigRequest(BaseModel):
@@ -171,6 +173,77 @@ class TraderStopRequest(BaseModel):
     confirm_live: bool = False
     requested_by: Optional[str] = None
     reason: Optional[str] = None
+
+
+def _normalize_status(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _collect_live_active_trader_ids_from_orders(orders: list[dict[str, Any]]) -> list[str]:
+    trader_ids: list[str] = []
+    seen: set[str] = set()
+    for row in orders:
+        if not isinstance(row, dict):
+            continue
+        mode_key = _normalize_status(row.get("mode"))
+        status_key = _normalize_status(row.get("status"))
+        if mode_key != "live" or status_key not in _LIVE_ACTIVE_ORDER_STATUSES:
+            continue
+        trader_id = str(row.get("trader_id") or "").strip()
+        if not trader_id or trader_id in seen:
+            continue
+        seen.add(trader_id)
+        trader_ids.append(trader_id)
+    return trader_ids
+
+
+async def _reconcile_live_order_authority_for_traders(
+    session: AsyncSession,
+    *,
+    trader_ids: list[str],
+    reason: str,
+) -> None:
+    for trader_id in trader_ids:
+        try:
+            await reconcile_live_provider_orders(
+                session,
+                trader_id=trader_id,
+                commit=True,
+                broadcast=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Live provider reconciliation during orders read failed",
+                trader_id=trader_id,
+                exc_info=exc,
+            )
+        try:
+            await reconcile_live_positions(
+                session,
+                trader_id=trader_id,
+                trader_params={},
+                dry_run=False,
+                reason=reason,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Live position reconciliation during orders read failed",
+                trader_id=trader_id,
+                exc_info=exc,
+            )
+        try:
+            await sync_trader_position_inventory(
+                session,
+                trader_id=trader_id,
+                mode="live",
+                commit=True,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Live inventory sync during orders read failed",
+                trader_id=trader_id,
+                exc_info=exc,
+            )
 
 
 def _collect_market_aliases(raw_market: Any) -> list[str]:
@@ -416,15 +489,31 @@ async def create_trader_route(
 async def get_all_trader_orders_all(
     status: Optional[str] = Query(default=None),
     limit: int = Query(default=1000, ge=1, le=5000),
+    reconcile_live: bool = Query(default=True),
     session: AsyncSession = Depends(get_db_session),
 ):
+    orders = await list_serialized_trader_orders(
+        session,
+        trader_id=None,
+        status=status,
+        limit=limit,
+    )
+    if reconcile_live:
+        live_trader_ids = _collect_live_active_trader_ids_from_orders(orders)
+        if live_trader_ids:
+            await _reconcile_live_order_authority_for_traders(
+                session,
+                trader_ids=live_trader_ids,
+                reason="orders_read_authority_sync",
+            )
+            orders = await list_serialized_trader_orders(
+                session,
+                trader_id=None,
+                status=status,
+                limit=limit,
+            )
     return {
-        "orders": await list_serialized_trader_orders(
-            session,
-            trader_id=None,
-            status=status,
-            limit=limit,
-        )
+        "orders": orders
     }
 
 
@@ -483,14 +572,16 @@ async def get_trader_market_history(
     row = (await session.execute(select(ScannerSnapshot).where(ScannerSnapshot.id == "latest"))).scalar_one_or_none()
     history_map = row.market_history_json if row is not None and isinstance(row.market_history_json, dict) else {}
     opportunities = row.opportunities_json if row is not None and isinstance(row.opportunities_json, list) else []
-    market_catalog_row = (
-        await session.execute(select(MarketCatalog).where(MarketCatalog.id == "latest"))
-    ).scalar_one_or_none()
     market_catalog = (
-        market_catalog_row.markets_json
-        if market_catalog_row is not None and isinstance(market_catalog_row.markets_json, list)
-        else []
+        (
+            await session.execute(
+                select(MarketCatalog.markets_json).where(MarketCatalog.id == "latest")
+            )
+        ).scalar_one_or_none()
+        or []
     )
+    if not isinstance(market_catalog, list):
+        market_catalog = []
 
     normalized_history: dict[str, list[dict[str, float]]] = {}
     for raw_market_id, raw_points in history_map.items():
@@ -1044,9 +1135,7 @@ async def start_trader(
 
     copy_bootstrap_summary: dict[str, Any] | None = None
     if not was_running:
-        session_close = getattr(session, "close", None)
-        if callable(session_close):
-            await session_close()
+        await session.close()
         try:
             copy_bootstrap_summary = await traders_copy_trade_signal_service.copy_existing_open_positions_for_trader(
                 trader_id=trader_id,
@@ -1476,15 +1565,31 @@ async def run_once(trader_id: str, session: AsyncSession = Depends(get_db_sessio
 async def get_all_trader_orders(
     status: Optional[str] = Query(default=None),
     limit: int = Query(default=2000, ge=1, le=5000),
+    reconcile_live: bool = Query(default=True),
     session: AsyncSession = Depends(get_db_session),
 ):
+    orders = await list_serialized_trader_orders(
+        session,
+        trader_id=None,
+        status=status,
+        limit=limit,
+    )
+    if reconcile_live:
+        live_trader_ids = _collect_live_active_trader_ids_from_orders(orders)
+        if live_trader_ids:
+            await _reconcile_live_order_authority_for_traders(
+                session,
+                trader_ids=live_trader_ids,
+                reason="orders_read_authority_sync",
+            )
+            orders = await list_serialized_trader_orders(
+                session,
+                trader_id=None,
+                status=status,
+                limit=limit,
+            )
     return {
-        "orders": await list_serialized_trader_orders(
-            session,
-            trader_id=None,
-            status=status,
-            limit=limit,
-        )
+        "orders": orders
     }
 
 
@@ -1510,15 +1615,34 @@ async def get_trader_orders(
     trader_id: str,
     status: Optional[str] = Query(default=None),
     limit: int = Query(default=200, ge=1, le=5000),
+    reconcile_live: bool = Query(default=True),
     session: AsyncSession = Depends(get_db_session),
 ):
+    orders = await list_serialized_trader_orders(
+        session,
+        trader_id=trader_id,
+        status=status,
+        limit=limit,
+    )
+    if reconcile_live:
+        live_trader_ids = _collect_live_active_trader_ids_from_orders(orders)
+        status_key = _normalize_status(status)
+        if trader_id not in live_trader_ids and status_key in {"", "submitted", "executed", "open"}:
+            live_trader_ids.append(trader_id)
+        if live_trader_ids:
+            await _reconcile_live_order_authority_for_traders(
+                session,
+                trader_ids=live_trader_ids,
+                reason="trader_orders_read_authority_sync",
+            )
+            orders = await list_serialized_trader_orders(
+                session,
+                trader_id=trader_id,
+                status=status,
+                limit=limit,
+            )
     return {
-        "orders": await list_serialized_trader_orders(
-            session,
-            trader_id=trader_id,
-            status=status,
-            limit=limit,
-        )
+        "orders": orders
     }
 
 
