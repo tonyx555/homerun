@@ -14,11 +14,13 @@ from utils.utcnow import utcnow
 from typing import Optional
 
 from sqlalchemy import select, func, and_, case
+from sqlalchemy.exc import DBAPIError
 
 from models.database import AsyncSessionLocal, OpportunityHistory
 from models.opportunity import Opportunity
 from services.polymarket import polymarket_client
 from utils.logger import get_logger
+from utils.retry import is_retryable_db_error, db_retry_delay, DB_RETRY_ATTEMPTS
 
 logger = get_logger("opportunity_recorder")
 
@@ -76,46 +78,61 @@ class OpportunityRecorder:
             return
 
         new_count = 0
-        try:
-            async with AsyncSessionLocal() as session:
-                for opp in opportunities:
-                    if opp.id in self._known_ids:
-                        continue
+        for attempt in range(DB_RETRY_ATTEMPTS):
+            try:
+                async with AsyncSessionLocal() as session:
+                    new_count = 0
+                    for opp in opportunities:
+                        if opp.id in self._known_ids:
+                            continue
 
-                    # Check DB as well (handles restart dedup)
-                    exists = await session.execute(select(OpportunityHistory.id).where(OpportunityHistory.id == opp.id))
-                    if exists.scalar_one_or_none() is not None:
+                        # Check DB as well (handles restart dedup)
+                        exists = await session.execute(
+                            select(OpportunityHistory.id).where(OpportunityHistory.id == opp.id)
+                        )
+                        if exists.scalar_one_or_none() is not None:
+                            self._known_ids.add(opp.id)
+                            continue
+
+                        record = OpportunityHistory(
+                            id=opp.id,
+                            strategy_type=opp.strategy,
+                            event_id=opp.event_id,
+                            title=opp.title,
+                            total_cost=opp.total_cost,
+                            expected_roi=opp.roi_percent,
+                            risk_score=opp.risk_score,
+                            positions_data=self._serialise_positions(opp),
+                            detected_at=opp.detected_at,
+                            resolution_date=opp.resolution_date,
+                        )
+                        session.add(record)
                         self._known_ids.add(opp.id)
-                        continue
+                        new_count += 1
 
-                    record = OpportunityHistory(
-                        id=opp.id,
-                        strategy_type=opp.strategy,
-                        event_id=opp.event_id,
-                        title=opp.title,
-                        total_cost=opp.total_cost,
-                        expected_roi=opp.roi_percent,
-                        risk_score=opp.risk_score,
-                        positions_data=self._serialise_positions(opp),
-                        detected_at=opp.detected_at,
-                        resolution_date=opp.resolution_date,
-                    )
-                    session.add(record)
-                    self._known_ids.add(opp.id)
-                    new_count += 1
+                    if new_count:
+                        await session.commit()
 
-                if new_count:
-                    await session.commit()
+                    if len(self._known_ids) > self._known_ids_max_size:
+                        excess = len(self._known_ids) - self._known_ids_max_size // 2
+                        it = iter(self._known_ids)
+                        to_remove = [next(it) for _ in range(excess)]
+                        self._known_ids.difference_update(to_remove)
 
-                if len(self._known_ids) > self._known_ids_max_size:
-                    excess = len(self._known_ids) - self._known_ids_max_size // 2
-                    it = iter(self._known_ids)
-                    to_remove = [next(it) for _ in range(excess)]
-                    self._known_ids.difference_update(to_remove)
-
-        except Exception:
-            logger.error("Failed to record opportunities", exc_info=True)
-            return
+                break  # success
+            except (DBAPIError, asyncio.TimeoutError) as exc:
+                if attempt < DB_RETRY_ATTEMPTS - 1 and (
+                    isinstance(exc, asyncio.TimeoutError) or is_retryable_db_error(exc)
+                ):
+                    delay = db_retry_delay(attempt)
+                    logger.warning("Retrying opportunity recording", attempt=attempt + 1, delay=round(delay, 3))
+                    await asyncio.sleep(delay)
+                    continue
+                logger.error("Failed to record opportunities", exc_info=True)
+                return
+            except Exception:
+                logger.error("Failed to record opportunities", exc_info=True)
+                return
 
         if new_count:
             logger.info(
@@ -167,13 +184,23 @@ class OpportunityRecorder:
                 outcome = await self._resolve_opportunity(record)
                 if outcome is not None:
                     was_profitable, actual_roi = outcome
-                    async with AsyncSessionLocal() as session:
-                        row = await session.get(OpportunityHistory, record.id)
-                        if row:
-                            row.was_profitable = was_profitable
-                            row.actual_roi = actual_roi
-                            row.expired_at = utcnow()
-                            await session.commit()
+                    for attempt in range(DB_RETRY_ATTEMPTS):
+                        try:
+                            async with AsyncSessionLocal() as session:
+                                row = await session.get(OpportunityHistory, record.id)
+                                if row:
+                                    row.was_profitable = was_profitable
+                                    row.actual_roi = actual_roi
+                                    row.expired_at = utcnow()
+                                    await session.commit()
+                            break
+                        except (DBAPIError, asyncio.TimeoutError) as exc:
+                            if attempt < DB_RETRY_ATTEMPTS - 1 and (
+                                isinstance(exc, asyncio.TimeoutError) or is_retryable_db_error(exc)
+                            ):
+                                await asyncio.sleep(db_retry_delay(attempt))
+                                continue
+                            raise
                     resolved_count += 1
             except Exception:
                 logger.error(

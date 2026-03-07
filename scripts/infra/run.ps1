@@ -2000,11 +2000,11 @@ try {
     # Activate venv
     & backend\venv\Scripts\Activate.ps1
 
-    # Ensure TUI dependencies are installed
-    python -c "import textual" *> $null
+    # Ensure TUI dependencies are installed (0.x API; 1.0+ has breaking changes)
+    python -c "import textual; v=tuple(int(x) for x in textual.__version__.split('.')[:2]); exit(0 if v < (1,0) else 1)" *> $null
     if ($LASTEXITCODE -ne 0) {
         Write-Host "Installing TUI dependencies..." -ForegroundColor Cyan
-        python -m pip install -q textual rich
+        python -m pip install -q "textual>=0.85.0,<1.0" "rich>=13.7.0"
         if ($LASTEXITCODE -ne 0) {
             throw "Failed to install TUI dependencies"
         }

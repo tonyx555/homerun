@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from collections import deque
-from datetime import timezone
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from config import settings
@@ -33,6 +33,98 @@ from utils.converters import safe_float
 from services.quality_filter import QualityFilterOverrides
 
 logger = logging.getLogger(__name__)
+
+# -- Market category constants ------------------------------------------------
+
+CATEGORY_SPORTS = "sports"
+CATEGORY_ESPORTS = "esports"
+CATEGORY_CRYPTO = "crypto"
+CATEGORY_POLITICAL = "political"
+CATEGORY_OTHER = "other"
+
+_SPORTS_KEYWORDS = [
+    "vs.", "vs ", " fc ", "hotspur", "united", "rovers", "city fc", "atletico",
+    "juventus", "barcelona", "bayern", "borussia", "schalke", "heracles",
+    "almelo", "napoli", "lazio", "inter ", "milan", "fiorentina", "roma ",
+    "o/u ", "spread:", "moneyline", "hatters", "governors", "warriors",
+    "broncos", "flashes", "mavericks", "celtics", "nets vs", "heat vs",
+    "tigers", "bulldogs", "wildcats", "hawks", "eagles", "bears", "lions",
+    "panthers", "knights", "raiders", "saints", "cardinals", "rams",
+    "nba", "nfl", "mlb", "nhl", "cbb", "ncaa", "premier league",
+    "la liga", "serie a", "bundesliga", "ligue 1", "eredivisie",
+    "champions league", "europa league", "copa ", "primera division",
+    " sc ", " afc ", "real madrid", "psg", "monaco", "tottenham",
+    "crystal palace", "hull city", "holstein",
+]
+
+_ESPORTS_KEYWORDS = [
+    "lol:", "league of legends", "counter-strike", "esports", "rift legends",
+    "dota", "valorant", "overwatch", "cs2", "cs:", "esl pro",
+    "game 1 winner", "game 2 winner", "game 3 winner",
+    "(bo3)", "(bo5)", "(bo1)",
+]
+
+_CRYPTO_KEYWORDS = [
+    "bitcoin", "btc", "ethereum", "eth", "solana", "sol ", "xrp",
+    "crypto", "up or down", "above $", "below $", "price of ",
+]
+
+_POLITICAL_KEYWORDS = [
+    "election", "vote", "primary", "congress", "senate", "president",
+    "prime minister", "parliament", "seats", "ballot", "referendum",
+    "trump", "biden", "paxton", "governor", "mayor", "iran",
+    "us forces", "strike ", "war ", "military", "geopolitical",
+    "nepal", "pakistan", "ceasefire", "tariff",
+]
+
+
+def _classify_market(text: str, sports_market_type: str | None) -> str:
+    """Classify a market into a category based on text content and metadata."""
+    if sports_market_type and sports_market_type in ("moneyline", "totals", "spreads", "props"):
+        return CATEGORY_SPORTS
+    lower = text.lower()
+    for kw in _ESPORTS_KEYWORDS:
+        if kw in lower:
+            return CATEGORY_ESPORTS
+    for kw in _SPORTS_KEYWORDS:
+        if kw in lower:
+            return CATEGORY_SPORTS
+    for kw in _CRYPTO_KEYWORDS:
+        if kw in lower:
+            return CATEGORY_CRYPTO
+    for kw in _POLITICAL_KEYWORDS:
+        if kw in lower:
+            return CATEGORY_POLITICAL
+    return CATEGORY_OTHER
+
+
+def _parse_game_start_time(raw: Any) -> datetime | None:
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        if raw.tzinfo is None:
+            return raw.replace(tzinfo=timezone.utc)
+        return raw
+    s = str(raw).strip()
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d %H:%M:%S%z", "%Y-%m-%d %H:%M:%S"):
+        try:
+            dt = datetime.strptime(s, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except ValueError:
+            continue
+    return None
+
+
+def _is_bool_true(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 class TailEndCarryStrategy(BaseStrategy):
@@ -79,7 +171,12 @@ class TailEndCarryStrategy(BaseStrategy):
         "min_repricing_buffer": 0.015,
         "repricing_weight": 0.45,
         "max_opportunities": 120,
-        "exclude_market_keywords": "bitcoin,ethereum,lol:,win on,counter-strike",
+        # --- Fix #6: expanded keyword exclusions for esports ---
+        "exclude_market_keywords": [
+            "bitcoin", "ethereum", "lol:", "win on", "counter-strike",
+            "tweets", "league of legends", "esports", "rift legends",
+            "dota", "valorant", "cs2", "cs:", "esl pro",
+        ],
         "panic_drop_threshold": 0.08,
         "panic_window_points": 6,
         "panic_recovery_ratio_max": 0.20,
@@ -87,12 +184,28 @@ class TailEndCarryStrategy(BaseStrategy):
         "smart_take_profit_enabled": True,
         "smart_take_profit_min_pnl_pct": 10.0,
         "smart_take_profit_max_price_headroom": 0.03,
+        # --- Fix #1/#2: category-aware exit config ---
         "inversion_stop_enabled": True,
         "inversion_price_threshold": 0.50,
+        # Trailing stop from high water mark (Fix #2)
+        "trailing_stop_enabled": True,
+        "trailing_stop_pct": 25.0,
+        # Sports-specific: disable fixed inversion during live games,
+        # use wider trailing stop instead (Fix #1)
+        "sports_inversion_stop_enabled": False,
+        "sports_trailing_stop_pct": 45.0,
+        "sports_sizing_multiplier": 0.55,
+        # --- Fix #3: skip live games ---
+        "skip_live_games": True,
+        "live_game_buffer_minutes": 15.0,
+        # --- Fix #5: session timeout ---
+        "session_timeout_seconds": 180,
+        # --- Fix #7: resolution proximity hold ---
+        "resolution_hold_enabled": True,
+        "resolution_hold_minutes": 120.0,
         "max_hold_minutes": 1440.0,
         "price_policy": "taker_limit",
         "time_in_force": "IOC",
-        "session_timeout_seconds": 90,
     }
 
     def __init__(self) -> None:
@@ -244,6 +357,80 @@ class TailEndCarryStrategy(BaseStrategy):
         return " | ".join(chunks)
 
     # ------------------------------------------------------------------
+    # Market category helpers (Fix #1)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _classify_market_from_model(cls, market: Market, event: Optional[Event]) -> str:
+        """Classify a Market model object at detect time."""
+        sports_type = getattr(market, "sports_market_type", None)
+        text = cls._market_text(market, event)
+        return _classify_market(text, sports_type)
+
+    @classmethod
+    def _classify_market_from_payload(cls, payload: dict[str, Any]) -> str:
+        """Classify from signal payload at evaluate/exit time."""
+        markets = payload.get("markets")
+        sports_type = None
+        if isinstance(markets, list) and markets:
+            m0 = markets[0] if isinstance(markets[0], dict) else {}
+            sports_type = m0.get("sports_market_type")
+        text_parts: list[str] = []
+        cls._append_text(text_parts, payload.get("title"))
+        cls._append_text(text_parts, payload.get("description"))
+        cls._append_text(text_parts, payload.get("category"))
+        cls._append_text(text_parts, payload.get("event_title"))
+        if isinstance(markets, list):
+            for m in markets[:2]:
+                if isinstance(m, dict):
+                    cls._append_text(text_parts, m.get("question"))
+                    cls._append_text(text_parts, m.get("slug"))
+                    cls._append_text(text_parts, m.get("sports_market_type"))
+                    cls._append_text(text_parts, m.get("group_item_title"))
+        return _classify_market(" | ".join(text_parts), sports_type)
+
+    @classmethod
+    def _classify_from_exit_config(cls, config: dict) -> str:
+        """Classify from the strategy_exit_config stored on the order."""
+        cached = config.get("_market_category")
+        if cached and isinstance(cached, str):
+            return cached
+        text_parts: list[str] = []
+        cls._append_text(text_parts, config.get("_market_question"))
+        cls._append_text(text_parts, config.get("_market_slug"))
+        cls._append_text(text_parts, config.get("_event_title"))
+        cls._append_text(text_parts, config.get("_category"))
+        sports_type = config.get("_sports_market_type")
+        return _classify_market(" | ".join(text_parts), sports_type)
+
+    # ------------------------------------------------------------------
+    # Live game detection (Fix #3)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_live_game(market: Market, now: datetime, buffer_minutes: float) -> bool:
+        """Check if a sports/esports market's game is currently live or about to start."""
+        raw_start = getattr(market, "game_start_time", None)
+        game_start = _parse_game_start_time(raw_start)
+        if game_start is None:
+            return False
+        buffer_seconds = buffer_minutes * 60.0
+        return (game_start.timestamp() - buffer_seconds) <= now.timestamp()
+
+    @staticmethod
+    def _is_live_game_from_payload(payload: dict, now: datetime, buffer_minutes: float) -> bool:
+        """Check if market is live from signal payload."""
+        markets = payload.get("markets")
+        if not isinstance(markets, list) or not markets:
+            return False
+        m0 = markets[0] if isinstance(markets[0], dict) else {}
+        game_start = _parse_game_start_time(m0.get("game_start_time"))
+        if game_start is None:
+            return False
+        buffer_seconds = buffer_minutes * 60.0
+        return (game_start.timestamp() - buffer_seconds) <= now.timestamp()
+
+    # ------------------------------------------------------------------
     # Detection
     # ------------------------------------------------------------------
 
@@ -270,6 +457,8 @@ class TailEndCarryStrategy(BaseStrategy):
         panic_window_points = max(3, int(safe_float(cfg.get("panic_window_points"), 6)))
         panic_recovery_ratio_max = clamp(safe_float(cfg.get("panic_recovery_ratio_max"), 0.20), 0.0, 0.9)
         excluded_keywords = self._normalize_excluded_keywords(cfg.get("exclude_market_keywords"))
+        skip_live_games = _is_bool_true(cfg.get("skip_live_games", True))
+        live_game_buffer_minutes = max(0.0, safe_float(cfg.get("live_game_buffer_minutes"), 15.0))
 
         event_by_market: dict[str, Event] = {}
         for event in events:
@@ -283,8 +472,9 @@ class TailEndCarryStrategy(BaseStrategy):
         for market in markets:
             if market.closed or not market.active:
                 continue
+            event_for_market = event_by_market.get(market.id)
             if excluded_keywords:
-                market_text = self._market_text(market, event_by_market.get(market.id))
+                market_text = self._market_text(market, event_for_market)
                 if self._first_blocked_keyword(market_text, excluded_keywords) is not None:
                     continue
             if safe_float(getattr(market, "liquidity", 0.0)) < min_liquidity:
@@ -299,9 +489,17 @@ class TailEndCarryStrategy(BaseStrategy):
             if end_date is None:
                 continue
 
-            days_to_resolution = (end_date - now).total_seconds() / 86400.0
-            if days_to_resolution < min_days or days_to_resolution > max_days:
+            days_to_res = (end_date - now).total_seconds() / 86400.0
+            if days_to_res < min_days or days_to_res > max_days:
                 continue
+
+            # Fix #1: classify market category
+            category = self._classify_market_from_model(market, event_for_market)
+
+            # Fix #3: skip live games for sports/esports
+            if skip_live_games and category in (CATEGORY_SPORTS, CATEGORY_ESPORTS):
+                if self._is_live_game(market, now, live_game_buffer_minutes):
+                    continue
 
             for outcome in ("YES", "NO"):
                 price, bid, ask, token_id = self._extract_side_book(market, prices, outcome)
@@ -347,11 +545,13 @@ class TailEndCarryStrategy(BaseStrategy):
                         "token_id": token_id,
                         "entry_style": "tail_carry",
                         "_tail_end": {
-                            "days_to_resolution": days_to_resolution,
+                            "days_to_resolution": days_to_res,
                             "spread": spread,
                             "target_price": target_price,
                             "probability": price,
                             "max_settlement_upside_pct": max_settlement_upside_pct,
+                            "market_category": category,
+                            "game_start_time": getattr(market, "game_start_time", None),
                         },
                     }
                 ]
@@ -359,14 +559,14 @@ class TailEndCarryStrategy(BaseStrategy):
                 opp = self.create_opportunity(
                     title=f"Tail Carry: {outcome} {price:.1%} into resolution",
                     description=(
-                        f"{outcome} at {price:.3f} with {days_to_resolution:.1f} days to resolution; "
-                        f"target repricing to {target_price:.3f}."
+                        f"{outcome} at {price:.3f} with {days_to_res:.1f} days to resolution; "
+                        f"target repricing to {target_price:.3f}. [{category}]"
                     ),
                     total_cost=price,
                     expected_payout=target_price,
                     markets=[market],
                     positions=positions,
-                    event=event_by_market.get(market.id),
+                    event=event_for_market,
                     is_guaranteed=False,
                     min_liquidity_hard=min_liquidity,
                     min_position_size=max(settings.MIN_POSITION_SIZE, 5.0),
@@ -374,17 +574,27 @@ class TailEndCarryStrategy(BaseStrategy):
                 if not opp:
                     continue
 
-                time_score = 1.0 - (days_to_resolution / max_days)
+                time_score = 1.0 - (days_to_res / max_days)
                 black_swan_penalty = clamp((price - 0.90) * 0.40, 0.0, 0.12)
                 spread_penalty = min(0.14, spread * 2.8)
-                risk = 0.56 - (time_score * 0.10) + black_swan_penalty + spread_penalty
+                # Fix #4: higher risk score for sports (reduces sizing via risk penalty in scoring)
+                category_penalty = 0.06 if category == CATEGORY_SPORTS else 0.0
+                risk = 0.56 - (time_score * 0.10) + black_swan_penalty + spread_penalty + category_penalty
                 opp.risk_score = clamp(risk, 0.35, 0.82)
                 opp.risk_factors = [
-                    f"Near-expiry carry ({days_to_resolution:.1f} days)",
+                    f"Near-expiry carry ({days_to_res:.1f} days)",
                     f"Selected probability {price:.1%}",
+                    f"Category: {category}",
                     "Non-zero tail-risk remains until resolution",
                 ]
                 opp.mispricing_type = MispricingType.WITHIN_MARKET
+
+                # Stash category in strategy_context so it flows to exit config
+                if not opp.strategy_context:
+                    opp.strategy_context = {}
+                opp.strategy_context["market_category"] = category
+                opp.strategy_context["game_start_time"] = getattr(market, "game_start_time", None)
+                opp.strategy_context["sports_market_type"] = getattr(market, "sports_market_type", None)
 
                 strength = (target_price - price) * (1.0 - opp.risk_score)
                 candidates.append((strength, opp))
@@ -412,7 +622,7 @@ class TailEndCarryStrategy(BaseStrategy):
     # ------------------------------------------------------------------
 
     def custom_checks(self, signal: Any, context: dict, params: dict, payload: dict) -> list[DecisionCheck]:
-        """Tail carry: source, strategy type, entry band, resolution window, keyword exclusion checks."""
+        """Tail carry: source, strategy type, entry band, resolution window, keyword exclusion, live game checks."""
         min_entry = clamp(to_float(params.get("min_entry_price", 0.85), 0.85), 0.01, 0.995)
         max_entry = clamp(to_float(params.get("max_entry_price", 0.999), 0.999), min_entry, 0.999)
         min_upside_percent = clamp(to_float(params.get("min_upside_percent", 10.0), 10.0), 10.0, 100.0)
@@ -448,14 +658,28 @@ class TailEndCarryStrategy(BaseStrategy):
         max_settlement_upside_pct = ((1.0 - entry_price) / entry_price * 100.0) if entry_price > 0.0 else 0.0
         upside_ok = max_settlement_upside_pct >= min_upside_percent
 
+        # Fix #1: classify market for category-aware logic
+        category = self._classify_market_from_payload(payload)
+
+        # Fix #3: live game gate
+        skip_live_games = _is_bool_true(params.get("skip_live_games", True))
+        live_game_buffer = max(0.0, to_float(params.get("live_game_buffer_minutes", 15.0), 15.0))
+        now = utcnow().astimezone(timezone.utc)
+        is_live = False
+        if skip_live_games and category in (CATEGORY_SPORTS, CATEGORY_ESPORTS):
+            is_live = self._is_live_game_from_payload(payload, now, live_game_buffer)
+        live_game_ok = not is_live
+
         # Stash for compute_score / evaluate
         payload["_entry_price"] = entry_price
         payload["_dtr"] = dtr
         payload["_max_days"] = max_days
         payload["_strategy_type"] = strategy_type
         payload["_max_settlement_upside_pct"] = max_settlement_upside_pct
+        payload["_market_category"] = category
+        payload["_is_live_game"] = is_live
 
-        return [
+        checks = [
             DecisionCheck("source", "Scanner source", source == "scanner", detail="Requires source=scanner."),
             DecisionCheck("strategy", "Tail carry strategy type", strategy_ok, detail="strategy=tail_end_carry"),
             DecisionCheck(
@@ -487,6 +711,19 @@ class TailEndCarryStrategy(BaseStrategy):
             ),
         ]
 
+        # Fix #3: live game check (hard reject)
+        if skip_live_games:
+            checks.append(
+                DecisionCheck(
+                    "live_game",
+                    "Not a live game",
+                    live_game_ok,
+                    detail=f"category={category}, live={is_live}",
+                ),
+            )
+
+        return checks
+
     def compute_score(
         self, edge: float, confidence: float, risk_score: float, market_count: int, payload: dict
     ) -> float:
@@ -501,7 +738,7 @@ class TailEndCarryStrategy(BaseStrategy):
         return score
 
     def evaluate(self, signal: Any, context: dict) -> StrategyDecision:
-        """Tail carry: composable pipeline with adaptive sizing and custom payload."""
+        """Tail carry: composable pipeline with adaptive sizing, category-aware sizing, and custom payload."""
         params = context.get("params") or {}
         payload = signal_payload(signal)
 
@@ -533,7 +770,7 @@ class TailEndCarryStrategy(BaseStrategy):
             ),
         ]
 
-        # Strategy-specific checks (also stashes entry_price/dtr/etc in payload)
+        # Strategy-specific checks (also stashes entry_price/dtr/category/etc in payload)
         checks.extend(self.custom_checks(signal, context, params, payload))
 
         score = self.compute_score(edge, confidence, risk_score, market_count, payload)
@@ -542,6 +779,7 @@ class TailEndCarryStrategy(BaseStrategy):
         dtr = payload.get("_dtr")
         max_settlement_upside_pct = float(payload.get("_max_settlement_upside_pct", 0.0) or 0.0)
         strategy_type = str(payload.get("_strategy_type", "") or "")
+        category = str(payload.get("_market_category", CATEGORY_OTHER) or CATEGORY_OTHER)
 
         if not all(c.passed for c in checks):
             return StrategyDecision(
@@ -556,17 +794,28 @@ class TailEndCarryStrategy(BaseStrategy):
                     "entry_price": entry_price,
                     "days_to_resolution": dtr,
                     "max_settlement_upside_pct": max_settlement_upside_pct,
+                    "market_category": category,
                 },
             )
 
         direction = str(getattr(signal, "direction", "") or "")
         probability = selected_probability(signal, payload, direction)
 
+        # Fix #4: reduce position sizes for sports markets
+        sports_sizing_multiplier = clamp(
+            to_float(params.get("sports_sizing_multiplier", 0.55), 0.55), 0.1, 1.0
+        )
+        effective_base_size = base_size
+        effective_max_size = max_size
+        if category == CATEGORY_SPORTS:
+            effective_base_size = base_size * sports_sizing_multiplier
+            effective_max_size = max_size * sports_sizing_multiplier
+
         from services.trader_orchestrator.strategies.sizing import compute_position_size
 
         sizing = compute_position_size(
-            base_size_usd=base_size,
-            max_size_usd=max_size,
+            base_size_usd=effective_base_size,
+            max_size_usd=effective_max_size,
             edge_percent=edge,
             confidence=confidence,
             sizing_policy=sizing_policy,
@@ -575,6 +824,20 @@ class TailEndCarryStrategy(BaseStrategy):
             liquidity_usd=liquidity,
             liquidity_cap_fraction=0.06,
         )
+
+        # Stash category metadata into the decision payload so it flows to
+        # strategy_exit_config via the session engine's param propagation.
+        # We also stash market question/slug for classification in should_exit.
+        market_question = str(getattr(signal, "market_question", "") or "")
+        market_slug = ""
+        event_title = str(payload.get("event_title", "") or "")
+        signal_category = str(payload.get("category", "") or "")
+        markets_list = payload.get("markets")
+        if isinstance(markets_list, list) and markets_list:
+            m0 = markets_list[0] if isinstance(markets_list[0], dict) else {}
+            market_slug = str(m0.get("slug", "") or "")
+            if not market_question:
+                market_question = str(m0.get("question", "") or "")
 
         return StrategyDecision(
             decision="selected",
@@ -591,48 +854,108 @@ class TailEndCarryStrategy(BaseStrategy):
                 "max_settlement_upside_pct": max_settlement_upside_pct,
                 "sizing": sizing,
                 "strategy_type": strategy_type,
+                "market_category": category,
+                # Stash for should_exit classification (flows into strategy_exit_config)
+                "_market_category": category,
+                "_market_question": market_question,
+                "_market_slug": market_slug,
+                "_event_title": event_title,
+                "_category": signal_category,
+                "_sports_market_type": (
+                    markets_list[0].get("sports_market_type")
+                    if isinstance(markets_list, list) and markets_list and isinstance(markets_list[0], dict)
+                    else None
+                ),
             },
         )
 
+    # ------------------------------------------------------------------
+    # Exit logic (Fix #1, #2, #7)
+    # ------------------------------------------------------------------
+
     def should_exit(self, position: Any, market_state: dict) -> ExitDecision:
-        """Near-expiry carry: hold unless market resolves or fully inverts."""
+        """Category-aware exit: trailing stop, resolution proximity hold, inversion stop."""
         if market_state.get("is_resolved"):
             return self.default_exit_check(position, market_state)
 
         config = getattr(position, "config", None) or {}
         config = dict(config)
 
-        smart_enabled_raw = config.get("smart_take_profit_enabled")
-        if isinstance(smart_enabled_raw, bool):
-            smart_enabled = smart_enabled_raw
-        elif smart_enabled_raw is None:
-            smart_enabled = True
-        else:
-            smart_enabled = str(smart_enabled_raw).strip().lower() in {"1", "true", "yes", "on"}
-
-        smart_min_pnl_pct = clamp(safe_float(config.get("smart_take_profit_min_pnl_pct"), 10.0), 0.0, 100.0)
-        smart_max_headroom = clamp(safe_float(config.get("smart_take_profit_max_price_headroom"), 0.03), 0.001, 0.20)
-        inversion_enabled_raw = config.get("inversion_stop_enabled")
-        if isinstance(inversion_enabled_raw, bool):
-            inversion_stop_enabled = inversion_enabled_raw
-        elif inversion_enabled_raw is None:
-            inversion_stop_enabled = True
-        else:
-            inversion_stop_enabled = str(inversion_enabled_raw).strip().lower() in {"1", "true", "yes", "on"}
-        inversion_price_threshold = clamp(safe_float(config.get("inversion_price_threshold"), 0.50), 0.05, 0.95)
-
         entry_price = safe_float(getattr(position, "entry_price", 0.0), 0.0)
         current_price = safe_float(market_state.get("current_price"), 0.0)
+        highest_price = safe_float(getattr(position, "highest_price", None), None)
+        age_minutes = safe_float(getattr(position, "age_minutes", None), None)
+        seconds_left = safe_float(market_state.get("seconds_left"), None)
+
+        # Fix #1: determine market category
+        category = self._classify_from_exit_config(config)
+
+        is_sports = category in (CATEGORY_SPORTS, CATEGORY_ESPORTS)
+
+        # -- Fix #7: Resolution proximity hold --
+        # If resolution is imminent, hold regardless of price (the thesis is
+        # "converge to 1.00 at resolution" — let it play out).
+        resolution_hold_enabled = _is_bool_true(config.get("resolution_hold_enabled", True))
+        resolution_hold_minutes = max(0.0, safe_float(config.get("resolution_hold_minutes"), 120.0))
+        if resolution_hold_enabled and seconds_left is not None:
+            minutes_left = seconds_left / 60.0
+            if minutes_left <= resolution_hold_minutes and current_price > 0.0:
+                # Still hold — skip all stops, let it resolve
+                return ExitDecision(
+                    "hold",
+                    (
+                        f"Resolution proximity hold ({minutes_left:.0f}m left <= {resolution_hold_minutes:.0f}m; "
+                        f"category={category}, price={current_price:.4f})"
+                    ),
+                    payload={"skip_default_exit": True},
+                )
+
+        # -- Fix #1: category-specific inversion stop --
+        if is_sports:
+            inversion_stop_enabled = _is_bool_true(config.get("sports_inversion_stop_enabled", False))
+        else:
+            inversion_stop_enabled = _is_bool_true(config.get("inversion_stop_enabled", True))
+        inversion_price_threshold = clamp(safe_float(config.get("inversion_price_threshold"), 0.50), 0.05, 0.95)
+
         if inversion_stop_enabled and entry_price > 0.0 and current_price > 0.0:
             if current_price <= inversion_price_threshold:
                 return ExitDecision(
                     "close",
                     (
                         f"Inversion stop triggered ({current_price:.4f} <= {inversion_price_threshold:.4f}; "
-                        f"entry={entry_price:.4f})"
+                        f"entry={entry_price:.4f}, category={category})"
                     ),
                     close_price=current_price,
                 )
+
+        # -- Fix #2: trailing stop from high water mark --
+        trailing_stop_enabled = _is_bool_true(config.get("trailing_stop_enabled", True))
+        if is_sports:
+            trailing_stop_pct = clamp(safe_float(config.get("sports_trailing_stop_pct"), 45.0), 5.0, 80.0)
+        else:
+            trailing_stop_pct = clamp(safe_float(config.get("trailing_stop_pct"), 25.0), 5.0, 80.0)
+
+        if trailing_stop_enabled and highest_price is not None and highest_price > 0.0 and current_price > 0.0:
+            drop_from_high_pct = ((highest_price - current_price) / highest_price) * 100.0
+            if drop_from_high_pct >= trailing_stop_pct:
+                return ExitDecision(
+                    "close",
+                    (
+                        f"Trailing stop triggered ({drop_from_high_pct:.1f}% drop from high "
+                        f"{highest_price:.4f}; threshold={trailing_stop_pct:.0f}%, "
+                        f"current={current_price:.4f}, category={category})"
+                    ),
+                    close_price=current_price,
+                )
+
+        # -- Smart take profit (unchanged) --
+        smart_enabled_raw = config.get("smart_take_profit_enabled")
+        smart_enabled = smart_enabled_raw if isinstance(smart_enabled_raw, bool) else (
+            True if smart_enabled_raw is None else _is_bool_true(smart_enabled_raw)
+        )
+        smart_min_pnl_pct = clamp(safe_float(config.get("smart_take_profit_min_pnl_pct"), 10.0), 0.0, 100.0)
+        smart_max_headroom = clamp(safe_float(config.get("smart_take_profit_max_price_headroom"), 0.03), 0.001, 0.20)
+
         if smart_enabled and entry_price > 0.0 and current_price > 0.0:
             pnl_pct = ((current_price - entry_price) / entry_price) * 100.0
             headroom = max(0.0, 1.0 - current_price)
@@ -646,8 +969,8 @@ class TailEndCarryStrategy(BaseStrategy):
                     close_price=current_price,
                 )
 
+        # -- Max hold timeout --
         max_hold_minutes = safe_float(config.get("max_hold_minutes"), None)
-        age_minutes = safe_float(getattr(position, "age_minutes", None), None)
         if (
             max_hold_minutes is not None
             and max_hold_minutes > 0.0
@@ -663,7 +986,7 @@ class TailEndCarryStrategy(BaseStrategy):
 
         return ExitDecision(
             "hold",
-            "Tail carry hold — awaiting resolution or full inversion",
+            f"Tail carry hold — awaiting resolution (category={category})",
             payload={"skip_default_exit": True},
         )
 

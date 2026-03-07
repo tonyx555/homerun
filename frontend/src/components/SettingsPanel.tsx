@@ -20,6 +20,7 @@ import {
   Play,
   Download,
   Upload,
+  Wifi,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { Card, CardContent } from './ui/card'
@@ -58,6 +59,7 @@ type SettingsSection =
   | 'notifications'
   | 'security'
   | 'vpn'
+  | 'network'
   | 'discovery'
   | 'maintenance'
   | 'transfer'
@@ -294,6 +296,10 @@ export default function SettingsPanel({
     clear_password: false,
   })
 
+  const [networkForm, setNetworkForm] = useState({
+    allow_network_access: false,
+  })
+
   const transferFileInputRef = useRef<HTMLInputElement | null>(null)
   const [transferCategories, setTransferCategories] = useState<Record<SettingsTransferCategory, boolean>>(() => {
     const initial: Record<SettingsTransferCategory, boolean> = {
@@ -406,6 +412,10 @@ export default function SettingsPanel({
         password: '',
         confirm_password: '',
         clear_password: false,
+      })
+
+      setNetworkForm({
+        allow_network_access: settings.network?.allow_network_access ?? false,
       })
 
     }
@@ -741,6 +751,9 @@ export default function SettingsPanel({
       case 'maintenance':
         updates.maintenance = maintenanceForm
         break
+      case 'network':
+        updates.network = networkForm
+        break
     }
 
     saveMutation.mutate(updates)
@@ -806,6 +819,8 @@ export default function SettingsPanel({
           : 'Disabled'
       case 'vpn':
         return vpnForm.enabled ? 'Active' : 'Disabled'
+      case 'network':
+        return networkForm.allow_network_access ? 'LAN Enabled' : 'Localhost Only'
       case 'maintenance':
         return maintenanceForm.auto_cleanup_enabled ? 'Auto-clean on' : 'Manual'
       case 'transfer':
@@ -831,6 +846,8 @@ export default function SettingsPanel({
           : 'text-muted-foreground bg-muted'
       case 'vpn':
         return vpnForm.enabled ? 'text-indigo-400 bg-indigo-500/10' : 'text-muted-foreground bg-muted'
+      case 'network':
+        return networkForm.allow_network_access ? 'text-sky-400 bg-sky-500/10' : 'text-muted-foreground bg-muted'
       case 'maintenance':
         return maintenanceForm.auto_cleanup_enabled ? 'text-red-400 bg-red-500/10' : 'text-muted-foreground bg-muted'
       case 'transfer':
@@ -846,6 +863,7 @@ export default function SettingsPanel({
     { id: 'notifications', icon: Bell, label: 'Notifications', description: 'Telegram alerts' },
     { id: 'security', icon: Lock, label: 'UI Lock', description: 'Local screen lock and inactivity timeout' },
     { id: 'vpn', icon: Shield, label: 'Trading VPN/Proxy', description: 'Route trades through VPN' },
+    { id: 'network', icon: Wifi, label: 'Network Access', description: 'Allow LAN devices to reach the dashboard' },
     { id: 'discovery', icon: Database, label: 'Discovery', description: 'Wallet discovery growth and maintenance' },
     { id: 'maintenance', icon: Database, label: 'Database', description: 'Cleanup & maintenance' },
     { id: 'transfer', icon: Upload, label: 'Import / Export', description: 'Migrate trading configuration bundle' },
@@ -1770,6 +1788,44 @@ export default function SettingsPanel({
                             {testVpnMutation.data.message}
                           </Badge>
                         )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Network Access Settings */}
+                  {section.id === 'network' && (
+                    <div className="space-y-4">
+                      <Card className="bg-muted border-sky-500/30">
+                        <CardContent className="flex items-center justify-between p-3">
+                          <div>
+                            <p className="font-medium text-sm">Allow Network Access</p>
+                            <p className="text-xs text-muted-foreground">
+                              Let other devices on your local network reach the dashboard
+                            </p>
+                          </div>
+                          <Switch
+                            checked={networkForm.allow_network_access}
+                            onCheckedChange={(checked) => setNetworkForm(p => ({ ...p, allow_network_access: checked }))}
+                          />
+                        </CardContent>
+                      </Card>
+
+                      <div className="flex items-start gap-2 p-3 bg-sky-500/5 border border-sky-500/20 rounded-lg">
+                        <Wifi className="w-4 h-4 text-sky-400 mt-0.5 shrink-0" />
+                        <p className="text-xs text-muted-foreground">
+                          When enabled, the dashboard binds to <span className="font-mono">0.0.0.0</span> instead of <span className="font-mono">localhost</span>,
+                          making it reachable from any device on your LAN (e.g. phone, tablet, another PC).
+                          <span className="text-yellow-400 font-medium"> Requires a restart to take effect.</span>
+                        </p>
+                      </div>
+
+                      <Separator className="opacity-30" />
+
+                      <div className="flex items-center gap-2">
+                        <Button size="sm" onClick={() => handleSaveSection('network')} disabled={saveMutation.isPending}>
+                          <Save className="w-3.5 h-3.5 mr-1.5" />
+                          Save
+                        </Button>
                       </div>
                     </div>
                   )}

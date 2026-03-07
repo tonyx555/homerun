@@ -727,7 +727,12 @@ async def _run_loop() -> None:
             state["fallback_updates"] = 0
             return
 
-        poll_tokens = stale_tokens[:stale_poll_batch_size]
+        critical_stale_set = set(critical_stale_tokens)
+        background_stale = [t for t in stale_tokens if t not in critical_stale_set]
+        poll_tokens = critical_stale_tokens[:stale_poll_batch_size]
+        remaining_budget = stale_poll_batch_size - len(poll_tokens)
+        if remaining_budget > 0:
+            poll_tokens.extend(background_stale[:remaining_budget])
         poly_poll = [token for token in poll_tokens if _is_polymarket_token(token)]
         kalshi_poll = [token for token in poll_tokens if not _is_polymarket_token(token)]
         fallback_prices: dict[str, dict] = {}
@@ -748,6 +753,7 @@ async def _run_loop() -> None:
         if updates:
             await redis_price_cache.write_prices(updates)
         state["fallback_polled_tokens"] = len(poll_tokens)
+        state["fallback_polled_critical"] = min(len(critical_stale_tokens), stale_poll_batch_size)
         state["fallback_updates"] = len(updates)
 
     async def _sleep_until_next_cycle(interval_seconds: float) -> None:

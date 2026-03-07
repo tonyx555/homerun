@@ -102,28 +102,8 @@ def _parse_balance_allowance_amount(value: Any) -> Optional[Decimal]:
         return Decimal(str(parsed_float))
 
 
-def _is_retryable_db_error(exc: Exception) -> bool:
-    message = str(getattr(exc, "orig", exc)).lower()
-    return any(
-        marker in message
-        for marker in (
-            "deadlock detected",
-            "serialization failure",
-            "could not serialize access",
-            "lock not available",
-            "connection is closed",
-            "underlying connection is closed",
-            "connection has been closed",
-            "closed the connection unexpectedly",
-            "terminating connection",
-            "connection reset by peer",
-            "broken pipe",
-        )
-    )
-
-
-def _db_retry_delay(attempt: int) -> float:
-    return min(DB_RETRY_BASE_DELAY_SECONDS * (2**attempt), DB_RETRY_MAX_DELAY_SECONDS)
+from utils.retry import is_retryable_db_error as _is_retryable_db_error  # noqa: E402
+from utils.retry import db_retry_delay as _db_retry_delay  # noqa: E402
 
 
 def _normalize_utc_datetime(value: datetime | None) -> datetime | None:
@@ -139,6 +119,45 @@ def _is_post_only_cross_reject(error_message: str | None) -> bool:
     if not text:
         return False
     return "post-only" in text and "crosses book" in text
+
+
+# Markers in exception text that indicate a transient network/proxy failure
+# rather than a genuine order rejection.  py_clob_client wraps httpx transport
+# errors as PolyApiException(error_msg="Request exception!"), so we match on
+# the wrapper text and common network error strings.
+_TRANSIENT_TRANSPORT_MARKERS = (
+    "request exception",
+    "proxy error",
+    "proxyerror",
+    "invalid username/password",
+    "connection reset",
+    "connection refused",
+    "connection closed",
+    "connect timeout",
+    "read timeout",
+    "timed out",
+    "network is unreachable",
+    "name or service not known",
+    "nodename nor servname",
+    "temporary failure in name resolution",
+    "broken pipe",
+    "connection aborted",
+    "remotedisconnected",
+    "connectionerror",
+)
+
+
+def _is_transient_transport_error(exc: Exception) -> bool:
+    """Check if an exception is a transient network/proxy error worth retrying."""
+    try:
+        import httpx as _httpx
+
+        if isinstance(exc, (_httpx.TransportError, _httpx.TimeoutException, ConnectionError, OSError)):
+            return True
+    except ImportError:
+        pass
+    text = str(exc).lower()
+    return any(marker in text for marker in _TRANSIENT_TRANSPORT_MARKERS)
 
 
 def _clamp_binary_price(value: float) -> float:
@@ -2218,8 +2237,10 @@ class LiveExecutionService:
             submit_price = float(price)
             order_side = BUY if side == OrderSide.BUY else SELL
 
+            transport_retries_used = 0
+            max_transport_retries = 2
             max_attempts = 3 if side == OrderSide.SELL else 2
-            for attempt in range(max_attempts):
+            for attempt in range(max_attempts + max_transport_retries):
                 order.price = submit_price
                 order_args = OrderArgs(
                     price=submit_price,
@@ -2280,6 +2301,24 @@ class LiveExecutionService:
                             submit_price = retry_price
                             await asyncio.sleep(0)
                             continue
+                    if (
+                        _is_transient_transport_error(exc)
+                        and transport_retries_used < max_transport_retries
+                    ):
+                        transport_retries_used += 1
+                        delay = 0.5 * (2 ** (transport_retries_used - 1))
+                        logger.warning(
+                            "Order submission failed with transient transport error; retrying",
+                            attempt=attempt + 1,
+                            transport_retry=transport_retries_used,
+                            token_id=token_id,
+                            side=side.value,
+                            error_type=type(exc).__name__,
+                            error=str(exc)[:200],
+                            delay=delay,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
                     raise
 
                 if response.get("success"):

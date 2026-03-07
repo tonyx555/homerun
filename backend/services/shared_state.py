@@ -90,28 +90,8 @@ def _format_iso_utc_z(dt: Optional[datetime]) -> Optional[str]:
     return dt.replace(tzinfo=None).isoformat() + "Z"
 
 
-def _is_retryable_db_error(exc: Exception) -> bool:
-    message = str(getattr(exc, "orig", exc)).lower()
-    return any(
-        marker in message
-        for marker in (
-            "deadlock detected",
-            "serialization failure",
-            "could not serialize access",
-            "lock not available",
-            "connection is closed",
-            "underlying connection is closed",
-            "connection has been closed",
-            "closed the connection unexpectedly",
-            "terminating connection",
-            "connection reset by peer",
-            "broken pipe",
-        )
-    )
-
-
-def _db_retry_delay(attempt: int) -> float:
-    return min(DB_RETRY_BASE_DELAY_SECONDS * (2**attempt), DB_RETRY_MAX_DELAY_SECONDS)
+from utils.retry import is_retryable_db_error as _is_retryable_db_error  # noqa: E402
+from utils.retry import db_retry_delay as _db_retry_delay  # noqa: E402
 
 
 async def _commit_with_retry(session: AsyncSession) -> None:

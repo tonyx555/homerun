@@ -582,6 +582,12 @@ def search_filters_payload(settings: AppSettings) -> dict[str, Any]:
     }
 
 
+def network_payload(settings: AppSettings) -> dict[str, Any]:
+    return {
+        "allow_network_access": bool(getattr(settings, "allow_network_access", False)),
+    }
+
+
 def events_payload(settings: AppSettings) -> dict[str, Any]:
     raw = getattr(settings, "events_settings_json", None)
     stored = raw if isinstance(raw, dict) else {}
@@ -869,6 +875,10 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
         settings.ui_lock_enabled = enabled
         settings.ui_lock_idle_timeout_minutes = timeout_minutes
         settings.ui_lock_password_hash = next_password_hash
+
+    network = getattr(request, "network", None)
+    if network is not None:
+        settings.allow_network_access = bool(getattr(network, "allow_network_access", False))
 
     if events is not None:
         current_raw = getattr(settings, "events_settings_json", None)

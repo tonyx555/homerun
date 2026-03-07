@@ -60,6 +60,7 @@ async def publish_trade_signal_batch(
     reason: str | None = None,
     emitted_at: str | None = None,
     metadata: dict[str, Any] | None = None,
+    signal_snapshots: dict[str, dict[str, Any]] | None = None,
 ) -> str | None:
     normalized_ids = _normalize_signal_ids(signal_ids)
     if not normalized_ids:
@@ -70,7 +71,7 @@ async def publish_trade_signal_batch(
     if not _is_actionable_event(normalized_event_type, normalized_trigger):
         return None
 
-    payload = {
+    payload: dict[str, Any] = {
         "event_type": normalized_event_type,
         "source": _normalize_source(source),
         "signal_ids": normalized_ids,
@@ -81,6 +82,8 @@ async def publish_trade_signal_batch(
     }
     if isinstance(metadata, dict) and metadata:
         payload["metadata"] = metadata
+    if isinstance(signal_snapshots, dict) and signal_snapshots:
+        payload["signal_snapshots"] = signal_snapshots
 
     return await redis_streams.append_json(
         str(settings.TRADE_SIGNAL_STREAM_KEY),
@@ -108,7 +111,7 @@ def _normalize_batch_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
     if not signal_ids:
         return None
 
-    return {
+    normalized: dict[str, Any] = {
         "event_type": event_type,
         "source": _normalize_source(payload.get("source")),
         "signal_ids": signal_ids,
@@ -118,6 +121,10 @@ def _normalize_batch_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
         "emitted_at": payload.get("emitted_at"),
         "metadata": payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
     }
+    snapshots = payload.get("signal_snapshots")
+    if isinstance(snapshots, dict) and snapshots:
+        normalized["signal_snapshots"] = snapshots
+    return normalized
 
 
 async def read_trade_signal_batches(

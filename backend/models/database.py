@@ -1158,6 +1158,9 @@ class AppSettings(Base):
     ui_lock_password_hash = Column(String, nullable=True)
     ui_lock_idle_timeout_minutes = Column(Integer, default=15)
 
+    # Network access (allow LAN devices to reach the dashboard)
+    allow_network_access = Column(Boolean, default=False)
+
     # Validation guardrails (auto strategy demotion/promotion)
     validation_guardrails_enabled = Column(Boolean, default=True)
     validation_min_samples = Column(Integer, default=25)
@@ -3446,6 +3449,207 @@ async def recover_pool() -> None:
     scenarios (e.g. PostgreSQL restart).
     """
     await async_engine.dispose()
+
+
+# ==================== CONNECTION CHECKOUT REAPER ====================
+#
+# Runs as a background task and periodically walks every connection in the
+# pool.  Any connection that has been checked out for longer than the hard
+# limit is forcibly invalidated — the underlying TCP socket is closed and
+# the connection_record is returned to the pool so a fresh connection can
+# be created on the next checkout.
+#
+# This prevents a single stuck task (e.g. an external HTTP call that hangs)
+# from permanently consuming a pool slot and eventually exhausting the
+# pool, which would take down the entire application.
+
+_CHECKOUT_HARD_LIMIT_SECONDS = 120.0  # 2 minutes — no single operation should ever take this long
+_REAPER_SCAN_INTERVAL_SECONDS = 10.0
+_POOL_EXHAUSTION_THRESHOLD = 0.85     # trigger recovery when 85% of slots are checked out
+_reaper_task: asyncio.Task | None = None
+
+
+def _get_pool_stats() -> dict:
+    """Return current pool utilization stats."""
+    pool = async_engine.pool
+    checked_in = pool.checkedin()
+    checked_out = pool.checkedout()
+    overflow = pool.overflow()
+    pool_size = pool.size()
+    total_capacity = pool_size + _max_overflow
+    return {
+        "checked_in": checked_in,
+        "checked_out": checked_out,
+        "overflow": overflow,
+        "pool_size": pool_size,
+        "max_overflow": _max_overflow,
+        "total_capacity": total_capacity,
+        "utilization": checked_out / total_capacity if total_capacity > 0 else 0.0,
+    }
+
+
+async def _reap_stale_checkouts() -> None:
+    """Walk the pool and invalidate connections held beyond the hard limit."""
+    pool = async_engine.pool
+    now = _time.monotonic()
+    reaped = 0
+
+    # SQLAlchemy's QueuePool tracks connection records internally.
+    # _pool is the queue of idle connections, but checked-out connections
+    # live on _all_conns (the full set of managed connection_records).
+    all_records = getattr(pool, "_all_conns", None)
+    if all_records is None:
+        return
+
+    for conn_record in list(all_records):
+        info = getattr(conn_record, "info", None)
+        if info is None:
+            continue
+        checkout_time = info.get("checkout_time")
+        if checkout_time is None:
+            continue  # checked in, not out
+        elapsed = now - checkout_time
+        if elapsed < _CHECKOUT_HARD_LIMIT_SECONDS:
+            continue
+
+        task_name = info.get("checkout_task_name", "unknown")
+        coro_name = info.get("checkout_task_coro", "unknown")
+        _db_logger.error(
+            "REAPER: Force-invalidating connection held for %.1fs (limit=%.0fs, task=%s, coro=%s)",
+            elapsed,
+            _CHECKOUT_HARD_LIMIT_SECONDS,
+            task_name,
+            coro_name,
+        )
+        # Invalidate the underlying DBAPI connection.  This closes the TCP
+        # socket, which causes any in-flight query to fail with a connection
+        # error.  The connection_record is returned to the pool and will
+        # create a fresh connection on next checkout.
+        try:
+            dbapi_conn = conn_record.dbapi_connection
+            if dbapi_conn is not None:
+                conn_record.invalidate(e=TimeoutError(f"checkout exceeded {_CHECKOUT_HARD_LIMIT_SECONDS}s"))
+                reaped += 1
+        except Exception as e:
+            _db_logger.warning("REAPER: Failed to invalidate connection: %s", e)
+
+    return reaped
+
+
+async def _pool_watchdog_loop() -> None:
+    """Background loop: reap stale checkouts and recover exhausted pools."""
+    _db_logger.info(
+        "Pool watchdog started (hard_limit=%.0fs, scan_interval=%.0fs, exhaustion_threshold=%.0f%%)",
+        _CHECKOUT_HARD_LIMIT_SECONDS,
+        _REAPER_SCAN_INTERVAL_SECONDS,
+        _POOL_EXHAUSTION_THRESHOLD * 100,
+    )
+    consecutive_exhausted = 0
+
+    while True:
+        try:
+            await asyncio.sleep(_REAPER_SCAN_INTERVAL_SECONDS)
+
+            # Phase 1: reap any connections held too long
+            reaped = await _reap_stale_checkouts()
+            if reaped:
+                _db_logger.warning("REAPER: Invalidated %d stale connection(s)", reaped)
+
+            # Phase 2: check pool utilization
+            stats = _get_pool_stats()
+            if stats["utilization"] >= _POOL_EXHAUSTION_THRESHOLD:
+                consecutive_exhausted += 1
+                _db_logger.error(
+                    "Pool near exhaustion: %d/%d checked out (%.0f%%), streak=%d",
+                    stats["checked_out"],
+                    stats["total_capacity"],
+                    stats["utilization"] * 100,
+                    consecutive_exhausted,
+                )
+                # After 3 consecutive scans at near-exhaustion, force pool
+                # recovery — dispose all connections and start fresh.
+                if consecutive_exhausted >= 3:
+                    _db_logger.error(
+                        "POOL RECOVERY: Disposing all connections after %d consecutive exhaustion scans",
+                        consecutive_exhausted,
+                    )
+                    await async_engine.dispose()
+                    consecutive_exhausted = 0
+            else:
+                consecutive_exhausted = 0
+
+        except asyncio.CancelledError:
+            _db_logger.info("Pool watchdog stopped")
+            return
+        except Exception as e:
+            _db_logger.error("Pool watchdog error: %s", e, exc_info=True)
+
+
+def start_pool_watchdog() -> asyncio.Task:
+    """Start the pool watchdog background task.  Safe to call multiple times."""
+    global _reaper_task
+    if _reaper_task is not None and not _reaper_task.done():
+        return _reaper_task
+    _reaper_task = asyncio.create_task(_pool_watchdog_loop(), name="pool-watchdog")
+    return _reaper_task
+
+
+def stop_pool_watchdog() -> None:
+    """Cancel the pool watchdog task."""
+    global _reaper_task
+    if _reaper_task is not None and not _reaper_task.done():
+        _reaper_task.cancel()
+    _reaper_task = None
+
+
+# ==================== BOUNDED SESSION CONTEXT MANAGER ====================
+#
+# Wraps AsyncSessionLocal with an overall timeout.  If the timeout fires,
+# the session is rolled back and closed, and asyncio.TimeoutError is raised.
+# This prevents any single database operation from holding a connection
+# indefinitely, even if the work involves awaiting external I/O while a
+# session is open.
+
+from contextlib import asynccontextmanager as _asynccontextmanager
+
+
+@_asynccontextmanager
+async def bounded_session(timeout_seconds: float = 30.0):
+    """Acquire a database session with a hard overall time limit.
+
+    Usage::
+
+        async with bounded_session(timeout_seconds=15.0) as session:
+            result = await session.execute(...)
+            await session.commit()
+
+    If the block takes longer than *timeout_seconds*, the session is
+    rolled back and closed, and ``asyncio.TimeoutError`` is raised.
+    """
+    session = AsyncSessionLocal()
+    deadline = _time.monotonic() + timeout_seconds
+    try:
+        yield session
+    except asyncio.TimeoutError:
+        try:
+            await session.rollback()
+        except Exception:
+            pass
+        raise
+    except Exception:
+        try:
+            await session.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        remaining = deadline - _time.monotonic()
+        if remaining <= 0:
+            _db_logger.warning(
+                "bounded_session exceeded %.1fs deadline, forcing close",
+                timeout_seconds,
+            )
+        await session.close()
 
 
 def _run_alembic_upgrade(connection) -> None:

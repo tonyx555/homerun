@@ -19,6 +19,7 @@ logger.error = (msg, options) => {
 
 const vitePort = Number(process.env.VITE_PORT || 3000)
 const viteStrictPort = String(process.env.VITE_STRICT_PORT || "").toLowerCase() === "true"
+const viteHost = process.env.VITE_HOST || undefined
 
 export default defineConfig({
   plugins: [react()],
@@ -29,6 +30,7 @@ export default defineConfig({
     },
   },
   server: {
+    host: viteHost,
     port: vitePort,
     strictPort: viteStrictPort,
     proxy: {

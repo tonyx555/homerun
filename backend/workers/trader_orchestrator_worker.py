@@ -77,37 +77,26 @@ from services.trader_orchestrator_state import (
     ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS,
     cleanup_trader_open_orders,
     compute_orchestrator_metrics,
-    create_trader_decision,
-    create_trader_decision_checks,
     create_trader_event,
     create_trader_order as _create_trader_order,
-    get_consecutive_loss_count,
-    get_trader_copy_leader_exposure,
-    get_daily_realized_pnl,
-    get_gross_exposure,
-    get_unrealized_pnl,
-    get_last_resolved_loss_at,
-    get_market_exposure,
-    get_open_order_count_for_trader,
     get_pending_live_exit_summary_for_trader,
-    get_trader_source_exposure,
-    get_open_market_ids_for_trader,
-    get_open_position_count_for_trader,
-    get_trader_signal_cursor,
     list_live_wallet_positions_for_trader,
     list_traders,
     list_unconsumed_trade_signals,
     reconcile_live_provider_orders,
     read_orchestrator_control,
-    record_signal_consumption,
     set_trader_paused,
     sync_trader_position_inventory,
     update_orchestrator_control,
     update_trader_decision,
-    upsert_trader_signal_cursor,
     write_orchestrator_snapshot,
 )
-from services.signal_bus import expire_stale_signals, set_trade_signal_status
+from services.signal_bus import expire_stale_signals
+import services.trader_hot_state as hot_state
+from services.trader_hot_state import (
+    SignalSnapshot as _SignalSnapshot,
+    hydrate_signals_from_stream as _hydrate_signals_from_stream,
+)
 from services.ws_feeds import get_feed_manager
 from utils.utcnow import utcnow
 from utils.converters import safe_float, safe_int
@@ -115,6 +104,99 @@ from utils.secrets import decrypt_secret
 
 logger = logging.getLogger("trader_orchestrator_worker")
 strategy_db_loader = strategy_loader
+
+
+# ── Hot-path shims ────────────────────────────────────────────────
+# These replace the DB-backed originals with write-behind buffer calls.
+# Signature matches the call sites so we don't rewrite 50+ callers.
+
+class _DecisionStub:
+    def __init__(self, row_id: str):
+        self.id = row_id
+
+
+async def record_signal_consumption(session, *, trader_id, signal_id, outcome, reason=None, decision_id=None, payload=None, commit=True):
+    await hot_state.buffer_signal_consumption(
+        trader_id=trader_id, signal_id=signal_id, outcome=outcome,
+        reason=reason, decision_id=decision_id, payload=payload,
+    )
+
+
+async def upsert_trader_signal_cursor(session, *, trader_id, last_signal_created_at, last_signal_id, commit=True):
+    hot_state.update_signal_cursor(trader_id, "live", last_signal_created_at, last_signal_id)
+    await hot_state.buffer_signal_cursor(
+        trader_id=trader_id, last_signal_created_at=last_signal_created_at,
+        last_signal_id=last_signal_id,
+    )
+
+
+async def create_trader_decision(session, *, trader_id, signal, strategy_key, strategy_version=None,
+                                  decision, reason=None, score=None, checks_summary=None,
+                                  risk_snapshot=None, payload=None, trace_id=None, commit=True):
+    row_id = await hot_state.buffer_decision(
+        trader_id=trader_id, signal_id=str(signal.id),
+        signal_source=str(getattr(signal, "source", "")),
+        strategy_key=strategy_key, strategy_version=strategy_version,
+        decision=decision, reason=reason, score=score, trace_id=trace_id,
+        checks_summary=checks_summary, risk_snapshot=risk_snapshot, payload=payload,
+    )
+    return _DecisionStub(row_id)
+
+
+async def create_trader_decision_checks(session, *, decision_id, checks, commit=True):
+    await hot_state.buffer_decision_checks(decision_id=decision_id, checks=checks)
+
+
+async def set_trade_signal_status(session, *, signal_id, status, commit=True):
+    await hot_state.buffer_signal_status(signal_id=signal_id, status=status)
+
+
+async def get_trader_signal_cursor(session, *, trader_id):
+    return hot_state.get_signal_cursor(trader_id, "live")
+
+
+async def get_open_position_count_for_trader(session, trader_id, mode=None, position_cap_scope=None):
+    return hot_state.get_open_position_count(trader_id, mode or "live", position_cap_scope=position_cap_scope or "market_direction")
+
+
+async def get_open_order_count_for_trader(session, trader_id, mode=None):
+    return hot_state.get_open_order_count(trader_id, mode or "live")
+
+
+async def get_open_market_ids_for_trader(session, trader_id, mode=None):
+    return hot_state.get_open_market_ids(trader_id, mode or "live")
+
+
+async def get_daily_realized_pnl(session, *, trader_id=None, mode=None):
+    return hot_state.get_daily_realized_pnl(trader_id, mode or "live")
+
+
+async def get_unrealized_pnl(session, *, trader_id=None, mode=None):
+    return await hot_state.get_unrealized_pnl(trader_id, mode or "live")
+
+
+async def get_consecutive_loss_count(session, *, trader_id, mode=None, limit=100, since=None):
+    return hot_state.get_consecutive_loss_count(trader_id, mode or "live")
+
+
+async def get_last_resolved_loss_at(session, *, trader_id, mode=None, since=None):
+    return hot_state.get_last_resolved_loss_at(trader_id, mode or "live")
+
+
+async def get_gross_exposure(session, mode=None):
+    return hot_state.get_gross_exposure(mode or "live")
+
+
+async def get_market_exposure(session, market_id, mode=None):
+    return hot_state.get_market_exposure(market_id, mode or "live")
+
+
+async def get_trader_source_exposure(session, *, trader_id, source, mode=None):
+    return hot_state.get_trader_source_exposure(trader_id, source, mode or "live")
+
+
+async def get_trader_copy_leader_exposure(session, *, trader_id, source_wallet, mode=None):
+    return hot_state.get_copy_leader_exposure(trader_id, source_wallet, mode or "live")
 create_trader_order = _create_trader_order
 reconcile_paper_positions = reconcile_shadow_positions
 _RESUME_POLICIES = {"resume_full", "manage_only", "flatten_then_start"}
@@ -2382,10 +2464,7 @@ async def _run_trader_once(
         loss_streak_reset_at = _parse_iso(str(metadata.get(_LOSS_STREAK_RESET_AT_KEY) or "").strip())
         run_mode = _canonical_trader_mode(control.get("mode"), default="shadow")
         resume_policy = _normalize_resume_policy(metadata.get("resume_policy"))
-        cursor_created_at, cursor_signal_id = await get_trader_signal_cursor(
-            session,
-            trader_id=trader_id,
-        )
+        cursor_created_at, cursor_signal_id = hot_state.get_signal_cursor(trader_id, run_mode)
         prefetched_signals: list[Any] | None = None
         stream_trigger_mode = bool(trigger_signal_ids_by_source)
         if effective_process_signals and sources:
@@ -2610,17 +2689,8 @@ async def _run_trader_once(
                 },
                 commit=False,
             )
-        open_positions = await get_open_position_count_for_trader(
-            session,
-            trader_id,
-            mode=run_mode,
-            position_cap_scope=position_cap_scope,
-        )
-        open_order_count = await get_open_order_count_for_trader(
-            session,
-            trader_id,
-            mode=run_mode,
-        )
+        open_positions = hot_state.get_open_position_count(trader_id, run_mode, position_cap_scope=position_cap_scope)
+        open_order_count = hot_state.get_open_order_count(trader_id, run_mode)
         control_settings = dict(control.get("settings") or {})
         global_runtime_settings = dict(control_settings.get("global_runtime") or {})
         pending_live_exit_guard_settings = dict(global_runtime_settings.get("pending_live_exit_guard") or {})
@@ -2664,11 +2734,7 @@ async def _run_trader_once(
             )
         pending_live_exit_count = int(pending_live_exit_summary.get("count", 0) or 0)
         effective_open_positions = max(open_positions, open_order_count)
-        open_market_ids = await get_open_market_ids_for_trader(
-            session,
-            trader_id,
-            mode=run_mode,
-        )
+        open_market_ids = hot_state.get_open_market_ids(trader_id, run_mode)
 
         block_entries_reason = None
         block_entries_payload: dict[str, Any] = {
@@ -2972,13 +3038,11 @@ async def _run_trader_once(
                 )
         allow_averaging = bool(effective_risk_limits.get("allow_averaging", False))
 
-        global_daily_pnl = await get_daily_realized_pnl(session, mode=run_mode)
-        trader_daily_pnl = await get_daily_realized_pnl(session, trader_id=trader_id, mode=run_mode)
-        # Compute unrealized PnL (mark-to-market) for open positions so the
-        # daily loss limit accounts for positions that are deeply underwater.
+        global_daily_pnl = hot_state.get_daily_realized_pnl(None, run_mode)
+        trader_daily_pnl = hot_state.get_daily_realized_pnl(trader_id, run_mode)
         try:
-            global_unrealized_pnl = await get_unrealized_pnl(session, mode=run_mode)
-            trader_unrealized_pnl = await get_unrealized_pnl(session, trader_id=trader_id, mode=run_mode)
+            global_unrealized_pnl = await hot_state.get_unrealized_pnl(None, run_mode)
+            trader_unrealized_pnl = await hot_state.get_unrealized_pnl(trader_id, run_mode)
         except Exception:
             global_unrealized_pnl = 0.0
             trader_unrealized_pnl = 0.0
@@ -2986,17 +3050,8 @@ async def _run_trader_once(
         # subsequent risk checks account for intra-cycle exposure even
         # before PnL is realized in the database.
         intra_cycle_committed_usd: float = 0.0
-        trader_loss_streak = await get_consecutive_loss_count(
-            session,
-            trader_id=trader_id,
-            mode=run_mode,
-            since=loss_streak_reset_at,
-        )
-        last_loss_at = await get_last_resolved_loss_at(
-            session,
-            trader_id=trader_id,
-            mode=run_mode,
-            since=loss_streak_reset_at,
+        trader_loss_streak = hot_state.get_consecutive_loss_count(trader_id, run_mode)
+        last_loss_at = hot_state.get_last_resolved_loss_at(trader_id, run_mode
         )
         cooldown_seconds = max(0, safe_int(effective_risk_limits.get("cooldown_seconds"), 0))
         cooldown_active = False
@@ -3901,19 +3956,9 @@ async def _run_trader_once(
                             "configured_daily_loss_cap_usd": configured_daily_loss_cap_usd,
                         }
 
-                        current_source_exposure_usd = await get_trader_source_exposure(
-                            session,
-                            trader_id=trader_id,
-                            source=signal_source,
-                            mode=run_mode,
-                        )
+                        current_source_exposure_usd = hot_state.get_trader_source_exposure(trader_id, signal_source, run_mode)
                         current_leader_exposure_usd = (
-                            await get_trader_copy_leader_exposure(
-                                session,
-                                trader_id=trader_id,
-                                source_wallet=source_wallet,
-                                mode=run_mode,
-                            )
+                            hot_state.get_copy_leader_exposure(trader_id, source_wallet, run_mode)
                             if source_wallet
                             else 0.0
                         )
@@ -4055,8 +4100,8 @@ async def _run_trader_once(
                     portfolio_allocator = None
                     portfolio_runtime_payload: dict[str, Any] = {}
                     if decision_obj.decision == "selected" and trading_schedule_ok:
-                        gross_exposure = await get_gross_exposure(session, mode=run_mode)
-                        market_exposure = await get_market_exposure(session, str(signal.market_id), mode=run_mode)
+                        gross_exposure = hot_state.get_gross_exposure(run_mode)
+                        market_exposure = hot_state.get_market_exposure(str(signal.market_id), run_mode)
                         adjusted_global_daily_pnl = global_daily_pnl - intra_cycle_committed_usd
                         adjusted_trader_daily_pnl = trader_daily_pnl - intra_cycle_committed_usd
                         risk_snapshot_base = {
@@ -4101,12 +4146,7 @@ async def _run_trader_once(
 
                         portfolio_config = _normalize_portfolio_config(effective_risk_limits)
                         if bool(portfolio_config.get("enabled", False)):
-                            source_exposure = await get_trader_source_exposure(
-                                session,
-                                trader_id=trader_id,
-                                source=signal_source,
-                                mode=run_mode,
-                            )
+                            source_exposure = hot_state.get_trader_source_exposure(trader_id, signal_source, run_mode)
                             gross_exposure_cap = safe_float(
                                 effective_risk_limits.get("max_gross_exposure_usd"),
                                 safe_float(global_limits.get("max_gross_exposure_usd"), 5000.0),
@@ -4348,12 +4388,6 @@ async def _run_trader_once(
 
                     order_status = None
                     if final_decision == "selected":
-                        await set_trade_signal_status(
-                            session,
-                            signal_id=signal_id,
-                            status="selected",
-                            commit=False,
-                        )
                         submit_result = await submit_order(
                             session_engine=session_engine,
                             trader_id=trader_id,
@@ -4404,17 +4438,8 @@ async def _run_trader_once(
                                 "open",
                                 "submitted",
                             }:
-                                open_positions = await get_open_position_count_for_trader(
-                                    session,
-                                    trader_id,
-                                    mode=run_mode,
-                                    position_cap_scope=position_cap_scope,
-                                )
-                                open_order_count = await get_open_order_count_for_trader(
-                                    session,
-                                    trader_id,
-                                    mode=run_mode,
-                                )
+                                open_positions = hot_state.get_open_position_count(trader_id, run_mode, position_cap_scope=position_cap_scope)
+                                open_order_count = hot_state.get_open_order_count(trader_id, run_mode)
                                 effective_open_positions = max(open_positions, open_order_count)
                                 opened_market_id = str(getattr(runtime_signal, "market_id", "") or "").strip()
                                 if opened_market_id:
@@ -4451,17 +4476,22 @@ async def _run_trader_once(
                                 "open",
                                 "submitted",
                             }:
-                                open_positions = await get_open_position_count_for_trader(
-                                    session,
-                                    trader_id,
-                                    mode=run_mode,
-                                    position_cap_scope=position_cap_scope,
-                                )
-                                open_order_count = await get_open_order_count_for_trader(
-                                    session,
-                                    trader_id,
-                                    mode=run_mode,
-                                )
+                                for _co in getattr(submit_result, "created_orders", None) or []:
+                                    hot_state.record_order_created(
+                                        trader_id=trader_id,
+                                        mode=run_mode,
+                                        order_id=str(_co.get("order_id", "")),
+                                        market_id=str(_co.get("market_id", "")),
+                                        direction=str(_co.get("direction", "")),
+                                        source=str(_co.get("source", "")),
+                                        notional_usd=float(_co.get("notional_usd", 0.0)),
+                                        entry_price=float(_co.get("entry_price", 0.0)),
+                                        token_id=str(_co.get("token_id", "")),
+                                        filled_shares=float(_co.get("filled_shares", 0.0)),
+                                        payload=dict(_co.get("payload") or {}),
+                                    )
+                                open_positions = hot_state.get_open_position_count(trader_id, run_mode, position_cap_scope=position_cap_scope)
+                                open_order_count = hot_state.get_open_order_count(trader_id, run_mode)
                                 effective_open_positions = max(open_positions, open_order_count)
                                 opened_market_id = str(getattr(runtime_signal, "market_id", "") or "").strip()
                                 if opened_market_id:
@@ -4469,12 +4499,7 @@ async def _run_trader_once(
                                 intra_cycle_committed_usd += size_usd
                     else:
                         signal_status = "failed" if final_decision == "failed" else "skipped"
-                        await set_trade_signal_status(
-                            session,
-                            signal_id=signal_id,
-                            status=signal_status,
-                            commit=False,
-                        )
+                        await hot_state.buffer_signal_status(signal_id=signal_id, status=signal_status)
 
                     await record_signal_consumption(
                         session,
@@ -4815,6 +4840,12 @@ async def run_worker_loop() -> None:
     except Exception as exc:
         logger.warning("Orchestrator strategy startup sync failed: %s", exc)
 
+    from services.trader_hot_state import seed as _seed_hot_state
+    try:
+        await _seed_hot_state()
+    except Exception as exc:
+        logger.warning("Hot state seed failed at startup: %s", exc)
+
     runtime_trigger_event: dict[str, Any] | None = None
     stream_consumer_name = f"{os.getpid()}-{utcnow().strftime('%Y%m%d%H%M%S%f')}"
     stream_claim_cursor = "0-0"
@@ -4915,6 +4946,11 @@ async def run_worker_loop() -> None:
                                 await session.rollback()
                             logger.warning("Failed stale-terminal-order watchdog pass: %s", exc)
                     if run_maintenance:
+                        try:
+                            await hot_state.flush_audit_buffer()
+                            await hot_state.reseed_if_stale()
+                        except Exception as exc:
+                            logger.warning("Hot state maintenance failed: %s", exc)
                         last_maintenance_at = utcnow()
                     mode = _canonical_trader_mode(control.get("mode"), default="shadow")
                     cycle_interval = max(

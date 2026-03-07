@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -175,6 +175,7 @@ class SessionExecutionResult:
     error_message: str | None
     orders_written: int
     payload: dict[str, Any]
+    created_orders: list[dict[str, Any]] = field(default_factory=list)
 
 
 class ExecutionSessionEngine:
@@ -400,6 +401,7 @@ class ExecutionSessionEngine:
         leg_rows = await self._fetch_leg_rows(session_row.id)
         leg_execution_records: list[dict[str, Any]] = []
         order_write_inputs: list[dict[str, Any]] = []
+        created_order_records: list[dict[str, Any]] = []
         orders_written = 0
         failed_legs = 0
         skipped_legs = 0
@@ -741,6 +743,7 @@ class ExecutionSessionEngine:
                             "cancel_failed_provider_orders": cancel_failed_provider_orders,
                         },
                     },
+                    created_orders=created_order_records,
                 )
 
         for item in order_write_inputs:
@@ -847,6 +850,18 @@ class ExecutionSessionEngine:
                 commit=False,
             )
             orders_written += 1
+            created_order_records.append({
+                "order_id": trader_order.id,
+                "market_id": str(getattr(signal, "market_id", "") or ""),
+                "direction": str(getattr(signal, "direction", "") or ""),
+                "source": str(getattr(signal, "source", "") or ""),
+                "notional_usd": safe_float(result.notional_usd, 0.0),
+                "entry_price": safe_float(result.effective_price, 0.0),
+                "token_id": str(leg_payload.get("token_id") or ""),
+                "filled_shares": safe_float(result.shares, 0.0),
+                "status": persisted_order_status,
+                "payload": order_payload,
+            })
 
             await create_execution_session_order(
                 self.db,
@@ -965,6 +980,7 @@ class ExecutionSessionEngine:
                 "execution_plan": plan,
                 "legs": leg_execution_records,
             },
+            created_orders=created_order_records,
         )
 
     async def reconcile_active_sessions(

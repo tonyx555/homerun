@@ -1399,6 +1399,8 @@ class BaseStrategy(ABC):
                 "liquidity": m.liquidity,
                 "volume": getattr(m, "volume", 0.0),
                 "platform": getattr(m, "platform", "polymarket"),
+                "game_start_time": getattr(m, "game_start_time", None),
+                "sports_market_type": getattr(m, "sports_market_type", None),
             }
             market_dicts.append(entry)
 

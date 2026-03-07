@@ -15,17 +15,25 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from config import apply_runtime_settings_overrides, settings
-from models.database import AsyncSessionLocal
+from models.database import AsyncSessionLocal, recover_pool
 from services.redis_price_cache import redis_price_cache
 from services.scanner import scanner
 from services.shared_state import read_market_catalog, read_scanner_status
 from services.strategy_runtime import refresh_strategy_runtime_if_needed
-from services.worker_state import clear_worker_run_request, read_worker_control, write_worker_snapshot
+from services.worker_state import (
+    _is_retryable_db_error,
+    clear_worker_run_request,
+    read_worker_control,
+    write_worker_snapshot,
+)
 from utils.logger import setup_logging
 from utils.utcnow import utcnow
 
 setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"), json_format=False)
 logger = logging.getLogger("market_universe_worker")
+
+_IDLE_SLEEP_SECONDS = 5
+_MAX_CONSECUTIVE_DB_FAILURES = 3
 
 
 async def _read_catalog_stats() -> dict[str, Any]:
@@ -185,6 +193,7 @@ async def _run_loop() -> None:
 
     heartbeat_task = asyncio.create_task(_heartbeat_loop(), name="market-universe-heartbeat")
     logger.info("Market universe worker started")
+    consecutive_db_failures = 0
 
     try:
         while True:
@@ -294,20 +303,48 @@ async def _run_loop() -> None:
                 )
                 async with AsyncSessionLocal() as session:
                     await clear_worker_run_request(session, worker_name)
+                consecutive_db_failures = 0
                 next_scheduled_run_at = now + timedelta(seconds=interval_seconds)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                is_db_disconnect = _is_retryable_db_error(exc)
+                if is_db_disconnect:
+                    consecutive_db_failures += 1
+                else:
+                    consecutive_db_failures = 0
+
                 state["last_error"] = str(exc)
                 state["phase"] = "error"
                 state["progress"] = 1.0
                 state["activity"] = f"Market universe refresh error: {exc}"
                 logger.exception("Market universe refresh cycle failed: %s", exc)
-                async with AsyncSessionLocal() as session:
-                    await clear_worker_run_request(session, worker_name)
+
+                if is_db_disconnect and consecutive_db_failures >= _MAX_CONSECUTIVE_DB_FAILURES:
+                    logger.warning(
+                        "DB disconnect streak=%d; disposing connection pool",
+                        consecutive_db_failures,
+                    )
+                    try:
+                        await recover_pool()
+                    except Exception:
+                        pass
+
+                try:
+                    async with AsyncSessionLocal() as session:
+                        await clear_worker_run_request(session, worker_name)
+                except Exception:
+                    pass
                 next_scheduled_run_at = now + timedelta(seconds=interval_seconds)
 
-            await asyncio.sleep(0.1)
+            if consecutive_db_failures > 0:
+                sleep_seconds = min(
+                    _IDLE_SLEEP_SECONDS * (2 ** (consecutive_db_failures - 1)),
+                    float(interval_seconds),
+                )
+            else:
+                sleep_seconds = 0.1
+            await asyncio.sleep(sleep_seconds)
     finally:
         heartbeat_stop_event.set()
         heartbeat_task.cancel()

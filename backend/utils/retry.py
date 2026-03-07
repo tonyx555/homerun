@@ -9,6 +9,53 @@ from utils.logger import get_logger
 logger = get_logger("retry")
 
 
+# ---------------------------------------------------------------------------
+# Shared DB retry helpers
+# ---------------------------------------------------------------------------
+
+DB_RETRY_ATTEMPTS = 4
+DB_RETRY_BASE_DELAY_SECONDS = 0.05
+DB_RETRY_MAX_DELAY_SECONDS = 0.4
+
+_DB_RETRYABLE_MARKERS = (
+    "deadlock detected",
+    "serialization failure",
+    "could not serialize access",
+    "lock not available",
+    "too many clients already",
+    "sorry, too many clients already",
+    "remaining connection slots are reserved",
+    "cannot connect now",
+    "connection is closed",
+    "underlying connection is closed",
+    "connection has been closed",
+    "closed the connection unexpectedly",
+    "terminating connection",
+    "connection reset by peer",
+    "broken pipe",
+    "connection was closed",
+    "connectiondoesnotexist",
+    "closed in the middle of operation",
+    "another operation",
+    "cannot switch to state",
+    "timeouterror",
+    "timeout",
+)
+
+
+def is_retryable_db_error(exc: Exception) -> bool:
+    """Check if a DB exception is transient and worth retrying."""
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return True
+    message = str(getattr(exc, "orig", exc)).lower()
+    return any(marker in message for marker in _DB_RETRYABLE_MARKERS)
+
+
+def db_retry_delay(attempt: int) -> float:
+    """Exponential backoff delay for DB retries."""
+    return min(DB_RETRY_BASE_DELAY_SECONDS * (2 ** attempt), DB_RETRY_MAX_DELAY_SECONDS)
+
+
 class RetryConfig:
     """Configuration for retry behavior"""
 

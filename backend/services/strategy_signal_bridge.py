@@ -150,6 +150,7 @@ async def bridge_opportunities_to_signals(
     emitted = 0
     keep_dedupe_keys: set[str] = set()
     signal_ids: list[str] = []
+    signal_snapshots: dict[str, dict[str, Any]] = {}
     market_data_ages_ms: list[int] = []
 
     for opp in opportunities:
@@ -247,7 +248,31 @@ async def bridge_opportunities_to_signals(
             commit=False,
         )
         emitted += 1
-        signal_ids.append(str(signal_row.id))
+        sid = str(signal_row.id)
+        signal_ids.append(sid)
+        signal_snapshots[sid] = {
+            "id": sid,
+            "source": str(signal_row.source or ""),
+            "source_item_id": str(signal_row.source_item_id or ""),
+            "signal_type": str(signal_row.signal_type or ""),
+            "strategy_type": str(signal_row.strategy_type or ""),
+            "market_id": str(signal_row.market_id or ""),
+            "market_question": str(signal_row.market_question or ""),
+            "direction": str(signal_row.direction or ""),
+            "entry_price": float(signal_row.entry_price or 0.0),
+            "effective_price": float(signal_row.effective_price or 0.0) if signal_row.effective_price else None,
+            "edge_percent": float(signal_row.edge_percent or 0.0),
+            "confidence": float(signal_row.confidence or 0.0),
+            "liquidity": float(signal_row.liquidity or 0.0),
+            "expires_at": signal_row.expires_at.isoformat() if signal_row.expires_at else None,
+            "status": str(signal_row.status or "pending"),
+            "payload_json": dict(signal_row.payload_json or {}),
+            "strategy_context_json": dict(signal_row.strategy_context_json or {}) if signal_row.strategy_context_json else {},
+            "quality_passed": signal_row.quality_passed,
+            "dedupe_key": str(signal_row.dedupe_key or ""),
+            "created_at": signal_row.created_at.isoformat() if signal_row.created_at else None,
+            "updated_at": signal_row.updated_at.isoformat() if signal_row.updated_at else None,
+        }
 
     if sweep_missing:
         await expire_source_signals_except(
@@ -297,6 +322,7 @@ async def bridge_opportunities_to_signals(
                     ),
                     "market_data_age_ms_max": max(market_data_ages_ms) if market_data_ages_ms else None,
                 },
+                signal_snapshots=signal_snapshots,
             )
         except Exception as exc:
             logger.warning(

@@ -362,6 +362,12 @@ async def lifespan(app: FastAPI):
         await init_database()
         logger.info("Database initialized")
 
+        # Start pool watchdog — reaps connections held too long and
+        # recovers the pool when near-exhaustion is detected.
+        from models.database import start_pool_watchdog, stop_pool_watchdog
+        pool_watchdog_task = start_pool_watchdog()
+        tasks.append(pool_watchdog_task)
+
         # Warm unified strategy loader at process startup.
         try:
             from services.opportunity_strategy_catalog import ensure_all_strategies_seeded

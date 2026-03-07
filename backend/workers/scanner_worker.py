@@ -26,6 +26,8 @@ os.environ.setdefault("NEWS_FAISS_THREADS", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("EMBEDDING_DEVICE", "cpu")
 
+from sqlalchemy.exc import DBAPIError
+
 from config import apply_runtime_settings_overrides, settings
 from models.database import AsyncSessionLocal
 from services.scanner import scanner
@@ -42,6 +44,7 @@ from services.shared_state import (
 from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.worker_state import write_worker_snapshot
 from utils.logger import setup_logging
+from utils.retry import is_retryable_db_error, db_retry_delay, DB_RETRY_ATTEMPTS
 from utils.utcnow import utcnow
 
 setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"), json_format=False)
@@ -587,27 +590,51 @@ async def _run_scan_loop() -> None:
                 heartbeat_state["last_run_at"] = utcnow()
             else:
                 batch_kind = "scan_error" if scan_error is not None else "scan_cycle"
-                try:
-                    heartbeat_state["phase"] = "enqueue_batch"
-                    heartbeat_state["progress"] = 0.85
-                    batch_id, pending, dropped = await _enqueue_detection_batch(
-                        opportunities,
-                        status,
-                        batch_kind=batch_kind,
-                    )
-                    heartbeat_state["queue_pending"] = pending
-                    heartbeat_state["dropped_batches"] = int(heartbeat_state.get("dropped_batches", 0) or 0) + dropped
-                    heartbeat_state["last_batch_id"] = batch_id
-                    heartbeat_state["last_run_at"] = utcnow()
-                    if dropped > 0:
-                        logger.warning("Scanner enqueued batch after dropping %d stale pending batches", dropped)
-                    heartbeat_state["phase"] = "idle"
-                    heartbeat_state["progress"] = 1.0
-                except Exception as exc:
-                    heartbeat_state["last_error"] = str(exc)
-                    heartbeat_state["phase"] = "error"
-                    heartbeat_state["progress"] = 1.0
-                    logger.exception("Failed enqueueing scanner detection batch: %s", exc)
+                enqueue_succeeded = False
+                for enqueue_attempt in range(DB_RETRY_ATTEMPTS):
+                    try:
+                        heartbeat_state["phase"] = "enqueue_batch"
+                        heartbeat_state["progress"] = 0.85
+                        batch_id, pending, dropped = await _enqueue_detection_batch(
+                            opportunities,
+                            status,
+                            batch_kind=batch_kind,
+                        )
+                        heartbeat_state["queue_pending"] = pending
+                        heartbeat_state["dropped_batches"] = (
+                            int(heartbeat_state.get("dropped_batches", 0) or 0) + dropped
+                        )
+                        heartbeat_state["last_batch_id"] = batch_id
+                        heartbeat_state["last_run_at"] = utcnow()
+                        if dropped > 0:
+                            logger.warning("Scanner enqueued batch after dropping %d stale pending batches", dropped)
+                        heartbeat_state["phase"] = "idle"
+                        heartbeat_state["progress"] = 1.0
+                        enqueue_succeeded = True
+                        break
+                    except (DBAPIError, asyncio.TimeoutError) as exc:
+                        if enqueue_attempt < DB_RETRY_ATTEMPTS - 1 and (
+                            isinstance(exc, asyncio.TimeoutError) or is_retryable_db_error(exc)
+                        ):
+                            delay = db_retry_delay(enqueue_attempt)
+                            logger.warning(
+                                "Retrying scanner batch enqueue",
+                                attempt=enqueue_attempt + 1,
+                                delay=round(delay, 3),
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        heartbeat_state["last_error"] = str(exc)
+                        heartbeat_state["phase"] = "error"
+                        heartbeat_state["progress"] = 1.0
+                        logger.exception("Failed enqueueing scanner detection batch: %s", exc)
+                        break
+                    except Exception as exc:
+                        heartbeat_state["last_error"] = str(exc)
+                        heartbeat_state["phase"] = "error"
+                        heartbeat_state["progress"] = 1.0
+                        logger.exception("Failed enqueueing scanner detection batch: %s", exc)
+                        break
 
             sleep_seconds = (
                 settings.FAST_SCAN_INTERVAL_SECONDS if settings.TIERED_SCANNING_ENABLED and not requested else interval

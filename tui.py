@@ -16,6 +16,37 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+# ---------------------------------------------------------------------------
+# Auto-install TUI prerequisites on the host machine.
+# This runs every launch and is a no-op when packages are already present.
+# ---------------------------------------------------------------------------
+_TUI_PREREQS = ["textual>=0.85.0,<1.0", "rich>=13.7.0"]
+
+def _ensure_prereqs() -> None:
+    needs_install = False
+    try:
+        import textual
+        import rich  # noqa: F401
+        # textual 1.0+ / 8.x removed App.dark and broke CSS theming.
+        # Force downgrade to the compatible 0.x line.
+        _tv = tuple(int(x) for x in textual.__version__.split(".")[:2])
+        if _tv >= (1, 0):
+            needs_install = True
+    except ImportError:
+        needs_install = True
+    if needs_install:
+        print("Installing TUI dependencies...", flush=True)
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "--quiet", *_TUI_PREREQS],
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+        # Re-launch so the freshly installed packages are loaded cleanly
+        # instead of the stale modules cached in sys.modules.
+        sys.exit(subprocess.call([sys.executable] + sys.argv))
+
+_ensure_prereqs()
+
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.events import Resize
@@ -2063,12 +2094,37 @@ class HomerunApp(App):
         # Stream backend output in a thread
         self._stream_output(self.backend_proc, "BACKEND")
 
+    def _read_network_access_setting(self) -> bool:
+        """Read allow_network_access from backend settings API."""
+        import urllib.request
+        import urllib.error
+
+        url = f"http://127.0.0.1:{BACKEND_PORT}/api/settings"
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode())
+                # AllSettings wraps inside {"data": ...} when using unwrapApiData
+                payload = data.get("data", data)
+                network = payload.get("network", {})
+                return bool(network.get("allow_network_access", False))
+        except Exception:
+            return False
+
     @work(thread=True)
     def _start_frontend(self) -> None:
         """Start frontend after backend is healthy."""
         env = os.environ.copy()
         env["BROWSER"] = "none"  # Don't auto-open browser
         env["FORCE_COLOR"] = "0"
+
+        if self._read_network_access_setting():
+            env["VITE_HOST"] = "0.0.0.0"
+            self._enqueue_log(
+                "Network access enabled — binding frontend to 0.0.0.0",
+                source="FRONTEND",
+                level="INFO",
+            )
 
         self._enqueue_log(
             ">>> Starting frontend (npm run dev)...", source="FRONTEND", level="INFO"

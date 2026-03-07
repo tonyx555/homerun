@@ -246,77 +246,84 @@ async def _persist_signals(signals: list[dict[str, Any]]) -> int:
     if not signals:
         return 0
 
-    try:
-        from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-        persisted = 0
-        async with AsyncSessionLocal() as session:
-            for signal in signals:
-                signal_id = str(signal.get("signal_id") or "").strip()
-                if not signal_id:
-                    continue
-                signal_type = str(signal.get("signal_type") or "world").strip().lower() or "world"
-                raw_country = str(signal.get("country") or "").strip().upper() or None
-                country_iso3 = _as_iso3(raw_country)
-                detected_at = _to_naive_utc(signal.get("detected_at"))
-                related_market_ids = [
-                    str(item or "").strip()
-                    for item in _as_list(signal.get("related_market_ids"))
-                    if str(item or "").strip()
-                ]
-                metadata = signal.get("metadata") if isinstance(signal.get("metadata"), dict) else {}
-                stmt = (
-                    pg_insert(EventsSignal)
-                    .values(
-                        id=signal_id,
-                        signal_type=signal_type,
-                        severity=_clamp(_as_float(signal.get("severity"), 0.0), 0.0, 1.0),
-                        country=raw_country or country_iso3,
-                        iso3=country_iso3,
-                        latitude=signal.get("latitude"),
-                        longitude=signal.get("longitude"),
-                        title=str(signal.get("title") or "Events signal").strip() or "Events signal",
-                        description=str(signal.get("description") or "").strip(),
-                        source=str(signal.get("source") or "events").strip().lower() or "events",
-                        detected_at=detected_at,
-                        metadata_json=metadata,
-                        related_market_ids=related_market_ids,
-                        market_relevance_score=(
-                            _as_float(signal.get("market_relevance_score"), 0.0)
-                            if signal.get("market_relevance_score") is not None
-                            else None
-                        ),
-                    )
-                    .on_conflict_do_update(
-                        index_elements=["id"],
-                        set_={
-                            "signal_type": signal_type,
-                            "severity": _clamp(_as_float(signal.get("severity"), 0.0), 0.0, 1.0),
-                            "country": raw_country or country_iso3,
-                            "iso3": country_iso3,
-                            "latitude": signal.get("latitude"),
-                            "longitude": signal.get("longitude"),
-                            "title": str(signal.get("title") or "Events signal").strip() or "Events signal",
-                            "description": str(signal.get("description") or "").strip(),
-                            "source": str(signal.get("source") or "events").strip().lower() or "events",
-                            "detected_at": detected_at,
-                            "metadata_json": metadata,
-                            "related_market_ids": related_market_ids,
-                            "market_relevance_score": (
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            persisted = 0
+            async with AsyncSessionLocal() as session:
+                for signal in signals:
+                    signal_id = str(signal.get("signal_id") or "").strip()
+                    if not signal_id:
+                        continue
+                    signal_type = str(signal.get("signal_type") or "world").strip().lower() or "world"
+                    raw_country = str(signal.get("country") or "").strip().upper() or None
+                    country_iso3 = _as_iso3(raw_country)
+                    detected_at = _to_naive_utc(signal.get("detected_at"))
+                    related_market_ids = [
+                        str(item or "").strip()
+                        for item in _as_list(signal.get("related_market_ids"))
+                        if str(item or "").strip()
+                    ]
+                    metadata = signal.get("metadata") if isinstance(signal.get("metadata"), dict) else {}
+                    stmt = (
+                        pg_insert(EventsSignal)
+                        .values(
+                            id=signal_id,
+                            signal_type=signal_type,
+                            severity=_clamp(_as_float(signal.get("severity"), 0.0), 0.0, 1.0),
+                            country=raw_country or country_iso3,
+                            iso3=country_iso3,
+                            latitude=signal.get("latitude"),
+                            longitude=signal.get("longitude"),
+                            title=str(signal.get("title") or "Events signal").strip() or "Events signal",
+                            description=str(signal.get("description") or "").strip(),
+                            source=str(signal.get("source") or "events").strip().lower() or "events",
+                            detected_at=detected_at,
+                            metadata_json=metadata,
+                            related_market_ids=related_market_ids,
+                            market_relevance_score=(
                                 _as_float(signal.get("market_relevance_score"), 0.0)
                                 if signal.get("market_relevance_score") is not None
                                 else None
                             ),
-                        },
+                        )
+                        .on_conflict_do_update(
+                            index_elements=["id"],
+                            set_={
+                                "signal_type": signal_type,
+                                "severity": _clamp(_as_float(signal.get("severity"), 0.0), 0.0, 1.0),
+                                "country": raw_country or country_iso3,
+                                "iso3": country_iso3,
+                                "latitude": signal.get("latitude"),
+                                "longitude": signal.get("longitude"),
+                                "title": str(signal.get("title") or "Events signal").strip() or "Events signal",
+                                "description": str(signal.get("description") or "").strip(),
+                                "source": str(signal.get("source") or "events").strip().lower() or "events",
+                                "detected_at": detected_at,
+                                "metadata_json": metadata,
+                                "related_market_ids": related_market_ids,
+                                "market_relevance_score": (
+                                    _as_float(signal.get("market_relevance_score"), 0.0)
+                                    if signal.get("market_relevance_score") is not None
+                                    else None
+                                ),
+                            },
+                        )
                     )
-                )
-                await session.execute(stmt)
-                persisted += 1
-            await session.commit()
-        return persisted
-    except Exception as exc:
-        logger.warning("Failed to persist events signals: %s", exc)
-        return 0
+                    await session.execute(stmt)
+                    persisted += 1
+                await session.commit()
+            return persisted
+        except Exception as exc:
+            if _is_retryable_db_error(exc) and attempt < max_attempts - 1:
+                logger.warning("Persist signals DB error (attempt %d/%d): %s", attempt + 1, max_attempts, exc)
+                await asyncio.sleep(0.15 * (attempt + 1))
+                continue
+            logger.warning("Failed to persist events signals: %s", exc)
+            return 0
+    return 0
 
 
 async def _write_snapshot(

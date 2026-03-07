@@ -47,19 +47,6 @@ POOL_RECOMPUTE_INTERVAL = timedelta(minutes=1)
 FULL_INTELLIGENCE_INTERVAL = timedelta(minutes=20)
 INSIDER_RESCORING_INTERVAL = timedelta(minutes=10)
 POOL_RECOMPUTE_MODE_MAP = {"quality_only": "quality_only", "balanced": "balanced"}
-_RETRYABLE_DB_ERROR_MARKERS = (
-    "deadlock detected",
-    "serialization failure",
-    "could not serialize access",
-    "lock not available",
-    "connection is closed",
-    "underlying connection is closed",
-    "connection has been closed",
-    "closed the connection unexpectedly",
-    "terminating connection",
-    "connection reset by peer",
-    "broken pipe",
-)
 _RETRYABLE_DB_ATTEMPTS = 3
 _RETRYABLE_DB_BASE_DELAY_SECONDS = 0.2
 _RETRYABLE_DB_MAX_DELAY_SECONDS = 2.0
@@ -126,9 +113,7 @@ def _clamp_float(value: Any, default: float, minimum: float, maximum: float) -> 
     return max(minimum, min(maximum, parsed))
 
 
-def _is_retryable_db_error(exc: Exception) -> bool:
-    message = str(getattr(exc, "orig", exc)).lower()
-    return any(marker in message for marker in _RETRYABLE_DB_ERROR_MARKERS)
+from utils.retry import is_retryable_db_error as _is_retryable_db_error  # noqa: E402
 
 
 def _retry_delay_seconds(attempt: int) -> float:

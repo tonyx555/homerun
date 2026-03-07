@@ -84,36 +84,8 @@ DB_RETRY_BASE_DELAY_SECONDS = 0.2
 DB_RETRY_MAX_DELAY_SECONDS = 1.5
 
 
-def _is_retryable_db_error(exc: Exception) -> bool:
-    message = str(getattr(exc, "orig", exc)).lower()
-    return any(
-        marker in message
-        for marker in (
-            "deadlock detected",
-            "serialization failure",
-            "could not serialize access",
-            "lock not available",
-            "too many clients already",
-            "remaining connection slots are reserved",
-            "cannot connect now",
-            "connection is closed",
-            "underlying connection is closed",
-            "connection has been closed",
-            "closed the connection unexpectedly",
-            "connection reset by peer",
-            "broken pipe",
-            "connection was closed",
-            "connectiondoesnotexist",
-            "closed in the middle of operation",
-            "another operation",
-            "cannot switch to state",
-            "terminating connection",
-        )
-    )
-
-
-def _db_retry_delay(attempt: int) -> float:
-    return min(DB_RETRY_BASE_DELAY_SECONDS * (2**attempt), DB_RETRY_MAX_DELAY_SECONDS)
+from utils.retry import is_retryable_db_error as _is_retryable_db_error  # noqa: E402
+from utils.retry import db_retry_delay as _db_retry_delay  # noqa: E402
 
 
 def _strategy_meta(strategy_type: str, *, is_plugin: bool) -> dict[str, object]:

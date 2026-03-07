@@ -17,6 +17,7 @@ from models.database import (
 )
 from models.opportunity import Opportunity
 from utils.logger import get_logger
+from utils.retry import is_retryable_db_error as _is_retryable_db_error
 from utils.utcnow import utcnow
 
 logger = get_logger("simulation")
@@ -62,16 +63,7 @@ class SimulationService:
 
     @staticmethod
     def is_retryable_db_error(exc: Exception) -> bool:
-        message = str(getattr(exc, "orig", exc)).lower()
-        return any(
-            marker in message
-            for marker in (
-                "deadlock detected",
-                "serialization failure",
-                "could not serialize access",
-                "lock not available",
-            )
-        )
+        return _is_retryable_db_error(exc)
 
     async def create_account(
         self,

@@ -554,7 +554,8 @@ class WalletDiscoveryEngine:
                     mapping.get("numeric_scale"),
                 )
         except Exception:
-            bounds = {}
+            # Don't cache empty result on failure so next call retries.
+            return {}
         self._discovered_wallet_numeric_bounds = bounds
         return bounds
 
@@ -1863,6 +1864,8 @@ class WalletDiscoveryEngine:
                             )
                         elif key in numeric_bounds and value is not None:
                             value = self._clamp_numeric_value(value, numeric_bounds[key])
+                        elif isinstance(value, (int, float)) and not isinstance(value, bool) and value is not None:
+                            value = self._clamp_numeric_value(value, _NUMERIC_DEFAULT_ABS_MAX)
                         if isinstance(value, float) and (math.isinf(value) or math.isnan(value)):
                             value = None
                         if hasattr(wallet, key):

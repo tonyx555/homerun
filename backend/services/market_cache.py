@@ -10,6 +10,7 @@ with a write-through strategy: updates go to both in-memory dicts (for fast O(1)
 lookups on the hot path) and the SQL database (for persistence across restarts).
 """
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from utils.utcnow import utcnow
 from typing import Optional
@@ -27,6 +28,7 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import DBAPIError
 
 from models.database import (
     Base,
@@ -35,6 +37,7 @@ from models.database import (
     MarketConfluenceSignal,
 )
 from utils.logger import get_logger
+from utils.retry import is_retryable_db_error, db_retry_delay, DB_RETRY_ATTEMPTS
 
 logger = get_logger("market_cache")
 
@@ -184,51 +187,66 @@ class MarketCacheService:
         # Update in-memory cache immediately
         self._market_cache[condition_id] = data
 
-        # Persist to database
-        try:
-            async with AsyncSessionLocal() as session:
-                now = _utcnow_naive()
-                # Separate known columns from extra data
-                known_keys = {
-                    "question",
-                    "slug",
-                    "groupItemTitle",
-                    "category",
-                    "active",
-                }
-                extra = {k: v for k, v in data.items() if k not in known_keys}
+        # Persist to database with retry
+        for attempt in range(DB_RETRY_ATTEMPTS):
+            try:
+                async with AsyncSessionLocal() as session:
+                    now = _utcnow_naive()
+                    # Separate known columns from extra data
+                    known_keys = {
+                        "question",
+                        "slug",
+                        "groupItemTitle",
+                        "category",
+                        "active",
+                    }
+                    extra = {k: v for k, v in data.items() if k not in known_keys}
 
-                stmt = pg_insert(CachedMarket).values(
+                    stmt = pg_insert(CachedMarket).values(
+                        condition_id=condition_id,
+                        question=data.get("question"),
+                        slug=data.get("slug"),
+                        group_item_title=data.get("groupItemTitle"),
+                        category=data.get("category"),
+                        active=data.get("active"),
+                        extra_data=extra if extra else None,
+                        cached_at=now,
+                        updated_at=now,
+                    )
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=["condition_id"],
+                        set_={
+                            "question": stmt.excluded.question,
+                            "slug": stmt.excluded.slug,
+                            "group_item_title": stmt.excluded.group_item_title,
+                            "category": stmt.excluded.category,
+                            "active": stmt.excluded.active,
+                            "extra_data": stmt.excluded.extra_data,
+                            "updated_at": now,
+                        },
+                    )
+                    await session.execute(stmt)
+                    await session.commit()
+                return
+            except (DBAPIError, asyncio.TimeoutError) as e:
+                if attempt < DB_RETRY_ATTEMPTS - 1 and (
+                    isinstance(e, asyncio.TimeoutError) or is_retryable_db_error(e)
+                ):
+                    await asyncio.sleep(db_retry_delay(attempt))
+                    continue
+                logger.error(
+                    "Failed to persist market cache entry",
                     condition_id=condition_id,
-                    question=data.get("question"),
-                    slug=data.get("slug"),
-                    group_item_title=data.get("groupItemTitle"),
-                    category=data.get("category"),
-                    active=data.get("active"),
-                    extra_data=extra if extra else None,
-                    cached_at=now,
-                    updated_at=now,
+                    error=str(e),
                 )
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=["condition_id"],
-                    set_={
-                        "question": stmt.excluded.question,
-                        "slug": stmt.excluded.slug,
-                        "group_item_title": stmt.excluded.group_item_title,
-                        "category": stmt.excluded.category,
-                        "active": stmt.excluded.active,
-                        "extra_data": stmt.excluded.extra_data,
-                        "updated_at": now,
-                    },
+                return
+            except Exception as e:
+                logger.error(
+                    "Failed to persist market cache entry",
+                    condition_id=condition_id,
+                    error=str(e),
                 )
-                await session.execute(stmt)
-                await session.commit()
-        except Exception as e:
-            logger.error(
-                "Failed to persist market cache entry",
-                condition_id=condition_id,
-                error=str(e),
-            )
+                return
 
     async def bulk_set_markets(self, markets: dict[str, dict]):
         """Bulk cache market metadata."""

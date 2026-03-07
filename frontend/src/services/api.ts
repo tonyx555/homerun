@@ -2975,6 +2975,10 @@ export interface SearchFilterSettings {
   btc_eth_thin_liquidity_usd: number
 }
 
+export interface NetworkSettings {
+  allow_network_access: boolean
+}
+
 export interface AllSettings {
   polymarket: PolymarketSettings
   kalshi: KalshiSettings
@@ -2986,6 +2990,7 @@ export interface AllSettings {
   discovery: DiscoverySettings
   trading_proxy: TradingProxySettings
   ui_lock: UILockSettings
+  network: NetworkSettings
   events: EventsSettings
   search_filters: SearchFilterSettings
   updated_at: string | null
@@ -3002,6 +3007,7 @@ export interface UpdateSettingsRequest {
   discovery?: Partial<DiscoverySettings>
   trading_proxy?: Partial<TradingProxySettings>
   ui_lock?: Partial<UILockSettings>
+  network?: Partial<NetworkSettings>
   events?: Partial<EventsSettings>
   search_filters?: Partial<SearchFilterSettings>
 }

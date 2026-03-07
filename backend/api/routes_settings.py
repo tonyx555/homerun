@@ -38,6 +38,7 @@ from api.settings_helpers import (
     kalshi_payload,
     llm_payload,
     maintenance_payload,
+    network_payload,
     notifications_payload,
     polymarket_payload,
     scanner_payload,
@@ -535,6 +536,15 @@ class UILockSettings(BaseModel):
     clear_password: bool = Field(default=False, description="Clear existing lock password")
 
 
+class NetworkSettings(BaseModel):
+    """Network access configuration"""
+
+    allow_network_access: bool = Field(
+        default=False,
+        description="Allow other devices on the local network to access the dashboard (requires restart)",
+    )
+
+
 class EventsSettings(BaseModel):
     """Events source and threshold configuration."""
 
@@ -686,6 +696,7 @@ class AllSettings(BaseModel):
     discovery: DiscoverySettings
     trading_proxy: TradingProxySettings
     ui_lock: UILockSettings
+    network: NetworkSettings
     events: EventsSettings
     search_filters: SearchFilterSettings
     updated_at: Optional[str] = None
@@ -704,6 +715,7 @@ class UpdateSettingsRequest(BaseModel):
     discovery: Optional[DiscoverySettings] = None
     trading_proxy: Optional[TradingProxySettings] = None
     ui_lock: Optional[UILockSettings] = None
+    network: Optional[NetworkSettings] = None
     events: Optional[EventsSettings] = None
     search_filters: Optional[SearchFilterSettings] = None
 
@@ -2261,6 +2273,7 @@ async def get_settings():
             discovery=DiscoverySettings(**discovery_payload(settings)),
             trading_proxy=TradingProxySettings(**trading_proxy_payload(settings)),
             ui_lock=UILockSettings(**ui_lock_payload(settings)),
+            network=NetworkSettings(**network_payload(settings)),
             events=EventsSettings(**events_payload(settings)),
             search_filters=SearchFilterSettings(**search_filters_payload(settings)),
             updated_at=settings.updated_at.isoformat() if settings.updated_at else None,

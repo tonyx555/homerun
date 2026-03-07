@@ -7,9 +7,10 @@ Run from backend dir:
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 from datetime import datetime, timedelta, timezone
+
+from sqlalchemy.exc import DBAPIError
 
 from config import settings
 from models.database import AsyncSessionLocal
@@ -21,11 +22,13 @@ from services.discovery_shared_state import (
 from services.pause_state import global_pause_state
 from services.wallet_discovery import wallet_discovery
 from services.worker_state import write_worker_snapshot
-from utils.logger import setup_logging
+from utils.logger import get_logger, setup_logging
+from utils.retry import is_retryable_db_error, db_retry_delay
 
 setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"), json_format=False)
-logger = logging.getLogger("discovery_worker")
+logger = get_logger("discovery_worker")
 PRIORITY_BACKLOG_INTERVAL_MINUTES = 10
+_DISCOVERY_DB_RETRY_ATTEMPTS = 3
 
 
 async def _run_loop() -> None:
@@ -156,7 +159,26 @@ async def _run_loop() -> None:
                     },
                 )
 
-            await wallet_discovery.run_discovery()
+            discovery_exc: Exception | None = None
+            for _db_attempt in range(_DISCOVERY_DB_RETRY_ATTEMPTS):
+                try:
+                    await wallet_discovery.run_discovery()
+                    discovery_exc = None
+                    break
+                except DBAPIError as db_exc:
+                    if not is_retryable_db_error(db_exc) or _db_attempt >= _DISCOVERY_DB_RETRY_ATTEMPTS - 1:
+                        raise
+                    delay = db_retry_delay(_db_attempt)
+                    logger.warning(
+                        "Discovery cycle hit retryable DB error; retrying",
+                        attempt=_db_attempt + 1,
+                        delay=round(delay, 3),
+                        error=str(db_exc),
+                    )
+                    discovery_exc = db_exc
+                    await asyncio.sleep(delay)
+            if discovery_exc is not None:
+                raise discovery_exc
 
             async with AsyncSessionLocal() as session:
                 await clear_discovery_run_request(session)
