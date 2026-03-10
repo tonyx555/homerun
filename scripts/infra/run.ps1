@@ -52,34 +52,7 @@ function Ensure-ConsoleViewport {
         [int]$MinBufferRows = 60
 )
 
-    if ($env:WT_SESSION) {
-        return
-    }
-
-    try {
-        $rawUi = $Host.UI.RawUI
-        $maxWindow = $rawUi.MaxPhysicalWindowSize
-        if (-not $maxWindow) {
-            return
-        }
-
-        $targetCols = [Math]::Min([Math]::Max($rawUi.WindowSize.Width, $MinCols), $maxWindow.Width)
-        $targetRows = [Math]::Min([Math]::Max($rawUi.WindowSize.Height, $MinRows), $maxWindow.Height)
-
-        $targetBufferCols = [Math]::Max($rawUi.BufferSize.Width, $targetCols)
-        $targetBufferRows = [Math]::Max([Math]::Max($rawUi.BufferSize.Height, $targetRows), $MinBufferRows)
-        if ($targetBufferRows -gt ($targetRows + 200)) {
-            $targetBufferRows = $targetRows + 200
-        }
-
-        $rawUi.BufferSize = New-Object System.Management.Automation.Host.Size($targetBufferCols, $targetBufferRows)
-        $rawUi.WindowSize = New-Object System.Management.Automation.Host.Size($targetCols, $targetRows)
-    } catch {
-        try {
-            mode con cols=$MinCols lines=$MinRows *> $null
-        } catch {
-        }
-    }
+    return
 }
 
 Ensure-ConsoleViewport
@@ -2342,6 +2315,11 @@ try {
 
     # Launch the TUI
     Ensure-ConsoleViewport
+    try {
+        Clear-Host
+    } catch {
+    }
+    Start-Sleep -Milliseconds 250
     python tui.py @tuiArgs
 } finally {
     # Kill any remaining Homerun Python processes (workers, backend, etc.)

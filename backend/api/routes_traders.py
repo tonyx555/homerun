@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
@@ -12,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
-from models.database import MarketCatalog, ScannerSnapshot, TraderOrder, get_db_session
+from models.database import AsyncSessionLocal, MarketCatalog, ScannerSnapshot, TraderOrder, get_db_session
 from services.live_price_snapshot import normalize_binary_price_history
 from services.pause_state import global_pause_state
 from services.traders_copy_trade_signal_service import traders_copy_trade_signal_service
@@ -59,6 +60,65 @@ _LOSS_STREAK_RESET_AT_KEY = "loss_streak_reset_at"
 _LOSS_STREAK_RESET_REASON_KEY = "loss_streak_reset_reason"
 logger = get_logger(__name__)
 _LIVE_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
+_background_tasks: set[Any] = set()
+
+
+def _track_background_task(task: Any) -> None:
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+def _copy_bootstrap_requested(trader_payload: dict[str, Any], override: bool | None) -> bool:
+    if override is False:
+        return False
+    source_configs = trader_payload.get("source_configs") if isinstance(trader_payload, dict) else []
+    if not isinstance(source_configs, list):
+        return False
+    for source_config in source_configs:
+        if not isinstance(source_config, dict):
+            continue
+        if str(source_config.get("source_key") or "").strip().lower() != "traders":
+            continue
+        if str(source_config.get("strategy_key") or "").strip().lower() != "traders_copy_trade":
+            continue
+        params = source_config.get("strategy_params") if isinstance(source_config.get("strategy_params"), dict) else {}
+        if override is True:
+            return True
+        return bool(params.get("copy_existing_positions_on_start", False))
+    return False
+
+
+async def _run_copy_bootstrap_background(
+    *,
+    trader_id: str,
+    copy_existing_positions: bool | None,
+    requested_by: str | None,
+) -> None:
+    try:
+        summary = await traders_copy_trade_signal_service.copy_existing_open_positions_for_trader(
+            trader_id=trader_id,
+            copy_existing_positions=copy_existing_positions,
+        )
+    except Exception as exc:
+        logger.warning("Copy-trade start bootstrap failed", trader_id=trader_id, exc_info=exc)
+        summary = {
+            "trader_id": trader_id,
+            "status": "failed",
+            "reason": "bootstrap_exception",
+            "error": str(exc),
+        }
+
+    async with AsyncSessionLocal() as session:
+        await create_trader_event(
+            session,
+            trader_id=trader_id,
+            event_type="trader_copy_bootstrap",
+            severity="warn" if str(summary.get("status") or "").strip().lower() == "failed" else "info",
+            source="operator",
+            operator=requested_by,
+            message="Copy bootstrap evaluated on trader start",
+            payload=summary,
+        )
 
 
 class TraderSourceConfigRequest(BaseModel):
@@ -1099,6 +1159,7 @@ async def start_trader(
     )
     if trader is None:
         raise HTTPException(status_code=404, detail="Trader not found")
+    await request_trader_run(session, trader_id)
 
     control = await read_orchestrator_control(session)
     mode = str(control.get("mode") or "shadow").strip().lower()
@@ -1134,30 +1195,22 @@ async def start_trader(
         )
 
     copy_bootstrap_summary: dict[str, Any] | None = None
-    if not was_running:
-        await session.close()
-        try:
-            copy_bootstrap_summary = await traders_copy_trade_signal_service.copy_existing_open_positions_for_trader(
-                trader_id=trader_id,
-                copy_existing_positions=request.copy_existing_positions,
+    should_schedule_bootstrap = (not was_running) and _copy_bootstrap_requested(before, request.copy_existing_positions)
+    if should_schedule_bootstrap:
+        copy_bootstrap_summary = {
+            "trader_id": trader_id,
+            "status": "scheduled",
+            "reason": "bootstrap_running_in_background",
+        }
+        _track_background_task(
+            asyncio.create_task(
+                _run_copy_bootstrap_background(
+                    trader_id=trader_id,
+                    copy_existing_positions=request.copy_existing_positions,
+                    requested_by=request.requested_by,
+                ),
+                name=f"trader-copy-bootstrap:{trader_id}",
             )
-        except Exception as exc:
-            logger.warning("Copy-trade start bootstrap failed", trader_id=trader_id, exc_info=exc)
-            copy_bootstrap_summary = {
-                "trader_id": trader_id,
-                "status": "failed",
-                "reason": "bootstrap_exception",
-                "error": str(exc),
-            }
-        await create_trader_event(
-            session,
-            trader_id=trader_id,
-            event_type="trader_copy_bootstrap",
-            severity="warn" if str(copy_bootstrap_summary.get("status") or "").strip().lower() == "failed" else "info",
-            source="operator",
-            operator=request.requested_by,
-            message="Copy bootstrap evaluated on trader start",
-            payload=copy_bootstrap_summary,
         )
 
     started_payload: dict[str, Any] = {}

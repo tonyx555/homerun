@@ -37,6 +37,7 @@ class PolymarketClient:
         self._trading_client: Optional[httpx.AsyncClient] = None  # Proxy-aware for trading
         self._market_cache: dict[str, dict] = {}  # condition_id -> {question, slug}
         self._market_cache_max_size: int = 20_000
+        self._market_lookup_cooldown_until: dict[str, float] = {}
         self._username_cache: dict[str, str] = {}  # address (lowercase) -> username
         self._username_cache_max_size: int = 10_000
         self._persistent_cache = None  # Lazy-loaded MarketCacheService
@@ -525,6 +526,14 @@ class PolymarketClient:
                 await self._evict_market_cache_entry(condition_id, requested)
 
         try:
+            now = time.monotonic()
+            cooldown_until = float(self._market_lookup_cooldown_until.get(requested, 0.0) or 0.0)
+            if cooldown_until > now:
+                raise httpx.HTTPStatusError(
+                    "market lookup gamma cooldown active",
+                    request=httpx.Request("GET", f"{self.gamma_url}/markets"),
+                    response=httpx.Response(429, request=httpx.Request("GET", f"{self.gamma_url}/markets")),
+                )
             # Gamma expects plural ``condition_ids`` for direct condition lookups.
             for params in ({"condition_ids": condition_id, "limit": 80},):
                 response = await self._rate_limited_get(
@@ -558,9 +567,11 @@ class PolymarketClient:
                         await cache.set_market(resolved_key, info)
                     except Exception:
                         pass  # Non-critical
-
+                
                 return info
         except Exception as e:
+            if isinstance(e, httpx.HTTPStatusError) and e.response is not None and e.response.status_code == 429:
+                self._market_lookup_cooldown_until[requested] = time.monotonic() + 60.0
             print(f"Market lookup failed for {condition_id}: {e}")
 
         # Fallback path: the Data API reliably accepts ``market=<condition_id>``

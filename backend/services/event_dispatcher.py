@@ -140,7 +140,7 @@ class EventDispatcher:
         self._handler_cancel_grace_seconds = float(
             max(
                 0.1,
-                float(getattr(settings, "EVENT_HANDLER_CANCEL_GRACE_SECONDS", 2.0) or 2.0),
+                float(getattr(settings, "EVENT_HANDLER_CANCEL_GRACE_SECONDS", 5.0) or 5.0),
             )
         )
         runtime_env = (
@@ -382,15 +382,19 @@ class EventDispatcher:
                 result = handler_task.result()
                 return result if isinstance(result, list) else []
             handler_task.cancel()
-            done_after_cancel, _pending_after_cancel = await asyncio.wait(
-                {handler_task},
-                timeout=self._handler_cancel_grace_seconds,
+            done_after_cancel, _pending_after_cancel = await asyncio.shield(
+                asyncio.wait(
+                    {handler_task},
+                    timeout=self._handler_cancel_grace_seconds,
+                )
             )
             if done_after_cancel:
                 try:
                     handler_task.result()
                     logger.warning(
-                        "Strategy event handler timed out but completed during cancellation grace period",
+                        "Strategy event handler timed out but completed during cancellation grace period: %s (%s)",
+                        slug,
+                        event.event_type,
                         strategy=slug,
                         event_type=event.event_type,
                         timeout_seconds=timeout_seconds,
@@ -398,7 +402,9 @@ class EventDispatcher:
                     )
                 except asyncio.CancelledError:
                     logger.warning(
-                        "Strategy event handler timed out and was cancelled",
+                        "Strategy event handler timed out and was cancelled: %s (%s)",
+                        slug,
+                        event.event_type,
                         strategy=slug,
                         event_type=event.event_type,
                         timeout_seconds=timeout_seconds,
@@ -406,7 +412,9 @@ class EventDispatcher:
                     )
                 except Exception as exc:
                     logger.warning(
-                        "Strategy event handler timed out and failed during cancellation",
+                        "Strategy event handler timed out and failed during cancellation: %s (%s)",
+                        slug,
+                        event.event_type,
                         strategy=slug,
                         event_type=event.event_type,
                         timeout_seconds=timeout_seconds,
@@ -422,7 +430,9 @@ class EventDispatcher:
                     timeout_seconds=timeout_seconds,
                 )
                 logger.warning(
-                    "Strategy event handler timed out; cancellation grace exceeded",
+                    "Strategy event handler timed out; cancellation grace exceeded: %s (%s)",
+                    slug,
+                    event.event_type,
                     strategy=slug,
                     event_type=event.event_type,
                     timeout_seconds=timeout_seconds,

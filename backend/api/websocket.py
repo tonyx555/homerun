@@ -235,44 +235,34 @@ async def _get_market_token_cache() -> dict[str, tuple[str, str]]:
             return _market_token_cache
 
         async with AsyncSessionLocal() as session:
-            _, _, metadata = await shared_state.read_market_catalog(
-                session,
-                include_events=False,
-                include_markets=False,
-                validate=False,
-            )
-        updated_at = metadata.get("updated_at")
-        if (
-            _market_token_cache
-            and _market_token_cache_updated_at is not None
-            and updated_at is not None
-            and updated_at <= _market_token_cache_updated_at
-        ):
-            _market_token_cache_loaded_at_mono = now_mono
-            return _market_token_cache
-
-        async with AsyncSessionLocal() as session:
             _, markets, metadata = await shared_state.read_market_catalog(
                 session,
                 include_events=False,
                 include_markets=True,
                 validate=False,
             )
+            updated_at = metadata.get("updated_at")
+            if (
+                _market_token_cache
+                and _market_token_cache_updated_at is not None
+                and updated_at is not None
+                and updated_at <= _market_token_cache_updated_at
+            ):
+                _market_token_cache_loaded_at_mono = now_mono
+                return _market_token_cache
 
-        rebuilt: dict[str, tuple[str, str]] = {}
-        for market in markets:
-            if isinstance(market, dict):
+            rebuilt: dict[str, tuple[str, str]] = {}
+            for market in markets:
+                if not isinstance(market, dict):
+                    continue
                 market_id = str(market.get("condition_id") or market.get("id") or "").strip().lower()
                 raw_tokens = list(market.get("clob_token_ids") or [])
-            else:
-                market_id = str(getattr(market, "condition_id", None) or getattr(market, "id", None) or "").strip().lower()
-                raw_tokens = list(getattr(market, "clob_token_ids", None) or [])
-            if not market_id:
-                continue
-            clean_tokens = [str(token or "").strip() for token in raw_tokens if str(token or "").strip()]
-            if len(clean_tokens) < 2:
-                continue
-            rebuilt[market_id] = (clean_tokens[0], clean_tokens[1])
+                if not market_id:
+                    continue
+                clean_tokens = [str(token or "").strip() for token in raw_tokens if str(token or "").strip()]
+                if len(clean_tokens) < 2:
+                    continue
+                rebuilt[market_id] = (clean_tokens[0], clean_tokens[1])
 
         _market_token_cache = rebuilt
         _market_token_cache_loaded_at_mono = now_mono
@@ -389,6 +379,13 @@ async def handle_websocket(websocket: WebSocket):
         world_snapshot = (
             (await session.execute(select(EventsSnapshot).where(EventsSnapshot.id == "latest"))).scalars().one_or_none()
         )
+        events_status = {
+            "status": (world_snapshot.status if world_snapshot else {}) or {},
+            "stats": (world_snapshot.stats if world_snapshot else {}) or {},
+            "updated_at": (
+                world_snapshot.updated_at.isoformat() if world_snapshot and world_snapshot.updated_at else None
+            ),
+        }
     crypto_markets = []
     crypto_stats = crypto_snapshot.get("stats")
     if isinstance(crypto_stats, dict):
@@ -422,13 +419,7 @@ async def handle_websocket(websocket: WebSocket):
                 "trader_orchestrator_status": orchestrator_status,
                 "traders": traders,
                 "execution_sessions": execution_sessions,
-                "events_status": {
-                    "status": (world_snapshot.status if world_snapshot else {}) or {},
-                    "stats": (world_snapshot.stats if world_snapshot else {}) or {},
-                    "updated_at": (
-                        world_snapshot.updated_at.isoformat() if world_snapshot and world_snapshot.updated_at else None
-                    ),
-                },
+                "events_status": events_status,
             },
         },
     )

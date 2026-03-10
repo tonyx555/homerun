@@ -92,10 +92,10 @@ async def publish_trade_signal_batch(
     )
 
 
-async def ensure_trade_signal_group() -> bool:
+async def ensure_trade_signal_group(*, group: str | None = None) -> bool:
     return await redis_streams.ensure_consumer_group(
         stream=str(settings.TRADE_SIGNAL_STREAM_KEY),
-        group=str(settings.TRADE_SIGNAL_STREAM_GROUP),
+        group=str(group or settings.TRADE_SIGNAL_STREAM_GROUP),
         start_id="$",
         create_stream=True,
     )
@@ -130,13 +130,14 @@ def _normalize_batch_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
 async def read_trade_signal_batches(
     *,
     consumer: str,
+    group: str | None = None,
     block_ms: int | None = None,
     count: int | None = None,
     include_pending: bool = False,
 ) -> list[tuple[str, dict[str, Any]]]:
     rows = await redis_streams.read_group_raw(
         stream=str(settings.TRADE_SIGNAL_STREAM_KEY),
-        group=str(settings.TRADE_SIGNAL_STREAM_GROUP),
+        group=str(group or settings.TRADE_SIGNAL_STREAM_GROUP),
         consumer=str(consumer),
         block_ms=(
             max(1, int(block_ms))
@@ -168,13 +169,14 @@ async def read_trade_signal_batches(
 async def auto_claim_trade_signal_batches(
     *,
     consumer: str,
+    group: str | None = None,
     min_idle_ms: int | None = None,
     start_id: str = "0-0",
     count: int | None = None,
 ) -> tuple[str, list[tuple[str, dict[str, Any]]]]:
     next_start_id, rows = await redis_streams.auto_claim_raw(
         stream=str(settings.TRADE_SIGNAL_STREAM_KEY),
-        group=str(settings.TRADE_SIGNAL_STREAM_GROUP),
+        group=str(group or settings.TRADE_SIGNAL_STREAM_GROUP),
         consumer=str(consumer),
         min_idle_ms=(
             max(1, int(min_idle_ms))
@@ -203,9 +205,9 @@ async def auto_claim_trade_signal_batches(
     return str(next_start_id or start_id), out
 
 
-async def ack_trade_signal_batches(entry_ids: list[str]) -> int:
+async def ack_trade_signal_batches(entry_ids: list[str], *, group: str | None = None) -> int:
     return await redis_streams.ack(
         stream=str(settings.TRADE_SIGNAL_STREAM_KEY),
-        group=str(settings.TRADE_SIGNAL_STREAM_GROUP),
+        group=str(group or settings.TRADE_SIGNAL_STREAM_GROUP),
         entry_ids=entry_ids,
     )

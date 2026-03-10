@@ -162,64 +162,42 @@ class ProbSurfaceArbStrategy(BaseStrategy):
 
     @staticmethod
     def _isotonic_fit(prices: list[float], decreasing: bool = True) -> list[float]:
-        """Fit a monotone function to *prices* via PAVA.
-
-        Args:
-            prices: Observed prices sorted by threshold (ascending).
-            decreasing: If True, enforce monotone non-increasing (above-style).
-                        If False, enforce monotone non-decreasing (below-style).
-
-        Returns:
-            List of fitted (adjusted) prices preserving the specified monotonicity.
-        """
-        n = len(prices)
-        if n <= 1:
+        """Fit a monotone function to *prices* via linear-time PAVA."""
+        if len(prices) <= 1:
             return list(prices)
 
-        fitted = list(prices)
+        def _fit_increasing(values: list[float]) -> list[float]:
+            block_starts: list[int] = []
+            block_counts: list[int] = []
+            block_means: list[float] = []
+
+            for idx, value in enumerate(values):
+                block_starts.append(idx)
+                block_counts.append(1)
+                block_means.append(float(value))
+
+                while len(block_means) >= 2 and block_means[-2] > block_means[-1]:
+                    right_mean = block_means.pop()
+                    right_count = block_counts.pop()
+                    block_starts.pop()
+                    left_mean = block_means.pop()
+                    left_count = block_counts.pop()
+                    left_start = block_starts[-1]
+                    merged_count = left_count + right_count
+                    merged_mean = ((left_mean * left_count) + (right_mean * right_count)) / merged_count
+                    block_counts.append(merged_count)
+                    block_means.append(merged_mean)
+                    block_starts[-1] = left_start
+
+            fitted = [0.0] * len(values)
+            for start, count, mean in zip(block_starts, block_counts, block_means):
+                for out_idx in range(start, start + count):
+                    fitted[out_idx] = mean
+            return fitted
 
         if decreasing:
-            # Enforce non-increasing: fitted[i] >= fitted[i+1]
-            # When a violation occurs (fitted[i] < fitted[i+1]), pool the
-            # violating block and replace with their average.
-            changed = True
-            while changed:
-                changed = False
-                i = 0
-                while i < n - 1:
-                    if fitted[i] < fitted[i + 1]:
-                        # Find the extent of the violation block
-                        j = i + 1
-                        while j < n - 1 and fitted[j] < fitted[j + 1]:
-                            j += 1
-                        # Pool [i..j] and average
-                        avg = sum(fitted[i : j + 1]) / (j - i + 1)
-                        for k in range(i, j + 1):
-                            fitted[k] = avg
-                        changed = True
-                        i = j + 1
-                    else:
-                        i += 1
-        else:
-            # Enforce non-decreasing: fitted[i] <= fitted[i+1]
-            changed = True
-            while changed:
-                changed = False
-                i = 0
-                while i < n - 1:
-                    if fitted[i] > fitted[i + 1]:
-                        j = i + 1
-                        while j < n - 1 and fitted[j] > fitted[j + 1]:
-                            j += 1
-                        avg = sum(fitted[i : j + 1]) / (j - i + 1)
-                        for k in range(i, j + 1):
-                            fitted[k] = avg
-                        changed = True
-                        i = j + 1
-                    else:
-                        i += 1
-
-        return fitted
+            return [-value for value in _fit_increasing([-price for price in prices])]
+        return _fit_increasing(prices)
 
     # ------------------------------------------------------------------
     # Family building

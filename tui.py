@@ -48,7 +48,7 @@ _ensure_prereqs()
 
 from textual import on, work
 from textual.app import App, ComposeResult
-from textual.events import Resize
+from textual.events import MouseDown, Resize
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.widgets import (
@@ -461,12 +461,48 @@ def _ensure_startup_terminal_size() -> None:
     if sys.platform == "darwin" and _resize_macos_terminal_window_to_quarter_screen():
         return
     if sys.platform == "win32":
-        cols, lines = _target_terminal_size()
-        _resize_windows_console(cols, lines)
-        _nudge_windows_terminal_window()
         return
     cols, lines = _target_terminal_size()
     _resize_posix_terminal(cols, lines)
+
+
+_WINDOWS_CONSOLE_INPUT_MODE: int | None = None
+STD_INPUT_HANDLE = -10
+ENABLE_QUICK_EDIT_MODE = 0x0040
+ENABLE_EXTENDED_FLAGS = 0x0080
+ENABLE_MOUSE_INPUT = 0x0010
+
+
+def _configure_windows_console_for_tui() -> None:
+    global _WINDOWS_CONSOLE_INPUT_MODE
+    if sys.platform != "win32" or not sys.stdout.isatty():
+        return
+    try:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+        if handle in (0, -1):
+            return
+        mode = ctypes.c_uint()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return
+        _WINDOWS_CONSOLE_INPUT_MODE = int(mode.value)
+        new_mode = (_WINDOWS_CONSOLE_INPUT_MODE | ENABLE_EXTENDED_FLAGS | ENABLE_MOUSE_INPUT) & ~ENABLE_QUICK_EDIT_MODE
+        kernel32.SetConsoleMode(handle, new_mode)
+    except Exception:
+        return
+
+
+def _restore_windows_console_mode() -> None:
+    if sys.platform != "win32" or _WINDOWS_CONSOLE_INPUT_MODE is None:
+        return
+    try:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+        if handle in (0, -1):
+            return
+        kernel32.SetConsoleMode(handle, _WINDOWS_CONSOLE_INPUT_MODE)
+    except Exception:
+        return
 
 
 # ---------------------------------------------------------------------------
@@ -490,12 +526,15 @@ LOG_TRIM_BATCH = 1000  # Remove this many lines when cap is hit
 LOG_FLUSH_MS = 500  # Flush buffered lines every N ms
 HEALTH_POLL_INTERVAL_SECONDS = 3.0
 HEALTH_REQUEST_TIMEOUT_SECONDS = 2.5
+TUI_STARTUP_DEBUG_PATH = PROJECT_ROOT / "data" / "tui_startup_debug.jsonl"
+TUI_STARTUP_DEBUG_WINDOW_SECONDS = 90.0
 HEALTH_FAILURES_BEFORE_OFFLINE = 2
 HEALTH_OFFLINE_GRACE_SECONDS = 10.0
 
 # Log level ordering for filter comparison
 LOG_LEVEL_ORDER = {"DEBUG": 0, "INFO": 1, "WARNING": 2, "ERROR": 3}
 ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+OSC_ESCAPE_RE = re.compile(r"\x1B\].*?(?:\x07|\x1B\\)")
 CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
 
 WORKER_STATUS_ORDER: list[tuple[str, str]] = [
@@ -588,6 +627,9 @@ WORKER_FILTER_LABELS: dict[str, str] = {
 WORKER_MINI_LOG_LINES = 2
 WORKER_PANEL_HORIZONTAL_CHROME = 6
 WORKER_PANEL_FALLBACK_CONTENT_WIDTH = 24
+WORKER_PANEL_HEIGHT = 7
+WORKER_GRID_GUTTER = 1
+HOME_NON_GRID_HEIGHT = 20
 MIN_TERMINAL_COLUMNS = 80
 MIN_TERMINAL_LINES = 24
 
@@ -628,7 +670,7 @@ Screen {
 #hero-row {
     layout: horizontal;
     margin: 1 1 0 1;
-    height: 13;
+    height: 11;
 }
 
 #brand-panel {
@@ -702,6 +744,7 @@ Screen {
     color: #b5d4e7;
     text-style: bold;
     margin: 1 2 0 2;
+    height: 1;
 }
 
 #workers-grid {
@@ -710,11 +753,13 @@ Screen {
     grid-gutter: 1;
     padding: 0 1;
     margin: 0 1 1 1;
-    height: auto;
+    height: 1fr;
+    overflow-y: auto;
+    overflow-x: hidden;
 }
 
 .worker-panel {
-    height: 8;
+    height: 7;
     background: #0f1d2c;
     border: round #2b4961;
     padding: 0 1;
@@ -770,6 +815,8 @@ Screen {
     margin: 0 2 1 2;
     color: #7f98ac;
     text-align: center;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
 }
 
 /* ---- Logs pane ---- */
@@ -860,7 +907,8 @@ TabPane {
 
 
 #home {
-    overflow-y: auto;
+    layout: vertical;
+    overflow-y: hidden;
 }
 
 /* ---- Light mode ---- */
@@ -1026,6 +1074,55 @@ def kill_port(port: int) -> None:
 def kill_legacy_worker_processes() -> None:
     """Stop detached legacy worker processes from pre in-process runs."""
     if sys.platform == "win32":
+        backend_dir = str(BACKEND_DIR)
+        project_root = str(PROJECT_ROOT)
+        try:
+            result = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    "Get-CimInstance Win32_Process "
+                    "| Where-Object { $_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe' } "
+                    "| Select-Object ProcessId,CommandLine "
+                    "| ConvertTo-Json -Compress",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return
+
+            data = json.loads(result.stdout)
+            if isinstance(data, dict):
+                data = [data]
+
+            for entry in data:
+                pid = entry.get("ProcessId")
+                cmd = str(entry.get("CommandLine") or "")
+                if not pid or pid == os.getpid():
+                    continue
+                if backend_dir not in cmd and project_root not in cmd:
+                    continue
+                is_homerun = False
+                if "workers.runner" in cmd or ("workers." in cmd and "_worker" in cmd):
+                    is_homerun = True
+                elif "uvicorn" in cmd and "main:app" in cmd:
+                    is_homerun = True
+                if not is_homerun:
+                    continue
+                try:
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(pid)],
+                        capture_output=True,
+                        timeout=5,
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        time.sleep(0.25)
         return
     try:
         result = subprocess.run(
@@ -1119,7 +1216,8 @@ def format_log_line(line: str, tag: str) -> tuple[str, str]:
 
     Returns (formatted_text, level).
     """
-    line = CONTROL_CHAR_RE.sub("", ANSI_ESCAPE_RE.sub("", line))
+    line = OSC_ESCAPE_RE.sub("", line)
+    line = CONTROL_CHAR_RE.sub("", ANSI_ESCAPE_RE.sub("", line.replace("\r", "")))
     prefix = f"[{tag}]"
 
     # Try to parse structured JSON log lines from backend
@@ -1191,6 +1289,8 @@ class HomerunApp(App):
     _last_known_viewport_size: tuple[int, int] = (0, 0)
     _startup_layout_timer = None
     _startup_services_started: bool = False
+    _startup_debug_enabled: bool = False
+    _startup_debug_started_at: float = 0.0
 
     def __init__(self) -> None:
         super().__init__()
@@ -1231,6 +1331,9 @@ class HomerunApp(App):
         self._health_poll_inflight = False
         self._health_last_success_monotonic = 0.0
         self._health_consecutive_failures = 0
+        self._startup_debug_enabled = os.environ.get("HOMERUN_TUI_DEBUG_STARTUP") == "1"
+        self._startup_debug_started_at = 0.0
+        self._last_button_action_at: dict[str, float] = {}
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -1321,8 +1424,10 @@ class HomerunApp(App):
     # ---- Lifecycle ----
     def on_mount(self) -> None:
         self.start_time = time.time()
+        self._init_startup_debug_trace()
         self._startup_layout_settle_deadline = time.monotonic() + 3.0
         self._last_known_viewport_size = (int(self.size.width), int(self.size.height))
+        self._trace_startup_debug("on_mount:start")
         # Remove "active" press animation delay so UI clicks feel immediate.
         for button in self.query(Button):
             button.active_effect_duration = 0.0
@@ -1332,6 +1437,8 @@ class HomerunApp(App):
         self._apply_responsive_layout()
         self.set_timer(0.0, self._finalize_initial_layout)
         self.set_timer(0.2, self._finalize_initial_layout)
+        self.set_timer(1.0, self._finalize_delayed_startup_layout)
+        self.set_timer(2.0, self._finalize_delayed_startup_layout)
         self.set_timer(0.5, self._start_services_after_initial_paint)
         self._startup_layout_timer = self.set_interval(0.1, self._settle_startup_layout)
         self._poll_health()
@@ -1341,17 +1448,73 @@ class HomerunApp(App):
         # Check scroll state less frequently (not on_idle which fires constantly)
         self.set_interval(0.5, self._check_scroll_follow)
 
+    def _init_startup_debug_trace(self) -> None:
+        if not self._startup_debug_enabled:
+            return
+        self._startup_debug_started_at = time.monotonic()
+        try:
+            TUI_STARTUP_DEBUG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            if TUI_STARTUP_DEBUG_PATH.exists():
+                TUI_STARTUP_DEBUG_PATH.unlink()
+        except Exception:
+            pass
+        self._trace_startup_debug("trace_initialized")
+
+    def _trace_startup_debug(self, event: str, **extra: object) -> None:
+        if not self._startup_debug_enabled:
+            return
+        if self._startup_debug_started_at and (time.monotonic() - self._startup_debug_started_at) > TUI_STARTUP_DEBUG_WINDOW_SECONDS:
+            return
+        payload: dict[str, object] = {
+            "event": event,
+            "ts": round(time.time(), 3),
+            "mono": round(time.monotonic(), 3),
+        }
+        try:
+            payload["app_size"] = {
+                "width": int(self.size.width),
+                "height": int(self.size.height),
+            }
+        except Exception:
+            payload["app_size"] = None
+        try:
+            workers_grid = self.query_one("#workers-grid", Container)
+            payload["workers_grid"] = {
+                "width": int(workers_grid.size.width),
+                "height": int(workers_grid.size.height),
+                "grid_columns": getattr(workers_grid.styles, "grid_size_columns", None),
+            }
+        except Exception:
+            payload["workers_grid"] = None
+        worker_widths: dict[str, int | None] = {}
+        for worker_name, _worker_label in WORKER_STATUS_ORDER[:4]:
+            try:
+                panel = self.query_one(f"#worker-{worker_name}", WorkerPanel)
+                worker_widths[worker_name] = int(panel.size.width)
+            except Exception:
+                worker_widths[worker_name] = None
+        payload["sample_worker_widths"] = worker_widths
+        if extra:
+            payload.update(extra)
+        try:
+            with TUI_STARTUP_DEBUG_PATH.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, sort_keys=True) + "\n")
+        except Exception:
+            pass
+
     def _apply_responsive_layout(self, viewport_width: int | None = None) -> None:
         try:
             width = int(viewport_width) if isinstance(viewport_width, int) and viewport_width > 0 else int(self.size.width)
         except Exception:
             return
 
-        if width >= 180:
+        if width >= 160:
+            grid_cols = 5
+        elif width >= 120:
             grid_cols = 4
-        elif width >= 140:
+        elif width >= 88:
             grid_cols = 3
-        elif width >= 104:
+        elif width >= 60:
             grid_cols = 2
         else:
             grid_cols = 1
@@ -1361,6 +1524,7 @@ class HomerunApp(App):
             workers_grid.styles.grid_size_columns = grid_cols
         except Exception:
             pass
+        self._trace_startup_debug("apply_responsive_layout", viewport_width=viewport_width, resolved_width=width, grid_cols=grid_cols)
         self._rerender_all_worker_panels()
 
     def _finalize_initial_layout(self) -> None:
@@ -1374,11 +1538,17 @@ class HomerunApp(App):
             self.screen.refresh(repaint=True, layout=True)
         except Exception:
             pass
+        self._trace_startup_debug("finalize_initial_layout")
+
+    def _finalize_delayed_startup_layout(self) -> None:
+        self._finalize_initial_layout()
+        self._rerender_all_worker_panels()
 
     def _start_services_after_initial_paint(self) -> None:
         if self._startup_services_started:
             return
         self._startup_services_started = True
+        self._trace_startup_debug("start_services_after_initial_paint")
         self._start_services()
 
     def _settle_startup_layout(self) -> None:
@@ -1393,10 +1563,12 @@ class HomerunApp(App):
         current_size = (int(self.size.width), int(self.size.height))
         if current_size != self._last_known_viewport_size:
             self._last_known_viewport_size = current_size
+            self._trace_startup_debug("settle_layout:size_changed", current_size={"width": current_size[0], "height": current_size[1]})
             self._finalize_initial_layout()
             return
         for worker_name, _worker_label in WORKER_STATUS_ORDER:
             if self._get_worker_content_width(worker_name) <= 0:
+                self._trace_startup_debug("settle_layout:bad_worker_width", worker_name=worker_name)
                 self._finalize_initial_layout()
                 return
 
@@ -1406,15 +1578,25 @@ class HomerunApp(App):
 
     def on_resize(self, event: Resize) -> None:
         viewport_width = getattr(event, "width", None)
+        viewport_height = getattr(getattr(event, "size", None), "height", None)
         if not isinstance(viewport_width, int) or viewport_width <= 0:
             maybe_size = getattr(event, "size", None)
             viewport_width = getattr(maybe_size, "width", None)
+            viewport_height = getattr(maybe_size, "height", None)
+        self._trace_startup_debug(
+            "on_resize",
+            event_width=viewport_width,
+            event_height=viewport_height,
+            pixel_size=getattr(event, "pixel_size", None),
+        )
+        if isinstance(viewport_width, int) and isinstance(viewport_height, int):
+            current_size = (viewport_width, viewport_height)
+            if current_size == self._last_known_viewport_size:
+                return
+            self._last_known_viewport_size = current_size
         self._apply_responsive_layout(viewport_width if isinstance(viewport_width, int) else None)
-        try:
-            self.screen.clear_cached_dimensions()
-        except Exception:
-            pass
-        self.refresh(repaint=True, layout=True)
+        self.refresh(layout=True)
+        self.set_timer(0.0, self._rerender_all_worker_panels)
 
     def action_show_tab(self, tab: str) -> None:
         self.query_one(TabbedContent).active = tab
@@ -1775,12 +1957,23 @@ class HomerunApp(App):
         return width - WORKER_PANEL_HORIZONTAL_CHROME
 
     def _normalize_worker_log_line(self, text: str, max_width: int | None = None) -> str:
-        line = text.strip()
+        line = OSC_ESCAPE_RE.sub("", text.replace("\r", "")).strip()
+        line = CONTROL_CHAR_RE.sub("", ANSI_ESCAPE_RE.sub("", line))
         if line.startswith("[") and "] " in line:
             line = line.split("] ", 1)[1]
         return self._truncate_worker_text(line, max_width or 0)
 
     # ---- Button handlers ----
+    def _should_handle_button_action(self, btn_id: Optional[str], now: float | None = None) -> bool:
+        if not btn_id:
+            return False
+        current = time.monotonic() if now is None else now
+        previous = self._last_button_action_at.get(btn_id, 0.0)
+        if current - previous < 0.35:
+            return False
+        self._last_button_action_at[btn_id] = current
+        return True
+
     def _handle_button_action(self, btn_id: Optional[str]) -> None:
         if not btn_id:
             return
@@ -1856,7 +2049,20 @@ class HomerunApp(App):
             self._update_and_restart()
             return
 
+    @on(MouseDown, "Button")
+    def _on_button_mouse_down(self, event: MouseDown) -> None:
+        button = event.widget if isinstance(event.widget, Button) else None
+        if button is None or button.disabled:
+            return
+        if getattr(event, "button", 1) != 1:
+            return
+        if not self._should_handle_button_action(button.id):
+            return
+        self._handle_button_action(button.id)
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if not self._should_handle_button_action(event.button.id):
+            return
         self._handle_button_action(event.button.id)
 
     @on(Input.Changed, "#log-search-input")
@@ -2737,7 +2943,7 @@ class HomerunApp(App):
 
                 try:
                     subprocess.run(
-                        ["taskkill", "/F", "/PID", str(pid)],
+                        ["taskkill", "/F", "/T", "/PID", str(pid)],
                         capture_output=True,
                         timeout=5,
                     )
@@ -2767,12 +2973,18 @@ def main() -> None:
         signal.signal(signal.SIGBREAK, _sigbreak_handler)
 
     _ensure_startup_terminal_size()
+    _configure_windows_console_for_tui()
 
     app = HomerunApp()
+    exit_code = 0
 
     try:
         app.run()
+    except BaseException:
+        exit_code = 1
+        raise
     finally:
+        _restore_windows_console_mode()
         # Kill any remaining child process trees, then close the Job Object handle
         # (triggers KILL_ON_JOB_CLOSE as a safety net).
         _sigbreak_kill_children()
@@ -2780,7 +2992,7 @@ def main() -> None:
         # Force-exit to avoid hanging on background thread joins.
         # Textual worker threads (subprocess readers) may still be blocked
         # on I/O; Python's atexit handler would wait for them indefinitely.
-        os._exit(0)
+        os._exit(exit_code)
 
 
 if __name__ == "__main__":

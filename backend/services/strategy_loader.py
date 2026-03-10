@@ -36,6 +36,16 @@ from services.event_dispatcher import event_dispatcher
 logger = get_logger(__name__)
 
 
+@dataclass(frozen=True)
+class _StrategyRefreshSnapshot:
+    slug: str
+    enabled: bool
+    source_code: str
+    config: dict[str, Any]
+    status: str | None
+    error_message: str | None
+
+
 # ---------------------------------------------------------------------------
 # Strategy template — shown to users as a starting point
 # ---------------------------------------------------------------------------
@@ -808,7 +818,9 @@ class StrategyLoader:
         Returns:
             Dict with ``"loaded"``, ``"errors"`` keys.
         """
-        from models.database import Strategy
+        del session
+
+        from models.database import AsyncSessionLocal, Strategy
         from sqlalchemy import func, select
         from utils.utcnow import utcnow
 
@@ -823,12 +835,25 @@ class StrategyLoader:
                 query = query.where(
                     func.lower(func.coalesce(Strategy.source_key, "")).in_(tuple(sorted(source_filter)))
                 )
-            rows = list((await session.execute(query)).scalars().all())
+            async with AsyncSessionLocal() as read_session:
+                rows = list((await read_session.execute(query)).scalars().all())
+            snapshots = [
+                _StrategyRefreshSnapshot(
+                    slug=str(row.slug or "").strip().lower(),
+                    enabled=bool(row.enabled),
+                    source_code=str(row.source_code or ""),
+                    config=dict(row.config) if isinstance(row.config, dict) else {},
+                    status=str(row.status or "").strip() or None,
+                    error_message=str(row.error_message) if row.error_message is not None else None,
+                )
+                for row in rows
+                if str(row.slug or "").strip()
+            ]
 
             next_loaded = dict(self._loaded)
             next_errors = dict(self._errors)
-            db_state_changed = False
-            selected_slugs = {str(row.slug or "").strip().lower() for row in rows if str(row.slug or "").strip()}
+            status_updates: dict[str, tuple[str, str | None, datetime]] = {}
+            selected_slugs = {snapshot.slug for snapshot in snapshots}
 
             is_filtered_refresh = bool(keys_filter or source_filter)
             should_prune = bool(prune_unlisted or not is_filtered_refresh)
@@ -840,26 +865,18 @@ class StrategyLoader:
                     next_loaded.pop(loaded_slug, None)
                     next_errors.pop(loaded_slug, None)
 
-            for row in rows:
-                slug = str(row.slug or "").strip().lower()
-                row_config = row.config if isinstance(row.config, dict) else {}
+            for snapshot in snapshots:
+                slug = snapshot.slug
+                row_config = snapshot.config
 
                 # Compute hash of the incoming source code for change detection
-                new_source_hash = _strategy_runtime_hash(row.source_code or "", row_config)
+                new_source_hash = _strategy_runtime_hash(snapshot.source_code, row_config)
                 current_loaded = next_loaded.get(slug)
 
                 # Skip reload if already loaded with identical source and still enabled
-                if current_loaded and current_loaded.source_hash == new_source_hash and bool(row.enabled):
-                    row_changed = False
-                    if row.status != "loaded":
-                        row.status = "loaded"
-                        row_changed = True
-                    if row.error_message is not None:
-                        row.error_message = None
-                        row_changed = True
-                    if row_changed:
-                        row.updated_at = utcnow()
-                        db_state_changed = True
+                if current_loaded and current_loaded.source_hash == new_source_hash and snapshot.enabled:
+                    if snapshot.status != "loaded" or snapshot.error_message is not None:
+                        status_updates[slug] = ("loaded", None, utcnow())
                     continue
 
                 # Clear previous state for this slug
@@ -868,57 +885,55 @@ class StrategyLoader:
                     next_loaded.pop(slug, None)
                 next_errors.pop(slug, None)
 
-                if not bool(row.enabled):
-                    row_changed = False
-                    if row.status != "disabled":
-                        row.status = "disabled"
-                        row_changed = True
-                    if row.error_message is not None:
-                        row.error_message = None
-                        row_changed = True
-                    if row_changed:
-                        row.updated_at = utcnow()
-                        db_state_changed = True
+                if not snapshot.enabled:
+                    if snapshot.status != "disabled" or snapshot.error_message is not None:
+                        status_updates[slug] = ("disabled", None, utcnow())
                     continue
 
                 try:
                     loaded = self.load(
                         slug=slug,
-                        source_code=row.source_code or "",
+                        source_code=snapshot.source_code,
                         config=row_config,
                     )
                     next_loaded[slug] = loaded
-                    row_changed = False
-                    if row.status != "loaded":
-                        row.status = "loaded"
-                        row_changed = True
-                    if row.error_message is not None:
-                        row.error_message = None
-                        row_changed = True
-                    if row_changed:
-                        row.updated_at = utcnow()
-                        db_state_changed = True
+                    if snapshot.status != "loaded" or snapshot.error_message is not None:
+                        status_updates[slug] = ("loaded", None, utcnow())
                 except Exception as exc:
                     error_message = str(exc)
                     tb = traceback.format_exc()
                     next_errors[slug] = error_message
                     formatted_error = f"{error_message}\n{tb}"
-                    row_changed = False
-                    if row.status != "error":
-                        row.status = "error"
-                        row_changed = True
-                    if row.error_message != formatted_error:
-                        row.error_message = formatted_error
-                        row_changed = True
-                    if row_changed:
-                        row.updated_at = utcnow()
-                        db_state_changed = True
+                    if snapshot.status != "error" or snapshot.error_message != formatted_error:
+                        status_updates[slug] = ("error", formatted_error, utcnow())
 
             self._loaded = next_loaded
             self._errors = next_errors
 
-            if db_state_changed:
-                await session.commit()
+            if status_updates:
+                update_slugs = tuple(sorted(status_updates.keys()))
+                async with AsyncSessionLocal() as write_session:
+                    update_rows = list(
+                        (
+                            await write_session.execute(
+                                select(Strategy).where(
+                                    func.lower(func.coalesce(Strategy.slug, "")).in_(update_slugs)
+                                )
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+                    for row in update_rows:
+                        slug = str(row.slug or "").strip().lower()
+                        update = status_updates.get(slug)
+                        if update is None:
+                            continue
+                        status, error_message, updated_at = update
+                        row.status = status
+                        row.error_message = error_message
+                        row.updated_at = updated_at
+                    await write_session.commit()
 
             return {
                 "loaded": sorted(self._loaded.keys()),

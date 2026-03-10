@@ -232,7 +232,10 @@ async def lifespan(app: FastAPI):
         if process.returncode is not None:
             return
         try:
-            process.send_signal(signal.SIGTERM)
+            if sys.platform == "win32":
+                process.terminate()
+            else:
+                process.send_signal(signal.SIGTERM)
         except ProcessLookupError:
             return
         except Exception as e:
@@ -665,6 +668,7 @@ async def lifespan(app: FastAPI):
             "workers.weather_worker",
             "workers.tracked_traders_worker",
             "workers.trader_orchestrator_worker",
+            "workers.trader_orchestrator_crypto_worker",
             "workers.trader_reconciliation_worker",
             "workers.redeemer_worker",
             "workers.events_worker",

@@ -125,6 +125,82 @@ async def test_build_live_signal_contexts_uses_live_prices_and_history(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_build_live_signal_contexts_uses_hot_cache_without_network(monkeypatch):
+    yes_token = "123456789012345678"
+    no_token = "987654321098765432"
+
+    class _Cache:
+        def get_mid_price(self, token_id: str):
+            if token_id == yes_token:
+                return 0.41
+            if token_id == no_token:
+                return 0.59
+            return None
+
+        def staleness(self, token_id: str):
+            if token_id in {yes_token, no_token}:
+                return 0.02
+            return None
+
+        def get_price_history(self, token_id: str, max_snapshots: int = 60):
+            del max_snapshots
+            if token_id != no_token:
+                return []
+            return [
+                {"timestamp": "2026-03-10T02:39:40Z", "mid": 0.61, "bid": 0.60, "ask": 0.62},
+                {"timestamp": "2026-03-10T02:39:50Z", "mid": 0.59, "bid": 0.58, "ask": 0.60},
+            ]
+
+    monkeypatch.setattr(
+        "services.trader_orchestrator.live_market_context.get_feed_manager",
+        lambda: SimpleNamespace(_started=True, cache=_Cache()),
+    )
+    monkeypatch.setattr(
+        "services.trader_orchestrator.live_market_context.polymarket_client.get_market_by_condition_id",
+        AsyncMock(side_effect=AssertionError("network market lookup should not run")),
+    )
+    monkeypatch.setattr(
+        "services.trader_orchestrator.live_market_context.polymarket_client.get_prices_batch",
+        AsyncMock(side_effect=AssertionError("network price batch should not run")),
+    )
+    monkeypatch.setattr(
+        "services.trader_orchestrator.live_market_context.polymarket_client.get_prices_history",
+        AsyncMock(side_effect=AssertionError("network history fetch should not run")),
+    )
+
+    signal = SimpleNamespace(
+        id="sig_hot_cache",
+        market_id="btc-5m-hint",
+        market_question="BTC 5m Manip",
+        source="crypto",
+        direction="buy_no",
+        entry_price=0.60,
+        edge_percent=4.0,
+        payload_json={
+            "markets": [
+                {
+                    "condition_id": "0x" + ("a" * 64),
+                    "question": "BTC 5m Manip",
+                    "clob_token_ids": [yes_token, no_token],
+                    "outcome_labels": ["Yes", "No"],
+                    "seconds_left": 42,
+                    "liquidity": 12000,
+                }
+            ]
+        },
+    )
+
+    contexts = await build_live_signal_contexts([signal], strict_ws_only=True)
+    ctx = contexts["sig_hot_cache"]
+    assert ctx["available"] is True
+    assert ctx["market_data_source"] == "ws_strict"
+    assert ctx["selected_token_id"] == no_token
+    assert ctx["live_selected_price"] == pytest.approx(0.59)
+    assert ctx["history_summary"]["points"] == 2
+    assert ctx["seconds_left"] == pytest.approx(42)
+
+
+@pytest.mark.asyncio
 async def test_build_live_signal_contexts_derives_model_probability_from_weather_payload(
     monkeypatch,
 ):

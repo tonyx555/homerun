@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import sys
 import re
 import threading
 from dataclasses import dataclass
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 _HAS_TRANSFORMERS = False
 _HAS_FAISS = False
 # FAISS remains enabled by default; set NEWS_ENABLE_FAISS=0 only for emergency fallback.
-_ENABLE_FAISS = os.environ.get("NEWS_ENABLE_FAISS", "1").strip().lower() not in {
+_ENABLE_FAISS = os.environ.get("NEWS_ENABLE_FAISS", "0" if sys.platform == "win32" else "1").strip().lower() not in {
     "0",
     "false",
     "no",
@@ -63,7 +64,7 @@ if _ENABLE_FAISS:
             pass
 
         _HAS_FAISS = True
-    except ImportError:
+    except Exception:
         faiss = None  # type: ignore
 else:
     faiss = None  # type: ignore

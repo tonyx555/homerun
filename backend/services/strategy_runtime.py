@@ -95,45 +95,46 @@ async def refresh_strategy_runtime_if_needed(
 ) -> dict[str, Any]:
     normalized_sources = _normalize_source_keys(source_keys)
     cache_key = _scope_cache_key(source_keys)
-    revision_stamp = await read_strategy_revision_stamp(
-        session,
-        source_keys=source_keys,
-    )
-    effective_stamp = revision_stamp
-    previous_stamp = _last_loaded_revision_stamps.get(cache_key)
+    async with AsyncSessionLocal() as runtime_session:
+        revision_stamp = await read_strategy_revision_stamp(
+            runtime_session,
+            source_keys=source_keys,
+        )
+        effective_stamp = revision_stamp
+        previous_stamp = _last_loaded_revision_stamps.get(cache_key)
 
-    scope_fully_loaded = True
-    if normalized_sources:
-        scoped_rows = (
-            (
-                await session.execute(
-                    select(Strategy.slug, Strategy.enabled).where(
-                        func.lower(func.coalesce(Strategy.source_key, "")).in_(tuple(normalized_sources)),
+        scope_fully_loaded = True
+        if normalized_sources:
+            scoped_rows = (
+                (
+                    await runtime_session.execute(
+                        select(Strategy.slug, Strategy.enabled).where(
+                            func.lower(func.coalesce(Strategy.source_key, "")).in_(tuple(normalized_sources)),
+                        )
                     )
                 )
+                .all()
             )
-            .all()
-        )
 
-        enabled_slugs: set[str] = set()
-        scoped_slugs: set[str] = set()
-        for slug_raw, enabled_raw in scoped_rows:
-            normalized_slug = str(slug_raw or "").strip().lower()
-            if not normalized_slug:
-                continue
-            scoped_slugs.add(normalized_slug)
-            if bool(enabled_raw):
-                enabled_slugs.add(normalized_slug)
+            enabled_slugs: set[str] = set()
+            scoped_slugs: set[str] = set()
+            for slug_raw, enabled_raw in scoped_rows:
+                normalized_slug = str(slug_raw or "").strip().lower()
+                if not normalized_slug:
+                    continue
+                scoped_slugs.add(normalized_slug)
+                if bool(enabled_raw):
+                    enabled_slugs.add(normalized_slug)
 
-        for slug in enabled_slugs:
-            if strategy_loader.get_strategy(slug) is None:
-                scope_fully_loaded = False
-                break
+            for slug in enabled_slugs:
+                if strategy_loader.get_strategy(slug) is None:
+                    scope_fully_loaded = False
+                    break
 
-        if scope_fully_loaded:
-            loaded_scoped_slugs = {slug for slug in strategy_loader._loaded.keys() if slug in scoped_slugs}
-            if any(slug not in enabled_slugs for slug in loaded_scoped_slugs):
-                scope_fully_loaded = False
+            if scope_fully_loaded:
+                loaded_scoped_slugs = {slug for slug in strategy_loader._loaded.keys() if slug in scoped_slugs}
+                if any(slug not in enabled_slugs for slug in loaded_scoped_slugs):
+                    scope_fully_loaded = False
 
     if not force and previous_stamp == effective_stamp and scope_fully_loaded:
         return {

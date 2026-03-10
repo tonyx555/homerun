@@ -1476,6 +1476,9 @@ async def reconcile_paper_positions(
                         pos_view.notional_usd = notional
                         if "strategy_context" not in payload:
                             payload["strategy_context"] = {}
+                        strategy_context_payload = (
+                            payload["strategy_context"] if isinstance(payload.get("strategy_context"), dict) else {}
+                        )
                         pos_view.strategy_context = payload["strategy_context"]
                         pos_view.config = payload.get("strategy_exit_config", {})
                         pos_view.outcome_idx = outcome_idx
@@ -1497,6 +1500,11 @@ async def reconcile_paper_positions(
                             "mark_source": current_price_source,
                             "min_order_size_usd": min_order_size_usd,
                             "notional_usd": notional,
+                            "oracle_price": strategy_context_payload.get("oracle_price"),
+                            "price_to_beat": strategy_context_payload.get("price_to_beat"),
+                            "oracle_age_seconds": strategy_context_payload.get("oracle_age_seconds"),
+                            "confirmed_stage_triggered": strategy_context_payload.get("confirmed_stage_triggered"),
+                            "strategy_stage": strategy_context_payload.get("stage"),
                         }
 
                         exit_decision = _exit_instance.should_exit(pos_view, market_state_dict)
@@ -3496,6 +3504,9 @@ async def reconcile_live_positions(
                         pos_view.notional_usd = notional
                         if "strategy_context" not in payload:
                             payload["strategy_context"] = {}
+                        strategy_context_payload = (
+                            payload["strategy_context"] if isinstance(payload.get("strategy_context"), dict) else {}
+                        )
                         pos_view.strategy_context = payload["strategy_context"]
                         pos_view.config = payload.get("strategy_exit_config", {})
                         pos_view.outcome_idx = outcome_idx
@@ -3516,6 +3527,11 @@ async def reconcile_live_positions(
                             "mark_source": exit_eval_price_source,
                             "min_order_size_usd": min_order_size_usd,
                             "notional_usd": notional,
+                            "oracle_price": strategy_context_payload.get("oracle_price"),
+                            "price_to_beat": strategy_context_payload.get("price_to_beat"),
+                            "oracle_age_seconds": strategy_context_payload.get("oracle_age_seconds"),
+                            "confirmed_stage_triggered": strategy_context_payload.get("confirmed_stage_triggered"),
+                            "strategy_stage": strategy_context_payload.get("stage"),
                         }
 
                         exit_decision = _exit_instance.should_exit(pos_view, market_state_dict)

@@ -47,6 +47,7 @@ _WALLET_MONITOR_REFRESH_SECONDS = 15.0
 _TRADER_RECONCILE_ATTEMPTS = 3
 _TRADER_RECONCILE_RETRY_BASE_DELAY_SECONDS = 0.05
 _TRADER_RECONCILE_RETRY_MAX_DELAY_SECONDS = 0.3
+_MAX_TRIGGER_DRAIN_PER_CYCLE = 128
 _RECONCILE_TRIGGER_EVENTS = frozenset(
     {
         "trader_order",
@@ -456,7 +457,19 @@ async def run_worker_loop() -> None:
                             trigger_queue.get(),
                             timeout=max(0.05, wait_seconds),
                         )
-                        cycle_reason = f"event:{event_type}"
+                        drained_event_types = [event_type]
+                        while len(drained_event_types) < _MAX_TRIGGER_DRAIN_PER_CYCLE:
+                            try:
+                                drained_event_types.append(trigger_queue.get_nowait())
+                            except asyncio.QueueEmpty:
+                                break
+                        unique_event_types = list(dict.fromkeys(str(item or "").strip() for item in drained_event_types if item))
+                        drained_count = len(drained_event_types) - 1
+                        cycle_reason = f"event:{unique_event_types[0]}"
+                        if len(unique_event_types) > 1:
+                            cycle_reason = f"{cycle_reason}+{len(unique_event_types) - 1}_types"
+                        elif drained_count > 0:
+                            cycle_reason = f"{cycle_reason}+{drained_count}_queued"
                         provider_pass = True
                     except asyncio.TimeoutError:
                         if last_open_positions > 0:

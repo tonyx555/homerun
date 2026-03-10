@@ -399,6 +399,7 @@ class ExecutionSessionEngine:
             status="placing",
             commit=False,
         )
+        await _commit_with_retry(self.db)
 
         leg_rows = await self._fetch_leg_rows(session_row.id)
         leg_execution_records: list[dict[str, Any]] = []

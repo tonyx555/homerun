@@ -8,7 +8,6 @@ and enqueues normalized detection batches for the opportunity aggregator worker.
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import time
 import uuid
@@ -43,12 +42,12 @@ from services.shared_state import (
 )
 from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.worker_state import write_worker_snapshot
-from utils.logger import setup_logging
+from utils.logger import get_logger, setup_logging
 from utils.retry import is_retryable_db_error, db_retry_delay, DB_RETRY_ATTEMPTS
 from utils.utcnow import utcnow
 
 setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"), json_format=False)
-logger = logging.getLogger("scanner_worker")
+logger = get_logger("scanner_worker")
 
 
 def _is_upstream_resolution_error(exc: Exception) -> bool:
@@ -287,6 +286,7 @@ async def _run_scan_loop() -> None:
                             ),
                             "heavy_lane_degraded_reason": heartbeat_state.get("heavy_lane_degraded_reason"),
                         },
+                        publish_event=False,
                     )
             except Exception as exc:
                 heartbeat_state["last_error"] = str(exc)

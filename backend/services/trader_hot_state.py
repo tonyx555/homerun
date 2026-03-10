@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import (
@@ -936,11 +937,9 @@ async def flush_audit_buffer() -> int:
 
 
 async def _flush_decision(session: AsyncSession, p: dict[str, Any]) -> None:
-    # Use merge() instead of add() so that decisions already written
-    # to Postgres by the worker's own DB session are handled as no-ops
-    # rather than raising a duplicate-key IntegrityError.
-    await session.merge(
-        TraderDecision(
+    await session.execute(
+        pg_insert(TraderDecision)
+        .values(
             id=p["id"],
             trader_id=p["trader_id"],
             signal_id=p["signal_id"],
@@ -956,6 +955,7 @@ async def _flush_decision(session: AsyncSession, p: dict[str, Any]) -> None:
             payload_json=p.get("payload_json") or {},
             created_at=p.get("created_at") or utcnow(),
         )
+        .on_conflict_do_nothing(index_elements=[TraderDecision.id])
     )
 
 

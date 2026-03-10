@@ -321,6 +321,266 @@ def _extract_model_probability(signal: Any, *, direction: str) -> Optional[float
     return None
 
 
+def _cached_history_points_for_token(
+    feed_manager: Any,
+    token_id: str,
+    *,
+    max_history_points: int,
+) -> list[dict[str, float]]:
+    if feed_manager is None or not getattr(feed_manager, "_started", False):
+        return []
+    try:
+        cached_history = feed_manager.cache.get_price_history(
+            token_id,
+            max_snapshots=max(20, int(max_history_points) * 2),
+        )
+    except Exception as exc:
+        logger.warning(
+            "WebSocket history lookup failed",
+            token_id=token_id,
+            exc_info=exc,
+        )
+        return []
+    normalized_cached: list[dict[str, Any]] = []
+    for item in cached_history:
+        if not isinstance(item, dict):
+            continue
+        ts = _epoch_seconds_from_market_timestamp(item.get("timestamp"))
+        mid = safe_float(item.get("mid"))
+        if ts is None or mid is None:
+            continue
+        normalized_cached.append({"t": ts * 1000.0, "p": float(mid)})
+    return _normalize_history_points(
+        normalized_cached,
+        max_points=max_history_points,
+    )
+
+
+def _build_context_from_cached_market_state(
+    signal: Any,
+    *,
+    market_id: str,
+    market_info: dict[str, Any],
+    direction: str,
+    yes_token: str | None,
+    no_token: str | None,
+    yes_live: float | None,
+    no_live: float | None,
+    yes_age_ms: float | None,
+    no_age_ms: float | None,
+    yes_observed_at: str | None,
+    no_observed_at: str | None,
+    selected_token: str | None,
+    selected_history: list[dict[str, float]],
+    allow_redis_strict: bool,
+) -> dict[str, Any]:
+    signal_market_id = _normalize_identifier(getattr(signal, "market_id", ""))
+    signal_entry = safe_float(getattr(signal, "entry_price", None))
+    selected_outcome: Optional[str] = None
+    selected_live: Optional[float] = None
+    selected_source: str | None = None
+    selected_age_ms: float | None = None
+    selected_observed_at: str | None = None
+    yes_source = "ws_strict" if yes_live is not None else None
+    no_source = "ws_strict" if no_live is not None else None
+
+    if direction == "buy_yes":
+        selected_outcome = "yes"
+        selected_live = yes_live
+        selected_source = yes_source
+        selected_age_ms = yes_age_ms
+        selected_observed_at = yes_observed_at
+    elif direction == "buy_no":
+        selected_outcome = "no"
+        selected_live = no_live
+        selected_source = no_source
+        selected_age_ms = no_age_ms
+        selected_observed_at = no_observed_at
+    elif selected_token:
+        selected_outcome = "yes" if selected_token == yes_token else "no"
+        if selected_token == yes_token:
+            selected_live = yes_live
+            selected_source = yes_source
+            selected_age_ms = yes_age_ms
+            selected_observed_at = yes_observed_at
+        elif selected_token == no_token:
+            selected_live = no_live
+            selected_source = no_source
+            selected_age_ms = no_age_ms
+            selected_observed_at = no_observed_at
+
+    entry_delta = None
+    entry_delta_pct = None
+    adverse_move = None
+    if signal_entry is not None and selected_live is not None:
+        entry_delta = selected_live - signal_entry
+        if signal_entry > 0:
+            entry_delta_pct = (entry_delta / signal_entry) * 100.0
+        adverse_move = entry_delta > 0.0001
+
+    model_probability = _extract_model_probability(signal, direction=direction)
+    live_edge = None
+    if model_probability is not None and selected_live is not None:
+        live_edge = (model_probability - selected_live) * 100.0
+
+    timing = _extract_market_timing(market_info)
+    strict_sources = {"ws_strict"}
+    if allow_redis_strict:
+        strict_sources.add("redis_strict")
+
+    return {
+        "available": bool(selected_live is not None),
+        "fetched_at": utcnow().isoformat().replace("+00:00", "Z"),
+        "live_market_fetched_at": utcnow().isoformat().replace("+00:00", "Z"),
+        "market_id": signal_market_id or market_id,
+        "condition_id": _normalize_identifier(market_info.get("condition_id") or market_id),
+        "market_question": (
+            str(market_info.get("question") or getattr(signal, "market_question", "") or "").strip()
+        ),
+        "direction": direction,
+        "selected_outcome": selected_outcome,
+        "token_ids": [token for token in (yes_token, no_token) if token],
+        "yes_token_id": yes_token,
+        "no_token_id": no_token,
+        "selected_token_id": selected_token,
+        "live_yes_price": yes_live,
+        "live_no_price": no_live,
+        "live_selected_price": selected_live,
+        "yes_price_source": yes_source,
+        "no_price_source": no_source,
+        "live_selected_price_source": selected_source,
+        "market_data_source": selected_source,
+        "source_observed_at": selected_observed_at,
+        "market_data_age_ms": selected_age_ms,
+        "market_data_age_seconds": ((selected_age_ms / 1000.0) if selected_age_ms is not None else None),
+        "signal_entry_price": signal_entry,
+        "entry_price_delta": entry_delta,
+        "entry_price_delta_pct": entry_delta_pct,
+        "adverse_price_move": adverse_move,
+        "liquidity_usd": safe_float(market_info.get("liquidity")),
+        "volume_usd": safe_float(market_info.get("volume")),
+        "spread": safe_float(market_info.get("spread")),
+        "model_probability": model_probability,
+        "live_edge_percent": live_edge,
+        "oracle_price": safe_float(market_info.get("oracle_price")),
+        "oracle_source": str(market_info.get("oracle_source") or "").strip().lower() or None,
+        "price_to_beat": safe_float(market_info.get("price_to_beat")),
+        "oracle_prices_by_source": (
+            dict(market_info.get("oracle_prices_by_source"))
+            if isinstance(market_info.get("oracle_prices_by_source"), dict)
+            else {}
+        ),
+        "oracle_age_seconds": safe_float(market_info.get("oracle_age_seconds")),
+        "oracle_updated_at_ms": safe_float(market_info.get("oracle_updated_at_ms")),
+        "market_end_time": timing.get("end_time"),
+        "seconds_left": timing.get("seconds_left"),
+        "is_live": timing.get("is_live"),
+        "is_current": timing.get("is_current"),
+        "market_closed": timing.get("closed"),
+        "market_resolved": timing.get("resolved"),
+        "history_summary": _build_history_summary(selected_history),
+        "history_tail": selected_history[-20:] if selected_history else [],
+    }
+
+
+def _build_cached_signal_contexts(
+    signal_rows: list[dict[str, Any]],
+    *,
+    max_history_points: int,
+    strict_ws_only: bool,
+    allow_redis_strict: bool,
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    try:
+        feed_manager = get_feed_manager()
+    except Exception:
+        return {}, signal_rows
+    if feed_manager is None or not getattr(feed_manager, "_started", False):
+        return {}, signal_rows
+
+    strict_ttl = max(0.05, float(getattr(settings, "WS_EXECUTION_PRICE_STALE_SECONDS", 1.0) or 1.0))
+    resolved: dict[str, dict[str, Any]] = {}
+    unresolved: list[dict[str, Any]] = []
+    history_cache: dict[str, list[dict[str, float]]] = {}
+    now_epoch = time.time()
+
+    for row in signal_rows:
+        signal = row["signal"]
+        signal_id = row["signal_id"]
+        market_id = row["market_lookup_id"]
+        market_info = dict(_extract_signal_market_hint(signal) or {})
+        if not market_info:
+            unresolved.append(row)
+            continue
+        yes_token, no_token = _extract_yes_no_tokens(market_info)
+        if yes_token is None and no_token is None:
+            unresolved.append(row)
+            continue
+        direction = row["direction"]
+        selected_token = None
+        if direction == "buy_yes":
+            selected_token = yes_token
+        elif direction == "buy_no":
+            selected_token = no_token
+        else:
+            selected_token = yes_token or no_token
+        if not selected_token:
+            unresolved.append(row)
+            continue
+
+        def _cached_price(token_id: str | None) -> tuple[float | None, float | None, str | None]:
+            if not token_id:
+                return None, None, None
+            try:
+                mid = safe_float(feed_manager.cache.get_mid_price(token_id))
+                age_s = safe_float(feed_manager.cache.staleness(token_id))
+            except Exception:
+                return None, None, None
+            if mid is None:
+                return None, None, None
+            if age_s is not None and age_s > strict_ttl:
+                if strict_ws_only:
+                    return None, None, None
+                return None, None, None
+            observed_at_s = now_epoch - max(0.0, float(age_s or 0.0))
+            return float(mid), max(0.0, float(age_s or 0.0) * 1000.0), _iso_from_epoch_seconds(observed_at_s)
+
+        yes_live, yes_age_ms, yes_observed_at = _cached_price(yes_token)
+        no_live, no_age_ms, no_observed_at = _cached_price(no_token)
+        selected_live = yes_live if selected_token == yes_token else no_live
+        if selected_live is None:
+            unresolved.append(row)
+            continue
+
+        selected_history = history_cache.get(selected_token)
+        if selected_history is None:
+            selected_history = _cached_history_points_for_token(
+                feed_manager,
+                selected_token,
+                max_history_points=max_history_points,
+            )
+            history_cache[selected_token] = selected_history
+
+        resolved[signal_id] = _build_context_from_cached_market_state(
+            signal,
+            market_id=market_id,
+            market_info=market_info,
+            direction=direction,
+            yes_token=yes_token,
+            no_token=no_token,
+            yes_live=yes_live,
+            no_live=no_live,
+            yes_age_ms=yes_age_ms,
+            no_age_ms=no_age_ms,
+            yes_observed_at=yes_observed_at,
+            no_observed_at=no_observed_at,
+            selected_token=selected_token,
+            selected_history=selected_history,
+            allow_redis_strict=allow_redis_strict,
+        )
+
+    return resolved, unresolved
+
+
 async def _fetch_market_info(
     market_id: str,
     *,
@@ -374,7 +634,6 @@ async def build_live_signal_contexts(
 ) -> dict[str, dict[str, Any]]:
     """Fetch live market prices + movement context for a set of trade signals."""
     signal_rows: list[dict[str, Any]] = []
-    market_hints_by_lookup_id: dict[str, dict[str, Any]] = {}
     for signal in signals:
         signal_id = str(getattr(signal, "id", "") or "").strip()
         signal_market_id = _normalize_identifier(getattr(signal, "market_id", ""))
@@ -384,19 +643,36 @@ async def build_live_signal_contexts(
         if not signal_id or not market_lookup_id:
             continue
         direction = str(getattr(signal, "direction", "") or "").strip().lower()
-        if market_hint and market_lookup_id not in market_hints_by_lookup_id:
-            market_hints_by_lookup_id[market_lookup_id] = market_hint
         signal_rows.append(
             {
                 "signal_id": signal_id,
                 "signal_market_id": signal_market_id,
                 "market_lookup_id": market_lookup_id,
                 "direction": direction,
+                "market_hint": market_hint,
                 "signal": signal,
             }
         )
     if not signal_rows:
         return {}
+
+    cached_contexts, unresolved_signal_rows = _build_cached_signal_contexts(
+        signal_rows,
+        max_history_points=max_history_points,
+        strict_ws_only=strict_ws_only,
+        allow_redis_strict=allow_redis_strict,
+    )
+    if not unresolved_signal_rows:
+        return cached_contexts
+
+    signal_rows = unresolved_signal_rows
+
+    market_hints_by_lookup_id: dict[str, dict[str, Any]] = {}
+    for row in signal_rows:
+        market_hint = row.get("market_hint")
+        market_lookup_id = row["market_lookup_id"]
+        if market_hint and market_lookup_id not in market_hints_by_lookup_id:
+            market_hints_by_lookup_id[market_lookup_id] = dict(market_hint)
 
     market_ids = sorted({row["market_lookup_id"] for row in signal_rows})
     market_infos: dict[str, dict[str, Any]] = {
@@ -774,7 +1050,7 @@ async def build_live_signal_contexts(
     fetched_at_dt = utcnow()
     fetched_at_iso = fetched_at_dt.isoformat().replace("+00:00", "Z")
     fetched_at_epoch = fetched_at_dt.timestamp()
-    contexts: dict[str, dict[str, Any]] = {}
+    contexts: dict[str, dict[str, Any]] = dict(cached_contexts)
     for row in signal_rows:
         signal = row["signal"]
         signal_id = row["signal_id"]

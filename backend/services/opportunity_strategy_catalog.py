@@ -840,10 +840,48 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         },
     ),
     SystemOpportunityStrategySeed(
+        slug="btc_5m_threshold_flip",
+        source_key="crypto",
+        import_module="services.strategies.btc_5m_threshold_flip",
+        sort_order=193,
+        config_schema={
+            "param_fields": [
+                {"key": "max_oracle_age_seconds", "label": "Max Oracle Age (sec)", "type": "number", "min": 0.1, "max": 10},
+                {"key": "entry_mode", "label": "Entry Mode", "type": "enum", "options": ["two_stage", "one_stage"]},
+                {"key": "entry_window_start_seconds", "label": "Entry Window Start (sec)", "type": "number", "min": 2, "max": 120},
+                {"key": "entry_window_end_seconds", "label": "Entry Window End (sec)", "type": "number", "min": 0, "max": 30},
+                {"key": "probe_window_end_seconds", "label": "Probe Window End (sec)", "type": "number", "min": 1, "max": 30},
+                {"key": "liquidity_floor_usd", "label": "Liquidity Floor (USD)", "type": "number", "min": 0},
+                {"key": "max_no_spread", "label": "Max NO Spread", "type": "number", "min": 0, "max": 0.2},
+                {"key": "max_gap_usd", "label": "Max Gap (USD)", "type": "number", "min": 1, "max": 500},
+                {"key": "preferred_gap_usd", "label": "Preferred Gap (USD)", "type": "number", "min": 1, "max": 500},
+                {"key": "arm_yes_mid_min", "label": "Arm YES Mid Min", "type": "number", "min": 0.5, "max": 0.99},
+                {"key": "preferred_yes_mid_min", "label": "Preferred YES Mid Min", "type": "number", "min": 0.5, "max": 0.99},
+                {"key": "weak_yes_mid_min", "label": "Weak YES Mid Min", "type": "number", "min": 0.5, "max": 0.99},
+                {"key": "preferred_no_ask_max", "label": "Preferred NO Ask Max", "type": "number", "min": 0.01, "max": 0.5},
+                {"key": "weak_no_ask_max", "label": "Weak NO Ask Max", "type": "number", "min": 0.01, "max": 0.5},
+                {"key": "compression_drop_usd", "label": "Compression Drop (USD)", "type": "number", "min": 0, "max": 100},
+                {"key": "strong_compression_drop_usd", "label": "Strong Compression Drop (USD)", "type": "number", "min": 0, "max": 100},
+                {"key": "breakout_price", "label": "Breakout Price", "type": "number", "min": 0.1, "max": 0.99},
+                {"key": "breakout_final_seconds", "label": "Breakout Final Seconds", "type": "number", "min": 1, "max": 30},
+                {"key": "breakout_gap_cap_usd", "label": "Breakout Gap Cap (USD)", "type": "number", "min": 0, "max": 100},
+                {"key": "max_depth_fraction", "label": "Max Depth Fraction", "type": "number", "min": 0.001, "max": 1},
+                {"key": "probe_fraction", "label": "Probe Fraction", "type": "number", "min": 0.01, "max": 0.99},
+                {"key": "confirm_fraction", "label": "Confirm Fraction", "type": "number", "min": 0.01, "max": 0.99},
+                {"key": "base_size_usd", "label": "Target Size (USD)", "type": "number", "min": 1, "max": 10000},
+                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
+                {"key": "max_average_entry_price", "label": "Max Average Entry Price", "type": "number", "min": 0.05, "max": 0.95},
+                {"key": "max_confirmation_no_ask", "label": "Max Confirmation NO Ask", "type": "number", "min": 0.05, "max": 0.99},
+                {"key": "min_flow_imbalance", "label": "Min Flow Imbalance", "type": "number", "min": 0, "max": 1},
+                {"key": "max_recent_move_zscore", "label": "Max Recent Move Z-Score", "type": "number", "min": 0, "max": 100},
+            ]
+        },
+    ),
+    SystemOpportunityStrategySeed(
         slug="crypto_queue_hazard_flip",
         source_key="crypto",
         import_module="services.strategies.crypto_queue_hazard_flip",
-        sort_order=193,
+        sort_order=194,
         config_schema={
             "param_fields": [
                 {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
@@ -873,7 +911,7 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         slug="crypto_oracle_lag_capture",
         source_key="crypto",
         import_module="services.strategies.crypto_oracle_lag_capture",
-        sort_order=194,
+        sort_order=195,
         config_schema={
             "param_fields": [
                 {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
@@ -903,7 +941,7 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         slug="crypto_entropy_maker",
         source_key="crypto",
         import_module="services.strategies.crypto_entropy_maker",
-        sort_order=195,
+        sort_order=196,
         config_schema={
             "param_fields": [
                 {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
@@ -928,7 +966,7 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         slug="crypto_cancel_cluster_reentry",
         source_key="crypto",
         import_module="services.strategies.crypto_cancel_cluster_reentry",
-        sort_order=196,
+        sort_order=197,
         config_schema={
             "param_fields": [
                 {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
@@ -965,7 +1003,7 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         slug="crypto_twin_parallel",
         source_key="crypto",
         import_module="services.strategies.crypto_twin_parallel",
-        sort_order=197,
+        sort_order=198,
         config_schema={
             "param_fields": [
                 {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},

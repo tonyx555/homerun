@@ -34,6 +34,31 @@ _snapshot_refresh_last_started_mono = 0.0
 _SNAPSHOT_REFRESH_MIN_INTERVAL_SECONDS = 0.25
 
 
+async def _publish_hot_path_signal_batch(
+    *,
+    source: str,
+    signal_ids: list[str],
+    emitted_at_iso: str,
+    market_data_ages_ms: list[int],
+    signal_snapshots: dict[str, dict[str, Any]],
+) -> None:
+    await publish_trade_signal_stream_batch(
+        event_type="upsert_insert",
+        source=source,
+        signal_ids=signal_ids,
+        trigger="strategy_signal_bridge",
+        emitted_at=emitted_at_iso,
+        metadata={
+            "market_data_age_ms_avg": (
+                round(sum(market_data_ages_ms) / len(market_data_ages_ms), 2) if market_data_ages_ms else None
+            ),
+            "market_data_age_ms_max": max(market_data_ages_ms) if market_data_ages_ms else None,
+            "published_precommit": True,
+        },
+        signal_snapshots=signal_snapshots,
+    )
+
+
 def _parse_datetime_utc(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         if value.tzinfo is None:
@@ -282,6 +307,23 @@ async def bridge_opportunities_to_signals(
             signal_types=[signal_type],
             commit=False,
         )
+    if signal_ids:
+        emitted_at_iso = now.isoformat()
+        try:
+            await _publish_hot_path_signal_batch(
+                source=str(source),
+                signal_ids=signal_ids,
+                emitted_at_iso=emitted_at_iso,
+                market_data_ages_ms=market_data_ages_ms,
+                signal_snapshots=signal_snapshots,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to append precommit trade_signal_batch stream event",
+                source=str(source),
+                signal_count=len(signal_ids),
+                exc_info=exc,
+            )
     await _commit_with_retry(session)
     _schedule_trade_signal_snapshot_refresh()
     if signal_ids:
@@ -305,28 +347,6 @@ async def bridge_opportunities_to_signals(
         except Exception as exc:
             logger.warning(
                 "Failed to publish trade_signal_batch event",
-                source=str(source),
-                signal_count=len(signal_ids),
-                exc_info=exc,
-            )
-        try:
-            await publish_trade_signal_stream_batch(
-                event_type="upsert_insert",
-                source=str(source),
-                signal_ids=signal_ids,
-                trigger="strategy_signal_bridge",
-                emitted_at=emitted_at_iso,
-                metadata={
-                    "market_data_age_ms_avg": (
-                        round(sum(market_data_ages_ms) / len(market_data_ages_ms), 2) if market_data_ages_ms else None
-                    ),
-                    "market_data_age_ms_max": max(market_data_ages_ms) if market_data_ages_ms else None,
-                },
-                signal_snapshots=signal_snapshots,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to append trade_signal_batch stream event",
                 source=str(source),
                 signal_count=len(signal_ids),
                 exc_info=exc,

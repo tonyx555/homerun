@@ -147,6 +147,13 @@ async def test_start_trader_unpauses_active_trader(monkeypatch):
         "is_enabled": True,
         "is_paused": True,
         "metadata": {"resume_policy": "resume_full"},
+        "source_configs": [
+            {
+                "source_key": "traders",
+                "strategy_key": "traders_copy_trade",
+                "strategy_params": {"copy_existing_positions_on_start": True},
+            }
+        ],
     }
     updated = {
         "id": trader_id,
@@ -178,6 +185,7 @@ async def test_start_trader_unpauses_active_trader(monkeypatch):
     monkeypatch.setattr(routes_traders, "get_trader", AsyncMock(return_value=existing))
     monkeypatch.setattr(routes_traders, "update_trader", update_trader_mock)
     monkeypatch.setattr(routes_traders, "read_orchestrator_control", read_control_mock)
+    monkeypatch.setattr(routes_traders, "request_trader_run", AsyncMock(return_value=updated))
     monkeypatch.setattr(routes_traders, "sync_trader_position_inventory", sync_inventory_mock)
     monkeypatch.setattr(routes_traders, "get_open_position_summary_for_trader", open_summary_mock)
     monkeypatch.setattr(routes_traders, "create_trader_event", create_event_mock)
@@ -192,7 +200,7 @@ async def test_start_trader_unpauses_active_trader(monkeypatch):
     assert result["id"] == updated["id"]
     assert result["is_enabled"] is True
     assert result["is_paused"] is False
-    assert result["copy_bootstrap"]["status"] == "completed"
+    assert result["copy_bootstrap"]["status"] == "scheduled"
     update_trader_mock.assert_awaited_once()
     update_payload = update_trader_mock.await_args.args[2]
     assert "is_enabled" not in update_payload
@@ -200,19 +208,13 @@ async def test_start_trader_unpauses_active_trader(monkeypatch):
     assert update_payload["metadata"]["loss_streak_reset_reason"] == "operator_start"
     assert isinstance(update_payload["metadata"]["loss_streak_reset_at"], str)
     assert update_payload["metadata"]["loss_streak_reset_at"]
-    copy_bootstrap_mock.assert_awaited_once_with(
-        trader_id=trader_id,
-        copy_existing_positions=None,
-    )
-    assert create_event_mock.await_count == 2
-    bootstrap_event = create_event_mock.await_args_list[0].kwargs
-    started_event = create_event_mock.await_args_list[1].kwargs
-    assert bootstrap_event["event_type"] == "trader_copy_bootstrap"
-    assert bootstrap_event["payload"]["status"] == "completed"
+    copy_bootstrap_mock.assert_not_awaited()
+    assert create_event_mock.await_count == 1
+    started_event = create_event_mock.await_args_list[0].kwargs
     assert started_event["event_type"] == "trader_started"
     assert started_event["message"] == "Trader resumed"
     assert started_event["payload"]["loss_streak_reset_at"] == update_payload["metadata"]["loss_streak_reset_at"]
-    assert started_event["payload"]["copy_bootstrap"]["status"] == "completed"
+    assert started_event["payload"]["copy_bootstrap"]["status"] == "scheduled"
 
 
 @pytest.mark.asyncio
@@ -238,6 +240,13 @@ async def test_start_trader_forwards_copy_existing_override(monkeypatch):
         "is_enabled": True,
         "is_paused": True,
         "metadata": {},
+        "source_configs": [
+            {
+                "source_key": "traders",
+                "strategy_key": "traders_copy_trade",
+                "strategy_params": {"copy_existing_positions_on_start": True},
+            }
+        ],
     }
     updated = {
         "id": trader_id,
@@ -251,6 +260,7 @@ async def test_start_trader_forwards_copy_existing_override(monkeypatch):
     monkeypatch.setattr(routes_traders, "get_trader", AsyncMock(return_value=existing))
     monkeypatch.setattr(routes_traders, "update_trader", AsyncMock(return_value=updated))
     monkeypatch.setattr(routes_traders, "read_orchestrator_control", AsyncMock(return_value={"mode": "shadow"}))
+    monkeypatch.setattr(routes_traders, "request_trader_run", AsyncMock(return_value=updated))
     monkeypatch.setattr(routes_traders, "sync_trader_position_inventory", AsyncMock(return_value=None))
     monkeypatch.setattr(routes_traders, "get_open_position_summary_for_trader", AsyncMock(return_value={"live": 0, "shadow": 0}))
     monkeypatch.setattr(routes_traders, "create_trader_event", AsyncMock(return_value=None))
@@ -266,10 +276,7 @@ async def test_start_trader_forwards_copy_existing_override(monkeypatch):
         session=session_obj,
     )
 
-    copy_bootstrap_mock.assert_awaited_once_with(
-        trader_id=trader_id,
-        copy_existing_positions=False,
-    )
+    copy_bootstrap_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -22,7 +22,7 @@ from itertools import combinations
 from utils.utcnow import utcnow
 from typing import Dict, List, Optional, Set, Tuple
 
-from sqlalchemy import and_, select, text, update, func, or_
+from sqlalchemy import and_, select, text, update, func, or_, tuple_
 
 from models.database import (
     DiscoveredWallet,
@@ -521,17 +521,26 @@ class ConfluenceDetector:
             return
         now = utcnow()
         async with AsyncSessionLocal() as session:
-            for p in payloads:
-                result = await session.execute(
-                    select(MarketConfluenceSignal)
-                    .where(
-                        MarketConfluenceSignal.market_id == p["market_id"],
-                        MarketConfluenceSignal.outcome == p["outcome"],
+            keys = sorted({(str(payload["market_id"]), str(payload["outcome"])) for payload in payloads})
+            existing_rows = list(
+                (
+                    await session.execute(
+                        select(MarketConfluenceSignal).where(
+                            tuple_(MarketConfluenceSignal.market_id, MarketConfluenceSignal.outcome).in_(keys)
+                        )
                     )
-                    .order_by(MarketConfluenceSignal.last_seen_at.desc())
-                    .limit(1)
                 )
-                existing = result.scalars().first()
+                .scalars()
+                .all()
+            )
+            existing_by_key: dict[tuple[str, str], MarketConfluenceSignal] = {}
+            for row in existing_rows:
+                key = (str(row.market_id or ""), str(row.outcome or ""))
+                previous = existing_by_key.get(key)
+                if previous is None or (row.last_seen_at or datetime.min) > (previous.last_seen_at or datetime.min):
+                    existing_by_key[key] = row
+            for p in payloads:
+                existing = existing_by_key.get((str(p["market_id"]), str(p["outcome"])))
 
                 if existing:
                     existing.signal_type = p["signal_type"]
@@ -562,37 +571,37 @@ class ConfluenceDetector:
                     if p["conviction_score"] >= (existing.conviction_score or 0) + 5:
                         existing.cooldown_until = now + timedelta(minutes=5)
                 else:
-                    session.add(
-                        MarketConfluenceSignal(
-                            id=str(uuid.uuid4()),
-                            market_id=p["market_id"],
-                            market_question=p["market_question"],
-                            market_slug=p["market_slug"],
-                            signal_type=p["signal_type"],
-                            strength=p["strength"],
-                            conviction_score=p["conviction_score"],
-                            tier=p["tier"],
-                            window_minutes=p["window_minutes"],
-                            wallet_count=p["wallet_count"],
-                            cluster_adjusted_wallet_count=p["cluster_adjusted_wallet_count"],
-                            unique_core_wallets=p["unique_core_wallets"],
-                            weighted_wallet_score=p["weighted_wallet_score"],
-                            wallets=p["wallets"],
-                            outcome=p["outcome"],
-                            avg_entry_price=p["avg_entry_price"],
-                            total_size=p["total_size"],
-                            avg_wallet_rank=p["avg_wallet_rank"],
-                            net_notional=p["net_notional"],
-                            conflicting_notional=p["conflicting_notional"],
-                            market_liquidity=p["market_liquidity"],
-                            market_volume_24h=p["market_volume_24h"],
-                            is_active=True,
-                            first_seen_at=now,
-                            last_seen_at=now,
-                            detected_at=now,
-                            cooldown_until=now + timedelta(minutes=5),
-                        )
+                    existing = MarketConfluenceSignal(
+                        id=str(uuid.uuid4()),
+                        market_id=p["market_id"],
+                        market_question=p["market_question"],
+                        market_slug=p["market_slug"],
+                        signal_type=p["signal_type"],
+                        strength=p["strength"],
+                        conviction_score=p["conviction_score"],
+                        tier=p["tier"],
+                        window_minutes=p["window_minutes"],
+                        wallet_count=p["wallet_count"],
+                        cluster_adjusted_wallet_count=p["cluster_adjusted_wallet_count"],
+                        unique_core_wallets=p["unique_core_wallets"],
+                        weighted_wallet_score=p["weighted_wallet_score"],
+                        wallets=p["wallets"],
+                        outcome=p["outcome"],
+                        avg_entry_price=p["avg_entry_price"],
+                        total_size=p["total_size"],
+                        avg_wallet_rank=p["avg_wallet_rank"],
+                        net_notional=p["net_notional"],
+                        conflicting_notional=p["conflicting_notional"],
+                        market_liquidity=p["market_liquidity"],
+                        market_volume_24h=p["market_volume_24h"],
+                        is_active=True,
+                        first_seen_at=now,
+                        last_seen_at=now,
+                        detected_at=now,
+                        cooldown_until=now + timedelta(minutes=5),
                     )
+                    session.add(existing)
+                    existing_by_key[(str(p["market_id"]), str(p["outcome"]))] = existing
             await session.commit()
 
     async def _resolve_market_context(self, market_id: str) -> dict:

@@ -353,6 +353,7 @@ async def write_worker_snapshot(
     lag_seconds: Optional[float] = None,
     last_error: Optional[str] = None,
     stats: Optional[dict[str, Any]] = None,
+    publish_event: bool = True,
 ) -> None:
     result = await session.execute(select(WorkerSnapshot).where(WorkerSnapshot.worker_name == worker_name))
     row = result.scalar_one_or_none()
@@ -375,27 +376,28 @@ async def write_worker_snapshot(
     await _commit_with_retry(session)
 
     # Publish worker status update event.
-    try:
-        await event_bus.publish(
-            "worker_status_update",
-            {
-                "workers": [
-                    {
-                        "worker_name": worker_name,
-                        "running": bool(running),
-                        "enabled": bool(enabled),
-                        "current_activity": current_activity,
-                        "interval_seconds": int(row.interval_seconds or _default_interval(worker_name)),
-                        "last_run_at": to_iso(last_run_at),
-                        "lag_seconds": lag_seconds,
-                        "last_error": last_error,
-                        "updated_at": to_iso(row.updated_at),
-                    }
-                ],
-            },
-        )
-    except Exception:
-        pass  # fire-and-forget
+    if publish_event:
+        try:
+            await event_bus.publish(
+                "worker_status_update",
+                {
+                    "workers": [
+                        {
+                            "worker_name": worker_name,
+                            "running": bool(running),
+                            "enabled": bool(enabled),
+                            "current_activity": current_activity,
+                            "interval_seconds": int(row.interval_seconds or _default_interval(worker_name)),
+                            "last_run_at": to_iso(last_run_at),
+                            "lag_seconds": lag_seconds,
+                            "last_error": last_error,
+                            "updated_at": to_iso(row.updated_at),
+                        }
+                    ],
+                },
+            )
+        except Exception:
+            pass  # fire-and-forget
 
 
 async def read_worker_snapshot(

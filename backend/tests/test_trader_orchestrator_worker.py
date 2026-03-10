@@ -129,6 +129,111 @@ def test_merged_strategy_params_use_loaded_strategy_config_defaults(monkeypatch)
     assert merged["max_signal_age_seconds"] == 7.5
 
 
+def test_coalesce_stream_trigger_preserves_signal_snapshots():
+    trigger = trader_orchestrator_worker._coalesce_stream_trigger(
+        [
+            (
+                "1-0",
+                {
+                    "source": "crypto",
+                    "signal_ids": ["signal-1"],
+                    "signal_snapshots": {
+                        "signal-1": {
+                            "id": "signal-1",
+                            "source": "crypto",
+                            "status": "pending",
+                            "created_at": "2026-03-10T02:39:50Z",
+                            "updated_at": "2026-03-10T02:39:50Z",
+                        }
+                    },
+                },
+            )
+        ]
+    )
+
+    assert trigger is not None
+    assert trigger["source_signal_ids"] == {"crypto": ["signal-1"]}
+    assert trigger["source_signal_snapshots"]["crypto"]["signal-1"]["id"] == "signal-1"
+
+
+@pytest.mark.asyncio
+async def test_build_triggered_trade_signals_prefers_stream_snapshots(monkeypatch):
+    fallback_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(trader_orchestrator_worker, "_list_triggered_trade_signals", fallback_mock)
+
+    rows = await trader_orchestrator_worker._build_triggered_trade_signals(
+        None,
+        trader_id="trader-1",
+        signal_ids_by_source={"crypto": ["signal-1"]},
+        signal_snapshots_by_source={
+            "crypto": {
+                "signal-1": {
+                    "id": "signal-1",
+                    "source": "crypto",
+                    "strategy_type": "btc_5m_threshold_flip",
+                    "market_id": "market-1",
+                    "direction": "buy_no",
+                    "entry_price": 0.2,
+                    "edge_percent": 5.0,
+                    "confidence": 0.7,
+                    "liquidity": 5000.0,
+                    "status": "pending",
+                    "payload_json": {"asset": "BTC", "timeframe": "5m"},
+                    "strategy_context_json": {"asset": "BTC", "timeframe": "5m"},
+                    "created_at": "2026-03-10T02:39:50Z",
+                    "updated_at": "2026-03-10T02:39:51Z",
+                }
+            }
+        },
+        sources=["crypto"],
+        strategy_types_by_source={"crypto": ["btc_5m_threshold_flip"]},
+        cursor_created_at=None,
+        cursor_signal_id=None,
+        statuses=["pending", "selected"],
+        limit=10,
+    )
+
+    assert [row.id for row in rows] == ["signal-1"]
+    assert rows[0].payload_json["asset"] == "BTC"
+    fallback_mock.assert_not_awaited()
+
+
+def test_trigger_signal_snapshots_for_trader_filters_by_source():
+    trader = {
+        "source_configs": [
+            {
+                "source_key": "crypto",
+                "strategy_key": "btc_5m_threshold_flip",
+                "strategy_params": {},
+            }
+        ]
+    }
+    trigger = {
+        "source_signal_snapshots": {
+            "crypto": {"signal-1": {"id": "signal-1", "source": "crypto"}},
+            "scanner": {"signal-2": {"id": "signal-2", "source": "scanner"}},
+        }
+    }
+
+    filtered = trader_orchestrator_worker._trigger_signal_snapshots_for_trader(trader, trigger)
+
+    assert filtered == {"crypto": {"signal-1": {"id": "signal-1", "source": "crypto"}}}
+
+
+def test_is_crypto_source_trader_uses_source_key_not_strategy_slug():
+    trader = {
+        "source_configs": [
+            {
+                "source_key": "crypto",
+                "strategy_key": "some_future_crypto_strategy",
+                "strategy_params": {},
+            }
+        ]
+    }
+
+    assert trader_orchestrator_worker._is_crypto_source_trader(trader) is True
+
+
 def test_normalize_source_configs_merges_strategy_defaults(monkeypatch):
     strategy = SimpleNamespace(
         config={
@@ -1404,6 +1509,98 @@ async def test_run_worker_loop_runs_manage_only_cycle_when_globally_paused(monke
     assert run_once_mock.await_args.kwargs["process_signals"] is False
     assert snapshot_mock.await_args.kwargs["current_activity"].startswith("Manage-only[")
     assert "(global_pause)" in snapshot_mock.await_args.kwargs["current_activity"]
+
+
+@pytest.mark.asyncio
+async def test_run_worker_loop_dispatches_crypto_traders_concurrently_with_non_crypto(monkeypatch):
+    class _Session:
+        async def get(self, model, key):
+            if getattr(model, "__name__", "") == "SimulationAccount" and key == "paper-1":
+                return object()
+            return None
+
+        async def rollback(self):
+            return None
+
+    class _SessionContext:
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    call_order: list[str] = []
+
+    async def _run_once(trader, control, **kwargs):
+        del control, kwargs
+        trader_id = str(trader.get("id"))
+        call_order.append(trader_id)
+        return 1, 0, 1 if trader_id == "crypto-1" else (0, 0, 0)
+
+    async def _cancel_wait(*_args, **_kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(trader_orchestrator_worker, "AsyncSessionLocal", lambda: _SessionContext())
+    monkeypatch.setattr(
+        trader_orchestrator_worker, "_ensure_orchestrator_cycle_lock_owner", AsyncMock(return_value=True)
+    )
+    monkeypatch.setattr(
+        trader_orchestrator_worker, "_release_orchestrator_cycle_lock_owner", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(trader_orchestrator_worker, "ensure_all_strategies_seeded", AsyncMock(return_value=None))
+    monkeypatch.setattr(trader_orchestrator_worker, "ensure_trade_signal_group", AsyncMock(return_value=True))
+    monkeypatch.setattr(trader_orchestrator_worker, "refresh_strategy_runtime_if_needed", AsyncMock(return_value=None))
+    monkeypatch.setattr(trader_orchestrator_worker, "expire_stale_signals", AsyncMock(return_value=None))
+    monkeypatch.setattr(trader_orchestrator_worker, "_reconcile_orphan_open_orders", AsyncMock(return_value={}))
+    monkeypatch.setattr(trader_orchestrator_worker, "_run_terminal_stale_order_watchdog", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "read_orchestrator_control",
+        AsyncMock(
+            return_value={
+                "is_enabled": True,
+                "is_paused": False,
+                "kill_switch": False,
+                "run_interval_seconds": 1,
+                "mode": "paper",
+                "settings": {"paper_account_id": "paper-1"},
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "list_traders",
+        AsyncMock(
+            return_value=[
+                {
+                    "id": "crypto-1",
+                    "is_enabled": True,
+                    "is_paused": False,
+                    "mode": "paper",
+                    "metadata": {},
+                    "source_configs": [{"source_key": "crypto", "strategy_key": "generic_crypto", "strategy_params": {}}],
+                },
+                {
+                    "id": "weather-1",
+                    "is_enabled": True,
+                    "is_paused": False,
+                    "mode": "paper",
+                    "metadata": {},
+                    "source_configs": [{"source_key": "weather", "strategy_key": "weather_edge", "strategy_params": {}}],
+                },
+            ]
+        ),
+    )
+    monkeypatch.setattr(trader_orchestrator_worker, "_run_trader_once_with_timeout", AsyncMock(side_effect=_run_once))
+    monkeypatch.setattr(trader_orchestrator_worker, "compute_orchestrator_metrics", AsyncMock(return_value={}))
+    monkeypatch.setattr(trader_orchestrator_worker, "_write_orchestrator_snapshot_best_effort", AsyncMock(return_value=None))
+    monkeypatch.setattr(trader_orchestrator_worker, "update_orchestrator_control", AsyncMock(return_value={}))
+    monkeypatch.setattr(trader_orchestrator_worker, "_wait_for_runtime_trigger", _cancel_wait)
+
+    with pytest.raises(asyncio.CancelledError):
+        await trader_orchestrator_worker.run_worker_loop(lane="crypto", write_snapshot=False)
+
+    assert call_order == ["crypto-1"]
 
 
 @pytest.mark.asyncio

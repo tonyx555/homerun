@@ -15,7 +15,7 @@ import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from utils.utcnow import utcnow, utcfromtimestamp
-from typing import Any, Optional
+from typing import Any, Awaitable, Optional, TypeVar
 
 from sqlalchemy import select, func, or_, update as sa_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -37,6 +37,9 @@ from utils.converters import clamp
 from utils.logger import get_logger
 
 logger = get_logger("smart_wallet_pool")
+
+_T = TypeVar("_T")
+_CANCEL_GRACE_SECONDS = 5.0
 
 IN_CLAUSE_CHUNK_SIZE = 5000
 ACTIVITY_INSERT_CHUNK_SIZE = 2000
@@ -180,6 +183,7 @@ class SmartWalletPoolService:
         self.client = polymarket_client
         self._running = False
         self._lock: Optional[asyncio.Lock] = None
+        self._abandoned_tasks: set[asyncio.Task[Any]] = set()
         self._activity_cache: dict[str, datetime] = {}
         self._callback_registered = False
         self._ws_broadcast_callback = None
@@ -216,6 +220,30 @@ class SmartWalletPoolService:
         if self._lock is None:
             self._lock = asyncio.Lock()
         return self._lock
+
+    def _discard_abandoned_task(self, task: asyncio.Task[Any]) -> None:
+        self._abandoned_tasks.discard(task)
+
+    async def _run_cancellation_safe(self, label: str, coro: Awaitable[_T]) -> _T:
+        task = asyncio.create_task(coro, name=f"smart-wallet-{label}")
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if not task.done():
+                task.cancel()
+                try:
+                    await asyncio.shield(asyncio.wait({task}, timeout=_CANCEL_GRACE_SECONDS))
+                except (asyncio.CancelledError, Exception):
+                    pass
+                if not task.done():
+                    self._abandoned_tasks.add(task)
+                    task.add_done_callback(self._discard_abandoned_task)
+                    logger.warning(
+                        "Smart wallet task cancelled during DB cleanup; holding reference until completion",
+                        task=label,
+                        cancel_grace_seconds=_CANCEL_GRACE_SECONDS,
+                    )
+            raise
 
     @staticmethod
     def _coerce_int(value: Any, default: int, lo: int, hi: int) -> int:
@@ -460,175 +488,185 @@ class SmartWalletPoolService:
 
     async def run_full_sweep(self):
         """Collect candidates from all configured sources."""
-        lock = self._get_lock()
-        async with lock:
-            logger.info("Starting smart wallet full candidate sweep")
+        async def _run() -> None:
+            lock = self._get_lock()
+            async with lock:
+                logger.info("Starting smart wallet full candidate sweep")
 
-            candidate_sources: dict[str, dict[str, bool]] = defaultdict(dict)
-            candidate_usernames: dict[str, str] = {}
-            events: list[dict] = []
+                candidate_sources: dict[str, dict[str, bool]] = defaultdict(dict)
+                candidate_usernames: dict[str, str] = {}
+                events: list[dict] = []
 
-            await self._collect_leaderboard_candidates(
-                candidate_sources,
-                candidate_usernames=candidate_usernames,
-                periods=LEADERBOARD_PERIODS,
-                sorts=LEADERBOARD_SORTS,
-                categories=LEADERBOARD_CATEGORIES,
-                per_matrix_limit=100,
-            )
-            await self._collect_wallet_trade_candidates(
-                candidate_sources,
-                events,
-                wallet_addresses=list(candidate_sources.keys())[:LEADERBOARD_WALLET_TRADE_SAMPLE],
-                per_wallet_limit=80,
-            )
-            markets = await self._collect_market_trade_candidates(
-                candidate_sources,
-                events,
-                max_markets=30,
-                max_trades_per_market=120,
-            )
-            await self._collect_activity_candidates(
-                candidate_sources,
-                events,
-                limit=500,
-            )
-            await self._collect_holder_candidates(
-                candidate_sources,
-                events,
-                market_ids=markets,
-                per_market_limit=100,
-            )
-            await self._collect_tracked_wallet_candidates(
-                candidate_sources,
-                events,
-                per_wallet_limit=80,
-            )
+                await self._collect_leaderboard_candidates(
+                    candidate_sources,
+                    candidate_usernames=candidate_usernames,
+                    periods=LEADERBOARD_PERIODS,
+                    sorts=LEADERBOARD_SORTS,
+                    categories=LEADERBOARD_CATEGORIES,
+                    per_matrix_limit=100,
+                )
+                await self._collect_wallet_trade_candidates(
+                    candidate_sources,
+                    events,
+                    wallet_addresses=list(candidate_sources.keys())[:LEADERBOARD_WALLET_TRADE_SAMPLE],
+                    per_wallet_limit=80,
+                )
+                markets = await self._collect_market_trade_candidates(
+                    candidate_sources,
+                    events,
+                    max_markets=30,
+                    max_trades_per_market=120,
+                )
+                await self._collect_activity_candidates(
+                    candidate_sources,
+                    events,
+                    limit=500,
+                )
+                await self._collect_holder_candidates(
+                    candidate_sources,
+                    events,
+                    market_ids=markets,
+                    per_market_limit=100,
+                )
+                await self._collect_tracked_wallet_candidates(
+                    candidate_sources,
+                    events,
+                    per_wallet_limit=80,
+                )
 
-            await self._upsert_candidate_wallets(
-                candidate_sources,
-                candidate_usernames=candidate_usernames,
-            )
-            inserted = await self._persist_activity_events(events)
+                await self._upsert_candidate_wallets(
+                    candidate_sources,
+                    candidate_usernames=candidate_usernames,
+                )
+                inserted = await self._persist_activity_events(events)
 
-            self._stats["last_full_sweep_at"] = utcnow().isoformat()
-            self._stats["candidates_last_sweep"] = len(candidate_sources)
-            self._stats["events_last_reconcile"] = inserted
+                self._stats["last_full_sweep_at"] = utcnow().isoformat()
+                self._stats["candidates_last_sweep"] = len(candidate_sources)
+                self._stats["events_last_reconcile"] = inserted
 
-            logger.info(
-                "Smart wallet full sweep complete",
-                candidates=len(candidate_sources),
-                events=inserted,
-            )
+                logger.info(
+                    "Smart wallet full sweep complete",
+                    candidates=len(candidate_sources),
+                    events=inserted,
+                )
+
+        await self._run_cancellation_safe("full_sweep", _run())
 
     async def run_incremental_refresh(self):
         """Lightweight candidate refresh intended for frequent runs."""
-        lock = self._get_lock()
-        async with lock:
-            candidate_sources: dict[str, dict[str, bool]] = defaultdict(dict)
-            candidate_usernames: dict[str, str] = {}
-            events: list[dict] = []
+        async def _run() -> None:
+            lock = self._get_lock()
+            async with lock:
+                candidate_sources: dict[str, dict[str, bool]] = defaultdict(dict)
+                candidate_usernames: dict[str, str] = {}
+                events: list[dict] = []
 
-            await self._collect_leaderboard_candidates(
-                candidate_sources,
-                candidate_usernames=candidate_usernames,
-                periods=("DAY",),
-                sorts=LEADERBOARD_SORTS,
-                categories=("OVERALL", "CRYPTO", "POLITICS", "SPORTS"),
-                per_matrix_limit=80,
-            )
-            await self._collect_wallet_trade_candidates(
-                candidate_sources,
-                events,
-                wallet_addresses=list(candidate_sources.keys())[:INCREMENTAL_WALLET_TRADE_SAMPLE],
-                per_wallet_limit=50,
-            )
-            await self._collect_market_trade_candidates(
-                candidate_sources,
-                events,
-                max_markets=12,
-                max_trades_per_market=80,
-            )
-            await self._collect_tracked_wallet_candidates(
-                candidate_sources,
-                events,
-                per_wallet_limit=50,
-            )
-            await self._upsert_candidate_wallets(
-                candidate_sources,
-                candidate_usernames=candidate_usernames,
-            )
-            await self._persist_activity_events(events)
+                await self._collect_leaderboard_candidates(
+                    candidate_sources,
+                    candidate_usernames=candidate_usernames,
+                    periods=("DAY",),
+                    sorts=LEADERBOARD_SORTS,
+                    categories=("OVERALL", "CRYPTO", "POLITICS", "SPORTS"),
+                    per_matrix_limit=80,
+                )
+                await self._collect_wallet_trade_candidates(
+                    candidate_sources,
+                    events,
+                    wallet_addresses=list(candidate_sources.keys())[:INCREMENTAL_WALLET_TRADE_SAMPLE],
+                    per_wallet_limit=50,
+                )
+                await self._collect_market_trade_candidates(
+                    candidate_sources,
+                    events,
+                    max_markets=12,
+                    max_trades_per_market=80,
+                )
+                await self._collect_tracked_wallet_candidates(
+                    candidate_sources,
+                    events,
+                    per_wallet_limit=50,
+                )
+                await self._upsert_candidate_wallets(
+                    candidate_sources,
+                    candidate_usernames=candidate_usernames,
+                )
+                await self._persist_activity_events(events)
 
-            self._stats["last_incremental_refresh_at"] = utcnow().isoformat()
-            logger.info(
-                "Smart wallet incremental refresh complete",
-                candidates=len(candidate_sources),
-                events=len(events),
-            )
+                self._stats["last_incremental_refresh_at"] = utcnow().isoformat()
+                logger.info(
+                    "Smart wallet incremental refresh complete",
+                    candidates=len(candidate_sources),
+                    events=len(events),
+                )
+
+        await self._run_cancellation_safe("incremental_refresh", _run())
 
     async def reconcile_activity(self):
         """Use activity endpoint to backfill missed trades."""
-        lock = self._get_lock()
-        async with lock:
-            candidate_sources: dict[str, dict[str, bool]] = defaultdict(dict)
-            candidate_usernames: dict[str, str] = {}
-            events: list[dict] = []
+        async def _run() -> None:
+            lock = self._get_lock()
+            async with lock:
+                candidate_sources: dict[str, dict[str, bool]] = defaultdict(dict)
+                candidate_usernames: dict[str, str] = {}
+                events: list[dict] = []
 
-            await self._collect_activity_candidates(
-                candidate_sources,
-                events,
-                limit=250,
-            )
-            await self._upsert_candidate_wallets(
-                candidate_sources,
-                candidate_usernames=candidate_usernames,
-            )
-            inserted = await self._persist_activity_events(events)
+                await self._collect_activity_candidates(
+                    candidate_sources,
+                    events,
+                    limit=250,
+                )
+                await self._upsert_candidate_wallets(
+                    candidate_sources,
+                    candidate_usernames=candidate_usernames,
+                )
+                inserted = await self._persist_activity_events(events)
 
-            self._stats["last_activity_reconciliation_at"] = utcnow().isoformat()
-            self._stats["events_last_reconcile"] = inserted
+                self._stats["last_activity_reconciliation_at"] = utcnow().isoformat()
+                self._stats["events_last_reconcile"] = inserted
 
-            logger.info(
-                "Smart wallet activity reconciliation complete",
-                candidates=len(candidate_sources),
-                events=inserted,
-            )
+                logger.info(
+                    "Smart wallet activity reconciliation complete",
+                    candidates=len(candidate_sources),
+                    events=inserted,
+                )
+
+        await self._run_cancellation_safe("activity_reconcile", _run())
 
     async def recompute_pool(self, mode: Optional[str] = None):
         """Recompute scoring, apply churn guard, and update pool membership."""
-        lock = self._get_lock()
-        async with lock:
-            if mode is not None:
-                self.set_recompute_mode(mode)
-            now = utcnow()
-            churn = await self._refresh_metrics_and_apply_pool(now)
-            self._stats["churn_rate"] = round(churn, 4)
-            self._stats["last_pool_recompute_at"] = utcnow().isoformat()
-            self._stats["recompute_mode"] = self._recompute_mode
+        async def _run() -> None:
+            lock = self._get_lock()
+            async with lock:
+                if mode is not None:
+                    self.set_recompute_mode(mode)
+                now = utcnow()
+                churn, pool_size = await self._refresh_metrics_and_apply_pool(now)
+                self._stats["churn_rate"] = round(churn, 4)
+                self._stats["last_pool_recompute_at"] = utcnow().isoformat()
+                self._stats["recompute_mode"] = self._recompute_mode
+                self._stats["pool_size"] = pool_size
+                await self._broadcast_event(
+                    "tracked_trader_pool_update",
+                    {
+                        "pool_size": pool_size,
+                        "target_pool_size": TARGET_POOL_SIZE,
+                        "effective_target_pool_size": int(
+                            self._stats.get("effective_target_pool_size") or TARGET_POOL_SIZE
+                        ),
+                        "churn_rate": round(churn, 4),
+                        "recompute_mode": self._recompute_mode,
+                        "updated_at": utcnow().isoformat(),
+                    },
+                )
+                logger.info(
+                    "Smart wallet pool recompute complete",
+                    pool_size=pool_size,
+                    effective_target_pool_size=int(self._stats.get("effective_target_pool_size") or TARGET_POOL_SIZE),
+                    churn_rate=round(churn, 4),
+                    recompute_mode=self._recompute_mode,
+                )
 
-            pool_size = await self._count_pool_wallets()
-            self._stats["pool_size"] = pool_size
-            await self._broadcast_event(
-                "tracked_trader_pool_update",
-                {
-                    "pool_size": pool_size,
-                    "target_pool_size": TARGET_POOL_SIZE,
-                    "effective_target_pool_size": int(
-                        self._stats.get("effective_target_pool_size") or TARGET_POOL_SIZE
-                    ),
-                    "churn_rate": round(churn, 4),
-                    "recompute_mode": self._recompute_mode,
-                    "updated_at": utcnow().isoformat(),
-                },
-            )
-            logger.info(
-                "Smart wallet pool recompute complete",
-                pool_size=pool_size,
-                effective_target_pool_size=int(self._stats.get("effective_target_pool_size") or TARGET_POOL_SIZE),
-                churn_rate=round(churn, 4),
-                recompute_mode=self._recompute_mode,
-            )
+        await self._run_cancellation_safe("pool_recompute", _run())
 
     @staticmethod
     def _normalize_recompute_mode(mode: str) -> str:
@@ -649,44 +687,22 @@ class SmartWalletPoolService:
     async def get_pool_stats(self) -> dict:
         """Return aggregate pool health and freshness stats."""
         async with AsyncSessionLocal() as session:
-            pool_size = (
+            row = (
                 await session.execute(
-                    select(func.count(DiscoveredWallet.address)).where(
-                        DiscoveredWallet.in_top_pool == True  # noqa: E712
-                    )
+                    select(
+                        func.count(DiscoveredWallet.address),
+                        func.count(DiscoveredWallet.address).filter(DiscoveredWallet.trades_1h > 0),
+                        func.count(DiscoveredWallet.address).filter(DiscoveredWallet.trades_24h > 0),
+                        func.max(DiscoveredWallet.last_trade_at),
+                        func.min(DiscoveredWallet.last_trade_at),
+                    ).where(DiscoveredWallet.in_top_pool == True)  # noqa: E712
                 )
-            ).scalar() or 0
-            active_1h = (
-                await session.execute(
-                    select(func.count(DiscoveredWallet.address)).where(
-                        DiscoveredWallet.in_top_pool == True,  # noqa: E712
-                        DiscoveredWallet.trades_1h > 0,
-                    )
-                )
-            ).scalar() or 0
-            active_24h = (
-                await session.execute(
-                    select(func.count(DiscoveredWallet.address)).where(
-                        DiscoveredWallet.in_top_pool == True,  # noqa: E712
-                        DiscoveredWallet.trades_24h > 0,
-                    )
-                )
-            ).scalar() or 0
-            newest = (
-                await session.execute(
-                    select(func.max(DiscoveredWallet.last_trade_at)).where(
-                        DiscoveredWallet.in_top_pool == True  # noqa: E712
-                    )
-                )
-            ).scalar() or None
-            oldest = (
-                await session.execute(
-                    select(func.min(DiscoveredWallet.last_trade_at)).where(
-                        DiscoveredWallet.in_top_pool == True,  # noqa: E712
-                        DiscoveredWallet.last_trade_at.is_not(None),
-                    )
-                )
-            ).scalar() or None
+            ).one()
+            pool_size = int(row[0] or 0)
+            active_1h = int(row[1] or 0)
+            active_24h = int(row[2] or 0)
+            newest = row[3] or None
+            oldest = row[4] or None
 
         return {
             **self._stats,
@@ -1486,7 +1502,7 @@ class SmartWalletPoolService:
             for key in stale_refresh:
                 self._signal_market_refresh_at.pop(key, None)
 
-    async def _refresh_metrics_and_apply_pool(self, now: datetime) -> float:
+    async def _refresh_metrics_and_apply_pool(self, now: datetime) -> tuple[float, int]:
         cutoff_1h = now - timedelta(hours=1)
         cutoff_24h = now - timedelta(hours=24)
         cutoff_active = now - timedelta(hours=ACTIVE_WINDOW_HOURS)
@@ -1955,26 +1971,26 @@ class SmartWalletPoolService:
         MERGE_BATCH_SIZE = 200
         for i in range(0, len(dirty_wallets), MERGE_BATCH_SIZE):
             batch = dirty_wallets[i : i + MERGE_BATCH_SIZE]
+            payloads = [
+                {
+                    "address": wallet.address,
+                    "trades_1h": wallet.trades_1h,
+                    "trades_24h": wallet.trades_24h,
+                    "unique_markets_24h": wallet.unique_markets_24h,
+                    "last_trade_at": wallet.last_trade_at,
+                    "quality_score": wallet.quality_score,
+                    "activity_score": wallet.activity_score,
+                    "stability_score": wallet.stability_score,
+                    "composite_score": wallet.composite_score,
+                    "in_top_pool": wallet.in_top_pool,
+                    "pool_tier": wallet.pool_tier,
+                    "pool_membership_reason": wallet.pool_membership_reason,
+                    "source_flags": wallet.source_flags,
+                }
+                for wallet in batch
+            ]
             async with AsyncSessionLocal() as session:
-                for wallet in batch:
-                    await session.execute(
-                        sa_update(DiscoveredWallet)
-                        .where(DiscoveredWallet.address == wallet.address)
-                        .values(
-                            trades_1h=wallet.trades_1h,
-                            trades_24h=wallet.trades_24h,
-                            unique_markets_24h=wallet.unique_markets_24h,
-                            last_trade_at=wallet.last_trade_at,
-                            quality_score=wallet.quality_score,
-                            activity_score=wallet.activity_score,
-                            stability_score=wallet.stability_score,
-                            composite_score=wallet.composite_score,
-                            in_top_pool=wallet.in_top_pool,
-                            pool_tier=wallet.pool_tier,
-                            pool_membership_reason=wallet.pool_membership_reason,
-                            source_flags=wallet.source_flags,
-                        )
-                    )
+                await session.execute(sa_update(DiscoveredWallet), payloads)
                 await session.commit()
 
         if len(dirty_wallets) < len(wallets):
@@ -1986,7 +2002,7 @@ class SmartWalletPoolService:
             )
 
         await self._sync_ws_membership(final_pool)
-        return churn_rate
+        return churn_rate, len(final_pool)
 
     def _source_flags(self, wallet: DiscoveredWallet) -> dict[str, Any]:
         raw = wallet.source_flags or {}
@@ -2547,15 +2563,6 @@ class SmartWalletPoolService:
             await wallet_ws_monitor.start()
         except Exception as e:
             logger.warning("Failed to sync discovery pool WS memberships", error=str(e))
-
-    async def _count_pool_wallets(self) -> int:
-        async with AsyncSessionLocal() as session:
-            count = await session.execute(
-                select(func.count(DiscoveredWallet.address)).where(
-                    DiscoveredWallet.in_top_pool == True  # noqa: E712
-                )
-            )
-            return int(count.scalar() or 0)
 
     # ------------------------------------------------------------------
     # WS callback integration

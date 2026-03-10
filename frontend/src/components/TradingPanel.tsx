@@ -2267,6 +2267,28 @@ function eventReasonDetail(event: TraderEvent): string {
   )
 }
 
+function formatLatencyMs(value: unknown): string | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  return `${Math.max(0, Math.round(value))}ms`
+}
+
+function eventLatencyDetail(event: TraderEvent): string | null {
+  if (String(event.event_type || '').trim().toLowerCase() !== 'execution_latency') return null
+  const payload = isRecord(event.payload) ? event.payload : null
+  const latency = payload && isRecord(payload.latency) ? payload.latency : null
+  if (!latency) return null
+  const parts = [
+    formatLatencyMs(latency.emit_to_now_ms),
+    formatLatencyMs(latency.ingest_to_now_ms),
+    formatLatencyMs(latency.decision_to_submit_ms),
+  ]
+  const labels = ['emit', 'ingest', 'submit']
+  const detail = parts
+    .map((part, index) => (part ? `${labels[index]}=${part}` : null))
+    .filter((part): part is string => Boolean(part))
+  return detail.length > 0 ? detail.join(' | ') : null
+}
+
 function parseJsonObject(text: string): { value: Record<string, unknown> | null; error: string | null } {
   try {
     const parsed: unknown = JSON.parse(text || '{}')
@@ -6811,6 +6833,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         || (linkedDecision ? normalizeTradeAction(linkedDecision.direction) : null)
       )
       const reason = eventReasonDetail(event)
+      const latencyDetail = eventLatencyDetail(event)
       const severity = String(event.severity || '').trim().toLowerCase()
       const eventType = String(event.event_type || '').trim().toLowerCase()
       const linkedDecisionReason = linkedDecision ? decisionReasonDetail(linkedDecision) : ''
@@ -6845,7 +6868,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         ts: event.created_at,
         traderId: event.trader_id,
         title: `${String(event.event_type || 'event').toUpperCase()} • ${String(event.severity || 'info').toUpperCase()} • ${marketLabel}`,
-        detail: `Markets: ${renderMarketsDetail(linkedLegs, fallbackMarket)} :: Reason: ${resolvedReason}`,
+        detail: `Markets: ${renderMarketsDetail(linkedLegs, fallbackMarket)} :: Reason: ${resolvedReason}${latencyDetail ? ` :: Latency: ${latencyDetail}` : ''}`,
         action,
         tone,
       })
