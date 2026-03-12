@@ -280,10 +280,24 @@ async def _seed_from_db(session: AsyncSession) -> None:
     today_start = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
 
     # ── Orders (single pass) ───────────────────────────────────────
-    order_rows = list(
-        (await session.execute(select(TraderOrder))).scalars().all()
+    order_rows = await session.stream(
+        select(
+            TraderOrder.id,
+            TraderOrder.trader_id,
+            TraderOrder.mode,
+            TraderOrder.payload_json,
+            TraderOrder.status,
+            TraderOrder.notional_usd,
+            TraderOrder.market_id,
+            TraderOrder.direction,
+            TraderOrder.source,
+            TraderOrder.effective_price,
+            TraderOrder.entry_price,
+            TraderOrder.updated_at,
+            TraderOrder.actual_profit,
+        )
     )
-    for order in order_rows:
+    async for order in order_rows:
         trader_id = str(order.trader_id or "")
         mode = _normalize_mode_key(order.mode)
         snap = _ensure_snapshot(trader_id, mode)
@@ -417,15 +431,28 @@ async def _seed_from_db(session: AsyncSession) -> None:
                 snap.last_loss_at = last_loss
 
     # ── Signal cursors ────────────────────────────────────────────
-    cursor_rows = list(
-        (await session.execute(select(TraderSignalCursor))).scalars().all()
-    )
+    snapshots_by_trader: dict[str, list[_TraderSnapshot]] = {}
+    for (tid, _), snap in _snapshots.items():
+        snapshots_by_trader.setdefault(tid, []).append(snap)
+
+    cursor_rows = (
+        await session.execute(
+            select(
+                TraderSignalCursor.trader_id,
+                TraderSignalCursor.last_signal_created_at,
+                TraderSignalCursor.last_signal_id,
+            )
+        )
+    ).all()
     for cursor in cursor_rows:
         trader_id = str(cursor.trader_id or "")
-        for (tid, mode), snap in _snapshots.items():
-            if tid == trader_id:
-                snap.cursor_created_at = cursor.last_signal_created_at
-                snap.cursor_signal_id = str(cursor.last_signal_id or "") or None
+        trader_snapshots = snapshots_by_trader.get(trader_id)
+        if not trader_snapshots:
+            continue
+        cursor_signal_id = str(cursor.last_signal_id or "") or None
+        for snap in trader_snapshots:
+            snap.cursor_created_at = cursor.last_signal_created_at
+            snap.cursor_signal_id = cursor_signal_id
 
 
 def _ensure_snapshot(trader_id: str, mode: str) -> _TraderSnapshot:
