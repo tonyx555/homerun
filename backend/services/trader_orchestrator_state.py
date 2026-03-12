@@ -5296,6 +5296,7 @@ async def get_pending_live_exit_summary_for_trader(
             "identity_keys": [],
         }
 
+    status_key_expr = func.lower(func.coalesce(TraderOrder.status, ""))
     rows = (
         await session.execute(
             select(
@@ -5308,6 +5309,7 @@ async def get_pending_live_exit_summary_for_trader(
             )
             .where(TraderOrder.trader_id == trader_id)
             .where(func.lower(func.coalesce(TraderOrder.mode, "")) == "live")
+            .where(status_key_expr.in_(tuple(_active_statuses_for_mode("live"))))
         )
     ).all()
 
@@ -5322,8 +5324,6 @@ async def get_pending_live_exit_summary_for_trader(
     identities: list[dict[str, Any]] = []
     identity_keys: set[str] = set()
     for row in rows:
-        if not _is_active_order_status("live", row.status):
-            continue
         payload = dict(row.payload_json or {})
         pending_live_exit = payload.get("pending_live_exit")
         if not _pending_live_exit_is_non_terminal(pending_live_exit, terminal_status_set):
@@ -6665,9 +6665,4 @@ async def get_serialized_execution_session_detail(
     session_id: str,
 ) -> dict[str, Any] | None:
     return await get_execution_session_detail(session, session_id)
-
-
-
-
-
 
