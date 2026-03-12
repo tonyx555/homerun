@@ -37,7 +37,7 @@ from models.database import (
 from utils.logger import get_logger
 from services.event_bus import event_bus
 from services.market_cache import CachedMarket
-from services.redis_streams import redis_streams
+from services.runtime_status import runtime_status
 from services.worker_state import (
     DB_RETRY_ATTEMPTS,
     _commit_with_retry,
@@ -105,7 +105,6 @@ DEFAULT_LIVE_MARKET_CONTEXT = {
     "max_history_points": 120,
     "timeout_seconds": 4.0,
     "strict_ws_pricing_only": True,
-    "allow_redis_strict_prices": True,
     "max_market_data_age_ms": 100,
 }
 DEFAULT_LIVE_PROVIDER_HEALTH = {
@@ -123,10 +122,6 @@ ACTIVE_POSITION_STATUS = "open"
 INACTIVE_POSITION_STATUS = "closed"
 ACTIVE_EXECUTION_SESSION_STATUSES = {"pending", "placing", "working", "partial", "hedging", "paused"}
 TERMINAL_EXECUTION_SESSION_STATUSES = {"completed", "failed", "cancelled", "expired", "skipped"}
-TRADER_ORDER_STATUS_HASH_KEY_PREFIX = "trader_order_status:"
-TRADER_ORDER_UPDATES_STREAM = "trader_order_updates"
-TRADER_ORDER_UPDATES_STREAM_MAXLEN = 200000
-TRADER_ORDER_STATUS_TTL_SECONDS = 14 * 24 * 60 * 60
 _TRADER_SCOPE_MODES = set(StrategySDK.TRADER_SCOPE_MODE_CANONICAL)
 _ORCHESTRATOR_SNAPSHOT_STALE_MULTIPLIER = 30.0
 _ORCHESTRATOR_SNAPSHOT_STALE_MIN_SECONDS = 120.0
@@ -297,9 +292,6 @@ def _normalize_live_market_context(value: Any) -> dict[str, Any]:
         ),
         "strict_ws_pricing_only": bool(
             source.get("strict_ws_pricing_only", DEFAULT_LIVE_MARKET_CONTEXT["strict_ws_pricing_only"])
-        ),
-        "allow_redis_strict_prices": bool(
-            source.get("allow_redis_strict_prices", DEFAULT_LIVE_MARKET_CONTEXT["allow_redis_strict_prices"])
         ),
         "max_market_data_age_ms": max(
             25,
@@ -2359,6 +2351,27 @@ async def read_orchestrator_control(session: AsyncSession) -> dict[str, Any]:
 
 
 async def read_orchestrator_snapshot(session: AsyncSession) -> dict[str, Any]:
+    runtime_snapshot = runtime_status.get_orchestrator()
+    if runtime_snapshot.get("updated_at") is not None:
+        stats = dict(runtime_snapshot.get("stats") or {})
+        return {
+            "id": ORCHESTRATOR_SNAPSHOT_ID,
+            "updated_at": runtime_snapshot.get("updated_at"),
+            "last_run_at": runtime_snapshot.get("last_run_at"),
+            "running": bool(runtime_snapshot.get("running")),
+            "enabled": bool(runtime_snapshot.get("enabled")),
+            "current_activity": runtime_snapshot.get("current_activity"),
+            "interval_seconds": int(runtime_snapshot.get("interval_seconds") or ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS),
+            "traders_total": int(stats.get("traders_total", 0) or 0),
+            "traders_running": int(stats.get("traders_running", 0) or 0),
+            "decisions_count": int(stats.get("decisions_count", 0) or 0),
+            "orders_count": int(stats.get("orders_count", 0) or 0),
+            "open_orders": int(stats.get("open_orders", 0) or 0),
+            "gross_exposure_usd": float(stats.get("gross_exposure_usd", 0.0) or 0.0),
+            "daily_pnl": float(stats.get("daily_pnl", 0.0) or 0.0),
+            "last_error": runtime_snapshot.get("last_error"),
+            "stats": stats,
+        }
     return _serialize_snapshot(await ensure_orchestrator_snapshot(session))
 
 
@@ -2433,6 +2446,15 @@ async def write_orchestrator_snapshot(
     last_error: Optional[str] = None,
     stats: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
+    runtime_status.update_orchestrator(
+        running=running,
+        enabled=enabled,
+        current_activity=current_activity,
+        interval_seconds=interval_seconds,
+        last_run_at=to_iso(last_run_at) if last_run_at is not None else None,
+        last_error=last_error,
+        stats=stats,
+    )
     row = await ensure_orchestrator_snapshot(session)
     row.updated_at = _now()
     row.running = bool(running)
@@ -3961,6 +3983,8 @@ async def reconcile_live_provider_orders(
         if str(order_id).strip()
     ]
     if not active_order_ids:
+        if commit and session.in_transaction():
+            await session.rollback()
         return {
             "trader_id": trader_id,
             "provider_ready": True,
@@ -4421,6 +4445,8 @@ async def reconcile_live_provider_orders(
         or tagged_payload_updates > 0
     ):
         await _commit_with_retry(session)
+    elif commit and session.in_transaction():
+        await session.rollback()
     elif not commit and (
         updated_orders > 0
         or updated_session_orders > 0
@@ -4452,37 +4478,6 @@ async def reconcile_live_provider_orders(
                 await event_bus.publish("execution_session", payload)
             except Exception:
                 continue
-
-        redis_rows: dict[str, dict[str, str]] = {}
-        for payload in order_payloads:
-            order_id = str(payload.get("id") or "").strip()
-            if not order_id:
-                continue
-            redis_rows[f"{TRADER_ORDER_STATUS_HASH_KEY_PREFIX}{order_id}"] = {
-                "id": order_id,
-                "trader_id": str(payload.get("trader_id") or ""),
-                "mode": str(payload.get("mode") or ""),
-                "status": str(payload.get("status") or ""),
-                "direction": str(payload.get("direction") or ""),
-                "market_id": str(payload.get("market_id") or ""),
-                "updated_at": str(payload.get("updated_at") or ""),
-                "effective_price": str(payload.get("effective_price") or ""),
-                "notional_usd": str(payload.get("notional_usd") or ""),
-                "provider_order_id": str(payload.get("provider_order_id") or ""),
-                "provider_clob_order_id": str(payload.get("provider_clob_order_id") or ""),
-            }
-
-        if redis_rows:
-            await redis_streams.hset_many(
-                redis_rows,
-                expire_seconds=TRADER_ORDER_STATUS_TTL_SECONDS,
-            )
-            for payload in order_payloads:
-                await redis_streams.append_json(
-                    TRADER_ORDER_UPDATES_STREAM,
-                    payload,
-                    maxlen=TRADER_ORDER_UPDATES_STREAM_MAXLEN,
-                )
 
     return {
         "trader_id": trader_id,
@@ -5039,6 +5034,8 @@ async def sync_trader_position_inventory(
 
     if commit and (inserts > 0 or updates > 0 or closures > 0):
         await _commit_with_retry(session)
+    elif commit and session.in_transaction():
+        await session.rollback()
 
     return {
         "trader_id": trader_id,
@@ -5099,7 +5096,7 @@ async def get_open_position_count_for_trader(
         TraderOrder.direction,
         TraderOrder.notional_usd,
         TraderOrder.payload_json,
-     ).where(TraderOrder.trader_id == trader_id).where(order_status_expr.in_(tuple(OPEN_ORDER_STATUSES)))
+    ).where(TraderOrder.trader_id == trader_id).where(order_status_expr.in_(tuple(OPEN_ORDER_STATUSES)))
     if mode is not None:
         mode_key = _normalize_mode_key(mode)
         if mode_key == "other":
@@ -5162,7 +5159,7 @@ async def get_open_market_ids_for_trader(
         TraderOrder.mode,
         TraderOrder.status,
         TraderOrder.market_id,
-     ).where(TraderOrder.trader_id == trader_id).where(order_status_expr.in_(tuple(OPEN_ORDER_STATUSES)))
+    ).where(TraderOrder.trader_id == trader_id).where(order_status_expr.in_(tuple(OPEN_ORDER_STATUSES)))
     if mode is not None:
         mode_key = _normalize_mode_key(mode)
         if mode_key == "other":
@@ -6212,57 +6209,57 @@ async def get_last_resolved_loss_at(
 
 
 async def compute_orchestrator_metrics(session: AsyncSession) -> dict[str, Any]:
-    traders_total = int((await session.execute(select(func.count(Trader.id)))).scalar() or 0)
-    traders_running = int(
-        (
-            await session.execute(
-                select(func.count(Trader.id)).where(
+    order_status_key = func.lower(func.trim(func.coalesce(TraderOrder.status, "")))
+    order_mode_key = func.lower(func.trim(func.coalesce(TraderOrder.mode, "")))
+    shadow_mode_keys = ("shadow", "paper")
+    open_order_filter = or_(
+        and_(order_mode_key.in_(shadow_mode_keys), order_status_key.in_(tuple(SHADOW_ACTIVE_ORDER_STATUSES))),
+        and_(order_mode_key == "live", order_status_key.in_(tuple(LIVE_ACTIVE_ORDER_STATUSES))),
+        and_(
+            order_mode_key.not_in(shadow_mode_keys + ("live",)),
+            order_status_key.in_(tuple(OPEN_ORDER_STATUSES)),
+        ),
+    )
+    active_execution_status_key = func.lower(func.trim(func.coalesce(ExecutionSession.status, "")))
+    metrics_row = (
+        await session.execute(
+            select(
+                select(func.count(Trader.id)).scalar_subquery().label("traders_total"),
+                select(func.count(Trader.id))
+                .where(
                     Trader.is_enabled == True,  # noqa: E712
                     Trader.is_paused == False,  # noqa: E712
                 )
+                .scalar_subquery()
+                .label("traders_running"),
+                select(func.count(TraderDecision.id)).scalar_subquery().label("decisions_count"),
+                select(func.count(TraderOrder.id)).scalar_subquery().label("orders_count"),
+                select(func.count(ExecutionSession.id)).scalar_subquery().label("execution_sessions_count"),
+                select(func.count(ExecutionSession.id))
+                .where(active_execution_status_key.in_(tuple(ACTIVE_EXECUTION_SESSION_STATUSES)))
+                .scalar_subquery()
+                .label("active_execution_sessions"),
+                select(func.count(TraderOrder.id))
+                .where(open_order_filter)
+                .scalar_subquery()
+                .label("open_orders"),
             )
-        ).scalar()
-        or 0
-    )
-    decisions_count = int((await session.execute(select(func.count(TraderDecision.id)))).scalar() or 0)
-    orders_count = int((await session.execute(select(func.count(TraderOrder.id)))).scalar() or 0)
-    execution_sessions_count = int((await session.execute(select(func.count(ExecutionSession.id)))).scalar() or 0)
-    active_execution_sessions = int(
-        (
-            await session.execute(
-                select(func.count(ExecutionSession.id)).where(
-                    func.lower(func.coalesce(ExecutionSession.status, "")).in_(tuple(ACTIVE_EXECUTION_SESSION_STATUSES))
-                )
-            )
-        ).scalar()
-        or 0
-    )
-    open_rows = (
-        await session.execute(
-            select(
-                TraderOrder.mode,
-                TraderOrder.status,
-                func.count(TraderOrder.id).label("count"),
-            ).group_by(TraderOrder.mode, TraderOrder.status)
         )
-    ).all()
-    open_orders = 0
-    for row in open_rows:
-        if _is_active_order_status(row.mode, row.status):
-            open_orders += int(row.count or 0)
+    ).one()
     daily_pnl = await get_daily_realized_pnl(session)
 
     return {
-        "traders_total": traders_total,
-        "traders_running": traders_running,
-        "decisions_count": decisions_count,
-        "orders_count": orders_count,
-        "execution_sessions_count": execution_sessions_count,
-        "active_execution_sessions": active_execution_sessions,
-        "open_orders": open_orders,
+        "traders_total": int(metrics_row.traders_total or 0),
+        "traders_running": int(metrics_row.traders_running or 0),
+        "decisions_count": int(metrics_row.decisions_count or 0),
+        "orders_count": int(metrics_row.orders_count or 0),
+        "execution_sessions_count": int(metrics_row.execution_sessions_count or 0),
+        "active_execution_sessions": int(metrics_row.active_execution_sessions or 0),
+        "open_orders": int(metrics_row.open_orders or 0),
         "gross_exposure_usd": await get_gross_exposure(session),
         "daily_pnl": daily_pnl,
     }
+
 
 
 async def compose_trader_orchestrator_config(session: AsyncSession) -> dict[str, Any]:
@@ -6319,12 +6316,6 @@ async def compose_trader_orchestrator_config(session: AsyncSession) -> dict[str,
                     live_market_context.get(
                         "strict_ws_pricing_only",
                         DEFAULT_LIVE_MARKET_CONTEXT["strict_ws_pricing_only"],
-                    )
-                ),
-                "allow_redis_strict_prices": bool(
-                    live_market_context.get(
-                        "allow_redis_strict_prices",
-                        DEFAULT_LIVE_MARKET_CONTEXT["allow_redis_strict_prices"],
                     )
                 ),
                 "max_market_data_age_ms": int(
@@ -6674,3 +6665,9 @@ async def get_serialized_execution_session_detail(
     session_id: str,
 ) -> dict[str, Any] | None:
     return await get_execution_session_detail(session, session_id)
+
+
+
+
+
+
