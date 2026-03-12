@@ -1440,13 +1440,27 @@ def _sync_order_runtime_payload(
     return payload
 
 
-def _active_order_notional_for_metrics(order: TraderOrder) -> float:
-    mode_key = _normalize_mode_key(order.mode)
-    if not _is_active_order_status(mode_key, order.status):
+def _active_order_notional_for_metrics_fields(
+    mode: Any,
+    status: Any,
+    notional_usd: Any,
+    payload_json: Any,
+) -> float:
+    mode_key = _normalize_mode_key(mode)
+    if not _is_active_order_status(mode_key, status):
         return 0.0
-    payload = dict(order.payload_json or {})
-    row_notional = safe_float(order.notional_usd, 0.0) or 0.0
-    return _live_active_notional(mode_key, order.status, row_notional, payload)
+    payload = dict(payload_json or {})
+    row_notional = safe_float(notional_usd, 0.0) or 0.0
+    return _live_active_notional(mode_key, status, row_notional, payload)
+
+
+def _active_order_notional_for_metrics(order: TraderOrder) -> float:
+    return _active_order_notional_for_metrics_fields(
+        mode=order.mode,
+        status=order.status,
+        notional_usd=order.notional_usd,
+        payload_json=order.payload_json,
+    )
 
 
 def _normalize_confidence_fraction(value: Any, default: float = 0.0) -> float:
@@ -6032,15 +6046,30 @@ async def get_trader_copy_analytics(
 
 
 async def get_gross_exposure(session: AsyncSession, mode: Optional[str] = None) -> float:
-    query = select(TraderOrder)
+    query = select(
+        TraderOrder.mode,
+        TraderOrder.status,
+        TraderOrder.notional_usd,
+        TraderOrder.payload_json,
+    )
     if mode is not None:
         mode_key = _normalize_mode_key(mode)
         if mode_key == "other":
             query = query.where(func.lower(func.coalesce(TraderOrder.mode, "")) == "")
         else:
             query = query.where(func.lower(func.coalesce(TraderOrder.mode, "")) == mode_key)
-    rows = list((await session.execute(query)).scalars().all())
-    return float(sum(_active_order_notional_for_metrics(row) for row in rows))
+    rows = (await session.execute(query)).all()
+    return float(
+        sum(
+            _active_order_notional_for_metrics_fields(
+                mode=row.mode,
+                status=row.status,
+                notional_usd=row.notional_usd,
+                payload_json=row.payload_json,
+            )
+            for row in rows
+        )
+    )
 
 
 async def get_realized_pnl(
