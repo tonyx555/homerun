@@ -5265,18 +5265,6 @@ async def get_open_order_summary_for_trader(session: AsyncSession, trader_id: st
         summary["total"] += count
     return summary
 
-
-def _pending_live_exit_is_non_terminal(
-    value: Any,
-    terminal_statuses: set[str] | None = None,
-) -> bool:
-    if not isinstance(value, dict):
-        return False
-    status_key = _normalize_status_key(value.get("status"))
-    terminal_set = terminal_statuses or set(DEFAULT_PENDING_LIVE_EXIT_GUARD["terminal_statuses"])
-    return status_key not in terminal_set
-
-
 async def get_pending_live_exit_summary_for_trader(
     session: AsyncSession,
     trader_id: str,
@@ -5296,27 +5284,43 @@ async def get_pending_live_exit_summary_for_trader(
             "identity_keys": [],
         }
 
-    status_key_expr = func.lower(func.coalesce(TraderOrder.status, ""))
-    rows = (
-        await session.execute(
-            select(
-                TraderOrder.id,
-                TraderOrder.status,
-                TraderOrder.market_id,
-                TraderOrder.direction,
-                TraderOrder.signal_id,
-                TraderOrder.payload_json,
-            )
-            .where(TraderOrder.trader_id == trader_id)
-            .where(func.lower(func.coalesce(TraderOrder.mode, "")) == "live")
-            .where(status_key_expr.in_(tuple(_active_statuses_for_mode("live"))))
-        )
-    ).all()
-
     configured_terminal_statuses = _normalize_pending_live_exit_terminal_statuses(
         list(terminal_statuses) if isinstance(terminal_statuses, (list, set, tuple)) else None
     )
     terminal_status_set = set(configured_terminal_statuses)
+
+    status_key_expr = func.lower(func.coalesce(TraderOrder.status, ""))
+    pending_live_exit_expr = TraderOrder.payload_json["pending_live_exit"]
+    pending_live_exit_status_expr = func.lower(
+        func.trim(
+            func.coalesce(
+                pending_live_exit_expr["status"].as_string(),
+                "",
+            )
+        )
+    )
+    rows = (
+        await session.execute(
+            select(
+                TraderOrder.id,
+                TraderOrder.market_id,
+                TraderOrder.direction,
+                TraderOrder.signal_id,
+                pending_live_exit_status_expr.label("pending_live_exit_status"),
+            )
+            .where(TraderOrder.trader_id == trader_id)
+            .where(func.lower(func.coalesce(TraderOrder.mode, "")) == "live")
+            .where(status_key_expr.in_(tuple(_active_statuses_for_mode("live"))))
+            .where(pending_live_exit_expr.is_not(None))
+            .where(
+                or_(
+                    pending_live_exit_status_expr == "",
+                    pending_live_exit_status_expr.not_in(tuple(terminal_status_set)),
+                )
+            )
+        )
+    ).all()
+
     order_ids: list[str] = []
     market_ids: set[str] = set()
     signal_ids: set[str] = set()
@@ -5324,15 +5328,11 @@ async def get_pending_live_exit_summary_for_trader(
     identities: list[dict[str, Any]] = []
     identity_keys: set[str] = set()
     for row in rows:
-        payload = dict(row.payload_json or {})
-        pending_live_exit = payload.get("pending_live_exit")
-        if not _pending_live_exit_is_non_terminal(pending_live_exit, terminal_status_set):
-            continue
         order_id = str(row.id or "").strip()
         market_id = str(row.market_id or "").strip()
         direction = str(row.direction or "").strip().lower()
         signal_id = str(row.signal_id or "").strip()
-        status_key = _normalize_status_key((pending_live_exit or {}).get("status")) or "unknown"
+        status_key = _normalize_status_key(row.pending_live_exit_status) or "unknown"
         statuses[status_key] = int(statuses.get(status_key, 0)) + 1
         if order_id:
             order_ids.append(order_id)
