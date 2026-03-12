@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import asyncpg
+import copy
+import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -312,6 +314,12 @@ _live_provider_block_event_cooldown_until: dict[str, datetime] = {}
 _live_risk_clamp_event_cooldown_until: dict[str, datetime] = {}
 _live_provider_reconcile_cache: dict[str, tuple[datetime, dict[str, Any]]] = {}
 _trader_maintenance_last_run: dict[str, datetime] = {}
+_TRADERS_SCOPE_CONTEXT_CACHE_TTL_SECONDS = 5.0
+_traders_scope_context_cache: dict[str, tuple[datetime, dict[str, Any]]] = {}
+
+
+def _traders_scope_cache_key(normalized_scope: dict[str, Any]) -> str:
+    return json.dumps(normalized_scope, sort_keys=True, separators=(",", ":"))
 
 
 def _prune_module_caches(active_trader_ids: set[str]) -> None:
@@ -2467,6 +2475,19 @@ def _apply_live_risk_clamps(
 
 async def _build_traders_scope_context(session: Any, traders_scope: dict[str, Any]) -> dict[str, Any]:
     normalized_scope = StrategySDK.validate_trader_scope_config(traders_scope)
+    now_utc = utcnow()
+
+    for key, (cached_at, _cached_context) in list(_traders_scope_context_cache.items()):
+        if (now_utc - cached_at).total_seconds() > _TRADERS_SCOPE_CONTEXT_CACHE_TTL_SECONDS:
+            _traders_scope_context_cache.pop(key, None)
+
+    scope_cache_key = _traders_scope_cache_key(normalized_scope)
+    cached_row = _traders_scope_context_cache.get(scope_cache_key)
+    if cached_row is not None:
+        cached_at, cached_context = cached_row
+        if (now_utc - cached_at).total_seconds() <= _TRADERS_SCOPE_CONTEXT_CACHE_TTL_SECONDS:
+            return copy.deepcopy(cached_context)
+
     modes = {
         str(mode or "").strip().lower() for mode in (normalized_scope.get("modes") or []) if str(mode or "").strip()
     }
@@ -2496,47 +2517,59 @@ async def _build_traders_scope_context(session: Any, traders_scope: dict[str, An
     pool_rows: list[Any] = []
     group_rows: list[Any] = []
 
-    if "tracked" in modes:
-        tracked_rows = list((await session.execute(select(TrackedWallet.address))).scalars().all())
+    try:
+        if "tracked" in modes:
+            tracked_rows = list((await session.execute(select(TrackedWallet.address))).scalars().all())
 
-    if "pool" in modes:
-        pool_rows = list(
-            (
-                await session.execute(
-                    select(DiscoveredWallet.address).where(DiscoveredWallet.in_top_pool == True)  # noqa: E712
-                )
-            )
-            .scalars()
-            .all()
-        )
-
-    if "group" in modes and list(normalized_scope.get("group_ids") or []):
-        group_rows = list(
-            (
-                await session.execute(
-                    select(TraderGroupMember.wallet_address).where(
-                        TraderGroupMember.group_id.in_(list(normalized_scope.get("group_ids") or []))
+        if "pool" in modes:
+            pool_rows = list(
+                (
+                    await session.execute(
+                        select(DiscoveredWallet.address).where(DiscoveredWallet.in_top_pool == True)  # noqa: E712
                     )
                 )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
+
+        if "group" in modes and list(normalized_scope.get("group_ids") or []):
+            group_rows = list(
+                (
+                    await session.execute(
+                        select(TraderGroupMember.wallet_address).where(
+                            TraderGroupMember.group_id.in_(list(normalized_scope.get("group_ids") or []))
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+        async with release_conn(session):
+            if tracked_rows:
+                tracked_wallets = await _normalize_scope_wallets(tracked_rows)
+            if pool_rows:
+                pool_wallets = await _normalize_scope_wallets(pool_rows)
+            if group_rows:
+                group_wallets = await _normalize_scope_wallets(group_rows)
+
+        context = StrategySDK.build_trader_scope_runtime_context(
+            normalized_scope,
+            tracked_wallets=tracked_wallets,
+            pool_wallets=pool_wallets,
+            group_wallets=group_wallets,
         )
-
-    async with release_conn(session):
-        if tracked_rows:
-            tracked_wallets = await _normalize_scope_wallets(tracked_rows)
-        if pool_rows:
-            pool_wallets = await _normalize_scope_wallets(pool_rows)
-        if group_rows:
-            group_wallets = await _normalize_scope_wallets(group_rows)
-
-    return StrategySDK.build_trader_scope_runtime_context(
-        normalized_scope,
-        tracked_wallets=tracked_wallets,
-        pool_wallets=pool_wallets,
-        group_wallets=group_wallets,
-    )
+        _traders_scope_context_cache[scope_cache_key] = (now_utc, dict(context))
+        return context
+    except Exception as exc:
+        stale = _traders_scope_context_cache.get(scope_cache_key)
+        if stale is not None:
+            logger.warning(
+                "Using cached traders scope context after refresh failure",
+                exc_info=exc,
+            )
+            return copy.deepcopy(stale[1])
+        raise
 
 
 def _signal_matches_traders_scope(signal: Any, scope_context: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
@@ -5979,4 +6012,3 @@ async def main(*, lane: str = _LANE_GENERAL, notifier_enabled: bool = True, writ
 
 if __name__ == "__main__":
     asyncio.run(main())
-
