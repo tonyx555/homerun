@@ -631,12 +631,14 @@ class ExecutionSessionEngine:
                     }
                 )
 
-        session_detail = await get_execution_session_detail(self.db, session_row.id)
-        session_view = session_detail["session"] if session_detail else {"unhedged_notional_usd": 0.0}
         pair_lock_enabled = requires_pair_lock(plan["policy"], constraints)
         max_unhedged = safe_float(constraints.get("max_unhedged_notional_usd"), 0.0)
         if pair_lock_enabled and max_unhedged > 0:
-            current_unhedged = safe_float(session_view.get("unhedged_notional_usd"), 0.0)
+            current_unhedged = safe_float(getattr(session_row, "unhedged_notional_usd", None), None)
+            if current_unhedged is None:
+                session_detail = await get_execution_session_detail(self.db, session_row.id)
+                session_view = session_detail["session"] if session_detail else {"unhedged_notional_usd": 0.0}
+                current_unhedged = safe_float(session_view.get("unhedged_notional_usd"), 0.0)
             if current_unhedged > max_unhedged:
                 violation_reason = (
                     f"Pair lock violation: unhedged notional {current_unhedged:.2f} exceeded {max_unhedged:.2f}."

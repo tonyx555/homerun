@@ -3364,47 +3364,36 @@ async def _refresh_execution_session_rollups(
     if row is None:
         return None
 
-    legs = (
-        (await session.execute(select(ExecutionSessionLeg).where(ExecutionSessionLeg.session_id == session_id)))
-        .scalars()
-        .all()
-    )
+    status_key = func.lower(func.coalesce(ExecutionSessionLeg.status, ""))
+    side_key = func.lower(func.coalesce(ExecutionSessionLeg.side, ""))
+    leg_notional = func.abs(func.coalesce(ExecutionSessionLeg.filled_notional_usd, 0.0))
+    failed_statuses = ("failed", "cancelled", "expired")
+    open_statuses = ("open", "submitted", "placing", "working", "partial", "hedging", "pending")
+    rollup_row = (
+        await session.execute(
+            select(
+                func.count(ExecutionSessionLeg.id).label("legs_total"),
+                func.sum(case((status_key == "completed", 1), else_=0)).label("legs_completed"),
+                func.sum(case((status_key.in_(failed_statuses), 1), else_=0)).label("legs_failed"),
+                func.sum(case((status_key.in_(open_statuses), 1), else_=0)).label("legs_open"),
+                func.sum(leg_notional).label("executed_notional_usd"),
+                func.sum(case((side_key == "sell", leg_notional), else_=0.0)).label("sell_notional_usd"),
+                func.sum(case((side_key == "sell", 0.0), else_=leg_notional)).label("buy_notional_usd"),
+            ).where(ExecutionSessionLeg.session_id == session_id)
+        )
+    ).one()
 
-    total = len(legs)
-    completed = 0
-    failed = 0
-    open_count = 0
-    buy_notional = 0.0
-    sell_notional = 0.0
-    executed_notional = 0.0
-
-    for leg in legs:
-        status_key = str(leg.status or "").strip().lower()
-        leg_notional = abs(safe_float(leg.filled_notional_usd, 0.0))
-        executed_notional += leg_notional
-        side_key = str(leg.side or "").strip().lower()
-        if side_key == "sell":
-            sell_notional += leg_notional
-        else:
-            buy_notional += leg_notional
-
-        if status_key == "completed":
-            completed += 1
-        elif status_key in {"failed", "cancelled", "expired"}:
-            failed += 1
-        elif status_key in {"open", "submitted", "placing", "working", "partial", "hedging", "pending"}:
-            open_count += 1
-
-    row.legs_total = total
-    row.legs_completed = completed
-    row.legs_failed = failed
-    row.legs_open = open_count
-    row.executed_notional_usd = executed_notional
+    row.legs_total = safe_int(rollup_row.legs_total, 0)
+    row.legs_completed = safe_int(rollup_row.legs_completed, 0)
+    row.legs_failed = safe_int(rollup_row.legs_failed, 0)
+    row.legs_open = safe_int(rollup_row.legs_open, 0)
+    row.executed_notional_usd = safe_float(rollup_row.executed_notional_usd, 0.0)
+    buy_notional = safe_float(rollup_row.buy_notional_usd, 0.0)
+    sell_notional = safe_float(rollup_row.sell_notional_usd, 0.0)
     row.unhedged_notional_usd = abs(buy_notional - sell_notional)
     row.updated_at = _now()
     await session.flush()
     return row
-
 
 async def create_execution_session(
     session: AsyncSession,
