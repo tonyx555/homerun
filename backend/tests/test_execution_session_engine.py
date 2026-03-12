@@ -392,7 +392,7 @@ async def test_reconcile_active_sessions_escalates_hedging_timeout(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_cancel_session_skips_already_terminal_trader_orders(monkeypatch):
-    db = SimpleNamespace(commit=AsyncMock(), get=AsyncMock())
+    db = SimpleNamespace(commit=AsyncMock(), execute=AsyncMock())
     engine = session_engine_module.ExecutionSessionEngine(db)
 
     session_detail = {
@@ -408,6 +408,7 @@ async def test_cancel_session_skips_already_terminal_trader_orders(monkeypatch):
         "legs": [],
     }
     terminal_order = SimpleNamespace(
+        id="order-1",
         status="cancelled",
         payload_json={},
         reason="cleanup:max_open_order_timeout:crypto",
@@ -415,7 +416,11 @@ async def test_cancel_session_skips_already_terminal_trader_orders(monkeypatch):
         executed_at=None,
         updated_at=None,
     )
-    db.get = AsyncMock(return_value=terminal_order)
+    db.execute = AsyncMock(
+        return_value=SimpleNamespace(
+            scalars=lambda: SimpleNamespace(all=lambda: [terminal_order])
+        )
+    )
 
     monkeypatch.setattr(
         session_engine_module,
@@ -443,7 +448,7 @@ async def test_cancel_session_skips_already_terminal_trader_orders(monkeypatch):
 
     assert result is True
     assert cancel_provider_mock.await_count == 0
-    assert db.get.await_count == 1
+    assert db.execute.await_count == 1
     assert update_leg_mock.await_count == 0
     assert update_status_mock.await_count == 1
     assert set_signal_status_mock.await_count == 1

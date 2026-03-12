@@ -1129,6 +1129,23 @@ class ExecutionSessionEngine:
                 except Exception:
                     provider_snapshots = {}
 
+        trader_orders_by_id: dict[str, TraderOrder] = {}
+        trader_order_ids = sorted(
+            {
+                str(order.get("trader_order_id") or "").strip()
+                for order in detail.get("orders", [])
+                if str(order.get("status") or "").strip().lower() in {"open", "submitted"}
+                and str(order.get("trader_order_id") or "").strip()
+            }
+        )
+        if trader_order_ids:
+            trader_order_rows = (
+                await self.db.execute(
+                    select(TraderOrder).where(TraderOrder.id.in_(trader_order_ids))
+                )
+            ).scalars().all()
+            trader_orders_by_id = {str(row.id): row for row in trader_order_rows}
+
         updated_trader_orders: list[TraderOrder] = []
         filled_leg_ids: set[str] = set()
         total_orders_processed = 0
@@ -1138,7 +1155,7 @@ class ExecutionSessionEngine:
             if status_key not in {"open", "submitted"}:
                 continue
             trader_order_id = str(order.get("trader_order_id") or "").strip()
-            trader_order = await self.db.get(TraderOrder, trader_order_id) if trader_order_id else None
+            trader_order = trader_orders_by_id.get(trader_order_id) if trader_order_id else None
             if trader_order is not None:
                 local_status_key = str(trader_order.status or "").strip().lower()
                 if local_status_key not in {"open", "submitted", "executed"}:
