@@ -2744,15 +2744,40 @@ async def _run_terminal_stale_order_watchdog(session: Any, *, now: datetime | No
     _terminal_stale_order_last_checked_at = now_utc
 
     status_key_expr = func.lower(func.coalesce(TraderOrder.status, ""))
-    candidates = (
-        (
-            await session.execute(
-                select(TraderOrder).where(status_key_expr.in_(tuple(_ACTIVE_ORDER_STATUSES))).limit(2000)
-            )
+    age_anchor_expr = func.coalesce(TraderOrder.executed_at, TraderOrder.updated_at, TraderOrder.created_at)
+    raw_result = await session.execute(
+        select(
+            TraderOrder.id,
+            TraderOrder.trader_id,
+            TraderOrder.mode,
+            TraderOrder.status,
+            TraderOrder.market_id,
+            TraderOrder.executed_at,
+            TraderOrder.updated_at,
+            TraderOrder.created_at,
         )
-        .scalars()
-        .all()
+        .where(status_key_expr.in_(tuple(_ACTIVE_ORDER_STATUSES)))
+        .order_by(age_anchor_expr.asc())
+        .limit(2000)
     )
+    raw_rows = list(raw_result.all())
+    candidates: list[Any] = []
+    if raw_rows and hasattr(raw_rows[0], "_mapping"):
+        candidates = [
+            SimpleNamespace(
+                id=row._mapping["id"],
+                trader_id=row._mapping["trader_id"],
+                mode=row._mapping["mode"],
+                status=row._mapping["status"],
+                market_id=row._mapping["market_id"],
+                executed_at=row._mapping["executed_at"],
+                updated_at=row._mapping["updated_at"],
+                created_at=row._mapping["created_at"],
+            )
+            for row in raw_rows
+        ]
+    elif raw_rows:
+        candidates = list(raw_rows)
     if not candidates:
         return {"checked": True, "stale": 0, "alerted": 0}
 
