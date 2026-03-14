@@ -284,6 +284,15 @@ class TelegramNotifier:
             await self._http_client.aclose()
             self._http_client = None
 
+    async def _replace_http_client(self) -> None:
+        existing_client = self._http_client
+        self._http_client = httpx.AsyncClient(timeout=15.0)
+        if existing_client is not None:
+            try:
+                await existing_client.aclose()
+            except Exception:
+                pass
+
     async def _load_settings(self) -> None:
         """Load notifier configuration from DB with environment fallback."""
         row: Optional[AppSettings] = None
@@ -1216,6 +1225,10 @@ class TelegramNotifier:
         except asyncio.CancelledError:
             raise
         except httpx.TimeoutException:
+            return []
+        except httpx.NetworkError as exc:
+            logger.warning("Telegram getUpdates network error (%s); resetting HTTP client", type(exc).__name__)
+            await self._replace_http_client()
             return []
         except Exception as exc:
             logger.error("Failed to poll Telegram updates", exc_info=exc)

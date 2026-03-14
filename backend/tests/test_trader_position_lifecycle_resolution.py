@@ -84,6 +84,32 @@ async def _seed_order(
 
 
 @pytest.mark.asyncio
+async def test_load_market_info_for_orders_uses_payload_aliases_when_market_id_is_numeric(monkeypatch):
+    order = TraderOrder(
+        id="order-alias-load",
+        trader_id="trader-1",
+        market_id="1456183",
+        payload_json={
+            "token_id": "114272436076579993156006679750078555145975747668079881983093157238223214149562",
+            "live_market": {
+                "condition_id": "0x2baff1bf5e4771cc3728df56a825374733f3c9b3faa8da72e0572419f17efaa8",
+                "selected_token_id": "114272436076579993156006679750078555145975747668079881983093157238223214149562",
+            },
+        },
+    )
+    expected = {"id": "1456183", "closed": True, "accepting_orders": False, "outcome_prices": [0.0, 1.0]}
+    get_by_condition = AsyncMock(return_value=expected)
+    get_by_token = AsyncMock(return_value=None)
+    monkeypatch.setattr(position_lifecycle.polymarket_client, "get_market_by_condition_id", get_by_condition)
+    monkeypatch.setattr(position_lifecycle.polymarket_client, "get_market_by_token_id", get_by_token)
+
+    result = await position_lifecycle.load_market_info_for_orders([order])
+
+    assert result["1456183"] == expected
+    get_by_condition.assert_awaited()
+
+
+@pytest.mark.asyncio
 async def test_reconcile_infers_resolution_from_settled_prices_when_terminal(tmp_path, monkeypatch):
     engine, session_factory = await _build_session_factory(tmp_path)
     try:
@@ -1121,6 +1147,262 @@ async def test_live_pending_exit_does_not_close_when_fill_threshold_met_but_prov
             pending_exit = (order.payload_json or {}).get("pending_live_exit", {})
             assert pending_exit.get("status") == "submitted"
             assert (order.payload_json or {}).get("position_close") is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_live_blocked_retry_exhausted_resolves_when_market_is_terminal(tmp_path, monkeypatch):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    try:
+        async with session_factory() as session:
+            await _seed_order(
+                session,
+                mode="live",
+                status="executed",
+                payload_json={
+                    "token_id": "token-1",
+                    "provider_reconciliation": {
+                        "filled_size": 5.0,
+                        "average_fill_price": 0.4,
+                        "filled_notional_usd": 2.0,
+                    },
+                    "pending_live_exit": {
+                        "status": "blocked_retry_exhausted",
+                        "provider_status": "open",
+                    },
+                },
+            )
+            monkeypatch.setattr(
+                position_lifecycle,
+                "load_market_info_for_orders",
+                AsyncMock(
+                    return_value={
+                        "market-1": {
+                            "closed": True,
+                            "accepting_orders": False,
+                            "winner": None,
+                            "winning_outcome": None,
+                            "outcome_prices": [1.0, 0.0],
+                        }
+                    }
+                ),
+            )
+
+            result = await position_lifecycle.reconcile_live_positions(
+                session,
+                trader_id="trader-1",
+                trader_params={},
+                dry_run=False,
+                force_mark_to_market=True,
+            )
+            order = await session.get(TraderOrder, "order-1")
+
+            assert result["closed"] == 1
+            assert order is not None
+            assert order.status == "resolved_win"
+            assert (order.payload_json or {}).get("pending_live_exit", {}).get("status") == "superseded_resolution"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_live_unfilled_terminal_order_is_cancelled(tmp_path, monkeypatch):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    try:
+        async with session_factory() as session:
+            await _seed_order(
+                session,
+                mode="live",
+                status="open",
+                payload_json={
+                    "token_id": "token-1",
+                    "provider_reconciliation": {
+                        "filled_size": 0.0,
+                        "average_fill_price": 0.0,
+                        "filled_notional_usd": 0.0,
+                    },
+                },
+            )
+            monkeypatch.setattr(
+                position_lifecycle,
+                "load_market_info_for_orders",
+                AsyncMock(
+                    return_value={
+                        "market-1": {
+                            "closed": True,
+                            "accepting_orders": False,
+                            "winner": None,
+                            "winning_outcome": None,
+                            "outcome_prices": [0.0, 1.0],
+                        }
+                    }
+                ),
+            )
+
+            result = await position_lifecycle.reconcile_live_positions(
+                session,
+                trader_id="trader-1",
+                trader_params={},
+                dry_run=False,
+                force_mark_to_market=True,
+            )
+            order = await session.get(TraderOrder, "order-1")
+
+            assert result["closed"] == 1
+            assert order is not None
+            assert order.status == "cancelled"
+            assert (order.payload_json or {}).get("position_close", {}).get("close_trigger") == "terminal_unfilled_cancel"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_live_exit_blocks_no_inventory_after_pre_submit_gate_failure(tmp_path, monkeypatch):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    try:
+        async with session_factory() as session:
+            await _seed_order(
+                session,
+                mode="live",
+                status="open",
+                payload_json={
+                    "token_id": "token-1",
+                    "provider_reconciliation": {
+                        "filled_size": 11.32,
+                        "average_fill_price": 0.4,
+                        "filled_notional_usd": 4.528,
+                    },
+                },
+            )
+            monkeypatch.setattr(
+                position_lifecycle,
+                "load_market_info_for_orders",
+                AsyncMock(
+                    return_value={
+                        "market-1": {
+                            "closed": False,
+                            "accepting_orders": True,
+                            "winner": None,
+                            "winning_outcome": None,
+                            "outcome_prices": [0.45, 0.55],
+                        }
+                    }
+                ),
+            )
+            monkeypatch.setattr(
+                position_lifecycle,
+                "_load_execution_wallet_positions_by_token",
+                AsyncMock(return_value={}),
+            )
+            monkeypatch.setattr(
+                position_lifecycle,
+                "_load_execution_wallet_recent_sell_trades_by_token",
+                AsyncMock(return_value={}),
+            )
+            execute_mock = AsyncMock(
+                return_value=SimpleNamespace(
+                    status="failed",
+                    error_message=(
+                        "SELL pre-submit gate failed: not enough conditional token balance/allowance. "
+                        "token_id=token-1 required_shares=11.32 available_shares=0 shortfall_shares=11.32 "
+                        "balance_shares=0 allowance_shares=1 signature_type=1 funder_wallet=0xabc"
+                    ),
+                    order_id=None,
+                    payload={},
+                )
+            )
+            monkeypatch.setattr("services.live_execution_adapter.execute_live_order", execute_mock)
+
+            result = await position_lifecycle.reconcile_live_positions(
+                session,
+                trader_id="trader-1",
+                trader_params={"live_max_hold_minutes": 0.0},
+                dry_run=False,
+            )
+            order = await session.get(TraderOrder, "order-1")
+
+            assert result["closed"] == 0
+            assert order is not None
+            pending_exit = (order.payload_json or {}).get("pending_live_exit", {})
+            assert pending_exit.get("status") == "blocked_no_inventory"
+            assert pending_exit.get("next_retry_at") is None
+            assert pending_exit.get("retry_count") == 1
+            assert pending_exit.get("last_error", "")
+            assert execute_mock.await_count == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_live_blocked_no_inventory_does_not_resubmit_exit(tmp_path, monkeypatch):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    try:
+        async with session_factory() as session:
+            await _seed_order(
+                session,
+                mode="live",
+                status="open",
+                payload_json={
+                    "token_id": "token-1",
+                    "provider_reconciliation": {
+                        "filled_size": 11.32,
+                        "average_fill_price": 0.4,
+                        "filled_notional_usd": 4.528,
+                    },
+                    "pending_live_exit": {
+                        "status": "blocked_no_inventory",
+                        "close_trigger": "strategy:Smart take profit near max",
+                        "close_price": 0.45,
+                        "exit_size": 11.32,
+                        "retry_count": 1,
+                        "last_error": "available_shares=0 balance_shares=0",
+                        "last_attempt_at": "2099-01-01T00:00:00Z",
+                    },
+                },
+            )
+            monkeypatch.setattr(
+                position_lifecycle,
+                "load_market_info_for_orders",
+                AsyncMock(
+                    return_value={
+                        "market-1": {
+                            "closed": False,
+                            "accepting_orders": True,
+                            "winner": None,
+                            "winning_outcome": None,
+                            "outcome_prices": [0.45, 0.55],
+                        }
+                    }
+                ),
+            )
+            monkeypatch.setattr(
+                position_lifecycle,
+                "_load_execution_wallet_positions_by_token",
+                AsyncMock(return_value={}),
+            )
+            monkeypatch.setattr(
+                position_lifecycle,
+                "_load_execution_wallet_recent_sell_trades_by_token",
+                AsyncMock(return_value={}),
+            )
+            execute_mock = AsyncMock()
+            monkeypatch.setattr("services.live_execution_adapter.execute_live_order", execute_mock)
+
+            result = await position_lifecycle.reconcile_live_positions(
+                session,
+                trader_id="trader-1",
+                trader_params={"live_max_hold_minutes": 0.0},
+                dry_run=False,
+            )
+            order = await session.get(TraderOrder, "order-1")
+
+            assert result["closed"] == 0
+            assert result["held"] >= 1
+            assert order is not None
+            pending_exit = (order.payload_json or {}).get("pending_live_exit", {})
+            assert pending_exit.get("status") == "blocked_no_inventory"
+            assert execute_mock.await_count == 0
     finally:
         await engine.dispose()
 

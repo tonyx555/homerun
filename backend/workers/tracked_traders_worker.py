@@ -12,9 +12,12 @@ import os
 from datetime import timedelta
 from typing import Any, Awaitable, Callable, TypeVar
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.orm import sessionmaker
 
+from config import settings
 from utils.utcnow import utcnow
-from models.database import AsyncSessionLocal, AppSettings
+from models.database import AppSettings, RetryableAsyncSession
 from services.data_events import DataEvent, EventType
 from services.event_dispatcher import event_dispatcher
 from services.insider_detector import insider_detector
@@ -38,6 +41,43 @@ from utils.logger import setup_logging
 
 setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"), json_format=False)
 logger = logging.getLogger("tracked_traders_worker")
+
+_TRACKED_TRADERS_DB_POOL_SIZE = max(
+    1,
+    min(4, int(max(1, int(getattr(settings, "DATABASE_WORKER_POOL_SIZE", 8) or 8)) / 2)),
+)
+_TRACKED_TRADERS_DB_MAX_OVERFLOW = 0
+_tracked_traders_engine = create_async_engine(
+    settings.DATABASE_URL,
+    pool_pre_ping=True,
+    pool_size=_TRACKED_TRADERS_DB_POOL_SIZE,
+    max_overflow=_TRACKED_TRADERS_DB_MAX_OVERFLOW,
+    pool_timeout=max(1, int(getattr(settings, "DATABASE_POOL_TIMEOUT_SECONDS", 30) or 30)),
+    pool_recycle=max(30, int(getattr(settings, "DATABASE_POOL_RECYCLE_SECONDS", 300) or 300)),
+    pool_use_lifo=True,
+    connect_args={
+        "timeout": float(max(1.0, float(getattr(settings, "DATABASE_CONNECT_TIMEOUT_SECONDS", 8.0) or 8.0))),
+        "command_timeout": float(
+            max(
+                5.0,
+                float(getattr(settings, "DATABASE_POOL_TIMEOUT_SECONDS", 30) or 30),
+                (float(getattr(settings, "DATABASE_STATEMENT_TIMEOUT_MS", 30000) or 30000) / 1000.0) + 5.0,
+            )
+        ),
+        "server_settings": {
+            "timezone": "UTC",
+            "statement_timeout": str(max(1000, int(getattr(settings, "DATABASE_STATEMENT_TIMEOUT_MS", 30000) or 30000))),
+            "idle_in_transaction_session_timeout": str(
+                max(1000, int(getattr(settings, "DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS", 60000) or 60000))
+            ),
+        },
+    },
+)
+AsyncSessionLocal = sessionmaker(
+    _tracked_traders_engine,
+    class_=RetryableAsyncSession,
+    expire_on_commit=False,
+)
 
 
 FULL_SWEEP_INTERVAL = timedelta(minutes=30)
@@ -64,10 +104,20 @@ _CANCEL_GRACE_SECONDS = 5.0
 # session cleanup naturally instead of being GC'd mid-flight (which causes
 # the SAWarning "connection was garbage collected" leak).
 _abandoned_tasks: set[asyncio.Task] = set()
+_inflight_timed_tasks: dict[str, asyncio.Task] = {}
+
+
+class _TimedTaskStillRunningError(RuntimeError):
+    pass
 
 
 def _discard_abandoned(task: asyncio.Task) -> None:
     _abandoned_tasks.discard(task)
+
+
+def _clear_inflight_timed_task(label: str, task: asyncio.Task) -> None:
+    if _inflight_timed_tasks.get(label) is task:
+        _inflight_timed_tasks.pop(label, None)
 
 
 async def _graceful_timeout(coro, *, timeout: float, label: str):
@@ -85,7 +135,13 @@ async def _graceful_timeout(coro, *, timeout: float, label: str):
     alive in ``_abandoned_tasks`` so it can complete and return its DB
     connection to the pool, rather than being GC'd.
     """
-    task = asyncio.create_task(coro)
+    existing = _inflight_timed_tasks.get(label)
+    if existing is not None and not existing.done():
+        raise _TimedTaskStillRunningError(label)
+
+    task = asyncio.create_task(coro, name=f"tracked-traders-{label}")
+    _inflight_timed_tasks[label] = task
+    task.add_done_callback(lambda done_task, step_label=label: _clear_inflight_timed_task(step_label, done_task))
 
     try:
         done, _ = await asyncio.wait({task}, timeout=timeout)
@@ -158,6 +214,8 @@ async def _run_with_retryable_db_retries(
     for attempt in range(_RETRYABLE_DB_ATTEMPTS):
         try:
             return await operation()
+        except _TimedTaskStillRunningError:
+            raise
         except asyncio.TimeoutError:
             raise
         except Exception as exc:
@@ -278,11 +336,10 @@ async def _run_loop() -> None:
     try:
         async with AsyncSessionLocal() as session:
             await ensure_all_strategies_seeded(session)
-            await refresh_strategy_runtime_if_needed(
-                session,
-                source_keys=["traders"],
-                force=True,
-            )
+        await refresh_strategy_runtime_if_needed(
+            source_keys=["traders"],
+            force=True,
+        )
     except Exception as exc:
         logger.warning("Tracked-traders strategy startup sync failed: %s", exc)
 
@@ -321,13 +378,12 @@ async def _run_loop() -> None:
     while True:
         async with AsyncSessionLocal() as session:
             control = await read_worker_control(session, worker_name, default_interval=30)
-            try:
-                await refresh_strategy_runtime_if_needed(
-                    session,
-                    source_keys=["traders"],
-                )
-            except Exception as exc:
-                logger.warning("Tracked-traders strategy refresh check failed: %s", exc)
+        try:
+            await refresh_strategy_runtime_if_needed(
+                source_keys=["traders"],
+            )
+        except Exception as exc:
+            logger.warning("Tracked-traders strategy refresh check failed: %s", exc)
 
         interval = max(10, min(3600, int(control.get("interval_seconds") or 60)))
         paused = bool(control.get("is_paused", False))
@@ -437,6 +493,9 @@ async def _run_loop() -> None:
                         "full_sweep",
                         lambda: _graceful_timeout(smart_wallet_pool.run_full_sweep(), timeout=180, label="full_sweep"),
                     )
+                except _TimedTaskStillRunningError:
+                    activity_labels.append("full_sweep_still_running")
+                    logger.warning("Tracked-traders full_sweep skipped because prior run is still finishing")
                 except asyncio.TimeoutError:
                     activity_labels.append("full_sweep_timeout")
                     logger.warning("Tracked-traders full_sweep timed out after 180s")
@@ -448,12 +507,17 @@ async def _run_loop() -> None:
                     await _run_with_retryable_db_retries(
                         "incremental_refresh",
                         lambda: _graceful_timeout(
-                            smart_wallet_pool.run_incremental_refresh(), timeout=90, label="incremental_refresh"
+                            smart_wallet_pool.run_incremental_refresh(), timeout=150, label="incremental_refresh"
                         ),
+                    )
+                except _TimedTaskStillRunningError:
+                    activity_labels.append("incremental_refresh_still_running")
+                    logger.warning(
+                        "Tracked-traders incremental_refresh skipped because prior run is still finishing"
                     )
                 except asyncio.TimeoutError:
                     activity_labels.append("incremental_refresh_timeout")
-                    logger.warning("Tracked-traders incremental_refresh timed out after 90s")
+                    logger.warning("Tracked-traders incremental_refresh timed out after 150s")
                 next_incremental = now + incremental_refresh_interval
 
             if requested or now >= next_reconcile:
@@ -464,6 +528,11 @@ async def _run_loop() -> None:
                         lambda: _graceful_timeout(
                             smart_wallet_pool.reconcile_activity(), timeout=45, label="activity_reconcile"
                         ),
+                    )
+                except _TimedTaskStillRunningError:
+                    activity_labels.append("activity_reconcile_still_running")
+                    logger.warning(
+                        "Tracked-traders activity_reconcile skipped because prior run is still finishing"
                     )
                 except asyncio.TimeoutError:
                     activity_labels.append("activity_reconcile_timeout")
@@ -477,6 +546,9 @@ async def _run_loop() -> None:
                         "pool_recompute",
                         lambda: _graceful_timeout(smart_wallet_pool.recompute_pool(), timeout=90, label="pool_recompute"),
                     )
+                except _TimedTaskStillRunningError:
+                    activity_labels.append("pool_recompute_still_running")
+                    logger.warning("Tracked-traders pool_recompute skipped because prior run is still finishing")
                 except asyncio.TimeoutError:
                     activity_labels.append("pool_recompute_timeout")
                     logger.warning("Tracked-traders pool_recompute timed out after 90s")
@@ -490,6 +562,9 @@ async def _run_loop() -> None:
                         wallet_intelligence.confluence.scan_for_confluence(), timeout=45, label="confluence_scan"
                     ),
                 )
+            except _TimedTaskStillRunningError:
+                activity_labels.append("confluence_scan_still_running")
+                logger.warning("Tracked-traders confluence_scan skipped because prior run is still finishing")
             except asyncio.TimeoutError:
                 activity_labels.append("confluence_scan_timeout")
                 logger.warning("Tracked-traders confluence_scan timed out after 45s")
@@ -608,11 +683,14 @@ async def _run_loop() -> None:
                 try:
                     await _run_with_retryable_db_retries(
                         "full_intelligence",
-                        lambda: _graceful_timeout(wallet_intelligence.run_full_analysis(), timeout=180, label="full_intelligence"),
+                        lambda: _graceful_timeout(wallet_intelligence.run_full_analysis(include_confluence=False), timeout=300, label="full_intelligence"),
                     )
+                except _TimedTaskStillRunningError:
+                    activity_labels.append("full_intelligence_still_running")
+                    logger.warning("Tracked-traders full_intelligence skipped because prior run is still finishing")
                 except asyncio.TimeoutError:
                     activity_labels.append("full_intelligence_timeout")
-                    logger.warning("Tracked-traders full_intelligence timed out after 180s")
+                    logger.warning("Tracked-traders full_intelligence timed out after 300s")
                 except Exception as exc:
                     if _is_retryable_db_error(exc):
                         activity_labels.append("full_intelligence_db_contention")
@@ -633,6 +711,9 @@ async def _run_loop() -> None:
                     )
                     insider_flagged = int(rescore.get("flagged_insiders") or 0)
                     last_insider_flagged = insider_flagged
+                except _TimedTaskStillRunningError:
+                    activity_labels.append("insider_rescore_still_running")
+                    logger.warning("Tracked-traders insider_rescore skipped because prior run is still finishing")
                 except asyncio.TimeoutError:
                     activity_labels.append("insider_rescore_timeout")
                     logger.warning("Tracked-traders insider rescore timed out after 90s")
@@ -730,3 +811,4 @@ async def start_loop() -> None:
         await _run_loop()
     except asyncio.CancelledError:
         logger.info("Tracked-traders worker shutting down")
+

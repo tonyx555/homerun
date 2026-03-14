@@ -1608,6 +1608,31 @@ export interface TraderDecisionFailedCheck {
   created_at: string | null
 }
 
+export interface ExecutionLatencyPercentiles {
+  p50: number | null
+  p95: number | null
+  p99: number | null
+}
+
+export interface ExecutionLatencyBucket {
+  count: number
+  emit_to_queue_wake_ms: ExecutionLatencyPercentiles
+  wake_to_context_ready_ms: ExecutionLatencyPercentiles
+  context_ready_to_decision_ms: ExecutionLatencyPercentiles
+  decision_to_submit_start_ms: ExecutionLatencyPercentiles
+  submit_start_to_provider_ack_ms: ExecutionLatencyPercentiles
+  emit_to_submit_start_ms: ExecutionLatencyPercentiles
+}
+
+export interface ExecutionLatencySummary {
+  internal_sla_definition: string
+  internal_sla_target_ms: number
+  overall: ExecutionLatencyBucket
+  by_source: Record<string, ExecutionLatencyBucket>
+  by_strategy: Record<string, ExecutionLatencyBucket>
+  by_trader: Record<string, ExecutionLatencyBucket>
+}
+
 export interface TraderOrchestratorOverview {
   control: {
     is_enabled: boolean
@@ -1654,8 +1679,14 @@ export interface TraderOrchestratorOverview {
     open_orders: number
     gross_exposure_usd: number
     daily_pnl: number
+    execution_latency?: ExecutionLatencySummary
   }
-  traders: Trader[]
+  traders?: Trader[]
+}
+
+export interface TraderOrchestratorControlResponse {
+  status: string
+  control?: Partial<TraderOrchestratorOverview['control']>
 }
 
 export interface TraderOrchestratorStatus {
@@ -1792,21 +1823,17 @@ export const getTraderOrchestratorStatus = async (): Promise<TraderOrchestratorS
 export const startTraderOrchestrator = async (payload?: {
   mode?: string
   requested_by?: string
-}): Promise<{ status: string; mode: string; message: string }> => {
+}): Promise<TraderOrchestratorControlResponse> => {
   const { data } = await api.post('/trader-orchestrator/start', {
     mode: payload?.mode || 'shadow',
     requested_by: payload?.requested_by,
   })
-  return {
-    status: data.status || 'started',
-    mode: data.control?.mode || payload?.mode || 'shadow',
-    message: 'Trader orchestrator start command submitted.',
-  }
+  return unwrapApiData(data)
 }
 
-export const stopTraderOrchestrator = async (): Promise<{ status: string }> => {
+export const stopTraderOrchestrator = async (): Promise<TraderOrchestratorControlResponse> => {
   const { data } = await api.post('/trader-orchestrator/stop')
-  return { status: data.status || 'stopped' }
+  return unwrapApiData(data)
 }
 
 export const runTraderOrchestratorLivePreflight = async (payload?: {
@@ -2436,7 +2463,7 @@ export const adoptTraderLiveWalletPosition = async (
 
 export const getAllTraderOrders = async (limit = 2000): Promise<TraderOrder[]> => {
   const { data } = await api.get('/traders/orders/all', {
-    params: { limit: Math.max(1, Math.trunc(Number(limit) || 2000)) },
+    params: { limit: Math.max(1, Math.trunc(Number(limit) || 2000)), reconcile_live: false },
   })
   return data.orders || []
 }

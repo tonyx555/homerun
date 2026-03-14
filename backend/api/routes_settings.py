@@ -2681,7 +2681,7 @@ async def import_settings_bundle(request: SettingsImportRequest):
             if SettingsTransferCategory.STRATEGIES.value in categories:
                 from services.strategy_loader import strategy_loader
 
-                refresh_result = await strategy_loader.refresh_all_from_db(session=session)
+                refresh_result = await strategy_loader.refresh_all_from_db()
                 results["strategies_runtime"] = {
                     "loaded": len(refresh_result.get("loaded", [])),
                     "errors": len((refresh_result.get("errors") or {}).keys()),
@@ -2690,7 +2690,7 @@ async def import_settings_bundle(request: SettingsImportRequest):
             if SettingsTransferCategory.DATA_SOURCES.value in categories:
                 from services.data_source_loader import data_source_loader
 
-                refresh_result = await data_source_loader.refresh_all_from_db(session=session)
+                refresh_result = await data_source_loader.refresh_all_from_db()
                 results["data_sources_runtime"] = {
                     "loaded": len(refresh_result.get("loaded", [])),
                     "errors": len((refresh_result.get("errors") or {}).keys()),

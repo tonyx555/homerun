@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -33,6 +32,22 @@ logger = logging.getLogger("market_universe_worker")
 
 _IDLE_SLEEP_SECONDS = 5
 _MAX_CONSECUTIVE_DB_FAILURES = 3
+_CANCEL_GRACE_SECONDS = 5.0
+_abandoned_tasks: set[asyncio.Task] = set()
+_inflight_timed_tasks: dict[str, asyncio.Task] = {}
+
+
+class _TimedTaskStillRunningError(RuntimeError):
+    pass
+
+
+def _discard_abandoned(task: asyncio.Task) -> None:
+    _abandoned_tasks.discard(task)
+
+
+def _clear_inflight_timed_task(label: str, task: asyncio.Task) -> None:
+    if _inflight_timed_tasks.get(label) is task:
+        _inflight_timed_tasks.pop(label, None)
 
 
 async def _read_catalog_stats() -> dict[str, Any]:
@@ -74,12 +89,46 @@ async def _read_catalog_stats() -> dict[str, Any]:
 
 async def _run_with_timeout_budget(coro, *, timeout_seconds: float, label: str):
     timeout_budget = max(0.01, float(timeout_seconds))
-    started = time.monotonic()
-    result = await coro
-    elapsed = time.monotonic() - started
-    if elapsed > timeout_budget:
-        raise asyncio.TimeoutError(f"{label} exceeded timeout budget ({elapsed:.3f}s > {timeout_budget:.3f}s)")
-    return result
+    existing = _inflight_timed_tasks.get(label)
+    if existing is not None and not existing.done():
+        raise _TimedTaskStillRunningError(label)
+
+    task = asyncio.create_task(coro, name=f"market-universe-{label}")
+    _inflight_timed_tasks[label] = task
+    task.add_done_callback(lambda done_task, step_label=label: _clear_inflight_timed_task(step_label, done_task))
+
+    try:
+        done, _ = await asyncio.wait({task}, timeout=timeout_budget)
+        if done:
+            return task.result()
+
+        task.cancel()
+        done_after, _ = await asyncio.wait({task}, timeout=_CANCEL_GRACE_SECONDS)
+        if done_after:
+            try:
+                task.result()
+            except (asyncio.CancelledError, Exception):
+                pass
+        else:
+            _abandoned_tasks.add(task)
+            task.add_done_callback(_discard_abandoned)
+            logger.warning(
+                "%s: task did not finish within %ss cancel grace; holding reference until completion",
+                label,
+                _CANCEL_GRACE_SECONDS,
+            )
+        raise asyncio.TimeoutError(f"{label} exceeded timeout budget ({timeout_budget:.3f}s)")
+    except asyncio.CancelledError:
+        if not task.done():
+            task.cancel()
+            try:
+                await asyncio.shield(asyncio.wait({task}, timeout=_CANCEL_GRACE_SECONDS))
+            except (asyncio.CancelledError, Exception):
+                pass
+            if not task.done():
+                _abandoned_tasks.add(task)
+                task.add_done_callback(_discard_abandoned)
+        raise
 
 
 async def _run_loop() -> None:
@@ -187,22 +236,21 @@ async def _run_loop() -> None:
                     worker_name,
                     default_interval=default_interval,
                 )
-                try:
-                    await apply_runtime_settings_overrides()
-                except Exception as exc:
-                    logger.warning("Market universe runtime settings refresh failed: %s", exc)
-                try:
-                    await refresh_strategy_runtime_if_needed(
-                        session,
-                        source_keys=["scanner"],
-                    )
-                except Exception as exc:
-                    logger.warning("Market universe strategy refresh check failed: %s", exc)
+            try:
+                await apply_runtime_settings_overrides()
+            except Exception as exc:
+                logger.warning("Market universe runtime settings refresh failed: %s", exc)
 
             interval_seconds = max(
                 30,
                 int(control.get("interval_seconds") or default_interval),
             )
+            try:
+                await refresh_strategy_runtime_if_needed(
+                    source_keys=["scanner"],
+                )
+            except Exception as exc:
+                logger.warning("Market universe strategy refresh check failed: %s", exc)
             incremental_enabled = bool(
                 getattr(settings, "MARKET_UNIVERSE_INCREMENTAL_ENABLED", incremental_enabled_default)
             )
@@ -245,6 +293,17 @@ async def _run_loop() -> None:
                         timeout_seconds=sync_timeout,
                         label="market_universe_sync",
                     )
+                except _TimedTaskStillRunningError:
+                    state["last_error"] = "prior market_universe_sync still cleaning up"
+                    state["phase"] = "waiting_for_cleanup"
+                    state["progress"] = 1.0
+                    state["activity"] = "Skipping market universe refresh; previous sync is still finishing."
+                    logger.warning(
+                        "Market universe refresh skipped because prior sync is still finishing",
+                    )
+                    next_scheduled_run_at = now + timedelta(seconds=interval_seconds)
+                    await asyncio.sleep(0.1)
+                    continue
                 except Exception:
                     if force_full:
                         raise
@@ -292,7 +351,7 @@ async def _run_loop() -> None:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                is_db_disconnect = _is_retryable_db_error(exc)
+                is_db_disconnect = _is_retryable_db_error(exc) and not isinstance(exc, (asyncio.TimeoutError, TimeoutError))
                 if is_db_disconnect:
                     consecutive_db_failures += 1
                 else:

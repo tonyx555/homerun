@@ -56,6 +56,7 @@ import {
   stopTraderOrchestratorLive,
   runTraderTuneIteration,
   sellTraderOrderNow,
+  type ExecutionLatencySummary,
   type Trader,
   type TraderConfigSchema,
   type TraderEvent,
@@ -2289,6 +2290,49 @@ function eventLatencyDetail(event: TraderEvent): string | null {
   return detail.length > 0 ? detail.join(' | ') : null
 }
 
+function latencyStagePercentiles(
+  bucket: unknown,
+  stageKey: 'emit_to_submit_start_ms'
+): { p95: number | null; p99: number | null } {
+  const stage = isRecord(bucket) && isRecord(bucket[stageKey]) ? bucket[stageKey] : null
+  return {
+    p95: stage ? toNumber(stage.p95) : null,
+    p99: stage ? toNumber(stage.p99) : null,
+  }
+}
+
+function formatLatencyPercentilePair(bucket: unknown, stageKey: 'emit_to_submit_start_ms'): string {
+  const { p95, p99 } = latencyStagePercentiles(bucket, stageKey)
+  const p95Label = formatLatencyMs(p95)
+  const p99Label = formatLatencyMs(p99)
+  if (!p95Label && !p99Label) return '—'
+  if (!p99Label) return `p95 ${p95Label}`
+  if (!p95Label) return `p99 ${p99Label}`
+  return `${p95Label}/${p99Label}`
+}
+
+function worstLatencyGroup(
+  summary: ExecutionLatencySummary | null | undefined,
+  groupKey: 'by_source' | 'by_strategy' | 'by_trader'
+): { label: string | null; p95: number | null; p99: number | null } {
+  const groups = summary?.[groupKey]
+  if (!groups || typeof groups !== 'object') {
+    return { label: null, p95: null, p99: null }
+  }
+
+  let bestLabel: string | null = null
+  let bestP95: number | null = null
+  let bestP99: number | null = null
+  for (const [label, bucket] of Object.entries(groups)) {
+    const { p95, p99 } = latencyStagePercentiles(bucket, 'emit_to_submit_start_ms')
+    if (p95 === null || (bestP95 !== null && p95 <= bestP95)) continue
+    bestLabel = label
+    bestP95 = p95
+    bestP99 = p99
+  }
+  return { label: bestLabel, p95: bestP95, p99: bestP99 }
+}
+
 function parseJsonObject(text: string): { value: Record<string, unknown> | null; error: string | null } {
   try {
     const parsed: unknown = JSON.parse(text || '{}')
@@ -4050,26 +4094,26 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const overviewQuery = useQuery({
     queryKey: ['trader-orchestrator-overview'],
     queryFn: getTraderOrchestratorOverview,
-    refetchInterval: 4000,
+    refetchInterval: isConnected ? 4000 : 15000,
   })
 
   const settingsQuery = useQuery({
     queryKey: ['settings'],
     queryFn: getSettings,
-    refetchInterval: 5000,
+    refetchInterval: isConnected ? 5000 : 20000,
   })
   const liveExecutionSettings = settingsQuery.data?.live_execution ?? null
 
   const tradersQuery = useQuery({
     queryKey: ['traders-list', selectedAccountMode],
     queryFn: () => getTraders({ mode: selectedAccountMode }),
-    refetchInterval: 5000,
+    refetchInterval: isConnected ? 5000 : 20000,
   })
 
   const allTradersQuery = useQuery({
     queryKey: ['traders-list', 'all'],
     queryFn: () => getTraders(),
-    refetchInterval: 5000,
+    refetchInterval: isConnected ? 5000 : 20000,
   })
 
   const traderSourcesQuery = useQuery({
@@ -4115,7 +4159,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const cryptoMarketsQuery = useQuery({
     queryKey: ['crypto-markets'],
     queryFn: () => getCryptoMarkets(),
-    refetchInterval: 5000,
+    refetchInterval: isConnected ? 5000 : 20000,
   })
   const cryptoMarkets = useMemo(
     () => (Array.isArray(cryptoMarketsQuery.data) ? (cryptoMarketsQuery.data as CryptoMarket[]) : []),
@@ -4249,7 +4293,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     queryKey: ['trader-orders-all'],
     queryFn: () => getAllTraderOrders(5000),
     enabled: traderIds.length > 0,
-    refetchInterval: isConnected ? 2000 : 1000,
+    refetchInterval: isConnected ? 2000 : 10000,
     staleTime: 0,
     refetchOnMount: 'always',
   })
@@ -4257,7 +4301,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const allDecisionsQuery = useQuery({
     queryKey: ['trader-decisions-all', traderIdsKey],
     enabled: traderIds.length > 0,
-    refetchInterval: isConnected ? 30000 : 3000,
+    refetchInterval: isConnected ? 30000 : 30000,
     staleTime: 0,
     refetchOnMount: 'always',
     queryFn: () => getAllTraderDecisions(traderIds, {
@@ -4269,7 +4313,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const allEventsQuery = useQuery({
     queryKey: ['trader-events-all', traderIdsKey],
     enabled: traderIds.length > 0,
-    refetchInterval: isConnected ? 30000 : 5000,
+    refetchInterval: isConnected ? 30000 : 30000,
     queryFn: async () => {
       const grouped = await Promise.all(
         traderIds.map((traderId) => getTraderEvents(traderId, { limit: 80 }))
@@ -4390,6 +4434,32 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       return traders.some((trader) => trader.id === current) ? current : null
     })
   }, [traders])
+
+  useEffect(() => {
+    if (Object.keys(traderTogglePendingById).length === 0) return
+    const tradersById = new Map(traders.map((trader) => [trader.id, trader]))
+    setTraderTogglePendingById((current) => {
+      let changed = false
+      const next: Record<string, TraderToggleAction> = {}
+      for (const [traderId, action] of Object.entries(current)) {
+        const trader = tradersById.get(traderId)
+        const settled =
+          action === 'start'
+            ? Boolean(trader?.is_enabled) && !Boolean(trader?.is_paused)
+            : action === 'stop'
+              ? !Boolean(trader?.is_enabled) || Boolean(trader?.is_paused)
+              : action === 'activate'
+                ? Boolean(trader?.is_enabled)
+                : !Boolean(trader?.is_enabled)
+        if (settled) {
+          changed = true
+          continue
+        }
+        next[traderId] = action
+      }
+      return changed ? next : current
+    })
+  }, [traderTogglePendingById, traders])
 
   const selectedOrders = useMemo(
     () => (selectedTraderId ? allOrders.filter((order) => order.trader_id === selectedTraderId) : []),
@@ -5947,6 +6017,44 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const orchestratorControl = overviewQuery.data?.control
   const orchestratorConfig = overviewQuery.data?.config || null
   const metrics = overviewQuery.data?.metrics
+  const executionLatency = metrics?.execution_latency || null
+  const executionLatencyOverall = executionLatency?.overall || null
+  const executionLatencyOverallLabel = formatLatencyPercentilePair(
+    executionLatencyOverall,
+    'emit_to_submit_start_ms'
+  )
+  const executionLatencyTargetMs = toNumber(executionLatency?.internal_sla_target_ms)
+  const executionLatencyOverallP95 = latencyStagePercentiles(
+    executionLatencyOverall,
+    'emit_to_submit_start_ms'
+  ).p95
+  const executionLatencySlaBreached = Boolean(
+    executionLatencyTargetMs !== null &&
+    executionLatencyOverallP95 !== null &&
+    executionLatencyOverallP95 > executionLatencyTargetMs
+  )
+  const worstLatencySource = worstLatencyGroup(executionLatency, 'by_source')
+  const worstLatencyStrategy = worstLatencyGroup(executionLatency, 'by_strategy')
+  const worstLatencySourceLabel = worstLatencySource.label
+    ? `${worstLatencySource.label} ${formatLatencyPercentilePair({ emit_to_submit_start_ms: worstLatencySource }, 'emit_to_submit_start_ms')}`
+    : '—'
+  const worstLatencyStrategyLabel = worstLatencyStrategy.label
+    ? `${worstLatencyStrategy.label} ${formatLatencyPercentilePair({ emit_to_submit_start_ms: worstLatencyStrategy }, 'emit_to_submit_start_ms')}`
+    : '—'
+  const selectedTraderLatencyBucket = selectedTrader ? executionLatency?.by_trader?.[selectedTrader.id] || null : null
+  const selectedTraderLatencyLabel = formatLatencyPercentilePair(
+    selectedTraderLatencyBucket,
+    'emit_to_submit_start_ms'
+  )
+  const selectedTraderLatencyP95 = latencyStagePercentiles(
+    selectedTraderLatencyBucket,
+    'emit_to_submit_start_ms'
+  ).p95
+  const selectedTraderLatencySlaBreached = Boolean(
+    executionLatencyTargetMs !== null &&
+    selectedTraderLatencyP95 !== null &&
+    selectedTraderLatencyP95 > executionLatencyTargetMs
+  )
   const killSwitchOn = Boolean(orchestratorControl?.kill_switch)
   const killSwitchSwitchValue = killSwitchMutation.isPending && typeof killSwitchMutation.variables === 'boolean'
     ? killSwitchMutation.variables
@@ -5966,10 +6074,17 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     : orchestratorWorkerRunning
       ? 'RUNNING'
       : 'STOPPED'
+  const orchestratorStartRequestPending =
+    startBySelectedAccountMutation.isPending &&
+    !orchestratorEnabled &&
+    !orchestratorWorkerRunning
+  const orchestratorStopRequestPending =
+    stopByModeMutation.isPending &&
+    (orchestratorEnabled || orchestratorWorkerRunning)
 
   const controlBusy =
-    startBySelectedAccountMutation.isPending ||
-    stopByModeMutation.isPending ||
+    orchestratorStartRequestPending ||
+    orchestratorStopRequestPending ||
     killSwitchMutation.isPending
   const traderFlyoutBusy =
     createTraderMutation.isPending ||
@@ -7609,9 +7724,9 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const startStopIsConfigured = orchestratorStartStopActive
   const startStopIsRunning = orchestratorWorkerRunning
   const startStopIsStarting =
-    startBySelectedAccountMutation.isPending ||
+    orchestratorStartRequestPending ||
     (orchestratorEnabled && !startStopIsRunning && workerActivity.includes('start command queued'))
-  const startStopIsStopping = stopByModeMutation.isPending
+  const startStopIsStopping = orchestratorStopRequestPending
   const startStopPending = startStopIsStarting || startStopIsStopping
   const startStopDisabled = startStopPending || (startStopIsConfigured ? !canStopOrchestrator : !canStartOrchestrator)
 
@@ -9860,6 +9975,37 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
 
                 {workTab === 'performance' && (
                   <div className="h-full min-h-0 flex flex-col gap-2 px-1">
+                    {executionLatency ? (
+                      <div className="shrink-0 grid gap-1 sm:grid-cols-2 xl:grid-cols-5">
+                        <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                          <p className="text-[9px] uppercase text-muted-foreground">Internal SLA</p>
+                          <p className="text-xs font-mono">
+                            {formatLatencyMs(executionLatencyTargetMs) || '—'}
+                          </p>
+                        </div>
+                        <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                          <p className="text-[9px] uppercase text-muted-foreground">Trader SLA</p>
+                          <p className={cn('text-xs font-mono', selectedTraderLatencySlaBreached ? 'text-amber-400' : 'text-cyan-400')}>
+                            {selectedTraderLatencyLabel}
+                          </p>
+                        </div>
+                        <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                          <p className="text-[9px] uppercase text-muted-foreground">Overall SLA</p>
+                          <p className={cn('text-xs font-mono', executionLatencySlaBreached ? 'text-amber-400' : 'text-cyan-400')}>
+                            {executionLatencyOverallLabel}
+                          </p>
+                        </div>
+                        <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                          <p className="text-[9px] uppercase text-muted-foreground">Worst Source</p>
+                          <p className="text-xs font-mono">{worstLatencySourceLabel}</p>
+                        </div>
+                        <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
+                          <p className="text-[9px] uppercase text-muted-foreground">Worst Strategy</p>
+                          <p className="text-xs font-mono">{worstLatencyStrategyLabel}</p>
+                        </div>
+                      </div>
+                    ) : null}
+
                     <div className="shrink-0 grid gap-1 sm:grid-cols-2 lg:grid-cols-6">
                       <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
                         <p className="text-[9px] uppercase text-muted-foreground">Realized P&amp;L</p>

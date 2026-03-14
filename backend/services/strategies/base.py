@@ -231,14 +231,14 @@ class BaseStrategy(ABC):
        multiple strategies collapses to the best signal. Opt out via
        ``allow_deduplication = False``.
 
-    4. **TradeSignal Upsert** — ``strategy_signal_bridge.bridge_opportunities_to_signals()``
-       Opportunity is written to the ``trade_signals`` table as a pending signal.
-       Dedupe key = (stable_id, strategy_type, market_id).
+    4. **Runtime Intent Publication** — ``strategy_signal_bridge.bridge_opportunities_to_signals()``
+       Opportunity is published into the in-process intent runtime immediately.
+       ``trade_signals`` is a projected audit table, not the transport.
 
     5. **Signal Expiry** — stale signals past ``expires_at`` are skipped.
 
-    6. **Orchestrator Pickup** — ``trader_orchestrator_worker`` polls pending
-       signals and calls ``strategy.evaluate(signal, context)``.
+    6. **Orchestrator Pickup** — ``trader_orchestrator_worker`` consumes the
+       runtime queue and calls ``strategy.evaluate(signal, context)``.
 
     7. **Evaluate** — ``evaluate(signal, context) -> StrategyDecision``
        Your strategy decides whether to trade the signal RIGHT NOW.
@@ -320,7 +320,6 @@ class BaseStrategy(ABC):
     source_key: str = "scanner"  # "scanner", "crypto", "news", "weather", "traders", "manual"
 
     # Worker affinity — which worker should run this strategy's detect()
-    worker_affinity: str = "scanner"  # "scanner", "crypto", "news", "weather", "traders", "manual"
 
     # Opportunity TTL — how long detected opportunities stay valid (minutes)
     # None means use the global SCANNER_STALE_OPPORTUNITY_MINUTES default.
@@ -359,7 +358,6 @@ class BaseStrategy(ABC):
     # - "incremental": run on affected-market batches in reactive fast scans
     # - "full_snapshot": always run on the full cached market snapshot
     # - "auto": scanner decides based on strategy metadata (default)
-    realtime_processing_mode: str = "auto"
 
     # Composable evaluate pipeline — set scoring_weights to opt in.
     # When scoring_weights is None, evaluate() uses the base passthrough.
@@ -452,12 +450,6 @@ class BaseStrategy(ABC):
                         f"Valid types: {sorted(EventType._ALL)}. "
                         f"Use EventType.* constants from services.data_events."
                     )
-        own_realtime_mode = cls.__dict__.get("realtime_processing_mode")
-        if own_realtime_mode is not None:
-            if own_realtime_mode not in {"auto", "incremental", "full_snapshot"}:
-                raise TypeError(
-                    f"{cls.__name__}.realtime_processing_mode must be one of ['auto', 'incremental', 'full_snapshot']"
-                )
         # Only validate strategy_type if this class explicitly declares it.
         # Intermediate base classes (e.g. BaseWeatherStrategy) do not declare
         # strategy_type in their own __dict__ — their concrete subclasses do.

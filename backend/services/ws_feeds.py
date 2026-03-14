@@ -30,7 +30,6 @@ from sqlalchemy import select
 from config import settings
 from models.database import AppSettings, AsyncSessionLocal
 from services.optimization.vwap import OrderBook, OrderBookLevel
-from services.redis_price_cache import redis_price_cache
 from utils.logger import get_logger
 from utils.secrets import decrypt_secret
 
@@ -445,6 +444,22 @@ class PriceCache:
             return False
         ttl = self._stale_ttl if max_age_seconds is None else max(0.0, float(max_age_seconds))
         return (time.monotonic() - entry.updated_at) < ttl
+
+    def get_observed_at_epoch(self, token_id: str) -> Optional[float]:
+        """Return wall-clock ingest timestamp in epoch seconds, or ``None``."""
+        with self._lock:
+            entry = self._entries.get(token_id)
+        if entry is None or entry.updated_at_epoch <= 0.0:
+            return None
+        return float(entry.updated_at_epoch)
+
+    def get_sequence(self, token_id: str) -> Optional[int]:
+        """Return local cache update sequence, or ``None`` when unavailable."""
+        with self._lock:
+            entry = self._entries.get(token_id)
+        if entry is None or entry.sequence <= 0:
+            return None
+        return int(entry.sequence)
 
     def staleness(self, token_id: str) -> Optional[float]:
         """Return age in seconds of the cached data, or ``None``."""
@@ -1327,13 +1342,6 @@ class FeedManager:
         self._reactive_scan_callback: Optional[Callable[[Set[str]], Coroutine[Any, Any, None]]] = None
         self._debounce_task: Optional[asyncio.Task] = None
         self._debounce_seconds: float = 2.0  # coalesce changes over 2s window
-        self._redis_price_updates: Dict[
-            str,
-            tuple[float | None, float | None, float | None, float | None, float | None, int | None],
-        ] = {}
-        self._redis_update_lock = asyncio.Lock()
-        self._redis_flush_task: Optional[asyncio.Task] = None
-        self._redis_flush_interval_seconds: float = max(0.01, float(settings.WS_REDIS_FLUSH_INTERVAL_SECONDS))
         self._dispatch_tasks: set[asyncio.Task] = set()
         self._eviction_task: Optional[asyncio.Task] = None
         self._cache.add_on_change_callback(self._on_price_change)
@@ -1398,14 +1406,10 @@ class FeedManager:
         """Stop both feeds and clear cache."""
         if self._debounce_task and not self._debounce_task.done():
             self._debounce_task.cancel()
-        if self._redis_flush_task and not self._redis_flush_task.done():
-            self._redis_flush_task.cancel()
         if self._eviction_task and not self._eviction_task.done():
             self._eviction_task.cancel()
         await self._polymarket_feed.stop()
         await self._kalshi_feed.stop()
-        async with self._redis_update_lock:
-            self._redis_price_updates = {}
         self._cache.clear()
         self._started = False
         logger.info("FeedManager stopped")
@@ -1494,54 +1498,7 @@ class FeedManager:
         ingest_ts: float | None = None,
         sequence: int | None = None,
     ) -> None:
-        """Buffer all price updates for periodic Redis persistence."""
-        if mid <= 0 or bid < 0 or ask < 0:
-            return
-        ingest = float(ingest_ts) if ingest_ts is not None and ingest_ts > 0 else float(time.time())
-        exchange = float(exchange_ts) if exchange_ts is not None and exchange_ts > 0 else ingest
-        seq = int(sequence) if sequence is not None and int(sequence) > 0 else 0
-        self._redis_price_updates[token_id] = (
-            float(mid),
-            float(bid),
-            float(ask),
-            exchange,
-            ingest,
-            seq,
-        )
-        if self._redis_flush_task is None or self._redis_flush_task.done():
-            try:
-                loop = asyncio.get_running_loop()
-                self._redis_flush_task = loop.create_task(self._flush_redis_price_updates())
-            except RuntimeError:
-                pass
-
-    async def _flush_redis_price_updates(self) -> None:
-        """Batch in-memory WS updates into Redis snapshots."""
-        try:
-            while True:
-                await asyncio.sleep(self._redis_flush_interval_seconds)
-                updates: dict[
-                    str,
-                    tuple[float | None, float | None, float | None, float | None, float | None, int | None],
-                ] = {}
-                async with self._redis_update_lock:
-                    if not self._redis_price_updates:
-                        self._redis_flush_task = None
-                        return
-                    updates = dict(self._redis_price_updates)
-                    self._redis_price_updates = {}
-                try:
-                    await redis_price_cache.write_prices(updates)
-                except Exception as exc:
-                    async with self._redis_update_lock:
-                        self._redis_price_updates = {**updates, **self._redis_price_updates}
-                    logger.warning(
-                        "Redis live price flush failed",
-                        error=str(exc),
-                        token_count=len(updates),
-                    )
-        except asyncio.CancelledError:
-            return
+        return
 
     async def _cache_eviction_loop(self) -> None:
         """Periodically evict stale entries from the price cache and prune

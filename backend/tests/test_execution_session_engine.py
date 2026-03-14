@@ -60,31 +60,13 @@ async def test_execute_signal_aborts_before_order_writes_on_pair_lock_violation(
         "hedge_timeout_seconds": 20,
     }
     monkeypatch.setattr(engine, "_build_plan", lambda *args, **kwargs: (plan, legs, constraints))
-    monkeypatch.setattr(
-        engine,
-        "_fetch_leg_rows",
-        AsyncMock(return_value={"leg-1": SimpleNamespace(id="leg-row-1")}),
-    )
-
-    create_session_mock = AsyncMock(return_value=SimpleNamespace(id="sess-1"))
-    create_event_mock = AsyncMock()
-    update_status_mock = AsyncMock()
-    update_leg_mock = AsyncMock()
-    set_signal_status_mock = AsyncMock()
-    create_order_mock = AsyncMock()
-    create_session_order_mock = AsyncMock()
+    buffer_outcome_mock = AsyncMock()
+    publish_signal_status_mock = AsyncMock()
     cancel_provider_mock = AsyncMock(return_value=True)
-    commit_mock = AsyncMock()
 
-    monkeypatch.setattr(session_engine_module, "create_execution_session", create_session_mock)
-    monkeypatch.setattr(session_engine_module, "create_execution_session_event", create_event_mock)
-    monkeypatch.setattr(session_engine_module, "update_execution_session_status", update_status_mock)
-    monkeypatch.setattr(session_engine_module, "update_execution_leg", update_leg_mock)
-    monkeypatch.setattr(session_engine_module, "set_trade_signal_status", set_signal_status_mock)
-    monkeypatch.setattr(session_engine_module, "create_trader_order", create_order_mock)
-    monkeypatch.setattr(session_engine_module, "create_execution_session_order", create_session_order_mock)
+    monkeypatch.setattr(session_engine_module.hot_state, "buffer_execution_outcome", buffer_outcome_mock)
+    monkeypatch.setattr(engine, "_publish_hot_signal_status", publish_signal_status_mock)
     monkeypatch.setattr(session_engine_module, "cancel_live_provider_order", cancel_provider_mock)
-    monkeypatch.setattr(session_engine_module, "_commit_with_retry", commit_mock)
     monkeypatch.setattr(session_engine_module, "supports_reprice", lambda _policy: False)
     monkeypatch.setattr(session_engine_module, "execution_waves", lambda _policy, leg_rows: [leg_rows])
     monkeypatch.setattr(session_engine_module, "requires_pair_lock", lambda _policy, _constraints: True)
@@ -112,10 +94,17 @@ async def test_execute_signal_aborts_before_order_writes_on_pair_lock_violation(
 
     signal = SimpleNamespace(
         id="signal-1",
+        source="scanner",
         trace_id="trace-1",
         strategy_type="tail_end_carry",
         strategy_context_json={},
+        payload_json={},
+        market_id="market-1",
         market_question="question",
+        direction="buy_yes",
+        entry_price=0.41,
+        edge_percent=4.0,
+        confidence=0.7,
     )
     result = await engine.execute_signal(
         trader_id="trader-1",
@@ -133,13 +122,14 @@ async def test_execute_signal_aborts_before_order_writes_on_pair_lock_violation(
     assert result.status == "failed"
     assert "Pair lock violation" in str(result.error_message)
     assert result.orders_written == 0
-    assert create_order_mock.await_count == 0
-    assert create_session_order_mock.await_count == 0
     assert cancel_provider_mock.await_count == 1
-    assert commit_mock.await_count == 1
-    assert update_status_mock.await_args_list[-1].kwargs["status"] == "failed"
-    assert any(call.kwargs.get("status") == "cancelled" for call in update_leg_mock.await_args_list)
-    assert set_signal_status_mock.await_args_list[-1].kwargs["status"] == "failed"
+    assert buffer_outcome_mock.await_count == 1
+    buffered = buffer_outcome_mock.await_args.kwargs
+    assert buffered["session_row"].status == "failed"
+    assert buffered["signal_status"] == "failed"
+    assert buffered["trader_orders"] == []
+    assert any(row.status == "cancelled" for row in buffered["leg_rows"])
+    assert publish_signal_status_mock.await_args.kwargs["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -167,39 +157,11 @@ async def test_execute_signal_sets_hedging_timeout_payload(monkeypatch):
         "hedge_timeout_seconds": 33,
     }
     monkeypatch.setattr(engine, "_build_plan", lambda *args, **kwargs: (plan, legs, constraints))
-    monkeypatch.setattr(
-        engine,
-        "_fetch_leg_rows",
-        AsyncMock(
-            return_value={
-                "leg-1": SimpleNamespace(id="leg-row-1"),
-                "leg-2": SimpleNamespace(id="leg-row-2"),
-            }
-        ),
-    )
+    buffer_outcome_mock = AsyncMock()
+    publish_signal_status_mock = AsyncMock()
 
-    create_session_mock = AsyncMock(return_value=SimpleNamespace(id="sess-2"))
-    create_event_mock = AsyncMock()
-    update_status_mock = AsyncMock()
-    update_leg_mock = AsyncMock()
-    set_signal_status_mock = AsyncMock()
-    create_order_mock = AsyncMock(
-        side_effect=[
-            SimpleNamespace(id="order-1"),
-            SimpleNamespace(id="order-2"),
-        ]
-    )
-    create_session_order_mock = AsyncMock()
-    commit_mock = AsyncMock()
-
-    monkeypatch.setattr(session_engine_module, "create_execution_session", create_session_mock)
-    monkeypatch.setattr(session_engine_module, "create_execution_session_event", create_event_mock)
-    monkeypatch.setattr(session_engine_module, "update_execution_session_status", update_status_mock)
-    monkeypatch.setattr(session_engine_module, "update_execution_leg", update_leg_mock)
-    monkeypatch.setattr(session_engine_module, "set_trade_signal_status", set_signal_status_mock)
-    monkeypatch.setattr(session_engine_module, "create_trader_order", create_order_mock)
-    monkeypatch.setattr(session_engine_module, "create_execution_session_order", create_session_order_mock)
-    monkeypatch.setattr(session_engine_module, "_commit_with_retry", commit_mock)
+    monkeypatch.setattr(session_engine_module.hot_state, "buffer_execution_outcome", buffer_outcome_mock)
+    monkeypatch.setattr(engine, "_publish_hot_signal_status", publish_signal_status_mock)
     monkeypatch.setattr(session_engine_module, "supports_reprice", lambda _policy: False)
     monkeypatch.setattr(session_engine_module, "execution_waves", lambda _policy, leg_rows: [leg_rows])
     monkeypatch.setattr(session_engine_module, "requires_pair_lock", lambda _policy, _constraints: False)
@@ -221,10 +183,17 @@ async def test_execute_signal_sets_hedging_timeout_payload(monkeypatch):
 
     signal = SimpleNamespace(
         id="signal-2",
+        source="scanner",
         trace_id="trace-2",
         strategy_type="tail_end_carry",
         strategy_context_json={},
+        payload_json={},
+        market_id="market-2",
         market_question="question",
+        direction="buy_yes",
+        entry_price=0.41,
+        edge_percent=4.0,
+        confidence=0.7,
     )
     result = await engine.execute_signal(
         trader_id="trader-2",
@@ -241,15 +210,16 @@ async def test_execute_signal_sets_hedging_timeout_payload(monkeypatch):
 
     assert result.status == "hedging"
     assert result.orders_written == 2
-    assert create_order_mock.await_count == 2
-    assert create_session_order_mock.await_count == 2
-    final_status_call = update_status_mock.await_args_list[-1]
-    assert final_status_call.kwargs["status"] == "hedging"
-    payload_patch = final_status_call.kwargs["payload_patch"]
+    assert buffer_outcome_mock.await_count == 1
+    buffered = buffer_outcome_mock.await_args.kwargs
+    assert buffered["session_row"].status == "hedging"
+    assert len(buffered["trader_orders"]) == 2
+    payload_patch = buffered["session_row"].payload_json
     assert payload_patch["hedge_timeout_seconds"] == 33
     assert payload_patch["hedging_escalation"] == "auto_fail_on_timeout"
     assert isinstance(payload_patch.get("hedging_started_at"), str)
     assert isinstance(payload_patch.get("hedging_deadline_at"), str)
+    assert publish_signal_status_mock.await_args.kwargs["status"] == "submitted"
 
 
 @pytest.mark.asyncio
@@ -271,29 +241,11 @@ async def test_execute_signal_skips_position_cap_failures_without_order_writes(m
         "hedge_timeout_seconds": 20,
     }
     monkeypatch.setattr(engine, "_build_plan", lambda *args, **kwargs: (plan, legs, constraints))
-    monkeypatch.setattr(
-        engine,
-        "_fetch_leg_rows",
-        AsyncMock(return_value={"leg-1": SimpleNamespace(id="leg-row-1")}),
-    )
+    buffer_outcome_mock = AsyncMock()
+    publish_signal_status_mock = AsyncMock()
 
-    create_session_mock = AsyncMock(return_value=SimpleNamespace(id="sess-skip"))
-    create_event_mock = AsyncMock()
-    update_status_mock = AsyncMock()
-    update_leg_mock = AsyncMock()
-    set_signal_status_mock = AsyncMock()
-    create_order_mock = AsyncMock()
-    create_session_order_mock = AsyncMock()
-    commit_mock = AsyncMock()
-
-    monkeypatch.setattr(session_engine_module, "create_execution_session", create_session_mock)
-    monkeypatch.setattr(session_engine_module, "create_execution_session_event", create_event_mock)
-    monkeypatch.setattr(session_engine_module, "update_execution_session_status", update_status_mock)
-    monkeypatch.setattr(session_engine_module, "update_execution_leg", update_leg_mock)
-    monkeypatch.setattr(session_engine_module, "set_trade_signal_status", set_signal_status_mock)
-    monkeypatch.setattr(session_engine_module, "create_trader_order", create_order_mock)
-    monkeypatch.setattr(session_engine_module, "create_execution_session_order", create_session_order_mock)
-    monkeypatch.setattr(session_engine_module, "_commit_with_retry", commit_mock)
+    monkeypatch.setattr(session_engine_module.hot_state, "buffer_execution_outcome", buffer_outcome_mock)
+    monkeypatch.setattr(engine, "_publish_hot_signal_status", publish_signal_status_mock)
     monkeypatch.setattr(session_engine_module, "supports_reprice", lambda _policy: False)
     monkeypatch.setattr(session_engine_module, "execution_waves", lambda _policy, leg_rows: [leg_rows])
     monkeypatch.setattr(session_engine_module, "requires_pair_lock", lambda _policy, _constraints: False)
@@ -320,10 +272,17 @@ async def test_execute_signal_skips_position_cap_failures_without_order_writes(m
 
     signal = SimpleNamespace(
         id="signal-skip",
+        source="scanner",
         trace_id="trace-skip",
         strategy_type="late_favorite_alpha",
         strategy_context_json={},
+        payload_json={},
+        market_id="market-skip",
         market_question="question",
+        direction="buy_yes",
+        entry_price=0.5,
+        edge_percent=1.0,
+        confidence=0.55,
     )
     result = await engine.execute_signal(
         trader_id="trader-skip",
@@ -340,11 +299,12 @@ async def test_execute_signal_skips_position_cap_failures_without_order_writes(m
 
     assert result.status == "skipped"
     assert result.orders_written == 0
-    assert create_order_mock.await_count == 0
-    assert create_session_order_mock.await_count == 0
-    assert update_status_mock.await_args_list[-1].kwargs["status"] == "skipped"
-    assert set_signal_status_mock.await_args_list[-1].kwargs["status"] == "skipped"
-    assert any(call.kwargs.get("status") == "skipped" for call in update_leg_mock.await_args_list)
+    assert buffer_outcome_mock.await_count == 1
+    buffered = buffer_outcome_mock.await_args.kwargs
+    assert buffered["session_row"].status == "skipped"
+    assert buffered["trader_orders"] == []
+    assert any(row.status == "skipped" for row in buffered["leg_rows"])
+    assert publish_signal_status_mock.await_args.kwargs["status"] == "skipped"
 
 
 @pytest.mark.asyncio

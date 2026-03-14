@@ -17,12 +17,13 @@ import math
 import uuid
 from collections import defaultdict
 from copy import deepcopy
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from itertools import combinations
-from utils.utcnow import utcnow
+from utils.utcnow import as_utc, as_utc_naive, utcnow
 from typing import Dict, List, Optional, Set, Tuple
 
 from sqlalchemy import and_, select, text, update, func, or_, tuple_
+from sqlalchemy.orm import load_only
 
 from models.database import (
     DiscoveredWallet,
@@ -43,15 +44,9 @@ from utils.logger import get_logger
 logger = get_logger("wallet_intelligence")
 
 IN_CLAUSE_CHUNK_SIZE = 5000
-
-
-def _chunked_in(column, values: list, chunk_size: int = IN_CLAUSE_CHUNK_SIZE):
-    if len(values) <= chunk_size:
-        return column.in_(values)
-    clauses = []
-    for i in range(0, len(values), chunk_size):
-        clauses.append(column.in_(values[i : i + chunk_size]))
-    return or_(*clauses)
+SIGNAL_UPSERT_BATCH_SIZE = 500
+WALLET_TAG_UPDATE_BATCH_SIZE = 200
+_MIN_UTC = datetime.min.replace(tzinfo=timezone.utc)
 
 
 def _iter_chunks(values: list[str], chunk_size: int = IN_CLAUSE_CHUNK_SIZE):
@@ -107,7 +102,7 @@ class ConfluenceDetector:
         cutoff_60m = now - timedelta(minutes=60)
         cutoff_15m = now - timedelta(minutes=15)
 
-        wallets = await self._get_qualifying_wallets()
+        wallets = await self._get_qualifying_wallets(cutoff_60m)
         if not wallets:
             logger.info("No qualifying wallets found for confluence scan")
             return []
@@ -117,36 +112,64 @@ class ConfluenceDetector:
 
         # -- Phase 1: read activity events --
         async with AsyncSessionLocal() as session:
-            events: list[WalletActivityRollup] = []
-            for address_chunk in _iter_chunks(addresses):
-                result = await session.execute(
-                    select(WalletActivityRollup)
-                    .where(
-                        WalletActivityRollup.wallet_address.in_(address_chunk),
-                        WalletActivityRollup.traded_at >= cutoff_60m,
+            events = [
+                dict(row)
+                for row in (
+                    await session.execute(
+                        text(
+                            """
+                            SELECT
+                                war.wallet_address AS wallet_address,
+                                war.market_id AS market_id,
+                                war.side AS side,
+                                war.price AS price,
+                                war.size AS size,
+                                war.notional AS notional,
+                                war.traded_at AS traded_at
+                            FROM wallet_activity_rollups AS war
+                            JOIN (
+                                SELECT DISTINCT wallet_address
+                                FROM unnest(CAST(:addresses AS text[])) AS qualifying(wallet_address)
+                            ) AS qa
+                                ON qa.wallet_address = war.wallet_address
+                            WHERE war.traded_at >= :cutoff_60m
+                            """
+                        ),
+                        {
+                            "addresses": addresses,
+                            "cutoff_60m": as_utc_naive(cutoff_60m),
+                        },
                     )
-                    .order_by(WalletActivityRollup.traded_at.desc())
-                )
-                events.extend(result.scalars().all())
-            events.sort(key=lambda row: row.traded_at or datetime.min, reverse=True)
+                ).mappings()
+            ]
+            for event in events:
+                event["traded_at"] = as_utc(event.get("traded_at"))
+            events.sort(key=lambda row: row.get("traded_at") or _MIN_UTC, reverse=True)
 
         if not events:
             await self.expire_old_signals()
             return await self.get_active_signals()
 
         # -- Phase 2: group events and build candidate list (pure Python) --
-        grouped: dict[tuple[str, str], list[WalletActivityRollup]] = {}
+        grouped: dict[tuple[str, str], list[dict[str, object]]] = {}
         for event in events:
-            side = self._normalize_side(event.side)
+            side = self._normalize_side(event.get("side"))
             if side not in ("BUY", "SELL"):
                 continue
-            key = (event.market_id, side)
+            market_id = str(event.get("market_id") or "")
+            if not market_id:
+                continue
+            key = (market_id, side)
             grouped.setdefault(key, []).append(event)
 
         # Pre-compute per-market-side stats, filtering by wallet count early.
         candidates: list[dict] = []
         for (market_id, side), side_events in grouped.items():
-            unique_wallets = {e.wallet_address.lower() for e in side_events if e.wallet_address}
+            unique_wallets = {
+                str(event.get("wallet_address") or "").strip().lower()
+                for event in side_events
+                if str(event.get("wallet_address") or "").strip()
+            }
             if len(unique_wallets) < self.MIN_WALLETS_WATCH:
                 continue
 
@@ -162,7 +185,11 @@ class ConfluenceDetector:
             if cluster_adjusted < self.MIN_WALLETS_WATCH:
                 continue
 
-            window_events = [e for e in side_events if e.traded_at and e.traded_at >= cutoff_15m]
+            window_events = [
+                event
+                for event in side_events
+                if isinstance(event.get("traded_at"), datetime) and event["traded_at"] >= cutoff_15m
+            ]
             window_minutes = 15 if window_events else 60
             active_events = window_events or side_events
 
@@ -180,12 +207,20 @@ class ConfluenceDetector:
                 anomaly_avg = sum(an_vals) / len(an_vals)
                 core_wallets = sum(1 for w in wallets_sorted if wallet_map.get(w, {}).get("in_top_pool"))
 
-            prices = [float(e.price or 0) for e in active_events if e.price and e.price > 0]
-            sizes = [abs(float(e.size or 0)) for e in active_events if e.size]
+            prices = [
+                float(event.get("price") or 0)
+                for event in active_events
+                if event.get("price") is not None and float(event.get("price") or 0) > 0
+            ]
+            sizes = [abs(float(event.get("size") or 0)) for event in active_events if event.get("size") is not None]
             avg_entry_price = sum(prices) / len(prices) if prices else None
             total_size = sum(sizes) if sizes else None
-            net_notional = sum(abs(float(e.notional or 0.0)) for e in active_events)
-            timestamps = [e.traded_at for e in active_events if e.traded_at]
+            net_notional = sum(abs(float(event.get("notional") or 0.0)) for event in active_events)
+            timestamps = [
+                event["traded_at"]
+                for event in active_events
+                if isinstance(event.get("traded_at"), datetime)
+            ]
             timing_tightness = self._timing_tightness(timestamps)
 
             candidates.append({
@@ -301,12 +336,41 @@ class ConfluenceDetector:
     MIN_QUALIFYING_TOTAL_TRADES = 5
     MIN_QUALIFYING_TOTAL_PNL = 0.0  # Must be net-positive
 
-    async def _get_qualifying_wallets(self) -> list[dict]:
-        """Get wallets eligible for confluence scoring."""
+    async def _get_qualifying_wallets(self, cutoff_60m: datetime) -> list[dict]:
+        """Get recent wallets eligible for confluence scoring."""
+        recent_wallets = (
+            select(WalletActivityRollup.wallet_address.label("wallet_address"))
+            .where(WalletActivityRollup.traded_at >= as_utc_naive(cutoff_60m))
+            .group_by(WalletActivityRollup.wallet_address)
+            .subquery()
+        )
+        tracked_wallets = select(TrackedWallet.address.label("wallet_address")).subquery()
+        group_wallets = (
+            select(TraderGroupMember.wallet_address.label("wallet_address"))
+            .join(TraderGroup, TraderGroupMember.group_id == TraderGroup.id)
+            .where(TraderGroup.is_active == True)  # noqa: E712
+            .group_by(TraderGroupMember.wallet_address)
+            .subquery()
+        )
+
         async with AsyncSessionLocal() as session:
             result = await session.execute(
-                select(DiscoveredWallet).where(
+                select(
+                    recent_wallets.c.wallet_address,
+                    DiscoveredWallet.rank_score,
+                    DiscoveredWallet.composite_score,
+                    DiscoveredWallet.anomaly_score,
+                    DiscoveredWallet.cluster_id,
+                    DiscoveredWallet.in_top_pool,
+                )
+                .select_from(recent_wallets)
+                .outerjoin(DiscoveredWallet, DiscoveredWallet.address == recent_wallets.c.wallet_address)
+                .outerjoin(tracked_wallets, tracked_wallets.c.wallet_address == recent_wallets.c.wallet_address)
+                .outerjoin(group_wallets, group_wallets.c.wallet_address == recent_wallets.c.wallet_address)
+                .where(
                     or_(
+                        tracked_wallets.c.wallet_address.is_not(None),
+                        group_wallets.c.wallet_address.is_not(None),
                         DiscoveredWallet.rank_score >= self.MIN_WALLET_RANK_SCORE,
                         DiscoveredWallet.in_top_pool == True,  # noqa: E712
                         # Recently active wallets must also meet minimum quality
@@ -323,59 +387,20 @@ class ConfluenceDetector:
                     ),
                 )
             )
-            discovered = list(result.scalars().all())
 
             wallet_map: dict[str, dict] = {}
-            for w in discovered:
-                address = str(w.address or "").strip().lower()
+            for address_raw, rank_score, composite_score, anomaly_score, cluster_id, in_top_pool in result.all():
+                address = str(address_raw or "").strip().lower()
                 if not address:
                     continue
                 wallet_map[address] = {
                     "address": address,
-                    "rank_score": w.rank_score or 0.0,
-                    "composite_score": w.composite_score or 0.0,
-                    "anomaly_score": w.anomaly_score or 0.0,
-                    "cluster_id": w.cluster_id,
-                    "in_top_pool": bool(w.in_top_pool),
+                    "rank_score": rank_score or 0.0,
+                    "composite_score": composite_score or 0.0,
+                    "anomaly_score": anomaly_score or 0.0,
+                    "cluster_id": cluster_id,
+                    "in_top_pool": bool(in_top_pool),
                 }
-
-            tracked_rows = await session.execute(select(TrackedWallet.address))
-            for (address_raw,) in tracked_rows.all():
-                address = str(address_raw or "").strip().lower()
-                if not address:
-                    continue
-                wallet_map.setdefault(
-                    address,
-                    {
-                        "address": address,
-                        "rank_score": 0.0,
-                        "composite_score": 0.0,
-                        "anomaly_score": 0.0,
-                        "cluster_id": None,
-                        "in_top_pool": False,
-                    },
-                )
-
-            group_rows = await session.execute(
-                select(TraderGroupMember.wallet_address)
-                .join(TraderGroup, TraderGroupMember.group_id == TraderGroup.id)
-                .where(TraderGroup.is_active == True)  # noqa: E712
-            )
-            for (address_raw,) in group_rows.all():
-                address = str(address_raw or "").strip().lower()
-                if not address:
-                    continue
-                wallet_map.setdefault(
-                    address,
-                    {
-                        "address": address,
-                        "rank_score": 0.0,
-                        "composite_score": 0.0,
-                        "anomaly_score": 0.0,
-                        "cluster_id": None,
-                        "in_top_pool": False,
-                    },
-                )
 
             return list(wallet_map.values())
 
@@ -473,26 +498,63 @@ class ConfluenceDetector:
         addresses: list[str],
         cutoff: datetime,
     ) -> dict[tuple[str, str], float]:
-        """Fetch conflicting notional for all market/side pairs, one session per candidate."""
+        """Fetch conflicting notionals for all candidate market/side pairs in one grouped query."""
         if not candidates or not addresses:
             return {}
+        candidate_pairs = {(str(market_id or ""), str(side or "").upper()) for market_id, side in candidates if market_id}
+        market_ids = sorted({market_id for market_id, _ in candidate_pairs})
+        if not market_ids:
+            return {}
+
+        totals_by_market_side: dict[tuple[str, str], float] = {}
+        async with AsyncSessionLocal() as session:
+            rows = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT
+                            war.market_id AS market_id,
+                            CASE
+                                WHEN war.side IN ('BUY', 'YES') THEN 'BUY'
+                                WHEN war.side IN ('SELL', 'NO') THEN 'SELL'
+                                ELSE NULL
+                            END AS normalized_side,
+                            SUM(ABS(COALESCE(war.notional, 0.0))) AS total_notional
+                        FROM wallet_activity_rollups AS war
+                        JOIN (
+                            SELECT DISTINCT wallet_address
+                            FROM unnest(CAST(:addresses AS text[])) AS qualifying(wallet_address)
+                        ) AS qa
+                            ON qa.wallet_address = war.wallet_address
+                        JOIN (
+                            SELECT DISTINCT market_id
+                            FROM unnest(CAST(:market_ids AS text[])) AS candidates(market_id)
+                        ) AS cm
+                            ON cm.market_id = war.market_id
+                        WHERE war.traded_at >= :cutoff
+                          AND war.side IN ('BUY', 'SELL', 'YES', 'NO')
+                        GROUP BY war.market_id, normalized_side
+                        """
+                    ),
+                    {
+                        "addresses": addresses,
+                        "market_ids": market_ids,
+                        "cutoff": as_utc_naive(cutoff),
+                    },
+                )
+            ).mappings()
+            for row in rows:
+                market_id = row["market_id"]
+                side_key = row["normalized_side"]
+                if market_id is None or side_key is None:
+                    continue
+                map_key = (str(market_id), str(side_key).upper())
+                totals_by_market_side[map_key] = float(row["total_notional"] or 0.0)
+
         result_map: dict[tuple[str, str], float] = {}
-        for market_id, side in candidates:
+        for market_id, side in candidate_pairs:
             opposite = "SELL" if side == "BUY" else "BUY"
-            opposite_sides = [opposite, "YES" if opposite == "BUY" else "NO"]
-            total = 0.0
-            async with AsyncSessionLocal() as session:
-                for address_chunk in _iter_chunks(addresses):
-                    result = await session.execute(
-                        select(func.sum(WalletActivityRollup.notional)).where(
-                            WalletActivityRollup.market_id == market_id,
-                            WalletActivityRollup.wallet_address.in_(address_chunk),
-                            WalletActivityRollup.traded_at >= cutoff,
-                            WalletActivityRollup.side.in_(opposite_sides),
-                        )
-                    )
-                    total += float(result.scalar() or 0.0)
-            result_map[(market_id, side)] = total
+            result_map[(market_id, side)] = totals_by_market_side.get((market_id, opposite), 0.0)
         return result_map
 
     async def _batch_resolve_market_context(self, market_ids: list[str]) -> dict[str, dict]:
@@ -516,93 +578,95 @@ class ConfluenceDetector:
         return context_map
 
     async def _batch_upsert_signals(self, payloads: list[dict]) -> None:
-        """Upsert all confluence signals in a single session + commit."""
+        """Upsert confluence signals in bounded batches to stay under asyncpg bind limits."""
         if not payloads:
             return
         now = utcnow()
-        async with AsyncSessionLocal() as session:
-            keys = sorted({(str(payload["market_id"]), str(payload["outcome"])) for payload in payloads})
-            existing_rows = list(
-                (
-                    await session.execute(
-                        select(MarketConfluenceSignal).where(
-                            tuple_(MarketConfluenceSignal.market_id, MarketConfluenceSignal.outcome).in_(keys)
+        for start in range(0, len(payloads), SIGNAL_UPSERT_BATCH_SIZE):
+            batch = payloads[start : start + SIGNAL_UPSERT_BATCH_SIZE]
+            async with AsyncSessionLocal() as session:
+                keys = sorted({(str(payload["market_id"]), str(payload["outcome"])) for payload in batch})
+                existing_rows = list(
+                    (
+                        await session.execute(
+                            select(MarketConfluenceSignal).where(
+                                tuple_(MarketConfluenceSignal.market_id, MarketConfluenceSignal.outcome).in_(keys)
+                            )
                         )
                     )
+                    .scalars()
+                    .all()
                 )
-                .scalars()
-                .all()
-            )
-            existing_by_key: dict[tuple[str, str], MarketConfluenceSignal] = {}
-            for row in existing_rows:
-                key = (str(row.market_id or ""), str(row.outcome or ""))
-                previous = existing_by_key.get(key)
-                if previous is None or (row.last_seen_at or datetime.min) > (previous.last_seen_at or datetime.min):
-                    existing_by_key[key] = row
-            for p in payloads:
-                existing = existing_by_key.get((str(p["market_id"]), str(p["outcome"])))
+                existing_by_key: dict[tuple[str, str], MarketConfluenceSignal] = {}
+                for row in existing_rows:
+                    key = (str(row.market_id or ""), str(row.outcome or ""))
+                    previous = existing_by_key.get(key)
+                    if previous is None or (row.last_seen_at or datetime.min) > (previous.last_seen_at or datetime.min):
+                        existing_by_key[key] = row
+                for p in batch:
+                    existing = existing_by_key.get((str(p["market_id"]), str(p["outcome"])))
 
-                if existing:
-                    existing.signal_type = p["signal_type"]
-                    existing.strength = p["strength"]
-                    existing.conviction_score = p["conviction_score"]
-                    existing.tier = p["tier"]
-                    existing.window_minutes = p["window_minutes"]
-                    existing.wallet_count = p["wallet_count"]
-                    existing.cluster_adjusted_wallet_count = p["cluster_adjusted_wallet_count"]
-                    existing.unique_core_wallets = p["unique_core_wallets"]
-                    existing.weighted_wallet_score = p["weighted_wallet_score"]
-                    existing.wallets = p["wallets"]
-                    existing.avg_entry_price = p["avg_entry_price"]
-                    existing.total_size = p["total_size"]
-                    existing.avg_wallet_rank = p["avg_wallet_rank"]
-                    existing.net_notional = p["net_notional"]
-                    existing.conflicting_notional = p["conflicting_notional"]
-                    existing.market_liquidity = p["market_liquidity"]
-                    existing.market_volume_24h = p["market_volume_24h"]
-                    existing.last_seen_at = now
-                    existing.detected_at = now
-                    existing.is_active = True
-                    existing.expired_at = None
-                    if p["market_slug"]:
-                        existing.market_slug = p["market_slug"]
-                    if p["market_question"]:
-                        existing.market_question = p["market_question"]
-                    if p["conviction_score"] >= (existing.conviction_score or 0) + 5:
-                        existing.cooldown_until = now + timedelta(minutes=5)
-                else:
-                    existing = MarketConfluenceSignal(
-                        id=str(uuid.uuid4()),
-                        market_id=p["market_id"],
-                        market_question=p["market_question"],
-                        market_slug=p["market_slug"],
-                        signal_type=p["signal_type"],
-                        strength=p["strength"],
-                        conviction_score=p["conviction_score"],
-                        tier=p["tier"],
-                        window_minutes=p["window_minutes"],
-                        wallet_count=p["wallet_count"],
-                        cluster_adjusted_wallet_count=p["cluster_adjusted_wallet_count"],
-                        unique_core_wallets=p["unique_core_wallets"],
-                        weighted_wallet_score=p["weighted_wallet_score"],
-                        wallets=p["wallets"],
-                        outcome=p["outcome"],
-                        avg_entry_price=p["avg_entry_price"],
-                        total_size=p["total_size"],
-                        avg_wallet_rank=p["avg_wallet_rank"],
-                        net_notional=p["net_notional"],
-                        conflicting_notional=p["conflicting_notional"],
-                        market_liquidity=p["market_liquidity"],
-                        market_volume_24h=p["market_volume_24h"],
-                        is_active=True,
-                        first_seen_at=now,
-                        last_seen_at=now,
-                        detected_at=now,
-                        cooldown_until=now + timedelta(minutes=5),
-                    )
-                    session.add(existing)
-                    existing_by_key[(str(p["market_id"]), str(p["outcome"]))] = existing
-            await session.commit()
+                    if existing:
+                        existing.signal_type = p["signal_type"]
+                        existing.strength = p["strength"]
+                        existing.conviction_score = p["conviction_score"]
+                        existing.tier = p["tier"]
+                        existing.window_minutes = p["window_minutes"]
+                        existing.wallet_count = p["wallet_count"]
+                        existing.cluster_adjusted_wallet_count = p["cluster_adjusted_wallet_count"]
+                        existing.unique_core_wallets = p["unique_core_wallets"]
+                        existing.weighted_wallet_score = p["weighted_wallet_score"]
+                        existing.wallets = p["wallets"]
+                        existing.avg_entry_price = p["avg_entry_price"]
+                        existing.total_size = p["total_size"]
+                        existing.avg_wallet_rank = p["avg_wallet_rank"]
+                        existing.net_notional = p["net_notional"]
+                        existing.conflicting_notional = p["conflicting_notional"]
+                        existing.market_liquidity = p["market_liquidity"]
+                        existing.market_volume_24h = p["market_volume_24h"]
+                        existing.last_seen_at = now
+                        existing.detected_at = now
+                        existing.is_active = True
+                        existing.expired_at = None
+                        if p["market_slug"]:
+                            existing.market_slug = p["market_slug"]
+                        if p["market_question"]:
+                            existing.market_question = p["market_question"]
+                        if p["conviction_score"] >= (existing.conviction_score or 0) + 5:
+                            existing.cooldown_until = now + timedelta(minutes=5)
+                    else:
+                        existing = MarketConfluenceSignal(
+                            id=str(uuid.uuid4()),
+                            market_id=p["market_id"],
+                            market_question=p["market_question"],
+                            market_slug=p["market_slug"],
+                            signal_type=p["signal_type"],
+                            strength=p["strength"],
+                            conviction_score=p["conviction_score"],
+                            tier=p["tier"],
+                            window_minutes=p["window_minutes"],
+                            wallet_count=p["wallet_count"],
+                            cluster_adjusted_wallet_count=p["cluster_adjusted_wallet_count"],
+                            unique_core_wallets=p["unique_core_wallets"],
+                            weighted_wallet_score=p["weighted_wallet_score"],
+                            wallets=p["wallets"],
+                            outcome=p["outcome"],
+                            avg_entry_price=p["avg_entry_price"],
+                            total_size=p["total_size"],
+                            avg_wallet_rank=p["avg_wallet_rank"],
+                            net_notional=p["net_notional"],
+                            conflicting_notional=p["conflicting_notional"],
+                            market_liquidity=p["market_liquidity"],
+                            market_volume_24h=p["market_volume_24h"],
+                            is_active=True,
+                            first_seen_at=now,
+                            last_seen_at=now,
+                            detected_at=now,
+                            cooldown_until=now + timedelta(minutes=5),
+                        )
+                        session.add(existing)
+                        existing_by_key[(str(p["market_id"]), str(p["outcome"]))] = existing
+                await session.commit()
 
     async def _resolve_market_context(self, market_id: str) -> dict:
         market_slug = None
@@ -985,6 +1049,8 @@ class EntityClusterer:
     ):
         """Persist clusters to the database and update wallet cluster_id fields."""
         async with AsyncSessionLocal() as session:
+            cluster_rows: list[WalletCluster] = []
+            update_payloads: list[dict[str, str | None]] = []
             for root_addr, member_addrs in clusters.items():
                 # Aggregate stats
                 total_pnl = sum(wallet_data.get(a, {}).get("total_pnl", 0.0) for a in member_addrs)
@@ -998,30 +1064,32 @@ class EntityClusterer:
 
                 cluster_id = str(uuid.uuid4())
 
-                cluster = WalletCluster(
-                    id=cluster_id,
-                    label=f"Cluster ({len(member_addrs)} wallets)",
-                    confidence=0.6,
-                    total_wallets=len(member_addrs),
-                    combined_pnl=total_pnl,
-                    combined_trades=total_trades,
-                    avg_win_rate=avg_wr,
-                    detection_method="timing_correlation+pattern_match",
-                    evidence={
-                        "members": member_addrs,
-                        "root": root_addr,
-                    },
-                    created_at=utcnow(),
-                    updated_at=utcnow(),
-                )
-                session.add(cluster)
-
-                # Update wallet records with cluster_id
-                for addr in member_addrs:
-                    await session.execute(
-                        update(DiscoveredWallet).where(DiscoveredWallet.address == addr).values(cluster_id=cluster_id)
+                cluster_rows.append(
+                    WalletCluster(
+                        id=cluster_id,
+                        label=f"Cluster ({len(member_addrs)} wallets)",
+                        confidence=0.6,
+                        total_wallets=len(member_addrs),
+                        combined_pnl=total_pnl,
+                        combined_trades=total_trades,
+                        avg_win_rate=avg_wr,
+                        detection_method="timing_correlation+pattern_match",
+                        evidence={
+                            "members": member_addrs,
+                            "root": root_addr,
+                        },
+                        created_at=utcnow(),
+                        updated_at=utcnow(),
                     )
+                )
 
+                for addr in member_addrs:
+                    update_payloads.append({"address": addr, "cluster_id": cluster_id})
+
+            if cluster_rows:
+                session.add_all(cluster_rows)
+            if update_payloads:
+                await session.execute(update(DiscoveredWallet), update_payloads)
             await session.commit()
         logger.info(
             "Clusters stored in DB",
@@ -1313,10 +1381,32 @@ class WalletTagger:
         logger.info("Starting wallet auto-tagging...")
 
         async with AsyncSessionLocal() as session:
-            result = await session.execute(select(DiscoveredWallet))
+            result = await session.execute(
+                select(DiscoveredWallet).options(
+                    load_only(
+                        DiscoveredWallet.address,
+                        DiscoveredWallet.tags,
+                        DiscoveredWallet.total_trades,
+                        DiscoveredWallet.win_rate,
+                        DiscoveredWallet.total_pnl,
+                        DiscoveredWallet.anomaly_score,
+                        DiscoveredWallet.strategies_detected,
+                        DiscoveredWallet.avg_position_size,
+                        DiscoveredWallet.trades_per_day,
+                        DiscoveredWallet.is_bot,
+                        DiscoveredWallet.roi_std,
+                        DiscoveredWallet.sharpe_ratio,
+                        DiscoveredWallet.max_drawdown,
+                        DiscoveredWallet.rolling_pnl,
+                        DiscoveredWallet.days_active,
+                        DiscoveredWallet.insider_score,
+                        DiscoveredWallet.insider_confidence,
+                        DiscoveredWallet.insider_sample_size,
+                    )
+                )
+            )
             wallets = list(result.scalars().all())
 
-        BATCH_SIZE = 200
         dirty: list[tuple[str, list]] = []
         for wallet in wallets:
             try:
@@ -1331,13 +1421,13 @@ class WalletTagger:
                 )
 
         tagged_count = 0
-        for i in range(0, len(dirty), BATCH_SIZE):
-            batch = dirty[i : i + BATCH_SIZE]
+        for i in range(0, len(dirty), WALLET_TAG_UPDATE_BATCH_SIZE):
+            batch = dirty[i : i + WALLET_TAG_UPDATE_BATCH_SIZE]
             async with AsyncSessionLocal() as session:
-                for address, tags in batch:
-                    await session.execute(
-                        update(DiscoveredWallet).where(DiscoveredWallet.address == address).values(tags=tags)
-                    )
+                await session.execute(
+                    update(DiscoveredWallet),
+                    [{"address": address, "tags": tags} for address, tags in batch],
+                )
                 await session.commit()
                 tagged_count += len(batch)
 
@@ -2245,35 +2335,31 @@ class WalletIntelligence:
         await self.tagger.initialize_tags()
         logger.info("Wallet intelligence initialized")
 
-    async def run_full_analysis(self):
+    async def run_full_analysis(self, *, include_confluence: bool = True):
         """Run all intelligence subsystems."""
-        logger.info("Running full intelligence analysis...")
+        logger.info("Running full intelligence analysis...", include_confluence=include_confluence)
 
-        # Phase 1: Confluence detection (fast, positions-only scan)
-        try:
-            await self.confluence.scan_for_confluence()
-        except Exception as e:
-            logger.error("Confluence scan failed", error=str(e))
+        if include_confluence:
+            try:
+                await self.confluence.scan_for_confluence()
+            except Exception as e:
+                logger.error("Confluence scan failed", error=str(e))
 
-        # Phase 2: Auto-tag wallets (reads DB, light computation)
         try:
             await self.tagger.tag_all_wallets()
         except Exception as e:
             logger.error("Wallet tagging failed", error=str(e))
 
-        # Phase 3: Entity clustering (heavier, pairwise comparisons)
         try:
             await self.clusterer.run_clustering()
         except Exception as e:
             logger.error("Entity clustering failed", error=str(e))
 
-        # Phase 4: Cross-platform tracking (lowest priority, depends on Kalshi API)
         try:
             await self.cross_platform.scan_cross_platform()
         except Exception as e:
             logger.error("Cross-platform scan failed", error=str(e))
 
-        # Phase 5: Whale cohort analysis (pairwise co-trading network)
         try:
             await self.cohort_analyzer.analyze_cohorts()
         except Exception as e:

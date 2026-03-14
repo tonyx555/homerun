@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,8 +21,6 @@ from models.database import (
     ScannerRun,
     OpportunityState,
     OpportunityEvent,
-    ScannerBatchQueue,
-    StrategyDeadLetterQueue,
     ScannerSloIncident,
 )
 from models.opportunity import Opportunity, OpportunityFilter
@@ -51,10 +49,6 @@ CONTROL_ID = "default"
 DB_RETRY_ATTEMPTS = 3
 DB_RETRY_BASE_DELAY_SECONDS = 0.05
 DB_RETRY_MAX_DELAY_SECONDS = 0.3
-SCANNER_BATCH_LEASE_MIN_SECONDS = 5
-SCANNER_BATCH_LEASE_MAX_SECONDS = 300
-STRATEGY_DLQ_LEASE_MIN_SECONDS = 5
-STRATEGY_DLQ_LEASE_MAX_SECONDS = 300
 
 # In-memory targeted condition IDs for the next scan request.
 # Set by the evaluate endpoint, consumed and cleared by the scanner worker.
@@ -211,6 +205,24 @@ async def write_scanner_snapshot(
 CATALOG_ID = "latest"
 
 
+def relink_event_markets(events: list, markets: list) -> None:
+    if not events or not markets:
+        return
+
+    markets_by_slug: dict[str, list] = {}
+    for market in markets:
+        slug = str(getattr(market, "event_slug", "") or "").strip()
+        if not slug:
+            continue
+        markets_by_slug.setdefault(slug, []).append(market)
+
+    for event in events:
+        key = str(getattr(event, "slug", "") or getattr(event, "id", "") or "").strip()
+        if not key:
+            continue
+        event.markets = list(markets_by_slug.get(key, []))
+
+
 async def write_market_catalog(
     session: AsyncSession,
     events: list,
@@ -224,7 +236,14 @@ async def write_market_catalog(
     events_payload = []
     for e in events:
         try:
-            events_payload.append(e.model_dump(mode="json") if hasattr(e, "model_dump") else e)
+            if hasattr(e, "model_dump"):
+                payload = e.model_dump(mode="json", exclude={"markets"})
+            elif isinstance(e, dict):
+                payload = dict(e)
+                payload.pop("markets", None)
+            else:
+                payload = e
+            events_payload.append(payload)
         except Exception:
             pass
 
@@ -330,6 +349,8 @@ async def read_market_catalog(
         return events, markets
 
     events, markets = await asyncio.to_thread(_deserialize_payload)
+    if include_events and include_markets and events and markets:
+        relink_event_markets(events, markets)
     return events, markets, metadata
 
 
@@ -404,353 +425,6 @@ async def write_traders_snapshot(
         )
     except Exception:
         pass
-
-
-async def enqueue_scanner_batch(
-    session: AsyncSession,
-    opportunities: list[Opportunity],
-    status: dict[str, Any],
-    *,
-    source: str = "scanner",
-    batch_kind: str = "scan_cycle",
-) -> str | None:
-    """Enqueue a scanner detection batch for aggregation worker processing."""
-    payload, skipped = await asyncio.to_thread(_serialize_opportunity_payload, opportunities)
-    if skipped:
-        logger.warning(
-            "Skipped %d/%d opportunities while enqueueing scanner batch",
-            skipped,
-            len(opportunities),
-        )
-    if not payload and opportunities:
-        return None
-
-    batch_id = uuid.uuid4().hex[:16]
-    row = ScannerBatchQueue(
-        id=batch_id,
-        source=str(source or "scanner"),
-        batch_kind=str(batch_kind or "scan_cycle"),
-        opportunities_json=payload,
-        status_json=dict(status or {}),
-        emitted_at=utcnow(),
-        lease_owner=None,
-        lease_expires_at=None,
-        attempt_count=0,
-        processed_at=None,
-        error=None,
-    )
-    session.add(row)
-    await _commit_with_retry(session)
-    return batch_id
-
-
-async def claim_next_scanner_batch(
-    session: AsyncSession,
-    *,
-    owner: str,
-    lease_seconds: int,
-) -> dict[str, Any] | None:
-    """Claim the next unprocessed scanner batch and acquire a short lease."""
-    now = utcnow()
-    lease_ttl = max(
-        SCANNER_BATCH_LEASE_MIN_SECONDS,
-        min(SCANNER_BATCH_LEASE_MAX_SECONDS, int(lease_seconds or SCANNER_BATCH_LEASE_MIN_SECONDS)),
-    )
-    lease_until = now + timedelta(seconds=lease_ttl)
-
-    stmt = (
-        select(ScannerBatchQueue)
-        .where(ScannerBatchQueue.processed_at.is_(None))
-        .where(
-            (ScannerBatchQueue.lease_expires_at.is_(None))
-            | (ScannerBatchQueue.lease_expires_at < now)
-        )
-        .order_by(ScannerBatchQueue.emitted_at.asc(), ScannerBatchQueue.id.asc())
-        .limit(1)
-    )
-    bind = session.get_bind()
-    if bind is not None and str(getattr(bind.dialect, "name", "") or "").lower() == "postgresql":
-        stmt = stmt.with_for_update(skip_locked=True)
-    result = await session.execute(stmt)
-    row = result.scalars().first()
-    if row is None:
-        return None
-
-    row.lease_owner = str(owner or "")
-    row.lease_expires_at = lease_until
-    row.attempt_count = int(row.attempt_count or 0) + 1
-    row.error = None
-    await _commit_with_retry(session)
-    return {
-        "id": row.id,
-        "source": row.source,
-        "batch_kind": row.batch_kind,
-        "opportunities_json": list(row.opportunities_json or []),
-        "status_json": dict(row.status_json or {}),
-        "emitted_at": row.emitted_at,
-        "attempt_count": int(row.attempt_count or 0),
-    }
-
-
-async def mark_scanner_batch_processed(
-    session: AsyncSession,
-    batch_id: str,
-) -> None:
-    """Mark a claimed scanner batch as fully processed."""
-    row = await session.get(ScannerBatchQueue, str(batch_id or "").strip())
-    if row is None:
-        return
-    row.processed_at = utcnow()
-    row.lease_owner = None
-    row.lease_expires_at = None
-    row.error = None
-    await _commit_with_retry(session)
-
-
-async def mark_scanner_batch_failed(
-    session: AsyncSession,
-    batch_id: str,
-    *,
-    error: str,
-    requeue: bool,
-) -> None:
-    """Record scanner batch failure and optionally requeue for retry."""
-    row = await session.get(ScannerBatchQueue, str(batch_id or "").strip())
-    if row is None:
-        return
-    row.error = str(error or "")[:2000]
-    if requeue:
-        row.lease_owner = None
-        row.lease_expires_at = None
-        row.processed_at = None
-    else:
-        row.lease_owner = None
-        row.lease_expires_at = None
-        row.processed_at = utcnow()
-    await _commit_with_retry(session)
-
-
-async def count_pending_scanner_batches(session: AsyncSession) -> int:
-    value = await session.execute(
-        select(func.count())
-        .select_from(ScannerBatchQueue)
-        .where(ScannerBatchQueue.processed_at.is_(None))
-    )
-    return int(value.scalar_one() or 0)
-
-
-async def count_dead_letter_scanner_batches(session: AsyncSession) -> int:
-    value = await session.execute(
-        select(func.count())
-        .select_from(ScannerBatchQueue)
-        .where(ScannerBatchQueue.processed_at.is_not(None), ScannerBatchQueue.error.is_not(None))
-    )
-    return int(value.scalar_one() or 0)
-
-
-async def enqueue_strategy_dead_letter_batch(
-    session: AsyncSession,
-    *,
-    source: str,
-    batch_id: str | None,
-    strategy_type: str,
-    opportunities: list[Opportunity],
-    status: dict[str, Any] | None,
-    error: str,
-) -> str | None:
-    """Enqueue failed strategy opportunities into dedicated dead-letter queue."""
-    payload, skipped = await asyncio.to_thread(_serialize_opportunity_payload, opportunities)
-    if skipped:
-        logger.warning(
-            "Skipped %d/%d opportunities while enqueueing strategy dead-letter batch",
-            skipped,
-            len(opportunities),
-        )
-    if not payload:
-        return None
-
-    dead_letter_id = uuid.uuid4().hex[:16]
-    now = utcnow()
-    row = StrategyDeadLetterQueue(
-        id=dead_letter_id,
-        source=str(source or "scanner"),
-        batch_id=str(batch_id or "").strip() or None,
-        strategy_type=str(strategy_type or "unknown").strip().lower() or "unknown",
-        opportunities_json=payload,
-        status_json=dict(status or {}),
-        first_failed_at=now,
-        last_failed_at=now,
-        lease_owner=None,
-        lease_expires_at=None,
-        attempt_count=0,
-        processed_at=None,
-        terminal=False,
-        error=str(error or "")[:2000],
-    )
-    session.add(row)
-    await _commit_with_retry(session)
-    return dead_letter_id
-
-
-async def claim_next_strategy_dead_letter_batch(
-    session: AsyncSession,
-    *,
-    owner: str,
-    lease_seconds: int,
-) -> dict[str, Any] | None:
-    """Claim the next unprocessed strategy dead-letter batch and lease it."""
-    now = utcnow()
-    lease_ttl = max(
-        STRATEGY_DLQ_LEASE_MIN_SECONDS,
-        min(STRATEGY_DLQ_LEASE_MAX_SECONDS, int(lease_seconds or STRATEGY_DLQ_LEASE_MIN_SECONDS)),
-    )
-    lease_until = now + timedelta(seconds=lease_ttl)
-
-    stmt = (
-        select(StrategyDeadLetterQueue)
-        .where(StrategyDeadLetterQueue.processed_at.is_(None))
-        .where(
-            (StrategyDeadLetterQueue.lease_expires_at.is_(None))
-            | (StrategyDeadLetterQueue.lease_expires_at < now)
-        )
-        .order_by(StrategyDeadLetterQueue.first_failed_at.asc(), StrategyDeadLetterQueue.id.asc())
-        .limit(1)
-    )
-    bind = session.get_bind()
-    if bind is not None and str(getattr(bind.dialect, "name", "") or "").lower() == "postgresql":
-        stmt = stmt.with_for_update(skip_locked=True)
-    row = (await session.execute(stmt)).scalars().first()
-    if row is None:
-        return None
-
-    row.lease_owner = str(owner or "")
-    row.lease_expires_at = lease_until
-    row.attempt_count = int(row.attempt_count or 0) + 1
-    await _commit_with_retry(session)
-    return {
-        "id": row.id,
-        "source": row.source,
-        "batch_id": row.batch_id,
-        "strategy_type": row.strategy_type,
-        "opportunities_json": list(row.opportunities_json or []),
-        "status_json": dict(row.status_json or {}),
-        "attempt_count": int(row.attempt_count or 0),
-    }
-
-
-async def mark_strategy_dead_letter_processed(
-    session: AsyncSession,
-    dead_letter_id: str,
-) -> None:
-    row = await session.get(StrategyDeadLetterQueue, str(dead_letter_id or "").strip())
-    if row is None:
-        return
-    row.processed_at = utcnow()
-    row.terminal = False
-    row.error = None
-    row.lease_owner = None
-    row.lease_expires_at = None
-    await _commit_with_retry(session)
-
-
-async def mark_strategy_dead_letter_failed(
-    session: AsyncSession,
-    dead_letter_id: str,
-    *,
-    error: str,
-    requeue: bool,
-) -> None:
-    row = await session.get(StrategyDeadLetterQueue, str(dead_letter_id or "").strip())
-    if row is None:
-        return
-    now = utcnow()
-    row.error = str(error or "")[:2000]
-    row.last_failed_at = now
-    row.lease_owner = None
-    row.lease_expires_at = None
-    if requeue:
-        row.processed_at = None
-        row.terminal = False
-    else:
-        row.processed_at = now
-        row.terminal = True
-    await _commit_with_retry(session)
-
-
-async def count_pending_strategy_dead_letter_batches(session: AsyncSession) -> int:
-    value = await session.execute(
-        select(func.count())
-        .select_from(StrategyDeadLetterQueue)
-        .where(StrategyDeadLetterQueue.processed_at.is_(None))
-    )
-    return int(value.scalar_one() or 0)
-
-
-async def count_terminal_strategy_dead_letter_batches(session: AsyncSession) -> int:
-    value = await session.execute(
-        select(func.count())
-        .select_from(StrategyDeadLetterQueue)
-        .where(StrategyDeadLetterQueue.processed_at.is_not(None), StrategyDeadLetterQueue.terminal.is_(True))
-    )
-    return int(value.scalar_one() or 0)
-
-
-async def cleanup_processed_strategy_dead_letter_batches(
-    session: AsyncSession,
-    *,
-    retain_hours: int = 72,
-) -> int:
-    cutoff = utcnow() - timedelta(hours=max(1, int(retain_hours or 72)))
-    result = await session.execute(
-        delete(StrategyDeadLetterQueue).where(
-            StrategyDeadLetterQueue.processed_at.is_not(None),
-            StrategyDeadLetterQueue.processed_at < cutoff,
-        )
-    )
-    await _commit_with_retry(session)
-    return int(result.rowcount or 0)
-
-
-async def cleanup_processed_scanner_batches(
-    session: AsyncSession,
-    *,
-    retain_hours: int = 24,
-) -> int:
-    """Delete old processed scanner batches to keep queue table bounded."""
-    cutoff = utcnow() - timedelta(hours=max(1, int(retain_hours or 24)))
-    result = await session.execute(
-        delete(ScannerBatchQueue).where(
-            ScannerBatchQueue.processed_at.is_not(None),
-            ScannerBatchQueue.processed_at < cutoff,
-        )
-    )
-    await _commit_with_retry(session)
-    return int(result.rowcount or 0)
-
-
-async def drop_oldest_pending_scanner_batch(session: AsyncSession) -> str | None:
-    """Drop the oldest unprocessed scanner batch (backpressure safety valve)."""
-    now = utcnow()
-    stmt = (
-        select(ScannerBatchQueue)
-        .where(ScannerBatchQueue.processed_at.is_(None))
-        .where(
-            (ScannerBatchQueue.lease_expires_at.is_(None))
-            | (ScannerBatchQueue.lease_expires_at < now)
-        )
-        .order_by(ScannerBatchQueue.emitted_at.asc(), ScannerBatchQueue.id.asc())
-        .limit(1)
-    )
-    bind = session.get_bind()
-    if bind is not None and str(getattr(bind.dialect, "name", "") or "").lower() == "postgresql":
-        stmt = stmt.with_for_update(skip_locked=True)
-    row = (await session.execute(stmt)).scalars().first()
-    if row is None:
-        return None
-    dropped_id = str(row.id)
-    await session.delete(row)
-    await _commit_with_retry(session)
-    return dropped_id
 
 
 async def _persist_incremental_state(

@@ -1361,6 +1361,7 @@ export function TraderSignalTable({ signals, onNavigateToWallet, onOpenCopilot }
               <CryptoMarketCard
                 market={modalMarket}
                 themeMode={themeMode}
+                nowMs={Date.now()}
                 isModalView
                 onCloseModal={closeModal}
               />

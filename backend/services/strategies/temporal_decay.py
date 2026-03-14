@@ -139,7 +139,6 @@ class TemporalDecayStrategy(BaseStrategy):
     description = "Detect rapid near-deadline repricing toward certainty"
     mispricing_type = "within_market"
     requires_resolution_date = True
-    realtime_processing_mode = "incremental"
     subscriptions = ["market_data_refresh"]
 
     quality_filter_overrides = QualityFilterOverrides(

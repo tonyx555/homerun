@@ -246,7 +246,6 @@ class TradersCopyTradeStrategy(BaseStrategy):
     name = "Traders Copy Trade"
     description = "Mirror tracked wallet trades in real time with explicit scope, sizing, and execution controls"
     source_key = "traders"
-    worker_affinity = "traders"
     allow_deduplication = False
     accepted_signal_strategy_types = ["traders_copy_trade"]
     default_config = traders_copy_trade_defaults()

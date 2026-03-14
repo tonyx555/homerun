@@ -55,7 +55,7 @@ homerun-settings-*.json
 *.log
 logs/
 
-# Redis artifacts
+# Runtime artifacts
 *.rdb
 
 # Test / debug artifacts

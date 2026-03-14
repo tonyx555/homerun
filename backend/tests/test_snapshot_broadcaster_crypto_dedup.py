@@ -57,3 +57,46 @@ def test_crypto_markets_dedup_sig_is_order_invariant():
     sig_b = broadcaster._compute_dedup_sig("crypto_markets_update", {"markets": reordered})
 
     assert sig_a == sig_b
+
+
+def test_crypto_markets_dedup_sig_changes_when_oracle_source_view_changes():
+    broadcaster = SnapshotBroadcaster()
+    base_markets = [
+        {
+            "id": "btc-5m-1",
+            "up_price": 0.51,
+            "down_price": 0.49,
+            "combined": 1.0,
+            "oracle_price": 70000.0,
+            "oracle_updated_at_ms": 1_700_000_000_000,
+            "oracle_prices_by_source": {
+                "chainlink": {
+                    "source": "chainlink",
+                    "price": 70000.0,
+                    "updated_at_ms": 1_700_000_000_000,
+                },
+                "binance_direct": {
+                    "source": "binance_direct",
+                    "price": 70001.0,
+                    "updated_at_ms": 1_700_000_000_010,
+                },
+            },
+        }
+    ]
+    updated_markets = [dict(row) for row in base_markets]
+    updated_markets[0] = {
+        **updated_markets[0],
+        "oracle_prices_by_source": {
+            **updated_markets[0]["oracle_prices_by_source"],
+            "binance_direct": {
+                "source": "binance_direct",
+                "price": 70004.0,
+                "updated_at_ms": 1_700_000_000_040,
+            },
+        },
+    }
+
+    base_sig = broadcaster._compute_dedup_sig("crypto_markets_update", {"markets": base_markets})
+    updated_sig = broadcaster._compute_dedup_sig("crypto_markets_update", {"markets": updated_markets})
+
+    assert base_sig != updated_sig

@@ -306,20 +306,18 @@ async def get_live_mid_prices(
 
     fetched_prices: dict[str, float] = {}
     try:
-        from services.redis_price_cache import redis_price_cache
+        from services.ws_feeds import get_feed_manager
 
-        redis_rows = await redis_price_cache.read_prices(missing_tokens)
+        feed_manager = get_feed_manager()
+        if getattr(feed_manager, "_started", False):
+            for token_id in missing_tokens:
+                if not feed_manager.cache.is_fresh(token_id):
+                    continue
+                price = _coerce_mid_price(feed_manager.cache.get_mid_price(token_id))
+                if price is not None:
+                    fetched_prices[token_id] = price
     except Exception:
-        redis_rows = {}
-    if isinstance(redis_rows, dict):
-        for raw_token_id, raw_row in redis_rows.items():
-            token_id = _normalize_token_id(raw_token_id)
-            if not token_id:
-                continue
-            row = raw_row if isinstance(raw_row, dict) else {}
-            price = _coerce_mid_price(row.get("mid"))
-            if price is not None:
-                fetched_prices[token_id] = price
+        pass
 
     provider_missing = [token_id for token_id in missing_tokens if token_id not in fetched_prices]
     if provider_missing:

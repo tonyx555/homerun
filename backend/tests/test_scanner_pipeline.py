@@ -18,6 +18,7 @@ from models.opportunity import (
     MispricingType,
     OpportunityFilter,
 )
+from services.data_events import EventType
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +109,22 @@ class TestScannerInit:
         assert scanner._last_scan is None
         assert scanner._scan_callbacks == []
         assert scanner._status_callbacks == []
+
+    def test_tail_end_carry_routes_to_full_snapshot_lane(self):
+        scanner = _build_scanner()
+        tail_end_carry = MagicMock()
+        tail_end_carry.slug = "tail_end_carry"
+        tail_end_carry.name = "Tail-End Carry"
+        tail_end_carry.source_key = "scanner"
+        tail_end_carry.strategy_type = "tail_end_carry"
+        tail_end_carry.subscriptions = [EventType.MARKET_DATA_REFRESH]
+        tail_end_carry.mispricing_type = MispricingType.WITHIN_MARKET.value
+        scanner._strategy_overrides = [tail_end_carry]
+
+        incremental, full_snapshot = scanner._partition_market_refresh_strategies()
+
+        assert "tail_end_carry" not in incremental
+        assert "tail_end_carry" in full_snapshot
 
 
 # ---------------------------------------------------------------------------
@@ -425,8 +442,8 @@ class TestScanPipeline:
         assert scanner._full_snapshot_cycle_completed_at is not None
 
     @pytest.mark.asyncio
-    async def test_refresh_catalog_reads_prices_from_redis(self, mock_polymarket_client):
-        """refresh_catalog reads prices via _snapshot_ws_prices (Redis), not get_prices_batch."""
+    async def test_refresh_catalog_reads_prices_from_ws_cache(self, mock_polymarket_client):
+        """refresh_catalog reads prices via _snapshot_ws_prices, not get_prices_batch."""
         # Token IDs must be >20 chars to pass the _collect_polymarket_tokens filter
         tok_a = "tok_a_" + "0" * 20
         tok_b = "tok_b_" + "0" * 20

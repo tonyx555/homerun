@@ -88,7 +88,6 @@ async def bump_strategy_runtime_revisions(
 
 
 async def refresh_strategy_runtime_if_needed(
-    session: AsyncSession,
     *,
     source_keys: list[str] | None = None,
     force: bool = False,
@@ -145,7 +144,6 @@ async def refresh_strategy_runtime_if_needed(
         }
 
     loaded = await strategy_loader.refresh_all_from_db(
-        session=session,
         source_keys=normalized_sources or None,
         # In a shared in-process runtime, source-scoped refreshes must not
         # unload strategies owned by other workers.
@@ -165,7 +163,6 @@ async def preload_strategy_runtime(*, session: AsyncSession | None = None) -> di
     async def _run(target_session: AsyncSession) -> dict[str, Any]:
         seeded = await ensure_all_strategies_seeded(target_session)
         loaded = await refresh_strategy_runtime_if_needed(
-            target_session,
             force=True,
         )
         loaded_keys = list(loaded.get("loaded", []))

@@ -8,8 +8,9 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.database import TradeSignal, TradeSignalSnapshot, get_db_session
-from services.signal_bus import list_trade_signals, refresh_trade_signal_snapshots
+from models.database import TradeSignal, get_db_session
+from services.intent_runtime import get_intent_runtime
+from services.signal_bus import list_trade_signals
 
 router = APIRouter(prefix="/signals", tags=["Signals"])
 
@@ -70,11 +71,8 @@ async def get_signals(
 
 @router.get("/stats")
 async def get_signal_stats(session: AsyncSession = Depends(get_db_session)):
-    snapshots = await refresh_trade_signal_snapshots(session)
-
-    rows = (
-        (await session.execute(select(TradeSignalSnapshot).order_by(TradeSignalSnapshot.source.asc()))).scalars().all()
-    )
+    del session
+    snapshots = get_intent_runtime().get_signal_snapshot_rows()
 
     totals = {
         "pending": 0,
@@ -85,14 +83,14 @@ async def get_signal_stats(session: AsyncSession = Depends(get_db_session)):
         "expired": 0,
         "failed": 0,
     }
-    for row in rows:
-        totals["pending"] += int(row.pending_count or 0)
-        totals["selected"] += int(row.selected_count or 0)
-        totals["submitted"] += int(row.submitted_count or 0)
-        totals["executed"] += int(row.executed_count or 0)
-        totals["skipped"] += int(row.skipped_count or 0)
-        totals["expired"] += int(row.expired_count or 0)
-        totals["failed"] += int(row.failed_count or 0)
+    for row in snapshots:
+        totals["pending"] += int(row.get("pending_count", 0) or 0)
+        totals["selected"] += int(row.get("selected_count", 0) or 0)
+        totals["submitted"] += int(row.get("submitted_count", 0) or 0)
+        totals["executed"] += int(row.get("executed_count", 0) or 0)
+        totals["skipped"] += int(row.get("skipped_count", 0) or 0)
+        totals["expired"] += int(row.get("expired_count", 0) or 0)
+        totals["failed"] += int(row.get("failed_count", 0) or 0)
 
     return {
         "totals": totals,

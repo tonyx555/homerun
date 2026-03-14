@@ -55,20 +55,12 @@ class Settings(BaseSettings):
     WS_EXECUTION_PRICE_STALE_SECONDS: float = 0.1  # Trader execution staleness budget for cached prices
     EXECUTION_MARKET_DATA_MAX_AGE_MS: int = 100  # Hard freshness gate before trader decisions
     WS_HEARTBEAT_INTERVAL: float = 5.0  # Ping interval to keep connection alive
-    WS_REDIS_FLUSH_INTERVAL_SECONDS: float = 0.025  # Redis hot-cache flush cadence for live prices
     WS_STRICT_CONTEXT_WARMUP_SECONDS: float = 0.75  # Strict context WS subscribe warmup before evaluation
     SCANNER_STRICT_WS_MAX_AGE_MS: int = 30000  # WS-only max age for scanner-source strict execution
 
     # Scanner Settings
     SCAN_WATCHDOG_SECONDS: int = 600  # Max seconds before a scan cycle is killed
     SCANNER_HEARTBEAT_INTERVAL_SECONDS: float = 5.0  # Worker heartbeat persistence cadence
-    SCANNER_BATCH_QUEUE_LEASE_SECONDS: int = 45  # Aggregator batch lease duration
-    SCANNER_BATCH_QUEUE_RETRY_MAX_ATTEMPTS: int = 5  # Drop batch after repeated aggregator failures
-    SCANNER_BATCH_QUEUE_RETAIN_HOURS: int = 24  # Retention horizon for processed scanner batches
-    SCANNER_BATCH_QUEUE_CLEANUP_INTERVAL_SECONDS: int = 300  # Queue cleanup cadence
-    SCANNER_BATCH_QUEUE_MAX_PENDING: int = 200  # Backpressure cap before scanner drops oldest batch
-    OPPORTUNITY_AGGREGATOR_HEARTBEAT_INTERVAL_SECONDS: float = 3.0  # Aggregator heartbeat cadence
-    OPPORTUNITY_AGGREGATOR_IDLE_SLEEP_SECONDS: float = 0.25  # Idle sleep between queue polls
     MARKET_UNIVERSE_HEARTBEAT_INTERVAL_SECONDS: float = 5.0  # Catalog worker heartbeat cadence
     MARKET_UNIVERSE_REFRESH_INTERVAL_SECONDS: int = 120  # Full market catalog refresh cadence
     MARKET_UNIVERSE_REFRESH_TIMEOUT_SECONDS: int = 300  # Hard timeout for one market catalog refresh
@@ -77,20 +69,9 @@ class Settings(BaseSettings):
     MARKET_UNIVERSE_INCREMENTAL_SINCE_MINUTES: int = 5  # Delta fetch horizon for updated markets
     MARKET_UNIVERSE_INCREMENTAL_MAX_EVENT_SLUGS: int = 250  # Cap slug fanout for event-diff fetch
     MARKET_UNIVERSE_FULL_RECONCILE_INTERVAL_SECONDS: int = 900  # Forced full reconcile cadence
-    MARKET_DATA_WORKER_OWNS_WS: bool = True  # Dedicated market-data worker owns WS lifecycle
-    MARKET_DATA_HEARTBEAT_INTERVAL_SECONDS: float = 3.0  # Market data worker heartbeat cadence
-    MARKET_DATA_REFRESH_INTERVAL_SECONDS: int = 5  # Market data universe + subscription sync cadence
-    MARKET_DATA_STALE_POLL_INTERVAL_SECONDS: int = 3  # Gap-filler stale price poll cadence
-    MARKET_DATA_STALE_POLL_BATCH_SIZE: int = 400  # Max stale tokens polled per fallback cycle
-    MARKET_DATA_WS_SUBSCRIPTION_CAP: int = 8000  # Cap active WS token subscriptions for safety
     MARKET_DATA_PRICE_STREAM_INTERVAL_SECONDS: float = 1.0  # WS price topic stream cadence
     SCANNER_DEGRADE_HEAVY_ON_BACKLOG: bool = True  # Pause heavy lane under queue pressure
     SCANNER_DEGRADE_HEAVY_BACKLOG_THRESHOLD: int = 120  # Queue threshold for heavy-lane degradation
-    OPPORTUNITY_AGGREGATOR_BATCH_TIMEOUT_SECONDS: int = 45  # Timeout for one scanner batch aggregation
-    OPPORTUNITY_AGGREGATOR_STRATEGY_TIMEOUT_SECONDS: int = 20  # Timeout for one strategy bridge group
-    OPPORTUNITY_AGGREGATOR_GLOBAL_RUN_TIMEOUT_SECONDS: int = 120  # Hard deadline for one aggregator loop run
-    OPPORTUNITY_AGGREGATOR_STRATEGY_DLQ_RETRY_MAX_ATTEMPTS: int = 10  # Strategy DLQ retry cap before terminal
-    OPPORTUNITY_AGGREGATOR_STRATEGY_DLQ_RETAIN_HOURS: int = 72  # Retention for processed strategy DLQ rows
     SCANNER_SLO_WORKER_INTERVAL_SECONDS: int = 5  # Scanner SLO evaluator cadence
     SCANNER_SLO_MAX_FAST_SCAN_AGE_SECONDS: float = 120.0  # SLO threshold for fast scan freshness
     SCANNER_SLO_MAX_FULL_COVERAGE_COMPLETION_SECONDS: float = 900.0  # SLO threshold for full coverage cycle
@@ -153,34 +134,6 @@ class Settings(BaseSettings):
     DATABASE_STATEMENT_TIMEOUT_MS: int = 30000
     DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS: int = 60000
 
-    # Redis (worker/event IPC)
-    REDIS_HOST: str = "127.0.0.1"
-    REDIS_PORT: int = 6379
-    REDIS_DB: int = 0
-    REDIS_PASSWORD: Optional[str] = None
-    REDIS_CONNECT_TIMEOUT_SECONDS: float = 1.0
-    REDIS_SOCKET_TIMEOUT_SECONDS: float = 1.0
-    REDIS_STREAM_BLOCK_MS: int = 20
-    REDIS_STREAM_READ_COUNT: int = 200
-    EVENT_BUS_STREAM_KEY: str = "homerun:event_bus"
-    DATA_EVENT_STREAM_KEY: str = "homerun:data_events"
-    REDIS_EVENT_STREAM_MAXLEN: int = 50000
-    TRADE_SIGNAL_STREAM_KEY: str = "homerun:trade_signals"
-    TRADE_SIGNAL_STREAM_GROUP: str = "trader_orchestrator"
-    TRADE_SIGNAL_STREAM_MAXLEN: int = 200000
-    TRADE_SIGNAL_STREAM_BLOCK_MS: int = 20
-    TRADE_SIGNAL_STREAM_READ_COUNT: int = 500
-    TRADE_SIGNAL_STREAM_CLAIM_IDLE_MS: int = 2000
-    TRADE_SIGNAL_STREAM_CLAIM_READ_COUNT: int = 500
-    TRADE_SIGNAL_STREAM_CLAIM_INTERVAL_SECONDS: float = 1.0
-    CRYPTO_WS_UPDATE_STREAM_KEY: str = "homerun:crypto_ws_updates"
-    CRYPTO_WS_UPDATE_STREAM_GROUP: str = "crypto_worker"
-    CRYPTO_WS_UPDATE_STREAM_MAXLEN: int = 200000
-    CRYPTO_WS_UPDATE_STREAM_BLOCK_MS: int = 10
-    CRYPTO_WS_UPDATE_STREAM_READ_COUNT: int = 1000
-    CRYPTO_WS_UPDATE_STREAM_CLAIM_IDLE_MS: int = 1000
-    CRYPTO_WS_UPDATE_STREAM_CLAIM_READ_COUNT: int = 1000
-    CRYPTO_WS_UPDATE_STREAM_CLAIM_INTERVAL_SECONDS: float = 0.5
     ORCHESTRATOR_MAINTENANCE_INTERVAL_SECONDS: float = 5.0
     EVENT_HANDLER_TIMEOUT_SECONDS: float = 60.0
 

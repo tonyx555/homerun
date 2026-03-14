@@ -615,7 +615,7 @@ def apply_platform_decision_gates(
         strict_ws_pricing_required = _coerce_bool(params.get("require_strict_ws_pricing"), False)
         strict_ws_price_sources = _normalize_text_list(params.get("strict_ws_price_sources"))
         if not strict_ws_price_sources:
-            strict_ws_price_sources = ["ws_strict", "redis_strict"]
+            strict_ws_price_sources = ["ws_strict"]
 
         live_revalidation_enforced = _coerce_bool(params.get("require_live_market_revalidation"), True)
         live_revalidation_sources = _normalize_text_list(params.get("require_live_revalidation_for_sources"))
@@ -638,7 +638,6 @@ def apply_platform_decision_gates(
         live_age_ms = safe_float(live_age_raw, None)
         trusted_live_age_sources = {
             "ws_strict",
-            "redis_strict",
             "http_batch",
         }
         if live_age_ms is not None and live_age_ms < 0.0:

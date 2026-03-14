@@ -264,12 +264,6 @@ def _render_strategy_template_source(
         rendered,
         flags=re.MULTILINE,
     )
-    rendered = re.sub(
-        r'^\s*worker_affinity\s*=\s*".*"$',
-        f"    worker_affinity = {_python_string_literal(source_key)}",
-        rendered,
-        flags=re.MULTILINE,
-    )
     return rendered
 
 

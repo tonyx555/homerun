@@ -9,18 +9,21 @@ from fastapi import WebSocket, WebSocketDisconnect
 from config import settings
 from models.database import AsyncSessionLocal, EventsSnapshot
 from sqlalchemy import select
-from services.redis_price_cache import redis_price_cache
 from services import shared_state
+from services.intent_runtime import get_intent_runtime
+from services.market_runtime import get_market_runtime
 from services.news import shared_state as news_shared_state
+from services.runtime_status import runtime_status
 from services.trader_orchestrator_state import (
     list_serialized_execution_sessions,
     list_traders,
     read_orchestrator_snapshot,
 )
 from services.wallet_tracker import wallet_tracker
-from services.worker_state import list_worker_snapshots, read_worker_snapshot
+from services.worker_state import list_worker_snapshots
 from services.ui_lock import UI_LOCK_SESSION_COOKIE, ui_lock_service
 from services.weather import shared_state as weather_shared_state
+from services.ws_feeds import get_feed_manager
 from utils.market_urls import serialize_opportunity_with_links
 
 
@@ -307,7 +310,33 @@ async def _price_stream_loop(websocket: WebSocket) -> None:
                 if token
             }
         )
-        prices = await redis_price_cache.read_prices(token_ids)
+        prices: dict[str, dict[str, Any]] = {}
+        try:
+            feed_manager = get_feed_manager()
+            if getattr(feed_manager, "_started", False):
+                for token_id in token_ids:
+                    if not feed_manager.cache.is_fresh(token_id):
+                        continue
+                    mid = feed_manager.cache.get_mid_price(token_id)
+                    if mid is None:
+                        continue
+                    bid_ask = feed_manager.cache.get_best_bid_ask(token_id)
+                    bid = mid
+                    ask = mid
+                    if isinstance(bid_ask, tuple):
+                        bid, ask = bid_ask
+                    now_ts = time.time()
+                    prices[token_id] = {
+                        "mid": float(mid),
+                        "bid": float(bid),
+                        "ask": float(ask),
+                        "ingest_ts": float(now_ts),
+                        "exchange_ts": float(now_ts),
+                        "sequence": 0,
+                        "is_fresh": True,
+                    }
+        except Exception:
+            prices = {}
         signatures = state.get("price_signatures")
         if not isinstance(signatures, dict):
             signatures = {}
@@ -360,14 +389,13 @@ async def handle_websocket(websocket: WebSocket):
     await manager.connect(websocket)
     price_stream_task = asyncio.create_task(_price_stream_loop(websocket), name="ws-price-stream")
 
-    # Send current state (from DB snapshot)
+    # Send current state from the in-process runtimes plus durable projections.
     async with AsyncSessionLocal() as session:
         opportunities, status = await shared_state.read_scanner_snapshot(session)
         weather_opportunities = await weather_shared_state.get_weather_opportunities_from_db(session)
         weather_status = await weather_shared_state.get_weather_status_from_db(session)
         news_workflow_status = await news_shared_state.get_news_status_from_db(session)
         worker_statuses = await list_worker_snapshots(session, include_stats=False)
-        crypto_snapshot = await read_worker_snapshot(session, "crypto")
         orchestrator_status = await read_orchestrator_snapshot(session)
         traders = await list_traders(session)
         execution_sessions = await list_serialized_execution_sessions(
@@ -386,12 +414,8 @@ async def handle_websocket(websocket: WebSocket):
                 world_snapshot.updated_at.isoformat() if world_snapshot and world_snapshot.updated_at else None
             ),
         }
-    crypto_markets = []
-    crypto_stats = crypto_snapshot.get("stats")
-    if isinstance(crypto_stats, dict):
-        raw_markets = crypto_stats.get("markets")
-        if isinstance(raw_markets, list):
-            crypto_markets = raw_markets
+    crypto_snapshot = runtime_status.get_crypto()
+    crypto_markets = get_market_runtime().get_crypto_markets()
     if crypto_markets:
         for worker in worker_statuses:
             if worker.get("worker_name") == "crypto":
@@ -417,9 +441,11 @@ async def handle_websocket(websocket: WebSocket):
                 "news_workflow_status": news_workflow_status,
                 "workers_status": worker_statuses,
                 "trader_orchestrator_status": orchestrator_status,
+                "signals_status": {"sources": get_intent_runtime().get_signal_snapshot_rows()},
                 "traders": traders,
                 "execution_sessions": execution_sessions,
                 "events_status": events_status,
+                "crypto_markets": crypto_markets,
             },
         },
     )

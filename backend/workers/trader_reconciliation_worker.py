@@ -19,6 +19,7 @@ from services.live_execution_service import live_execution_service
 from services.trader_orchestrator.position_lifecycle import reconcile_live_positions
 from services.trader_orchestrator_state import (
     create_trader_event,
+    get_open_order_count_for_trader,
     list_traders,
     reconcile_live_provider_orders,
     sync_trader_position_inventory,
@@ -52,15 +53,10 @@ _RECONCILE_TRIGGER_EVENTS = frozenset(
     {
         "trader_order",
         "execution_order",
+        "execution_session",
+        "execution_session_event",
         "wallet_trade",
-        "trade_signal_batch",
-        "trade_signal_emission",
-        "crypto_markets_update",
-        "opportunities_update",
-        "events_update",
-        "weather_update",
-        "news_workflow_update",
-        "signals_update",
+        "provider_status",
     }
 )
 
@@ -176,9 +172,12 @@ async def _reconcile_live_state_for_trader(
             )
 
     active_seen = int(provider_result.get("active_seen", 0) or 0)
+    active_open_orders = 0
+    async with AsyncSessionLocal() as session:
+        active_open_orders = await get_open_order_count_for_trader(session, trader_id, mode="live")
     lifecycle_result: dict[str, Any] = {"would_close": 0, "closed": 0}
     trader_params = _default_strategy_params(trader)
-    if (not provider_pass) or active_seen > 0:
+    if (not provider_pass) or active_seen > 0 or active_open_orders > 0:
         async with AsyncSessionLocal() as session:
             lifecycle_result = await reconcile_live_positions(
                 session,
@@ -329,7 +328,7 @@ async def run_worker_loop() -> None:
     try:
         async with AsyncSessionLocal() as session:
             await ensure_all_strategies_seeded(session)
-            await refresh_strategy_runtime_if_needed(session, source_keys=None, force=True)
+        await refresh_strategy_runtime_if_needed(source_keys=None, force=True)
     except Exception as exc:
         logger.warning("Reconciliation strategy startup sync failed", exc_info=exc)
 
@@ -391,7 +390,8 @@ async def run_worker_loop() -> None:
             logger.warning("Reconciliation event queue full; dropping trigger", event_type=event_type)
 
     await event_bus.start()
-    event_bus.subscribe("*", _on_runtime_event)
+    for event_type in sorted(_RECONCILE_TRIGGER_EVENTS):
+        event_bus.subscribe(event_type, _on_runtime_event)
 
     try:
         while True:
@@ -404,17 +404,16 @@ async def run_worker_loop() -> None:
                             WORKER_NAME,
                             default_interval=DEFAULT_INTERVAL_SECONDS,
                         )
-                        try:
-                            await refresh_strategy_runtime_if_needed(session, source_keys=None)
-                        except Exception as exc:
-                            logger.warning("Reconciliation strategy runtime refresh failed", exc_info=exc)
-
                         interval_seconds = max(1, int(control.get("interval_seconds") or DEFAULT_INTERVAL_SECONDS))
                         is_enabled = bool(control.get("is_enabled", True))
                         is_paused = bool(control.get("is_paused", False))
                         requested_run = bool(control.get("requested_run_at") is not None)
                         if requested_run:
                             await clear_worker_run_request(session, WORKER_NAME)
+                    try:
+                        await refresh_strategy_runtime_if_needed(source_keys=None)
+                    except Exception as exc:
+                        logger.warning("Reconciliation strategy runtime refresh failed", exc_info=exc)
 
                         if not is_enabled or is_paused:
                             await write_worker_snapshot(
@@ -551,7 +550,8 @@ async def run_worker_loop() -> None:
                 wallet_monitor_refresh_at = 0.0
                 await asyncio.sleep(_IDLE_SLEEP_SECONDS)
     finally:
-        event_bus.unsubscribe("*", _on_runtime_event)
+        for event_type in sorted(_RECONCILE_TRIGGER_EVENTS):
+            event_bus.unsubscribe(event_type, _on_runtime_event)
 
 
 async def start_loop() -> None:

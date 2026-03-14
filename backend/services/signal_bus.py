@@ -18,17 +18,14 @@ from utils.utcnow import utcnow
 from typing import Any, Optional
 
 from config import settings
-from sqlalchemy import case, func, or_, select, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import (
     TradeSignal,
     TradeSignalEmission,
-    TradeSignalSnapshot,
 )
 from services.event_bus import event_bus
-from services.trade_signal_stream import publish_trade_signal_batch as publish_trade_signal_stream_batch
 from models.opportunity import Opportunity
 from services.market_tradability import get_market_tradability_map
 
@@ -61,6 +58,7 @@ _SKIPPED_REACTIVATION_LIQUIDITY_DELTA_ABS = 250.0
 _SKIPPED_REACTIVATION_LIQUIDITY_DELTA_REL = 0.10
 _SKIPPED_REACTIVATION_EXPIRY_DELTA_SECONDS = 15.0
 _SKIPPED_REACTIVATION_LIQUIDITY_BANDS = (250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0, 32000.0)
+_RUNTIME_SEQUENCE_UNSET = object()
 
 
 def _utc_now() -> datetime:
@@ -380,12 +378,42 @@ def _signal_recently_refreshed(row: TradeSignal, now: datetime, max_age_seconds:
     return (now - refreshed_at).total_seconds() <= max_age_seconds
 
 
+def _strategy_runtime_metadata(opportunity: Opportunity) -> dict[str, Any]:
+    strategy_slug = str(getattr(opportunity, "strategy", "") or "").strip().lower()
+    if not strategy_slug:
+        return {}
+    try:
+        from services.strategy_loader import strategy_loader
+    except Exception:
+        return {}
+    loaded = strategy_loader.get_strategy(strategy_slug)
+    if loaded is None:
+        return {}
+    instance = loaded.instance
+    source_key = str(getattr(instance, "source_key", "") or "").strip().lower()
+    subscriptions = sorted(
+        {
+            str(subscription or "").strip().lower()
+            for subscription in (getattr(instance, "subscriptions", None) or [])
+            if str(subscription or "").strip()
+        }
+    )
+    execution_activation = "immediate" if source_key == "crypto" else "ws_post_arm_tick"
+    return {
+        "strategy_slug": strategy_slug,
+        "source_key": source_key,
+        "subscriptions": subscriptions,
+        "execution_activation": execution_activation,
+    }
+
+
 def _execution_profile_for_opportunity(opportunity: Opportunity, legs_count: int) -> dict[str, Any]:
     strategy_key = str(getattr(opportunity, "strategy", "") or "").strip().lower()
+    runtime_metadata = _strategy_runtime_metadata(opportunity)
     strategy_context = getattr(opportunity, "strategy_context", None)
-    source_key = ""
+    source_key = str(runtime_metadata.get("source_key") or "").strip().lower()
     if isinstance(strategy_context, dict):
-        source_key = str(strategy_context.get("source_key") or "").strip().lower()
+        source_key = source_key or str(strategy_context.get("source_key") or "").strip().lower()
     is_traders = source_key == "traders" or strategy_key.startswith("traders")
 
     if is_traders:
@@ -544,6 +572,12 @@ def build_signal_contract_from_opportunity(
     if plan is not None:
         payload["execution_plan"] = plan
     strategy_context = dict(opportunity.strategy_context or {})
+    runtime_metadata = _strategy_runtime_metadata(opportunity)
+    if runtime_metadata:
+        payload["strategy_runtime"] = dict(runtime_metadata)
+        strategy_context.setdefault("source_key", runtime_metadata.get("source_key"))
+        strategy_context.setdefault("subscriptions", list(runtime_metadata.get("subscriptions") or []))
+        strategy_context.setdefault("execution_activation", runtime_metadata.get("execution_activation"))
     if plan is not None:
         strategy_context["execution_plan"] = plan
 
@@ -655,17 +689,6 @@ async def _publish_trade_signal_batch(
         await event_bus.publish("trade_signal_batch", payload)
     except Exception:
         pass
-    try:
-        await publish_trade_signal_stream_batch(
-            event_type=normalized_event_type,
-            source=normalized_source,
-            signal_ids=signal_ids,
-            trigger="signal_bus",
-            reason=reason,
-            emitted_at=emitted_at_iso,
-        )
-    except Exception:
-        pass
 
 
 def make_dedupe_key(*parts: Any) -> str:
@@ -693,6 +716,8 @@ async def upsert_trade_signal(
     quality_passed: Optional[bool] = None,
     quality_rejection_reasons: Optional[list] = None,
     dedupe_key: str,
+    signal_id: Optional[str] = None,
+    runtime_sequence: Any = _RUNTIME_SEQUENCE_UNSET,
     commit: bool = True,
 ) -> TradeSignal:
     """Idempotently upsert a normalized trade signal by ``(source, dedupe_key)``."""
@@ -722,7 +747,7 @@ async def upsert_trade_signal(
 
     if row is None:
         row = TradeSignal(
-            id=uuid.uuid4().hex,
+            id=str(signal_id or uuid.uuid4().hex),
             source=source,
             source_item_id=source_item_id,
             signal_type=signal_type,
@@ -740,6 +765,11 @@ async def upsert_trade_signal(
             quality_passed=quality_passed,
             quality_rejection_reasons=quality_rejection_reasons if quality_rejection_reasons else None,
             dedupe_key=dedupe_key,
+            runtime_sequence=(
+                int(runtime_sequence)
+                if runtime_sequence is not _RUNTIME_SEQUENCE_UNSET and runtime_sequence is not None
+                else None
+            ),
             status="pending",
             created_at=_utc_now(),
             updated_at=_utc_now(),
@@ -833,6 +863,8 @@ async def upsert_trade_signal(
                         row.effective_price = None
                         emission_event_type = "upsert_reactivated"
                         emission_reason = f"reactivated_from:{previous_status}"
+                    if runtime_sequence is not _RUNTIME_SEQUENCE_UNSET:
+                        row.runtime_sequence = int(runtime_sequence) if runtime_sequence is not None else None
                     row.updated_at = _utc_now()
                     await _record_signal_emission(
                         session,
@@ -843,12 +875,17 @@ async def upsert_trade_signal(
         else:
             emission_event_type = "upsert_ignored_terminal"
             emission_reason = f"terminal_status:{previous_status}"
+            if runtime_sequence is not _RUNTIME_SEQUENCE_UNSET:
+                row.runtime_sequence = int(runtime_sequence) if runtime_sequence is not None else None
             await _record_signal_emission(
                 session,
                 row,
                 event_type="upsert_ignored_terminal",
                 reason=f"terminal_status:{previous_status}",
             )
+
+    if row is not None and runtime_sequence is not _RUNTIME_SEQUENCE_UNSET:
+        row.runtime_sequence = int(runtime_sequence) if runtime_sequence is not None else None
 
     if commit:
         await session.commit()
@@ -1149,7 +1186,7 @@ async def _expire_non_tradable_pending_signals(
 
 
 async def refresh_trade_signal_snapshots(session: AsyncSession) -> list[dict[str, Any]]:
-    """Recompute per-source snapshot rows from ``trade_signals``."""
+    """Recompute per-source signal stats from ``trade_signals``."""
 
     rows = (
         await session.execute(
@@ -1193,105 +1230,26 @@ async def refresh_trade_signal_snapshots(session: AsyncSession) -> list[dict[str
         if oldest_pending and (stats["oldest_pending_at"] is None or oldest_pending < stats["oldest_pending_at"]):
             stats["oldest_pending_at"] = oldest_pending
 
-    now = _utc_now()
-    updated_sources: set[str] = set()
-
-    for source, stats in source_stats.items():
-        updated_sources.add(source)
-        payload = {
-            "source": source,
-            "pending_count": int(stats.get("pending_count", 0) or 0),
-            "selected_count": int(stats.get("selected_count", 0) or 0),
-            "submitted_count": int(stats.get("submitted_count", 0) or 0),
-            "executed_count": int(stats.get("executed_count", 0) or 0),
-            "skipped_count": int(stats.get("skipped_count", 0) or 0),
-            "expired_count": int(stats.get("expired_count", 0) or 0),
-            "failed_count": int(stats.get("failed_count", 0) or 0),
-            "latest_signal_at": stats.get("latest_signal_at"),
-            "oldest_pending_at": stats.get("oldest_pending_at"),
-            "freshness_seconds": (
-                (now - stats["latest_signal_at"]).total_seconds() if stats.get("latest_signal_at") else None
-            ),
-            "updated_at": now,
-            "stats_json": {
-                "total": sum(
-                    int(stats.get(k, 0) or 0)
-                    for k in (
-                        "pending_count",
-                        "selected_count",
-                        "submitted_count",
-                        "executed_count",
-                        "skipped_count",
-                        "expired_count",
-                        "failed_count",
-                    )
-                )
-            },
-        }
-        stmt = pg_insert(TradeSignalSnapshot).values(**payload)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=[TradeSignalSnapshot.source],
-            set_={
-                "pending_count": payload["pending_count"],
-                "selected_count": payload["selected_count"],
-                "submitted_count": payload["submitted_count"],
-                "executed_count": payload["executed_count"],
-                "skipped_count": payload["skipped_count"],
-                "expired_count": payload["expired_count"],
-                "failed_count": payload["failed_count"],
-                "latest_signal_at": payload["latest_signal_at"],
-                "oldest_pending_at": payload["oldest_pending_at"],
-                "freshness_seconds": payload["freshness_seconds"],
-                "updated_at": payload["updated_at"],
-                "stats_json": payload["stats_json"],
-            },
-        )
-        await session.execute(stmt)
-
-    zero_payload = {
-        "pending_count": 0,
-        "selected_count": 0,
-        "submitted_count": 0,
-        "executed_count": 0,
-        "skipped_count": 0,
-        "expired_count": 0,
-        "failed_count": 0,
-        "latest_signal_at": None,
-        "oldest_pending_at": None,
-        "freshness_seconds": None,
-        "updated_at": now,
-        "stats_json": {"total": 0},
-    }
-    if updated_sources:
-        await session.execute(
-            update(TradeSignalSnapshot)
-            .where(~TradeSignalSnapshot.source.in_(sorted(updated_sources)))
-            .values(**zero_payload)
-        )
-    else:
-        await session.execute(update(TradeSignalSnapshot).values(**zero_payload))
-
-    await session.commit()
-
     out: list[dict[str, Any]] = []
-    snapshot_rows = (
-        (await session.execute(select(TradeSignalSnapshot).order_by(TradeSignalSnapshot.source.asc()))).scalars().all()
-    )
-    for row in snapshot_rows:
+    now = _utc_now()
+    for source in sorted(source_stats.keys()):
+        stats = source_stats[source]
         out.append(
             {
-                "source": row.source,
-                "pending_count": int(row.pending_count or 0),
-                "selected_count": int(row.selected_count or 0),
-                "submitted_count": int(row.submitted_count or 0),
-                "executed_count": int(row.executed_count or 0),
-                "skipped_count": int(row.skipped_count or 0),
-                "expired_count": int(row.expired_count or 0),
-                "failed_count": int(row.failed_count or 0),
-                "latest_signal_at": row.latest_signal_at,
-                "oldest_pending_at": row.oldest_pending_at,
-                "freshness_seconds": row.freshness_seconds,
-                "updated_at": row.updated_at,
+                "source": source,
+                "pending_count": int(stats.get("pending_count", 0) or 0),
+                "selected_count": int(stats.get("selected_count", 0) or 0),
+                "submitted_count": int(stats.get("submitted_count", 0) or 0),
+                "executed_count": int(stats.get("executed_count", 0) or 0),
+                "skipped_count": int(stats.get("skipped_count", 0) or 0),
+                "expired_count": int(stats.get("expired_count", 0) or 0),
+                "failed_count": int(stats.get("failed_count", 0) or 0),
+                "latest_signal_at": stats.get("latest_signal_at"),
+                "oldest_pending_at": stats.get("oldest_pending_at"),
+                "freshness_seconds": (
+                    (now - stats["latest_signal_at"]).total_seconds() if stats.get("latest_signal_at") else None
+                ),
+                "updated_at": now,
             }
         )
     return out

@@ -93,7 +93,6 @@ async def test_worker_loop_does_not_seed_default_traders(postgres_session_factor
     monkeypatch.setattr(trader_orchestrator_worker, "AsyncSessionLocal", postgres_session_factory)
     monkeypatch.setattr(trader_orchestrator_worker, "expire_stale_signals", AsyncMock())
     monkeypatch.setattr(trader_orchestrator_worker, "ensure_all_strategies_seeded", AsyncMock())
-    monkeypatch.setattr(trader_orchestrator_worker, "ensure_trade_signal_group", AsyncMock(return_value=True))
     monkeypatch.setattr(trader_orchestrator_worker, "refresh_strategy_runtime_if_needed", AsyncMock())
     monkeypatch.setattr(trader_orchestrator_worker, "compute_orchestrator_metrics", AsyncMock(return_value={}))
     monkeypatch.setattr(

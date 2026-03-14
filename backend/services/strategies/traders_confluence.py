@@ -63,7 +63,6 @@ class TradersConfluenceStrategy(BaseStrategy):
     description = "Detect smart money convergence via tracked wallet confluence analysis"
     mispricing_type = "cross_market"
     source_key = "traders"
-    worker_affinity = "traders"
     allow_deduplication = False
     subscriptions = ["trader_activity"]
 

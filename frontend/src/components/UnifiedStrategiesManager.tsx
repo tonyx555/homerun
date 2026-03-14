@@ -137,7 +137,6 @@ function renderTemplateSource(
   out = out.replace(/^\s*name\s*=\s*".*"$/m, `    name = ${pythonStringLiteral(strategyName)}`)
   out = out.replace(/^\s*description\s*=\s*".*"$/m, `    description = ${pythonStringLiteral(strategyDescription)}`)
   out = out.replace(/^\s*source_key\s*=\s*".*"$/m, `    source_key = ${pythonStringLiteral(sourceKey)}`)
-  out = out.replace(/^\s*worker_affinity\s*=\s*".*"$/m, `    worker_affinity = ${pythonStringLiteral(sourceKey)}`)
   return out
 }
 
@@ -157,7 +156,6 @@ function applyStrategyMetadataToSource(
   out = out.replace(/^\s*name\s*=\s*".*"$/m, `    name = ${pythonStringLiteral(strategyName)}`)
   out = out.replace(/^\s*description\s*=\s*".*"$/m, `    description = ${pythonStringLiteral(strategyDescription)}`)
   out = out.replace(/^\s*source_key\s*=\s*".*"$/m, `    source_key = ${pythonStringLiteral(sourceKey)}`)
-  out = out.replace(/^\s*worker_affinity\s*=\s*".*"$/m, `    worker_affinity = ${pythonStringLiteral(sourceKey)}`)
   return out
 }
 
@@ -276,7 +274,6 @@ const FULL_TEMPLATE_FALLBACK = [
   '    name = "My Custom Strategy"',
   '    description = "Describe what this strategy detects and how it trades"',
   '    source_key = "scanner"',
-  '    worker_affinity = "scanner"',
   '',
   '    default_config = {',
   '        "min_edge_percent": 2.0,',
@@ -309,7 +306,6 @@ const DETECT_TEMPLATE = [
   '    name = "__STRATEGY_NAME__"',
   '    description = "__STRATEGY_DESCRIPTION__"',
   '    source_key = "__SOURCE_KEY__"',
-  '    worker_affinity = "__SOURCE_KEY__"',
   '',
   '    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:',
   '        opportunities: list[Opportunity] = []',
@@ -325,7 +321,6 @@ const EVALUATE_TEMPLATE = [
   '    name = "__STRATEGY_NAME__"',
   '    description = "__STRATEGY_DESCRIPTION__"',
   '    source_key = "__SOURCE_KEY__"',
-  '    worker_affinity = "__SOURCE_KEY__"',
   '',
   '    def evaluate(self, signal, context):',
   '        return StrategyDecision(decision="skipped", reason="No custom gating logic configured")',
@@ -341,7 +336,6 @@ const UNIFIED_MINIMAL_TEMPLATE = [
   '    name = "__STRATEGY_NAME__"',
   '    description = "__STRATEGY_DESCRIPTION__"',
   '    source_key = "__SOURCE_KEY__"',
-  '    worker_affinity = "__SOURCE_KEY__"',
   '',
   '    def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:',
   '        opportunities: list[Opportunity] = []',

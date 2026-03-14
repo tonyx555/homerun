@@ -41,7 +41,6 @@ class FlashCrashReversionStrategy(BaseStrategy):
     description = "Short-horizon crash detector with liquidity/spread gating"
     mispricing_type = "within_market"
     subscriptions = ["market_data_refresh"]
-    realtime_processing_mode = "incremental"
 
     quality_filter_overrides = QualityFilterOverrides(
         min_roi=1.0,

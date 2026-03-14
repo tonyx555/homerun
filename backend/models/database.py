@@ -2,6 +2,7 @@ from sqlalchemy import (
     Column,
     String,
     Integer,
+    BigInteger,
     Boolean,
     Text,
     JSON,
@@ -139,6 +140,19 @@ class RetryableAsyncSession(AsyncSession):
         except Exception:
             pass
 
+    async def execute(self, statement, params=None, **kwargs):
+        try:
+            return await super().execute(statement, params=params, **kwargs)
+        except asyncio.CancelledError:
+            self._fire_and_forget(self._do_rollback_or_invalidate())
+            raise
+        except DBAPIError:
+            try:
+                await self._reset_after_failed_execute()
+            except Exception:
+                pass
+            raise
+
     # ------------------------------------------------------------------
     # Internal helpers (run inside fire-and-forget tasks)
     # ------------------------------------------------------------------
@@ -213,6 +227,18 @@ class RetryableAsyncSession(AsyncSession):
     async def _reset_after_failed_commit(self) -> None:
         try:
             await self.rollback()
+        except Exception:
+            try:
+                await self.invalidate()
+            except Exception:
+                pass
+
+    async def _reset_after_failed_execute(self) -> None:
+        try:
+            if self.in_transaction():
+                await self.rollback()
+            else:
+                await self.invalidate()
         except Exception:
             try:
                 await self.invalidate()
@@ -2199,58 +2225,6 @@ class ScannerRun(Base):
         Index("idx_scanner_runs_success", "success"),
     )
 
-
-class ScannerBatchQueue(Base):
-    """Durable queue of scanner detection batches awaiting aggregation."""
-
-    __tablename__ = "scanner_batch_queue"
-
-    id = Column(String, primary_key=True)
-    source = Column(String, nullable=False, default="scanner")
-    batch_kind = Column(String, nullable=False, default="scan_cycle")
-    opportunities_json = Column(JSON, nullable=False, default=list)
-    status_json = Column(JSON, nullable=False, default=dict)
-    emitted_at = Column(DateTime, default=_utcnow, nullable=False)
-    lease_owner = Column(String, nullable=True)
-    lease_expires_at = Column(DateTime, nullable=True)
-    attempt_count = Column(Integer, nullable=False, default=0)
-    processed_at = Column(DateTime, nullable=True)
-    error = Column(Text, nullable=True)
-
-    __table_args__ = (
-        Index("idx_scanner_batch_queue_pending", "processed_at", "emitted_at"),
-        Index("idx_scanner_batch_queue_emitted", "emitted_at"),
-        Index("idx_scanner_batch_queue_lease", "lease_expires_at"),
-    )
-
-
-class StrategyDeadLetterQueue(Base):
-    """Durable per-strategy dead-letter queue for failed aggregation groups."""
-
-    __tablename__ = "strategy_dead_letter_queue"
-
-    id = Column(String, primary_key=True)
-    source = Column(String, nullable=False, default="scanner")
-    batch_id = Column(String, nullable=True)
-    strategy_type = Column(String, nullable=False, default="unknown")
-    opportunities_json = Column(JSON, nullable=False, default=list)
-    status_json = Column(JSON, nullable=False, default=dict)
-    first_failed_at = Column(DateTime, default=_utcnow, nullable=False)
-    last_failed_at = Column(DateTime, nullable=False, default=_utcnow)
-    lease_owner = Column(String, nullable=True)
-    lease_expires_at = Column(DateTime, nullable=True)
-    attempt_count = Column(Integer, nullable=False, default=0)
-    processed_at = Column(DateTime, nullable=True)
-    terminal = Column(Boolean, nullable=False, default=False)
-    error = Column(Text, nullable=True)
-
-    __table_args__ = (
-        Index("idx_strategy_dead_letter_pending", "processed_at", "first_failed_at"),
-        Index("idx_strategy_dead_letter_lease", "lease_expires_at"),
-        Index("idx_strategy_dead_letter_strategy", "strategy_type", "processed_at"),
-    )
-
-
 class ScannerSloIncident(Base):
     """Durable scanner SLO incident timeline (open/resolved)."""
 
@@ -2524,35 +2498,17 @@ class TradeSignal(Base):
     quality_passed = Column(Boolean, nullable=True)  # True = passed quality filter at signal creation
     quality_rejection_reasons = Column(JSON, nullable=True)  # List of rejection reason strings
     dedupe_key = Column(String, nullable=False)
+    runtime_sequence = Column(BigInteger, nullable=True, index=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
     __table_args__ = (
         Index("idx_trade_signals_created", "created_at"),
         Index("idx_trade_signals_source_status", "source", "status"),
+        Index("idx_trade_signals_source_status_sequence", "source", "status", "runtime_sequence"),
         Index("idx_trade_signals_market_status", "market_id", "status"),
         UniqueConstraint("source", "dedupe_key", name="uq_trade_signals_source_dedupe"),
     )
-
-
-class TradeSignalSnapshot(Base):
-    """Aggregated signal counts/freshness per source for UI and health."""
-
-    __tablename__ = "trade_signal_snapshots"
-
-    source = Column(String, primary_key=True)
-    pending_count = Column(Integer, default=0)
-    selected_count = Column(Integer, default=0)
-    submitted_count = Column(Integer, default=0)
-    executed_count = Column(Integer, default=0)
-    skipped_count = Column(Integer, default=0)
-    expired_count = Column(Integer, default=0)
-    failed_count = Column(Integer, default=0)
-    latest_signal_at = Column(DateTime, nullable=True)
-    oldest_pending_at = Column(DateTime, nullable=True)
-    freshness_seconds = Column(Float, nullable=True)
-    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
-    stats_json = Column(JSON, default=dict)
 
 
 # ==================== DB-NATIVE TRADER STRATEGIES ====================
@@ -2572,7 +2528,6 @@ class TradeSignalEmission(Base):
     id = Column(String, primary_key=True)
     signal_id = Column(
         String,
-        ForeignKey("trade_signals.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )
@@ -2775,6 +2730,7 @@ class TraderSignalCursor(Base):
     )
     last_signal_created_at = Column(DateTime, nullable=True)
     last_signal_id = Column(String, nullable=True)
+    last_runtime_sequence = Column(BigInteger, nullable=True)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
@@ -2846,7 +2802,7 @@ class TraderOrder(Base):
 
     id = Column(String, primary_key=True)
     trader_id = Column(String, nullable=False, index=True)
-    signal_id = Column(String, ForeignKey("trade_signals.id"), nullable=True, index=True)
+    signal_id = Column(String, nullable=True, index=True)
     decision_id = Column(
         String,
         ForeignKey("trader_decisions.id", ondelete="SET NULL"),
@@ -2898,7 +2854,6 @@ class ExecutionSession(Base):
     )
     signal_id = Column(
         String,
-        ForeignKey("trade_signals.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )
@@ -3106,7 +3061,6 @@ class TraderSignalConsumption(Base):
     )
     signal_id = Column(
         String,
-        ForeignKey("trade_signals.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -3221,7 +3175,6 @@ class StrategyExperimentAssignment(Base):
     )
     signal_id = Column(
         String,
-        ForeignKey("trade_signals.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )
@@ -3650,12 +3603,6 @@ async def release_conn(session):
 def _run_alembic_upgrade(connection) -> None:
     from alembic import command
     from alembic.config import Config
-
-    # Temporarily remove statement_timeout during migrations so that
-    # long-running backfill / DDL statements are not killed mid-flight.
-    from sqlalchemy import text as _text
-    connection.execute(_text("SET LOCAL statement_timeout = 0"))
-    connection.execute(_text("SET LOCAL idle_in_transaction_session_timeout = 0"))
 
     backend_root = Path(__file__).resolve().parents[1]
     alembic_cfg = Config(str(backend_root / "alembic.ini"))

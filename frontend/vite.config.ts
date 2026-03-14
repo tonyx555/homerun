@@ -10,7 +10,7 @@ const loggerError = logger.error.bind(logger)
 logger.error = (msg, options) => {
   if (
     msg.includes('ws proxy socket error') &&
-    (msg.includes('ECONNRESET') || msg.includes('EPIPE') || msg.includes('ETIMEDOUT'))
+    (msg.includes('ECONNRESET') || msg.includes('ECONNABORTED') || msg.includes('EPIPE') || msg.includes('ETIMEDOUT'))
   ) {
     return
   }
@@ -43,7 +43,12 @@ export default defineConfig({
         ws: true,
         configure: (proxy) => {
           proxy.on('error', (err) => {
-            if (err.message.includes('EPIPE') || err.message.includes('ECONNRESET') || err.message.includes('ETIMEDOUT')) {
+            if (
+              err.message.includes('EPIPE') ||
+              err.message.includes('ECONNRESET') ||
+              err.message.includes('ECONNABORTED') ||
+              err.message.includes('ETIMEDOUT')
+            ) {
               return
             }
             console.error('WebSocket proxy error:', err.message)

@@ -1,4 +1,4 @@
-# Homerun - Windows Run Script (TUI)
+﻿# Homerun - Windows Run Script (TUI)
 # Run: .\scripts\infra\run.ps1
 
 $ErrorActionPreference = "Stop"
@@ -16,11 +16,6 @@ foreach ($arg in $args) {
     }
 }
 
-$redisHost = if ($env:REDIS_HOST) { $env:REDIS_HOST } else { "127.0.0.1" }
-$redisPort = if ($env:REDIS_PORT) { [int]$env:REDIS_PORT } else { 6379 }
-$redisContainerName = if ($env:REDIS_CONTAINER_NAME) { $env:REDIS_CONTAINER_NAME } else { "homerun-redis" }
-$redisImage = if ($env:REDIS_IMAGE) { $env:REDIS_IMAGE } else { "redis:7-alpine" }
-
 $postgresHost = if ($env:POSTGRES_HOST) { $env:POSTGRES_HOST } else { "127.0.0.1" }
 $postgresPort = if ($env:POSTGRES_PORT) { [int]$env:POSTGRES_PORT } else { 5432 }
 $postgresDb = if ($env:POSTGRES_DB) { $env:POSTGRES_DB } else { "homerun" }
@@ -33,10 +28,6 @@ $script:dockerComposeFilePath = Join-Path (Get-Location).Path "scripts\infra\doc
 $script:dockerComposeProjectName = if ($env:HOMERUN_COMPOSE_PROJECT) { $env:HOMERUN_COMPOSE_PROJECT } else { "homerun" }
 $script:postgresPort = [int]$postgresPort
 
-$script:redisStartedByScript = $false
-$script:redisStartMode = ""
-$script:redisDockerCreatedByScript = $false
-$script:lastRedisContainerEngine = "docker"
 $script:postgresStartedByScript = $false
 $script:postgresStartMode = ""
 $script:postgresDockerCreatedByScript = $false
@@ -221,137 +212,6 @@ function Test-PortBindConflictError {
     return (($Output -match "(?i)ports are not available") -and ($Output -match "(?i):$Port\b"))
 }
 
-function Stop-ConflictingRedisListener {
-    param(
-        [string]$RedisHost,
-        [int]$RedisPort,
-        [string]$ContainerName
-    )
-
-    if (Test-RedisDockerListenerOwned -ContainerName $ContainerName -Port $RedisPort) {
-        return $true
-    }
-
-    foreach ($svcName in @("Redis", "Memurai")) {
-        try {
-            $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
-            if ($svc -and $svc.Status -eq "Running") {
-                Stop-Service -Name $svcName -Force -ErrorAction SilentlyContinue
-            }
-        } catch {
-        }
-    }
-
-    if (Test-RedisPing -RedisHost $RedisHost -RedisPort $RedisPort) {
-        Send-RedisShutdown -RedisHost $RedisHost -RedisPort $RedisPort
-    }
-
-    if (Wait-ForPortToClose -TargetHost $RedisHost -Port $RedisPort -TimeoutSeconds 6) {
-        return $true
-    }
-
-    $listenerPid = Get-ListeningProcessId -TargetHost $RedisHost -Port $RedisPort
-    if (-not $listenerPid) {
-        return $true
-    }
-
-    $proc = Get-Process -Id $listenerPid -ErrorAction SilentlyContinue
-    if (-not $proc) {
-        return (Wait-ForPortToClose -TargetHost $RedisHost -Port $RedisPort -TimeoutSeconds 2)
-    }
-
-    $processName = ($proc.ProcessName | Out-String).Trim().ToLowerInvariant()
-    $cmdLine = ""
-    try {
-        $procInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $listenerPid" -ErrorAction SilentlyContinue
-        if ($procInfo -and $procInfo.CommandLine) {
-            $cmdLine = ($procInfo.CommandLine | Out-String).Trim().ToLowerInvariant()
-        }
-    } catch {
-    }
-
-    $isRedisProcess = $false
-    if ($processName -match "redis|memurai") {
-        $isRedisProcess = $true
-    } elseif ($cmdLine -match "redis|memurai") {
-        $isRedisProcess = $true
-    }
-
-    if (-not $isRedisProcess) {
-        return $false
-    }
-
-    try {
-        Stop-Process -Id $listenerPid -Force -ErrorAction SilentlyContinue
-    } catch {
-        return $false
-    }
-
-    return (Wait-ForPortToClose -TargetHost $RedisHost -Port $RedisPort -TimeoutSeconds 4)
-}
-
-function Get-ProjectRedisRuntimeDir {
-    return (Join-Path (Get-Location).Path "data\runtime\redis")
-}
-
-function Find-RedisServer {
-    $projectRuntimeDir = Get-ProjectRedisRuntimeDir
-    if (Test-Path $projectRuntimeDir) {
-        $projectBinary = Join-Path $projectRuntimeDir "redis-server.exe"
-        if (Test-Path $projectBinary) {
-            return $projectBinary
-        }
-
-        $projectMatches = Get-ChildItem -Path $projectRuntimeDir -Filter "redis-server.exe" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($projectMatches) {
-            return $projectMatches.FullName
-        }
-    }
-
-    $cmd = Get-Command redis-server -ErrorAction SilentlyContinue
-    if ($cmd) { return $cmd.Source }
-
-    $wellKnown = "C:\Program Files\Redis\redis-server.exe"
-    if (Test-Path $wellKnown) { return $wellKnown }
-
-    return $null
-}
-
-function Get-RedisServerMajorVersion {
-    param([string]$RedisServerPath)
-
-    if (-not $RedisServerPath -or -not (Test-Path $RedisServerPath)) {
-        return $null
-    }
-
-    try {
-        $versionOutput = (& $RedisServerPath --version 2>&1 | Out-String).Trim()
-    } catch {
-        return $null
-    }
-
-    $versionMatch = [regex]::Match($versionOutput, 'v=(\d+)\.(\d+)\.(\d+)')
-    if (-not $versionMatch.Success) {
-        return $null
-    }
-
-    try {
-        return [int]$versionMatch.Groups[1].Value
-    } catch {
-        return $null
-    }
-}
-
-function Test-RedisServerSupportsStreams {
-    param([string]$RedisServerPath)
-
-    $majorVersion = Get-RedisServerMajorVersion -RedisServerPath $RedisServerPath
-    if ($null -eq $majorVersion) {
-        return $false
-    }
-    return ($majorVersion -ge 5)
-}
-
 function Find-PostgresBinDir {
     if ($env:POSTGRES_BIN_DIR) {
         $envBin = $env:POSTGRES_BIN_DIR
@@ -461,17 +321,6 @@ function Show-PostgresInitLogs {
             Write-Host "  $_" -ForegroundColor DarkYellow
         }
     }
-}
-
-function Find-MemuraiServer {
-    if ($env:MEMURAI_EXE -and (Test-Path $env:MEMURAI_EXE)) {
-        return $env:MEMURAI_EXE
-    }
-
-    $wellKnown = "C:\Program Files\Memurai\memurai.exe"
-    if (Test-Path $wellKnown) { return $wellKnown }
-
-    return $null
 }
 
 function Get-DockerCliPath {
@@ -729,521 +578,6 @@ function Wait-ForDockerRuntime {
         Start-Sleep -Seconds 3
     }
     return (Test-DockerRuntimeAvailable)
-}
-
-function Test-RedisRuntimeAvailable {
-    if (Test-DockerRuntimeAvailable) { return $true }
-    if (Find-MemuraiServer) { return $true }
-    $redisServerPath = Find-RedisServer
-    if ($redisServerPath -and (Test-RedisServerSupportsStreams -RedisServerPath $redisServerPath)) {
-        return $true
-    }
-    foreach ($svcName in @("Memurai")) {
-        try {
-            $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
-            if ($svc) { return $true }
-        } catch {
-        }
-    }
-    return $false
-}
-
-function Ensure-RedisRuntime {
-    if (Test-RedisRuntimeAvailable) {
-        return $true
-    }
-    Write-Host "Redis runtime missing; invoking setup redis bootstrap..." -ForegroundColor Cyan
-    try {
-        & .\scripts\infra\setup.ps1 -RedisOnly
-        return (Test-RedisRuntimeAvailable)
-    } catch {
-        return $false
-    }
-}
-
-function Test-RedisPing {
-    param(
-        [string]$RedisHost,
-        [int]$RedisPort
-    )
-
-    $client = $null
-    $stream = $null
-    try {
-        $client = [System.Net.Sockets.TcpClient]::new()
-        $client.ReceiveTimeout = 500
-        $client.SendTimeout = 500
-        $client.Connect($RedisHost, $RedisPort)
-        $stream = $client.GetStream()
-        $payload = [System.Text.Encoding]::ASCII.GetBytes("*1`r`n`$4`r`nPING`r`n")
-        $stream.Write($payload, 0, $payload.Length)
-        $buffer = New-Object byte[] 64
-        $bytesRead = $stream.Read($buffer, 0, $buffer.Length)
-        if ($bytesRead -le 0) { return $false }
-        $response = [System.Text.Encoding]::ASCII.GetString($buffer, 0, $bytesRead)
-        return $response.Contains("+PONG")
-    } catch {
-        return $false
-    } finally {
-        if ($stream) { $stream.Dispose() }
-        if ($client) { $client.Dispose() }
-    }
-}
-
-function Get-RedisVersion {
-    param(
-        [string]$RedisHost,
-        [int]$RedisPort
-    )
-
-    $client = $null
-    $stream = $null
-    try {
-        $client = [System.Net.Sockets.TcpClient]::new()
-        $client.ReceiveTimeout = 2000
-        $client.SendTimeout = 2000
-        $client.Connect($RedisHost, $RedisPort)
-        $stream = $client.GetStream()
-        # Send: INFO server
-        $payload = [System.Text.Encoding]::ASCII.GetBytes("*2`r`n`$4`r`nINFO`r`n`$6`r`nserver`r`n")
-        $stream.Write($payload, 0, $payload.Length)
-        $buffer = New-Object byte[] 4096
-        $bytesRead = $stream.Read($buffer, 0, $buffer.Length)
-        if ($bytesRead -le 0) { return "" }
-        $response = [System.Text.Encoding]::ASCII.GetString($buffer, 0, $bytesRead)
-        foreach ($line in $response -split "`r`n|`n") {
-            if ($line.StartsWith("redis_version:")) {
-                return $line.Substring("redis_version:".Length).Trim()
-            }
-        }
-        return ""
-    } catch {
-        return ""
-    } finally {
-        if ($stream) { $stream.Dispose() }
-        if ($client) { $client.Dispose() }
-    }
-}
-
-function Test-RedisVersionOk {
-    <#
-    .SYNOPSIS
-    Check if Redis version is >= 5.0 (required for Streams).
-    Returns $true if version is OK, $false if too old, $null if version unknown.
-    #>
-    param(
-        [string]$RedisHost,
-        [int]$RedisPort
-    )
-
-    $version = Get-RedisVersion -RedisHost $RedisHost -RedisPort $RedisPort
-    if (-not $version) { return $null }
-
-    $parts = $version.Split(".")
-    if ($parts.Count -lt 1) { return $null }
-    try {
-        $major = [int]$parts[0]
-        return ($major -ge 5)
-    } catch {
-        return $null
-    }
-}
-
-function Send-RedisShutdown {
-    param(
-        [string]$RedisHost,
-        [int]$RedisPort
-    )
-
-    $client = $null
-    $stream = $null
-    try {
-        $client = [System.Net.Sockets.TcpClient]::new()
-        $client.ReceiveTimeout = 500
-        $client.SendTimeout = 500
-        $client.Connect($RedisHost, $RedisPort)
-        $stream = $client.GetStream()
-        $payload = [System.Text.Encoding]::ASCII.GetBytes("*2`r`n`$8`r`nSHUTDOWN`r`n`$6`r`nNOSAVE`r`n")
-        $stream.Write($payload, 0, $payload.Length)
-    } catch {
-    } finally {
-        if ($stream) { $stream.Dispose() }
-        if ($client) { $client.Dispose() }
-    }
-}
-
-function Start-RedisDocker {
-    param(
-        [string]$RedisHost,
-        [int]$RedisPort,
-        [string]$ContainerName,
-        [string]$Image
-    )
-
-    $script:lastRedisContainerEngine = "docker"
-
-    $dockerInfo = Invoke-DockerCommand -Arguments @("info")
-    if ($dockerInfo.ExitCode -ne 0) {
-        return $false
-    }
-
-    if (Test-Path $script:dockerComposeFilePath) {
-        $composeResult = Invoke-DockerComposeCommand `
-            -Arguments @("up", "-d", "redis") `
-            -EnvironmentOverrides @{
-                "REDIS_HOST" = $RedisHost
-                "REDIS_PORT" = "$RedisPort"
-                "REDIS_IMAGE" = $Image
-                "REDIS_CONTAINER_NAME" = $ContainerName
-            }
-        if ($composeResult.ExitCode -eq 0) {
-            $script:lastRedisContainerEngine = "docker-compose"
-            $script:redisDockerCreatedByScript = $true
-            return $true
-        }
-
-        if (Test-PortBindConflictError -Output $composeResult.Output -Port $RedisPort) {
-            if (Stop-ConflictingRedisListener -RedisHost $RedisHost -RedisPort $RedisPort -ContainerName $ContainerName) {
-                $composeAfterPortCleanup = Invoke-DockerComposeCommand `
-                    -Arguments @("up", "-d", "redis") `
-                    -EnvironmentOverrides @{
-                        "REDIS_HOST" = $RedisHost
-                        "REDIS_PORT" = "$RedisPort"
-                        "REDIS_IMAGE" = $Image
-                        "REDIS_CONTAINER_NAME" = $ContainerName
-                    }
-                if ($composeAfterPortCleanup.ExitCode -eq 0) {
-                    $script:lastRedisContainerEngine = "docker-compose"
-                    $script:redisDockerCreatedByScript = $true
-                    return $true
-                }
-            }
-        }
-
-        if (Test-RedisDockerListenerOwned -ContainerName $ContainerName -Port $RedisPort) {
-            $script:lastRedisContainerEngine = "docker-compose"
-            $script:redisDockerCreatedByScript = $true
-            return $true
-        }
-
-        if (Test-ContainerNameConflict -Output $composeResult.Output -ContainerName $ContainerName) {
-            if (Remove-ContainerIfExists -ContainerName $ContainerName) {
-                $composeRetry = Invoke-DockerComposeCommand `
-                    -Arguments @("up", "-d", "redis") `
-                    -EnvironmentOverrides @{
-                        "REDIS_HOST" = $RedisHost
-                        "REDIS_PORT" = "$RedisPort"
-                        "REDIS_IMAGE" = $Image
-                        "REDIS_CONTAINER_NAME" = $ContainerName
-                    }
-                if ($composeRetry.ExitCode -eq 0) {
-                    $script:lastRedisContainerEngine = "docker-compose"
-                    $script:redisDockerCreatedByScript = $true
-                    return $true
-                }
-                if (Test-RedisDockerListenerOwned -ContainerName $ContainerName -Port $RedisPort) {
-                    $script:lastRedisContainerEngine = "docker-compose"
-                    $script:redisDockerCreatedByScript = $true
-                    return $true
-                }
-            }
-        }
-
-        return $false
-    }
-
-    $inspectResult = Invoke-DockerCommand -Arguments @("container", "inspect", $ContainerName)
-    if ($inspectResult.ExitCode -eq 0) {
-        $startResult = Invoke-DockerCommand -Arguments @("start", $ContainerName)
-        return ($startResult.ExitCode -eq 0)
-    }
-
-    $imageInspect = Invoke-DockerCommand -Arguments @("image", "inspect", $Image)
-    if ($imageInspect.ExitCode -ne 0) {
-        $pullResult = Invoke-DockerCommand -Arguments @("pull", $Image)
-        if ($pullResult.ExitCode -ne 0) {
-            return $false
-        }
-    }
-
-    $runResult = Invoke-DockerCommand -Arguments @(
-        "run",
-        "--name", $ContainerName,
-        "--detach",
-        "--publish", "${RedisHost}:${RedisPort}:6379",
-        $Image,
-        "redis-server",
-        "--save", "",
-        "--appendonly", "no"
-    )
-    if ($runResult.ExitCode -eq 0) {
-        $script:redisDockerCreatedByScript = $true
-        return $true
-    }
-
-    return $false
-}
-
-function Start-RedisLocal {
-    param(
-        [string]$RedisHost,
-        [int]$RedisPort
-    )
-
-    # Prefer Memurai service first - it supports Redis 5+ features (Streams)
-    # The old Redis.Redis/redis-64 packages install Redis 3.0 which does NOT
-    # support Streams and will silently break trade signal streaming.
-    foreach ($svcName in @("Memurai")) {
-        try {
-            $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
-            if ($svc) {
-                if ($svc.Status -ne "Running") {
-                    Start-Service -Name $svcName
-                }
-                return $true
-            }
-        } catch {
-        }
-    }
-
-    $memuraiPath = Find-MemuraiServer
-    if ($memuraiPath) {
-        try {
-            Start-Process -FilePath $memuraiPath -ArgumentList @("--bind", $RedisHost, "--port", "$RedisPort") -WindowStyle Hidden | Out-Null
-            return $true
-        } catch {
-        }
-    }
-
-    $redisServerPath = Find-RedisServer
-    if ($redisServerPath) {
-        if (-not (Test-RedisServerSupportsStreams -RedisServerPath $redisServerPath)) {
-            return $false
-        }
-        try {
-            Start-Process -FilePath $redisServerPath -ArgumentList "--bind $RedisHost --port $RedisPort --save `"`" --appendonly no" -WindowStyle Hidden | Out-Null
-            return $true
-        } catch {
-        }
-    }
-
-    return $false
-}
-
-function Warn-RedisVersionIfOld {
-    param(
-        [string]$RedisHost,
-        [int]$RedisPort
-    )
-
-    $version = Get-RedisVersion -RedisHost $RedisHost -RedisPort $RedisPort
-    if (-not $version) {
-        Write-Host ""
-        Write-Host "ERROR: Redis Streams support could not be verified." -ForegroundColor Red
-        Write-Host "Homerun requires Redis >= 5.0 with Streams support. Startup aborted." -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "Install a modern Redis runtime and rerun:" -ForegroundColor Cyan
-        Write-Host "  Option 1: Docker Desktop  ->  redis:7-alpine" -ForegroundColor White
-        Write-Host "  Option 2: Memurai         ->  winget install Memurai.MemuraiDeveloper" -ForegroundColor White
-        Write-Host "  Option 3: WSL2            ->  wsl --install && sudo apt install redis-server" -ForegroundColor White
-        Write-Host ""
-        return $false
-    }
-
-    $versionOk = Test-RedisVersionOk -RedisHost $RedisHost -RedisPort $RedisPort
-    if ($versionOk -eq $false) {
-        Write-Host ""
-        Write-Host "ERROR: Redis version $version does NOT support Streams (requires >= 5.0)." -ForegroundColor Red
-        Write-Host "Homerun requires Redis Streams and cannot continue with this runtime." -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "Install a modern Redis runtime and rerun:" -ForegroundColor Cyan
-        Write-Host "  Option 1: Docker Desktop  ->  redis:7-alpine" -ForegroundColor White
-        Write-Host "  Option 2: Memurai         ->  winget install Memurai.MemuraiDeveloper" -ForegroundColor White
-        Write-Host "  Option 3: WSL2            ->  wsl --install && sudo apt install redis-server" -ForegroundColor White
-        Write-Host ""
-        return $false
-    } elseif ($versionOk -eq $true) {
-        Write-Host "Redis version $version (Streams supported)" -ForegroundColor Green
-        return $true
-    }
-
-    Write-Host ""
-    Write-Host "ERROR: Redis version check returned an unknown state." -ForegroundColor Red
-    Write-Host "Homerun requires Redis >= 5.0 with Streams support. Startup aborted." -ForegroundColor Yellow
-    Write-Host ""
-    return $false
-}
-
-function Ensure-Redis {
-    param(
-        [string]$RedisHost,
-        [int]$RedisPort,
-        [string]$ContainerName,
-        [string]$Image
-)
-
-    if (Test-RedisPing -RedisHost $RedisHost -RedisPort $RedisPort) {
-        $versionOk = Test-RedisVersionOk -RedisHost $RedisHost -RedisPort $RedisPort
-        if ($versionOk -eq $false) {
-            Write-Host "Running Redis does not support Streams. Attempting runtime bootstrap..." -ForegroundColor Yellow
-            if (-not (Ensure-RedisRuntime)) {
-                if (-not (Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort)) {
-                    exit 1
-                }
-                return
-            }
-
-            # Stop the legacy Redis listener before starting a Streams-capable runtime.
-            try {
-                $legacyRedisService = Get-Service -Name "Redis" -ErrorAction SilentlyContinue
-                if ($legacyRedisService -and $legacyRedisService.Status -eq "Running") {
-                    Stop-Service -Name "Redis" -Force -ErrorAction SilentlyContinue
-                }
-            } catch {
-            }
-            Send-RedisShutdown -RedisHost $RedisHost -RedisPort $RedisPort
-            for ($i = 0; $i -lt 20; $i++) {
-                if (-not (Test-RedisPing -RedisHost $RedisHost -RedisPort $RedisPort)) {
-                    break
-                }
-                Start-Sleep -Milliseconds 250
-            }
-
-            $upgradedStarted = $false
-            if (Test-DockerRuntimeAvailable) {
-                $upgradedStarted = Start-RedisDocker -RedisHost $RedisHost -RedisPort $RedisPort -ContainerName $ContainerName -Image $Image
-                if ($upgradedStarted -and (Wait-ForService -TargetHost $RedisHost -Port $RedisPort)) {
-                    $script:redisStartedByScript = $true
-                    $script:redisStartMode = if ($script:lastRedisContainerEngine -eq "docker-compose") { "docker-compose" } else { "docker" }
-                } else {
-                    $upgradedStarted = $false
-                }
-            }
-
-            if (-not $upgradedStarted) {
-                $localStarted = Start-RedisLocal -RedisHost $RedisHost -RedisPort $RedisPort
-                if ($localStarted -and (Wait-ForService -TargetHost $RedisHost -Port $RedisPort)) {
-                    $upgradedStarted = $true
-                    $script:redisStartedByScript = $true
-                    $script:redisStartMode = "local"
-                }
-            }
-
-            if ($upgradedStarted) {
-                Write-Host "Redis upgraded to a Streams-capable runtime on ${RedisHost}:${RedisPort}" -ForegroundColor Green
-                if (-not (Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort)) {
-                    exit 1
-                }
-                return
-            }
-
-            if (-not (Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort)) {
-                exit 1
-            }
-            return
-        }
-        Write-Host "Redis already running on ${RedisHost}:${RedisPort}" -ForegroundColor Green
-        if (-not (Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort)) {
-            exit 1
-        }
-        return
-    }
-
-    if (Test-DockerRuntimeAvailable) {
-        $existingListenerPid = Get-ListeningProcessId -TargetHost $RedisHost -Port $RedisPort
-        if ($existingListenerPid -and (-not (Test-RedisDockerListenerOwned -ContainerName $ContainerName -Port $RedisPort))) {
-            Write-Host "Redis port ${RedisPort} is occupied by a non-Docker listener. Reclaiming port for launcher-managed Docker Redis..." -ForegroundColor Yellow
-            if (-not (Stop-ConflictingRedisListener -RedisHost $RedisHost -RedisPort $RedisPort -ContainerName $ContainerName)) {
-                Write-Host "Failed to reclaim Redis port ${RedisPort}. Stop the process on ${RedisHost}:${RedisPort} and rerun." -ForegroundColor Red
-                exit 1
-            }
-        }
-    }
-
-    if (-not (Ensure-RedisRuntime)) {
-        Write-Host "Failed to provision Redis runtime automatically." -ForegroundColor Red
-        Write-Host "Install Docker Desktop, Memurai, or another Redis >= 5.0 runtime, then rerun." -ForegroundColor Yellow
-        exit 1
-    }
-
-    Write-Host "Starting Redis..." -ForegroundColor Cyan
-
-    # Prefer Docker (redis:7-alpine) - guaranteed modern Redis with Streams support
-    $dockerStarted = $false
-    if (Test-DockerRuntimeAvailable) {
-        $dockerStarted = Start-RedisDocker -RedisHost $RedisHost -RedisPort $RedisPort -ContainerName $ContainerName -Image $Image
-    }
-    if ($dockerStarted -and (Wait-ForService -TargetHost $RedisHost -Port $RedisPort)) {
-        $script:redisStartedByScript = $true
-        $script:redisStartMode = if ($script:lastRedisContainerEngine -eq "docker-compose") { "docker-compose" } else { "docker" }
-        $redisRuntimeLabel = if ($script:redisStartMode -eq "docker-compose") { "Docker Compose" } else { "Docker" }
-        Write-Host "Redis started via $redisRuntimeLabel on ${RedisHost}:${RedisPort}" -ForegroundColor Green
-        if (-not (Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort)) {
-            exit 1
-        }
-        return
-    }
-
-    # Fall back to local (Memurai service preferred over redis-server.exe)
-    $localStarted = Start-RedisLocal -RedisHost $RedisHost -RedisPort $RedisPort
-    if ($localStarted -and (Wait-ForService -TargetHost $RedisHost -Port $RedisPort)) {
-        $script:redisStartedByScript = $true
-        $script:redisStartMode = "local"
-        Write-Host "Redis started via local service on ${RedisHost}:${RedisPort}" -ForegroundColor Green
-        if (-not (Warn-RedisVersionIfOld -RedisHost $RedisHost -RedisPort $RedisPort)) {
-            exit 1
-        }
-        return
-    }
-
-    Write-Host "Failed to start Redis automatically." -ForegroundColor Red
-    Write-Host "Install Docker Desktop, Memurai, or another Redis >= 5.0 runtime, then rerun." -ForegroundColor Yellow
-    exit 1
-}
-
-function Cleanup-StartedRedis {
-    if (-not $script:redisStartedByScript) {
-        return
-    }
-
-    if ($script:redisStartMode -eq "docker-compose") {
-        $composeStop = Invoke-DockerComposeCommand -Arguments @("stop", "redis") -EnvironmentOverrides @{
-            "REDIS_CONTAINER_NAME" = $redisContainerName
-        }
-        if ($composeStop.ExitCode -ne 0) {
-            if (Ensure-DockerCommand) {
-                try { docker stop $redisContainerName *> $null } catch {}
-            }
-        }
-        return
-    }
-
-    if ($script:redisStartMode -eq "docker") {
-        if (Ensure-DockerCommand) {
-            try { docker stop $redisContainerName *> $null } catch {}
-            if ($script:redisDockerCreatedByScript) {
-                try { docker rm $redisContainerName *> $null } catch {}
-            }
-        }
-        return
-    }
-
-    if ($script:redisStartMode -eq "local") {
-        # If we started via a Windows service, stop it gracefully
-        foreach ($svcName in @("Redis", "Memurai")) {
-            try {
-                $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
-                if ($svc -and $svc.Status -eq "Running") {
-                    Stop-Service -Name $svcName -Force -ErrorAction SilentlyContinue
-                    return
-                }
-            } catch {}
-        }
-        # Otherwise send raw SHUTDOWN to the redis-server process
-        if (Test-RedisPing -RedisHost $redisHost -RedisPort $redisPort) {
-            Send-RedisShutdown -RedisHost $redisHost -RedisPort $redisPort
-        }
-    }
 }
 
 function Test-PostgresRuntimeAvailable {
@@ -1607,36 +941,6 @@ function Ensure-PostgresFirewallRule {
     }
 }
 
-function Test-RedisDockerListenerOwned {
-    param(
-        [string]$ContainerName,
-        [int]$Port
-    )
-
-    if (-not (Ensure-DockerCommand)) {
-        return $false
-    }
-
-    $inspectResult = Invoke-DockerCommand -Arguments @("container", "inspect", $ContainerName)
-    if ($inspectResult.ExitCode -ne 0) {
-        return $false
-    }
-
-    $runningResult = Invoke-DockerCommand -Arguments @("inspect", "-f", "{{.State.Running}}", $ContainerName)
-    if ($runningResult.ExitCode -ne 0) {
-        return $false
-    }
-    if ((($runningResult.Output | Out-String).Trim().ToLowerInvariant()) -ne "true") {
-        return $false
-    }
-
-    $publishedPort = Get-DockerPublishedHostPort -ContainerName $ContainerName -ContainerPort "6379/tcp"
-    if (-not $publishedPort) {
-        return $false
-    }
-    return ([int]$publishedPort -eq [int]$Port)
-}
-
 function Test-PostgresDockerListenerOwned {
     param(
         [string]$ContainerName,
@@ -1667,6 +971,28 @@ function Test-PostgresDockerListenerOwned {
     return ([int]$publishedPort -eq [int]$Port)
 }
 
+function Get-RunningDockerPostgresPort {
+    param([string]$ContainerName)
+
+    if (-not (Ensure-DockerCommand)) {
+        return $null
+    }
+
+    $runningResult = Invoke-DockerCommand -Arguments @("inspect", "-f", "{{.State.Running}}", $ContainerName)
+    if ($runningResult.ExitCode -ne 0) {
+        return $null
+    }
+    if (((($runningResult.Output | Out-String).Trim().ToLowerInvariant()) -ne "true")) {
+        return $null
+    }
+
+    $publishedPort = Get-DockerPublishedHostPort -ContainerName $ContainerName -ContainerPort "5432/tcp"
+    if (-not $publishedPort) {
+        return $null
+    }
+    return [int]$publishedPort
+}
+
 function Test-LocalPostgresListenerOwned {
     param(
         [string]$DataDir,
@@ -1689,6 +1015,24 @@ function Test-LocalPostgresListenerOwned {
         return ($portValue -eq "$Port")
     } catch {
         return $false
+    }
+}
+
+function Get-ParentProcess {
+    param([int]$ProcessId)
+
+    try {
+        $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue
+        if (-not $processInfo) {
+            return $null
+        }
+        $parentId = [int]$processInfo.ParentProcessId
+        if ($parentId -le 0) {
+            return $null
+        }
+        return Get-Process -Id $parentId -ErrorAction SilentlyContinue
+    } catch {
+        return $null
     }
 }
 
@@ -1746,8 +1090,20 @@ function Stop-ConflictingPostgresListener {
         return $false
     }
 
+    $parentProcess = Get-ParentProcess -ProcessId $listenerPid
+    $stopProcessIds = [System.Collections.Generic.List[int]]::new()
+    if ($parentProcess) {
+        $parentName = ($parentProcess.ProcessName | Out-String).Trim().ToLowerInvariant()
+        if ($parentName -match "pg_ctl") {
+            $stopProcessIds.Add([int]$parentProcess.Id)
+        }
+    }
+    $stopProcessIds.Add([int]$listenerPid)
+
     try {
-        Stop-Process -Id $listenerPid -Force -ErrorAction SilentlyContinue
+        foreach ($processId in ($stopProcessIds | Select-Object -Unique)) {
+            Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+        }
     } catch {
         return $false
     }
@@ -1831,6 +1187,13 @@ function Ensure-Postgres {
         $pgBinDir = Find-PostgresBinDir
         if ($pgBinDir) { Ensure-PostgresFirewallRule -PostgresBinDir $pgBinDir }
         Write-Host "Postgres already running on ${PgHost}:${runningPort}" -ForegroundColor Green
+        return
+    }
+
+    $runningDockerPort = Get-RunningDockerPostgresPort -ContainerName $ContainerName
+    if ($runningDockerPort) {
+        $script:postgresPort = [int]$runningDockerPort
+        Write-Host "Postgres already running on ${PgHost}:${runningDockerPort}" -ForegroundColor Green
         return
     }
 
@@ -1996,27 +1359,6 @@ function Cleanup-AdoptedDockerPostgres {
     }
 }
 
-function Cleanup-AdoptedDockerRedis {
-    if ($script:redisStartedByScript) {
-        return
-    }
-
-    if (-not (Test-DockerContainerRunningByName -ContainerName $redisContainerName)) {
-        return
-    }
-
-    $composeStop = Invoke-DockerComposeCommand -Arguments @("stop", "redis") -EnvironmentOverrides @{
-        "REDIS_CONTAINER_NAME" = $redisContainerName
-    }
-    if ($composeStop.ExitCode -eq 0) {
-        return
-    }
-
-    if (Ensure-DockerCommand) {
-        try { docker stop $redisContainerName *> $null } catch {}
-    }
-}
-
 function Cleanup-StaleHomerunProcesses {
     <#
     .SYNOPSIS
@@ -2024,7 +1366,7 @@ function Cleanup-StaleHomerunProcesses {
 
     Finds python.exe processes whose command line contains "workers.runner"
     or "uvicorn" running from this project's backend directory and kills them.
-    This prevents stale connections from saturating Postgres/Redis and blocking
+    This prevents stale connections from saturating local services and blocking
     startup after an unclean exit.
     #>
     $projectRoot = (Get-Location).Path
@@ -2086,16 +1428,6 @@ function Cleanup-LocalPostgresIfOwned {
 
     if (Test-LocalPostgresListenerOwned -DataDir $postgresDataDir -Port $script:postgresPort) {
         try { & $pgctlPath -D $postgresDataDir -m fast -w stop *> $null } catch {}
-    }
-}
-
-function Cleanup-LocalRedisIfOwned {
-    <#
-    .SYNOPSIS
-    Stop the launcher-managed local Redis if it was started as a standalone process.
-    #>
-    if (Test-RedisPing -RedisHost $redisHost -RedisPort $redisPort) {
-        Send-RedisShutdown -RedisHost $redisHost -RedisPort $redisPort
     }
 }
 
@@ -2264,7 +1596,7 @@ if (Test-NeedsSetup) {
 }
 
 # Kill orphaned workers from a previous crashed run before starting services.
-# Stale processes hold Postgres/Redis connections that can block startup.
+# Stale processes hold local service connections that can block startup.
 Cleanup-StaleHomerunProcesses
 
 # If the previous run was terminated abruptly (window close/taskkill),
@@ -2272,14 +1604,12 @@ Cleanup-StaleHomerunProcesses
 if (-not $script:databaseUrlWasProvided) {
     Cleanup-AdoptedDockerPostgres
 }
-Cleanup-AdoptedDockerRedis
 
 # The Npcap Loopback Adapter (Wireshark/Nmap) can silently break loopback
 # TCP connections, causing Postgres to appear to listen but drop all traffic.
 Test-NpcapLoopbackInterference
 
 try {
-    Ensure-Redis -RedisHost $redisHost -RedisPort $redisPort -ContainerName $redisContainerName -Image $redisImage
     if ($env:DATABASE_URL) {
         Write-Host "Using provided DATABASE_URL; skipping launcher-managed Postgres startup." -ForegroundColor Cyan
     } else {
@@ -2327,18 +1657,16 @@ try {
 
     # Stop launcher-managed services
     Cleanup-StartedPostgres
-    Cleanup-StartedRedis
 
     # Stop adopted launcher-named Docker services as well. This handles
     # runs where services were already up from a previous session.
     if (-not $script:databaseUrlWasProvided) {
         Cleanup-AdoptedDockerPostgres
     }
-    Cleanup-AdoptedDockerRedis
 
     # Also stop services the launcher adopted (already running when we started)
     if (-not $script:databaseUrlWasProvided) {
         Cleanup-LocalPostgresIfOwned
     }
-    Cleanup-LocalRedisIfOwned
 }
+

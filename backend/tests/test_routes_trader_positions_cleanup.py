@@ -163,13 +163,13 @@ async def test_live_cleanup_requires_confirm(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_open_order_count_includes_executed_shadow_positions(tmp_path):
+async def test_open_order_count_excludes_executed_positions(tmp_path):
     engine, session_factory = await _build_session_factory(tmp_path)
     try:
         async with session_factory() as session:
             await _seed_trader_with_order(session)
             count = await get_open_order_count_for_trader(session, "trader-1", mode="shadow")
-            assert count == 1
+            assert count == 0
     finally:
         await engine.dispose()
 
@@ -204,7 +204,7 @@ async def test_open_position_count_aggregates_same_market_direction(tmp_path):
             open_orders = await get_open_order_count_for_trader(session, "trader-1", mode="shadow")
             open_positions = await get_open_position_count_for_trader(session, "trader-1", mode="shadow")
 
-            assert open_orders == 2
+            assert open_orders == 1
             assert open_positions == 1
     finally:
         await engine.dispose()

@@ -23,7 +23,6 @@ from services.pause_state import global_pause_state
 from utils.converters import to_iso
 from services.market_prioritizer import market_prioritizer, MarketTier
 from services.ws_feeds import get_feed_manager
-from services.redis_price_cache import redis_price_cache
 from services.quality_filter import quality_filter
 from services.data_events import DataEvent, EventType
 from services.event_dispatcher import event_dispatcher
@@ -676,7 +675,7 @@ class ArbitrageScanner:
         return out
 
     async def _snapshot_ws_prices(self, token_ids: list[str]) -> dict[str, dict]:
-        """Return fresh live snapshots for token IDs from Redis + in-memory fallback."""
+        """Return fresh live snapshots for token IDs from the in-memory WS cache."""
         if not token_ids or not settings.WS_FEED_ENABLED:
             return {}
         clean_token_ids = [str(token_id).strip() for token_id in token_ids if str(token_id).strip()]
@@ -685,20 +684,10 @@ class ArbitrageScanner:
 
         prices: dict[str, dict] = {}
         try:
-            prices = await redis_price_cache.read_prices(clean_token_ids)
-        except Exception as exc:
-            print(f"  Redis live price read failed (using in-memory fallback): {exc}")
-            prices = {}
-        missing = [token_id for token_id in clean_token_ids if token_id not in prices]
-        if not missing:
-            return prices
-
-        # Local fallback for same-process WS cache if Redis is slower to catch up.
-        try:
             feed_mgr = get_feed_manager()
             if not feed_mgr._started:
                 return prices
-            for token_id in missing:
+            for token_id in clean_token_ids:
                 if not feed_mgr.is_fresh(token_id):
                     continue
                 mid = feed_mgr.cache.get_mid_price(token_id)
@@ -1094,7 +1083,7 @@ class ArbitrageScanner:
         now: Optional[datetime] = None,
         drop_stale: bool = False,
     ) -> list[Opportunity]:
-        """Overlay fresh token prices onto opportunity markets from Redis/WS cache."""
+        """Overlay fresh token prices onto opportunity markets from the live WS cache."""
         if not opportunities:
             return opportunities
 
@@ -1437,6 +1426,7 @@ class ArbitrageScanner:
         """Split scanner market_data_refresh strategies into incremental vs full sets."""
         incremental: set[str] = set()
         full_snapshot: set[str] = set()
+        forced_full_snapshot = {"tail_end_carry"}
         within_market = str(MispricingType.WITHIN_MARKET.value).lower()
 
         # When strategy overrides are active (e.g. in tests), partition from those
@@ -1445,20 +1435,17 @@ class ArbitrageScanner:
         if self._strategy_overrides is not None:
             for instance in self._strategy_overrides:
                 slug = getattr(instance, "slug", None) or getattr(instance, "name", "__override__")
-                if getattr(instance, "worker_affinity", "scanner") != "scanner":
+                strategy_key = str(getattr(instance, "strategy_type", slug) or slug).strip().lower()
+                if str(getattr(instance, "source_key", "scanner") or "").strip().lower() != "scanner":
+                    continue
+                if strategy_key in forced_full_snapshot:
+                    full_snapshot.add(slug)
                     continue
                 subscriptions = set(getattr(instance, "subscriptions", None) or [])
                 if "*" in subscriptions:
                     full_snapshot.add(slug)
                     continue
                 if EventType.MARKET_DATA_REFRESH not in subscriptions:
-                    continue
-                mode = str(getattr(instance, "realtime_processing_mode", "auto") or "auto").strip().lower()
-                if mode == "incremental":
-                    incremental.add(slug)
-                    continue
-                if mode == "full_snapshot":
-                    full_snapshot.add(slug)
                     continue
                 mispricing = str(getattr(instance, "mispricing_type", "") or "").strip().lower()
                 if mispricing == within_market:
@@ -1473,21 +1460,17 @@ class ArbitrageScanner:
 
         for slug, loaded in strategy_loader._loaded.items():
             instance = loaded.instance
-            if getattr(instance, "worker_affinity", "scanner") != "scanner":
+            strategy_key = str(getattr(instance, "strategy_type", slug) or slug).strip().lower()
+            if str(getattr(instance, "source_key", "scanner") or "").strip().lower() != "scanner":
+                continue
+            if strategy_key in forced_full_snapshot:
+                full_snapshot.add(slug)
                 continue
             subscriptions = set(getattr(instance, "subscriptions", None) or [])
             if "*" in subscriptions:
                 full_snapshot.add(slug)
                 continue
             if EventType.MARKET_DATA_REFRESH not in subscriptions:
-                continue
-
-            mode = str(getattr(instance, "realtime_processing_mode", "auto") or "auto").strip().lower()
-            if mode == "incremental":
-                incremental.add(slug)
-                continue
-            if mode == "full_snapshot":
-                full_snapshot.add(slug)
                 continue
 
             mispricing = str(getattr(instance, "mispricing_type", "") or "").strip().lower()
@@ -2148,11 +2131,11 @@ class ArbitrageScanner:
         try:
             async with AsyncSessionLocal() as session:
                 await ensure_system_opportunity_strategies_seeded(session)
-                await strategy_loader.refresh_all_from_db(
-                    session=session,
-                    source_keys=source_keys,
-                    prune_unlisted=bool(source_keys),
-                )
+
+            await strategy_loader.refresh_all_from_db(
+                source_keys=source_keys,
+                prune_unlisted=bool(source_keys),
+            )
 
             self._plugins_loaded = True
         except Exception as e:
@@ -2166,15 +2149,13 @@ class ArbitrageScanner:
         await self.load_plugins()
 
     def _get_all_strategies(self) -> list:
-        """Return DB-loaded strategy instances whose worker_affinity is 'scanner'.
-
-        Strategies with other worker affinities (e.g. 'crypto') are handled
-        by their respective workers and should not run in the scanner loop.
-        """
+        """Return DB-loaded strategy instances whose source_key is 'scanner'."""
         if self._strategy_overrides is not None:
             return list(self._strategy_overrides)
         plugin_strategies = strategy_loader.get_all_instances()
-        scanner_strategies = [s for s in plugin_strategies if getattr(s, "worker_affinity", "scanner") == "scanner"]
+        scanner_strategies = [
+            s for s in plugin_strategies if str(getattr(s, "source_key", "scanner") or "").strip().lower() == "scanner"
+        ]
         return scanner_strategies
 
     def _get_news_edge_helper(self):
@@ -2314,12 +2295,23 @@ class ArbitrageScanner:
 
         try:
             await self._ensure_runtime_strategies_loaded()
+            refresh_timeout_budget = max(
+                30.0,
+                float(getattr(settings, "MARKET_UNIVERSE_REFRESH_TIMEOUT_SECONDS", 300) or 300),
+            )
+            core_fetch_timeout = max(30.0, min(180.0, refresh_timeout_budget * 0.6))
+            cross_platform_timeout = max(10.0, min(60.0, refresh_timeout_budget * 0.2))
+            optional_stage_timeout = max(5.0, min(30.0, refresh_timeout_budget * 0.1))
+            persist_timeout = max(10.0, min(45.0, refresh_timeout_budget * 0.15))
 
             # Phase 1 — Fetch events + markets concurrently
             _phase_t = _time.monotonic()
-            events, markets = await asyncio.gather(
-                self.market_data.get_all_events(closed=False),
-                self.market_data.get_all_markets(active=True),
+            events, markets = await asyncio.wait_for(
+                asyncio.gather(
+                    self.market_data.get_all_events(closed=False),
+                    self.market_data.get_all_markets(active=True),
+                ),
+                timeout=core_fetch_timeout,
             )
             print(f"  [timing] Polymarket fetch: {_time.monotonic() - _phase_t:.1f}s")
 
@@ -2342,10 +2334,14 @@ class ArbitrageScanner:
                 await self._set_activity("Catalog refresh: fetching Kalshi markets...")
                 _phase_t = _time.monotonic()
                 try:
-                    kalshi_markets = await self.market_data.get_cross_platform_markets(active=True)
+                    kalshi_events, kalshi_markets = await asyncio.wait_for(
+                        asyncio.gather(
+                            self.market_data.get_cross_platform_events(closed=False),
+                            self.market_data.get_cross_platform_markets(active=True),
+                        ),
+                        timeout=cross_platform_timeout,
+                    )
                     markets.extend(kalshi_markets)
-
-                    kalshi_events = await self.market_data.get_cross_platform_events(closed=False)
                     events.extend(kalshi_events)
 
                     if kalshi_markets:
@@ -2361,7 +2357,7 @@ class ArbitrageScanner:
             print(f"  Fetched {len(events)} events and {len(markets)} active markets{dedup_msg}")
             await self._set_activity(f"Catalog: {len(events)} events, {len(markets)} active markets")
 
-            # Phase 3 — Read live prices from Redis for ALL tokens
+            # Phase 3 — Read live prices from the WS cache for ALL tokens
             all_token_ids = self._collect_live_token_ids(markets)
             # Deduplicate
             seen_ids: set[str] = set()
@@ -2376,8 +2372,15 @@ class ArbitrageScanner:
             if all_token_ids:
                 _phase_t = _time.monotonic()
                 await self._set_activity(f"Catalog refresh: reading prices for {len(all_token_ids)} tokens...")
-                prices = await self._snapshot_ws_prices(all_token_ids)
-                print(f"  Loaded prices for {len(prices)}/{len(all_token_ids)} tokens from Redis")
+                try:
+                    prices = await asyncio.wait_for(
+                        self._snapshot_ws_prices(all_token_ids),
+                        timeout=optional_stage_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    prices = {}
+                    print(f"  Price load timed out after {optional_stage_timeout:.1f}s; continuing with cached market prices")
+                print(f"  Loaded prices for {len(prices)}/{len(all_token_ids)} tokens from WS cache")
                 print(f"  [timing] Price load: {_time.monotonic() - _phase_t:.1f}s")
             # Phase 4 — Update in-memory caches (offloaded to thread)
             def _update_caches_after_catalog(scanner, evts, mkts, prc, ts):
@@ -2409,7 +2412,10 @@ class ArbitrageScanner:
             try:
                 from services.market_monitor import market_monitor
 
-                await market_monitor.ingest_snapshot(events, markets)
+                await asyncio.wait_for(
+                    market_monitor.ingest_snapshot(events, markets),
+                    timeout=optional_stage_timeout,
+                )
             except Exception:
                 pass
 
@@ -2420,11 +2426,14 @@ class ArbitrageScanner:
                 from services.shared_state import write_market_catalog
 
                 async with AsyncSessionLocal() as session:
-                    await write_market_catalog(
-                        session,
-                        events,
-                        markets,
-                        duration_seconds=duration,
+                    await asyncio.wait_for(
+                        write_market_catalog(
+                            session,
+                            events,
+                            markets,
+                            duration_seconds=duration,
+                        ),
+                        timeout=persist_timeout,
                     )
             except Exception as e:
                 print(f"  Catalog DB persist failed (non-fatal): {e}")
@@ -2487,6 +2496,14 @@ class ArbitrageScanner:
 
         await self._ensure_runtime_strategies_loaded()
         await self._set_activity("Catalog incremental sync: fetching market/event deltas...")
+        incremental_timeout_budget = max(
+            15.0,
+            float(getattr(settings, "MARKET_UNIVERSE_INCREMENTAL_TIMEOUT_SECONDS", 120) or 120),
+        )
+        delta_fetch_timeout = max(10.0, min(45.0, incremental_timeout_budget * 0.5))
+        event_fetch_timeout = max(5.0, min(30.0, incremental_timeout_budget * 0.25))
+        optional_stage_timeout = max(5.0, min(20.0, incremental_timeout_budget * 0.15))
+        persist_timeout = max(10.0, min(30.0, incremental_timeout_budget * 0.2))
 
         delta_since_minutes = max(
             1,
@@ -2503,9 +2520,12 @@ class ArbitrageScanner:
 
         delta_markets: list = []
         try:
-            delta_markets = await self.market_data.get_recent_markets(
-                since_minutes=delta_since_minutes,
-                active=True,
+            delta_markets = await asyncio.wait_for(
+                self.market_data.get_recent_markets(
+                    since_minutes=delta_since_minutes,
+                    active=True,
+                ),
+                timeout=delta_fetch_timeout,
             )
         except Exception as e:
             print(f"  Incremental market fetch failed, falling back to full refresh: {e}")
@@ -2531,15 +2551,36 @@ class ArbitrageScanner:
             if len(event_slug_candidates) >= max_event_slugs:
                 break
 
+        cached_event_keys: set[str] = set()
+        for event in self._cached_events:
+            key = str(getattr(event, "slug", "") or getattr(event, "id", "") or "").strip()
+            if key:
+                cached_event_keys.add(key)
+
+        event_fetch_candidates = [slug for slug in event_slug_candidates if slug not in cached_event_keys]
         delta_events: list = []
-        if event_slug_candidates:
+        if event_fetch_candidates:
             try:
-                delta_events = await self.market_data.get_events_by_slugs(
-                    event_slug_candidates,
-                    closed=False,
+                delta_events = await asyncio.wait_for(
+                    self.market_data.get_events_by_slugs(
+                        event_fetch_candidates,
+                        closed=False,
+                    ),
+                    timeout=event_fetch_timeout,
                 )
+            except asyncio.TimeoutError:
+                print(
+                    f"  Incremental event fetch timed out after {event_fetch_timeout:.1f}s "
+                    f"for {len(event_fetch_candidates)} uncached event slugs; continuing with cached/derived events"
+                )
+                delta_events = []
             except Exception as e:
-                print(f"  Incremental event fetch failed (non-fatal): {e}")
+                error_name = type(e).__name__
+                error_message = str(e).strip()
+                if error_message:
+                    print(f"  Incremental event fetch failed (non-fatal) [{error_name}]: {error_message}")
+                else:
+                    print(f"  Incremental event fetch failed (non-fatal) [{error_name}]")
                 delta_events = []
 
         market_map: dict[str, object] = {}
@@ -2623,7 +2664,16 @@ class ArbitrageScanner:
         all_token_ids = self._collect_live_token_ids(merged_markets)
         prices: dict[str, dict] = {}
         if all_token_ids:
-            prices = await self._snapshot_ws_prices(all_token_ids)
+            try:
+                prices = await asyncio.wait_for(
+                    self._snapshot_ws_prices(all_token_ids),
+                    timeout=optional_stage_timeout,
+                )
+            except asyncio.TimeoutError:
+                prices = {}
+                print(
+                    f"  Incremental price load timed out after {optional_stage_timeout:.1f}s; continuing without fresh WS snapshot"
+                )
 
         def _update_incremental_caches(scanner, evts, mkts, prc, ts):
             scanner._apply_live_prices_to_markets(mkts, prc)
@@ -2652,7 +2702,10 @@ class ArbitrageScanner:
         try:
             from services.market_monitor import market_monitor
 
-            await market_monitor.ingest_snapshot(merged_events, merged_markets)
+            await asyncio.wait_for(
+                market_monitor.ingest_snapshot(merged_events, merged_markets),
+                timeout=optional_stage_timeout,
+            )
         except Exception:
             pass
 
@@ -2661,11 +2714,14 @@ class ArbitrageScanner:
             from services.shared_state import write_market_catalog
 
             async with AsyncSessionLocal() as session:
-                await write_market_catalog(
-                    session,
-                    merged_events,
-                    merged_markets,
-                    duration_seconds=duration,
+                await asyncio.wait_for(
+                    write_market_catalog(
+                        session,
+                        merged_events,
+                        merged_markets,
+                        duration_seconds=duration,
+                    ),
+                    timeout=persist_timeout,
                 )
         except Exception as e:
             print(f"  Incremental catalog DB persist failed (non-fatal): {e}")
@@ -2693,7 +2749,7 @@ class ArbitrageScanner:
         """
         try:
             from models.database import AsyncSessionLocal
-            from services.shared_state import read_market_catalog
+            from services.shared_state import read_market_catalog, relink_event_markets
 
             async with AsyncSessionLocal() as session:
                 _, _, meta_check = await read_market_catalog(
@@ -2715,6 +2771,7 @@ class ArbitrageScanner:
                 events, _, _ = await read_market_catalog(
                     session, include_events=True, include_markets=False,
                 )
+            relink_event_markets(events, markets)
         except Exception as e:
             print(f"  Catalog hydration from DB failed: {e}")
             return 0
@@ -2903,7 +2960,7 @@ class ArbitrageScanner:
                             f"Fast scan: reading live prices for {len(token_sample)} hot-tier tokens..."
                         )
                         live_prices = await self._snapshot_ws_prices(token_sample)
-                        print(f"  Loaded prices for {len(live_prices)} hot-tier tokens from Redis cache")
+                        print(f"  Loaded prices for {len(live_prices)} hot-tier tokens from WS cache")
 
                 merged_prices = dict(live_prices)
                 self._cached_prices.update(live_prices)
@@ -3798,7 +3855,7 @@ class ArbitrageScanner:
 
         Catalog refresh runs as a separate background task.  This loop
         always uses scan_fast() which reads from the cached catalog +
-        Redis live prices — it never calls upstream HTTP APIs directly.
+        live WS prices — it never calls upstream HTTP APIs directly.
         """
         # Hydrate catalog from DB so scan_fast works immediately
         await self._hydrate_catalog_from_db()

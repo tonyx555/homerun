@@ -32,11 +32,9 @@ class CryptoSpikeReversionStrategy(BaseStrategy):
     description = "Spike-reversion execution using live 5m/30m/2h movement context"
     mispricing_type = "within_market"
     source_key = "crypto"
-    worker_affinity = "crypto"
     market_categories = ["crypto"]
     subscriptions = ["crypto_update"]
     accepted_signal_strategy_types = ["btc_eth_highfreq"]
-    requires_live_market_context = True
 
     quality_filter_overrides = QualityFilterOverrides(
         min_roi=1.0,

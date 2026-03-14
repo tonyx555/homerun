@@ -55,7 +55,6 @@ class SettlementLagStrategy(BaseStrategy):
     description = "Exploit delayed price updates after outcome determination"
     mispricing_type = "settlement_lag"
     subscriptions = ["market_data_refresh"]
-    realtime_processing_mode = "incremental"
 
     quality_filter_overrides = QualityFilterOverrides(
         min_roi=0.5,

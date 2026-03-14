@@ -195,10 +195,8 @@ class LateFavoriteAlphaStrategy(BaseStrategy):
     description = "Near-expiry favorites with unresolved headroom and measurable continuation alpha"
     mispricing_type = "within_market"
     source_key = "scanner"
-    worker_affinity = "scanner"
     requires_resolution_date = True
     subscriptions = ["market_data_refresh"]
-    realtime_processing_mode = "full_snapshot"
 
     quality_filter_overrides = QualityFilterOverrides(
         min_roi=0.8,

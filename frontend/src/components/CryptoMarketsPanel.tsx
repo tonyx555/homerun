@@ -298,6 +298,7 @@ function OraclePriceDisplay({
   priceToBeat,
   source,
   sourceMap,
+  nowMs,
 }: {
   price: number | null
   priceToBeat: number | null
@@ -311,6 +312,7 @@ function OraclePriceDisplay({
       age_seconds: number | null
     }
   >
+  nowMs: number
 }) {
   if (price === null) return null
 
@@ -324,7 +326,9 @@ function OraclePriceDisplay({
       key: normalizeOracleSourceKey(row.source),
       label: oracleSourceLabel(row.source),
       price: row.price as number,
-      age: row.age_seconds,
+      age: typeof row.updated_at_ms === 'number' && Number.isFinite(row.updated_at_ms)
+        ? Math.max(0, (nowMs - row.updated_at_ms) / 1000)
+        : row.age_seconds,
     }))
     .sort((a, b) => {
       const orderDiff = oracleSourceSortOrder(a.key) - oracleSourceSortOrder(b.key)
@@ -381,7 +385,7 @@ function OraclePriceDisplay({
               <span className="text-[10px] text-muted-foreground/70 uppercase tracking-wide">{row.label}</span>
               <span className="text-xs font-data text-muted-foreground">
                 {formatPrice(row.price, 2)}
-                {row.age !== null ? <span className="text-[10px] text-muted-foreground/60"> · {row.age}s</span> : null}
+                {row.age !== null ? <span className="text-[10px] text-muted-foreground/60"> · {row.age < 10 ? row.age.toFixed(3) : row.age.toFixed(1)}s</span> : null}
               </span>
             </div>
           ))}
@@ -404,11 +408,13 @@ function OraclePriceDisplay({
 export function CryptoMarketCard({
   market,
   themeMode,
+  nowMs,
   isModalView = false,
   onCloseModal,
 }: {
   market: CryptoMarket
   themeMode: 'dark' | 'light'
+  nowMs: number
   isModalView?: boolean
   onCloseModal?: () => void
 }) {
@@ -642,6 +648,7 @@ export function CryptoMarketCard({
           priceToBeat={market.price_to_beat}
           source={market.oracle_source}
           sourceMap={market.oracle_prices_by_source}
+          nowMs={nowMs}
         />
 
         {/* Oracle price sparkline chart */}
@@ -864,6 +871,7 @@ export function CryptoMarketCard({
                 <CryptoMarketCard
                   market={market}
                   themeMode={themeMode}
+                  nowMs={nowMs}
                   isModalView
                   onCloseModal={closeModal}
                 />
@@ -1193,7 +1201,7 @@ export default function CryptoMarketsPanel({
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
           {filteredMarkets.map((market) => (
-            <CryptoMarketCard key={market.id} market={market} themeMode={themeMode} />
+            <CryptoMarketCard key={market.id} market={market} themeMode={themeMode} nowMs={nowMs} />
           ))}
         </div>
       )}

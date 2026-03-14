@@ -143,22 +143,6 @@ async def execute_live_order(
                 except Exception:
                     pass
 
-                # Try Redis cross-process cache (~5ms)
-                if live_quote is None:
-                    try:
-                        from services.redis_price_cache import redis_price_cache
-                        redis_result = await redis_price_cache.read_prices([normalized_token_id])
-                        redis_entry = redis_result.get(normalized_token_id)
-                        if redis_entry is not None:
-                            mid = safe_float(redis_entry.get("mid"))
-                            if mid is not None and mid > 0:
-                                redis_notional = float(mid) * requested_size
-                                if redis_notional + 1e-9 >= min_order_size:
-                                    live_quote = mid
-                                    price_resolution = "redis_cache"
-                    except Exception:
-                        pass
-
             # Slow path: HTTP API calls (50-500ms)
             if live_quote is None:
                 quote_buy = None
@@ -329,5 +313,7 @@ async def execute_live_order(
             "trading_status": str(getattr(getattr(order, "status", None), "value", getattr(order, "status", "")) or ""),
             "filled_size": safe_float(getattr(order, "filled_size", None), 0.0) or 0.0,
             "average_fill_price": average_fill,
+            "provider_order_type_sent": str(getattr(order, "_provider_order_type_sent", "") or "") or None,
+            "submit_method": str(getattr(order, "_submit_method", "") or "") or None,
         },
     )

@@ -704,7 +704,7 @@ def test_strict_ws_pricing_blocks_non_ws_market_source():
         invoke_hooks=False,
         strategy_params={
             "require_strict_ws_pricing": True,
-            "strict_ws_price_sources": ["ws_strict", "redis_strict"],
+            "strict_ws_price_sources": ["ws_strict"],
             "max_market_data_age_ms": 1000,
         },
     )
@@ -749,7 +749,7 @@ def test_strict_ws_pricing_allows_ws_source_with_fresh_age():
         invoke_hooks=False,
         strategy_params={
             "require_strict_ws_pricing": True,
-            "strict_ws_price_sources": ["ws_strict", "redis_strict"],
+            "strict_ws_price_sources": ["ws_strict"],
             "max_market_data_age_ms": 1000,
         },
     )

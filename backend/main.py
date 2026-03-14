@@ -1,5 +1,6 @@
 import os
 import asyncio
+import importlib
 import signal
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -55,13 +56,14 @@ from services.traders_copy_trade_signal_service import traders_copy_trade_signal
 from services.live_execution_service import live_execution_service
 from services.wallet_discovery import wallet_discovery
 from services.position_monitor import position_monitor
+from services.intent_runtime import get_intent_runtime
 from services.maintenance import maintenance_service
+from services.market_runtime import get_market_runtime
 from services.validation_service import validation_service
 from services.snapshot_broadcaster import snapshot_broadcaster
 from services.market_prioritizer import market_prioritizer
 from services.event_bus import event_bus
 from services.event_dispatcher import event_dispatcher
-from services.redis_streams import redis_streams
 from models.database import AppSettings, AsyncSessionLocal, init_database
 from models.model_registry import register_all_models
 from services import discovery_shared_state, shared_state
@@ -186,8 +188,10 @@ async def lifespan(app: FastAPI):
         "Thread pool executor configured",
         max_workers=max(cpu_count * 2 + 8, 16),
     )
-    worker_processes: dict[str, asyncio.subprocess.Process] = {}
+    worker_tasks: dict[str, asyncio.Task] = {}
     worker_monitor_tasks: list[asyncio.Task] = []
+    runtime_tasks: dict[str, asyncio.Task] = {}
+    runtime_monitor_tasks: list[asyncio.Task] = []
     tasks: list[asyncio.Task] = []
     workers_shutting_down = False
 
@@ -210,107 +214,183 @@ async def lifespan(app: FastAPI):
             return dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(timezone.utc)
 
-    async def _spawn_worker_process(module_name: str) -> asyncio.subprocess.Process:
-        worker_env = os.environ.copy()
-        worker_env["HOMERUN_PROCESS_ROLE"] = "worker"
-        process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "workers.runner",
-            module_name,
-            cwd=str(Path(__file__).resolve().parent),
-            env=worker_env,
-        )
+    async def _spawn_worker_task(module_name: str) -> asyncio.Task:
+        module = importlib.import_module(module_name)
+        start_loop = getattr(module, "start_loop", None)
+        if start_loop is None:
+            raise RuntimeError(f"{module_name} does not define start_loop()")
+        task = asyncio.create_task(start_loop(), name=f"worker-{module_name.split('.')[-1]}")
         logger.info(
-            "Worker process started",
+            "Worker task started",
             worker=module_name.split(".")[-1],
-            pid=process.pid,
         )
-        return process
+        return task
 
-    async def _terminate_worker_process(module_name: str, process: asyncio.subprocess.Process) -> None:
-        if process.returncode is not None:
+    async def _cancel_worker_task(module_name: str, task: asyncio.Task) -> None:
+        if task.done():
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
             return
+        task.cancel()
         try:
-            if sys.platform == "win32":
-                process.terminate()
-            else:
-                process.send_signal(signal.SIGTERM)
-        except ProcessLookupError:
-            return
-        except Exception as e:
-            logger.warning(
-                "Failed to signal worker process",
-                worker=_worker_name_from_module(module_name),
-                pid=process.pid,
-                exc_info=e,
-            )
-            return
-
-        try:
-            await asyncio.wait_for(process.wait(), timeout=10)
-            return
-        except asyncio.TimeoutError:
+            await task
+        except asyncio.CancelledError:
             pass
-
-        try:
-            process.kill()
-        except ProcessLookupError:
-            return
-        except Exception as e:
+        except Exception as exc:
             logger.warning(
-                "Failed to kill worker process",
+                "Worker task shutdown raised",
                 worker=_worker_name_from_module(module_name),
-                pid=process.pid,
-                exc_info=e,
+                exc_info=exc,
             )
-            return
-        try:
-            await process.wait()
-        except Exception:
-            pass
 
-    async def _restart_worker_process(module_name: str, *, reason: str) -> None:
+    async def _restart_worker_task(module_name: str, *, reason: str) -> None:
         if workers_shutting_down:
             return
 
-        current = worker_processes.get(module_name)
+        current = worker_tasks.get(module_name)
         if current is not None:
-            await _terminate_worker_process(module_name, current)
+            await _cancel_worker_task(module_name, current)
 
-        replacement = await _spawn_worker_process(module_name)
-        worker_processes[module_name] = replacement
+        replacement = await _spawn_worker_task(module_name)
+        worker_tasks[module_name] = replacement
         logger.warning(
-            "Worker process restarted",
+            "Worker task restarted",
             worker=_worker_name_from_module(module_name),
-            pid=replacement.pid,
             reason=reason,
         )
 
-    async def _monitor_worker_process(module_name: str) -> None:
+    async def _monitor_worker_task(module_name: str) -> None:
         while not workers_shutting_down:
-            process = worker_processes.get(module_name)
-            if process is None:
+            task = worker_tasks.get(module_name)
+            if task is None:
                 await asyncio.sleep(1.0)
                 continue
 
-            return_code = await process.wait()
-            if workers_shutting_down:
-                return
-            if worker_processes.get(module_name) is not process:
-                continue
+            try:
+                await task
+                if workers_shutting_down:
+                    return
+                if worker_tasks.get(module_name) is not task:
+                    continue
+                logger.error(
+                    "Worker task exited unexpectedly",
+                    worker=_worker_name_from_module(module_name),
+                )
+                await asyncio.sleep(1.0)
+                await _restart_worker_task(module_name, reason="unexpected_exit")
+            except asyncio.CancelledError:
+                if workers_shutting_down:
+                    return
+                if worker_tasks.get(module_name) is not task:
+                    continue
+                await asyncio.sleep(1.0)
+                await _restart_worker_task(module_name, reason="unexpected_cancel")
+            except Exception as exc:
+                if workers_shutting_down:
+                    return
+                if worker_tasks.get(module_name) is not task:
+                    continue
+                logger.error(
+                    "Worker task crashed",
+                    worker=_worker_name_from_module(module_name),
+                    exc_info=exc,
+                )
+                await asyncio.sleep(1.0)
+                await _restart_worker_task(module_name, reason=f"unexpected_error:{type(exc).__name__}")
 
-            logger.error(
-                "Worker process exited unexpectedly",
-                worker=_worker_name_from_module(module_name),
-                pid=process.pid,
-                return_code=return_code,
+    async def _spawn_runtime_task(runtime_name: str) -> asyncio.Task:
+        if runtime_name == "trader_orchestrator":
+            from workers import trader_orchestrator_worker as orchestrator_runtime
+
+            task = asyncio.create_task(
+                orchestrator_runtime.start_loop(
+                    lane="general",
+                    notifier_enabled=True,
+                    write_snapshot=True,
+                ),
+                name="runtime-trader-orchestrator",
             )
-            await asyncio.sleep(1.0)
-            await _restart_worker_process(
-                module_name,
-                reason=f"unexpected_exit:{return_code}",
+        elif runtime_name == "trader_orchestrator_crypto":
+            from workers import trader_orchestrator_worker as orchestrator_runtime
+
+            task = asyncio.create_task(
+                orchestrator_runtime.start_loop(
+                    lane="crypto",
+                    notifier_enabled=False,
+                    write_snapshot=False,
+                ),
+                name="runtime-trader-orchestrator-crypto",
             )
+        else:
+            raise RuntimeError(f"Unsupported runtime task '{runtime_name}'")
+        logger.info("Runtime task started", runtime=runtime_name)
+        return task
+
+    async def _cancel_runtime_task(runtime_name: str, task: asyncio.Task) -> None:
+        if task.done():
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning(
+                "Runtime task shutdown raised",
+                runtime=runtime_name,
+                exc_info=exc,
+            )
+
+    async def _restart_runtime_task(runtime_name: str, *, reason: str) -> None:
+        if workers_shutting_down:
+            return
+        current = runtime_tasks.get(runtime_name)
+        if current is not None:
+            await _cancel_runtime_task(runtime_name, current)
+        replacement = await _spawn_runtime_task(runtime_name)
+        runtime_tasks[runtime_name] = replacement
+        logger.warning("Runtime task restarted", runtime=runtime_name, reason=reason)
+
+    async def _monitor_runtime_task(runtime_name: str) -> None:
+        while not workers_shutting_down:
+            task = runtime_tasks.get(runtime_name)
+            if task is None:
+                await asyncio.sleep(1.0)
+                continue
+            try:
+                await task
+                if workers_shutting_down:
+                    return
+                if runtime_tasks.get(runtime_name) is not task:
+                    continue
+                logger.error("Runtime task exited unexpectedly", runtime=runtime_name)
+                await asyncio.sleep(1.0)
+                await _restart_runtime_task(runtime_name, reason="unexpected_exit")
+            except asyncio.CancelledError:
+                if workers_shutting_down:
+                    return
+                if runtime_tasks.get(runtime_name) is not task:
+                    continue
+                await asyncio.sleep(1.0)
+                await _restart_runtime_task(runtime_name, reason="unexpected_cancel")
+            except Exception as exc:
+                if workers_shutting_down:
+                    return
+                if runtime_tasks.get(runtime_name) is not task:
+                    continue
+                logger.error("Runtime task crashed", runtime=runtime_name, exc_info=exc)
+                await asyncio.sleep(1.0)
+                await _restart_runtime_task(runtime_name, reason=f"unexpected_error:{type(exc).__name__}")
 
     async def _monitor_worker_freshness() -> None:
         while not workers_shutting_down:
@@ -329,8 +409,8 @@ async def lifespan(app: FastAPI):
             }
 
             now = utcnow()
-            for module_name, process in list(worker_processes.items()):
-                if process.returncode is not None:
+            for module_name, task in list(worker_tasks.items()):
+                if task.done():
                     continue
                 worker_name = _worker_name_from_module(module_name)
                 snapshot = snapshot_by_name.get(worker_name)
@@ -352,13 +432,13 @@ async def lifespan(app: FastAPI):
                     continue
 
                 logger.error(
-                    "Worker heartbeat stale; restarting",
+                    "Worker heartbeat stale; restarting in-process task",
                     worker=worker_name,
                     age_seconds=round(age_seconds, 1),
                     stale_after_seconds=stale_after_seconds,
                     current_activity=snapshot.get("current_activity"),
                 )
-                await _restart_worker_process(module_name, reason="stale_heartbeat")
+                await _restart_worker_task(module_name, reason="stale_heartbeat")
 
     try:
         # Initialize database
@@ -407,11 +487,6 @@ async def lifespan(app: FastAPI):
 
         await event_bus.start()
         await event_dispatcher.start()
-        redis_healthy = await redis_streams.ping()
-        if redis_healthy:
-            logger.info("Redis stream transport online")
-        else:
-            logger.warning("Redis stream transport unavailable at startup")
 
         # Apply all DB runtime overrides using one deterministic precedence chain.
         try:
@@ -428,6 +503,9 @@ async def lifespan(app: FastAPI):
                 precedence=RUNTIME_SETTINGS_PRECEDENCE,
                 exc_info=exc,
             )
+
+        await get_intent_runtime().start()
+        await get_market_runtime().start()
 
         try:
             async with AsyncSessionLocal() as session:
@@ -533,7 +611,8 @@ async def lifespan(app: FastAPI):
         for wallet in settings.TRACKED_WALLETS:
             await wallet_tracker.add_wallet(wallet)
 
-        # Background tasks (scanner runs in separate worker process; API reads from DB)
+        # Background tasks. Hot runtimes live in this process; slower discovery
+        # and workflow loops remain background tasks supervised here.
 
         # Broadcast scanner snapshot deltas from DB to connected WebSocket clients.
         await snapshot_broadcaster.start(interval_seconds=1.0)
@@ -655,35 +734,39 @@ async def lifespan(app: FastAPI):
 
         logger.info("All services started successfully")
 
-        # Start worker loops in separate subprocesses so heavy scanners
-        # cannot starve API request handling on the main event loop.
+        # Start background runtimes in-process under one supervisor.
         _WORKER_MODULES = (
-            "workers.market_data_worker",
             "workers.market_universe_worker",
             "workers.scanner_worker",
             "workers.scanner_slo_worker",
-            "workers.opportunity_aggregator_worker",
-            "workers.crypto_worker",
             "workers.news_worker",
             "workers.weather_worker",
             "workers.tracked_traders_worker",
-            "workers.trader_orchestrator_worker",
-            "workers.trader_orchestrator_crypto_worker",
             "workers.trader_reconciliation_worker",
             "workers.redeemer_worker",
             "workers.events_worker",
             "workers.discovery_worker",
         )
         for mod_name in _WORKER_MODULES:
-            process = await _spawn_worker_process(mod_name)
-            worker_processes[mod_name] = process
+            task = await _spawn_worker_task(mod_name)
+            worker_tasks[mod_name] = task
             monitor_task = asyncio.create_task(
-                _monitor_worker_process(mod_name),
+                _monitor_worker_task(mod_name),
                 name=f"monitor-{mod_name.split('.')[-1]}",
             )
             worker_monitor_tasks.append(monitor_task)
         worker_monitor_tasks.append(asyncio.create_task(_monitor_worker_freshness(), name="monitor-worker-freshness"))
-        logger.info("All %d worker processes started", len(worker_processes))
+        logger.info("All %d worker tasks started", len(worker_tasks))
+
+        for runtime_name in ("trader_orchestrator", "trader_orchestrator_crypto"):
+            runtime_tasks[runtime_name] = await _spawn_runtime_task(runtime_name)
+            runtime_monitor_tasks.append(
+                asyncio.create_task(
+                    _monitor_runtime_task(runtime_name),
+                    name=f"monitor-{runtime_name}",
+                )
+            )
+        logger.info("All %d runtime tasks started", len(runtime_tasks))
 
         yield
 
@@ -708,6 +791,8 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
         await validation_service.stop()
+        await get_market_runtime().stop()
+        await get_intent_runtime().stop()
         try:
             from services.news.feed_service import news_feed_service
 
@@ -715,10 +800,19 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
 
-        # Stop worker subprocesses first.
+        # Stop worker runtimes first.
         workers_shutting_down = True
-        for mod_name, process in list(worker_processes.items()):
-            await _terminate_worker_process(mod_name, process)
+        for runtime_name, task in list(runtime_tasks.items()):
+            await _cancel_runtime_task(runtime_name, task)
+        for task in runtime_monitor_tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        for mod_name, task in list(worker_tasks.items()):
+            await _cancel_worker_task(mod_name, task)
         for task in worker_monitor_tasks:
             task.cancel()
         for task in worker_monitor_tasks:
@@ -728,7 +822,7 @@ async def lifespan(app: FastAPI):
                 pass
             except Exception:
                 pass
-        logger.info("All worker processes stopped")
+        logger.info("All worker tasks stopped")
 
         for task in tasks:
             task.cancel()
@@ -739,7 +833,6 @@ async def lifespan(app: FastAPI):
 
         await event_dispatcher.stop()
         await event_bus.stop()
-        await redis_streams.close()
 
         try:
             from services.polymarket import polymarket_client
@@ -921,11 +1014,10 @@ async def readiness_check():
     """Readiness probe - is the service ready to accept traffic?"""
     async with AsyncSessionLocal() as session:
         scanner_status = await shared_state.get_scanner_status_from_db(session)
-    redis_healthy = await redis_streams.ping()
     checks = {
         "scanner": scanner_status.get("running", False),
         "database": True,
-        "redis": redis_healthy,
+        "ws_feeds": bool(_get_ws_feeds_status(scanner_status).get("healthy", False)) if settings.WS_FEED_ENABLED else True,
         "polymarket_api": True,
     }
 
@@ -966,7 +1058,7 @@ async def _tui_health_db_queries() -> dict:
     }
 
 
-def _build_tui_health_response(db: dict, redis_healthy: bool) -> dict:
+def _build_tui_health_response(db: dict) -> dict:
     scanner_status = db.get("scanner_status", {})
     discovery_status = db.get("discovery_status", {})
     news_workflow_status = db.get("news_workflow_status", {})
@@ -978,7 +1070,6 @@ def _build_tui_health_response(db: dict, redis_healthy: bool) -> dict:
         "timestamp": utcnow().isoformat(),
         "checks": {
             "database": db.get("database", False),
-            "redis": redis_healthy,
         },
         "services": {
             "scanner": {
@@ -991,11 +1082,8 @@ def _build_tui_health_response(db: dict, redis_healthy: bool) -> dict:
                 "stats": orchestrator_snapshot,
             },
             "ws_feeds": _get_ws_feeds_status(scanner_status, worker_status),
-            "redis": {
-                "healthy": redis_healthy,
-                "host": settings.REDIS_HOST,
-                "port": int(settings.REDIS_PORT),
-                "db": int(settings.REDIS_DB),
+            "signal_runtime": {
+                "queue_depth": _get_signal_runtime_status(),
             },
             "news_workflow": {
                 "running": bool(news_workflow_status.get("running", False)),
@@ -1043,7 +1131,6 @@ async def tui_health_check():
     When the pool is busy the last successful result is served instead.
     """
     global _tui_health_cache, _tui_health_refresh_task
-    redis_healthy = await redis_streams.ping()
     if _tui_health_refresh_task is not None and _tui_health_refresh_task.done():
         try:
             _tui_health_cache = _tui_health_refresh_task.result()
@@ -1063,7 +1150,7 @@ async def tui_health_check():
         db = _tui_health_cache or {"database": False}
     else:
         _tui_health_refresh_task = None
-    return _build_tui_health_response(db, redis_healthy)
+    return _build_tui_health_response(db)
 
 
 def _get_news_status() -> dict:
@@ -1130,10 +1217,24 @@ def _get_ws_feeds_status(
         return {"healthy": False, "started": False}
 
 
+def _get_signal_runtime_status() -> dict:
+    try:
+        from services.runtime_signal_queue import get_queue_depth
+
+        depth = get_queue_depth()
+        if isinstance(depth, dict):
+            return {
+                "depth_by_lane": {str(key): int(value) for key, value in depth.items()},
+                "total_depth": sum(int(value) for value in depth.values()),
+            }
+    except Exception:
+        pass
+    return {"depth_by_lane": {}, "total_depth": 0}
+
+
 @app.get("/health/detailed")
 async def detailed_health_check():
     """Detailed health check with all system stats"""
-    redis_healthy = await redis_streams.ping()
     async with AsyncSessionLocal() as session:
         scanner_status = await shared_state.get_scanner_status_from_db(session)
         discovery_status = await discovery_shared_state.get_discovery_status_from_db(session)
@@ -1161,7 +1262,6 @@ async def detailed_health_check():
         "timestamp": utcnow().isoformat(),
         "checks": {
             "database": True,
-            "redis": redis_healthy,
         },
         "services": {
             "scanner": {
@@ -1185,11 +1285,8 @@ async def detailed_health_check():
             "market_prioritizer": market_prioritizer.get_stats(),
             "ai_intelligence": _get_ai_status(),
             "ws_feeds": _get_ws_feeds_status(scanner_status, worker_status),
-            "redis": {
-                "healthy": redis_healthy,
-                "host": settings.REDIS_HOST,
-                "port": int(settings.REDIS_PORT),
-                "db": int(settings.REDIS_DB),
+            "signal_runtime": {
+                "queue_depth": _get_signal_runtime_status(),
             },
             "news_intelligence": _get_news_status(),
             "news_workflow": {

@@ -109,11 +109,10 @@ async def _run_loop() -> None:
     try:
         async with AsyncSessionLocal() as session:
             await ensure_all_strategies_seeded(session)
-            await refresh_strategy_runtime_if_needed(
-                session,
-                source_keys=["news"],
-                force=True,
-            )
+        await refresh_strategy_runtime_if_needed(
+            source_keys=["news"],
+            force=True,
+        )
     except Exception as exc:
         logger.warning("News worker strategy startup sync failed: %s", exc)
 
@@ -185,13 +184,12 @@ async def _run_loop() -> None:
             async with AsyncSessionLocal() as session:
                 control = await shared_state.read_news_control(session)
                 wf_settings = await shared_state.get_news_settings(session)
-                try:
-                    await refresh_strategy_runtime_if_needed(
-                        session,
-                        source_keys=["news"],
-                    )
-                except Exception as exc:
-                    logger.warning("News worker strategy refresh check failed: %s", exc)
+            try:
+                await refresh_strategy_runtime_if_needed(
+                    source_keys=["news"],
+                )
+            except Exception as exc:
+                logger.warning("News worker strategy refresh check failed: %s", exc)
         except Exception as exc:
             if _is_db_disconnect_error(exc):
                 logger.warning("News workflow DB connection dropped; retrying cycle: %s", exc)

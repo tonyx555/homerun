@@ -84,7 +84,6 @@ class ProbSurfaceArbStrategy(BaseStrategy):
     name = "Probability Surface Arb"
     description = "Arbitrage deviations from monotonic probability surfaces across contract families"
     mispricing_type = "cross_market"
-    realtime_processing_mode = "full_snapshot"
     subscriptions = ["market_data_refresh"]
 
     quality_filter_overrides = QualityFilterOverrides(

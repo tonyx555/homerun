@@ -263,13 +263,25 @@ async def _reconcile_live_order_authority_for_traders(
     trader_ids: list[str],
     reason: str,
 ) -> None:
+    provider_timeout_seconds = 6.0
+    lifecycle_timeout_seconds = 12.0
+    inventory_timeout_seconds = 4.0
     for trader_id in trader_ids:
         try:
-            await reconcile_live_provider_orders(
-                session,
+            await asyncio.wait_for(
+                reconcile_live_provider_orders(
+                    session,
+                    trader_id=trader_id,
+                    commit=True,
+                    broadcast=False,
+                ),
+                timeout=provider_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Live provider reconciliation during orders read timed out",
                 trader_id=trader_id,
-                commit=True,
-                broadcast=False,
+                timeout_seconds=provider_timeout_seconds,
             )
         except Exception as exc:
             logger.warning(
@@ -278,12 +290,21 @@ async def _reconcile_live_order_authority_for_traders(
                 exc_info=exc,
             )
         try:
-            await reconcile_live_positions(
-                session,
+            await asyncio.wait_for(
+                reconcile_live_positions(
+                    session,
+                    trader_id=trader_id,
+                    trader_params={},
+                    dry_run=False,
+                    reason=reason,
+                ),
+                timeout=lifecycle_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Live position reconciliation during orders read timed out",
                 trader_id=trader_id,
-                trader_params={},
-                dry_run=False,
-                reason=reason,
+                timeout_seconds=lifecycle_timeout_seconds,
             )
         except Exception as exc:
             logger.warning(
@@ -292,11 +313,20 @@ async def _reconcile_live_order_authority_for_traders(
                 exc_info=exc,
             )
         try:
-            await sync_trader_position_inventory(
-                session,
+            await asyncio.wait_for(
+                sync_trader_position_inventory(
+                    session,
+                    trader_id=trader_id,
+                    mode="live",
+                    commit=True,
+                ),
+                timeout=inventory_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Live inventory sync during orders read timed out",
                 trader_id=trader_id,
-                mode="live",
-                commit=True,
+                timeout_seconds=inventory_timeout_seconds,
             )
         except Exception as exc:
             logger.warning(
@@ -549,7 +579,7 @@ async def create_trader_route(
 async def get_all_trader_orders_all(
     status: Optional[str] = Query(default=None),
     limit: int = Query(default=1000, ge=1, le=5000),
-    reconcile_live: bool = Query(default=True),
+    reconcile_live: bool = Query(default=False),
     session: AsyncSession = Depends(get_db_session),
 ):
     orders = await list_serialized_trader_orders(

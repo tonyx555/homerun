@@ -6,6 +6,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, delete
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from typing import Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from functools import partial
@@ -1169,34 +1170,28 @@ async def _ensure_discovered_wallet_entries(
     if not addresses:
         return 0
 
-    created = 0
     async with AsyncSessionLocal() as session:
-        existing_result = await session.execute(
-            select(DiscoveredWallet.address).where(DiscoveredWallet.address.in_(addresses))
-        )
-        existing_addresses = {str(row[0]).strip().lower() for row in existing_result.all() if row[0]}
-
-        for address in addresses:
-            addr_lower = address.strip().lower()
-            if addr_lower in existing_addresses:
-                continue
-            session.add(
-                DiscoveredWallet(
-                    address=addr_lower,
-                    discovered_at=utcnow(),
-                    discovery_source=source_label,
-                    source_flags={
-                        "tracked_wallet": True,
-                        "group_member": True,
-                    },
-                )
+        result = await session.execute(
+            pg_insert(DiscoveredWallet)
+            .values(
+                [
+                    {
+                        "address": address.strip().lower(),
+                        "discovered_at": utcnow(),
+                        "discovery_source": source_label,
+                        "source_flags": {
+                            "tracked_wallet": True,
+                            "group_member": True,
+                        },
+                    }
+                    for address in addresses
+                    if str(address or "").strip()
+                ]
             )
-            created += 1
-
-        if created:
-            await session.commit()
-
-    return created
+            .on_conflict_do_nothing(index_elements=[DiscoveredWallet.address])
+        )
+        await session.commit()
+        return int(result.rowcount or 0)
 
 
 def _apply_pool_flag_updates(
@@ -2058,12 +2053,18 @@ async def pool_manual_include(
         address = validate_eth_address(wallet_address).lower()
         wallet = await session.get(DiscoveredWallet, address)
         if wallet is None:
-            wallet = DiscoveredWallet(
-                address=address,
-                discovered_at=utcnow(),
-                discovery_source="manual_pool",
+            await session.execute(
+                pg_insert(DiscoveredWallet)
+                .values(
+                    address=address,
+                    discovered_at=utcnow(),
+                    discovery_source="manual_pool",
+                )
+                .on_conflict_do_nothing(index_elements=[DiscoveredWallet.address])
             )
-            session.add(wallet)
+            wallet = await session.get(DiscoveredWallet, address)
+        if wallet is None:
+            raise HTTPException(status_code=500, detail="Failed to materialize discovered wallet row")
 
         source_flags = _coerce_source_flags(wallet.source_flags)
         source_flags = _apply_pool_flag_updates(
@@ -2273,6 +2274,20 @@ async def promote_tracked_wallets_to_pool(
         if not tracked_addresses:
             return {"status": "success", "promoted": 0, "created": 0, "updated": 0}
 
+        insert_result = await session.execute(
+            pg_insert(DiscoveredWallet)
+            .values(
+                [
+                    {
+                        "address": address,
+                        "discovered_at": utcnow(),
+                        "discovery_source": "manual_pool",
+                    }
+                    for address in tracked_addresses
+                ]
+            )
+            .on_conflict_do_nothing(index_elements=[DiscoveredWallet.address])
+        )
         existing_rows = (
             (await session.execute(select(DiscoveredWallet).where(DiscoveredWallet.address.in_(tracked_addresses))))
             .scalars()
@@ -2280,20 +2295,12 @@ async def promote_tracked_wallets_to_pool(
         )
         existing = {row.address.lower(): row for row in existing_rows}
 
-        created = 0
-        updated = 0
+        created = int(insert_result.rowcount or 0)
+        updated = max(0, len(tracked_addresses) - created)
         for address in tracked_addresses:
             wallet = existing.get(address)
             if wallet is None:
-                wallet = DiscoveredWallet(
-                    address=address,
-                    discovered_at=utcnow(),
-                    discovery_source="manual_pool",
-                )
-                session.add(wallet)
-                created += 1
-            else:
-                updated += 1
+                continue
 
             source_flags = _coerce_source_flags(wallet.source_flags)
             source_flags = _apply_pool_flag_updates(

@@ -63,7 +63,6 @@ class WeatherDistributionStrategy(BaseStrategy):
     description = "Full distribution comparison: build probability across all buckets, buy the most underpriced"
     mispricing_type = "news_information"
     source_key = "weather"
-    worker_affinity = "weather"
     subscriptions = ["weather_update"]
 
     quality_filter_overrides = QualityFilterOverrides(

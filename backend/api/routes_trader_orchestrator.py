@@ -109,7 +109,6 @@ class LiveMarketContextSettingsRequest(BaseModel):
     max_history_points: int = Field(default=120, ge=20, le=240)
     timeout_seconds: float = Field(default=4.0, ge=1.0, le=12.0)
     strict_ws_pricing_only: bool = True
-    allow_redis_strict_prices: bool = True
     max_market_data_age_ms: int = Field(default=100, ge=25, le=10000)
 
 

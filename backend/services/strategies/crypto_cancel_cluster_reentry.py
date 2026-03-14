@@ -49,11 +49,9 @@ class CryptoCancelClusterReentryStrategy(BaseStrategy):
     description = "Re-enters after cancellation storms subside and spread quality recovers."
     mispricing_type = "within_market"
     source_key = "crypto"
-    worker_affinity = "crypto"
     market_categories = ["crypto"]
     subscriptions = ["crypto_update"]
     accepted_signal_strategy_types = ["btc_eth_highfreq"]
-    requires_live_market_context = True
 
     quality_filter_overrides = QualityFilterOverrides(
         min_roi=0.7,

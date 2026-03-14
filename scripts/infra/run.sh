@@ -23,14 +23,6 @@ for arg in "$@"; do
     esac
 done
 
-REDIS_HOST="${REDIS_HOST:-127.0.0.1}"
-REDIS_PORT="${REDIS_PORT:-6379}"
-REDIS_CONTAINER_NAME="${REDIS_CONTAINER_NAME:-homerun-redis}"
-REDIS_IMAGE="${REDIS_IMAGE:-redis:7-alpine}"
-REDIS_STARTED_BY_SCRIPT=0
-REDIS_START_MODE=""
-REDIS_DOCKER_CREATED_BY_SCRIPT=0
-
 POSTGRES_HOST="${POSTGRES_HOST:-127.0.0.1}"
 POSTGRES_PORT="${POSTGRES_PORT:-5432}"
 POSTGRES_DB="${POSTGRES_DB:-homerun}"
@@ -42,24 +34,6 @@ POSTGRES_DATA_DIR="${POSTGRES_DATA_DIR:-$(pwd)/data/postgres}"
 POSTGRES_STARTED_BY_SCRIPT=0
 POSTGRES_START_MODE=""
 POSTGRES_DOCKER_CREATED_BY_SCRIPT=0
-
-resolve_redis_server() {
-    if command -v redis-server >/dev/null 2>&1; then
-        command -v redis-server
-        return 0
-    fi
-
-    if command -v brew >/dev/null 2>&1; then
-        local brew_prefix
-        brew_prefix="$(brew --prefix redis 2>/dev/null || true)"
-        if [ -n "$brew_prefix" ] && [ -x "$brew_prefix/bin/redis-server" ]; then
-            echo "$brew_prefix/bin/redis-server"
-            return 0
-        fi
-    fi
-
-    return 1
-}
 
 resolve_postgres_bin_dir() {
     if command -v initdb >/dev/null 2>&1 && command -v pg_ctl >/dev/null 2>&1; then
@@ -108,208 +82,6 @@ wait_for_service() {
         sleep 0.25
     done
     return 1
-}
-
-redis_ping() {
-    python3 - "$REDIS_HOST" "$REDIS_PORT" <<'PY'
-import socket
-import sys
-
-host = sys.argv[1]
-port = int(sys.argv[2])
-payload = b"*1\r\n$4\r\nPING\r\n"
-
-try:
-    with socket.create_connection((host, port), timeout=0.5) as sock:
-        sock.sendall(payload)
-        sock.settimeout(0.5)
-        data = sock.recv(64)
-        if b"+PONG" in data:
-            raise SystemExit(0)
-except Exception:
-    pass
-
-raise SystemExit(1)
-PY
-}
-
-redis_version_check() {
-    # Returns 0 if Redis >= 5.0 (Streams supported), 1 if too old, 2 if unknown
-    python3 - "$REDIS_HOST" "$REDIS_PORT" <<'PY'
-import socket
-import sys
-
-host = sys.argv[1]
-port = int(sys.argv[2])
-# Send: INFO server
-payload = b"*2\r\n$4\r\nINFO\r\n$6\r\nserver\r\n"
-
-try:
-    with socket.create_connection((host, port), timeout=2.0) as sock:
-        sock.settimeout(2.0)
-        sock.sendall(payload)
-        data = b""
-        while True:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            data += chunk
-            if b"redis_version:" in data:
-                break
-        text = data.decode("ascii", errors="replace")
-        for line in text.split("\n"):
-            if line.startswith("redis_version:"):
-                version = line.split(":")[1].strip()
-                major = int(version.split(".")[0])
-                if major >= 5:
-                    print(f"Redis version {version} (Streams supported)")
-                    raise SystemExit(0)
-                else:
-                    print(f"WARNING: Redis version {version} does NOT support Streams (requires >= 5.0)")
-                    raise SystemExit(1)
-except SystemExit as e:
-    raise
-except Exception:
-    pass
-
-raise SystemExit(2)
-PY
-}
-
-redis_shutdown() {
-    python3 - "$REDIS_HOST" "$REDIS_PORT" <<'PY'
-import socket
-import sys
-
-host = sys.argv[1]
-port = int(sys.argv[2])
-payload = b"*2\r\n$8\r\nSHUTDOWN\r\n$6\r\nNOSAVE\r\n"
-
-try:
-    with socket.create_connection((host, port), timeout=0.5) as sock:
-        sock.sendall(payload)
-except Exception:
-    pass
-PY
-}
-
-try_start_redis_docker() {
-    if ! command -v docker >/dev/null 2>&1; then
-        return 1
-    fi
-    if ! docker info >/dev/null 2>&1; then
-        return 1
-    fi
-
-    if docker container inspect "$REDIS_CONTAINER_NAME" >/dev/null 2>&1; then
-        docker start "$REDIS_CONTAINER_NAME" >/dev/null 2>&1 || return 1
-    else
-        docker run \
-            --name "$REDIS_CONTAINER_NAME" \
-            --detach \
-            --publish "${REDIS_HOST}:${REDIS_PORT}:6379" \
-            "$REDIS_IMAGE" \
-            redis-server --save "" --appendonly no \
-            >/dev/null 2>&1 || return 1
-        REDIS_DOCKER_CREATED_BY_SCRIPT=1
-    fi
-    return 0
-}
-
-try_start_redis_local() {
-    local redis_server
-    redis_server="$(resolve_redis_server 2>/dev/null || true)"
-    if [ -z "$redis_server" ]; then
-        return 1
-    fi
-
-    "$redis_server" \
-        --bind "$REDIS_HOST" \
-        --port "$REDIS_PORT" \
-        --save "" \
-        --appendonly no \
-        --daemonize yes \
-        >/dev/null 2>&1 || return 1
-    return 0
-}
-
-has_redis_runtime() {
-    command -v docker >/dev/null 2>&1 || resolve_redis_server >/dev/null 2>&1
-}
-
-bootstrap_redis_runtime() {
-    if has_redis_runtime; then
-        return 0
-    fi
-    echo -e "${CYAN}Redis runtime missing; invoking setup redis bootstrap...${NC}"
-    ./scripts/infra/setup.sh --redis-only
-}
-
-cleanup_started_redis() {
-    if [ "$REDIS_STARTED_BY_SCRIPT" -ne 1 ]; then
-        return 0
-    fi
-
-    if [ "$REDIS_START_MODE" = "docker" ]; then
-        if command -v docker >/dev/null 2>&1; then
-            docker stop "$REDIS_CONTAINER_NAME" >/dev/null 2>&1 || true
-            if [ "$REDIS_DOCKER_CREATED_BY_SCRIPT" -eq 1 ]; then
-                docker rm "$REDIS_CONTAINER_NAME" >/dev/null 2>&1 || true
-            fi
-        fi
-        return 0
-    fi
-
-    if [ "$REDIS_START_MODE" = "local" ]; then
-        if redis_ping; then
-            redis_shutdown >/dev/null 2>&1 || true
-        fi
-        return 0
-    fi
-}
-
-warn_redis_version() {
-    redis_version_check
-    local rc=$?
-    if [ "$rc" -eq 1 ]; then
-        echo ""
-        echo -e "${YELLOW}Trade signal streaming will be DISABLED. The bot will fall back to slower DB polling.${NC}"
-        echo -e "${CYAN}To fix, install a modern Redis:${NC}"
-        echo "  Option 1 (macOS): brew install redis"
-        echo "  Option 2: Docker Desktop  ->  automatically uses redis:7-alpine"
-        echo ""
-    fi
-}
-
-ensure_redis() {
-    if redis_ping; then
-        echo -e "${GREEN}Redis already running on ${REDIS_HOST}:${REDIS_PORT}${NC}"
-        warn_redis_version
-        return 0
-    fi
-
-    bootstrap_redis_runtime
-
-    echo -e "${CYAN}Starting Redis...${NC}"
-    if try_start_redis_docker && wait_for_service "$REDIS_HOST" "$REDIS_PORT"; then
-        REDIS_STARTED_BY_SCRIPT=1
-        REDIS_START_MODE="docker"
-        echo -e "${GREEN}Redis started via Docker on ${REDIS_HOST}:${REDIS_PORT}${NC}"
-        warn_redis_version
-        return 0
-    fi
-
-    if try_start_redis_local && wait_for_service "$REDIS_HOST" "$REDIS_PORT"; then
-        REDIS_STARTED_BY_SCRIPT=1
-        REDIS_START_MODE="local"
-        echo -e "${GREEN}Redis started via redis-server on ${REDIS_HOST}:${REDIS_PORT}${NC}"
-        warn_redis_version
-        return 0
-    fi
-
-    echo -e "${YELLOW}Failed to start Redis automatically.${NC}"
-    echo "Install Docker or redis-server, then rerun."
-    exit 1
 }
 
 postgres_ping() {
@@ -583,20 +355,12 @@ cleanup_local_postgres_if_owned() {
     fi
 }
 
-cleanup_local_redis_if_owned() {
-    if redis_ping; then
-        redis_shutdown >/dev/null 2>&1 || true
-    fi
-}
-
 cleanup_started_services() {
     cleanup_stale_homerun_processes
     cleanup_started_postgres
-    cleanup_started_redis
     if [ -z "${DATABASE_URL_WAS_PROVIDED:-}" ]; then
         cleanup_local_postgres_if_owned
     fi
-    cleanup_local_redis_if_owned
 }
 
 auto_update_repository() {
@@ -744,8 +508,6 @@ cleanup_stale_homerun_processes
 DATABASE_URL_WAS_PROVIDED="${DATABASE_URL:-}"
 
 trap cleanup_started_services EXIT
-
-ensure_redis
 
 if [ -n "${DATABASE_URL:-}" ]; then
     echo -e "${CYAN}Using provided DATABASE_URL; skipping launcher-managed Postgres startup.${NC}"

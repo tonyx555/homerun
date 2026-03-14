@@ -485,14 +485,6 @@ async def get_unified_docs():
                         "Use this when one strategy evaluates feeder signals emitted by another."
                     ),
                 },
-                "requires_live_market_context": {
-                    "type": "bool",
-                    "required": False,
-                    "description": (
-                        "Optional orchestrator hint for crypto source strategies. "
-                        "When true, evaluate() receives live_market enrichment."
-                    ),
-                },
                 "allow_new_entries": {
                     "type": "bool",
                     "required": False,
@@ -767,17 +759,8 @@ async def get_unified_docs():
             "how_to_subscribe": (
                 "Set subscriptions = [EventType.MARKET_DATA_REFRESH] (or other EventType constants) "
                 "on your class. Implement on_event(self, event: DataEvent) -> list[Opportunity]. "
-                "For scanner strategies, set realtime_processing_mode = 'incremental' | 'full_snapshot' | 'auto' "
-                "to control reactive batch routing."
+                "Scanner strategies run in realtime against incremental market updates by default."
             ),
-            "realtime_processing_mode": {
-                "auto": (
-                    "Default. Scanner routes WITHIN_MARKET strategies on incremental batches "
-                    "and others on full snapshots."
-                ),
-                "incremental": "Always run this strategy on reactive affected-market batches.",
-                "full_snapshot": "Always run this strategy on the full cached market snapshot.",
-            },
             "data_event_types": {
                 "price_change": {
                     "description": "Low-level token price update from WS feed",
@@ -1002,10 +985,6 @@ async def get_unified_docs():
                 "accepted_signal_strategy_types": (
                     "Optional class attribute (list[str]): additional strategy_type values "
                     "your evaluate() should accept from the same source."
-                ),
-                "requires_live_market_context": (
-                    "Optional class attribute (bool): request live_market enrichment "
-                    "for evaluate() when using crypto source signals."
                 ),
                 "allow_new_entries": (
                     "Optional class attribute (bool): set False to disable new entries "
@@ -1675,7 +1654,10 @@ async def list_strategies(
     async with AsyncSessionLocal() as session:
         # Seed system strategies to ensure they exist
         await ensure_system_opportunity_strategies_seeded(session)
-        await refresh_strategy_runtime_if_needed(session, source_keys=None, force=False)
+
+    await refresh_strategy_runtime_if_needed(source_keys=None, force=False)
+
+    async with AsyncSessionLocal() as session:
 
         query = select(Strategy).order_by(
             Strategy.is_system.desc(),

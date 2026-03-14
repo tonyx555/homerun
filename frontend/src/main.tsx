@@ -8,7 +8,9 @@ import './index.css'
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
+      retry: false,
       refetchInterval: 120000, // Fallback poll every 120s (WS pushes are primary)
+      refetchOnWindowFocus: false,
       staleTime: 30000, // Data stays fresh for 30s (WS updates override)
     },
   },

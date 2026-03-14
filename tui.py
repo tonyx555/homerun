@@ -510,11 +510,6 @@ def _restore_windows_console_mode() -> None:
 # ---------------------------------------------------------------------------
 BACKEND_PORT = 8000
 FRONTEND_PORT = 3000
-REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
-try:
-    REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
-except ValueError:
-    REDIS_PORT = 6379
 # Use 127.0.0.1 instead of localhost; on Windows, localhost can resolve to
 # ::1 (IPv6) first while uvicorn only binds 0.0.0.0 (IPv4), causing timeouts.
 HEALTH_URL = f"http://127.0.0.1:{BACKEND_PORT}/health/tui"
@@ -1360,7 +1355,6 @@ class HomerunApp(App):
                 yield Static("Platform", id="platform-title")
                 yield Static("[red]\u25cf[/] BACKEND   OFFLINE", id="svc-backend", classes="platform-item")
                 yield Static("[red]\u25cf[/] DATABASE  OFFLINE", id="svc-database", classes="platform-item")
-                yield Static("[red]\u25cf[/] REDIS    OFFLINE", id="svc-redis", classes="platform-item")
                 yield Static("[red]\u25cf[/] FRONTEND  OFFLINE", id="svc-frontend", classes="platform-item")
                 yield Static("[red]\u25cf[/] WS FEEDS  OFFLINE", id="svc-wsfeeds", classes="platform-item")
                 yield Static(f"Dashboard  http://localhost:{FRONTEND_PORT}", classes="platform-url")
@@ -2482,11 +2476,9 @@ class HomerunApp(App):
         # --- Platform status ---
         ws = services.get("ws_feeds", {})
         database_healthy = self._resolve_database_health(data, services)
-        redis_healthy = self._resolve_redis_health(services)
 
         self._update_platform_item("svc-backend", "BACKEND", True)
         self._update_platform_item("svc-database", "DATABASE", database_healthy)
-        self._update_platform_item("svc-redis", "REDIS", redis_healthy)
         if not self._frontend_alive():
             self._request_frontend_start("backend health ready")
         frontend_alive = self._frontend_alive()
@@ -2518,7 +2510,6 @@ class HomerunApp(App):
         self.backend_healthy = False
         self._update_platform_item("svc-backend", "BACKEND", False)
         self._update_platform_item("svc-database", "DATABASE", False)
-        self._update_platform_item("svc-redis", "REDIS", self._ping_redis())
         # Frontend and WS feeds depend on backend, mark offline
         frontend_alive = self.frontend_proc is not None and self.frontend_proc.poll() is None
         self._update_platform_item("svc-frontend", "FRONTEND", frontend_alive)
@@ -2548,29 +2539,6 @@ class HomerunApp(App):
                 if key in db_status:
                     return bool(db_status.get(key))
         return True
-
-    def _resolve_redis_health(self, services: dict) -> bool:
-        redis_status = services.get("redis")
-        if isinstance(redis_status, bool):
-            return redis_status
-        if isinstance(redis_status, dict):
-            for key in ("healthy", "connected", "ok", "running"):
-                if key in redis_status:
-                    return bool(redis_status.get(key))
-        return self._ping_redis()
-
-    def _ping_redis(self) -> bool:
-        import socket
-
-        payload = b"*1\r\n$4\r\nPING\r\n"
-        try:
-            with socket.create_connection((REDIS_HOST, REDIS_PORT), timeout=0.3) as sock:
-                sock.sendall(payload)
-                sock.settimeout(0.3)
-                data = sock.recv(64)
-                return b"+PONG" in data
-        except Exception:
-            return False
 
     def _normalize_workers_payload(self, workers: object, services: dict) -> dict[str, dict]:
         by_name: dict[str, dict] = {}

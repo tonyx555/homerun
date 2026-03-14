@@ -95,9 +95,7 @@ class HoldingRewardYieldStrategy(BaseStrategy):
     )
     mispricing_type = "within_market"
     source_key = "scanner"
-    worker_affinity = "scanner"
     subscriptions = ["market_data_refresh"]
-    realtime_processing_mode = "full_snapshot"
     binary_only = True
 
     quality_filter_overrides = QualityFilterOverrides(

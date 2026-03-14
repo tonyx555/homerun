@@ -42,7 +42,6 @@ class VPINToxicityStrategy(BaseStrategy):
     name = "VPIN Toxicity"
     description = "Detect informed trading via VPIN order flow toxicity"
     mispricing_type = "within_market"
-    realtime_processing_mode = "incremental"
     subscriptions = ["market_data_refresh", "trade_execution"]
 
     quality_filter_overrides = QualityFilterOverrides(

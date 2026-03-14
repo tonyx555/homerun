@@ -7,8 +7,9 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from models.database import (
     AsyncSessionLocal,
@@ -59,6 +60,8 @@ WATCH_SAMPLE = 15
 
 MIN_TOTAL_TRADES = 30
 MIN_SAMPLE_FOR_DISPLAY = 15
+DEFAULT_RESCORE_MAX_WALLETS = 64
+RESCORE_UPDATE_BATCH_SIZE = 32
 
 
 def _floor_to_minutes(ts: datetime, bucket_minutes: int) -> datetime:
@@ -94,6 +97,7 @@ class InsiderDetectorService:
         """Rescore eligible wallets and persist insider metrics."""
         now = utcnow()
         stale_cutoff = now - timedelta(minutes=max(1, stale_minutes))
+        wallet_limit = max(1, int(max_wallets or DEFAULT_RESCORE_MAX_WALLETS))
 
         async with AsyncSessionLocal() as session:
             cluster_counts_rows = await session.execute(
@@ -109,7 +113,18 @@ class InsiderDetectorService:
             }
 
             query = (
-                select(DiscoveredWallet.address)
+                select(DiscoveredWallet)
+                .options(
+                    load_only(
+                        DiscoveredWallet.address,
+                        DiscoveredWallet.wins,
+                        DiscoveredWallet.losses,
+                        DiscoveredWallet.win_rate,
+                        DiscoveredWallet.avg_roi,
+                        DiscoveredWallet.max_drawdown,
+                        DiscoveredWallet.cluster_id,
+                    )
+                )
                 .where(DiscoveredWallet.total_trades >= MIN_TOTAL_TRADES)
                 .where(
                     or_(
@@ -119,16 +134,9 @@ class InsiderDetectorService:
                 )
                 .order_by(DiscoveredWallet.last_analyzed_at.desc().nullslast())
             )
-            if max_wallets:
-                query = query.limit(max(1, max_wallets))
+            candidates = list((await session.execute(query.limit(wallet_limit))).scalars().all())
 
-            wallet_addresses = [
-                str(address).lower()
-                for address in (await session.execute(query)).scalars().all()
-                if address
-            ]
-
-        if not wallet_addresses:
+        if not candidates:
             return {
                 "scored_wallets": 0,
                 "flagged_insiders": 0,
@@ -138,27 +146,31 @@ class InsiderDetectorService:
         flagged = 0
         watch = 0
         scored = 0
+        update_payloads: list[dict[str, Any]] = []
 
-        for wallet_address in wallet_addresses:
+        for wallet in candidates:
             try:
                 async with AsyncSessionLocal() as session:
-                    wallet = await session.get(DiscoveredWallet, wallet_address)
-                    if wallet is None:
-                        continue
-
                     score_result = await self._score_wallet(
                         session=session,
                         wallet=wallet,
                         cluster_sizes=cluster_sizes,
                         now=now,
                     )
-                    wallet.insider_score = score_result["insider_score"]
-                    wallet.insider_confidence = score_result["insider_confidence"]
-                    wallet.insider_sample_size = score_result["sample_size"]
-                    wallet.insider_last_scored_at = now
-                    wallet.insider_metrics_json = score_result["metrics"]
-                    wallet.insider_reasons_json = score_result["reasons"]
-                    await session.commit()
+                update_payloads.append(
+                    {
+                        "address": wallet.address,
+                        "insider_score": score_result["insider_score"],
+                        "insider_confidence": score_result["insider_confidence"],
+                        "insider_sample_size": score_result["sample_size"],
+                        "insider_last_scored_at": now,
+                        "insider_metrics_json": score_result["metrics"],
+                        "insider_reasons_json": score_result["reasons"],
+                    }
+                )
+                if len(update_payloads) >= RESCORE_UPDATE_BATCH_SIZE:
+                    await self._flush_rescore_updates(update_payloads)
+                    update_payloads = []
 
                 scored += 1
                 if score_result["classification"] == "flagged_insider":
@@ -166,7 +178,10 @@ class InsiderDetectorService:
                 elif score_result["classification"] == "watch_insider":
                     watch += 1
             except Exception as exc:
-                logger.warning("Insider wallet rescore failed for %s: %s", wallet_address, exc)
+                logger.warning("Insider wallet rescore failed for %s: %s", wallet.address, exc)
+
+        if update_payloads:
+            await self._flush_rescore_updates(update_payloads)
 
         logger.info(
             "Insider wallet rescoring complete",
@@ -179,6 +194,13 @@ class InsiderDetectorService:
             "flagged_insiders": flagged,
             "watch_insiders": watch,
         }
+
+    async def _flush_rescore_updates(self, payloads: list[dict[str, Any]]) -> None:
+        if not payloads:
+            return
+        async with AsyncSessionLocal() as session:
+            await session.execute(update(DiscoveredWallet), payloads)
+            await session.commit()
 
     # ------------------------------------------------------------------
     # Wallet scoring internals
@@ -329,6 +351,16 @@ class InsiderDetectorService:
         cutoff = now - timedelta(days=max(7, lookback_days))
         rows = await session.execute(
             select(WalletActivityRollup)
+            .options(
+                load_only(
+                    WalletActivityRollup.wallet_address,
+                    WalletActivityRollup.market_id,
+                    WalletActivityRollup.side,
+                    WalletActivityRollup.price,
+                    WalletActivityRollup.notional,
+                    WalletActivityRollup.traded_at,
+                )
+            )
             .where(
                 WalletActivityRollup.wallet_address == wallet_address.lower(),
                 WalletActivityRollup.traded_at >= cutoff,
@@ -351,6 +383,16 @@ class InsiderDetectorService:
 
         rows = await session.execute(
             select(WalletActivityRollup)
+            .options(
+                load_only(
+                    WalletActivityRollup.wallet_address,
+                    WalletActivityRollup.market_id,
+                    WalletActivityRollup.side,
+                    WalletActivityRollup.price,
+                    WalletActivityRollup.notional,
+                    WalletActivityRollup.traded_at,
+                )
+            )
             .where(
                 _chunked_in(WalletActivityRollup.market_id, market_ids),
                 WalletActivityRollup.traded_at >= start,
@@ -517,23 +559,29 @@ class InsiderDetectorService:
         end = events[-1].traded_at + timedelta(hours=24)
 
         rows = await session.execute(
-            select(NewsWorkflowFinding)
+            select(
+                NewsWorkflowFinding.market_id,
+                NewsWorkflowFinding.created_at,
+            )
             .where(
                 _chunked_in(NewsWorkflowFinding.market_id, market_ids),
                 NewsWorkflowFinding.created_at >= start,
                 NewsWorkflowFinding.created_at <= end,
             )
-            .order_by(NewsWorkflowFinding.created_at.asc())
+            .order_by(
+                NewsWorkflowFinding.market_id.asc(),
+                NewsWorkflowFinding.created_at.asc(),
+            )
             .limit(20000)
         )
-        findings = list(rows.scalars().all())
+        findings = rows.all()
         if not findings:
             return None, None
 
         by_market: dict[str, list[datetime]] = defaultdict(list)
-        for finding in findings:
-            if finding.market_id and finding.created_at:
-                by_market[str(finding.market_id)].append(finding.created_at)
+        for market_id, created_at in findings:
+            if market_id and created_at:
+                by_market[str(market_id)].append(created_at)
 
         lead_minutes_values: list[float] = []
         for event in events:

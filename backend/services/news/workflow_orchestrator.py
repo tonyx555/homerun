@@ -612,7 +612,7 @@ class WorkflowOrchestrator:
             for cluster in clusters:
                 if datetime.now(timezone.utc) >= cycle_deadline:
                     time_budget_exhausted = True
-                    logger.warning(
+                    logger.info(
                         "News workflow cycle hit time budget (%.1fs); ending current cycle early.",
                         float(
                             wf_settings.get("max_cycle_seconds", _MAX_WORKFLOW_CYCLE_SECONDS)

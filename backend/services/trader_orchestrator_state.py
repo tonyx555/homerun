@@ -36,6 +36,7 @@ from models.database import (
 )
 from utils.logger import get_logger
 from services.event_bus import event_bus
+from services.execution_latency_metrics import execution_latency_metrics
 from services.market_cache import CachedMarket
 from services.runtime_status import runtime_status
 from services.worker_state import (
@@ -74,6 +75,7 @@ ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS = 5
 _UNSET = object()  # Sentinel: distinguish "not provided" from explicit None
 ORCHESTRATOR_SNAPSHOT_ID = "latest"
 OPEN_ORDER_STATUSES = {"submitted", "executed", "open"}
+UNFILLED_ORDER_STATUSES = {"submitted", "open"}
 SHADOW_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
 LIVE_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
 CLEANUP_ELIGIBLE_ORDER_STATUSES = {"submitted", "executed", "open"}
@@ -3201,6 +3203,66 @@ async def create_trader_order(
     commit: bool = True,
 ) -> TraderOrder:
     now = _now()
+    row = build_trader_order_row(
+        trader_id=trader_id,
+        signal=signal,
+        decision_id=decision_id,
+        strategy_key=strategy_key,
+        strategy_version=strategy_version,
+        mode=mode,
+        status=status,
+        notional_usd=notional_usd,
+        effective_price=effective_price,
+        reason=reason,
+        payload=payload,
+        error_message=error_message,
+        trace_id=trace_id,
+        created_at=now,
+    )
+    session.add(row)
+    serialized_row = _serialize_order(row)
+    if not commit:
+        try:
+            await event_bus.publish("trader_order", serialized_row)
+        except Exception:
+            pass
+    await session.flush()
+    if _is_active_order_status(mode, status):
+        await sync_trader_position_inventory(
+            session,
+            trader_id=trader_id,
+            mode=str(mode),
+            commit=False,
+        )
+    if commit:
+        await _commit_with_retry(session)
+        await session.refresh(row)
+        try:
+            await event_bus.publish("trader_order", serialized_row)
+        except Exception:
+            pass
+
+    return row
+
+
+def build_trader_order_row(
+    *,
+    trader_id: str,
+    signal: Any,
+    decision_id: Optional[str],
+    strategy_key: str | None,
+    strategy_version: int | None,
+    mode: str,
+    status: str,
+    notional_usd: Optional[float],
+    effective_price: Optional[float],
+    reason: Optional[str],
+    payload: Optional[dict[str, Any]],
+    error_message: Optional[str] = None,
+    trace_id: Optional[str] = None,
+    created_at: datetime | None = None,
+) -> TraderOrder:
+    now = created_at or _now()
     order_payload = _sync_order_runtime_payload(
         payload=dict(payload or {}),
         status=status,
@@ -3343,29 +3405,6 @@ async def create_trader_order(
         executed_at=now if status in {"executed", "open"} else None,
         updated_at=now,
     )
-    session.add(row)
-    serialized_row = _serialize_order(row)
-    if not commit:
-        try:
-            await event_bus.publish("trader_order", serialized_row)
-        except Exception:
-            pass
-    await session.flush()
-    if _is_active_order_status(mode, status):
-        await sync_trader_position_inventory(
-            session,
-            trader_id=trader_id,
-            mode=str(mode),
-            commit=False,
-        )
-    if commit:
-        await _commit_with_retry(session)
-        await session.refresh(row)
-        try:
-            await event_bus.publish("trader_order", serialized_row)
-        except Exception:
-            pass
-
     return row
 
 
@@ -3409,11 +3448,51 @@ async def _refresh_execution_session_rollups(
     await session.flush()
     return row
 
-async def create_execution_session(
-    session: AsyncSession,
+
+def _apply_execution_session_rollups_from_rows(
+    row: ExecutionSession,
+    leg_rows: list[ExecutionSessionLeg],
+) -> None:
+    failed_statuses = {"failed", "cancelled", "expired"}
+    open_statuses = {"open", "submitted", "placing", "working", "partial", "hedging", "pending"}
+    legs_total = 0
+    legs_completed = 0
+    legs_failed = 0
+    legs_open = 0
+    executed_notional_usd = 0.0
+    buy_notional_usd = 0.0
+    sell_notional_usd = 0.0
+
+    for leg_row in leg_rows:
+        legs_total += 1
+        status_key = _normalize_status_key(leg_row.status)
+        if status_key == "completed":
+            legs_completed += 1
+        elif status_key in failed_statuses:
+            legs_failed += 1
+        elif status_key in open_statuses:
+            legs_open += 1
+
+        leg_notional = abs(safe_float(leg_row.filled_notional_usd, 0.0) or 0.0)
+        executed_notional_usd += leg_notional
+        if _normalize_status_key(leg_row.side) == "sell":
+            sell_notional_usd += leg_notional
+        else:
+            buy_notional_usd += leg_notional
+
+    row.legs_total = legs_total
+    row.legs_completed = legs_completed
+    row.legs_failed = legs_failed
+    row.legs_open = legs_open
+    row.executed_notional_usd = executed_notional_usd
+    row.unhedged_notional_usd = abs(buy_notional_usd - sell_notional_usd)
+    row.updated_at = _now()
+
+
+def build_execution_session_rows(
     *,
     trader_id: str,
-    signal: TradeSignal,
+    signal: Any,
     decision_id: str | None,
     strategy_key: str | None,
     strategy_version: int | None,
@@ -3426,8 +3505,9 @@ async def create_execution_session(
     expires_at: datetime | None,
     payload: dict[str, Any] | None = None,
     trace_id: str | None = None,
-    commit: bool = True,
-) -> ExecutionSession:
+    created_at: datetime | None = None,
+) -> tuple[ExecutionSession, list[ExecutionSessionLeg]]:
+    now = created_at or _now()
     row = ExecutionSession(
         id=_new_id(),
         trader_id=trader_id,
@@ -3452,21 +3532,20 @@ async def create_execution_session(
         max_unhedged_notional_usd=float(max(0.0, max_unhedged_notional_usd)),
         unhedged_notional_usd=0.0,
         trace_id=trace_id,
-        started_at=_now(),
+        started_at=now,
         completed_at=None,
         expires_at=expires_at,
         payload_json=payload or {},
-        created_at=_now(),
-        updated_at=_now(),
+        created_at=now,
+        updated_at=now,
     )
-    session.add(row)
-    await session.flush()
 
+    leg_rows: list[ExecutionSessionLeg] = []
     for index, leg in enumerate(legs):
         target_price = safe_float(leg.get("limit_price"), None)
         requested_notional = safe_float(leg.get("requested_notional_usd"), None)
         requested_shares = safe_float(leg.get("requested_shares"), None)
-        session.add(
+        leg_rows.append(
             ExecutionSessionLeg(
                 id=_new_id(),
                 session_id=row.id,
@@ -3489,13 +3568,55 @@ async def create_execution_session(
                 status="pending",
                 last_error=None,
                 metadata_json=dict(leg.get("metadata") or {}),
-                created_at=_now(),
-                updated_at=_now(),
+                created_at=now,
+                updated_at=now,
             )
         )
 
+    _apply_execution_session_rollups_from_rows(row, leg_rows)
+    return row, leg_rows
+
+
+async def create_execution_session(
+    session: AsyncSession,
+    *,
+    trader_id: str,
+    signal: TradeSignal,
+    decision_id: str | None,
+    strategy_key: str | None,
+    strategy_version: int | None,
+    mode: str,
+    policy: str,
+    plan_id: str | None,
+    legs: list[dict[str, Any]],
+    requested_notional_usd: float,
+    max_unhedged_notional_usd: float,
+    expires_at: datetime | None,
+    payload: dict[str, Any] | None = None,
+    trace_id: str | None = None,
+    commit: bool = True,
+) -> ExecutionSession:
+    row, leg_rows = build_execution_session_rows(
+        trader_id=trader_id,
+        signal=signal,
+        decision_id=decision_id,
+        strategy_key=strategy_key,
+        strategy_version=strategy_version,
+        mode=mode,
+        policy=policy,
+        plan_id=plan_id,
+        legs=legs,
+        requested_notional_usd=requested_notional_usd,
+        max_unhedged_notional_usd=max_unhedged_notional_usd,
+        expires_at=expires_at,
+        payload=payload,
+        trace_id=trace_id,
+    )
+    session.add(row)
     await session.flush()
-    await _refresh_execution_session_rollups(session, session_id=row.id)
+    for leg_row in leg_rows:
+        session.add(leg_row)
+    await session.flush()
     if commit:
         await _commit_with_retry(session)
         await session.refresh(row)
@@ -4023,7 +4144,7 @@ async def reconcile_live_provider_orders(
                 select(TraderOrder.id).where(
                     TraderOrder.trader_id == trader_id,
                     TraderOrder.mode == "live",
-                    TraderOrder.status.in_(tuple(LIVE_ACTIVE_ORDER_STATUSES)),
+                    TraderOrder.status.in_(tuple(UNFILLED_ORDER_STATUSES)),
                 )
             )
         )
@@ -5263,12 +5384,11 @@ async def get_open_order_count_for_trader(
     query = (
         select(
             TraderOrder.mode,
-            TraderOrder.status,
             func.count(TraderOrder.id).label("count"),
         )
         .where(TraderOrder.trader_id == trader_id)
-        .where(status_key_expr.in_(tuple(OPEN_ORDER_STATUSES)))
-        .group_by(TraderOrder.mode, TraderOrder.status)
+        .where(status_key_expr.in_(tuple(UNFILLED_ORDER_STATUSES)))
+        .group_by(TraderOrder.mode)
     )
     if mode is not None:
         mode_key = _normalize_mode_key(mode)
@@ -5280,9 +5400,7 @@ async def get_open_order_count_for_trader(
     rows = (await session.execute(query)).all()
     total = 0
     for row in rows:
-        mode_key = _normalize_mode_key(mode if mode is not None else row.mode)
-        if _is_active_order_status(mode_key, row.status):
-            total += int(row.count or 0)
+        total += int(row.count or 0)
     return total
 
 
@@ -5291,19 +5409,17 @@ async def get_open_order_summary_for_trader(session: AsyncSession, trader_id: st
         await session.execute(
             select(
                 TraderOrder.mode,
-                TraderOrder.status,
                 func.count(TraderOrder.id).label("count"),
             )
             .where(TraderOrder.trader_id == trader_id)
-            .group_by(TraderOrder.mode, TraderOrder.status)
+            .where(func.lower(func.trim(func.coalesce(TraderOrder.status, ""))).in_(tuple(UNFILLED_ORDER_STATUSES)))
+            .group_by(TraderOrder.mode)
         )
     ).all()
 
     summary = {"live": 0, "shadow": 0, "other": 0, "total": 0}
     for row in rows:
         mode = _normalize_mode_key(row.mode)
-        if not _is_active_order_status(mode, row.status):
-            continue
         count = int(row.count or 0)
         if mode == "live":
             summary["live"] += count
@@ -6277,11 +6393,11 @@ async def compute_orchestrator_metrics(session: AsyncSession) -> dict[str, Any]:
     order_mode_key = func.lower(func.trim(func.coalesce(TraderOrder.mode, "")))
     shadow_mode_keys = ("shadow", "paper")
     open_order_filter = or_(
-        and_(order_mode_key.in_(shadow_mode_keys), order_status_key.in_(tuple(SHADOW_ACTIVE_ORDER_STATUSES))),
-        and_(order_mode_key == "live", order_status_key.in_(tuple(LIVE_ACTIVE_ORDER_STATUSES))),
+        and_(order_mode_key.in_(shadow_mode_keys), order_status_key.in_(tuple(UNFILLED_ORDER_STATUSES))),
+        and_(order_mode_key == "live", order_status_key.in_(tuple(UNFILLED_ORDER_STATUSES))),
         and_(
             order_mode_key.not_in(shadow_mode_keys + ("live",)),
-            order_status_key.in_(tuple(OPEN_ORDER_STATUSES)),
+            order_status_key.in_(tuple(UNFILLED_ORDER_STATUSES)),
         ),
     )
     active_execution_status_key = func.lower(func.trim(func.coalesce(ExecutionSession.status, "")))
@@ -6311,6 +6427,7 @@ async def compute_orchestrator_metrics(session: AsyncSession) -> dict[str, Any]:
         )
     ).one()
     daily_pnl = await get_daily_realized_pnl(session)
+    latency_summary = await execution_latency_metrics.snapshot()
 
     return {
         "traders_total": int(metrics_row.traders_total or 0),
@@ -6322,6 +6439,7 @@ async def compute_orchestrator_metrics(session: AsyncSession) -> dict[str, Any]:
         "open_orders": int(metrics_row.open_orders or 0),
         "gross_exposure_usd": await get_gross_exposure(session),
         "daily_pnl": daily_pnl,
+        "execution_latency": latency_summary,
     }
 
 
@@ -6411,8 +6529,6 @@ async def get_orchestrator_overview(session: AsyncSession) -> dict[str, Any]:
         "reconciliation_worker": await read_worker_snapshot(session, "trader_reconciliation"),
         "config": await compose_trader_orchestrator_config(session),
         "metrics": await compute_orchestrator_metrics(session),
-        "traders": await list_traders(session),
-        "execution_sessions": await list_serialized_execution_sessions(session, limit=200),
     }
 
 

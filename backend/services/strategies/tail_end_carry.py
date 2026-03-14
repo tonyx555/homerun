@@ -136,7 +136,6 @@ class TailEndCarryStrategy(BaseStrategy):
     mispricing_type = "within_market"
     requires_resolution_date = True
     subscriptions = ["market_data_refresh"]
-    realtime_processing_mode = "full_snapshot"
 
     quality_filter_overrides = QualityFilterOverrides(
         min_roi=1.0,
@@ -206,7 +205,7 @@ class TailEndCarryStrategy(BaseStrategy):
         "immediate_break_even_stop_buffer_pct": 0.5,
         "max_market_data_age_ms": 15000,
         "require_strict_ws_pricing": True,
-        "strict_ws_price_sources": ["ws_strict", "redis_strict"],
+        "strict_ws_price_sources": ["ws_strict"],
     }
 
     def __init__(self) -> None:

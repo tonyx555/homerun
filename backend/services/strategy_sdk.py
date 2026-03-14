@@ -16,6 +16,7 @@ import json
 import logging
 from pathlib import Path
 import re
+import time
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -1642,10 +1643,9 @@ class StrategySDK:
     def is_ws_feed_started() -> bool:
         """Return True when this process has an active FeedManager."""
         try:
-            from services.ws_feeds import get_feed_manager
+            from services.market_runtime import get_market_runtime
 
-            mgr = get_feed_manager()
-            return bool(getattr(mgr, "_started", False))
+            return bool(get_market_runtime().started)
         except Exception:
             return False
 
@@ -1660,11 +1660,9 @@ class StrategySDK:
             Mid price or None if not fresh.
         """
         try:
-            from services.ws_feeds import get_feed_manager
+            from services.market_runtime import get_market_runtime
 
-            fm = get_feed_manager()
-            if fm and fm.cache.is_fresh(token_id):
-                return fm.cache.get_mid_price(token_id)
+            return get_market_runtime().get_token_mid_price(str(token_id or "").strip())
         except Exception:
             pass
         return None
@@ -1680,11 +1678,9 @@ class StrategySDK:
             Spread in bps or None.
         """
         try:
-            from services.ws_feeds import get_feed_manager
+            from services.market_runtime import get_market_runtime
 
-            fm = get_feed_manager()
-            if fm:
-                return fm.cache.get_spread_bps(token_id)
+            return get_market_runtime().get_token_spread_bps(str(token_id or "").strip())
         except Exception:
             pass
         return None
@@ -1702,12 +1698,11 @@ class StrategySDK:
             The oracle price in USD, or None if unavailable.
         """
         try:
-            from services.chainlink_feed import get_chainlink_feed
+            from services.reference_runtime import get_reference_runtime
 
-            feed = get_chainlink_feed()
-            if feed:
-                p = feed.get_price(asset.upper())
-                return p.price if p else None
+            payload = get_reference_runtime().get_oracle_price(asset.upper())
+            if isinstance(payload, dict) and payload.get("price") is not None:
+                return float(payload["price"])
         except Exception:
             pass
         return None
@@ -2081,11 +2076,12 @@ class StrategySDK:
             Empty list if no history available.
         """
         try:
-            from services.ws_feeds import get_feed_manager
+            from services.market_runtime import get_market_runtime
 
-            fm = get_feed_manager()
-            if fm and hasattr(fm.cache, "get_price_history"):
-                return fm.cache.get_price_history(token_id, max_snapshots=max_snapshots)
+            return get_market_runtime().get_price_history(
+                str(token_id or "").strip(),
+                max_snapshots=max_snapshots,
+            )
         except Exception:
             pass
         return []
@@ -2112,11 +2108,44 @@ class StrategySDK:
             }
         """
         try:
-            from services.ws_feeds import get_feed_manager
+            snapshots = StrategySDK.get_price_history(token_id, max_snapshots=max(20, int(lookback_seconds)))
+            if snapshots:
+                cutoff_ms = (time.time() - max(1, int(lookback_seconds))) * 1000.0
+                normalized: list[tuple[float, float]] = []
+                for snapshot in snapshots:
+                    if not isinstance(snapshot, dict):
+                        continue
+                    ts_raw = snapshot.get("timestamp") or snapshot.get("t")
+                    mid_raw = snapshot.get("mid") or snapshot.get("p")
+                    ts = _as_float(ts_raw, None)
+                    mid = _as_float(mid_raw, None)
+                    if ts is None or mid is None:
+                        continue
+                    if ts < 10_000_000_000:
+                        ts *= 1000.0
+                    normalized.append((ts, mid))
+                if normalized:
+                    normalized.sort(key=lambda item: item[0])
+                    current_ts, current_mid = normalized[-1]
+                    prior_mid = normalized[0][1]
+                    for ts, mid in normalized:
+                        if ts >= cutoff_ms:
+                            prior_mid = mid
+                            break
+                    change_abs = current_mid - prior_mid
+                    return {
+                        "current_mid": current_mid,
+                        "prior_mid": prior_mid,
+                        "change_abs": change_abs,
+                        "change_pct": ((change_abs / prior_mid) * 100.0) if prior_mid > 0 else None,
+                        "snapshots_in_window": len(normalized),
+                    }
+            from services.market_runtime import get_market_runtime
 
-            fm = get_feed_manager()
-            if fm and hasattr(fm.cache, "get_price_change"):
-                return fm.cache.get_price_change(token_id, lookback_seconds=lookback_seconds)
+            return get_market_runtime().get_price_change(
+                str(token_id or "").strip(),
+                lookback_seconds=lookback_seconds,
+            )
         except Exception:
             pass
         return None
@@ -2131,10 +2160,12 @@ class StrategySDK:
         Returns empty list if trade data is unavailable.
         """
         try:
-            from services.ws_feeds import FeedManager
+            from services.market_runtime import get_market_runtime
 
-            mgr = FeedManager.get_instance()
-            return mgr.cache.get_recent_trades(token_id, max_trades)
+            return get_market_runtime().get_recent_trades(
+                str(token_id or "").strip(),
+                max_trades=max_trades,
+            )
         except Exception:
             return []
 
@@ -2146,10 +2177,12 @@ class StrategySDK:
         Returns zero-volume dict if trade data is unavailable.
         """
         try:
-            from services.ws_feeds import FeedManager
+            from services.market_runtime import get_market_runtime
 
-            mgr = FeedManager.get_instance()
-            return mgr.cache.get_trade_volume(token_id, lookback_seconds)
+            return get_market_runtime().get_trade_volume(
+                str(token_id or "").strip(),
+                lookback_seconds=lookback_seconds,
+            )
         except Exception:
             return {"buy_volume": 0.0, "sell_volume": 0.0, "total": 0.0, "trade_count": 0}
 
@@ -2160,10 +2193,12 @@ class StrategySDK:
         +1 = all buys, -1 = all sells, 0 = balanced or no data.
         """
         try:
-            from services.ws_feeds import FeedManager
+            from services.market_runtime import get_market_runtime
 
-            mgr = FeedManager.get_instance()
-            return mgr.cache.get_buy_sell_imbalance(token_id, lookback_seconds)
+            return get_market_runtime().get_buy_sell_imbalance(
+                str(token_id or "").strip(),
+                lookback_seconds=lookback_seconds,
+            )
         except Exception:
             return 0.0
 

@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import WorkerControl, WorkerSnapshot
 from services.event_bus import event_bus
+from services.runtime_status import runtime_status
 from utils.converters import to_iso
 from utils.retry import db_retry_delay as _shared_db_retry_delay
 from utils.retry import is_retryable_db_error as _shared_is_retryable_db_error
@@ -48,10 +49,8 @@ def _is_retryable_commit_error(exc: Exception) -> bool:
 
 
 DEFAULT_WORKER_INTERVALS: dict[str, int] = {
-    "market_data": 5,
     "scanner": 60,
     "scanner_slo": 5,
-    "opportunity_aggregator": 1,
     "market_universe": 120,
     "news": 120,
     "weather": 14400,
@@ -404,6 +403,34 @@ async def read_worker_snapshot(
     session: AsyncSession,
     worker_name: str,
 ) -> dict[str, Any]:
+    normalized_worker_name = str(worker_name or "").strip().lower()
+    runtime_snapshot = None
+    if normalized_worker_name == "crypto":
+        runtime_snapshot = runtime_status.get_crypto()
+    elif normalized_worker_name == "trader_orchestrator":
+        runtime_snapshot = runtime_status.get_orchestrator()
+    if runtime_snapshot is not None:
+        snapshot = runtime_snapshot
+        if snapshot.get("updated_at") is not None:
+            if normalized_worker_name == "trader_orchestrator":
+                from services.trader_orchestrator_state import read_orchestrator_control
+
+                control = await read_orchestrator_control(session)
+                interval_seconds = int(control.get("run_interval_seconds") or _default_interval(normalized_worker_name))
+                requested_run_at = to_iso(control.get("requested_run_at"))
+            else:
+                control = await read_worker_control(session, normalized_worker_name)
+                interval_seconds = int(control.get("interval_seconds") or _default_interval(normalized_worker_name))
+                requested_run_at = to_iso(control.get("requested_run_at"))
+            snapshot["enabled"] = bool(control.get("is_enabled", True)) and not bool(control.get("is_paused", False))
+            snapshot["control"] = {
+                "is_enabled": bool(control.get("is_enabled", True)),
+                "is_paused": bool(control.get("is_paused", False)),
+                "interval_seconds": interval_seconds,
+                "requested_run_at": requested_run_at,
+            }
+            return snapshot
+
     result = await session.execute(select(WorkerSnapshot).where(WorkerSnapshot.worker_name == worker_name))
     row = result.scalar_one_or_none()
     if row is None:
@@ -445,7 +472,18 @@ async def list_worker_snapshots(
 
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
+    for runtime_row in (runtime_status.get_crypto(), runtime_status.get_orchestrator()):
+        worker_name = str(runtime_row.get("worker_name") or "").strip().lower()
+        if not worker_name or runtime_row.get("updated_at") is None:
+            continue
+        seen.add(worker_name)
+        payload = dict(runtime_row)
+        if not include_stats:
+            payload.pop("stats", None)
+        out.append(payload)
     for row in rows:
+        if row.worker_name in {"crypto", "trader_orchestrator"}:
+            continue
         seen.add(row.worker_name)
         snapshot = {
             "worker_name": row.worker_name,

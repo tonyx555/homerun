@@ -31,7 +31,6 @@ class BasicArbStrategy(BaseStrategy):
     description = "Buy YES and NO on same market when total < $1"
     mispricing_type = "within_market"
     subscriptions = ["market_data_refresh"]
-    realtime_processing_mode = "incremental"
 
     quality_filter_overrides = QualityFilterOverrides(
         min_roi=0.3,

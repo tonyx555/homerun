@@ -4,8 +4,7 @@ Snapshot broadcaster.
 Bridges worker data to connected WebSocket clients in the API process.
 
 **Primary path (event-driven):** Workers publish events on ``event_bus``;
-the bus fans out across processes via Redis stream and the broadcaster
-subscribes and immediately relays them to WS
+the broadcaster subscribes and immediately relays them to WS
 clients, applying signature-based deduplication for high-frequency events.
 
 **Fallback path (DB poll):** A slow 30-second DB-poll loop runs as a safety
@@ -24,15 +23,17 @@ from api.websocket import manager
 from models.database import (
     AsyncSessionLocal,
     OpportunityEvent,
-    TradeSignalSnapshot,
     EventsSignal,
     EventsSnapshot,
 )
 from services import shared_state
 from services.event_bus import event_bus
+from services.intent_runtime import get_intent_runtime
+from services.market_runtime import get_market_runtime
 from services.news import shared_state as news_shared_state
+from services.runtime_status import runtime_status
 from services.trader_orchestrator_state import read_orchestrator_snapshot
-from services.worker_state import list_worker_snapshots, read_worker_snapshot
+from services.worker_state import list_worker_snapshots
 from services.weather import shared_state as weather_shared_state
 from utils.logger import get_logger
 from utils.market_urls import serialize_opportunity_with_links
@@ -130,7 +131,7 @@ class SnapshotBroadcaster:
             )
         if event_type == "crypto_markets_update":
             markets = data.get("markets") or []
-            rows: list[tuple[str, float | None, float | None, float | None, Any, Any]] = []
+            rows: list[tuple[str, float | None, float | None, float | None, float | None, Any, Any, tuple]] = []
 
             def _to_price_sig(value: Any) -> float | None:
                 try:
@@ -140,6 +141,24 @@ class SnapshotBroadcaster:
                 if parsed != parsed:
                     return None
                 return round(parsed, 6)
+
+            def _source_sig(source_map: Any) -> tuple:
+                if not isinstance(source_map, dict):
+                    return ()
+                rows: list[tuple[str, float | None, Any]] = []
+                for raw_key, raw_value in source_map.items():
+                    if not isinstance(raw_value, dict):
+                        continue
+                    source_key = str(raw_value.get("source") or raw_key or "")
+                    rows.append(
+                        (
+                            source_key,
+                            _to_price_sig(raw_value.get("price")),
+                            raw_value.get("updated_at_ms"),
+                        )
+                    )
+                rows.sort(key=lambda row: row[0])
+                return tuple(rows)
 
             for market in markets:
                 if not isinstance(market, dict):
@@ -156,8 +175,10 @@ class SnapshotBroadcaster:
                         _to_price_sig(market.get("up_price")),
                         _to_price_sig(market.get("down_price")),
                         _to_price_sig(market.get("combined")),
+                        _to_price_sig(market.get("oracle_price")),
                         market.get("oracle_updated_at_ms"),
                         market.get("updated_at_ms"),
+                        _source_sig(market.get("oracle_prices_by_source")),
                     )
                 )
 
@@ -341,8 +362,7 @@ class SnapshotBroadcaster:
         """FALLBACK: Slow DB poll loop to ensure data consistency.
 
         This is the original polling logic, reduced to 30s interval now that
-        workers publish to event_bus and Redis stream fan-out delivers
-        those events to this process. It catches any data that workers may
+        workers publish directly to the in-process event bus. It catches any data that workers may
         not have published to the bus.
 
         Trader terminal streams (events/decisions/orders) are intentionally
@@ -359,11 +379,6 @@ class SnapshotBroadcaster:
                     news_status = await news_shared_state.get_news_status_from_db(session)
                     worker_statuses = await list_worker_snapshots(session, include_stats=False)
                     orchestrator_status = await read_orchestrator_snapshot(session)
-                    signal_rows = (
-                        (await session.execute(select(TradeSignalSnapshot).order_by(TradeSignalSnapshot.source.asc())))
-                        .scalars()
-                        .all()
-                    )
                     world_snapshot = (
                         (await session.execute(select(EventsSnapshot).where(EventsSnapshot.id == "latest")))
                         .scalars()
@@ -562,19 +577,13 @@ class SnapshotBroadcaster:
                     self._last_worker_status_sig = worker_sig
                     await manager.broadcast({"type": "worker_status_update", "data": {"workers": worker_statuses}})
 
-                crypto_row = await read_worker_snapshot(session, "crypto")
+                crypto_row = runtime_status.get_crypto()
                 crypto_stats = crypto_row.get("stats") if isinstance(crypto_row.get("stats"), dict) else {}
                 crypto_markets = crypto_stats.get("markets")
                 if not isinstance(crypto_markets, list):
-                    crypto_markets = []
+                    crypto_markets = get_market_runtime().get_crypto_markets()
 
-                crypto_sig = (
-                    crypto_row.get("updated_at"),
-                    crypto_row.get("last_run_at"),
-                    len(crypto_markets),
-                    ((crypto_markets[0] or {}).get("id") if crypto_markets else None),
-                    ((crypto_markets[0] or {}).get("oracle_updated_at_ms") if crypto_markets else None),
-                )
+                crypto_sig = self._compute_dedup_sig("crypto_markets_update", {"markets": crypto_markets})
                 if crypto_sig != self._last_crypto_markets_sig:
                     self._last_crypto_markets_sig = crypto_sig
                     await manager.broadcast(
@@ -584,21 +593,7 @@ class SnapshotBroadcaster:
                         }
                     )
 
-                signal_sources = [
-                    {
-                        "source": row.source,
-                        "pending_count": int(row.pending_count or 0),
-                        "selected_count": int(row.selected_count or 0),
-                        "submitted_count": int(row.submitted_count or 0),
-                        "executed_count": int(row.executed_count or 0),
-                        "skipped_count": int(row.skipped_count or 0),
-                        "expired_count": int(row.expired_count or 0),
-                        "failed_count": int(row.failed_count or 0),
-                        "latest_signal_at": row.latest_signal_at.isoformat() if row.latest_signal_at else None,
-                        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
-                    }
-                    for row in signal_rows
-                ]
+                signal_sources = get_intent_runtime().get_signal_snapshot_rows()
                 signals_sig = tuple(
                     (
                         row["source"],

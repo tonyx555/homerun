@@ -19,11 +19,35 @@ class _SequencedClient:
     def __init__(self, outcomes: list[bool]):
         self._outcomes = list(outcomes)
         self._counter = 0
+        self.posted_order_types: list[str] = []
+        self.created_market_orders: list[dict[str, object]] = []
+        self.created_limit_orders: list[dict[str, object]] = []
 
     def create_order(self, order_args):
+        self.created_limit_orders.append(
+            {
+                "price": order_args.price,
+                "size": order_args.size,
+                "side": order_args.side,
+                "token_id": order_args.token_id,
+            }
+        )
+        return {"order_args": order_args}
+
+    def create_market_order(self, order_args):
+        self.created_market_orders.append(
+            {
+                "token_id": order_args.token_id,
+                "amount": order_args.amount,
+                "side": order_args.side,
+                "price": order_args.price,
+                "order_type": order_args.order_type,
+            }
+        )
         return {"order_args": order_args}
 
     def post_order(self, signed_order, order_type, post_only=False):
+        self.posted_order_types.append(str(order_type))
         self._counter += 1
         success = self._outcomes.pop(0) if self._outcomes else True
         if success:
@@ -96,7 +120,19 @@ def _install_fake_clob_modules(monkeypatch) -> None:
             self.side = side
             self.token_id = token_id
 
+    class MarketOrderArgs:
+        def __init__(self, token_id, amount, side, price=0, fee_rate_bps=0, nonce=0, taker="0x0", order_type="FOK"):
+            self.token_id = token_id
+            self.amount = amount
+            self.side = side
+            self.price = price
+            self.fee_rate_bps = fee_rate_bps
+            self.nonce = nonce
+            self.taker = taker
+            self.order_type = order_type
+
     clob_types.OrderArgs = OrderArgs
+    clob_types.MarketOrderArgs = MarketOrderArgs
     constants.BUY = "BUY"
     constants.SELL = "SELL"
 
@@ -183,6 +219,39 @@ async def test_sell_order_reduces_market_exposure(monkeypatch):
     )
     assert sell.status == OrderStatus.OPEN
     assert "token-b" not in service._market_positions
+
+
+@pytest.mark.asyncio
+async def test_ioc_orders_submit_as_provider_fak(monkeypatch):
+    _configure_limits(monkeypatch)
+    _install_fake_clob_modules(monkeypatch)
+
+    monkeypatch.setattr(
+        live_execution_module.global_pause_state,
+        "refresh_from_db",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(live_execution_module, "pre_trade_vpn_check", AsyncMock(return_value=(True, "")))
+
+    service = LiveExecutionService()
+    service._initialized = True
+    client = _SequencedClient([True])
+    service._client = client
+
+    order = await service.place_order(
+        token_id="token-ioc",
+        side=OrderSide.BUY,
+        price=0.5,
+        size=10.0,
+        order_type=live_execution_module.OrderType.IOC,
+    )
+
+    assert order.status == OrderStatus.OPEN
+    assert order.order_type == live_execution_module.OrderType.IOC
+    assert client.posted_order_types == ["FAK"]
+    assert client.created_limit_orders == []
+    assert len(client.created_market_orders) == 1
+    assert client.created_market_orders[0]["amount"] == pytest.approx(5.0)
 
 
 def test_order_cache_is_bounded():

@@ -78,10 +78,8 @@ class CryptoMicroSniperStrategy(BaseStrategy):
     description = "Standalone BTC 5m tail-end sniper driven by price-to-beat/oracle divergence"
     mispricing_type = "within_market"
     source_key = "crypto"
-    worker_affinity = "crypto"
     market_categories = ["crypto"]
     subscriptions = [EventType.CRYPTO_UPDATE]
-    requires_live_market_context = True
     supports_entry_take_profit_exit = True
     default_open_order_timeout_seconds = 20.0
 

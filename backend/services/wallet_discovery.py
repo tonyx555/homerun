@@ -24,10 +24,11 @@ import math
 import statistics
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timedelta
-from utils.utcnow import utcnow, utcfromtimestamp
+from utils.utcnow import as_utc_naive, utcnow, utcfromtimestamp
 from typing import Any, Optional
 
 from sqlalchemy import delete, select, func, desc, asc, cast, String, or_, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import load_only
 
@@ -64,8 +65,10 @@ DISCOVERY_DEFAULT_MAINTENANCE_ENABLED = True
 DISCOVERY_DEFAULT_KEEP_RECENT_TRADE_DAYS = 7
 DISCOVERY_DEFAULT_KEEP_NEW_DISCOVERIES_DAYS = 30
 DISCOVERY_DEFAULT_MAINTENANCE_BATCH = 900
+DISCOVERY_MAX_DB_BATCH = 5000
 DISCOVERY_DEFAULT_STALE_ANALYSIS_HOURS = 12
 DISCOVERY_DEFAULT_ANALYSIS_PRIORITY_BATCH_LIMIT = 2500
+DISCOVERY_MAX_ANALYSIS_PRIORITY_BATCH_LIMIT = 5000
 DISCOVERY_DEFAULT_DELAY_BETWEEN_MARKETS = 0.25
 DISCOVERY_DEFAULT_DELAY_BETWEEN_WALLETS = 0.15
 DISCOVERY_DEFAULT_MAX_MARKETS_PER_RUN = 100
@@ -238,6 +241,7 @@ class WalletDiscoveryEngine:
                     row.discovery_maintenance_batch,
                     DISCOVERY_DEFAULT_MAINTENANCE_BATCH,
                     minimum=10,
+                    maximum=DISCOVERY_MAX_DB_BATCH,
                 )
                 settings["stale_analysis_hours"] = self._coerce_int(
                     row.discovery_stale_analysis_hours,
@@ -248,6 +252,7 @@ class WalletDiscoveryEngine:
                     row.discovery_analysis_priority_batch_limit,
                     DISCOVERY_DEFAULT_ANALYSIS_PRIORITY_BATCH_LIMIT,
                     minimum=100,
+                    maximum=DISCOVERY_MAX_ANALYSIS_PRIORITY_BATCH_LIMIT,
                 )
                 settings["delay_between_markets"] = self._coerce_float(
                     row.discovery_delay_between_markets,
@@ -1727,33 +1732,37 @@ class WalletDiscoveryEngine:
             self._discovery_setting("maintenance_batch", 900),
             DISCOVERY_DEFAULT_MAINTENANCE_BATCH,
             minimum=10,
+            maximum=DISCOVERY_MAX_DB_BATCH,
         )
-
-        existing: set[str] = set()
-        async with AsyncSessionLocal() as session:
-            for chunk in self._chunked(normalized_list, maintenance_batch):
-                rows = await session.execute(
-                    select(DiscoveredWallet.address).where(DiscoveredWallet.address.in_(chunk))
-                )
-                existing.update({str(row.address).lower() for row in rows.all() if row.address})
-
-        to_create = [address for address in normalized_list if address not in existing]
-        if not to_create:
-            return 0
 
         created = 0
         async with AsyncSessionLocal() as session:
-            for chunk in self._chunked(to_create, maintenance_batch):
-                for address in chunk:
-                    session.add(
-                        DiscoveredWallet(
-                            address=address,
-                            discovered_at=now,
-                            discovery_source=discovery_source,
+            for chunk in self._chunked(normalized_list, maintenance_batch):
+                result = await session.execute(
+                    text(
+                        """
+                        INSERT INTO discovered_wallets (
+                            address,
+                            discovered_at,
+                            discovery_source
                         )
-                    )
+                        SELECT
+                            discovered.address,
+                            :discovered_at,
+                            :discovery_source
+                        FROM unnest(CAST(:addresses AS text[])) AS discovered(address)
+                        ON CONFLICT (address) DO NOTHING
+                        RETURNING address
+                        """
+                    ),
+                    {
+                        "addresses": chunk,
+                        "discovered_at": as_utc_naive(now),
+                        "discovery_source": discovery_source,
+                    },
+                )
                 await session.commit()
-                created += len(chunk)
+                created += len(result.scalars().all())
         return created
 
     async def _cleanup_discovered_wallet_catalog(self, now: datetime | None = None) -> int:
@@ -1777,6 +1786,7 @@ class WalletDiscoveryEngine:
             self._discovery_setting("maintenance_batch", 900),
             DISCOVERY_DEFAULT_MAINTENANCE_BATCH,
             minimum=10,
+            maximum=DISCOVERY_MAX_DB_BATCH,
         )
         cutoff_trade = now - timedelta(
             days=max(
@@ -1888,14 +1898,10 @@ class WalletDiscoveryEngine:
             async with AsyncSessionLocal() as session:
                 try:
                     numeric_bounds = await self._load_discovered_wallet_numeric_bounds(session)
-                    wallet = await session.get(DiscoveredWallet, address)
-
-                    if wallet is None:
-                        wallet = DiscoveredWallet(
-                            address=address,
-                            discovered_at=utcnow(),
-                        )
-                        session.add(wallet)
+                    payload: dict[str, Any] = {
+                        "address": address,
+                        "discovered_at": utcnow(),
+                    }
 
                     for key, value in data.items():
                         if key == "address":
@@ -1916,8 +1922,23 @@ class WalletDiscoveryEngine:
                             value = self._sanitize_numeric_payload(value, _NUMERIC_DEFAULT_ABS_MAX)
                         if isinstance(value, float) and (math.isinf(value) or math.isnan(value)):
                             value = None
-                        if hasattr(wallet, key):
-                            setattr(wallet, key, value)
+                        if hasattr(DiscoveredWallet, key):
+                            payload[key] = value
+
+                    update_values = {
+                        key: value
+                        for key, value in payload.items()
+                        if key not in {"address", "discovered_at"}
+                    }
+
+                    await session.execute(
+                        pg_insert(DiscoveredWallet)
+                        .values(**payload)
+                        .on_conflict_do_update(
+                            index_elements=[DiscoveredWallet.address],
+                            set_=update_values,
+                        )
+                    )
 
                     await session.commit()
                     return
@@ -2031,6 +2052,7 @@ class WalletDiscoveryEngine:
             self._discovery_setting("analysis_priority_batch_limit", 2500),
             DISCOVERY_DEFAULT_ANALYSIS_PRIORITY_BATCH_LIMIT,
             minimum=100,
+            maximum=DISCOVERY_MAX_ANALYSIS_PRIORITY_BATCH_LIMIT,
         )
         default_limit = max(
             100,
@@ -2066,6 +2088,7 @@ class WalletDiscoveryEngine:
             self._discovery_setting("analysis_priority_batch_limit", 2500),
             DISCOVERY_DEFAULT_ANALYSIS_PRIORITY_BATCH_LIMIT,
             minimum=100,
+            maximum=DISCOVERY_MAX_ANALYSIS_PRIORITY_BATCH_LIMIT,
         )
         priority_limit = max(50, min(limit or default_limit, default_limit))
         backfill_limit = max(100, min(priority_limit, default_limit))
@@ -2092,6 +2115,10 @@ class WalletDiscoveryEngine:
                 .where(
                     DiscoveredWallet.discovery_source == "smart_pool",
                     DiscoveredWallet.last_analyzed_at.is_(None),
+                    or_(
+                        DiscoveredWallet.in_top_pool.is_(None),
+                        DiscoveredWallet.in_top_pool == False,  # noqa: E712
+                    ),
                 )
                 .order_by(
                     desc(func.coalesce(DiscoveredWallet.trades_24h, 0)),
@@ -2101,8 +2128,6 @@ class WalletDiscoveryEngine:
                 )
                 .limit(priority_limit)
             )
-            if top_pool:
-                smart_pool_query = smart_pool_query.where(DiscoveredWallet.address.notin_(top_pool))
             smart_pool_rows = await session.execute(smart_pool_query)
             smart_pool = [str(row.address).lower() for row in smart_pool_rows.all() if row.address]
 
@@ -2301,6 +2326,7 @@ class WalletDiscoveryEngine:
                     self._discovery_setting("maintenance_batch", 900),
                     DISCOVERY_DEFAULT_MAINTENANCE_BATCH,
                     minimum=10,
+                    maximum=DISCOVERY_MAX_DB_BATCH,
                 )
                 for chunk in self._chunked(address_list, maintenance_batch):
                     result = await session.execute(

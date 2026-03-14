@@ -10,7 +10,6 @@ class ManualManageHoldStrategy(BaseStrategy):
     name = "Manual Manage Hold"
     description = "Manage manually adopted positions with downside protection and profit lock-in."
     source_key = "manual"
-    worker_affinity = "manual"
     allow_new_entries = False
     default_config = {
         "min_hold_minutes": 2.0,

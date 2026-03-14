@@ -57,7 +57,6 @@ class MarketMakingStrategy(BaseStrategy):
     mispricing_type = "within_market"
     requires_order_book = True
     subscriptions = ["market_data_refresh"]
-    realtime_processing_mode = "incremental"
 
     quality_filter_overrides = QualityFilterOverrides(
         min_roi=0.5,

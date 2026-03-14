@@ -62,6 +62,7 @@ async def _load_strategy_row(session: AsyncSession) -> Optional[Strategy]:
 
 
 async def _resolve_traders_strategy(session: AsyncSession) -> Optional[Any]:
+    await refresh_strategy_runtime_if_needed(source_keys=["traders"], force=False)
     row = await _load_strategy_row(session)
     if row is None:
         logger.error("Traders strategy row missing: %s", _STRATEGY_SLUG)
@@ -70,7 +71,6 @@ async def _resolve_traders_strategy(session: AsyncSession) -> Optional[Any]:
         logger.info("Traders strategy disabled", slug=_STRATEGY_SLUG)
         return None
 
-    await refresh_strategy_runtime_if_needed(session, source_keys=["traders"], force=False)
     loaded = strategy_loader._loaded.get(_STRATEGY_SLUG)
     if loaded is None:
         logger.error("Traders strategy runtime not loaded", slug=_STRATEGY_SLUG)

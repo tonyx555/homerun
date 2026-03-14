@@ -11,6 +11,7 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from models.database import Base, Trader, TraderOrder
 from services import trader_orchestrator_state
+from workers import trader_reconciliation_worker
 from services.trader_orchestrator_state import (
     cleanup_trader_open_orders,
     get_open_order_count_for_trader,
@@ -84,6 +85,137 @@ async def test_sync_inventory_ignores_unfilled_live_open_orders(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_sync_inventory_noop_does_not_leave_transaction_open(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    trader_id = "live-trader-noop-inventory"
+    try:
+        async with session_factory() as session:
+            await _seed_trader(session, trader_id)
+
+            result = await sync_trader_position_inventory(session, trader_id=trader_id, mode="live")
+
+            assert result["open_positions"] == 0
+            assert not session.in_transaction()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_live_provider_orders_noop_does_not_leave_transaction_open(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    trader_id = "live-trader-noop-reconcile"
+    try:
+        async with session_factory() as session:
+            await _seed_trader(session, trader_id)
+
+            result = await reconcile_live_provider_orders(session, trader_id=trader_id, commit=True)
+
+            assert result["active_seen"] == 0
+            assert not session.in_transaction()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_live_provider_orders_unchanged_snapshot_does_not_leave_transaction_open(tmp_path, monkeypatch):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    trader_id = "live-trader-unchanged-reconcile"
+    try:
+        async with session_factory() as session:
+            await _seed_trader(session, trader_id)
+            now = utcnow()
+            session.add(
+                TraderOrder(
+                    id="live-order-unchanged",
+                    trader_id=trader_id,
+                    source="crypto",
+                    market_id="market-live-unchanged",
+                    direction="buy_yes",
+                    mode="live",
+                    status="open",
+                    notional_usd=50.0,
+                    entry_price=0.5,
+                    effective_price=0.5,
+                    payload_json={"provider_clob_order_id": "clob-live-unchanged"},
+                    created_at=now,
+                    executed_at=None,
+                    updated_at=now,
+                )
+            )
+            await session.commit()
+
+            monkeypatch.setattr(
+                trader_orchestrator_state.live_execution_service,
+                "ensure_initialized",
+                AsyncMock(return_value=True),
+            )
+            monkeypatch.setattr(
+                trader_orchestrator_state.live_execution_service,
+                "get_order_snapshots_by_clob_ids",
+                AsyncMock(return_value={}),
+            )
+
+            result = await reconcile_live_provider_orders(session, trader_id=trader_id, commit=True)
+
+            assert result["active_seen"] == 1
+            assert result["updated_orders"] == 0
+            assert not session.in_transaction()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_live_provider_orders_ignores_executed_orders(tmp_path, monkeypatch):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    trader_id = "live-trader-ignore-executed"
+    try:
+        async with session_factory() as session:
+            await _seed_trader(session, trader_id)
+            now = utcnow()
+            session.add(
+                TraderOrder(
+                    id="live-order-executed",
+                    trader_id=trader_id,
+                    source="crypto",
+                    market_id="market-live-executed",
+                    direction="buy_yes",
+                    mode="live",
+                    status="executed",
+                    notional_usd=12.0,
+                    entry_price=0.4,
+                    effective_price=0.4,
+                    payload_json={"provider_clob_order_id": "clob-live-executed"},
+                    created_at=now,
+                    executed_at=now,
+                    updated_at=now,
+                )
+            )
+            await session.commit()
+
+            ensure_mock = AsyncMock(return_value=True)
+            snapshots_mock = AsyncMock(return_value={})
+            monkeypatch.setattr(
+                trader_orchestrator_state.live_execution_service,
+                "ensure_initialized",
+                ensure_mock,
+            )
+            monkeypatch.setattr(
+                trader_orchestrator_state.live_execution_service,
+                "get_order_snapshots_by_clob_ids",
+                snapshots_mock,
+            )
+
+            result = await reconcile_live_provider_orders(session, trader_id=trader_id, commit=True)
+
+            assert result["active_seen"] == 0
+            ensure_mock.assert_not_awaited()
+            snapshots_mock.assert_not_awaited()
+            assert not session.in_transaction()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_reconcile_live_provider_orders_updates_fill_state(tmp_path, monkeypatch):
     engine, session_factory = await _build_session_factory(tmp_path)
     trader_id = "live-trader-reconcile"
@@ -148,6 +280,70 @@ async def test_reconcile_live_provider_orders_updates_fill_state(tmp_path, monke
             await sync_trader_position_inventory(session, trader_id=trader_id, mode="live")
             open_positions = await get_open_position_count_for_trader(session, trader_id, mode="live")
             assert open_positions == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_worker_runs_lifecycle_for_live_orders_without_provider_activity(tmp_path, monkeypatch):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    trader_id = "live-trader-lifecycle-no-provider-activity"
+    try:
+        async with session_factory() as session:
+            await _seed_trader(session, trader_id)
+            now = utcnow()
+            session.add(
+                TraderOrder(
+                    id="live-order-manual-open",
+                    trader_id=trader_id,
+                    source="scanner",
+                    market_id="market-live-manual",
+                    direction="buy_yes",
+                    mode="live",
+                    status="open",
+                    notional_usd=25.0,
+                    entry_price=0.8,
+                    effective_price=0.8,
+                    payload_json={},
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            await session.commit()
+
+        monkeypatch.setattr(trader_reconciliation_worker, "AsyncSessionLocal", session_factory)
+        monkeypatch.setattr(
+            trader_reconciliation_worker,
+            "reconcile_live_provider_orders",
+            AsyncMock(
+                return_value={
+                    "provider_ready": True,
+                    "active_seen": 0,
+                    "updated_orders": 0,
+                    "status_changes": 0,
+                    "notional_updates": 0,
+                    "price_updates": 0,
+                }
+            ),
+        )
+        lifecycle_mock = AsyncMock(return_value={"would_close": 1, "closed": 1})
+        monkeypatch.setattr(trader_reconciliation_worker, "reconcile_live_positions", lifecycle_mock)
+        monkeypatch.setattr(
+            trader_reconciliation_worker,
+            "sync_trader_position_inventory",
+            AsyncMock(return_value={"open_positions": 0, "updates": 0, "inserts": 0, "closures": 1}),
+        )
+
+        result = await trader_reconciliation_worker._reconcile_live_state_for_trader(
+            {
+                "id": trader_id,
+                "source_configs": [{"source_key": "scanner", "strategy_key": "tail_end_carry", "strategy_params": {}}],
+            },
+            provider_pass=True,
+        )
+
+        lifecycle_mock.assert_awaited_once()
+        assert result["lifecycle"]["closed"] == 1
     finally:
         await engine.dispose()
 

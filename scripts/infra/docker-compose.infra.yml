@@ -1,11 +1,4 @@
 services:
-  redis:
-    image: ${REDIS_IMAGE:-redis:7-alpine}
-    container_name: ${REDIS_CONTAINER_NAME:-homerun-redis}
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
-    ports:
-      - "${REDIS_HOST:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
-
   postgres:
     image: ${POSTGRES_IMAGE:-postgres:16-alpine}
     container_name: ${POSTGRES_CONTAINER_NAME:-homerun-postgres}

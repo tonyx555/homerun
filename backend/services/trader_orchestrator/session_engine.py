@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.database import ExecutionSessionLeg, TraderOrder, release_conn
+from models.database import ExecutionSessionEvent, ExecutionSessionLeg, ExecutionSessionOrder, TraderOrder, release_conn
 from services.event_bus import event_bus
 from services.live_execution_adapter import execute_live_order
 from services.live_execution_service import live_execution_service
@@ -33,6 +33,10 @@ from services.trader_orchestrator_state import (
     _extract_live_fill_metrics,
     _serialize_order,
     _sync_order_runtime_payload,
+    _apply_execution_session_rollups_from_rows,
+    _new_id,
+    build_execution_session_rows,
+    build_trader_order_row,
     create_execution_session,
     create_execution_session_event,
     create_execution_session_order,
@@ -309,17 +313,6 @@ class ExecutionSessionEngine:
         }
         return plan, legs, constraints
 
-    async def _fetch_leg_rows(self, session_id: str) -> dict[str, ExecutionSessionLeg]:
-        rows = (
-            (await self.db.execute(select(ExecutionSessionLeg).where(ExecutionSessionLeg.session_id == session_id)))
-            .scalars()
-            .all()
-        )
-        by_leg_id: dict[str, ExecutionSessionLeg] = {}
-        for row in rows:
-            by_leg_id[str(row.leg_id)] = row
-        return by_leg_id
-
     def _effective_price_from_leg_results(self, leg_results: list[dict[str, Any]]) -> float | None:
         numerator = 0.0
         denominator = 0.0
@@ -333,6 +326,29 @@ class ExecutionSessionEngine:
         if denominator <= 0:
             return None
         return numerator / denominator
+
+    async def _publish_hot_signal_status(
+        self,
+        *,
+        signal_id: str,
+        status: str,
+        effective_price: float | None = None,
+    ) -> None:
+        normalized_signal_id = str(signal_id or "").strip()
+        if not normalized_signal_id:
+            return
+        await hot_state.buffer_signal_status(
+            signal_id=normalized_signal_id,
+            status=str(status or "").strip().lower(),
+            effective_price=effective_price,
+        )
+        from services.intent_runtime import get_intent_runtime
+
+        await get_intent_runtime().update_signal_status(
+            signal_id=normalized_signal_id,
+            status=str(status or "").strip().lower(),
+            effective_price=effective_price,
+        )
 
     async def execute_signal(
         self,
@@ -354,13 +370,9 @@ class ExecutionSessionEngine:
             size_usd=size_usd,
             risk_limits=risk_limits,
         )
-        session_timeout_seconds = safe_int(
-            constraints.get("session_timeout_seconds"),
-            300,
-        )
+        session_timeout_seconds = safe_int(constraints.get("session_timeout_seconds"), 300)
         expires_at = utcnow() + timedelta(seconds=max(1, session_timeout_seconds))
-        session_row = await create_execution_session(
-            self.db,
+        session_row, built_leg_rows = build_execution_session_rows(
             trader_id=trader_id,
             signal=signal,
             decision_id=decision_id,
@@ -371,10 +383,7 @@ class ExecutionSessionEngine:
             plan_id=plan["plan_id"] or None,
             legs=legs,
             requested_notional_usd=size_usd,
-            max_unhedged_notional_usd=safe_float(
-                constraints.get("max_unhedged_notional_usd"),
-                0.0,
-            ),
+            max_unhedged_notional_usd=safe_float(constraints.get("max_unhedged_notional_usd"), 0.0),
             expires_at=expires_at,
             payload={
                 "execution_plan": plan,
@@ -383,26 +392,11 @@ class ExecutionSessionEngine:
                 "reason": reason,
             },
             trace_id=str(getattr(signal, "trace_id", "") or "") or None,
-            commit=False,
         )
-
-        await create_execution_session_event(
-            self.db,
-            session_id=session_row.id,
-            event_type="session_created",
-            message=f"Execution session created with {len(legs)} leg(s)",
-            payload={"policy": plan["policy"], "mode": mode},
-            commit=False,
-        )
-        await update_execution_session_status(
-            self.db,
-            session_id=session_row.id,
-            status="placing",
-            commit=False,
-        )
-        await _commit_with_retry(self.db)
-
-        leg_rows = await self._fetch_leg_rows(session_row.id)
+        leg_rows = {str(row.leg_id): row for row in built_leg_rows}
+        execution_orders: list[ExecutionSessionOrder] = []
+        execution_events: list[ExecutionSessionEvent] = []
+        trader_orders: list[TraderOrder] = []
         leg_execution_records: list[dict[str, Any]] = []
         order_write_inputs: list[dict[str, Any]] = []
         created_order_records: list[dict[str, Any]] = []
@@ -412,6 +406,100 @@ class ExecutionSessionEngine:
         open_legs = 0
         completed_legs = 0
         skip_reasons: list[str] = []
+
+        def _append_event(
+            *,
+            event_type: str,
+            severity: str = "info",
+            leg_id: str | None = None,
+            message: str | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> None:
+            execution_events.append(
+                ExecutionSessionEvent(
+                    id=_new_id(),
+                    session_id=session_row.id,
+                    leg_id=leg_id,
+                    event_type=str(event_type),
+                    severity=str(severity or "info"),
+                    message=message,
+                    payload_json=payload or {},
+                    created_at=utcnow(),
+                )
+            )
+
+        def _update_session_status(
+            *,
+            status: str,
+            error_message: str | None = None,
+            payload_patch: dict[str, Any] | None = None,
+        ) -> None:
+            now = utcnow()
+            session_row.status = str(status)
+            session_row.error_message = error_message
+            if payload_patch:
+                merged = dict(session_row.payload_json or {})
+                merged.update(payload_patch)
+                session_row.payload_json = merged
+            if str(status).strip().lower() in {"completed", "failed", "cancelled", "expired", "skipped"}:
+                session_row.completed_at = now
+            session_row.updated_at = now
+            _apply_execution_session_rollups_from_rows(session_row, list(leg_rows.values()))
+
+        def _update_leg_row(
+            *,
+            leg_row: ExecutionSessionLeg,
+            status: str | None = None,
+            filled_notional_usd: float | None = None,
+            filled_shares: float | None = None,
+            avg_fill_price: float | None = None,
+            last_error: str | None = None,
+            metadata_patch: dict[str, Any] | None = None,
+        ) -> None:
+            if status is not None:
+                leg_row.status = str(status)
+            if filled_notional_usd is not None:
+                leg_row.filled_notional_usd = float(max(0.0, filled_notional_usd))
+            if filled_shares is not None:
+                leg_row.filled_shares = float(max(0.0, filled_shares))
+            if avg_fill_price is not None:
+                leg_row.avg_fill_price = float(avg_fill_price)
+            if last_error is not None:
+                leg_row.last_error = last_error
+            if metadata_patch:
+                merged_metadata = dict(leg_row.metadata_json or {})
+                merged_metadata.update(metadata_patch)
+                leg_row.metadata_json = merged_metadata
+            leg_row.updated_at = utcnow()
+            _apply_execution_session_rollups_from_rows(session_row, list(leg_rows.values()))
+
+        async def _buffer_execution_projection(
+            *,
+            signal_status: str,
+            effective_price: float | None,
+        ) -> None:
+            await hot_state.buffer_execution_outcome(
+                session_row=session_row,
+                leg_rows=list(leg_rows.values()),
+                trader_orders=trader_orders,
+                execution_orders=execution_orders,
+                events=execution_events,
+                signal_id=str(getattr(signal, "id", "") or ""),
+                signal_status=signal_status,
+                effective_price=effective_price,
+            )
+            await self._publish_hot_signal_status(
+                signal_id=str(getattr(signal, "id", "") or ""),
+                status=signal_status,
+                effective_price=effective_price,
+            )
+
+        _append_event(
+            event_type="session_created",
+            message=f"Execution session created with {len(legs)} leg(s)",
+            payload={"policy": plan["policy"], "mode": mode},
+        )
+        _update_session_status(status="placing")
 
         waves = execution_waves(plan["policy"], legs)
         reprice_enabled = supports_reprice(plan["policy"])
@@ -491,14 +579,11 @@ class ExecutionSessionEngine:
                                 completed_legs += 1
                             else:
                                 open_legs += 1
-                            await create_execution_session_event(
-                                self.db,
-                                session_id=session_row.id,
-                                leg_id=leg_row.id,
+                            _append_event(
                                 event_type="reprice_success",
+                                leg_id=leg_row.id,
                                 message="Leg succeeded after reprice attempt",
                                 payload={"new_limit_price": reprice_price},
-                                commit=False,
                             )
 
                 filled_notional = (
@@ -510,9 +595,8 @@ class ExecutionSessionEngine:
                     safe_float(result.shares, 0.0) if normalized_status in {"executed", "open", "submitted"} else 0.0
                 )
 
-                await update_execution_leg(
-                    self.db,
-                    leg_row_id=leg_row.id,
+                _update_leg_row(
+                    leg_row=leg_row,
                     status=mapped_leg_status,
                     filled_notional_usd=filled_notional,
                     filled_shares=filled_shares,
@@ -523,7 +607,6 @@ class ExecutionSessionEngine:
                         "provider_order_id": result.provider_order_id,
                         "provider_clob_order_id": result.provider_clob_order_id,
                     },
-                    commit=False,
                 )
 
                 order_payload = dict(result.payload or {})
@@ -537,12 +620,11 @@ class ExecutionSessionEngine:
                 order_payload["strategy_context"] = (
                     getattr(signal, "strategy_context_json", None) or getattr(signal, "strategy_context", None) or {}
                 )
-                # Propagate live market context to order payload for freshness tracking.
-                _signal_payload = getattr(signal, "payload_json", None)
-                if isinstance(_signal_payload, dict):
-                    _live_market = _signal_payload.get("live_market")
-                    if isinstance(_live_market, dict):
-                        order_payload["live_market"] = dict(_live_market)
+                signal_payload = getattr(signal, "payload_json", None)
+                if isinstance(signal_payload, dict):
+                    live_market_payload = signal_payload.get("live_market")
+                    if isinstance(live_market_payload, dict):
+                        order_payload["live_market"] = dict(live_market_payload)
                 params = dict(strategy_params or {})
                 exit_config: dict[str, Any] = {}
                 for param_key, param_value in params.items():
@@ -634,18 +716,12 @@ class ExecutionSessionEngine:
         pair_lock_enabled = requires_pair_lock(plan["policy"], constraints)
         max_unhedged = safe_float(constraints.get("max_unhedged_notional_usd"), 0.0)
         if pair_lock_enabled and max_unhedged > 0:
-            current_unhedged = safe_float(getattr(session_row, "unhedged_notional_usd", None), None)
-            if current_unhedged is None:
-                session_detail = await get_execution_session_detail(self.db, session_row.id)
-                session_view = session_detail["session"] if session_detail else {"unhedged_notional_usd": 0.0}
-                current_unhedged = safe_float(session_view.get("unhedged_notional_usd"), 0.0)
+            current_unhedged = safe_float(getattr(session_row, "unhedged_notional_usd", None), 0.0)
             if current_unhedged > max_unhedged:
                 violation_reason = (
                     f"Pair lock violation: unhedged notional {current_unhedged:.2f} exceeded {max_unhedged:.2f}."
                 )
-                await create_execution_session_event(
-                    self.db,
-                    session_id=session_row.id,
+                _append_event(
                     event_type="pair_lock_violation",
                     severity="warn",
                     message=violation_reason,
@@ -653,7 +729,6 @@ class ExecutionSessionEngine:
                         "current_unhedged_notional_usd": current_unhedged,
                         "max_unhedged_notional_usd": max_unhedged,
                     },
-                    commit=False,
                 )
                 cancel_attempted_ids: set[str] = set()
                 cancelled_provider_orders: list[str] = []
@@ -682,14 +757,17 @@ class ExecutionSessionEngine:
                         cancel_failed_provider_orders.extend([cid for cid in candidate_ids if cid])
                     leg_row_id = str(item.get("leg_row_id") or "").strip()
                     if leg_row_id:
-                        await update_execution_leg(
-                            self.db,
-                            leg_row_id=leg_row_id,
-                            status="cancelled",
-                            last_error=violation_reason,
-                            metadata_patch={"pair_lock_violation": True},
-                            commit=False,
+                        leg_row = next(
+                            (candidate for candidate in leg_rows.values() if str(candidate.id or "") == leg_row_id),
+                            None,
                         )
+                        if leg_row is not None:
+                            _update_leg_row(
+                                leg_row=leg_row,
+                                status="cancelled",
+                                last_error=violation_reason,
+                                metadata_patch={"pair_lock_violation": True},
+                            )
                     leg_id = str(item.get("leg_id") or "").strip()
                     for record in leg_execution_records:
                         if str(record.get("leg_id") or "") != leg_id:
@@ -699,9 +777,7 @@ class ExecutionSessionEngine:
                         break
 
                 effective_price = self._effective_price_from_leg_results(leg_execution_records)
-                await update_execution_session_status(
-                    self.db,
-                    session_id=session_row.id,
+                _update_session_status(
                     status="failed",
                     error_message=violation_reason,
                     payload_patch={
@@ -713,18 +789,8 @@ class ExecutionSessionEngine:
                             "cancel_failed_provider_orders": cancel_failed_provider_orders,
                         },
                     },
-                    commit=False,
                 )
-                await set_trade_signal_status(
-                    self.db,
-                    signal_id=str(getattr(signal, "id", "")),
-                    status="failed",
-                    effective_price=effective_price,
-                    commit=False,
-                )
-                await create_execution_session_event(
-                    self.db,
-                    session_id=session_row.id,
+                _append_event(
                     event_type="session_aborted",
                     severity="error",
                     message="Execution session aborted after pair lock violation",
@@ -734,9 +800,8 @@ class ExecutionSessionEngine:
                         "cancelled_provider_orders": cancelled_provider_orders,
                         "cancel_failed_provider_orders": cancel_failed_provider_orders,
                     },
-                    commit=False,
                 )
-                await _commit_with_retry(self.db)
+                await _buffer_execution_projection(signal_status="failed", effective_price=effective_price)
                 return SessionExecutionResult(
                     session_id=session_row.id,
                     status="failed",
@@ -844,8 +909,7 @@ class ExecutionSessionEngine:
                 "open" if mode in {"live", "shadow"} and normalized_status == "executed" else normalized_status
             )
 
-            trader_order = await create_trader_order(
-                self.db,
+            trader_order = build_trader_order_row(
                 trader_id=trader_id,
                 signal=signal,
                 decision_id=decision_id,
@@ -858,39 +922,44 @@ class ExecutionSessionEngine:
                 reason=reason,
                 payload=order_payload,
                 error_message=result.error_message,
-                commit=False,
             )
+            trader_orders.append(trader_order)
             orders_written += 1
-            created_order_records.append({
-                "order_id": trader_order.id,
-                "market_id": str(getattr(signal, "market_id", "") or ""),
-                "direction": str(getattr(signal, "direction", "") or ""),
-                "source": str(getattr(signal, "source", "") or ""),
-                "notional_usd": safe_float(result.notional_usd, 0.0),
-                "entry_price": safe_float(result.effective_price, 0.0),
-                "token_id": str(leg_payload.get("token_id") or ""),
-                "filled_shares": safe_float(result.shares, 0.0),
-                "status": persisted_order_status,
-                "payload": order_payload,
-            })
+            created_order_records.append(
+                {
+                    "order_id": trader_order.id,
+                    "market_id": str(getattr(signal, "market_id", "") or ""),
+                    "direction": str(getattr(signal, "direction", "") or ""),
+                    "source": str(getattr(signal, "source", "") or ""),
+                    "notional_usd": safe_float(result.notional_usd, 0.0),
+                    "entry_price": safe_float(result.effective_price, 0.0),
+                    "token_id": str(leg_payload.get("token_id") or ""),
+                    "filled_shares": safe_float(result.shares, 0.0),
+                    "status": persisted_order_status,
+                    "payload": order_payload,
+                }
+            )
 
-            await create_execution_session_order(
-                self.db,
-                session_id=session_row.id,
-                leg_id=leg_row_id,
-                trader_order_id=trader_order.id,
-                provider_order_id=result.provider_order_id,
-                provider_clob_order_id=result.provider_clob_order_id,
-                action="submit",
-                side=str(leg_payload.get("side") or "buy"),
-                price=safe_float(result.effective_price, None),
-                size=safe_float(result.shares, None),
-                notional_usd=safe_float(result.notional_usd, None),
-                status=normalized_status,
-                reason=reason,
-                payload=result.payload,
-                error_message=result.error_message,
-                commit=False,
+            execution_orders.append(
+                ExecutionSessionOrder(
+                    id=_new_id(),
+                    session_id=session_row.id,
+                    leg_id=leg_row_id,
+                    trader_order_id=trader_order.id,
+                    provider_order_id=result.provider_order_id,
+                    provider_clob_order_id=result.provider_clob_order_id,
+                    action="submit",
+                    side=str(leg_payload.get("side") or "buy"),
+                    price=safe_float(result.effective_price, None),
+                    size=safe_float(result.shares, None),
+                    notional_usd=safe_float(result.notional_usd, None),
+                    status=normalized_status,
+                    reason=reason,
+                    payload_json=dict(result.payload or {}),
+                    error_message=result.error_message,
+                    created_at=utcnow(),
+                    updated_at=utcnow(),
+                )
             )
 
         final_status = "completed"
@@ -902,11 +971,7 @@ class ExecutionSessionEngine:
         if failed_legs == 0 and completed_legs == 0 and open_legs == 0 and skipped_legs > 0:
             final_status = "skipped"
             signal_status = "skipped"
-            error_message = (
-                skip_reasons[0]
-                if skip_reasons
-                else "Execution skipped before order submission."
-            )
+            error_message = skip_reasons[0] if skip_reasons else "Execution skipped before order submission."
         elif failed_legs > 0 and completed_legs == 0 and open_legs == 0:
             final_status = "failed"
             signal_status = "failed"
@@ -937,20 +1002,10 @@ class ExecutionSessionEngine:
                     "hedging_escalation": "auto_fail_on_timeout",
                 }
             )
-        await update_execution_session_status(
-            self.db,
-            session_id=session_row.id,
+        _update_session_status(
             status=final_status,
             error_message=error_message,
             payload_patch=session_payload_patch,
-            commit=False,
-        )
-        await set_trade_signal_status(
-            self.db,
-            signal_id=str(getattr(signal, "id", "")),
-            status=signal_status,
-            effective_price=effective_price,
-            commit=False,
         )
         event_type = "session_completed"
         event_severity = "info" if final_status == "completed" else "warn"
@@ -963,9 +1018,7 @@ class ExecutionSessionEngine:
             event_type = "session_skipped"
             event_severity = "info"
             event_message = error_message or "Execution session skipped."
-        await create_execution_session_event(
-            self.db,
-            session_id=session_row.id,
+        _append_event(
             event_type=event_type,
             severity=event_severity,
             message=event_message,
@@ -977,9 +1030,8 @@ class ExecutionSessionEngine:
                 "hedge_timeout_seconds": hedging_timeout_seconds,
                 "hedging_deadline_at": (_iso_utc(hedging_deadline_at) if hedging_deadline_at is not None else None),
             },
-            commit=False,
         )
-        await _commit_with_retry(self.db)
+        await _buffer_execution_projection(signal_status=signal_status, effective_price=effective_price)
 
         return SessionExecutionResult(
             session_id=session_row.id,

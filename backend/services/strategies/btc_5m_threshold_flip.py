@@ -164,10 +164,8 @@ class BTC5mThresholdFlipStrategy(BaseStrategy):
     description = "Buys late NO against overconfident BTC 5m YES pricing as the oracle compresses toward the threshold."
     mispricing_type = "within_market"
     source_key = "crypto"
-    worker_affinity = "crypto"
     market_categories = ["crypto"]
     subscriptions = [EventType.CRYPTO_UPDATE]
-    requires_live_market_context = True
 
     default_config = {
         "asset": "BTC",

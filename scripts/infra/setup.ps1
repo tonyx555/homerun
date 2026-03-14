@@ -1,8 +1,7 @@
-# Homerun - Windows Setup Script
+﻿# Homerun - Windows Setup Script
 # Run: .\scripts\infra\setup.ps1
 
 param(
-    [switch]$RedisOnly,
     [switch]$PostgresOnly
 )
 
@@ -15,10 +14,6 @@ Write-Host "=========================================" -ForegroundColor Green
 Write-Host "  Homerun Setup (Windows)" -ForegroundColor Green
 Write-Host "=========================================" -ForegroundColor Green
 Write-Host ""
-
-function Get-ProjectRedisRuntimeDir {
-    return (Join-Path (Get-Location).Path "data\runtime\redis")
-}
 
 function Get-InstallerLogDir {
     $logDir = Join-Path (Get-Location).Path "data\runtime\logs"
@@ -40,64 +35,6 @@ function Show-LogTail {
     Get-Content -Path $Path -Tail 30 -ErrorAction SilentlyContinue | ForEach-Object {
         Write-Host "  $_" -ForegroundColor DarkYellow
     }
-}
-
-function Find-RedisServer {
-    $projectRuntimeDir = Get-ProjectRedisRuntimeDir
-    if (Test-Path $projectRuntimeDir) {
-        $projectBinary = Join-Path $projectRuntimeDir "redis-server.exe"
-        if (Test-Path $projectBinary) {
-            return $projectBinary
-        }
-
-        $projectMatches = Get-ChildItem -Path $projectRuntimeDir -Filter "redis-server.exe" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($projectMatches) {
-            return $projectMatches.FullName
-        }
-    }
-
-    $cmd = Get-Command redis-server -ErrorAction SilentlyContinue
-    if ($cmd) { return $cmd.Source }
-
-    $wellKnown = "C:\Program Files\Redis\redis-server.exe"
-    if (Test-Path $wellKnown) { return $wellKnown }
-
-    return $null
-}
-
-function Get-RedisServerMajorVersion {
-    param([string]$RedisServerPath)
-
-    if (-not $RedisServerPath -or -not (Test-Path $RedisServerPath)) {
-        return $null
-    }
-
-    try {
-        $versionOutput = (& $RedisServerPath --version 2>&1 | Out-String).Trim()
-    } catch {
-        return $null
-    }
-
-    $versionMatch = [regex]::Match($versionOutput, 'v=(\d+)\.(\d+)\.(\d+)')
-    if (-not $versionMatch.Success) {
-        return $null
-    }
-
-    try {
-        return [int]$versionMatch.Groups[1].Value
-    } catch {
-        return $null
-    }
-}
-
-function Test-RedisServerSupportsStreams {
-    param([string]$RedisServerPath)
-
-    $majorVersion = Get-RedisServerMajorVersion -RedisServerPath $RedisServerPath
-    if ($null -eq $majorVersion) {
-        return $false
-    }
-    return ($majorVersion -ge 5)
 }
 
 function Find-PostgresBinDir {
@@ -136,17 +73,6 @@ function Find-PostgresBinDir {
             }
         }
     }
-
-    return $null
-}
-
-function Find-MemuraiServer {
-    if ($env:MEMURAI_EXE -and (Test-Path $env:MEMURAI_EXE)) {
-        return $env:MEMURAI_EXE
-    }
-
-    $wellKnown = "C:\Program Files\Memurai\memurai.exe"
-    if (Test-Path $wellKnown) { return $wellKnown }
 
     return $null
 }
@@ -330,198 +256,6 @@ function Ensure-DockerRuntime {
     return $false
 }
 
-function Test-RedisRuntimeAvailable {
-    if (Test-DockerRuntimeAvailable) { return $true }
-    if (Find-MemuraiServer) { return $true }
-    $redisServerPath = Find-RedisServer
-    if ($redisServerPath -and (Test-RedisServerSupportsStreams -RedisServerPath $redisServerPath)) {
-        return $true
-    }
-    try {
-        $svc = Get-Service -Name "Memurai" -ErrorAction SilentlyContinue
-        if ($svc) { return $true }
-    } catch {
-    }
-    return $false
-}
-
-function Install-PortableRedisRuntime {
-    $runtimeDir = Get-ProjectRedisRuntimeDir
-    $downloadDir = Join-Path $runtimeDir "_download"
-    $extractDir = Join-Path $runtimeDir "portable"
-    $zipPath = Join-Path $downloadDir "redis-windows.zip"
-
-    try {
-        New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
-        if (Test-Path $extractDir) {
-            Remove-Item -Path $extractDir -Recurse -Force -ErrorAction SilentlyContinue
-        }
-        New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
-
-        $headers = @{ "User-Agent" = "HomerunLauncher/1.0" }
-        $releaseApiUrl = "https://api.github.com/repos/redis-windows/redis-windows/releases/latest"
-        $release = Invoke-RestMethod -Uri $releaseApiUrl -Headers $headers -TimeoutSec 30
-        if (-not $release -or -not $release.assets) {
-            return $false
-        }
-
-        $asset = $release.assets |
-            Where-Object { $_.name -match "Windows-x64" -and $_.name -match "\.zip$" } |
-            Select-Object -First 1
-        if (-not $asset -or -not $asset.browser_download_url) {
-            return $false
-        }
-
-        Invoke-WebRequest -Uri $asset.browser_download_url -Headers $headers -OutFile $zipPath -TimeoutSec 120
-        Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
-
-        $redisExe = Get-ChildItem -Path $extractDir -Filter "redis-server.exe" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $redisExe) {
-            return $false
-        }
-
-        Write-Host "Redis portable runtime installed at $($redisExe.FullName)." -ForegroundColor Green
-        return $true
-    } catch {
-        return $false
-    }
-}
-
-function Remove-LegacyRedisRuntime {
-    $legacyRedisPath = Find-RedisServer
-    if (-not $legacyRedisPath) {
-        return
-    }
-
-    $legacyMajorVersion = Get-RedisServerMajorVersion -RedisServerPath $legacyRedisPath
-    if ($null -eq $legacyMajorVersion -or $legacyMajorVersion -ge 5) {
-        return
-    }
-
-    Write-Host "Legacy Redis runtime detected (major version $legacyMajorVersion). Removing conflicting legacy service/package..." -ForegroundColor Yellow
-
-    try {
-        $legacyService = Get-Service -Name "Redis" -ErrorAction SilentlyContinue
-        if ($legacyService -and $legacyService.Status -eq "Running") {
-            Stop-Service -Name "Redis" -Force -ErrorAction SilentlyContinue
-        }
-    } catch {
-    }
-
-    try {
-        sc.exe delete Redis *> $null
-    } catch {
-    }
-
-    $winget = Get-Command winget -ErrorAction SilentlyContinue
-    if ($winget) {
-        try {
-            & winget uninstall --id Redis.Redis --exact --silent --disable-interactivity --accept-source-agreements *> $null
-        } catch {
-        }
-    }
-
-    $choco = Get-Command choco -ErrorAction SilentlyContinue
-    if ($choco) {
-        try {
-            & choco uninstall redis-64 -y --no-progress *> $null
-        } catch {
-        }
-    }
-}
-
-function Show-WingetInstallerLogTail {
-    param([string]$WingetOutputLogPath)
-
-    if (-not (Test-Path $WingetOutputLogPath)) {
-        return
-    }
-
-    try {
-        $installerLogLine = Select-String -Path $WingetOutputLogPath -Pattern "Installer log is available at:" -SimpleMatch | Select-Object -Last 1
-        if (-not $installerLogLine) {
-            return
-        }
-
-        $parts = $installerLogLine.Line.Split(":", 2)
-        if ($parts.Count -lt 2) {
-            return
-        }
-        $installerLogPath = $parts[1].Trim()
-        if (-not $installerLogPath -or -not (Test-Path $installerLogPath)) {
-            return
-        }
-
-        Show-LogTail -Path $installerLogPath -Label "winget installer log"
-    } catch {
-    }
-}
-
-function Try-InstallMemuraiWithWinget {
-    $winget = Get-Command winget -ErrorAction SilentlyContinue
-    if (-not $winget) {
-        return $false
-    }
-
-    $logDir = Get-InstallerLogDir
-    $logPath = Join-Path $logDir "memurai-winget-install.log"
-    Write-Host "Installing Memurai via winget..." -ForegroundColor Cyan
-    try {
-        & winget install --id Memurai.MemuraiDeveloper --exact --silent --disable-interactivity --accept-source-agreements --accept-package-agreements 2>&1 | Tee-Object -FilePath $logPath | Out-Null
-        $exitCode = $LASTEXITCODE
-        if ($exitCode -eq 0 -and (Test-RedisRuntimeAvailable)) {
-            Write-Host "Redis runtime installed via winget (Memurai.MemuraiDeveloper)." -ForegroundColor Green
-            return $true
-        }
-        Write-Host "Winget Memurai install failed (exit code $exitCode)." -ForegroundColor Yellow
-        Write-Host "Log: $logPath" -ForegroundColor Yellow
-        Show-LogTail -Path $logPath -Label "winget output"
-        Show-WingetInstallerLogTail -WingetOutputLogPath $logPath
-        return $false
-    } catch {
-        Write-Host "Winget Memurai install threw an exception: $($_.Exception.Message)" -ForegroundColor Yellow
-        Write-Host "Log: $logPath" -ForegroundColor Yellow
-        Show-LogTail -Path $logPath -Label "winget output"
-        Show-WingetInstallerLogTail -WingetOutputLogPath $logPath
-        return $false
-    }
-}
-
-function Ensure-RedisRuntime {
-    if (Test-RedisRuntimeAvailable) {
-        Write-Host "Redis runtime prerequisite found (Streams-capable runtime)." -ForegroundColor Green
-        return $true
-    }
-
-    $legacyRedisPath = Find-RedisServer
-    if ($legacyRedisPath) {
-        $legacyMajorVersion = Get-RedisServerMajorVersion -RedisServerPath $legacyRedisPath
-        if ($null -ne $legacyMajorVersion -and $legacyMajorVersion -lt 5) {
-            Write-Host "Detected legacy Redis runtime (major version $legacyMajorVersion). Homerun requires Redis >= 5.0 Streams support." -ForegroundColor Yellow
-        }
-    }
-
-    Write-Host "Redis Streams-capable runtime missing. Attempting to install Memurai..." -ForegroundColor Cyan
-
-    Remove-LegacyRedisRuntime
-
-    if (Try-InstallMemuraiWithWinget) {
-        return $true
-    }
-
-    Write-Host "Memurai install unavailable. Attempting portable Redis runtime download..." -ForegroundColor Cyan
-    if (Install-PortableRedisRuntime) {
-        if (Test-RedisRuntimeAvailable) {
-            Write-Host "Redis runtime installed via portable project runtime." -ForegroundColor Green
-            return $true
-        }
-    }
-
-    Write-Host "Failed to auto-install a Streams-capable Redis runtime." -ForegroundColor Red
-    Write-Host "Homerun requires Redis Streams (Redis >= 5.0). Install Docker Desktop or Memurai, then rerun setup." -ForegroundColor Yellow
-    return $false
-}
-
 function Test-PostgresRuntimeAvailable {
     if (Test-DockerRuntimeAvailable) { return $true }
     return [bool](Find-PostgresBinDir)
@@ -573,19 +307,6 @@ function Ensure-PostgresRuntime {
     Write-Host "Failed to auto-install Postgres runtime prerequisites." -ForegroundColor Red
     Write-Host "Install Docker Desktop (recommended) or PostgreSQL tools (initdb + pg_ctl), then rerun setup." -ForegroundColor Yellow
     return $false
-}
-
-if ($RedisOnly -and $PostgresOnly) {
-    if (-not (Ensure-RedisRuntime)) { exit 1 }
-    if (-not (Ensure-PostgresRuntime)) { exit 1 }
-    exit 0
-}
-
-if ($RedisOnly) {
-    if (-not (Ensure-RedisRuntime)) {
-        exit 1
-    }
-    exit 0
 }
 
 if ($PostgresOnly) {
@@ -865,11 +586,6 @@ if (-not (Test-Path "data")) {
 }
 
 Write-Host ""
-Write-Host "Ensuring Redis runtime prerequisites..." -ForegroundColor Cyan
-if (-not (Ensure-RedisRuntime)) {
-    exit 1
-}
-
 Write-Host "Ensuring Postgres runtime prerequisites..." -ForegroundColor Cyan
 if (-not (Ensure-PostgresRuntime)) {
     exit 1
@@ -915,3 +631,4 @@ Write-Host "  Frontend: http://localhost:3000" -ForegroundColor Cyan
 Write-Host "  Backend:  http://localhost:8000" -ForegroundColor Cyan
 Write-Host "  API Docs: http://localhost:8000/docs" -ForegroundColor Cyan
 Write-Host ""
+

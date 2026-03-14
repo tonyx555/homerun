@@ -38,22 +38,32 @@ _DB_RETRYABLE_MARKERS = (
     "closed in the middle of operation",
     "another operation",
     "cannot switch to state",
-    "timeouterror",
-    "timeout",
 )
 
 
 def is_retryable_db_error(exc: Exception) -> bool:
     """Check if a DB exception is transient and worth retrying."""
-    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
-        return True
+    timeout_types = (TimeoutError, asyncio.TimeoutError)
+    if isinstance(exc, timeout_types):
+        return False
+    cause = getattr(exc, "__cause__", None)
+    if isinstance(cause, timeout_types):
+        return False
+    context = getattr(exc, "__context__", None)
+    if isinstance(context, timeout_types):
+        return False
     message = str(getattr(exc, "orig", exc)).lower()
     return any(marker in message for marker in _DB_RETRYABLE_MARKERS)
 
 
-def db_retry_delay(attempt: int) -> float:
+def db_retry_delay(
+    attempt: int,
+    *,
+    base_delay: float = DB_RETRY_BASE_DELAY_SECONDS,
+    max_delay: float = DB_RETRY_MAX_DELAY_SECONDS,
+) -> float:
     """Exponential backoff delay for DB retries."""
-    return min(DB_RETRY_BASE_DELAY_SECONDS * (2 ** attempt), DB_RETRY_MAX_DELAY_SECONDS)
+    return min(float(base_delay) * (2 ** attempt), float(max_delay))
 
 
 class RetryConfig:

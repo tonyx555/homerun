@@ -313,6 +313,17 @@ class DataSourceRuntime:
     last_error: str | None = None
 
 
+@dataclass(frozen=True)
+class _DataSourceRefreshSnapshot:
+    slug: str
+    enabled: bool
+    source_code: str
+    config: dict[str, Any]
+    class_name: str | None
+    status: str | None
+    error_message: str | None
+
+
 class DataSourceLoader:
     def __init__(self) -> None:
         self._runtimes: dict[str, DataSourceRuntime] = {}
@@ -399,96 +410,93 @@ class DataSourceLoader:
             )
         return rows
 
-    async def refresh_all_from_db(self, session: AsyncSession | None = None) -> dict[str, Any]:
-        import contextlib
-
+    async def refresh_all_from_db(self) -> dict[str, Any]:
         from models.database import AsyncSessionLocal, DataSource
 
-        async with contextlib.AsyncExitStack() as _stack:
-            if session is None:
-                db: AsyncSession = await _stack.enter_async_context(AsyncSessionLocal())
-            else:
-                db = session
-
-            loaded: list[str] = []
-            errors: dict[str, str] = {}
-            db_state_changed = False
-
+        async with AsyncSessionLocal() as db:
             rows = (
                 (await db.execute(select(DataSource).order_by(DataSource.sort_order.asc(), DataSource.slug.asc())))
                 .scalars()
                 .all()
             )
-            active_slugs: set[str] = set()
 
-            for row in rows:
-                slug = str(row.slug or "").strip().lower()
-                if not slug:
-                    continue
-                active_slugs.add(slug)
-                if not bool(row.enabled):
-                    self.unload(slug)
-                    row_changed = False
-                    if row.status != "unloaded":
-                        row.status = "unloaded"
-                        row_changed = True
-                    if row.error_message is not None:
-                        row.error_message = None
-                        row_changed = True
-                    if row_changed:
-                        db_state_changed = True
-                    continue
+        snapshots = [
+            _DataSourceRefreshSnapshot(
+                slug=str(row.slug or "").strip().lower(),
+                enabled=bool(row.enabled),
+                source_code=str(row.source_code or ""),
+                config=dict(row.config or {}),
+                class_name=str(row.class_name or "").strip() or None,
+                status=str(row.status or "").strip() or None,
+                error_message=str(row.error_message) if row.error_message is not None else None,
+            )
+            for row in rows
+            if str(row.slug or "").strip()
+        ]
 
-                try:
-                    runtime = self.load(
-                        slug=slug,
-                        source_code=str(row.source_code or ""),
-                        config=dict(row.config or {}),
-                        class_name=row.class_name,
+        loaded: list[str] = []
+        errors: dict[str, str] = {}
+        status_updates: dict[str, tuple[str, str | None, str | None]] = {}
+        active_slugs = {snapshot.slug for snapshot in snapshots}
+
+        for snapshot in snapshots:
+            slug = snapshot.slug
+            if not snapshot.enabled:
+                self.unload(slug)
+                if snapshot.status != "unloaded" or snapshot.error_message is not None:
+                    status_updates[slug] = ("unloaded", None, snapshot.class_name)
+                continue
+
+            try:
+                runtime = self.load(
+                    slug=slug,
+                    source_code=snapshot.source_code,
+                    config=snapshot.config,
+                    class_name=snapshot.class_name,
+                )
+                if (
+                    snapshot.status != "loaded"
+                    or snapshot.error_message is not None
+                    or snapshot.class_name != runtime.class_name
+                ):
+                    status_updates[slug] = ("loaded", None, runtime.class_name)
+                loaded.append(slug)
+            except DataSourceValidationError as exc:
+                error_text = str(exc)
+                if snapshot.status != "error" or snapshot.error_message != error_text:
+                    status_updates[slug] = ("error", error_text, snapshot.class_name)
+                errors[slug] = error_text
+            except Exception as exc:  # pragma: no cover - safety net
+                error_text = str(exc)
+                if snapshot.status != "error" or snapshot.error_message != error_text:
+                    status_updates[slug] = ("error", error_text, snapshot.class_name)
+                errors[slug] = error_text
+
+        for loaded_slug in list(self._runtimes.keys()):
+            if loaded_slug not in active_slugs:
+                self.unload(loaded_slug)
+
+        if status_updates:
+            update_slugs = tuple(sorted(status_updates.keys()))
+            async with AsyncSessionLocal() as db:
+                update_rows = list(
+                    (
+                        await db.execute(
+                            select(DataSource).where(DataSource.slug.in_(update_slugs))
+                        )
                     )
-                    row_changed = False
-                    if row.status != "loaded":
-                        row.status = "loaded"
-                        row_changed = True
-                    if row.error_message is not None:
-                        row.error_message = None
-                        row_changed = True
-                    if row.class_name != runtime.class_name:
-                        row.class_name = runtime.class_name
-                        row_changed = True
-                    if row_changed:
-                        db_state_changed = True
-                    loaded.append(slug)
-                except DataSourceValidationError as exc:
-                    error_text = str(exc)
-                    row_changed = False
-                    if row.status != "error":
-                        row.status = "error"
-                        row_changed = True
-                    if row.error_message != error_text:
-                        row.error_message = error_text
-                        row_changed = True
-                    if row_changed:
-                        db_state_changed = True
-                    errors[slug] = error_text
-                except Exception as exc:  # pragma: no cover - safety net
-                    error_text = str(exc)
-                    row_changed = False
-                    if row.status != "error":
-                        row.status = "error"
-                        row_changed = True
-                    if row.error_message != error_text:
-                        row.error_message = error_text
-                        row_changed = True
-                    if row_changed:
-                        db_state_changed = True
-                    errors[slug] = error_text
-
-            for loaded_slug in list(self._runtimes.keys()):
-                if loaded_slug not in active_slugs:
-                    self.unload(loaded_slug)
-
-            if db_state_changed:
+                    .scalars()
+                    .all()
+                )
+                for row in update_rows:
+                    slug = str(row.slug or "").strip().lower()
+                    update = status_updates.get(slug)
+                    if update is None:
+                        continue
+                    status, error_message, class_name = update
+                    row.status = status
+                    row.error_message = error_message
+                    row.class_name = class_name
                 await db.commit()
 
         return {"loaded": loaded, "errors": errors}

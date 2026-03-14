@@ -23,9 +23,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import (
     AsyncSessionLocal,
+    ExecutionSession,
+    ExecutionSessionEvent,
+    ExecutionSessionLeg,
+    ExecutionSessionOrder,
     TradeSignal,
     TraderDecision,
     TraderDecisionCheck,
+    TraderEvent,
     TraderOrder,
     TraderPosition,
     TraderSignalConsumption,
@@ -43,6 +48,12 @@ from services.trader_orchestrator_state import (
     _normalize_mode_key,
     _normalize_status_key,
     _position_cap_scope_key,
+    _serialize_execution_event,
+    _serialize_execution_leg,
+    _serialize_execution_order,
+    _serialize_execution_session,
+    _serialize_order,
+    sync_trader_position_inventory,
 )
 from utils.converters import safe_float
 from utils.logger import get_logger
@@ -51,6 +62,7 @@ from utils.utcnow import utcnow
 logger = get_logger("trader_hot_state")
 
 _new_id = lambda: __import__("uuid").uuid4().hex  # noqa: E731
+_HOT_UNFILLED_ORDER_STATUSES = {"pending", "placing", "submitted", "open", "working", "partial", "hedging", "partially_filled"}
 
 
 # ── Lightweight signal proxy (hydrated from Redis stream snapshot) ─
@@ -142,6 +154,7 @@ class _TraderSnapshot:
 
     open_position_keys: set[tuple[str, str, str]] = field(default_factory=set)
     open_order_keys: set[tuple[str, str, str]] = field(default_factory=set)
+    open_order_ids: set[str] = field(default_factory=set)
     open_order_count: int = 0
     open_market_ids: set[str] = field(default_factory=set)
     gross_notional: float = 0.0
@@ -154,6 +167,7 @@ class _TraderSnapshot:
     last_loss_at: Optional[datetime] = None
     cursor_created_at: Optional[datetime] = None
     cursor_signal_id: Optional[str] = None
+    cursor_runtime_sequence: Optional[int] = None
     # Active orders for unrealized PnL — keyed by order_id
     active_order_legs: dict[str, _ActiveLeg] = field(default_factory=dict)
 
@@ -186,7 +200,7 @@ _seed_lock = asyncio.Lock()
 
 @dataclass
 class _AuditEntry:
-    kind: str  # "decision" | "decision_checks" | "consumption" | "cursor" | "signal_status"
+    kind: str  # "decision" | "decision_checks" | "consumption" | "cursor" | "signal_status" | "trader_event" | "experiment_assignment" | "execution_outcome"
     payload: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.monotonic)
 
@@ -282,6 +296,7 @@ async def _seed_from_db(session: AsyncSession) -> None:
     # ── Orders (single pass) ───────────────────────────────────────
     order_status_key = func.lower(func.trim(func.coalesce(TraderOrder.status, "")))
     seed_active_statuses = tuple(_normalize_status_key(status) for status in ("submitted", "executed", "open"))
+    seed_unfilled_statuses = tuple(_normalize_status_key(status) for status in _HOT_UNFILLED_ORDER_STATUSES)
     seed_realized_statuses = tuple(_normalize_status_key(status) for status in REALIZED_ORDER_STATUSES)
     order_rows = await session.stream(
         select(
@@ -318,7 +333,10 @@ async def _seed_from_db(session: AsyncSession) -> None:
         active_notional = _live_active_notional(mode, order.status, row_notional, payload)
 
         if _is_active_order_status(mode, order.status):
-            snap.open_order_count += 1
+            order_id = str(order.id or "").strip()
+            if status_key in seed_unfilled_statuses and order_id:
+                snap.open_order_ids.add(order_id)
+                snap.open_order_count = len(snap.open_order_ids)
             market_id = str(order.market_id or "").strip()
             if market_id:
                 snap.open_market_ids.add(market_id)
@@ -490,6 +508,7 @@ async def _seed_from_db(session: AsyncSession) -> None:
                 TraderSignalCursor.trader_id,
                 TraderSignalCursor.last_signal_created_at,
                 TraderSignalCursor.last_signal_id,
+                TraderSignalCursor.last_runtime_sequence,
             )
         )
     ).all()
@@ -502,6 +521,7 @@ async def _seed_from_db(session: AsyncSession) -> None:
         for snap in trader_snapshots:
             snap.cursor_created_at = cursor.last_signal_created_at
             snap.cursor_signal_id = cursor_signal_id
+            snap.cursor_runtime_sequence = int(cursor.last_runtime_sequence) if cursor.last_runtime_sequence is not None else None
 
 
 def _ensure_snapshot(trader_id: str, mode: str) -> _TraderSnapshot:
@@ -532,6 +552,7 @@ def get_open_order_count(trader_id: str, mode: str) -> int:
     snap = _snapshots.get((trader_id, _normalize_mode_key(mode)))
     if snap is None:
         return 0
+    snap.open_order_count = len(snap.open_order_ids)
     return snap.open_order_count
 
 
@@ -604,6 +625,13 @@ def get_signal_cursor(trader_id: str, mode: str) -> tuple[Optional[datetime], Op
     return snap.cursor_created_at, snap.cursor_signal_id
 
 
+def get_signal_sequence_cursor(trader_id: str, mode: str) -> int | None:
+    snap = _snapshots.get((trader_id, _normalize_mode_key(mode)))
+    if snap is None:
+        return None
+    return snap.cursor_runtime_sequence
+
+
 async def get_unrealized_pnl(trader_id: Optional[str], mode: str) -> float:
     """Compute mark-to-market unrealized PnL from cached active legs + live prices."""
     from services.live_price_snapshot import get_live_mid_prices
@@ -651,6 +679,7 @@ def record_order_created(
     trader_id: str,
     mode: str,
     order_id: str,
+    status: str,
     market_id: str,
     direction: str,
     source: str,
@@ -667,7 +696,11 @@ def record_order_created(
     if active_notional <= 0:
         active_notional = abs(notional_usd)
 
-    snap.open_order_count += 1
+    order_id_clean = str(order_id or "").strip()
+    status_key = _normalize_status_key(status)
+    if order_id_clean and status_key in _HOT_UNFILLED_ORDER_STATUSES:
+        snap.open_order_ids.add(order_id_clean)
+        snap.open_order_count = len(snap.open_order_ids)
     market_id_clean = str(market_id or "").strip()
     if market_id_clean:
         snap.open_market_ids.add(market_id_clean)
@@ -698,7 +731,7 @@ def record_order_created(
     )
     token_id_clean = str(token_id or "").strip()
     if token_id_clean and entry_price > 0 and quantity > 0:
-        snap.active_order_legs[order_id] = _ActiveLeg(
+        snap.active_order_legs[order_id_clean] = _ActiveLeg(
             token_id=token_id_clean,
             entry_price=entry_price,
             quantity=quantity,
@@ -731,10 +764,9 @@ def record_order_resolved(
 
     status_key = _normalize_status_key(status)
     was_active_before = True  # assume it was active
-    if was_active_before:
-        snap.open_order_count = max(0, snap.open_order_count - 1)
-        # We can't perfectly remove scope keys without rescanning,
-        # but this is conservative — the periodic reseed will fix it.
+    if str(order_id or "").strip():
+        snap.open_order_ids.discard(str(order_id or "").strip())
+        snap.open_order_count = len(snap.open_order_ids)
 
     if notional_to_remove > 0:
         snap.gross_notional = max(0.0, snap.gross_notional - notional_to_remove)
@@ -792,7 +824,9 @@ def record_order_cancelled(
     leg = snap.active_order_legs.pop(order_id, None)
     notional_to_remove = leg.notional if leg else 0.0
 
-    snap.open_order_count = max(0, snap.open_order_count - 1)
+    if str(order_id or "").strip():
+        snap.open_order_ids.discard(str(order_id or "").strip())
+        snap.open_order_count = len(snap.open_order_ids)
 
     if notional_to_remove > 0:
         snap.gross_notional = max(0.0, snap.gross_notional - notional_to_remove)
@@ -814,11 +848,18 @@ def record_order_cancelled(
             )
 
 
-def update_signal_cursor(trader_id: str, mode: str, created_at: Optional[datetime], signal_id: Optional[str]) -> None:
+def update_signal_cursor(
+    trader_id: str,
+    mode: str,
+    created_at: Optional[datetime],
+    signal_id: Optional[str],
+    runtime_sequence: Optional[int] = None,
+) -> None:
     mode_key = _normalize_mode_key(mode)
     snap = _ensure_snapshot(trader_id, mode_key)
     snap.cursor_created_at = created_at
     snap.cursor_signal_id = str(signal_id or "") or None
+    snap.cursor_runtime_sequence = int(runtime_sequence) if runtime_sequence is not None else snap.cursor_runtime_sequence
 
 
 # ── Buffered audit writes ─────────────────────────────────────────
@@ -839,6 +880,7 @@ async def buffer_decision(
     risk_snapshot: Optional[dict[str, Any]],
     payload: Optional[dict[str, Any]],
     decision_id: Optional[str] = None,
+    publish: bool = True,
 ) -> str:
     row_id = decision_id or _new_id()
     entry = _AuditEntry(
@@ -862,22 +904,23 @@ async def buffer_decision(
     )
     async with _audit_lock:
         _audit_buffer_append(entry)
-    try:
-        await event_bus.publish(
-            "trader_decision",
-            {
-                "id": row_id,
-                "trader_id": trader_id,
-                "signal_id": signal_id,
-                "source": signal_source,
-                "strategy_key": strategy_key,
-                "decision": decision,
-                "reason": reason,
-                "score": score,
-            },
-        )
-    except Exception:
-        pass
+    if publish:
+        try:
+            await event_bus.publish(
+                "trader_decision",
+                {
+                    "id": row_id,
+                    "trader_id": trader_id,
+                    "signal_id": signal_id,
+                    "source": signal_source,
+                    "strategy_key": strategy_key,
+                    "decision": decision,
+                    "reason": reason,
+                    "score": score,
+                },
+            )
+        except Exception:
+            pass
     return row_id
 
 
@@ -922,6 +965,7 @@ async def buffer_signal_cursor(
     trader_id: str,
     last_signal_created_at: Optional[datetime],
     last_signal_id: Optional[str],
+    last_runtime_sequence: Optional[int],
 ) -> None:
     entry = _AuditEntry(
         kind="cursor",
@@ -929,16 +973,262 @@ async def buffer_signal_cursor(
             "trader_id": trader_id,
             "last_signal_created_at": last_signal_created_at,
             "last_signal_id": last_signal_id,
+            "last_runtime_sequence": last_runtime_sequence,
         },
     )
     async with _audit_lock:
         _audit_buffer_append(entry)
 
 
-async def buffer_signal_status(*, signal_id: str, status: str) -> None:
+async def buffer_signal_status(*, signal_id: str, status: str, effective_price: float | None = None) -> None:
     entry = _AuditEntry(
         kind="signal_status",
-        payload={"signal_id": signal_id, "status": status},
+        payload={"signal_id": signal_id, "status": status, "effective_price": effective_price},
+    )
+    async with _audit_lock:
+        _audit_buffer_append(entry)
+
+
+def _snapshot_execution_session_row(row: ExecutionSession) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "trader_id": row.trader_id,
+        "signal_id": row.signal_id,
+        "decision_id": row.decision_id,
+        "source": row.source,
+        "strategy_key": row.strategy_key,
+        "strategy_version": row.strategy_version,
+        "mode": row.mode,
+        "status": row.status,
+        "policy": row.policy,
+        "plan_id": row.plan_id,
+        "market_ids_json": list(row.market_ids_json or []),
+        "legs_total": int(row.legs_total or 0),
+        "legs_completed": int(row.legs_completed or 0),
+        "legs_failed": int(row.legs_failed or 0),
+        "legs_open": int(row.legs_open or 0),
+        "requested_notional_usd": row.requested_notional_usd,
+        "executed_notional_usd": row.executed_notional_usd,
+        "max_unhedged_notional_usd": row.max_unhedged_notional_usd,
+        "unhedged_notional_usd": row.unhedged_notional_usd,
+        "trace_id": row.trace_id,
+        "started_at": row.started_at,
+        "completed_at": row.completed_at,
+        "expires_at": row.expires_at,
+        "error_message": row.error_message,
+        "payload_json": dict(row.payload_json or {}),
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+
+def _snapshot_execution_leg_row(row: ExecutionSessionLeg) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "session_id": row.session_id,
+        "leg_index": int(row.leg_index or 0),
+        "leg_id": row.leg_id,
+        "market_id": row.market_id,
+        "market_question": row.market_question,
+        "token_id": row.token_id,
+        "side": row.side,
+        "outcome": row.outcome,
+        "price_policy": row.price_policy,
+        "time_in_force": row.time_in_force,
+        "post_only": bool(row.post_only),
+        "target_price": row.target_price,
+        "requested_notional_usd": row.requested_notional_usd,
+        "requested_shares": row.requested_shares,
+        "filled_notional_usd": row.filled_notional_usd,
+        "filled_shares": row.filled_shares,
+        "avg_fill_price": row.avg_fill_price,
+        "status": row.status,
+        "last_error": row.last_error,
+        "metadata_json": dict(row.metadata_json or {}),
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+
+def _snapshot_trader_order_row(row: TraderOrder) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "trader_id": row.trader_id,
+        "signal_id": row.signal_id,
+        "decision_id": row.decision_id,
+        "source": row.source,
+        "strategy_key": row.strategy_key,
+        "strategy_version": row.strategy_version,
+        "market_id": row.market_id,
+        "market_question": row.market_question,
+        "direction": row.direction,
+        "event_id": row.event_id,
+        "trace_id": row.trace_id,
+        "mode": row.mode,
+        "status": row.status,
+        "notional_usd": row.notional_usd,
+        "entry_price": row.entry_price,
+        "effective_price": row.effective_price,
+        "edge_percent": row.edge_percent,
+        "confidence": row.confidence,
+        "actual_profit": row.actual_profit,
+        "reason": row.reason,
+        "payload_json": dict(row.payload_json or {}),
+        "error_message": row.error_message,
+        "created_at": row.created_at,
+        "executed_at": row.executed_at,
+        "updated_at": row.updated_at,
+    }
+
+
+def _snapshot_execution_order_row(row: ExecutionSessionOrder) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "session_id": row.session_id,
+        "leg_id": row.leg_id,
+        "trader_order_id": row.trader_order_id,
+        "provider_order_id": row.provider_order_id,
+        "provider_clob_order_id": row.provider_clob_order_id,
+        "action": row.action,
+        "side": row.side,
+        "price": row.price,
+        "size": row.size,
+        "notional_usd": row.notional_usd,
+        "status": row.status,
+        "reason": row.reason,
+        "payload_json": dict(row.payload_json or {}),
+        "error_message": row.error_message,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+
+def _snapshot_execution_event_row(row: ExecutionSessionEvent) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "session_id": row.session_id,
+        "leg_id": row.leg_id,
+        "event_type": row.event_type,
+        "severity": row.severity,
+        "message": row.message,
+        "payload_json": dict(row.payload_json or {}),
+        "created_at": row.created_at,
+    }
+
+
+async def buffer_execution_outcome(
+    *,
+    session_row: ExecutionSession,
+    leg_rows: list[ExecutionSessionLeg],
+    trader_orders: list[TraderOrder],
+    execution_orders: list[ExecutionSessionOrder],
+    events: list[ExecutionSessionEvent],
+    signal_id: str,
+    signal_status: str,
+    effective_price: float | None = None,
+) -> None:
+    entry = _AuditEntry(
+        kind="execution_outcome",
+        payload={
+            "session": _snapshot_execution_session_row(session_row),
+            "legs": [_snapshot_execution_leg_row(row) for row in leg_rows],
+            "trader_orders": [_snapshot_trader_order_row(row) for row in trader_orders],
+            "execution_orders": [_snapshot_execution_order_row(row) for row in execution_orders],
+            "events": [_snapshot_execution_event_row(row) for row in events],
+            "signal": {
+                "signal_id": str(signal_id or ""),
+                "status": str(signal_status or ""),
+                "effective_price": effective_price,
+            },
+        },
+    )
+    async with _audit_lock:
+        _audit_buffer_append(entry)
+    try:
+        await event_bus.publish("execution_session", _serialize_execution_session(session_row))
+    except Exception:
+        pass
+    for leg_row in leg_rows:
+        try:
+            await event_bus.publish("execution_leg", _serialize_execution_leg(leg_row))
+        except Exception:
+            pass
+    for trader_order in trader_orders:
+        try:
+            await event_bus.publish("trader_order", _serialize_order(trader_order))
+        except Exception:
+            pass
+    for execution_order in execution_orders:
+        try:
+            await event_bus.publish("execution_order", _serialize_execution_order(execution_order))
+        except Exception:
+            pass
+    for event_row in events:
+        try:
+            await event_bus.publish("execution_session_event", _serialize_execution_event(event_row))
+        except Exception:
+            pass
+
+
+async def buffer_trader_event(
+    *,
+    event_type: str,
+    severity: str = "info",
+    trader_id: str | None = None,
+    source: str | None = None,
+    operator: str | None = None,
+    message: str | None = None,
+    trace_id: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> str:
+    row_id = _new_id()
+    entry = _AuditEntry(
+        kind="trader_event",
+        payload={
+            "id": row_id,
+            "trader_id": trader_id,
+            "event_type": str(event_type or ""),
+            "severity": str(severity or "info"),
+            "source": source,
+            "operator": operator,
+            "message": message,
+            "trace_id": trace_id,
+            "payload_json": payload or {},
+            "created_at": utcnow(),
+        },
+    )
+    async with _audit_lock:
+        _audit_buffer_append(entry)
+    return row_id
+
+
+async def buffer_experiment_assignment(
+    *,
+    experiment_id: str,
+    trader_id: str | None,
+    signal_id: str | None,
+    source_key: str,
+    strategy_key: str,
+    strategy_version: int,
+    assignment_group: str,
+    decision_id: str | None = None,
+    order_id: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    entry = _AuditEntry(
+        kind="experiment_assignment",
+        payload={
+            "experiment_id": experiment_id,
+            "trader_id": trader_id,
+            "signal_id": signal_id,
+            "source_key": source_key,
+            "strategy_key": strategy_key,
+            "strategy_version": int(strategy_version),
+            "assignment_group": assignment_group,
+            "decision_id": decision_id,
+            "order_id": order_id,
+            "payload_json": payload or {},
+        },
     )
     async with _audit_lock:
         _audit_buffer_append(entry)
@@ -986,6 +1276,12 @@ async def flush_audit_buffer() -> int:
                         await _flush_cursor(session, entry.payload)
                     elif entry.kind == "signal_status":
                         await _flush_signal_status(session, entry.payload)
+                    elif entry.kind == "trader_event":
+                        _flush_trader_event(session, entry.payload)
+                    elif entry.kind == "experiment_assignment":
+                        await _flush_experiment_assignment(session, entry.payload)
+                    elif entry.kind == "execution_outcome":
+                        await _flush_execution_outcome(session, entry.payload)
                     flushed += 1
                 except Exception as exc:
                     logger.warning("Audit entry flush failed", kind=entry.kind, exc_info=exc)
@@ -1094,12 +1390,14 @@ async def _flush_cursor(session: AsyncSession, p: dict[str, Any]) -> None:
                 trader_id=trader_id,
                 last_signal_created_at=p.get("last_signal_created_at"),
                 last_signal_id=p.get("last_signal_id"),
+                last_runtime_sequence=p.get("last_runtime_sequence"),
                 updated_at=utcnow(),
             )
         )
     else:
         row.last_signal_created_at = p.get("last_signal_created_at")
         row.last_signal_id = str(p.get("last_signal_id") or "") or None
+        row.last_runtime_sequence = p.get("last_runtime_sequence")
         row.updated_at = utcnow()
 
 
@@ -1107,4 +1405,200 @@ async def _flush_signal_status(session: AsyncSession, p: dict[str, Any]) -> None
     signal = await session.get(TradeSignal, p["signal_id"])
     if signal is not None:
         signal.status = p["status"]
+        if p.get("effective_price") is not None:
+            signal.effective_price = p["effective_price"]
         signal.updated_at = utcnow()
+
+
+async def _flush_execution_outcome(session: AsyncSession, p: dict[str, Any]) -> None:
+    session_payload = dict(p.get("session") or {})
+    if session_payload:
+        await session.merge(
+            ExecutionSession(
+                id=session_payload["id"],
+                trader_id=session_payload["trader_id"],
+                signal_id=session_payload.get("signal_id"),
+                decision_id=session_payload.get("decision_id"),
+                source=session_payload["source"],
+                strategy_key=session_payload.get("strategy_key"),
+                strategy_version=session_payload.get("strategy_version"),
+                mode=session_payload["mode"],
+                status=session_payload["status"],
+                policy=session_payload.get("policy"),
+                plan_id=session_payload.get("plan_id"),
+                market_ids_json=list(session_payload.get("market_ids_json") or []),
+                legs_total=int(session_payload.get("legs_total") or 0),
+                legs_completed=int(session_payload.get("legs_completed") or 0),
+                legs_failed=int(session_payload.get("legs_failed") or 0),
+                legs_open=int(session_payload.get("legs_open") or 0),
+                requested_notional_usd=session_payload.get("requested_notional_usd"),
+                executed_notional_usd=session_payload.get("executed_notional_usd") or 0.0,
+                max_unhedged_notional_usd=session_payload.get("max_unhedged_notional_usd") or 0.0,
+                unhedged_notional_usd=session_payload.get("unhedged_notional_usd") or 0.0,
+                trace_id=session_payload.get("trace_id"),
+                started_at=session_payload.get("started_at"),
+                completed_at=session_payload.get("completed_at"),
+                expires_at=session_payload.get("expires_at"),
+                error_message=session_payload.get("error_message"),
+                payload_json=dict(session_payload.get("payload_json") or {}),
+                created_at=session_payload.get("created_at") or utcnow(),
+                updated_at=session_payload.get("updated_at") or utcnow(),
+            )
+        )
+
+    for leg_payload in p.get("legs") or []:
+        await session.merge(
+            ExecutionSessionLeg(
+                id=leg_payload["id"],
+                session_id=leg_payload["session_id"],
+                leg_index=int(leg_payload.get("leg_index") or 0),
+                leg_id=leg_payload["leg_id"],
+                market_id=leg_payload["market_id"],
+                market_question=leg_payload.get("market_question"),
+                token_id=leg_payload.get("token_id"),
+                side=leg_payload.get("side") or "buy",
+                outcome=leg_payload.get("outcome"),
+                price_policy=leg_payload.get("price_policy") or "maker_limit",
+                time_in_force=leg_payload.get("time_in_force") or "GTC",
+                post_only=bool(leg_payload.get("post_only", False)),
+                target_price=leg_payload.get("target_price"),
+                requested_notional_usd=leg_payload.get("requested_notional_usd"),
+                requested_shares=leg_payload.get("requested_shares"),
+                filled_notional_usd=leg_payload.get("filled_notional_usd") or 0.0,
+                filled_shares=leg_payload.get("filled_shares") or 0.0,
+                avg_fill_price=leg_payload.get("avg_fill_price"),
+                status=leg_payload.get("status") or "pending",
+                last_error=leg_payload.get("last_error"),
+                metadata_json=dict(leg_payload.get("metadata_json") or {}),
+                created_at=leg_payload.get("created_at") or utcnow(),
+                updated_at=leg_payload.get("updated_at") or utcnow(),
+            )
+        )
+
+    sync_targets: set[tuple[str, str]] = set()
+    for order_payload in p.get("trader_orders") or []:
+        await session.merge(
+            TraderOrder(
+                id=order_payload["id"],
+                trader_id=order_payload["trader_id"],
+                signal_id=order_payload.get("signal_id"),
+                decision_id=order_payload.get("decision_id"),
+                source=order_payload["source"],
+                strategy_key=order_payload.get("strategy_key"),
+                strategy_version=order_payload.get("strategy_version"),
+                market_id=order_payload["market_id"],
+                market_question=order_payload.get("market_question"),
+                direction=order_payload.get("direction"),
+                event_id=order_payload.get("event_id"),
+                trace_id=order_payload.get("trace_id"),
+                mode=order_payload.get("mode") or "shadow",
+                status=order_payload.get("status") or "submitted",
+                notional_usd=order_payload.get("notional_usd"),
+                entry_price=order_payload.get("entry_price"),
+                effective_price=order_payload.get("effective_price"),
+                edge_percent=order_payload.get("edge_percent"),
+                confidence=order_payload.get("confidence"),
+                actual_profit=order_payload.get("actual_profit"),
+                reason=order_payload.get("reason"),
+                payload_json=dict(order_payload.get("payload_json") or {}),
+                error_message=order_payload.get("error_message"),
+                created_at=order_payload.get("created_at") or utcnow(),
+                executed_at=order_payload.get("executed_at"),
+                updated_at=order_payload.get("updated_at") or utcnow(),
+            )
+        )
+        trader_id = str(order_payload.get("trader_id") or "").strip()
+        mode = str(order_payload.get("mode") or "").strip()
+        if trader_id and mode:
+            sync_targets.add((trader_id, mode))
+
+    for execution_order_payload in p.get("execution_orders") or []:
+        await session.merge(
+            ExecutionSessionOrder(
+                id=execution_order_payload["id"],
+                session_id=execution_order_payload["session_id"],
+                leg_id=execution_order_payload["leg_id"],
+                trader_order_id=execution_order_payload.get("trader_order_id"),
+                provider_order_id=execution_order_payload.get("provider_order_id"),
+                provider_clob_order_id=execution_order_payload.get("provider_clob_order_id"),
+                action=execution_order_payload.get("action") or "submit",
+                side=execution_order_payload.get("side") or "buy",
+                price=execution_order_payload.get("price"),
+                size=execution_order_payload.get("size"),
+                notional_usd=execution_order_payload.get("notional_usd"),
+                status=execution_order_payload.get("status") or "submitted",
+                reason=execution_order_payload.get("reason"),
+                payload_json=dict(execution_order_payload.get("payload_json") or {}),
+                error_message=execution_order_payload.get("error_message"),
+                created_at=execution_order_payload.get("created_at") or utcnow(),
+                updated_at=execution_order_payload.get("updated_at") or utcnow(),
+            )
+        )
+
+    for event_payload in p.get("events") or []:
+        await session.merge(
+            ExecutionSessionEvent(
+                id=event_payload["id"],
+                session_id=event_payload["session_id"],
+                leg_id=event_payload.get("leg_id"),
+                event_type=event_payload["event_type"],
+                severity=event_payload.get("severity") or "info",
+                message=event_payload.get("message"),
+                payload_json=dict(event_payload.get("payload_json") or {}),
+                created_at=event_payload.get("created_at") or utcnow(),
+            )
+        )
+
+    signal_payload = dict(p.get("signal") or {})
+    signal_id = str(signal_payload.get("signal_id") or "").strip()
+    if signal_id:
+        signal = await session.get(TradeSignal, signal_id)
+        if signal is not None:
+            signal.status = str(signal_payload.get("status") or signal.status or "").strip().lower()
+            if signal_payload.get("effective_price") is not None:
+                signal.effective_price = signal_payload["effective_price"]
+            signal.updated_at = utcnow()
+
+    for trader_id, mode in sorted(sync_targets):
+        await sync_trader_position_inventory(
+            session,
+            trader_id=trader_id,
+            mode=mode,
+            commit=False,
+        )
+
+
+def _flush_trader_event(session: AsyncSession, p: dict[str, Any]) -> None:
+    session.add(
+        TraderEvent(
+            id=p["id"],
+            trader_id=p.get("trader_id"),
+            event_type=str(p.get("event_type") or ""),
+            severity=str(p.get("severity") or "info"),
+            source=p.get("source"),
+            operator=p.get("operator"),
+            message=p.get("message"),
+            trace_id=p.get("trace_id"),
+            payload_json=p.get("payload_json") or {},
+            created_at=p.get("created_at") or utcnow(),
+        )
+    )
+
+
+async def _flush_experiment_assignment(session: AsyncSession, p: dict[str, Any]) -> None:
+    from services.strategy_experiments import upsert_strategy_experiment_assignment
+
+    await upsert_strategy_experiment_assignment(
+        session,
+        experiment_id=str(p.get("experiment_id") or ""),
+        trader_id=str(p.get("trader_id") or "") or None,
+        signal_id=str(p.get("signal_id") or "") or None,
+        source_key=str(p.get("source_key") or ""),
+        strategy_key=str(p.get("strategy_key") or ""),
+        strategy_version=int(p.get("strategy_version") or 1),
+        assignment_group=str(p.get("assignment_group") or "control"),
+        decision_id=str(p.get("decision_id") or "") or None,
+        order_id=str(p.get("order_id") or "") or None,
+        payload=dict(p.get("payload_json") or {}),
+        commit=False,
+    )

@@ -4,15 +4,11 @@ set -euo pipefail
 # Navigate to project root (grandparent of scripts/infra/)
 cd "$(dirname "$0")/../.."
 
-REDIS_ONLY=0
 POSTGRES_ONLY=0
 PYTHON_MIN_MINOR=10
 PYTHON_MAX_MINOR=13
 for arg in "$@"; do
     case "$arg" in
-        --redis-only)
-            REDIS_ONLY=1
-            ;;
         --postgres-only)
             POSTGRES_ONLY=1
             ;;
@@ -77,24 +73,6 @@ run_with_optional_sudo() {
     "$@"
 }
 
-resolve_redis_server() {
-    if command -v redis-server >/dev/null 2>&1; then
-        command -v redis-server
-        return 0
-    fi
-
-    if command -v brew >/dev/null 2>&1; then
-        local brew_prefix
-        brew_prefix="$(brew --prefix redis 2>/dev/null || true)"
-        if [ -n "$brew_prefix" ] && [ -x "$brew_prefix/bin/redis-server" ]; then
-            echo "$brew_prefix/bin/redis-server"
-            return 0
-        fi
-    fi
-
-    return 1
-}
-
 resolve_postgres_bin_dir() {
     if command -v initdb >/dev/null 2>&1 && command -v pg_ctl >/dev/null 2>&1; then
         dirname "$(command -v initdb)"
@@ -113,42 +91,6 @@ resolve_postgres_bin_dir() {
         done
     fi
 
-    return 1
-}
-
-ensure_redis_runtime() {
-    if command -v docker >/dev/null 2>&1 || resolve_redis_server >/dev/null 2>&1; then
-        echo "Redis runtime prerequisite found (docker or redis-server)."
-        return 0
-    fi
-
-    echo "Redis runtime prerequisite missing. Attempting to install redis-server..."
-    if command -v brew >/dev/null 2>&1; then
-        if ! brew list redis >/dev/null 2>&1; then
-            brew install redis
-        fi
-    elif command -v apt-get >/dev/null 2>&1; then
-        run_with_optional_sudo apt-get update
-        run_with_optional_sudo apt-get install -y redis-server
-    elif command -v dnf >/dev/null 2>&1; then
-        run_with_optional_sudo dnf install -y redis
-    elif command -v yum >/dev/null 2>&1; then
-        run_with_optional_sudo yum install -y redis
-    elif command -v pacman >/dev/null 2>&1; then
-        run_with_optional_sudo pacman -Sy --noconfirm redis
-    else
-        echo "Error: no supported package manager found to install redis-server."
-        echo "Install Docker or redis-server manually, then rerun setup."
-        return 1
-    fi
-
-    if command -v docker >/dev/null 2>&1 || resolve_redis_server >/dev/null 2>&1; then
-        echo "Redis runtime prerequisite is now available."
-        return 0
-    fi
-
-    echo "Error: automatic redis-server installation completed but redis-server is still unavailable."
-    echo "Install Docker or redis-server manually, then rerun setup."
     return 1
 }
 
@@ -196,17 +138,6 @@ echo "========================================="
 echo "  Autonomous Prediction Market Trading Platform Setup"
 echo "========================================="
 echo ""
-
-if [ "$REDIS_ONLY" -eq 1 ] && [ "$POSTGRES_ONLY" -eq 1 ]; then
-    ensure_redis_runtime
-    ensure_postgres_runtime
-    exit 0
-fi
-
-if [ "$REDIS_ONLY" -eq 1 ]; then
-    ensure_redis_runtime
-    exit 0
-fi
 
 if [ "$POSTGRES_ONLY" -eq 1 ]; then
     ensure_postgres_runtime
@@ -328,10 +259,6 @@ fi
 
 # Create data directory
 mkdir -p data
-
-echo ""
-echo "Ensuring Redis runtime prerequisites..."
-ensure_redis_runtime
 
 echo "Ensuring Postgres runtime prerequisites..."
 ensure_postgres_runtime

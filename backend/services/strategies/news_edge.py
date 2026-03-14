@@ -148,7 +148,6 @@ class NewsEdgeStrategy(BaseStrategy):
     description = "Detect news-driven mispricings via semantic matching + LLM probability estimation"
     mispricing_type = "news_information"
     source_key = "news"
-    worker_affinity = "news"
     requires_news_data = True
     allow_deduplication = False
     subscriptions = ["news_update"]

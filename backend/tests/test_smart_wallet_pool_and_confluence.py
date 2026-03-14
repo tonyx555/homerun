@@ -1,6 +1,7 @@
 """Unit tests for smart wallet pool scoring/churn and confluence thresholds."""
 
 import sys
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from datetime import timedelta
@@ -12,6 +13,15 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from utils.utcnow import utcnow
+import services.wallet_intelligence as wallet_intelligence_module  # noqa: E402
+from models.database import (  # noqa: E402
+    Base,
+    DiscoveredWallet,
+    TraderGroup,
+    TraderGroupMember,
+    TrackedWallet,
+    WalletActivityRollup,
+)
 from services.smart_wallet_pool import (  # noqa: E402
     SmartWalletPoolService,
     TARGET_POOL_SIZE,
@@ -24,6 +34,7 @@ from services.smart_wallet_pool import (  # noqa: E402
     POOL_FLAG_MANUAL_INCLUDE,
 )
 from services.wallet_intelligence import ConfluenceDetector  # noqa: E402
+from tests.postgres_test_db import build_postgres_session_factory  # noqa: E402
 
 
 def _wallet(
@@ -422,3 +433,75 @@ class TestConfluenceDetectorThresholds:
         assert 0.0 <= best_case <= 100.0
         assert 0.0 <= worst_case <= 100.0
         assert best_case > worst_case
+
+
+@pytest.mark.asyncio
+async def test_confluence_qualifying_wallets_only_include_recent_activity_candidates(tmp_path, monkeypatch):
+    engine, session_factory = await build_postgres_session_factory(Base, "confluence_recent_qualifiers")
+    monkeypatch.setattr(wallet_intelligence_module, "AsyncSessionLocal", session_factory)
+
+    now = utcnow()
+    cutoff_60m = now - timedelta(minutes=60)
+
+    async with session_factory() as session:
+        session.add_all(
+            [
+                DiscoveredWallet(
+                    address="recent_ranked",
+                    rank_score=0.95,
+                    composite_score=0.81,
+                    anomaly_score=0.05,
+                ),
+                DiscoveredWallet(
+                    address="stale_ranked",
+                    rank_score=0.99,
+                    composite_score=0.88,
+                    anomaly_score=0.03,
+                ),
+                TrackedWallet(address="tracked_recent"),
+                TrackedWallet(address="tracked_stale"),
+                TraderGroup(id="group-1", name="Unit Test Group", is_active=True),
+                TraderGroupMember(
+                    id="group-member-1",
+                    group_id="group-1",
+                    wallet_address="group_recent",
+                ),
+                WalletActivityRollup(
+                    id=str(uuid.uuid4()),
+                    wallet_address="recent_ranked",
+                    market_id="market-1",
+                    side="BUY",
+                    traded_at=now - timedelta(minutes=5),
+                    source="unit_test",
+                ),
+                WalletActivityRollup(
+                    id=str(uuid.uuid4()),
+                    wallet_address="tracked_recent",
+                    market_id="market-2",
+                    side="BUY",
+                    traded_at=now - timedelta(minutes=7),
+                    source="unit_test",
+                ),
+                WalletActivityRollup(
+                    id=str(uuid.uuid4()),
+                    wallet_address="group_recent",
+                    market_id="market-3",
+                    side="SELL",
+                    traded_at=now - timedelta(minutes=9),
+                    source="unit_test",
+                ),
+            ]
+        )
+        await session.commit()
+
+    detector = ConfluenceDetector()
+    wallets = await detector._get_qualifying_wallets(cutoff_60m)
+    addresses = {str(row.get("address") or "") for row in wallets}
+
+    assert "recent_ranked" in addresses
+    assert "tracked_recent" in addresses
+    assert "group_recent" in addresses
+    assert "stale_ranked" not in addresses
+    assert "tracked_stale" not in addresses
+
+    await engine.dispose()

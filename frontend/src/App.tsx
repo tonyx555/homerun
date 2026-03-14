@@ -825,13 +825,13 @@ function App() {
   } = useQuery({
     queryKey: ['scanner-status'],
     queryFn: getScannerStatus,
-    refetchInterval: isConnected ? false : 5000,
+    refetchInterval: isConnected ? false : 15000,
   })
 
   const { data: workersData } = useQuery({
     queryKey: ['workers-status'],
     queryFn: getWorkersStatus,
-    refetchInterval: isConnected ? false : 5000,
+    refetchInterval: isConnected ? false : 15000,
   })
 
   const {
@@ -842,6 +842,7 @@ function App() {
     queryKey: ['trading-vpn-status'],
     queryFn: getTradingVpnStatus,
     refetchInterval: 30000,
+    retry: false,
   })
 
   const workers = workersData?.workers || []
@@ -860,7 +861,7 @@ function App() {
   const { data: signalStats } = useQuery({
     queryKey: ['signals-stats'],
     queryFn: getSignalStats,
-    refetchInterval: isConnected ? false : 10000,
+    refetchInterval: isConnected ? false : 20000,
   })
   const trackedTradersExecutableCount = useMemo<number | null>(() => {
     const stats = trackedTradersWorker?.stats

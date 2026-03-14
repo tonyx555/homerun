@@ -103,7 +103,7 @@ The fastest way to start Homerun — double-click the launcher for your OS:
 | Windows | `scripts/launchers/Homerun.bat` | Double-click in Explorer |
 | Linux | `scripts/launchers/Homerun.desktop` | Double-click in file manager |
 
-The launcher automatically installs dependencies (Python venv, npm, Redis, Postgres) on first run, then opens the terminal UI. No manual setup required.
+The launcher automatically installs dependencies (Python venv, npm, Postgres) on first run, then opens the terminal UI. No manual setup required.
 
 ### Shell launch
 
@@ -113,7 +113,7 @@ cd homerun
 ./scripts/infra/run.sh
 ```
 
-`run.sh` detects missing or stale setup and runs `setup.sh` automatically. It starts Redis and Postgres (via Docker or local install), runs DB migrations, and launches the TUI.
+`run.sh` detects missing or stale setup and runs `setup.sh` automatically. It starts Postgres (via Docker or local install), runs DB migrations, and launches the TUI.
 The launcher writes the active DB URL to `backend/.runtime/database_url`; use that value when inspecting Postgres from another shell.
 
 To run setup separately:
@@ -143,7 +143,7 @@ The setup script installs most dependencies automatically. You only need:
 
 - Python 3.10+ (setup will attempt to install via your package manager if missing)
 - Node.js
-- Docker **or** locally installed Redis + PostgreSQL (setup bootstraps these if absent)
+- Docker **or** locally installed PostgreSQL (setup bootstraps this if absent)
 
 ## Wire Any Source Into Any Strategy
 

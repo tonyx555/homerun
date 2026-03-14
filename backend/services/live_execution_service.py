@@ -215,6 +215,23 @@ class OrderStatus(str, Enum):
     FAILED = "failed"
 
 
+def _normalize_order_type(value: Any) -> OrderType:
+    raw = str(getattr(value, "value", value) or "").strip().upper()
+    if raw == "FAK":
+        return OrderType.IOC
+    try:
+        return OrderType(raw)
+    except ValueError:
+        return OrderType.GTC
+
+
+def _provider_order_type_value(value: Any) -> str:
+    order_type = _normalize_order_type(value)
+    if order_type == OrderType.IOC:
+        return OrderType.FAK.value
+    return order_type.value
+
+
 @dataclass
 class Order:
     """Represents a trading order"""
@@ -1411,11 +1428,7 @@ class LiveExecutionService:
                         for row in persisted_orders:
                             side_raw = str(row.side or "").strip().upper()
                             side = OrderSide.SELL if side_raw == OrderSide.SELL.value else OrderSide.BUY
-                            order_type_raw = str(row.order_type or "").strip().upper()
-                            try:
-                                order_type = OrderType(order_type_raw)
-                            except ValueError:
-                                order_type = OrderType.GTC
+                            order_type = _normalize_order_type(row.order_type)
                             status_raw = str(row.status or "").strip().lower()
                             try:
                                 status = OrderStatus(status_raw)
@@ -1932,10 +1945,7 @@ class LiveExecutionService:
                     .strip()
                     .upper()
                 )
-                try:
-                    order_type = OrderType(order_type_raw)
-                except ValueError:
-                    order_type = OrderType.GTC
+                order_type = _normalize_order_type(order_type_raw)
 
                 created_at = _parse_provider_datetime(
                     server_order.get("created_at") or server_order.get("createdAt") or server_order.get("timestamp")
@@ -2177,13 +2187,14 @@ class LiveExecutionService:
             Order object with status
         """
         order_id = str(uuid.uuid4())
+        normalized_order_type = _normalize_order_type(order_type)
         order = Order(
             id=order_id,
             token_id=token_id,
             side=side,
             price=price,
             size=size,
-            order_type=order_type,
+            order_type=normalized_order_type,
             market_question=market_question,
             opportunity_id=opportunity_id,
         )
@@ -2239,30 +2250,44 @@ class LiveExecutionService:
                     raise RuntimeError(sell_gate_error or "SELL pre-submit gate failed")
 
             # Build and sign order using py-clob-client
-            from py_clob_client.clob_types import OrderArgs
+            from py_clob_client.clob_types import MarketOrderArgs, OrderArgs
             from py_clob_client.order_builder.constants import BUY, SELL
 
             submit_price = float(price)
             order_side = BUY if side == OrderSide.BUY else SELL
+            provider_order_type = _provider_order_type_value(normalized_order_type)
+            provider_market_order = provider_order_type in {OrderType.FAK.value, OrderType.FOK.value}
 
             transport_retries_used = 0
             max_transport_retries = 2
             max_attempts = 3 if side == OrderSide.SELL else 2
             for attempt in range(max_attempts + max_transport_retries):
                 order.price = submit_price
-                order_args = OrderArgs(
-                    price=submit_price,
-                    size=size,
-                    side=order_side,
-                    token_id=token_id,
-                )
                 try:
-                    # Create and sign the order
-                    signed_order = self._client.create_order(order_args)
+                    if provider_market_order:
+                        market_amount = float(size)
+                        if side == OrderSide.BUY:
+                            market_amount = float(max(0.0, submit_price) * max(0.0, size))
+                        order_args = MarketOrderArgs(
+                            token_id=token_id,
+                            amount=market_amount,
+                            side=order_side,
+                            price=submit_price,
+                            order_type=provider_order_type,
+                        )
+                        signed_order = self._client.create_market_order(order_args)
+                    else:
+                        order_args = OrderArgs(
+                            price=submit_price,
+                            size=size,
+                            side=order_side,
+                            token_id=token_id,
+                        )
+                        signed_order = self._client.create_order(order_args)
                     # Post order to CLOB
                     response = self._client.post_order(
                         signed_order,
-                        order_type.value,
+                        provider_order_type,
                         post_only=post_only,
                     )
                 except Exception as exc:
@@ -2332,6 +2357,12 @@ class LiveExecutionService:
                 if response.get("success"):
                     order.status = OrderStatus.OPEN
                     order.clob_order_id = response.get("orderID")
+                    setattr(order, "_provider_order_type_sent", provider_order_type)
+                    setattr(
+                        order,
+                        "_submit_method",
+                        "create_market_order" if provider_market_order else "create_order",
+                    )
                     immediate_snapshot = self._parse_provider_order_snapshot(response)
                     if immediate_snapshot is not None:
                         self._apply_snapshot_to_order(order, immediate_snapshot)

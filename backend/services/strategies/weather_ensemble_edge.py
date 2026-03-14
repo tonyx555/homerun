@@ -55,7 +55,6 @@ class WeatherEnsembleEdgeStrategy(BaseStrategy):
     description = "Ensemble Monte Carlo: count fraction of GFS ensemble members in each temperature bucket"
     mispricing_type = "news_information"
     source_key = "weather"
-    worker_affinity = "weather"
     subscriptions = ["weather_update"]
 
     quality_filter_overrides = QualityFilterOverrides(

@@ -1,15 +1,14 @@
 """
 Scanner worker: detection-only plane.
 
-Runs fast/heavy scanner lanes, consumes DB market catalog + Redis prices,
-and enqueues normalized detection batches for the opportunity aggregator worker.
+Runs fast/heavy scanner lanes, consumes DB market catalog + live WS prices,
+and bridges opportunities directly into the runtime signal queue.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
-import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -30,16 +29,16 @@ from sqlalchemy.exc import DBAPIError
 from config import apply_runtime_settings_overrides, settings
 from models.database import AsyncSessionLocal
 from services.scanner import scanner
+from services.runtime_signal_queue import get_queue_depth
 from services.shared_state import (
     clear_scanner_heavy_lane_degrade_if_expired,
     clear_scan_request,
-    count_pending_scanner_batches,
-    drop_oldest_pending_scanner_batch,
-    enqueue_scanner_batch,
     pop_targeted_condition_ids,
     read_scanner_control,
     read_scanner_snapshot,
+    write_scanner_snapshot,
 )
+from services.strategy_signal_bridge import bridge_opportunities_to_signals
 from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.worker_state import write_worker_snapshot
 from utils.logger import get_logger, setup_logging
@@ -48,6 +47,29 @@ from utils.utcnow import utcnow
 
 setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"), json_format=False)
 logger = get_logger("scanner_worker")
+_CANCEL_GRACE_SECONDS = 5.0
+_abandoned_tasks: set[asyncio.Task] = set()
+_inflight_timed_tasks: dict[str, asyncio.Task] = {}
+
+
+class _TimedTaskStillRunningError(RuntimeError):
+    pass
+
+
+def _discard_abandoned(task: asyncio.Task) -> None:
+    _abandoned_tasks.discard(task)
+
+
+def _clear_inflight_timed_task(label: str, task: asyncio.Task) -> None:
+    if _inflight_timed_tasks.get(label) is task:
+        _inflight_timed_tasks.pop(label, None)
+
+
+def _runtime_queue_pending() -> int:
+    depth = get_queue_depth()
+    if isinstance(depth, dict):
+        return sum(int(value) for value in depth.values())
+    return int(depth or 0)
 
 
 def _is_upstream_resolution_error(exc: Exception) -> bool:
@@ -81,12 +103,46 @@ def _parse_iso_utc(value: Optional[str]) -> Optional[datetime]:
 
 async def _run_with_timeout_budget(coro, *, timeout_seconds: float, label: str):
     timeout_budget = max(0.01, float(timeout_seconds))
-    started = time.monotonic()
-    result = await coro
-    elapsed = time.monotonic() - started
-    if elapsed > timeout_budget:
-        raise asyncio.TimeoutError(f"{label} exceeded timeout budget ({elapsed:.3f}s > {timeout_budget:.3f}s)")
-    return result
+    existing = _inflight_timed_tasks.get(label)
+    if existing is not None and not existing.done():
+        raise _TimedTaskStillRunningError(label)
+
+    task = asyncio.create_task(coro, name=f"scanner-{label}")
+    _inflight_timed_tasks[label] = task
+    task.add_done_callback(lambda done_task, step_label=label: _clear_inflight_timed_task(step_label, done_task))
+
+    try:
+        done, _ = await asyncio.wait({task}, timeout=timeout_budget)
+        if done:
+            return task.result()
+
+        task.cancel()
+        done_after, _ = await asyncio.wait({task}, timeout=_CANCEL_GRACE_SECONDS)
+        if done_after:
+            try:
+                task.result()
+            except (asyncio.CancelledError, Exception):
+                pass
+        else:
+            _abandoned_tasks.add(task)
+            task.add_done_callback(_discard_abandoned)
+            logger.warning(
+                "%s: task did not finish within %ss cancel grace; holding reference until completion",
+                label,
+                _CANCEL_GRACE_SECONDS,
+            )
+        raise asyncio.TimeoutError(f"{label} exceeded timeout budget ({timeout_budget:.3f}s)")
+    except asyncio.CancelledError:
+        if not task.done():
+            task.cancel()
+            try:
+                await asyncio.shield(asyncio.wait({task}, timeout=_CANCEL_GRACE_SECONDS))
+            except (asyncio.CancelledError, Exception):
+                pass
+            if not task.done():
+                _abandoned_tasks.add(task)
+                task.add_done_callback(_discard_abandoned)
+        raise
 
 
 async def _hydrate_scanner_pool_from_snapshot() -> int:
@@ -170,38 +226,39 @@ async def _enqueue_detection_batch(
     *,
     batch_kind: str,
 ) -> tuple[str | None, int, int]:
-    """Enqueue scanner batch with backpressure trimming."""
-    max_pending = max(
-        1,
-        int(getattr(settings, "SCANNER_BATCH_QUEUE_MAX_PENDING", 200) or 200),
-    )
-    dropped = 0
-    batch_id: str | None = None
+    """Persist scanner truth and emit runtime signals directly."""
+    market_history: dict[str, list[dict]] = {}
+    for opportunity in opportunities:
+        for market in getattr(opportunity, "markets", None) or []:
+            if not isinstance(market, dict):
+                continue
+            history = market.get("price_history")
+            if not isinstance(history, list) or len(history) < 2:
+                continue
+            for market_id in (
+                str(market.get("id") or "").strip(),
+                str(market.get("condition_id") or market.get("conditionId") or "").strip(),
+            ):
+                if market_id and market_id not in market_history:
+                    market_history[market_id] = history
 
     async with AsyncSessionLocal() as session:
-        pending = await count_pending_scanner_batches(session)
-        while pending >= max_pending:
-            dropped_id = await drop_oldest_pending_scanner_batch(session)
-            if not dropped_id:
-                break
-            dropped += 1
-            pending = max(0, pending - 1)
-            logger.warning(
-                "Scanner batch queue backpressure: dropped oldest pending batch %s",
-                dropped_id,
-            )
-
-        batch_id = await enqueue_scanner_batch(
+        await write_scanner_snapshot(
             session,
             opportunities,
-            status,
-            source="scanner_worker",
-            batch_kind=batch_kind,
+            {**status, "batch_kind": str(batch_kind or "scan_cycle")},
+            market_history=market_history or None,
+        )
+        await bridge_opportunities_to_signals(
+            session,
+            opportunities,
+            source="scanner",
+            sweep_missing=True,
+            refresh_prices=False,
         )
         await clear_scan_request(session)
-        pending_after = await count_pending_scanner_batches(session)
 
-    return batch_id, pending_after, dropped
+    return utcnow().strftime("%Y%m%d%H%M%S%f"), 0, 0
 
 
 async def _run_scan_loop() -> None:
@@ -253,7 +310,7 @@ async def _run_scan_loop() -> None:
                 tiered = status.get("tiered_scanning") or {}
                 lane_watchdogs = status.get("lane_watchdogs") or {}
                 async with AsyncSessionLocal() as session:
-                    pending = await count_pending_scanner_batches(session)
+                    pending = _runtime_queue_pending()
                     heartbeat_state["queue_pending"] = int(pending)
                     await write_worker_snapshot(
                         session,
@@ -315,6 +372,8 @@ async def _run_scan_loop() -> None:
                 timeout_seconds=float(watchdog_seconds),
                 label="scanner_full_snapshot",
             )
+        except _TimedTaskStillRunningError:
+            logger.warning("Full-snapshot scan skipped because prior run is still finishing")
         except asyncio.TimeoutError:
             scanner.note_heavy_lane_watchdog_timeout(watchdog_seconds)
             logger.warning("Full-snapshot scan timed out after %ss", watchdog_seconds)
@@ -367,14 +426,12 @@ async def _run_scan_loop() -> None:
             except Exception as exc:
                 logger.warning("Failed to refresh scanner runtime settings from DB: %s", exc)
 
-            async with AsyncSessionLocal() as session:
-                try:
-                    await refresh_strategy_runtime_if_needed(
-                        session,
-                        source_keys=["scanner"],
-                    )
-                except Exception as exc:
-                    logger.warning("Scanner strategy refresh check failed: %s", exc)
+            try:
+                await refresh_strategy_runtime_if_needed(
+                    source_keys=["scanner"],
+                )
+            except Exception as exc:
+                logger.warning("Scanner strategy refresh check failed: %s", exc)
 
             interval = max(10, min(3600, int(control.get("scan_interval_seconds") or 60)))
             paused = bool(control.get("is_paused", False))
@@ -437,6 +494,10 @@ async def _run_scan_loop() -> None:
                     label="scanner_fast_lane",
                 )
                 stale_scan_streak = 0
+            except _TimedTaskStillRunningError as exc:
+                stale_scan_streak += 1
+                logger.warning("Scanner fast lane skipped because prior run is still finishing")
+                scan_error = exc
             except asyncio.CancelledError:
                 raise
             except asyncio.TimeoutError as exc:
@@ -454,9 +515,14 @@ async def _run_scan_loop() -> None:
 
             if scan_error is not None:
                 heartbeat_state["last_error"] = str(scan_error)
+                timed_task_cleanup = isinstance(scan_error, _TimedTaskStillRunningError)
                 timeout_error = isinstance(scan_error, asyncio.TimeoutError)
                 network_resolution_error = _is_upstream_resolution_error(scan_error)
-                if timeout_error:
+                if timed_task_cleanup:
+                    logger.warning(
+                        "Scanner fast lane skipped because prior timed-out run is still cleaning up",
+                    )
+                elif timeout_error:
                     logger.warning("Scanner scan timeout handling after %.1fs: %s", scan_watchdog_seconds, scan_error)
                 elif network_resolution_error:
                     logger.warning(
@@ -505,8 +571,7 @@ async def _run_scan_loop() -> None:
                         1,
                         int(getattr(settings, "SCANNER_DEGRADE_HEAVY_BACKLOG_THRESHOLD", 120) or 120),
                     )
-                    async with AsyncSessionLocal() as session:
-                        pending_for_heavy = await count_pending_scanner_batches(session)
+                    pending_for_heavy = _runtime_queue_pending()
                     if pending_for_heavy >= heavy_backlog_threshold:
                         run_heavy_now = False
                         queue_backlogged = True

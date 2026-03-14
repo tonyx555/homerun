@@ -1860,6 +1860,7 @@ export default function PositionsPanel() {
                 <CryptoMarketCard
                   market={modalMarket}
                   themeMode={themeMode}
+                  nowMs={Date.now()}
                   isModalView
                   onCloseModal={closeMarketModal}
                 />

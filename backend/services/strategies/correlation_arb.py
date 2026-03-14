@@ -187,7 +187,6 @@ class CorrelationArbStrategy(BaseStrategy):
     description = "Mean-reversion on correlated market pair spreads"
     mispricing_type = "cross_market"
     subscriptions = ["market_data_refresh"]
-    realtime_processing_mode = "full_snapshot"
 
     quality_filter_overrides = QualityFilterOverrides(
         min_roi=2.0,

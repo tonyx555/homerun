@@ -2661,11 +2661,9 @@ class BtcEthHighFreqStrategy(BaseStrategy):
     description = "Dynamic high-frequency arbitrage on BTC/ETH 15-min and 1-hr binary markets"
     mispricing_type = "within_market"
     source_key = "crypto"
-    worker_affinity = "crypto"
     market_categories = ["crypto"]
     requires_historical_prices = True
     subscriptions = ["crypto_update"]
-    requires_live_market_context = True
     supports_entry_take_profit_exit = True
     default_open_order_timeout_seconds = 45.0
 

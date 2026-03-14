@@ -556,17 +556,16 @@ async def _run_loop() -> None:
     try:
         async with AsyncSessionLocal() as session:
             await ensure_all_data_sources_seeded(session)
-            await data_source_loader.refresh_all_from_db(session=session)
+        await data_source_loader.refresh_all_from_db()
     except Exception as exc:
         logger.warning("Events data source seed/refresh failed: %s", exc)
     try:
         async with AsyncSessionLocal() as session:
             await ensure_all_strategies_seeded(session)
-            await refresh_strategy_runtime_if_needed(
-                session,
-                source_keys=["events"],
-                force=True,
-            )
+        await refresh_strategy_runtime_if_needed(
+            source_keys=["events"],
+            force=True,
+        )
     except Exception as exc:
         logger.warning("Events worker strategy startup sync failed: %s", exc)
 
@@ -577,13 +576,12 @@ async def _run_loop() -> None:
         try:
             async with AsyncSessionLocal() as session:
                 control = await read_worker_control(session, "events")
-                try:
-                    await refresh_strategy_runtime_if_needed(
-                        session,
-                        source_keys=["events"],
-                    )
-                except Exception as exc:
-                    logger.warning("Events worker strategy refresh check failed: %s", exc)
+            try:
+                await refresh_strategy_runtime_if_needed(
+                    source_keys=["events"],
+                )
+            except Exception as exc:
+                logger.warning("Events worker strategy refresh check failed: %s", exc)
 
             interval = int(
                 max(

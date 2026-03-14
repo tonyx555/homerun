@@ -8,6 +8,7 @@ from utils.utcnow import utcnow
 from typing import Any, Optional
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings as app_settings
@@ -465,16 +466,20 @@ async def clear_weather_scan_request(session: AsyncSession) -> None:
 
 
 async def upsert_weather_intent(session: AsyncSession, intent: dict[str, Any]) -> None:
-    result = await session.execute(select(WeatherTradeIntent).where(WeatherTradeIntent.id == intent["id"]))
-    row = result.scalar_one_or_none()
-    if row is None:
-        row = WeatherTradeIntent(**intent)
-        session.add(row)
-    else:
-        # Do not overwrite consumed intents; keep only fresh updates for pending/submitted.
-        if row.status in {"pending", "submitted"}:
-            for key, value in intent.items():
-                setattr(row, key, value)
+    update_values = {
+        key: value
+        for key, value in intent.items()
+        if key != "id"
+    }
+    await session.execute(
+        pg_insert(WeatherTradeIntent)
+        .values(**intent)
+        .on_conflict_do_update(
+            index_elements=[WeatherTradeIntent.id],
+            set_=update_values,
+            where=WeatherTradeIntent.status.in_(("pending", "submitted")),
+        )
+    )
 
 
 async def list_weather_intents(

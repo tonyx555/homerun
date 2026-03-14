@@ -78,13 +78,11 @@ class MyCustomStrategy(BaseStrategy):
     # Strategy metadata
     mispricing_type = "within_market"  # or "cross_market", "settlement_lag", "news_information"
     source_key = "scanner"
-    worker_affinity = "scanner"
     subscriptions = ["market_data_refresh"]  # Required for scanner strategies
     opportunity_ttl_minutes = 45  # None = use global default
     allow_deduplication = True
     binary_only = True
     accepted_signal_strategy_types = []  # Optional additional strategy_type inputs for evaluate()
-    requires_live_market_context = False  # Optional live-market enrichment hint for orchestrator
     allow_new_entries = True  # Set False for exit-only/manual-management strategies
 
     default_config = {
@@ -797,7 +795,6 @@ class StrategyLoader:
     async def refresh_all_from_db(
         self,
         *,
-        session: "AsyncSession",
         strategy_keys: Optional[list[str]] = None,
         source_keys: Optional[list[str]] = None,
         prune_unlisted: bool = False,
@@ -808,7 +805,6 @@ class StrategyLoader:
         are unloaded. Rows are updated with ``status`` and ``error_message``.
 
         Args:
-            session: SQLAlchemy async session (caller manages commit/close).
             strategy_keys: Optional subset of slugs to refresh. If None,
                 refreshes all rows.
             source_keys: Optional subset of source keys to refresh.
@@ -818,8 +814,6 @@ class StrategyLoader:
         Returns:
             Dict with ``"loaded"``, ``"errors"`` keys.
         """
-        del session
-
         from models.database import AsyncSessionLocal, Strategy
         from sqlalchemy import func, select
         from utils.utcnow import utcnow

@@ -53,11 +53,10 @@ async def _run_loop() -> None:
     try:
         async with AsyncSessionLocal() as session:
             await ensure_all_strategies_seeded(session)
-            await refresh_strategy_runtime_if_needed(
-                session,
-                source_keys=["weather"],
-                force=True,
-            )
+        await refresh_strategy_runtime_if_needed(
+            source_keys=["weather"],
+            force=True,
+        )
     except Exception as exc:
         logger.warning("Weather worker strategy startup sync failed: %s", exc)
 
@@ -96,13 +95,12 @@ async def _run_loop() -> None:
         async with AsyncSessionLocal() as session:
             control = await shared_state.read_weather_control(session)
             wf_settings = await shared_state.get_weather_settings(session)
-            try:
-                await refresh_strategy_runtime_if_needed(
-                    session,
-                    source_keys=["weather"],
-                )
-            except Exception as exc:
-                logger.warning("Weather worker strategy refresh check failed: %s", exc)
+        try:
+            await refresh_strategy_runtime_if_needed(
+                source_keys=["weather"],
+            )
+        except Exception as exc:
+            logger.warning("Weather worker strategy refresh check failed: %s", exc)
 
         interval = int(
             max(
