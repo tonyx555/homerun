@@ -157,6 +157,15 @@ async def _reconcile_live_state_for_trader(
         }
 
     import time as _time
+    _TIMING_LOG = r"C:\homerun\reconcile_timing.log"
+
+    def _tlog(msg: str) -> None:
+        try:
+            with open(_TIMING_LOG, "a") as _f:
+                _f.write(f"{_time.strftime('%H:%M:%S')} {msg}\n")
+                _f.flush()
+        except Exception:
+            pass
 
     provider_result: dict[str, Any] = {
         "provider_ready": True,
@@ -176,8 +185,7 @@ async def _reconcile_live_state_for_trader(
                 broadcast=True,
             )
         _t1 = _time.monotonic()
-        if _t1 - _t0 > 5.0:
-            logger.warning("reconcile_phase provider_orders=%.1fs", _t1 - _t0)
+        _tlog(f"provider_orders={_t1 - _t0:.1f}s")
 
     active_seen = int(provider_result.get("active_seen", 0) or 0)
     active_open_orders = 0
@@ -196,8 +204,7 @@ async def _reconcile_live_state_for_trader(
                 reason="reconciliation_worker",
             )
         _t3 = _time.monotonic()
-        if _t3 - _t2 > 5.0:
-            logger.warning("reconcile_phase lifecycle=%.1fs", _t3 - _t2)
+        _tlog(f"lifecycle={_t3 - _t2:.1f}s")
     _t4 = _time.monotonic()
     async with AsyncSessionLocal() as session:
         inventory_result = await sync_trader_position_inventory(
@@ -207,8 +214,7 @@ async def _reconcile_live_state_for_trader(
             commit=True,
         )
     _t5 = _time.monotonic()
-    if _t5 - _t4 > 5.0:
-        logger.warning("reconcile_phase inventory=%.1fs", _t5 - _t4)
+    _tlog(f"inventory={_t5 - _t4:.1f}s")
 
     return {
         "provider": provider_result,
