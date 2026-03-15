@@ -43,7 +43,7 @@ DEFAULT_INTERVAL_SECONDS = 1
 _IDLE_SLEEP_SECONDS = 1
 _MAX_CONSECUTIVE_DB_FAILURES = 3
 _CONTROL_REFRESH_SECONDS = 1.0
-_ACTIVE_POSITION_TICK_SECONDS = 0.25
+_ACTIVE_POSITION_TICK_SECONDS = 3.0
 _EVENT_QUEUE_MAXSIZE = 4096
 _WALLET_MONITOR_REFRESH_SECONDS = 15.0
 _TRADER_RECONCILE_ATTEMPTS = 3
@@ -228,7 +228,7 @@ async def _run_reconciliation_cycle(
 
     summary["traders_seen"] = len(traders)
 
-    _RECONCILE_CONCURRENCY = 2
+    _RECONCILE_CONCURRENCY = 1
     sem = asyncio.Semaphore(_RECONCILE_CONCURRENCY)
 
     async def _reconcile_one(trader: dict[str, Any]) -> dict[str, Any] | None:

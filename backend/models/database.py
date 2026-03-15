@@ -3272,10 +3272,10 @@ if not _database_url.startswith("postgresql"):
 # must have enough headroom for concurrent DB consumers (event dispatcher
 # stream listener, fire-and-forget reactive tasks, demand polling, etc.).
 # Postgres max_connections is set to 200 by run.ps1/run.sh.  With the
-# worker process at pool_size=18 + max_overflow=8 (26 max) plus the main
-# process at 20+10 (30 max), the theoretical ceiling is 56 per pair —
-# well within the 200-connection budget.  Previous pool_size=14 + 6=20
-# was too tight and caused pool exhaustion under reconciliation load.
+# worker process at pool_size=22 + max_overflow=12 (34 max) plus the main
+# process at 20+10 (30 max), the theoretical ceiling is 64 per pair —
+# well within the 200-connection budget.  Previous pool_size=18 + 8=26
+# was too tight under heavy reconciliation load with many open positions.
 _is_worker = _os.environ.get("HOMERUN_PROCESS_ROLE") == "worker"
 if _is_worker:
     _pool_size = max(1, int(settings.DATABASE_WORKER_POOL_SIZE))
@@ -3351,7 +3351,7 @@ def _on_checkin(dbapi_connection, connection_record):
     checkout_task_coro = connection_record.info.pop("checkout_task_coro", "unknown")
     if checkout_time is not None:
         elapsed = _time.monotonic() - checkout_time
-        if elapsed > 10.0:
+        if elapsed > 20.0:
             _db_logger.warning(
                 "Connection held for %.1fs before return to pool (task=%s, coro=%s)",
                 elapsed,
