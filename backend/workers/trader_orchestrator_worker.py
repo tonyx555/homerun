@@ -5659,6 +5659,16 @@ async def _run_trader_once(
                             "score": getattr(decision_obj, "score", None),
                             "size_usd": getattr(decision_obj, "size_usd", None),
                             "checks_payload": checks_payload,
+                            "risk_snapshot": None,
+                            "strategy_decision": str(getattr(decision_obj, "decision", "blocked") or "blocked"),
+                            "strategy_reason": str(getattr(decision_obj, "reason", "") or ""),
+                            "platform_gates": [
+                                {
+                                    "gate": "stacking_guard_pre_gate",
+                                    "passed": False,
+                                    "reason": "Market already open (pre-gate)",
+                                }
+                            ],
                         }
                     else:
                         gate_result = apply_platform_decision_gates(
