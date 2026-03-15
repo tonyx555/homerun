@@ -31,6 +31,10 @@ from services.trader_orchestrator.order_manager import (
 from services.trader_orchestrator_state import (
     _extract_copy_source_wallet_from_payload,
     _extract_live_fill_metrics,
+    _serialize_execution_event,
+    _serialize_execution_leg,
+    _serialize_execution_order,
+    _serialize_execution_session,
     _serialize_order,
     _sync_order_runtime_payload,
     _apply_execution_session_rollups_from_rows,
@@ -337,11 +341,6 @@ class ExecutionSessionEngine:
         normalized_signal_id = str(signal_id or "").strip()
         if not normalized_signal_id:
             return
-        await hot_state.buffer_signal_status(
-            signal_id=normalized_signal_id,
-            status=str(status or "").strip().lower(),
-            effective_price=effective_price,
-        )
         from services.intent_runtime import get_intent_runtime
 
         await get_intent_runtime().update_signal_status(
@@ -473,26 +472,79 @@ class ExecutionSessionEngine:
             leg_row.updated_at = utcnow()
             _apply_execution_session_rollups_from_rows(session_row, list(leg_rows.values()))
 
-        async def _buffer_execution_projection(
+        async def _persist_execution_projection(
             *,
             signal_status: str,
             effective_price: float | None,
         ) -> None:
-            await hot_state.buffer_execution_outcome(
-                session_row=session_row,
-                leg_rows=list(leg_rows.values()),
-                trader_orders=trader_orders,
-                execution_orders=execution_orders,
-                events=execution_events,
-                signal_id=str(getattr(signal, "id", "") or ""),
-                signal_status=signal_status,
-                effective_price=effective_price,
-            )
-            await self._publish_hot_signal_status(
-                signal_id=str(getattr(signal, "id", "") or ""),
-                status=signal_status,
-                effective_price=effective_price,
-            )
+            normalized_signal_id = str(getattr(signal, "id", "") or "").strip()
+            normalized_signal_status = str(signal_status or "").strip().lower()
+            self.db.add(session_row)
+            for leg_row in leg_rows.values():
+                self.db.add(leg_row)
+            for trader_order in trader_orders:
+                self.db.add(trader_order)
+            await self.db.flush()
+            for execution_order in execution_orders:
+                self.db.add(execution_order)
+            if execution_orders:
+                await self.db.flush()
+            for execution_event in execution_events:
+                self.db.add(execution_event)
+            if execution_events:
+                await self.db.flush()
+            if normalized_signal_id:
+                await set_trade_signal_status(
+                    self.db,
+                    normalized_signal_id,
+                    normalized_signal_status,
+                    effective_price=effective_price,
+                    commit=False,
+                )
+                await self._publish_hot_signal_status(
+                    signal_id=normalized_signal_id,
+                    status=normalized_signal_status,
+                    effective_price=effective_price,
+                )
+            sync_targets = {
+                (
+                    str(order.trader_id or "").strip(),
+                    str(order.mode or "").strip(),
+                )
+                for order in trader_orders
+                if str(order.trader_id or "").strip() and str(order.mode or "").strip()
+            }
+            for trader_id_key, mode_key in sorted(sync_targets):
+                await sync_trader_position_inventory(
+                    self.db,
+                    trader_id=trader_id_key,
+                    mode=mode_key,
+                    commit=False,
+                )
+            try:
+                await event_bus.publish("execution_session", _serialize_execution_session(session_row))
+            except Exception:
+                pass
+            for leg_row in leg_rows.values():
+                try:
+                    await event_bus.publish("execution_leg", _serialize_execution_leg(leg_row))
+                except Exception:
+                    pass
+            for trader_order in trader_orders:
+                try:
+                    await event_bus.publish("trader_order", _serialize_order(trader_order))
+                except Exception:
+                    pass
+            for execution_order in execution_orders:
+                try:
+                    await event_bus.publish("execution_order", _serialize_execution_order(execution_order))
+                except Exception:
+                    pass
+            for execution_event in execution_events:
+                try:
+                    await event_bus.publish("execution_session_event", _serialize_execution_event(execution_event))
+                except Exception:
+                    pass
 
         _append_event(
             event_type="session_created",
@@ -610,6 +662,12 @@ class ExecutionSessionEngine:
                 )
 
                 order_payload = dict(result.payload or {})
+                # Persist provider IDs at the top level so venue authority
+                # recovery can match this order and avoid creating duplicates.
+                if result.provider_order_id:
+                    order_payload["provider_order_id"] = result.provider_order_id
+                if result.provider_clob_order_id:
+                    order_payload["provider_clob_order_id"] = result.provider_clob_order_id
                 order_payload["execution_session"] = {
                     "session_id": session_row.id,
                     "leg_id": leg_row.id,
@@ -802,7 +860,7 @@ class ExecutionSessionEngine:
                         "cancel_failed_provider_orders": cancel_failed_provider_orders,
                     },
                 )
-                await _buffer_execution_projection(signal_status="failed", effective_price=effective_price)
+                await _persist_execution_projection(signal_status="failed", effective_price=effective_price)
                 return SessionExecutionResult(
                     session_id=session_row.id,
                     status="failed",
@@ -1036,7 +1094,7 @@ class ExecutionSessionEngine:
                 "hedging_deadline_at": (_iso_utc(hedging_deadline_at) if hedging_deadline_at is not None else None),
             },
         )
-        await _buffer_execution_projection(signal_status=signal_status, effective_price=effective_price)
+        await _persist_execution_projection(signal_status=signal_status, effective_price=effective_price)
 
         return SessionExecutionResult(
             session_id=session_row.id,
