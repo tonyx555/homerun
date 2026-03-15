@@ -2238,6 +2238,10 @@ class WalletDiscoveryEngine:
                 )
                 .order_by(
                     desc(func.coalesce(DiscoveredWallet.in_top_pool, False)),
+                    desc(
+                        DiscoveredWallet.recommendation.in_(["copy_candidate", "monitor"]),
+                    ),
+                    desc(func.coalesce(DiscoveredWallet.is_profitable, False)),
                     desc(func.coalesce(DiscoveredWallet.trades_24h, 0)),
                     DiscoveredWallet.last_analyzed_at.asc(),
                 )
