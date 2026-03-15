@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 from config import settings as app_settings
 from models import Opportunity
+from models.database import release_conn
 from models.opportunity import ROIType
 from services.polymarket import polymarket_client
 from utils.logger import get_logger
@@ -63,7 +64,10 @@ class WeatherWorkflowOrchestrator:
 
         configured_limit = int(settings.get("max_markets_per_scan", 200) or 200)
         market_limit = max(10, min(500, configured_limit))
-        markets = await self._fetch_weather_markets(market_limit)
+
+        async with release_conn(session):
+            markets = await self._fetch_weather_markets(market_limit)
+
         opportunities: list[Opportunity] = []
         report_only_findings: list[Opportunity] = []
         intents_created = 0
@@ -102,10 +106,11 @@ class WeatherWorkflowOrchestrator:
             async with sem:
                 return await self._evaluate_market(market_obj, settings=settings, min_liquidity=min_liquidity)
 
-        evaluations = await asyncio.gather(
-            *[_bounded_evaluate(m) for m in markets],
-            return_exceptions=True,
-        )
+        async with release_conn(session):
+            evaluations = await asyncio.gather(
+                *[_bounded_evaluate(m) for m in markets],
+                return_exceptions=True,
+            )
 
         # Collect all raw evaluation results for strategy enrichment
         raw_results: list[dict[str, Any]] = []

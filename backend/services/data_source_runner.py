@@ -13,7 +13,7 @@ from sqlalchemy import delete, desc, func, select
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.database import AsyncSessionLocal, DataSource, DataSourceRecord, DataSourceRun, async_engine, recover_pool
+from models.database import AsyncSessionLocal, DataSource, DataSourceRecord, DataSourceRun, async_engine, recover_pool, release_conn
 from services.data_source_catalog import default_data_source_retention_policy
 from services.data_source_loader import DataSourceValidationError, data_source_loader
 from utils.logger import get_logger
@@ -434,12 +434,13 @@ async def run_data_source(
             )
         instance = runtime.instance
 
-        if hasattr(instance, "fetch_async"):
-            fetched = await _invoke_callable(instance.fetch_async)
-        elif hasattr(instance, "fetch"):
-            fetched = await _invoke_callable(instance.fetch)
-        else:
-            raise DataSourceValidationError("Source instance has no fetch/fetch_async method")
+        async with release_conn(session):
+            if hasattr(instance, "fetch_async"):
+                fetched = await _invoke_callable(instance.fetch_async)
+            elif hasattr(instance, "fetch"):
+                fetched = await _invoke_callable(instance.fetch)
+            else:
+                raise DataSourceValidationError("Source instance has no fetch/fetch_async method")
 
         if fetched is None:
             fetched_rows: list[Any] = []

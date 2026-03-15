@@ -3271,11 +3271,11 @@ if not _database_url.startswith("postgresql"):
 # Worker subprocesses need smaller pools than the main API process but
 # must have enough headroom for concurrent DB consumers (event dispatcher
 # stream listener, fire-and-forget reactive tasks, demand polling, etc.).
-# Postgres max_connections is set to 200 by run.ps1/run.sh.  With 14
-# workers at pool_size=8 + max_overflow=4 each (168 max) plus the main
-# process at 12+8 (20 max), the theoretical ceiling is 188 — within the
-# 200-connection budget, and in practice much lower because max_overflow
-# connections are short-lived.
+# Postgres max_connections is set to 200 by run.ps1/run.sh.  With the
+# worker process at pool_size=18 + max_overflow=8 (26 max) plus the main
+# process at 20+10 (30 max), the theoretical ceiling is 56 per pair —
+# well within the 200-connection budget.  Previous pool_size=14 + 6=20
+# was too tight and caused pool exhaustion under reconciliation load.
 _is_worker = _os.environ.get("HOMERUN_PROCESS_ROLE") == "worker"
 if _is_worker:
     _pool_size = max(1, int(settings.DATABASE_WORKER_POOL_SIZE))
@@ -3351,7 +3351,7 @@ def _on_checkin(dbapi_connection, connection_record):
     checkout_task_coro = connection_record.info.pop("checkout_task_coro", "unknown")
     if checkout_time is not None:
         elapsed = _time.monotonic() - checkout_time
-        if elapsed > 15.0:
+        if elapsed > 10.0:
             _db_logger.warning(
                 "Connection held for %.1fs before return to pool (task=%s, coro=%s)",
                 elapsed,
@@ -3423,8 +3423,8 @@ async def recover_pool() -> None:
 # from permanently consuming a pool slot and eventually exhausting the
 # pool, which would take down the entire application.
 
-_CHECKOUT_HARD_LIMIT_SECONDS = 120.0  # 2 minutes — no single operation should ever take this long
-_REAPER_SCAN_INTERVAL_SECONDS = 10.0
+_CHECKOUT_HARD_LIMIT_SECONDS = 45.0   # 45 seconds — no single checkout should take this long; previous 120s allowed cascading exhaustion
+_REAPER_SCAN_INTERVAL_SECONDS = 5.0   # check more frequently to catch exhaustion earlier
 _POOL_EXHAUSTION_THRESHOLD = 0.85     # trigger recovery when 85% of slots are checked out
 _reaper_task: asyncio.Task | None = None
 
@@ -3526,9 +3526,9 @@ async def _pool_watchdog_loop() -> None:
                     stats["utilization"] * 100,
                     consecutive_exhausted,
                 )
-                # After 3 consecutive scans at near-exhaustion, force pool
+                # After 2 consecutive scans at near-exhaustion, force pool
                 # recovery — dispose all connections and start fresh.
-                if consecutive_exhausted >= 3:
+                if consecutive_exhausted >= 2:
                     _db_logger.error(
                         "POOL RECOVERY: Disposing all connections after %d consecutive exhaustion scans",
                         consecutive_exhausted,

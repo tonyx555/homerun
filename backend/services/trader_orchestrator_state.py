@@ -1748,13 +1748,20 @@ async def recover_missing_live_trader_orders(
     existing_rows_by_live_order_id: dict[str, TraderOrder] = {}
     rows_by_authority_key: dict[str, list[TraderOrder]] = {}
     rows_without_authority: list[TraderOrder] = []
+    existing_active_markets: set[tuple[str, str]] = set()
     for row in existing_rows:
         payload = dict(row.payload_json or {})
         authority_key = _live_order_authority_key_from_payload(payload)
         if authority_key:
             rows_by_authority_key.setdefault(authority_key, []).append(row)
-            continue
-        rows_without_authority.append(row)
+        else:
+            rows_without_authority.append(row)
+        row_status = str(row.status or "").strip().lower()
+        if row_status in OPEN_ORDER_STATUSES:
+            row_trader_id = str(row.trader_id or "").strip()
+            row_market_id = str(row.market_id or "").strip()
+            if row_trader_id and row_market_id:
+                existing_active_markets.add((row_trader_id, row_market_id))
 
     collapsed_duplicates = 0
     for group in rows_by_authority_key.values():
@@ -1849,6 +1856,12 @@ async def recover_missing_live_trader_orders(
             ambiguous_orders += 1
             continue
 
+        candidate_trader_id = str(candidate["trader_id"]).strip()
+        candidate_market_id = str(candidate["market_id"]).strip()
+        if (candidate_trader_id, candidate_market_id) in existing_active_markets:
+            ambiguous_orders += 1
+            continue
+
         recovered_row = TraderOrder(
             id=_new_id(),
             trader_id=str(candidate["trader_id"]),
@@ -1879,6 +1892,7 @@ async def recover_missing_live_trader_orders(
         )
         session.add(recovered_row)
         recovered_rows.append(recovered_row)
+        existing_active_markets.add((candidate_trader_id, candidate_market_id))
         affected_traders.add(str(candidate["trader_id"]))
         if clob_order_id:
             existing_provider_rows_by_clob_id[clob_order_id] = recovered_row
@@ -4968,14 +4982,14 @@ async def reconcile_live_provider_orders(
             if provider_order_id and provider_order_id not in cancel_targets:
                 cancel_targets.append(provider_order_id)
             cancel_success = False
+            if commit:
+                await session.commit()
             for cancel_target in cancel_targets:
                 try:
-                    if commit:
-                        # Release the connection before provider cancellation I/O.
-                        await session.commit()
-                    if await live_execution_service.cancel_order(cancel_target):
-                        cancel_success = True
-                        break
+                    async with release_conn(session):
+                        if await live_execution_service.cancel_order(cancel_target):
+                            cancel_success = True
+                            break
                 except Exception as exc:
                     logger.warning(
                         "Failed to cancel terminal-session live provider order",

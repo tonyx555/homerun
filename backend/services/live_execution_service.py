@@ -2755,7 +2755,11 @@ class LiveExecutionService:
                     token_id=token_key,
                 )
                 reserved = False
-            logger.error(f"Order execution error: {e}")
+            error_str = str(e).lower()
+            if "no orders found to match" in error_str or "fak" in error_str:
+                logger.warning(f"Order execution no-fill (FAK/FOK no liquidity): {e}")
+            else:
+                logger.error(f"Order execution error: {e}")
 
         order.updated_at = utcnow()
         self._remember_order(order)

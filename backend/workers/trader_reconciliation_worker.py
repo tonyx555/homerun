@@ -49,6 +49,7 @@ _WALLET_MONITOR_REFRESH_SECONDS = 15.0
 _TRADER_RECONCILE_ATTEMPTS = 3
 _TRADER_RECONCILE_RETRY_BASE_DELAY_SECONDS = 0.05
 _TRADER_RECONCILE_RETRY_MAX_DELAY_SECONDS = 0.3
+_TRADER_RECONCILE_TIMEOUT_SECONDS = 15.0
 _MAX_TRIGGER_DRAIN_PER_CYCLE = 128
 _RECONCILE_TRIGGER_EVENTS = frozenset(
     {
@@ -237,7 +238,21 @@ async def _run_reconciliation_cycle(
         async with sem:
             for attempt in range(_TRADER_RECONCILE_ATTEMPTS):
                 try:
-                    return await _reconcile_live_state_for_trader(trader, provider_pass=provider_pass)
+                    return await asyncio.wait_for(
+                        _reconcile_live_state_for_trader(trader, provider_pass=provider_pass),
+                        timeout=_TRADER_RECONCILE_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Live reconciliation timed out for trader=%s reason=%s attempt=%d/%d timeout=%.1fs",
+                        trader_id,
+                        reason,
+                        attempt + 1,
+                        _TRADER_RECONCILE_ATTEMPTS,
+                        _TRADER_RECONCILE_TIMEOUT_SECONDS,
+                    )
+                    summary["failures"] = int(summary["failures"]) + 1
+                    break
                 except StaleDataError as exc:
                     if attempt < _TRADER_RECONCILE_ATTEMPTS - 1:
                         logger.warning(
