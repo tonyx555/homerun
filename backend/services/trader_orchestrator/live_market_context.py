@@ -452,8 +452,15 @@ def _window_change(
     return {"delta": delta, "percent": pct}
 
 
-def _build_history_summary(history: list[dict[str, float]]) -> dict[str, Any]:
+def _build_history_summary(
+    history: list[dict[str, float]],
+    *,
+    max_history_seconds: int | None = None,
+) -> dict[str, Any]:
     now_ms = float(time.time() * 1000.0)
+    if max_history_seconds is not None and history:
+        cutoff_ms = now_ms - (max_history_seconds * 1000.0)
+        history = [pt for pt in history if pt["t"] >= cutoff_ms]
     if not history:
         return {
             "points": 0,
@@ -565,6 +572,7 @@ def _build_context_from_cached_market_state(
     no_observed_at: str | None,
     selected_token: str | None,
     selected_history: list[dict[str, float]],
+    max_history_seconds: int | None = None,
 ) -> dict[str, Any]:
     signal_market_id = _normalize_identifier(getattr(signal, "market_id", ""))
     signal_entry = safe_float(getattr(signal, "entry_price", None))
@@ -668,7 +676,7 @@ def _build_context_from_cached_market_state(
         "is_current": timing.get("is_current"),
         "market_closed": timing.get("closed"),
         "market_resolved": timing.get("resolved"),
-        "history_summary": _build_history_summary(selected_history),
+        "history_summary": _build_history_summary(selected_history, max_history_seconds=max_history_seconds),
         "history_tail": selected_history[-20:] if selected_history else [],
     }
 
@@ -678,6 +686,7 @@ def _build_cached_signal_contexts(
     *,
     max_history_points: int,
     strict_ws_only: bool,
+    max_history_seconds: int | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
     try:
         feed_manager = get_feed_manager()
@@ -764,6 +773,7 @@ def _build_cached_signal_contexts(
             no_observed_at=no_observed_at,
             selected_token=selected_token,
             selected_history=selected_history,
+            max_history_seconds=max_history_seconds,
         )
 
     return resolved, unresolved
@@ -836,6 +846,7 @@ async def build_cached_live_signal_contexts(
     *,
     max_history_points: int = 120,
     strict_ws_only: bool = False,
+    max_history_seconds: int | None = None,
 ) -> dict[str, dict[str, Any]]:
     signal_rows = _build_signal_context_rows(signals)
     if not signal_rows:
@@ -844,6 +855,7 @@ async def build_cached_live_signal_contexts(
         signal_rows,
         max_history_points=max_history_points,
         strict_ws_only=strict_ws_only,
+        max_history_seconds=max_history_seconds,
     )
     return cached_contexts
 
@@ -861,6 +873,7 @@ async def build_live_signal_contexts(
     prices_batch_timeout_seconds: float = 3.0,
     history_fetch_timeout_seconds: float = 3.0,
     strict_ws_only: bool = False,
+    max_history_seconds: int | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Fetch live market prices + movement context for a set of trade signals."""
     signal_rows = _build_signal_context_rows(signals)
@@ -871,6 +884,7 @@ async def build_live_signal_contexts(
         signal_rows,
         max_history_points=max_history_points,
         strict_ws_only=strict_ws_only,
+        max_history_seconds=max_history_seconds,
     )
     if not unresolved_signal_rows:
         return cached_contexts
@@ -1162,7 +1176,10 @@ async def build_live_signal_contexts(
 
     history_sem = asyncio.Semaphore(max(1, int(max_history_concurrency)))
     now_s = int(time.time())
-    start_s = max(0, now_s - max(60, int(history_window_seconds)))
+    effective_window = int(history_window_seconds)
+    if max_history_seconds is not None and max_history_seconds < effective_window:
+        effective_window = max_history_seconds
+    start_s = max(0, now_s - max(60, effective_window))
     fidelity = max(30, int(history_fidelity_seconds))
     history_timeout = max(0.1, float(history_fetch_timeout_seconds))
     feed_manager = None
@@ -1423,7 +1440,7 @@ async def build_live_signal_contexts(
             "is_current": timing.get("is_current"),
             "market_closed": timing.get("closed"),
             "market_resolved": timing.get("resolved"),
-            "history_summary": _build_history_summary(selected_history),
+            "history_summary": _build_history_summary(selected_history, max_history_seconds=max_history_seconds),
             "history_tail": (selected_history[-max(1, int(history_tail_points)) :] if selected_history else []),
         }
     return contexts

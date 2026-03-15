@@ -7,6 +7,7 @@ import asyncpg
 import copy
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -108,6 +109,7 @@ strategy_db_loader = strategy_loader
 
 _TRADER_TIMEOUT_CANCEL_GRACE_SECONDS = 5.0
 _STRATEGY_EVALUATION_TIMEOUT_SECONDS = 15.0
+_STRATEGY_EVAL_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="strategy-eval")
 _abandoned_trader_cycle_tasks: set[asyncio.Task] = set()
 _inflight_trader_cycle_tasks: dict[str, asyncio.Task] = {}
 
@@ -4528,7 +4530,6 @@ async def _run_trader_once(
                             last_signal_id=signal_id,
                             commit=False,
                         )
-                        await _commit_with_retry(session)
                         cursor_created_at = _signal_cursor_timestamp(signal)
                         cursor_signal_id = signal_id
                         cursor_runtime_sequence = _signal_runtime_sequence(signal) or cursor_runtime_sequence
@@ -4737,7 +4738,6 @@ async def _run_trader_once(
                             last_signal_id=signal_id,
                             commit=False,
                         )
-                        await _commit_with_retry(session)
                         cursor_created_at = _signal_cursor_timestamp(signal)
                         cursor_signal_id = signal_id
                         cursor_runtime_sequence = _signal_runtime_sequence(signal) or cursor_runtime_sequence
@@ -4887,7 +4887,6 @@ async def _run_trader_once(
                             last_signal_id=signal_id,
                             commit=False,
                         )
-                        await _commit_with_retry(session)
                         cursor_created_at = _signal_cursor_timestamp(signal)
                         cursor_signal_id = signal_id
                         cursor_runtime_sequence = _signal_runtime_sequence(signal) or cursor_runtime_sequence
@@ -4999,7 +4998,6 @@ async def _run_trader_once(
                                 last_signal_id=signal_id,
                                 commit=False,
                             )
-                            await _commit_with_retry(session)
                             cursor_created_at = _signal_cursor_timestamp(signal)
                             cursor_signal_id = signal_id
                             cursor_runtime_sequence = _signal_runtime_sequence(signal) or cursor_runtime_sequence
@@ -5145,7 +5143,7 @@ async def _run_trader_once(
                         strategy_params,
                     )
                     decision_future = loop.run_in_executor(
-                        None,
+                        _STRATEGY_EVAL_POOL,
                         strategy.evaluate,
                         runtime_signal,
                         {
@@ -5840,7 +5838,6 @@ async def _run_trader_once(
                         last_signal_id=signal_id,
                         commit=False,
                     )
-                    await _commit_with_retry(session)
                     cursor_created_at = _signal_cursor_timestamp(signal)
                     cursor_signal_id = signal_id
                     cursor_runtime_sequence = _signal_runtime_sequence(signal) or cursor_runtime_sequence
@@ -6355,62 +6352,6 @@ async def run_worker_loop(*, lane: str = _LANE_GENERAL, write_snapshot: bool = T
                     if manual_force_cycle:
                         run_maintenance = False
 
-                    if run_maintenance:
-                        try:
-                            await refresh_strategy_runtime_if_needed(source_keys=None)
-                        except Exception as exc:
-                            logger.warning("Failed strategy runtime refresh pass: %s", exc)
-
-                    if run_maintenance:
-                        try:
-                            await expire_stale_signals(session)
-                        except OperationalError as exc:
-                            if _is_retryable_db_error(exc):
-                                if hasattr(session, "rollback"):
-                                    await session.rollback()
-                                logger.warning("Skipped stale-signal expiry due to transient DB error")
-                            else:
-                                raise
-                        except Exception as exc:
-                            if hasattr(session, "rollback"):
-                                await session.rollback()
-                            logger.warning("Failed stale-signal expiry pass: %s", exc)
-
-                        try:
-                            orphan_cleanup = await _reconcile_orphan_open_orders(session)
-                            if orphan_cleanup.get("rows_seen", 0) > 0:
-                                logger.warning(
-                                    "Reconciled orphan trader orders",
-                                    extra={"orphan_cleanup": orphan_cleanup},
-                                )
-                        except Exception as exc:
-                            if hasattr(session, "rollback"):
-                                await session.rollback()
-                            logger.warning("Failed orphan-order reconciliation pass: %s", exc)
-
-                    if run_maintenance:
-                        control = await read_orchestrator_control(session)
-                    control_active = bool(control.get("is_enabled", False)) and not bool(control.get("is_paused", True))
-                    if control_active and run_maintenance:
-                        try:
-                            stale_watchdog = await _run_terminal_stale_order_watchdog(session)
-                            if stale_watchdog.get("alerted", 0) > 0:
-                                logger.warning(
-                                    "Detected stale active orders on terminal markets",
-                                    extra={"stale_watchdog": stale_watchdog},
-                                )
-                        except Exception as exc:
-                            if hasattr(session, "rollback"):
-                                await session.rollback()
-                            logger.warning("Failed stale-terminal-order watchdog pass: %s", exc)
-                    if run_maintenance:
-                        try:
-                            async with release_conn(session):
-                                await hot_state.flush_audit_buffer()
-                                await hot_state.reseed_if_stale()
-                        except Exception as exc:
-                            logger.warning("Hot state maintenance failed: %s", exc)
-                        last_maintenance_at = utcnow()
                     mode = _canonical_trader_mode(control.get("mode"), default="shadow")
                     cycle_interval = max(
                         1,
@@ -6686,7 +6627,7 @@ async def run_worker_loop(*, lane: str = _LANE_GENERAL, write_snapshot: bool = T
                     else:
                         non_crypto_trader_specs.append(spec)
 
-                crypto_tasks = [
+                all_trader_tasks = [
                     asyncio.create_task(
                         _run_trader_once_with_timeout(
                             spec["trader"],
@@ -6697,31 +6638,72 @@ async def run_worker_loop(*, lane: str = _LANE_GENERAL, write_snapshot: bool = T
                             timeout_seconds=trader_cycle_timeout_seconds,
                         )
                     )
-                    for spec in crypto_trader_specs
+                    for spec in crypto_trader_specs + non_crypto_trader_specs
                 ]
-                if crypto_tasks:
-                    await asyncio.sleep(0)
-
-                for spec in non_crypto_trader_specs:
-                    decisions, orders, processed_signals = await _run_trader_once_with_timeout(
-                        spec["trader"],
-                        control,
-                        process_signals=bool(spec["process_signals"]),
-                        trigger_signal_ids_by_source=spec["trigger_signal_ids_by_source"],
-                        trigger_signal_snapshots_by_source=spec["trigger_signal_snapshots_by_source"],
-                        timeout_seconds=trader_cycle_timeout_seconds,
-                    )
-                    total_decisions += decisions
-                    total_orders += orders
-                    total_processed_signals += processed_signals
-
-                if crypto_tasks:
-                    for decisions, orders, processed_signals in await asyncio.gather(*crypto_tasks):
+                if all_trader_tasks:
+                    for decisions, orders, processed_signals in await asyncio.gather(*all_trader_tasks):
                         total_decisions += decisions
                         total_orders += orders
                         total_processed_signals += processed_signals
 
                 _prune_module_caches({str(t.get("id") or "") for t in traders})
+
+                # ── Deferred maintenance (runs after trader processing) ──
+                if run_maintenance:
+                    try:
+                        await refresh_strategy_runtime_if_needed(source_keys=None)
+                    except Exception as exc:
+                        logger.warning("Failed strategy runtime refresh pass: %s", exc)
+
+                if run_maintenance:
+                    async with AsyncSessionLocal() as maint_session:
+                        try:
+                            await expire_stale_signals(maint_session)
+                        except OperationalError as exc:
+                            if _is_retryable_db_error(exc):
+                                if hasattr(maint_session, "rollback"):
+                                    await maint_session.rollback()
+                                logger.warning("Skipped stale-signal expiry due to transient DB error")
+                            else:
+                                raise
+                        except Exception as exc:
+                            if hasattr(maint_session, "rollback"):
+                                await maint_session.rollback()
+                            logger.warning("Failed stale-signal expiry pass: %s", exc)
+
+                        try:
+                            orphan_cleanup = await _reconcile_orphan_open_orders(maint_session)
+                            if orphan_cleanup.get("rows_seen", 0) > 0:
+                                logger.warning(
+                                    "Reconciled orphan trader orders",
+                                    extra={"orphan_cleanup": orphan_cleanup},
+                                )
+                        except Exception as exc:
+                            if hasattr(maint_session, "rollback"):
+                                await maint_session.rollback()
+                            logger.warning("Failed orphan-order reconciliation pass: %s", exc)
+
+                    control_active = bool(control.get("is_enabled", False)) and not bool(control.get("is_paused", True))
+                    if control_active:
+                        async with AsyncSessionLocal() as maint_session:
+                            try:
+                                stale_watchdog = await _run_terminal_stale_order_watchdog(maint_session)
+                                if stale_watchdog.get("alerted", 0) > 0:
+                                    logger.warning(
+                                        "Detected stale active orders on terminal markets",
+                                        extra={"stale_watchdog": stale_watchdog},
+                                    )
+                            except Exception as exc:
+                                if hasattr(maint_session, "rollback"):
+                                    await maint_session.rollback()
+                                logger.warning("Failed stale-terminal-order watchdog pass: %s", exc)
+
+                    try:
+                        await hot_state.flush_audit_buffer()
+                        await hot_state.reseed_if_stale()
+                    except Exception as exc:
+                        logger.warning("Hot state maintenance failed: %s", exc)
+                    last_maintenance_at = utcnow()
 
                 if write_snapshot:
                     async with AsyncSessionLocal() as session:
