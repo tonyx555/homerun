@@ -1543,7 +1543,7 @@ class SmartWalletPoolService:
         quality_only_mode = self._recompute_mode == POOL_RECOMPUTE_MODE_QUALITY_ONLY
         candidate_ring_depth = max(1500, TARGET_POOL_SIZE * 3, MAX_POOL_SIZE * 3)
 
-        # -- Phase 1: Read aggregates + load wallets (short-lived session) --
+        # -- Phase 1a: Read aggregates + collect candidate addresses --
         async with AsyncSessionLocal() as session:
             aggregate_rows = (
                 await session.execute(
@@ -1655,40 +1655,42 @@ class SmartWalletPoolService:
                 if str(address or "").strip()
             )
 
-            wallet_columns = load_only(
-                DiscoveredWallet.address,
-                DiscoveredWallet.in_top_pool,
-                DiscoveredWallet.discovery_source,
-                DiscoveredWallet.source_flags,
-                DiscoveredWallet.rank_score,
-                DiscoveredWallet.win_rate,
-                DiscoveredWallet.sharpe_ratio,
-                DiscoveredWallet.profit_factor,
-                DiscoveredWallet.total_pnl,
-                DiscoveredWallet.total_trades,
-                DiscoveredWallet.recommendation,
-                DiscoveredWallet.anomaly_score,
-                DiscoveredWallet.max_drawdown,
-                DiscoveredWallet.roi_std,
-                DiscoveredWallet.cluster_id,
-                DiscoveredWallet.is_profitable,
-                DiscoveredWallet.last_analyzed_at,
-                DiscoveredWallet.last_trade_at,
-                DiscoveredWallet.metrics_source_version,
-                DiscoveredWallet.insider_score,
-                DiscoveredWallet.trades_1h,
-                DiscoveredWallet.trades_24h,
-                DiscoveredWallet.unique_markets_24h,
-                DiscoveredWallet.quality_score,
-                DiscoveredWallet.activity_score,
-                DiscoveredWallet.stability_score,
-                DiscoveredWallet.composite_score,
-                DiscoveredWallet.pool_tier,
-                DiscoveredWallet.pool_membership_reason,
-            )
-            wallets: list[DiscoveredWallet] = []
-            seen_wallets: set[str] = set()
-            for address_chunk in _iter_chunks(sorted(candidate_addresses)):
+        # -- Phase 1b: Load wallet objects (separate session, returns conn faster) --
+        wallet_columns = load_only(
+            DiscoveredWallet.address,
+            DiscoveredWallet.in_top_pool,
+            DiscoveredWallet.discovery_source,
+            DiscoveredWallet.source_flags,
+            DiscoveredWallet.rank_score,
+            DiscoveredWallet.win_rate,
+            DiscoveredWallet.sharpe_ratio,
+            DiscoveredWallet.profit_factor,
+            DiscoveredWallet.total_pnl,
+            DiscoveredWallet.total_trades,
+            DiscoveredWallet.recommendation,
+            DiscoveredWallet.anomaly_score,
+            DiscoveredWallet.max_drawdown,
+            DiscoveredWallet.roi_std,
+            DiscoveredWallet.cluster_id,
+            DiscoveredWallet.is_profitable,
+            DiscoveredWallet.last_analyzed_at,
+            DiscoveredWallet.last_trade_at,
+            DiscoveredWallet.metrics_source_version,
+            DiscoveredWallet.insider_score,
+            DiscoveredWallet.trades_1h,
+            DiscoveredWallet.trades_24h,
+            DiscoveredWallet.unique_markets_24h,
+            DiscoveredWallet.quality_score,
+            DiscoveredWallet.activity_score,
+            DiscoveredWallet.stability_score,
+            DiscoveredWallet.composite_score,
+            DiscoveredWallet.pool_tier,
+            DiscoveredWallet.pool_membership_reason,
+        )
+        wallets: list[DiscoveredWallet] = []
+        seen_wallets: set[str] = set()
+        for address_chunk in _iter_chunks(sorted(candidate_addresses)):
+            async with AsyncSessionLocal() as session:
                 wallet_rows = (
                     await session.execute(
                         select(DiscoveredWallet)

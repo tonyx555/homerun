@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
@@ -1951,7 +1951,17 @@ async def reconcile_paper_positions(
     if not dry_run and (closed > 0 or state_updates > 0):
         touched_rows = [row for row in candidates if row.updated_at == now]
         for row in touched_rows:
-            await session.merge(row)
+            await session.execute(
+                update(TraderOrder)
+                .where(TraderOrder.id == row.id)
+                .values(
+                    status=row.status,
+                    actual_profit=row.actual_profit,
+                    updated_at=row.updated_at,
+                    payload_json=row.payload_json,
+                    reason=row.reason,
+                )
+            )
         await session.commit()
         await _publish_trader_order_updates(touched_rows)
         if reverse_signal_ids_by_source:
@@ -4324,7 +4334,17 @@ async def reconcile_live_positions(
     if not dry_run and (closed > 0 or state_updates > 0):
         touched_rows = [row for row in candidates if row.updated_at == now]
         for row in touched_rows:
-            await session.merge(row)
+            await session.execute(
+                update(TraderOrder)
+                .where(TraderOrder.id == row.id)
+                .values(
+                    status=row.status,
+                    actual_profit=row.actual_profit,
+                    updated_at=row.updated_at,
+                    payload_json=row.payload_json,
+                    reason=row.reason,
+                )
+            )
         await session.commit()
         await _publish_trader_order_updates(touched_rows)
         if reverse_signal_ids_by_source:
