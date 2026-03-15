@@ -162,7 +162,7 @@ class TailEndCarryStrategy(BaseStrategy):
     default_config = {
         "min_probability": 0.85,
         "max_probability": 0.999,
-        "min_upside_percent": 10.0,
+        "min_upside_percent": 5.0,
         "min_days_to_resolution": 0.01,
         "max_days_to_resolution": 1.0,
         "min_liquidity": 3500.0,
@@ -471,7 +471,7 @@ class TailEndCarryStrategy(BaseStrategy):
 
         min_probability = clamp(safe_float(cfg.get("min_probability"), 0.85), 0.5, 0.995)
         max_probability = clamp(safe_float(cfg.get("max_probability"), 0.999), min_probability + 0.005, 0.999)
-        min_upside_percent = clamp(safe_float(cfg.get("min_upside_percent"), 10.0), 10.0, 100.0)
+        min_upside_percent = clamp(safe_float(cfg.get("min_upside_percent"), 10.0), 5.0, 100.0)
         min_days = max(0.0, safe_float(cfg.get("min_days_to_resolution"), 0.01))
         max_days = max(min_days + 0.005, safe_float(cfg.get("max_days_to_resolution"), 1.0))
         min_liquidity = max(100.0, safe_float(cfg.get("min_liquidity"), 3500.0))
