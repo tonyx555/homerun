@@ -1105,41 +1105,48 @@ class EntityClusterer:
                 .order_by(WalletCluster.combined_pnl.desc())
             )
             clusters = list(result.scalars().all())
+            cluster_ids = [c.id for c in clusters]
 
-            output = []
-            for c in clusters:
-                # Fetch member wallets
+        # Batch-load all members in one query instead of N+1
+        members_by_cluster: dict[Any, list] = {cid: [] for cid in cluster_ids}
+        if cluster_ids:
+            async with AsyncSessionLocal() as session:
                 members_result = await session.execute(
-                    select(DiscoveredWallet).where(DiscoveredWallet.cluster_id == c.id)
+                    select(DiscoveredWallet).where(DiscoveredWallet.cluster_id.in_(cluster_ids))
                 )
-                members = list(members_result.scalars().all())
+                for m in members_result.scalars().all():
+                    if m.cluster_id in members_by_cluster:
+                        members_by_cluster[m.cluster_id].append(m)
 
-                output.append(
-                    {
-                        "id": c.id,
-                        "label": c.label,
-                        "confidence": c.confidence,
-                        "total_wallets": c.total_wallets,
-                        "combined_pnl": c.combined_pnl,
-                        "combined_trades": c.combined_trades,
-                        "avg_win_rate": c.avg_win_rate,
-                        "detection_method": c.detection_method,
-                        "evidence": c.evidence,
-                        "created_at": c.created_at.isoformat() if c.created_at else None,
-                        "wallets": [
-                            {
-                                "address": m.address,
-                                "username": m.username,
-                                "total_pnl": m.total_pnl,
-                                "win_rate": m.win_rate,
-                                "total_trades": m.total_trades,
-                                "rank_score": m.rank_score,
-                            }
-                            for m in members
-                        ],
-                    }
-                )
-            return output
+        output = []
+        for c in clusters:
+            members = members_by_cluster.get(c.id, [])
+            output.append(
+                {
+                    "id": c.id,
+                    "label": c.label,
+                    "confidence": c.confidence,
+                    "total_wallets": c.total_wallets,
+                    "combined_pnl": c.combined_pnl,
+                    "combined_trades": c.combined_trades,
+                    "avg_win_rate": c.avg_win_rate,
+                    "detection_method": c.detection_method,
+                    "evidence": c.evidence,
+                    "created_at": c.created_at.isoformat() if c.created_at else None,
+                    "wallets": [
+                        {
+                            "address": m.address,
+                            "username": m.username,
+                            "total_pnl": m.total_pnl,
+                            "win_rate": m.win_rate,
+                            "total_trades": m.total_trades,
+                            "rank_score": m.rank_score,
+                        }
+                        for m in members
+                    ],
+                }
+            )
+        return output
 
     async def get_cluster_detail(self, cluster_id: str) -> dict:
         """Get detailed info about a specific cluster."""
@@ -1882,8 +1889,8 @@ class WhaleCohortAnalyzer:
     async def _fetch_rollups(self, addresses: List[str]) -> List[WalletActivityRollup]:
         cutoff = utcnow() - timedelta(days=self.LOOKBACK_DAYS)
         rollups: List[WalletActivityRollup] = []
-        async with AsyncSessionLocal() as session:
-            for chunk in _iter_chunks(addresses):
+        for chunk in _iter_chunks(addresses):
+            async with AsyncSessionLocal() as session:
                 result = await session.execute(
                     select(WalletActivityRollup).where(
                         WalletActivityRollup.wallet_address.in_(chunk),
