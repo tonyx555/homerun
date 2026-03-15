@@ -336,6 +336,7 @@ class BaseStrategy(ABC):
     allow_deduplication: bool = True
 
     # Requirements declaration — what data this strategy needs
+    required_history_seconds: int = 7200  # How much price history the strategy needs (default: 2h)
     requires_order_book: bool = False
     requires_news_data: bool = False
     requires_historical_prices: bool = False

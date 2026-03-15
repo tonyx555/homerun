@@ -4045,21 +4045,22 @@ async def list_unconsumed_trade_signals(
         normalized_cursor_created_at = normalized_cursor_created_at.astimezone(timezone.utc).replace(tzinfo=None)
     normalized_cursor_signal_id = str(cursor_signal_id or "").strip()
     signal_sort_ts = func.coalesce(TradeSignal.updated_at, TradeSignal.created_at)
-    latest_consumed_at = (
-        select(func.max(TraderSignalConsumption.consumed_at))
-        .where(
-            TraderSignalConsumption.trader_id == trader_id,
-            TraderSignalConsumption.signal_id == TradeSignal.id,
+    max_consumed_subq = (
+        select(
+            TraderSignalConsumption.signal_id,
+            func.max(TraderSignalConsumption.consumed_at).label("max_consumed_at"),
         )
-        .correlate(TradeSignal)
-        .scalar_subquery()
+        .where(TraderSignalConsumption.trader_id == trader_id)
+        .group_by(TraderSignalConsumption.signal_id)
+        .subquery("max_consumed")
     )
     query = (
         select(TradeSignal)
+        .outerjoin(max_consumed_subq, TradeSignal.id == max_consumed_subq.c.signal_id)
         .where(
             or_(
-                latest_consumed_at.is_(None),
-                signal_sort_ts > latest_consumed_at,
+                max_consumed_subq.c.max_consumed_at.is_(None),
+                signal_sort_ts > max_consumed_subq.c.max_consumed_at,
             )
         )
         .where(or_(TradeSignal.expires_at.is_(None), TradeSignal.expires_at >= now))

@@ -141,6 +141,10 @@ async def publish_signal_batch(
     if isinstance(signal_snapshots, dict) and signal_snapshots:
         payload["signal_snapshots"] = signal_snapshots
 
+    token_ids = _extract_token_ids(signal_snapshots)
+    if token_ids:
+        _schedule_token_warmup(token_ids)
+
     target_lane = _default_lane_for_source(str(source or ""))
     payload["lane"] = target_lane
     for lane in (target_lane,):
@@ -169,6 +173,60 @@ async def wait_for_signal_batch(
         except asyncio.QueueEmpty:
             break
     return _coalesce_batches(batches)
+
+
+def _extract_token_ids(
+    signal_snapshots: dict[str, dict[str, Any]] | None,
+) -> set[str]:
+    if not isinstance(signal_snapshots, dict):
+        return set()
+    token_ids: set[str] = set()
+    for snapshot in signal_snapshots.values():
+        if not isinstance(snapshot, dict):
+            continue
+        positions = snapshot.get("positions_to_take")
+        if isinstance(positions, list):
+            for pos in positions:
+                if isinstance(pos, dict):
+                    tid = pos.get("token_id")
+                    if isinstance(tid, str) and tid:
+                        token_ids.add(tid)
+        markets = snapshot.get("markets")
+        if isinstance(markets, list):
+            for mkt in markets:
+                if isinstance(mkt, dict):
+                    for key in ("yes_token_id", "no_token_id"):
+                        tid = mkt.get(key)
+                        if isinstance(tid, str) and tid:
+                            token_ids.add(tid)
+        ctx = snapshot.get("strategy_context_json")
+        if isinstance(ctx, dict):
+            tid = ctx.get("token_id")
+            if isinstance(tid, str) and tid:
+                token_ids.add(tid)
+            tids = ctx.get("token_ids")
+            if isinstance(tids, list):
+                for tid in tids:
+                    if isinstance(tid, str) and tid:
+                        token_ids.add(tid)
+    return token_ids
+
+
+def _schedule_token_warmup(token_ids: set[str]) -> None:
+    async def _warmup() -> None:
+        try:
+            from services.ws_feeds import get_feed_manager
+
+            fm = get_feed_manager()
+            await fm.polymarket_feed.subscribe(sorted(token_ids))
+        except Exception:
+            pass
+
+    try:
+        task = asyncio.create_task(_warmup())
+        task.add_done_callback(lambda _t: None)
+    except RuntimeError:
+        pass
 
 
 def get_queue_depth(*, lane: str | None = None) -> int | dict[str, int]:
