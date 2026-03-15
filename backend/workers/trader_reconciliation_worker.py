@@ -156,6 +156,8 @@ async def _reconcile_live_state_for_trader(
             "inventory": {"open_positions": 0, "updates": 0, "inserts": 0, "closures": 0},
         }
 
+    import time as _time
+
     provider_result: dict[str, Any] = {
         "provider_ready": True,
         "active_seen": 0,
@@ -165,6 +167,7 @@ async def _reconcile_live_state_for_trader(
         "price_updates": 0,
     }
     if provider_pass:
+        _t0 = _time.monotonic()
         async with AsyncSessionLocal() as session:
             provider_result = await reconcile_live_provider_orders(
                 session,
@@ -172,6 +175,9 @@ async def _reconcile_live_state_for_trader(
                 commit=True,
                 broadcast=True,
             )
+        _t1 = _time.monotonic()
+        if _t1 - _t0 > 5.0:
+            logger.warning("reconcile_phase provider_orders=%.1fs", _t1 - _t0)
 
     active_seen = int(provider_result.get("active_seen", 0) or 0)
     active_open_orders = 0
@@ -180,6 +186,7 @@ async def _reconcile_live_state_for_trader(
     lifecycle_result: dict[str, Any] = {"would_close": 0, "closed": 0}
     trader_params = _default_strategy_params(trader)
     if (not provider_pass) or active_seen > 0 or active_open_orders > 0:
+        _t2 = _time.monotonic()
         async with AsyncSessionLocal() as session:
             lifecycle_result = await reconcile_live_positions(
                 session,
@@ -188,6 +195,10 @@ async def _reconcile_live_state_for_trader(
                 dry_run=False,
                 reason="reconciliation_worker",
             )
+        _t3 = _time.monotonic()
+        if _t3 - _t2 > 5.0:
+            logger.warning("reconcile_phase lifecycle=%.1fs", _t3 - _t2)
+    _t4 = _time.monotonic()
     async with AsyncSessionLocal() as session:
         inventory_result = await sync_trader_position_inventory(
             session,
@@ -195,6 +206,9 @@ async def _reconcile_live_state_for_trader(
             mode="live",
             commit=True,
         )
+    _t5 = _time.monotonic()
+    if _t5 - _t4 > 5.0:
+        logger.warning("reconcile_phase inventory=%.1fs", _t5 - _t4)
 
     return {
         "provider": provider_result,

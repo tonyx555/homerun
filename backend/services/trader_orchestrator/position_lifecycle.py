@@ -2044,6 +2044,9 @@ async def reconcile_live_positions(
     )
     mark_touch_interval_seconds = _mark_touch_interval_seconds(params, mode="live")
 
+    import time as _time
+    _lc_t0 = _time.monotonic()
+
     candidates = list(
         (
             await session.execute(
@@ -2191,6 +2194,7 @@ async def reconcile_live_positions(
         ).all()
         signal_payloads = {str(row.id): dict(row.payload_json or {}) for row in signal_rows}
 
+    _lc_t1 = _time.monotonic()
     # Release the DB connection back to the pool while we do external I/O
     # (Polymarket API, wallet positions, WS cache, CLOB midpoints).  The session
     # lazily reconnects on the next DB operation.
@@ -2294,6 +2298,8 @@ async def reconcile_live_positions(
                 )
             except Exception:
                 pending_exit_snapshots = {}
+
+    _lc_t2 = _time.monotonic()
 
     for row in candidates:
         payload = dict(row.payload_json or {})
@@ -4331,9 +4337,12 @@ async def reconcile_live_positions(
                 row.updated_at = now
                 state_updates += 1
 
+    _lc_t3 = _time.monotonic()
+
     if not dry_run and (closed > 0 or state_updates > 0):
         touched_rows = [row for row in candidates if row.updated_at == now]
         if touched_rows:
+            _lc_t3a = _time.monotonic()
             await session.execute(
                 update(TraderOrder)
                 .where(TraderOrder.id == bindparam("_id"))
@@ -4356,7 +4365,18 @@ async def reconcile_live_positions(
                     for row in touched_rows
                 ],
             )
-        await session.commit()
+            _lc_t3b = _time.monotonic()
+            await session.commit()
+            _lc_t3c = _time.monotonic()
+            logger.warning(
+                "reconcile_live_positions timing: db_load=%.1fs external_io=%.1fs processing=%.1fs "
+                "executemany=%.1fs(n=%d) commit=%.1fs total=%.1fs",
+                _lc_t1 - _lc_t0, _lc_t2 - _lc_t1, _lc_t3 - _lc_t2,
+                _lc_t3b - _lc_t3a, len(touched_rows), _lc_t3c - _lc_t3b,
+                _lc_t3c - _lc_t0,
+            )
+        else:
+            await session.commit()
         await _publish_trader_order_updates(touched_rows)
         if reverse_signal_ids_by_source:
             await _publish_reverse_signal_batches(reverse_signal_ids_by_source, emitted_at=now)
