@@ -5645,26 +5645,42 @@ async def _run_trader_once(
 
                             portfolio_allocator = _evaluate_portfolio
 
-                    gate_result = apply_platform_decision_gates(
-                        decision_obj=decision_obj,
-                        runtime_signal=runtime_signal,
-                        strategy=strategy,
-                        checks_payload=checks_payload,
-                        trading_schedule_ok=trading_schedule_ok,
-                        trading_schedule_config=metadata.get("trading_schedule_utc"),
-                        global_limits=global_limits,
-                        effective_risk_limits=effective_risk_limits,
-                        allow_averaging=allow_averaging,
-                        open_market_ids=open_market_ids,
-                        pending_live_exit_count=pending_live_exit_count,
-                        pending_live_exit_summary=pending_live_exit_summary,
-                        pending_live_exit_max_allowed=pending_live_exit_max_allowed,
-                        pending_live_exit_identity_guard_enabled=pending_live_exit_identity_guard_enabled,
-                        portfolio_allocator=portfolio_allocator,
-                        risk_evaluator=risk_evaluator,
-                        invoke_hooks=True,
-                        strategy_params=strategy_params,
+                    _pre_gate_market_id = str(getattr(runtime_signal, "market_id", "") or "").strip()
+                    _pre_gate_blocked = (
+                        _pre_gate_market_id
+                        and not allow_averaging
+                        and _pre_gate_market_id in open_market_ids
+                        and str(getattr(decision_obj, "decision", "") or "").strip() == "selected"
                     )
+                    if _pre_gate_blocked:
+                        gate_result = {
+                            "final_decision": "blocked",
+                            "final_reason": "Stacking guard: market already open (pre-gate)",
+                            "score": getattr(decision_obj, "score", None),
+                            "size_usd": getattr(decision_obj, "size_usd", None),
+                            "checks_payload": checks_payload,
+                        }
+                    else:
+                        gate_result = apply_platform_decision_gates(
+                            decision_obj=decision_obj,
+                            runtime_signal=runtime_signal,
+                            strategy=strategy,
+                            checks_payload=checks_payload,
+                            trading_schedule_ok=trading_schedule_ok,
+                            trading_schedule_config=metadata.get("trading_schedule_utc"),
+                            global_limits=global_limits,
+                            effective_risk_limits=effective_risk_limits,
+                            allow_averaging=allow_averaging,
+                            open_market_ids=open_market_ids,
+                            pending_live_exit_count=pending_live_exit_count,
+                            pending_live_exit_summary=pending_live_exit_summary,
+                            pending_live_exit_max_allowed=pending_live_exit_max_allowed,
+                            pending_live_exit_identity_guard_enabled=pending_live_exit_identity_guard_enabled,
+                            portfolio_allocator=portfolio_allocator,
+                            risk_evaluator=risk_evaluator,
+                            invoke_hooks=True,
+                            strategy_params=strategy_params,
+                        )
                     final_decision = gate_result["final_decision"]
                     final_reason = gate_result["final_reason"]
                     score = gate_result["score"]
@@ -6583,8 +6599,13 @@ async def _run_trader_once_with_timeout(
         else:
             _abandoned_trader_cycle_tasks.add(task)
             task.add_done_callback(_discard_abandoned_trader_cycle)
+            # Clear the inflight entry so the next cycle is not blocked
+            # indefinitely.  The abandoned task will finish eventually
+            # (its done-callback cleans up _abandoned_trader_cycle_tasks)
+            # but we must not let it prevent new cycles from starting.
+            _clear_inflight_trader_cycle_task(trader_id, task)
             logger.warning(
-                "Trader cycle did not finish within %ss cancel-grace; holding reference until completion trader=%s process_signals=%s",
+                "Trader cycle did not finish within %ss cancel-grace; abandoned and cleared inflight lock trader=%s process_signals=%s",
                 _TRADER_TIMEOUT_CANCEL_GRACE_SECONDS,
                 trader_id,
                 process_signals,
@@ -6632,8 +6653,9 @@ async def _run_trader_once_with_timeout(
             if not task.done():
                 _abandoned_trader_cycle_tasks.add(task)
                 task.add_done_callback(_discard_abandoned_trader_cycle)
+                _clear_inflight_trader_cycle_task(trader_id, task)
                 logger.warning(
-                    "Trader cycle parent cancelled during cleanup; holding reference until completion trader=%s",
+                    "Trader cycle parent cancelled during cleanup; abandoned and cleared inflight lock trader=%s",
                     trader_id,
                 )
         raise

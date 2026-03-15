@@ -3300,24 +3300,24 @@ async def reconcile_live_positions(
                 try:
                     from services.live_execution_adapter import execute_live_order
 
-                    try:
-                        await live_execution_service.prepare_sell_balance_allowance(token_id)
-                    except Exception:
-                        pass
-
                     rapid_retry_exit = force_rapid_retry
                     post_only_retry = bool(pending_exit_kind == "take_profit_limit" and not rapid_retry_exit)
-                    exec_result = await execute_live_order(
-                        token_id=token_id,
-                        side="SELL",
-                        size=exit_size,
-                        fallback_price=exit_price,
-                        min_order_size_usd=min_order_size_usd,
-                        time_in_force="IOC" if rapid_retry_exit else "GTC",
-                        post_only=post_only_retry,
-                        resolve_live_price=rapid_retry_exit,
-                        enforce_fallback_bound=True,
-                    )
+                    async with release_conn(session):
+                        try:
+                            await live_execution_service.prepare_sell_balance_allowance(token_id)
+                        except Exception:
+                            pass
+                        exec_result = await execute_live_order(
+                            token_id=token_id,
+                            side="SELL",
+                            size=exit_size,
+                            fallback_price=exit_price,
+                            min_order_size_usd=min_order_size_usd,
+                            time_in_force="IOC" if rapid_retry_exit else "GTC",
+                            post_only=post_only_retry,
+                            resolve_live_price=rapid_retry_exit,
+                            enforce_fallback_bound=True,
+                        )
                     if exec_result.status in {"executed", "open", "submitted"}:
                         logger.info(
                             "Exit retry succeeded for order=%s attempt=%d status=%s",
@@ -4063,7 +4063,8 @@ async def reconcile_live_positions(
                     cancel_success = False
                     if cancel_target:
                         try:
-                            cancel_success = bool(await live_execution_service.cancel_order(cancel_target))
+                            async with release_conn(session):
+                                cancel_success = bool(await live_execution_service.cancel_order(cancel_target))
                         except Exception:
                             cancel_success = False
                     existing_tp_limit["cancelled_for_override_at"] = _iso_utc(now)
@@ -4135,21 +4136,21 @@ async def reconcile_live_positions(
                     try:
                         from services.live_execution_adapter import execute_live_order
 
-                        try:
-                            await live_execution_service.prepare_sell_balance_allowance(token_id)
-                        except Exception:
-                            pass
-
-                        exec_result = await execute_live_order(
-                            token_id=token_id,
-                            side="SELL",
-                            size=exit_size,
-                            fallback_price=close_price,
-                            min_order_size_usd=min_order_size_usd,
-                            time_in_force="IOC" if rapid_close_exit else "GTC",
-                            resolve_live_price=rapid_close_exit,
-                            enforce_fallback_bound=True,
-                        )
+                        async with release_conn(session):
+                            try:
+                                await live_execution_service.prepare_sell_balance_allowance(token_id)
+                            except Exception:
+                                pass
+                            exec_result = await execute_live_order(
+                                token_id=token_id,
+                                side="SELL",
+                                size=exit_size,
+                                fallback_price=close_price,
+                                min_order_size_usd=min_order_size_usd,
+                                time_in_force="IOC" if rapid_close_exit else "GTC",
+                                resolve_live_price=rapid_close_exit,
+                                enforce_fallback_bound=True,
+                            )
                         if exec_result.status in {"executed", "open", "submitted"}:
                             exit_record["status"] = "submitted"
                             exit_record["exit_order_id"] = exec_result.order_id
@@ -4265,6 +4266,60 @@ async def reconcile_live_positions(
             copy_source_wallet=_extract_copy_source_wallet_from_payload(payload),
         )
         closed += 1
+
+    # Grouped exit: when any order in a (market, direction) group gets an exit
+    # triggered, propagate the exit to all siblings in the same group so stacked
+    # orders exit together.
+    if not dry_run:
+        order_groups: dict[tuple[str, str], list] = {}
+        for row in candidates:
+            gk = (str(row.market_id or "").strip(), str(row.direction or "").strip().lower())
+            order_groups.setdefault(gk, []).append(row)
+        for group_key, group_rows in order_groups.items():
+            if len(group_rows) < 2:
+                continue
+            trigger_source: dict[str, Any] | None = None
+            for row in group_rows:
+                payload = dict(row.payload_json or {})
+                pe = payload.get("pending_live_exit")
+                if isinstance(pe, dict) and pe.get("status") in ("pending", "submitted"):
+                    trigger_source = pe
+                    break
+                if row.status in ("closed_win", "closed_loss", "resolved_win", "resolved_loss"):
+                    pc = payload.get("position_close", {})
+                    trigger_source = {
+                        "close_trigger": str(pc.get("close_trigger") or "grouped_exit"),
+                        "close_price": pc.get("close_price"),
+                        "price_source": pc.get("price_source"),
+                    }
+                    break
+            if trigger_source is None:
+                continue
+            for row in group_rows:
+                if row.status not in LIVE_ACTIVE_STATUSES:
+                    continue
+                payload = dict(row.payload_json or {})
+                existing_pe = payload.get("pending_live_exit")
+                if isinstance(existing_pe, dict) and existing_pe.get("status") in ("pending", "submitted", "filled"):
+                    continue
+                token_id = _extract_live_token_id(payload)
+                _fill_not, _fill_sz, _fill_px = _extract_live_fill_metrics(payload)
+                exit_size = _fill_sz if _fill_sz > 0 else ((_fill_not / _fill_px) if _fill_px and _fill_px > 0 else 0.0)
+                source_trigger = str(trigger_source.get("close_trigger") or "grouped_exit")
+                payload["pending_live_exit"] = {
+                    "status": "pending",
+                    "close_trigger": f"grouped:{source_trigger}" if not source_trigger.startswith("grouped:") else source_trigger,
+                    "close_price": trigger_source.get("close_price"),
+                    "price_source": trigger_source.get("price_source"),
+                    "token_id": token_id,
+                    "exit_size": float(exit_size),
+                    "triggered_at": _iso_utc(now),
+                    "reason": "Grouped exit: sibling order in same market exited",
+                    "retry_count": 0,
+                }
+                row.payload_json = payload
+                row.updated_at = now
+                state_updates += 1
 
     if not dry_run and (closed > 0 or state_updates > 0):
         touched_rows = [row for row in candidates if row.updated_at == now]
