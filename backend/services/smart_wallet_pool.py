@@ -1755,7 +1755,6 @@ class SmartWalletPoolService:
                 trades_24h,
                 last_trade_at,
                 now,
-                wallet=wallet,
             )
             stability = self._score_stability(wallet)
             composite = clamp(0.45 * quality + 0.35 * activity + 0.20 * stability, 0.0, 1.0)
@@ -2544,11 +2543,20 @@ class SmartWalletPoolService:
         elif recommendation == "monitor":
             recommendation_boost = 0.02
 
-        return clamp(
+        raw = clamp(
             0.35 * rank + 0.25 * win + 0.15 * sharpe_norm + 0.15 * pf_norm + 0.10 * pnl_norm + recommendation_boost,
             0.0,
             1.0,
         )
+
+        # Moderate discount when quality metrics were computed with a legacy
+        # algorithm version — the underlying stats (win_rate, sharpe, pf, pnl)
+        # are still directionally correct, just less precise.
+        source_version = str(wallet.metrics_source_version or "").strip()
+        if wallet.last_analyzed_at is None or source_version != QUALITY_METRICS_SOURCE_VERSION:
+            raw *= 0.80
+
+        return clamp(raw, 0.0, 1.0)
 
     def _score_activity(
         self,
@@ -2556,7 +2564,6 @@ class SmartWalletPoolService:
         trades_24h: int,
         last_trade_at: Optional[datetime],
         now: datetime,
-        wallet: Optional[DiscoveredWallet] = None,
     ) -> float:
         flow_1h = clamp(trades_1h / 6.0, 0.0, 1.0)
         flow_24h = clamp(trades_24h / 40.0, 0.0, 1.0)
@@ -2568,15 +2575,7 @@ class SmartWalletPoolService:
             recency = clamp(1.0 - (age_hours / ACTIVE_WINDOW_HOURS), 0.0, 1.0)
 
         base_score = clamp(0.50 * flow_1h + 0.30 * flow_24h + 0.20 * recency, 0.0, 1.0)
-        if wallet is None:
-            return base_score
-
-        # Downweight activity for wallets with unverified/legacy analysis profiles.
-        source_version = str(wallet.metrics_source_version or "").strip()
-        analysis_verified = wallet.last_analyzed_at is not None and source_version == QUALITY_METRICS_SOURCE_VERSION
-        if analysis_verified:
-            return base_score
-        return clamp(base_score * 0.35, 0.0, 1.0)
+        return base_score
 
     def _score_stability(self, wallet: DiscoveredWallet) -> float:
         drawdown = wallet.max_drawdown
