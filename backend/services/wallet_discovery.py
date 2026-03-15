@@ -2163,10 +2163,10 @@ class WalletDiscoveryEngine:
         priority_limit = max(50, min(limit or default_limit, default_limit))
         backfill_limit = max(100, min(priority_limit, default_limit))
 
-        async with AsyncSessionLocal() as session:
-            resolved_positions_expr = func.coalesce(DiscoveredWallet.wins, 0) + func.coalesce(DiscoveredWallet.losses, 0)
-            gap_reanalysis_cutoff = utcnow() - timedelta(hours=_TRADE_GAP_REANALYSIS_INTERVAL_HOURS)
+        resolved_positions_expr = func.coalesce(DiscoveredWallet.wins, 0) + func.coalesce(DiscoveredWallet.losses, 0)
+        gap_reanalysis_cutoff = utcnow() - timedelta(hours=_TRADE_GAP_REANALYSIS_INTERVAL_HOURS)
 
+        async with AsyncSessionLocal() as session:
             top_pool_rows = await session.execute(
                 select(DiscoveredWallet.address)
                 .where(
@@ -2183,6 +2183,7 @@ class WalletDiscoveryEngine:
             )
             top_pool = [str(row.address).lower() for row in top_pool_rows.all() if row.address]
 
+        async with AsyncSessionLocal() as session:
             smart_pool_query = (
                 select(DiscoveredWallet.address)
                 .where(
@@ -2204,6 +2205,7 @@ class WalletDiscoveryEngine:
             smart_pool_rows = await session.execute(smart_pool_query)
             smart_pool = [str(row.address).lower() for row in smart_pool_rows.all() if row.address]
 
+        async with AsyncSessionLocal() as session:
             gap_refresh_rows = await session.execute(
                 select(DiscoveredWallet.address)
                 .where(
@@ -2224,6 +2226,7 @@ class WalletDiscoveryEngine:
             )
             gap_refresh = [str(row.address).lower() for row in gap_refresh_rows.all() if row.address]
 
+        async with AsyncSessionLocal() as session:
             backfill_rows = await session.execute(
                 select(DiscoveredWallet.address)
                 .where(
