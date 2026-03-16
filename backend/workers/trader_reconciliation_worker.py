@@ -191,6 +191,7 @@ async def _reconcile_live_state_for_trader(
     active_open_orders = 0
     async with AsyncSessionLocal() as session:
         active_open_orders = await get_open_order_count_for_trader(session, trader_id, mode="live")
+    _tlog(f"guard trader={trader_id[:8]} provider_pass={provider_pass} active_seen={active_seen} active_open_orders={active_open_orders}")
     lifecycle_result: dict[str, Any] = {"would_close": 0, "closed": 0}
     trader_params = _default_strategy_params(trader)
     if (not provider_pass) or active_seen > 0 or active_open_orders > 0:
