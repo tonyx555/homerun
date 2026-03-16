@@ -118,6 +118,20 @@ strategy_db_loader = strategy_loader
 
 _TRADER_TIMEOUT_CANCEL_GRACE_SECONDS = 5.0
 _STRATEGY_EVALUATION_TIMEOUT_SECONDS = 15.0
+_SIGNAL_DEADLOCK_MAX_RETRIES = 3
+_SIGNAL_DEADLOCK_BASE_DELAY = 0.1
+_SIGNAL_TRANSIENT_ERROR_MARKERS = (
+    "deadlock detected",
+    "serialization failure",
+    "could not serialize access",
+)
+
+
+def _is_transient_db_error(exc: Exception) -> bool:
+    """Return True for DB errors that are safe to retry (deadlock, serialization)."""
+    msg = str(getattr(exc, "orig", exc)).lower()
+    return any(marker in msg for marker in _SIGNAL_TRANSIENT_ERROR_MARKERS)
+
 _STRATEGY_EVAL_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="strategy-eval")
 _abandoned_trader_cycle_tasks: set[asyncio.Task] = set()
 _inflight_trader_cycle_tasks: dict[str, asyncio.Task] = {}
@@ -5216,10 +5230,11 @@ async def _run_trader_once(
                     if signal_source == "traders":
                         if traders_scope_context is None:
                             traders_params = dict(source_config.get("strategy_params") or {})
-                            traders_scope_context = await _build_traders_scope_context(
-                                session,
-                                traders_params.get("traders_scope"),
-                            )
+                            async with AsyncSessionLocal() as _scope_session:
+                                traders_scope_context = await _build_traders_scope_context(
+                                    _scope_session,
+                                    traders_params.get("traders_scope"),
+                                )
                         scope_ok, scope_payload = _signal_matches_traders_scope(runtime_signal, traders_scope_context)
                         traders_scope_payload = scope_payload
                         if not scope_ok:
@@ -5414,11 +5429,17 @@ async def _run_trader_once(
                             if not copy_inventory_loaded or copy_signal_side == "SELL":
                                 copy_inventory_loaded = True
                                 try:
-                                    wallet_snapshot = await list_live_wallet_positions_for_trader(
-                                        session,
-                                        trader_id=trader_id,
-                                        include_managed=True,
-                                    )
+                                    # Use a separate session to prevent
+                                    # release_conn inside this function from
+                                    # rolling back uncommitted data on the
+                                    # main session (signal upsert, emissions,
+                                    # strategy version rows, etc.).
+                                    async with AsyncSessionLocal() as _inv_session:
+                                        wallet_snapshot = await list_live_wallet_positions_for_trader(
+                                            _inv_session,
+                                            trader_id=trader_id,
+                                            include_managed=True,
+                                        )
                                 except Exception as exc:
                                     copy_inventory_context = {
                                         "available": False,
@@ -6253,6 +6274,19 @@ async def _run_trader_once(
                             "Trader %s session rollback failed after signal %s error; session may be invalidated",
                             trader_id, signal_id,
                         )
+                    # Transient DB errors (deadlock, serialization failure):
+                    # skip this signal without recording a permanent failure
+                    # or advancing the cursor.  The signal stays pending and
+                    # will be retried on the next orchestrator cycle once the
+                    # conflicting transaction has finished.
+                    if _is_transient_db_error(exc):
+                        logger.warning(
+                            "Trader %s transient DB error on signal %s, will retry next cycle: %s",
+                            trader_id,
+                            signal_id,
+                            exc,
+                        )
+                        continue
                     logger.exception(
                         "Trader %s failed to process signal %s",
                         trader_id,
