@@ -5970,7 +5970,7 @@ async def get_open_order_count_for_trader(
             func.count(TraderOrder.id).label("count"),
         )
         .where(TraderOrder.trader_id == trader_id)
-        .where(status_key_expr.in_(tuple(UNFILLED_ORDER_STATUSES)))
+        .where(status_key_expr.in_(tuple(OPEN_ORDER_STATUSES)))
         .group_by(TraderOrder.mode)
     )
     if mode is not None:
