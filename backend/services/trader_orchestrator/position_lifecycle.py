@@ -1961,6 +1961,7 @@ async def reconcile_paper_positions(
                     payload_json=row.payload_json,
                     reason=row.reason,
                 )
+                .execution_options(synchronize_session=None)
             )
         await session.commit()
         await _publish_trader_order_updates(touched_rows)
@@ -4352,7 +4353,8 @@ async def reconcile_live_positions(
                     updated_at=bindparam("_updated_at"),
                     payload_json=bindparam("_payload_json"),
                     reason=bindparam("_reason"),
-                ),
+                )
+                .execution_options(synchronize_session=None),
                 [
                     {
                         "_id": row.id,
