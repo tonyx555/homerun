@@ -3381,6 +3381,12 @@ async def delete_trader(session: AsyncSession, trader_id: str, *, force: bool = 
     elif force and open_total_positions > 0:
         await sync_trader_position_inventory(session, trader_id=trader_id)
 
+    # Re-fetch the row: sync_trader_position_inventory may rollback the
+    # session when there are no changes (line 5791), which expires the
+    # original ORM instance and triggers MissingGreenlet on delete.
+    row = await session.get(Trader, trader_id)
+    if row is None:
+        return False
     await session.delete(row)
     await _commit_with_retry(session)
     return True
@@ -5787,8 +5793,6 @@ async def sync_trader_position_inventory(
 
     if commit and (inserts > 0 or updates > 0 or closures > 0):
         await _commit_with_retry(session)
-    elif commit and session.in_transaction():
-        await session.rollback()
 
     return {
         "trader_id": trader_id,

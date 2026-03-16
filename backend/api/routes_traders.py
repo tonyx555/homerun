@@ -1046,6 +1046,9 @@ async def delete_trader_route(
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:
+        logger.error("delete_trader failed for %s: %s", trader_id, exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to delete trader: {exc}")
     if not ok:
         raise HTTPException(status_code=404, detail="Trader not found")
     await create_trader_event(
