@@ -30,6 +30,7 @@ _FAILED_EXIT_MIN_RETRY_INTERVAL_SECONDS = 15
 _WALLET_SIZE_EPSILON = 1e-9
 _MARK_TOUCH_INTERVAL_SECONDS = 0.5
 _MAX_LIVE_EXIT_FALLBACK_MARK_AGE_SECONDS = 20.0
+_WALLET_ABSENT_GRACE_MINUTES = 5.0
 
 
 def _iso_utc(value: datetime) -> str:
@@ -2301,6 +2302,36 @@ async def reconcile_live_positions(
 
     _lc_t2 = _time.monotonic()
 
+    # Pre-scan: identify duplicate orders where multiple orders for the same
+    # token collectively claim more shares than the wallet actually holds.
+    # Keep the oldest order(s) that fit within wallet size; mark excess as duplicates.
+    _duplicate_order_ids: set[str] = set()
+    if wallet_positions_loaded:
+        _token_order_claims: dict[str, list[tuple[str, float, datetime]]] = {}
+        for _scan_row in candidates:
+            _scan_payload = dict(_scan_row.payload_json or {})
+            _scan_token = _extract_live_token_id(_scan_payload)
+            if not _scan_token:
+                continue
+            _, _scan_fill_size, _ = _extract_live_fill_metrics(_scan_payload)
+            if _scan_fill_size <= _WALLET_SIZE_EPSILON:
+                continue
+            _scan_created = _scan_row.created_at or _scan_row.updated_at or now
+            _token_order_claims.setdefault(_scan_token, []).append(
+                (str(_scan_row.id or ""), _scan_fill_size, _scan_created)
+            )
+        for _tok, _orders in _token_order_claims.items():
+            if len(_orders) < 2:
+                continue
+            _wallet_pos = wallet_positions_by_token.get(_tok)
+            _wallet_sz = _extract_wallet_position_size(_wallet_pos)
+            _orders.sort(key=lambda x: x[2])  # oldest first
+            _claimed = 0.0
+            for _oid, _fsz, _ in _orders:
+                if _claimed + _WALLET_SIZE_EPSILON >= _wallet_sz:
+                    _duplicate_order_ids.add(_oid)
+                _claimed += _fsz
+
     for row in candidates:
         payload = dict(row.payload_json or {})
         _exit_instance = None
@@ -2530,6 +2561,63 @@ async def reconcile_live_positions(
                         )
                         closed += 1
                     continue
+
+        # Duplicate order detection (common section): close excess orders
+        # for the same token that collectively claim more shares than wallet holds.
+        if str(row.id or "") in _duplicate_order_ids:
+            _dup_close_price = (
+                pending_current_price
+                if pending_current_price is not None and pending_current_price > 0
+                else entry_fill_price
+            )
+            if _dup_close_price is not None and _dup_close_price > 0 and entry_fill_size > 0:
+                _dup_notional = entry_fill_notional if entry_fill_notional > 0 else (safe_float(row.notional_usd) or 0.0)
+                _dup_proceeds = entry_fill_size * _dup_close_price
+                _dup_pnl = _dup_proceeds - _dup_notional
+                _dup_status = _status_for_close(pnl=_dup_pnl, close_trigger="duplicate_wallet_excess")
+                if not dry_run:
+                    pending_exit_local = payload.get("pending_live_exit")
+                    if isinstance(pending_exit_local, dict):
+                        pending_exit_local["status"] = "superseded_duplicate"
+                        pending_exit_local["resolved_at"] = _iso_utc(now)
+                        payload["pending_live_exit"] = pending_exit_local
+                    row.status = _dup_status
+                    row.actual_profit = _dup_pnl
+                    row.updated_at = now
+                    payload["position_close"] = {
+                        "close_price": _dup_close_price,
+                        "price_source": "duplicate_wallet_excess",
+                        "close_trigger": "duplicate_wallet_excess",
+                        "realized_pnl": _dup_pnl,
+                        "closed_at": _iso_utc(now),
+                        "reason": reason,
+                    }
+                    row.payload_json = payload
+                    hot_state.record_order_resolved(
+                        trader_id=trader_id,
+                        mode=str(row.mode or ""),
+                        order_id=str(row.id or ""),
+                        market_id=str(row.market_id or ""),
+                        direction=str(row.direction or ""),
+                        source=str(row.source or ""),
+                        status=_dup_status,
+                        actual_profit=_dup_pnl,
+                        payload=payload,
+                        copy_source_wallet=_extract_copy_source_wallet_from_payload(payload),
+                    )
+                    closed += 1
+                total_realized_pnl += _dup_pnl
+                by_status[_dup_status] = int(by_status.get(_dup_status, 0)) + 1
+                would_close += 1
+                details.append({
+                    "order_id": row.id,
+                    "market_id": row.market_id,
+                    "close_trigger": "duplicate_wallet_excess",
+                    "close_price": _dup_close_price,
+                    "realized_pnl": _dup_pnl,
+                    "next_status": _dup_status,
+                })
+                continue
 
         pending_exit = payload.get("pending_live_exit")
         pending_exit_status = (
@@ -3540,7 +3628,7 @@ async def reconcile_live_positions(
             )
             wallet_flat_override = (
                 (wallet_flat_by_snapshot or wallet_flat_by_absence)
-                and (provider_terminal or wallet_trade_confirms_exit)
+                and (provider_terminal or wallet_trade_confirms_exit or not pending_market_tradable)
             )
             if wallet_flat_override:
                 close_trigger = "wallet_flat_override"
@@ -3821,6 +3909,17 @@ async def reconcile_live_positions(
             close_price = wallet_settlement_price
             close_trigger = "resolution"
             price_source = "wallet_redeemable_mark"
+        elif (
+            wallet_positions_loaded
+            and token_id
+            and wallet_position_size <= _WALLET_SIZE_EPSILON
+            and not market_tradable
+            and age_minutes is not None
+            and age_minutes >= _WALLET_ABSENT_GRACE_MINUTES
+        ):
+            close_price = current_price if current_price is not None and current_price > 0 else entry_price
+            close_trigger = "wallet_absent_flatten"
+            price_source = current_price_source or "entry_price"
         else:
             pnl_pct = None
             if exit_eval_price is not None and entry_price > 0:
@@ -3997,7 +4096,9 @@ async def reconcile_live_positions(
                     close_trigger = "market_inactive"
                     price_source = exit_eval_price_source
 
-        close_is_resolution = close_trigger in {"resolution", "resolution_inferred"}
+        close_is_resolution = close_trigger in {
+            "resolution", "resolution_inferred", "wallet_absent_flatten",
+        }
 
         if close_price is None:
             state_changed = False
