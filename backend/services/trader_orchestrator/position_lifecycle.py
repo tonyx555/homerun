@@ -4360,19 +4360,17 @@ async def reconcile_live_positions(
             _lc_t3b = _time.monotonic()
             await session.commit()
             _lc_t3c = _time.monotonic()
+            _total_elapsed = _lc_t3c - _lc_t0
             _timing_msg = (
                 f"  lifecycle_detail: db_load={_lc_t1 - _lc_t0:.1f}s "
                 f"external_io={_lc_t2 - _lc_t1:.1f}s processing={_lc_t3 - _lc_t2:.1f}s "
                 f"executemany={_lc_t3b - _lc_t3a:.1f}s(n={len(touched_rows)}) "
-                f"commit={_lc_t3c - _lc_t3b:.1f}s total={_lc_t3c - _lc_t0:.1f}s"
+                f"commit={_lc_t3c - _lc_t3b:.1f}s total={_total_elapsed:.1f}s"
             )
-            logger.warning("reconcile_live_positions timing: %s", _timing_msg)
-            try:
-                with open(r"C:\homerun\reconcile_timing.log", "a") as _f:
-                    _f.write(f"{_timing_msg}\n")
-                    _f.flush()
-            except Exception:
-                pass
+            if _total_elapsed >= 5.0:
+                logger.warning("reconcile_live_positions timing: %s", _timing_msg)
+            else:
+                logger.debug("reconcile_live_positions timing: %s", _timing_msg)
         else:
             await session.commit()
         await _publish_trader_order_updates(touched_rows)

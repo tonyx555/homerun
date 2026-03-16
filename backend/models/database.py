@@ -3351,7 +3351,7 @@ def _on_checkin(dbapi_connection, connection_record):
     checkout_task_coro = connection_record.info.pop("checkout_task_coro", "unknown")
     if checkout_time is not None:
         elapsed = _time.monotonic() - checkout_time
-        if elapsed > 10.0:
+        if elapsed > 30.0:
             _db_logger.warning(
                 "Connection held for %.1fs before return to pool (task=%s, coro=%s)",
                 elapsed,

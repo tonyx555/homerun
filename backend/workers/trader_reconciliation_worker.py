@@ -156,17 +156,6 @@ async def _reconcile_live_state_for_trader(
             "inventory": {"open_positions": 0, "updates": 0, "inserts": 0, "closures": 0},
         }
 
-    import time as _time
-    _TIMING_LOG = r"C:\homerun\reconcile_timing.log"
-
-    def _tlog(msg: str) -> None:
-        try:
-            with open(_TIMING_LOG, "a") as _f:
-                _f.write(f"{_time.strftime('%H:%M:%S')} {msg}\n")
-                _f.flush()
-        except Exception:
-            pass
-
     provider_result: dict[str, Any] = {
         "provider_ready": True,
         "active_seen": 0,
@@ -176,7 +165,6 @@ async def _reconcile_live_state_for_trader(
         "price_updates": 0,
     }
     if provider_pass:
-        _t0 = _time.monotonic()
         async with AsyncSessionLocal() as session:
             provider_result = await reconcile_live_provider_orders(
                 session,
@@ -184,18 +172,14 @@ async def _reconcile_live_state_for_trader(
                 commit=True,
                 broadcast=True,
             )
-        _t1 = _time.monotonic()
-        _tlog(f"provider_orders={_t1 - _t0:.1f}s")
 
     active_seen = int(provider_result.get("active_seen", 0) or 0)
     active_open_orders = 0
     async with AsyncSessionLocal() as session:
         active_open_orders = await get_open_order_count_for_trader(session, trader_id, mode="live")
-    _tlog(f"guard trader={trader_id[:8]} provider_pass={provider_pass} active_seen={active_seen} active_open_orders={active_open_orders}")
     lifecycle_result: dict[str, Any] = {"would_close": 0, "closed": 0}
     trader_params = _default_strategy_params(trader)
     if (not provider_pass) or active_seen > 0 or active_open_orders > 0:
-        _t2 = _time.monotonic()
         async with AsyncSessionLocal() as session:
             lifecycle_result = await reconcile_live_positions(
                 session,
@@ -204,9 +188,6 @@ async def _reconcile_live_state_for_trader(
                 dry_run=False,
                 reason="reconciliation_worker",
             )
-        _t3 = _time.monotonic()
-        _tlog(f"lifecycle={_t3 - _t2:.1f}s")
-    _t4 = _time.monotonic()
     async with AsyncSessionLocal() as session:
         inventory_result = await sync_trader_position_inventory(
             session,
@@ -214,8 +195,6 @@ async def _reconcile_live_state_for_trader(
             mode="live",
             commit=True,
         )
-    _t5 = _time.monotonic()
-    _tlog(f"inventory={_t5 - _t4:.1f}s")
 
     return {
         "provider": provider_result,
@@ -471,9 +450,10 @@ async def run_worker_loop() -> None:
                     except Exception as exc:
                         logger.warning("Reconciliation strategy runtime refresh failed", exc_info=exc)
 
-                        if not is_enabled or is_paused:
+                    if not is_enabled or is_paused:
+                        async with AsyncSessionLocal() as snap_session:
                             await write_worker_snapshot(
-                                session,
+                                snap_session,
                                 WORKER_NAME,
                                 running=False,
                                 enabled=bool(is_enabled and not is_paused),
