@@ -4860,3 +4860,34 @@ export const getActiveMLModel = async (modelType?: string) => {
   const { data } = await api.get('/ml/active-model', { params: { model_type: modelType } })
   return data
 }
+
+// --- Crypto Filter Diagnostics ---
+
+export interface CryptoFilterRejection {
+  market: string
+  asset: string
+  timeframe: string
+  gate: 'oracle_move' | 'repriced'
+  oracle_move_pct: number
+  threshold_pct?: number
+  side?: string
+  price?: number
+  max_price?: number
+}
+
+export interface CryptoFilterDiagnostics {
+  scanned_at: string
+  markets_scanned: number
+  signals_emitted: number
+  rejections: CryptoFilterRejection[]
+  summary: {
+    oracle_move: number
+    repriced: number
+    max_oracle_move_pct: number
+  }
+}
+
+export const getCryptoFilterDiagnostics = async (): Promise<CryptoFilterDiagnostics> => {
+  const { data } = await api.get('/crypto/filter-diagnostics')
+  return data
+}

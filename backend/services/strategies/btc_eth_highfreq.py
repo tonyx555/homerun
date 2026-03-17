@@ -47,6 +47,17 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# ---------------------------------------------------------------------------
+# Crypto filter diagnostics buffer (populated by _detect_from_crypto_markets)
+# ---------------------------------------------------------------------------
+
+_latest_crypto_filter_diagnostics: dict[str, Any] = {}
+
+
+def get_crypto_filter_diagnostics() -> dict[str, Any]:
+    """Return the most recent crypto market filtering diagnostics."""
+    return dict(_latest_crypto_filter_diagnostics)
+
 
 # ---------------------------------------------------------------------------
 # Evaluate-method constants (ported from BaseCryptoTimeframeStrategy)
@@ -6729,7 +6740,9 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         with fee-aware gating. No rebalance, no pure_arb -- direction is
         determined SOLELY by the oracle signal when oracle is available.
         """
+        global _latest_crypto_filter_diagnostics
         opportunities: list[Opportunity] = []
+        rejections: list[dict[str, Any]] = []
 
         for market in markets:
             market_id = str(market.get("condition_id") or market.get("id") or "")
@@ -6820,15 +6833,44 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 2.5,
             )
             if oracle_move_pct < min_oracle_move:
+                rejections.append({
+                    "market": market.get("slug") or market_id,
+                    "asset": asset or "?",
+                    "timeframe": timeframe or "?",
+                    "gate": "oracle_move",
+                    "oracle_move_pct": round(oracle_move_pct, 4),
+                    "threshold_pct": round(min_oracle_move, 2),
+                })
                 continue
 
             # Gate 2: Price lag detection — only enter when Polymarket hasn't
             # repriced to reflect the oracle move.  If the contract price on our
             # predicted winning side is already expensive, there's no lag to exploit.
             max_repricing = to_float(defaults.get("max_market_repricing_for_entry"), 0.30)
-            if diff_pct > 0 and up_price > (0.50 + max_repricing):
+            repricing_ceiling = round(0.50 + max_repricing, 3)
+            if diff_pct > 0 and up_price > repricing_ceiling:
+                rejections.append({
+                    "market": market.get("slug") or market_id,
+                    "asset": asset or "?",
+                    "timeframe": timeframe or "?",
+                    "gate": "repriced",
+                    "side": "YES",
+                    "price": up_price,
+                    "max_price": repricing_ceiling,
+                    "oracle_move_pct": round(oracle_move_pct, 4),
+                })
                 continue  # YES side already repriced — no lag
-            if diff_pct < 0 and down_price > (0.50 + max_repricing):
+            if diff_pct < 0 and down_price > repricing_ceiling:
+                rejections.append({
+                    "market": market.get("slug") or market_id,
+                    "asset": asset or "?",
+                    "timeframe": timeframe or "?",
+                    "gate": "repriced",
+                    "side": "NO",
+                    "price": down_price,
+                    "max_price": repricing_ceiling,
+                    "oracle_move_pct": round(oracle_move_pct, 4),
+                })
                 continue  # NO side already repriced — no lag
 
             spread = clamp(self._float(market.get("spread")) or 0.0, 0.0, 0.10)
@@ -6884,6 +6926,19 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             if opp is not None:
                 opportunities.append(opp)
 
+        oracle_rejections = [r for r in rejections if r["gate"] == "oracle_move"]
+        max_oracle_move = max((r["oracle_move_pct"] for r in oracle_rejections), default=0.0)
+        _latest_crypto_filter_diagnostics = {
+            "scanned_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            "markets_scanned": len(markets),
+            "signals_emitted": len(opportunities),
+            "rejections": rejections,
+            "summary": {
+                "oracle_move": len(oracle_rejections),
+                "repriced": sum(1 for r in rejections if r["gate"] == "repriced"),
+                "max_oracle_move_pct": round(max_oracle_move, 4),
+            },
+        }
         return opportunities
 
     def _build_detect_opportunity(

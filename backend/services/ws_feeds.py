@@ -1344,6 +1344,17 @@ class FeedManager:
         self._debounce_seconds: float = 2.0  # coalesce changes over 2s window
         self._dispatch_tasks: set[asyncio.Task] = set()
         self._eviction_task: Optional[asyncio.Task] = None
+        # -- WS price push state -----------------------------------------------
+        # Registered frontends: ws_id -> {token_ids: set, callback: async callable}
+        self._ws_push_lock = Lock()
+        self._ws_push_clients: Dict[int, Dict[str, Any]] = {}
+        # token_id -> set of ws_ids wanting that token's prices
+        self._token_to_ws_clients: Dict[str, Set[int]] = {}
+        # Coalesced price updates pending push: token_id -> price dict
+        self._pending_price_updates: Dict[str, Dict[str, Any]] = {}
+        self._price_push_task: Optional[asyncio.Task] = None
+        self._coalesce_ms: float = max(10, int(settings.WS_PRICE_PUSH_COALESCE_MS or 100))
+        self._loop: Optional[asyncio.AbstractEventLoop] = None  # captured in start()
         self._cache.add_on_change_callback(self._on_price_change)
         self._cache.add_on_trade_callback(self._on_trade)
         self._cache.add_on_update_callback(self._on_price_update)
@@ -1395,11 +1406,18 @@ class FeedManager:
         await self._kalshi_feed.start()
         self._started = True
         loop = asyncio.get_running_loop()
+        self._loop = loop  # store for thread-safe scheduling from callbacks
         self._eviction_task = loop.create_task(self._cache_eviction_loop())
+        # Wire PositionMarkState to receive every price tick
+        from services.position_mark_state import get_position_mark_state
+
+        pms = get_position_mark_state()
+        self._cache.add_on_update_callback(pms.on_price_update)
         logger.info(
-            "FeedManager started",
-            polymarket_ws=True,
-            kalshi_state=self._kalshi_feed.state.value,
+            "FeedManager started: loop=%s, on_update_callbacks=%d, pms_callback=%s, pms_on_marks_changed=%s",
+            id(loop), len(self._cache._on_update_callbacks),
+            "wired" if pms.on_price_update in self._cache._on_update_callbacks else "MISSING",
+            "set" if pms._on_marks_changed else "NOT SET",
         )
 
     async def stop(self) -> None:
@@ -1408,9 +1426,15 @@ class FeedManager:
             self._debounce_task.cancel()
         if self._eviction_task and not self._eviction_task.done():
             self._eviction_task.cancel()
+        if self._price_push_task and not self._price_push_task.done():
+            self._price_push_task.cancel()
         await self._polymarket_feed.stop()
         await self._kalshi_feed.stop()
         self._cache.clear()
+        with self._ws_push_lock:
+            self._ws_push_clients.clear()
+            self._token_to_ws_clients.clear()
+            self._pending_price_updates.clear()
         self._started = False
         logger.info("FeedManager stopped")
 
@@ -1430,43 +1454,66 @@ class FeedManager:
         self._debounce_seconds = debounce_seconds
 
     def _on_price_change(self, token_id: str, old_mid: float, new_mid: float) -> None:
-        """Called by PriceCache when a significant price change occurs."""
+        """Called by PriceCache when a significant price change occurs.
+
+        NOTE: Fires from WS receive threads, not the asyncio loop.
+        Must use call_soon_threadsafe for all async scheduling.
+        """
         if self._reactive_scan_callback:
             self._changed_tokens.add(token_id)
-            # Schedule a debounced trigger on the event loop
-            try:
-                loop = asyncio.get_running_loop()
-                if self._debounce_task is None or self._debounce_task.done():
-                    self._debounce_task = loop.create_task(self._debounced_trigger())
-            except RuntimeError:
-                pass  # no running event loop (e.g. during shutdown)
+            if self._loop is not None:
+                try:
+                    self._loop.call_soon_threadsafe(self._schedule_debounced_trigger)
+                except RuntimeError:
+                    pass  # loop closed
+
+        # Event-driven exit evaluation for open positions on significant moves
+        try:
+            from services.trader_orchestrator.position_lifecycle import (
+                evaluate_exit_for_token,
+                get_registered_token_ids,
+            )
+
+            if token_id in get_registered_token_ids() and self._loop is not None:
+                bid_ask = self._cache.get_best_bid_ask(token_id)
+                bid = bid_ask[0] if bid_ask else new_mid
+                ask = bid_ask[1] if bid_ask else new_mid
+                self._loop.call_soon_threadsafe(
+                    self._schedule_exit_eval, token_id, new_mid, bid, ask
+                )
+        except RuntimeError:
+            pass
+        except Exception:
+            pass
 
         # Dispatch DataEvent for event-driven strategies
-        try:
-            from services.data_events import DataEvent, EventType
-            from services.event_dispatcher import event_dispatcher
-            from utils.utcnow import utcnow
+        if self._loop is not None:
+            try:
+                from services.data_events import DataEvent, EventType
+                from utils.utcnow import utcnow
 
-            event = DataEvent(
-                event_type=EventType.PRICE_CHANGE,
-                source="polymarket_ws",
-                timestamp=utcnow(),
-                token_id=token_id,
-                old_price=old_mid,
-                new_price=new_mid,
-            )
-            loop = asyncio.get_running_loop()
-            task = loop.create_task(event_dispatcher.dispatch(event))
-            self._dispatch_tasks.add(task)
-            task.add_done_callback(self._dispatch_tasks.discard)
-        except RuntimeError:
-            pass  # No running event loop
+                event = DataEvent(
+                    event_type=EventType.PRICE_CHANGE,
+                    source="polymarket_ws",
+                    timestamp=utcnow(),
+                    token_id=token_id,
+                    old_price=old_mid,
+                    new_price=new_mid,
+                )
+                self._loop.call_soon_threadsafe(
+                    self._schedule_event_dispatch, event
+                )
+            except RuntimeError:
+                pass
+            except Exception:
+                pass
 
     def _on_trade(self, token_id: str, trade: "TradeRecord") -> None:
         """Dispatch a TRADE_EXECUTION DataEvent for each trade."""
+        if self._loop is None:
+            return
         try:
             from services.data_events import DataEvent, EventType
-            from services.event_dispatcher import event_dispatcher
             from utils.utcnow import utcnow
 
             event = DataEvent(
@@ -1481,12 +1528,13 @@ class FeedManager:
                     "timestamp": trade.timestamp,
                 },
             )
-            loop = asyncio.get_running_loop()
-            task = loop.create_task(event_dispatcher.dispatch(event))
-            self._dispatch_tasks.add(task)
-            task.add_done_callback(self._dispatch_tasks.discard)
+            self._loop.call_soon_threadsafe(
+                self._schedule_event_dispatch, event
+            )
         except RuntimeError:
-            pass  # No running event loop
+            pass
+        except Exception:
+            pass
 
     def _on_price_update(
         self,
@@ -1498,7 +1546,152 @@ class FeedManager:
         ingest_ts: float | None = None,
         sequence: int | None = None,
     ) -> None:
-        return
+        """Called by PriceCache on every cache replacement.
+
+        Accumulates updates for the coalescing window, then a background task
+        flushes them to registered WS clients.
+        """
+        should_schedule = False
+        with self._ws_push_lock:
+            ws_ids = self._token_to_ws_clients.get(token_id)
+            if not ws_ids:
+                return
+            self._pending_price_updates[token_id] = {
+                "mid": mid,
+                "bid": bid,
+                "ask": ask,
+                "exchange_ts": exchange_ts or 0.0,
+                "ingest_ts": ingest_ts or 0.0,
+                "sequence": sequence or 0,
+                "is_fresh": True,
+            }
+            # Check under the same lock to prevent duplicate task creation
+            if self._price_push_task is None or self._price_push_task.done():
+                should_schedule = True
+        # Schedule outside the lock to avoid holding it during asyncio calls.
+        # NOTE: This callback fires from WS receive threads, NOT the asyncio
+        # event loop, so asyncio.get_running_loop() would raise RuntimeError.
+        # Use call_soon_threadsafe to schedule the task on the captured loop.
+        if should_schedule and self._loop is not None:
+            try:
+                self._loop.call_soon_threadsafe(self._schedule_price_push)
+            except RuntimeError:
+                pass  # loop closed
+
+    def _schedule_price_push(self) -> None:
+        """Create the coalesced price push task from the event loop thread."""
+        if self._price_push_task is None or self._price_push_task.done():
+            self._price_push_task = self._loop.create_task(self._coalesced_price_push())
+
+    def _schedule_debounced_trigger(self) -> None:
+        """Schedule the debounced reactive scan trigger from the event loop thread."""
+        if self._debounce_task is None or self._debounce_task.done():
+            self._debounce_task = self._loop.create_task(self._debounced_trigger())
+
+    def _schedule_exit_eval(self, token_id: str, mid: float, bid: float, ask: float) -> None:
+        """Schedule exit evaluation from the event loop thread."""
+        from services.trader_orchestrator.position_lifecycle import evaluate_exit_for_token
+        task = self._loop.create_task(evaluate_exit_for_token(token_id, mid, bid, ask))
+        self._dispatch_tasks.add(task)
+        task.add_done_callback(self._dispatch_tasks.discard)
+
+    def _schedule_event_dispatch(self, event) -> None:
+        """Schedule event dispatcher from the event loop thread."""
+        from services.event_dispatcher import event_dispatcher
+        task = self._loop.create_task(event_dispatcher.dispatch(event))
+        self._dispatch_tasks.add(task)
+        task.add_done_callback(self._dispatch_tasks.discard)
+
+    # -- WS price push registration -----------------------------------------
+
+    def register_ws_client(
+        self,
+        ws_id: int,
+        token_ids: Set[str],
+        push_callback: Callable[..., Any],
+    ) -> None:
+        """Register a frontend WS connection to receive price pushes.
+
+        *ws_id* must be a unique identifier for the websocket (``id(ws)``).
+        *token_ids* is the initial set of token_ids to receive.
+        *push_callback* is an async callable ``(list[dict]) -> None`` that
+        sends the batched price messages to the frontend.
+        """
+        with self._ws_push_lock:
+            self._ws_push_clients[ws_id] = {
+                "token_ids": set(token_ids),
+                "callback": push_callback,
+            }
+            for tid in token_ids:
+                if tid not in self._token_to_ws_clients:
+                    self._token_to_ws_clients[tid] = set()
+                self._token_to_ws_clients[tid].add(ws_id)
+
+    def unregister_ws_client(self, ws_id: int) -> None:
+        """Remove a frontend WS connection from price push."""
+        with self._ws_push_lock:
+            client = self._ws_push_clients.pop(ws_id, None)
+            if client:
+                for tid in client.get("token_ids", set()):
+                    ws_set = self._token_to_ws_clients.get(tid)
+                    if ws_set:
+                        ws_set.discard(ws_id)
+                        if not ws_set:
+                            del self._token_to_ws_clients[tid]
+
+    def update_ws_client_tokens(self, ws_id: int, token_ids: Set[str]) -> None:
+        """Update the set of token_ids a frontend WS client is watching."""
+        with self._ws_push_lock:
+            client = self._ws_push_clients.get(ws_id)
+            if client is None:
+                return
+            old_tokens = client["token_ids"]
+            removed = old_tokens - token_ids
+            added = token_ids - old_tokens
+            client["token_ids"] = set(token_ids)
+            for tid in removed:
+                ws_set = self._token_to_ws_clients.get(tid)
+                if ws_set:
+                    ws_set.discard(ws_id)
+                    if not ws_set:
+                        del self._token_to_ws_clients[tid]
+            for tid in added:
+                if tid not in self._token_to_ws_clients:
+                    self._token_to_ws_clients[tid] = set()
+                self._token_to_ws_clients[tid].add(ws_id)
+
+    async def _coalesced_price_push(self) -> None:
+        """Wait for the coalescing window, then push accumulated updates."""
+        await asyncio.sleep(self._coalesce_ms / 1000.0)
+        with self._ws_push_lock:
+            pending = dict(self._pending_price_updates)
+            self._pending_price_updates.clear()
+        if not pending:
+            return
+        # Build per-client batch: for each client, collect updates for tokens they care about
+        client_batches: Dict[int, Dict[str, Dict[str, Any]]] = {}
+        with self._ws_push_lock:
+            for token_id, price_data in pending.items():
+                ws_ids = self._token_to_ws_clients.get(token_id)
+                if not ws_ids:
+                    continue
+                for ws_id in ws_ids:
+                    if ws_id not in client_batches:
+                        client_batches[ws_id] = {}
+                    client_batches[ws_id][token_id] = price_data
+            callbacks = {
+                ws_id: self._ws_push_clients[ws_id]["callback"]
+                for ws_id in client_batches
+                if ws_id in self._ws_push_clients
+            }
+        for ws_id, token_updates in client_batches.items():
+            cb = callbacks.get(ws_id)
+            if cb is None:
+                continue
+            try:
+                await cb(token_updates)
+            except Exception:
+                pass
 
     async def _cache_eviction_loop(self) -> None:
         """Periodically evict stale entries from the price cache and prune

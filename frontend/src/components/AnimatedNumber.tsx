@@ -54,7 +54,9 @@ export default function AnimatedNumber({
 }
 
 /**
- * Simple animated counter that flashes green/red on change
+ * Financial-grade animated price tick.
+ * Green background pulse + fade on uptick, red on downtick.
+ * Inspired by Bloomberg/Reuters terminal tick coloring.
  */
 export function FlashNumber({
   value,
@@ -62,29 +64,35 @@ export function FlashNumber({
   suffix = '',
   decimals = 2,
   className = '',
-  positiveClass = 'data-glow-green',
-  negativeClass = 'data-glow-red',
 }: AnimatedNumberProps & {
   positiveClass?: string
   negativeClass?: string
 }) {
   const [flash, setFlash] = useState<'up' | 'down' | null>(null)
   const prevValue = useRef(value)
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     if (value !== prevValue.current) {
       setFlash(value > prevValue.current ? 'up' : 'down')
       prevValue.current = value
-      const timer = setTimeout(() => setFlash(null), 600)
-      return () => clearTimeout(timer)
+      if (timerRef.current) clearTimeout(timerRef.current)
+      timerRef.current = setTimeout(() => setFlash(null), 1200)
+      return () => {
+        if (timerRef.current) clearTimeout(timerRef.current)
+      }
     }
   }, [value])
 
   return (
     <motion.span
-      className={`${className} ${flash === 'up' ? positiveClass : flash === 'down' ? negativeClass : ''}`}
-      animate={flash ? { scale: [1, 1.05, 1] } : {}}
-      transition={{ duration: 0.3 }}
+      className={`${className} tick-flash ${flash === 'up' ? 'tick-up' : flash === 'down' ? 'tick-down' : ''}`}
+      animate={
+        flash
+          ? { scale: [1, 1.04, 1] }
+          : {}
+      }
+      transition={{ duration: 0.2, ease: 'easeOut' }}
     >
       {prefix}{value.toFixed(decimals)}{suffix}
     </motion.span>

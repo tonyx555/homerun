@@ -4389,7 +4389,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const [globalSettingsSaveError, setGlobalSettingsSaveError] = useState<string | null>(null)
   const [controlActionError, setControlActionError] = useState<string | null>(null)
   const [globalSettingsDraft, setGlobalSettingsDraft] = useState<GlobalSettingsDraft>(() => buildGlobalSettingsDraft(null, null))
-  const [workTab, setWorkTab] = useState<'trades' | 'terminal' | 'tune' | 'decisions' | 'performance'>('trades')
+  const [workTab, setWorkTab] = useState<'trades' | 'terminal' | 'tune' | 'risk' | 'decisions' | 'performance'>('trades')
   const [performanceSubview, setPerformanceSubview] = useState<PerformanceSubview>('latency')
   const [performanceSectionKey, setPerformanceSectionKey] = useState('')
   const [performanceParamKey, setPerformanceParamKey] = useState('')
@@ -4428,6 +4428,8 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const [tuneDraftTraderId, setTuneDraftTraderId] = useState<string | null>(null)
   const [tuneDraftDirty, setTuneDraftDirty] = useState(false)
   const [tuneSaveError, setTuneSaveError] = useState<string | null>(null)
+  const [riskDraftDirty, setRiskDraftDirty] = useState(false)
+  const [riskSaveError, setRiskSaveError] = useState<string | null>(null)
   const [tuneIteratePrompt, setTuneIteratePrompt] = useState(
     'Analyze recent trader performance and optimize source strategy parameters for higher risk-adjusted PnL. Apply only high-confidence parameter updates.'
   )
@@ -4447,6 +4449,20 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     queryFn: getTraderOrchestratorOverview,
     refetchInterval: isConnected ? 10000 : 20000,
   })
+
+  // Live position marks from event-driven WS push (sub-second freshness)
+  const liveMarksRaw = queryClient.getQueryData<any[]>(['position-marks-live'])
+  const liveMarksByOrderId = useMemo(() => {
+    const map = new Map<string, any>()
+    if (Array.isArray(liveMarksRaw)) {
+      for (const m of liveMarksRaw) {
+        if (m && typeof m === 'object' && m.order_id) {
+          map.set(String(m.order_id), m)
+        }
+      }
+    }
+    return map
+  }, [liveMarksRaw])
 
   const settingsQuery = useQuery({
     queryKey: ['settings'],
@@ -5336,6 +5352,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     if (!selectedTrader) {
       if (tuneDraftTraderId !== null) setTuneDraftTraderId(null)
       if (tuneDraftDirty) setTuneDraftDirty(false)
+      if (riskDraftDirty) setRiskDraftDirty(false)
       return
     }
     if (tuneDraftTraderId === selectedTrader.id) return
@@ -5343,8 +5360,10 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     applyTraderDraftSettings(selectedTrader)
     setTuneDraftTraderId(selectedTrader.id)
     setTuneDraftDirty(false)
+    setRiskDraftDirty(false)
     setTuneSaveError(null)
     setTuneRevertError(null)
+    setRiskSaveError(null)
   }, [
     creatingTraderPreview,
     selectedTrader,
@@ -5467,6 +5486,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
 
   const setDraftRiskFromForm = (values: Record<string, unknown>) => {
     setDraftRisk(JSON.stringify(values, null, 2))
+    if (!traderFlyoutOpen) setRiskDraftDirty(true)
   }
 
   const setDraftTradingSchedule = (
@@ -6128,6 +6148,33 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     },
     onError: (error: unknown) => {
       setTuneSaveError(errorMessage(error, 'Failed to save tune parameters'))
+    },
+  })
+
+  const saveRiskLimitsMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedTrader) {
+        throw new Error('Select a bot before saving risk limits.')
+      }
+      const parsedRisk = parseJsonObject(draftRisk || '{}')
+      if (!parsedRisk.value) {
+        throw new Error(`Risk limits JSON error: ${parsedRisk.error || 'invalid object'}`)
+      }
+      return updateTrader(selectedTrader.id, {
+        risk_limits: parsedRisk.value,
+      })
+    },
+    onMutate: () => {
+      setRiskSaveError(null)
+    },
+    onSuccess: (trader) => {
+      setRiskSaveError(null)
+      setRiskDraftDirty(false)
+      applyTraderDraftSettings(trader)
+      refreshAll()
+    },
+    onError: (error: unknown) => {
+      setRiskSaveError(errorMessage(error, 'Failed to save risk limits'))
     },
   })
 
@@ -7375,8 +7422,10 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         ?? order.entry_price
       )
       const realtimeCrypto = resolveOrderRealtimeCryptoSnapshot(order, directionPresentation.side)
+      const liveMark = liveMarksByOrderId.get(String(order.id || ''))
       const markPx = toNumber(
-        realtimeCrypto.markPrice
+        liveMark?.mark_price
+        ?? realtimeCrypto.markPrice
         ?? order.current_price
         ?? positionState.last_mark_price
         ?? orderPayload.market_price
@@ -7414,7 +7463,13 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         filledNotional,
       })
       const exitProgressPercent = computePendingExitProgressPercent(pendingExit as Record<string, unknown>)
+      // Prefer live mark timestamp from event-driven WS push (epoch seconds)
+      const liveMarkTs = liveMark?.mark_updated_at
+      const liveMarkIso = typeof liveMarkTs === 'number' && liveMarkTs > 0
+        ? new Date(liveMarkTs * 1000).toISOString()
+        : null
       const markUpdatedAt = latestTimestampValue(
+        liveMarkIso,
         realtimeCrypto.updatedAt,
         resolveOrderMarketUpdateTimestamp(order, orderPayload),
       )
@@ -9305,8 +9360,10 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                   )
                                   const directionPresentation = resolveOrderDirectionPresentation(order)
                                   const realtimeCrypto = resolveOrderRealtimeCryptoSnapshot(order, directionPresentation.side)
+                                  const liveMark2 = liveMarksByOrderId.get(String(order.id || ''))
                                   const markPx = toNumber(
-                                    realtimeCrypto.markPrice
+                                    liveMark2?.mark_price
+                                    ?? realtimeCrypto.markPrice
                                     ?? order.current_price
                                     ?? positionState.last_mark_price
                                     ?? orderPayload.market_price
@@ -9350,7 +9407,12 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                     : null
                                   const links = buildOrderMarketLinks(order, orderPayload, signalPayload)
                                   const primaryMarketLink = links.polymarket || links.kalshi
+                                  const liveMark2Ts = liveMark2?.mark_updated_at
+                                  const liveMark2Iso = typeof liveMark2Ts === 'number' && liveMark2Ts > 0
+                                    ? new Date(liveMark2Ts * 1000).toISOString()
+                                    : null
                                   const markUpdatedAt = latestTimestampValue(
+                                    liveMark2Iso,
                                     realtimeCrypto.updatedAt,
                                     resolveOrderMarketUpdateTimestamp(order, orderPayload),
                                   )
@@ -9457,7 +9519,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                         <TableCell className="text-right font-mono py-0.5 text-[10px]">{formatCurrency(toNumber(order.notional_usd), true)}</TableCell>
                                         <TableCell className="text-right font-mono py-0.5 text-[10px]">{fillPx > 0 ? fillPx.toFixed(3) : '\u2014'}</TableCell>
                                         <TableCell className="text-right font-mono py-0.5 text-[10px]">{fillProgressPercent !== null ? formatPercent(fillProgressPercent, 0) : '\u2014'}</TableCell>
-                                        <TableCell className="text-right font-mono py-0.5 text-[10px]">{markPx > 0 ? markPx.toFixed(3) : '\u2014'}</TableCell>
+                                        <TableCell className="text-right font-mono py-0.5 text-[10px]">{markPx > 0 ? <FlashNumber value={markPx} decimals={3} className="font-mono" /> : '\u2014'}</TableCell>
                                         <TableCell className={cn('text-right font-mono py-0.5 text-[10px] font-semibold', unrealized > 0 ? 'text-emerald-500' : unrealized < 0 ? 'text-red-500' : '')}>
                                           {OPEN_ORDER_STATUSES.has(status) ? formatCurrency(unrealized) : '\u2014'}
                                         </TableCell>
@@ -9687,14 +9749,12 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                   </TableCell>
                                     <TableCell className="text-right font-mono py-1">{formatCurrency(row.exposureUsd)}</TableCell>
                                     <TableCell className="text-right font-mono py-1">{row.averagePrice !== null ? row.averagePrice.toFixed(3) : '—'}</TableCell>
-                                    <TableCell className={cn('text-right font-mono py-1', row.markFresh && 'text-sky-300')}>
+                                    <TableCell className="text-right font-mono py-1">
                                       {row.markPrice !== null ? (
                                         <FlashNumber
                                           value={row.markPrice}
                                           decimals={3}
-                                          className={cn('font-mono text-xs', row.markFresh ? 'data-glow-blue' : '')}
-                                          positiveClass="data-glow-green"
-                                          negativeClass="data-glow-red"
+                                          className="font-mono text-xs"
                                         />
                                       ) : '—'}
                                     </TableCell>
@@ -9834,6 +9894,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                   { key: 'trades' as const, label: 'Trades' },
                   { key: 'terminal' as const, label: 'Terminal' },
                   { key: 'tune' as const, label: 'Tune' },
+                  { key: 'risk' as const, label: 'Risk' },
                   { key: 'decisions' as const, label: 'Decisions' },
                   { key: 'performance' as const, label: 'Performance' },
                 ]).map((tab) => (
@@ -10060,7 +10121,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                   providerSnapshotStatus,
                                   pendingExitStatus,
                                   closeTrigger,
-                                  markFresh,
+                                  markFresh: _markFresh,
                                   links,
                                   directionSide,
                                   directionLabel,
@@ -10158,14 +10219,12 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                       <TableCell className="text-right font-mono py-0.5 text-[10px]">{formatCurrency(toNumber(order.notional_usd), true)}</TableCell>
                                       <TableCell className="text-right font-mono py-0.5 text-[10px]">{fillPx > 0 ? fillPx.toFixed(3) : '\u2014'}</TableCell>
                                       <TableCell className="text-right font-mono py-0.5 text-[10px]">{fillProgressPercent !== null ? formatPercent(fillProgressPercent, 0) : '\u2014'}</TableCell>
-                                      <TableCell className={cn('text-right font-mono py-0.5 text-[10px]', markFresh && 'text-sky-300')}>
+                                      <TableCell className="text-right font-mono py-0.5 text-[10px]">
                                         {markPx > 0 ? (
                                           <FlashNumber
                                             value={markPx}
                                             decimals={3}
-                                            className={cn('font-mono text-[10px]', markFresh ? 'data-glow-blue' : '')}
-                                            positiveClass="data-glow-green"
-                                            negativeClass="data-glow-red"
+                                            className="font-mono text-[10px]"
                                           />
                                         ) : '\u2014'}
                                       </TableCell>
@@ -10176,8 +10235,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                             decimals={2}
                                             prefix="$"
                                             className={cn('font-mono text-[10px] font-semibold', unrealized > 0 ? 'text-emerald-500' : unrealized < 0 ? 'text-red-500' : '')}
-                                            positiveClass="data-glow-green"
-                                            negativeClass="data-glow-red"
                                           />
                                         ) : '\u2014'}
                                       </TableCell>
@@ -10554,6 +10611,81 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                 </Tabs>
                               )}
                             </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {workTab === 'risk' && (
+                  <div className="h-full min-h-0 overflow-auto px-1">
+                    <div className="h-full min-h-0 rounded-md border border-border/50 bg-muted/10 p-2">
+                      {!selectedTrader ? (
+                        <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-700 dark:text-amber-100">
+                          Select a bot to configure risk limits.
+                        </div>
+                      ) : (
+                        <div className="flex h-full min-h-0 flex-col gap-2">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex items-center gap-1.5">
+                              <AlertTriangle className="h-3.5 w-3.5 text-rose-500" />
+                              <p className="text-[11px] font-medium">Risk Limits</p>
+                              <Badge variant="outline" className="h-4 px-1.5 text-[9px] font-mono">
+                                {riskFormSchema.param_fields.length} fields
+                              </Badge>
+                              {riskDraftDirty ? (
+                                <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-semibold text-amber-500">
+                                  UNSAVED
+                                </span>
+                              ) : null}
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                className="h-6 px-2 text-[10px]"
+                                onClick={() => {
+                                  applyTraderDraftSettings(selectedTrader)
+                                  setRiskDraftDirty(false)
+                                }}
+                                disabled={!riskDraftDirty}
+                              >
+                                Discard
+                              </Button>
+                              <Button
+                                type="button"
+                                size="sm"
+                                className="h-6 px-2 text-[10px]"
+                                onClick={() => saveRiskLimitsMutation.mutate()}
+                                disabled={saveRiskLimitsMutation.isPending || !riskDraftDirty}
+                              >
+                                {saveRiskLimitsMutation.isPending ? (
+                                  <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                                ) : null}
+                                Save Risk Limits
+                              </Button>
+                            </div>
+                          </div>
+                          <p className="text-[10px] text-muted-foreground/80">
+                            Rendered directly from StrategySDK risk limit schema.
+                          </p>
+                          {riskSaveError ? (
+                            <div className="rounded-md border border-red-500/30 bg-red-500/10 px-2 py-1 text-[10px] text-red-500">
+                              {riskSaveError}
+                            </div>
+                          ) : null}
+                          <div className="flex-1 min-h-0 overflow-auto">
+                            {riskFormSchema.param_fields.length > 0 ? (
+                              <StrategyConfigForm
+                                schema={riskFormSchema as { param_fields: any[] }}
+                                values={riskFormValues}
+                                onChange={setDraftRiskFromForm}
+                              />
+                            ) : (
+                              <p className="text-[10px] text-muted-foreground/80">No risk schema available.</p>
+                            )}
                           </div>
                         </div>
                       )}
@@ -12247,25 +12379,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                       />
                     </div>
                   </div>
-                </FlyoutSection>
-
-                <FlyoutSection
-                  title="Risk Limits"
-                  icon={AlertTriangle}
-                  iconClassName="text-rose-500"
-                  count={`${riskFormSchema.param_fields.length} fields`}
-                  defaultOpen={false}
-                  subtitle="Rendered directly from StrategySDK risk limit schema."
-                >
-                  {riskFormSchema.param_fields.length > 0 ? (
-                    <StrategyConfigForm
-                      schema={riskFormSchema as { param_fields: any[] }}
-                      values={riskFormValues}
-                      onChange={setDraftRiskFromForm}
-                    />
-                  ) : (
-                    <p className="text-[10px] text-muted-foreground/80">No risk schema available.</p>
-                  )}
                 </FlyoutSection>
 
                 <FlyoutSection

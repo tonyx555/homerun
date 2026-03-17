@@ -52,8 +52,8 @@ class Settings(BaseSettings):
     WS_FEED_ENABLED: bool = True  # Enable real-time WebSocket price feeds
     WS_RECONNECT_MAX_DELAY: float = 60.0  # Max reconnect backoff seconds
     WS_PRICE_STALE_SECONDS: float = 30.0  # UI/discovery staleness budget for cached prices
-    WS_EXECUTION_PRICE_STALE_SECONDS: float = 0.1  # Trader execution staleness budget for cached prices
-    EXECUTION_MARKET_DATA_MAX_AGE_MS: int = 100  # Hard freshness gate before trader decisions
+    WS_EXECUTION_PRICE_STALE_SECONDS: float = 10.0  # Trader execution staleness budget for cached WS prices
+    EXECUTION_MARKET_DATA_MAX_AGE_MS: int = 10000  # Hard freshness gate before trader decisions (ms)
     WS_HEARTBEAT_INTERVAL: float = 5.0  # Ping interval to keep connection alive
     WS_STRICT_CONTEXT_WARMUP_SECONDS: float = 0.75  # Strict context WS subscribe warmup before evaluation
     SCANNER_STRICT_WS_MAX_AGE_MS: int = 30000  # WS-only max age for scanner-source strict execution
@@ -69,7 +69,8 @@ class Settings(BaseSettings):
     MARKET_UNIVERSE_INCREMENTAL_SINCE_MINUTES: int = 5  # Delta fetch horizon for updated markets
     MARKET_UNIVERSE_INCREMENTAL_MAX_EVENT_SLUGS: int = 250  # Cap slug fanout for event-diff fetch
     MARKET_UNIVERSE_FULL_RECONCILE_INTERVAL_SECONDS: int = 900  # Forced full reconcile cadence
-    MARKET_DATA_PRICE_STREAM_INTERVAL_SECONDS: float = 1.0  # WS price topic stream cadence
+    MARKET_DATA_PRICE_STREAM_INTERVAL_SECONDS: float = 30.0  # Safety-net fallback cadence (event-driven push is primary)
+    WS_PRICE_PUSH_COALESCE_MS: int = 100  # Coalesce WS price push updates over this window (ms)
     SCANNER_DEGRADE_HEAVY_ON_BACKLOG: bool = True  # Pause heavy lane under queue pressure
     SCANNER_DEGRADE_HEAVY_BACKLOG_THRESHOLD: int = 120  # Queue threshold for heavy-lane degradation
     SCANNER_SLO_WORKER_INTERVAL_SECONDS: int = 5  # Scanner SLO evaluator cadence

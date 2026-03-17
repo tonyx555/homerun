@@ -352,6 +352,61 @@
 }
 
 /* ============================================
+   FINANCIAL TICK FLASH — Bloomberg-style
+   Green pulse on uptick, red pulse on downtick.
+   Background washes in then fades out smoothly.
+   ============================================ */
+.tick-flash {
+  border-radius: 2px;
+  padding: 0px 2px;
+  transition: color 0.8s ease-out;
+}
+
+/* Uptick: green background pulse */
+.tick-up {
+  animation: tick-pulse-up 1.2s ease-out forwards;
+  color: #16a34a; /* green-600 */
+}
+:is(.dark) .tick-up {
+  animation: tick-pulse-up-dark 1.2s ease-out forwards;
+  color: #4ade80; /* green-400 */
+}
+
+/* Downtick: red background pulse */
+.tick-down {
+  animation: tick-pulse-down 1.2s ease-out forwards;
+  color: #dc2626; /* red-600 */
+}
+:is(.dark) .tick-down {
+  animation: tick-pulse-down-dark 1.2s ease-out forwards;
+  color: #f87171; /* red-400 */
+}
+
+@keyframes tick-pulse-up {
+  0%   { background-color: rgba(22, 163, 74, 0.25); box-shadow: 0 0 6px rgba(22, 163, 74, 0.2); }
+  30%  { background-color: rgba(22, 163, 74, 0.12); box-shadow: 0 0 3px rgba(22, 163, 74, 0.1); }
+  100% { background-color: transparent; box-shadow: none; color: inherit; }
+}
+
+@keyframes tick-pulse-up-dark {
+  0%   { background-color: rgba(74, 222, 128, 0.18); box-shadow: 0 0 8px rgba(74, 222, 128, 0.15); }
+  30%  { background-color: rgba(74, 222, 128, 0.08); box-shadow: 0 0 4px rgba(74, 222, 128, 0.08); }
+  100% { background-color: transparent; box-shadow: none; color: inherit; }
+}
+
+@keyframes tick-pulse-down {
+  0%   { background-color: rgba(220, 38, 38, 0.25); box-shadow: 0 0 6px rgba(220, 38, 38, 0.2); }
+  30%  { background-color: rgba(220, 38, 38, 0.12); box-shadow: 0 0 3px rgba(220, 38, 38, 0.1); }
+  100% { background-color: transparent; box-shadow: none; color: inherit; }
+}
+
+@keyframes tick-pulse-down-dark {
+  0%   { background-color: rgba(248, 113, 113, 0.18); box-shadow: 0 0 8px rgba(248, 113, 113, 0.15); }
+  30%  { background-color: rgba(248, 113, 113, 0.08); box-shadow: 0 0 4px rgba(248, 113, 113, 0.08); }
+  100% { background-color: transparent; box-shadow: none; color: inherit; }
+}
+
+/* ============================================
    TICKER TAPE
    ============================================ */
 

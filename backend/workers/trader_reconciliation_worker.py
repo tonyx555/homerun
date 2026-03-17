@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json as _json
 import logging
 import os
 import time
 from typing import Any
+
+import asyncpg
 
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm.exc import StaleDataError
@@ -16,7 +19,12 @@ from services.event_bus import event_bus
 from services.opportunity_strategy_catalog import ensure_all_strategies_seeded
 from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.live_execution_service import live_execution_service
-from services.trader_orchestrator.position_lifecycle import reconcile_live_positions
+from services.trader_orchestrator.position_lifecycle import (
+    reconcile_live_positions,
+    register_open_orders as register_exit_orders,
+    unregister_token as unregister_exit_token,
+    get_registered_token_ids as get_exit_registered_tokens,
+)
 from services.trader_orchestrator_state import (
     create_trader_event,
     get_open_order_count_for_trader,
@@ -24,6 +32,7 @@ from services.trader_orchestrator_state import (
     recover_missing_live_trader_orders,
     reconcile_live_provider_orders,
     sync_trader_position_inventory,
+    OPEN_ORDER_STATUSES,
 )
 from services.wallet_ws_monitor import wallet_ws_monitor
 from services.worker_state import (
@@ -41,10 +50,14 @@ logger = logging.getLogger("trader_reconciliation_worker")
 WORKER_NAME = "trader_reconciliation"
 DEFAULT_INTERVAL_SECONDS = 1
 _IDLE_SLEEP_SECONDS = 1
+_POSITION_MARK_SYNC_INTERVAL_SECONDS = 10.0
+_last_position_mark_sync_at = 0.0
 _MAX_CONSECUTIVE_DB_FAILURES = 3
 _CONTROL_REFRESH_SECONDS = 1.0
-_ACTIVE_POSITION_TICK_SECONDS = 3.0
+_ACTIVE_POSITION_TICK_SECONDS = 10.0
 _EVENT_QUEUE_MAXSIZE = 4096
+_previous_active_order_ids: set[str] = set()
+_pg_notify_conn: asyncpg.Connection | None = None
 _WALLET_MONITOR_REFRESH_SECONDS = 15.0
 _TRADER_RECONCILE_ATTEMPTS = 3
 _TRADER_RECONCILE_RETRY_BASE_DELAY_SECONDS = 0.05
@@ -201,6 +214,233 @@ async def _reconcile_live_state_for_trader(
         "lifecycle": lifecycle_result,
         "inventory": inventory_result,
     }
+
+
+async def _get_pg_notify_conn() -> asyncpg.Connection | None:
+    """Return (or create) a raw asyncpg connection for NOTIFY.
+
+    Re-uses a module-level connection so we don't open a new one per cycle.
+    """
+    global _pg_notify_conn
+    if _pg_notify_conn is not None:
+        try:
+            if not _pg_notify_conn.is_closed():
+                return _pg_notify_conn
+        except Exception:
+            pass
+        _pg_notify_conn = None
+
+    try:
+        from config import settings as _settings
+        dsn = str(_settings.DATABASE_URL).replace("+asyncpg", "")
+        _pg_notify_conn = await asyncpg.connect(dsn=dsn)
+        return _pg_notify_conn
+    except Exception as exc:
+        logger.debug("Failed to create asyncpg NOTIFY connection: %s", exc)
+        return None
+
+
+async def _pg_notify_position_changes(
+    new_active: set[str],
+    closed_ids: set[str],
+    opened_ids: set[str],
+    order_token_map: dict[str, str],
+) -> None:
+    """Fire PG NOTIFY for each detected position change (fill or closure)."""
+    conn = await _get_pg_notify_conn()
+    if conn is None:
+        return
+
+    payloads: list[str] = []
+    for oid in opened_ids:
+        payloads.append(_json.dumps({
+            "action": "fill",
+            "order_id": oid,
+            "token_id": order_token_map.get(oid, ""),
+        }))
+    for oid in closed_ids:
+        payloads.append(_json.dumps({
+            "action": "close",
+            "order_id": oid,
+            "token_id": order_token_map.get(oid, ""),
+        }))
+
+    for payload in payloads:
+        try:
+            await conn.execute(f"SELECT pg_notify('position_change', $1)", payload)
+        except Exception as exc:
+            logger.debug("pg_notify failed: %s", exc)
+            # Reset connection on failure so it reconnects next cycle
+            global _pg_notify_conn
+            try:
+                await conn.close()
+            except Exception:
+                pass
+            _pg_notify_conn = None
+            break
+
+
+async def _sync_position_marks_and_exit_registry() -> None:
+    """Refresh PositionMarkState and exit evaluation registry with current open orders.
+
+    Called periodically after reconciliation cycles to keep the event-driven
+    infrastructure aware of which positions exist and which tokens to monitor.
+    """
+    global _last_position_mark_sync_at
+    now = time.monotonic()
+    if (now - _last_position_mark_sync_at) < _POSITION_MARK_SYNC_INTERVAL_SECONDS:
+        return
+    _last_position_mark_sync_at = now
+
+    try:
+        from models.database import TraderOrder
+        from sqlalchemy import select
+
+        from services.position_mark_state import get_position_mark_state
+        from services.ws_feeds import get_feed_manager
+
+        pms = get_position_mark_state()
+        feed_manager = get_feed_manager()
+
+        async with AsyncSessionLocal() as session:
+            rows = list(
+                (
+                    await session.execute(
+                        select(TraderOrder).where(
+                            TraderOrder.mode == "live",
+                            TraderOrder.status.in_(tuple(OPEN_ORDER_STATUSES)),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+        # Build sets for tracking
+        active_order_ids: set[str] = set()
+        token_ids_to_subscribe: set[str] = set()
+        exit_registry_by_token: dict[str, list[dict[str, Any]]] = {}
+
+        for row in rows:
+            order_id = str(row.id)
+            active_order_ids.add(order_id)
+            payload = dict(row.payload_json or {})
+            live_market = payload.get("live_market") if isinstance(payload.get("live_market"), dict) else {}
+            position_state = payload.get("position_state") if isinstance(payload.get("position_state"), dict) else {}
+
+            # Resolve token_id
+            token_id = str(
+                payload.get("selected_token_id")
+                or payload.get("token_id")
+                or live_market.get("selected_token_id")
+                or ""
+            ).strip()
+            if not token_id:
+                continue
+
+            market_id = str(row.market_id or "").strip()
+            direction = str(row.direction or "yes").strip().lower()
+            entry_price = float(row.effective_price or row.entry_price or 0)
+            notional = float(row.notional_usd or 0)
+            edge_pct = float(row.edge_percent or 0)
+
+            if entry_price <= 0 or notional <= 0:
+                continue
+
+            token_ids_to_subscribe.add(token_id)
+
+            # Register with PositionMarkState
+            pms.register_position(
+                order_id=order_id,
+                market_id=market_id,
+                token_id=token_id,
+                direction=direction,
+                entry_price=entry_price,
+                notional=notional,
+                edge_percent=edge_pct,
+            )
+
+            # Build exit evaluation registry entry
+            if token_id not in exit_registry_by_token:
+                exit_registry_by_token[token_id] = []
+
+            strategy_params = payload.get("strategy_params") if isinstance(payload.get("strategy_params"), dict) else {}
+            pending_exit = payload.get("pending_live_exit") if isinstance(payload.get("pending_live_exit"), dict) else {}
+
+            exit_registry_by_token[token_id].append({
+                "order_id": order_id,
+                "trader_id": str(row.trader_id or ""),
+                "entry_price": entry_price,
+                "has_pending_exit": bool(pending_exit.get("status") in ("submitted", "working")),
+                "take_profit_pct": float(strategy_params.get("take_profit_pct") or 0) or None,
+                "stop_loss_pct": float(strategy_params.get("stop_loss_pct") or 0) or None,
+                "trailing_stop_pct": float(strategy_params.get("trailing_stop_pct") or 0) or None,
+                "min_hold_minutes": float(strategy_params.get("min_hold_minutes") or 0),
+                "highest_price": float(position_state.get("highest_price") or 0) or None,
+                "age_anchor": str(
+                    (row.executed_at or row.updated_at or row.created_at).isoformat()
+                    if (row.executed_at or row.updated_at or row.created_at)
+                    else ""
+                ),
+            })
+
+        # Unregister closed positions from PositionMarkState
+        current_marks = pms.get_marks()
+        for existing_oid in list(current_marks.keys()):
+            if existing_oid not in active_order_ids:
+                pms.unregister_position(existing_oid)
+
+        # Update exit evaluation registry
+        all_registered_tokens = set(get_exit_registered_tokens())
+        for token_id, orders in exit_registry_by_token.items():
+            register_exit_orders(token_id, orders)
+        for old_token in all_registered_tokens - set(exit_registry_by_token.keys()):
+            unregister_exit_token(old_token)
+
+        # Subscribe tokens to WS feed for price updates
+        if token_ids_to_subscribe and getattr(feed_manager, "_started", False):
+            try:
+                await feed_manager.polymarket_feed.subscribe(sorted(token_ids_to_subscribe))
+            except Exception:
+                pass
+
+        # Detect position changes and fire PG NOTIFY for the API process
+        global _previous_active_order_ids
+        opened_ids = active_order_ids - _previous_active_order_ids
+        closed_ids = _previous_active_order_ids - active_order_ids
+        if opened_ids or closed_ids:
+            # Build order→token map for the notification payload
+            order_token_map: dict[str, str] = {}
+            for row in rows:
+                oid = str(row.id)
+                payload = dict(row.payload_json or {})
+                lm = payload.get("live_market") if isinstance(payload.get("live_market"), dict) else {}
+                tid = str(
+                    payload.get("selected_token_id")
+                    or payload.get("token_id")
+                    or lm.get("selected_token_id")
+                    or ""
+                ).strip()
+                order_token_map[oid] = tid
+            try:
+                await _pg_notify_position_changes(
+                    new_active=active_order_ids,
+                    closed_ids=closed_ids,
+                    opened_ids=opened_ids,
+                    order_token_map=order_token_map,
+                )
+            except Exception as exc:
+                logger.debug("Position change notify failed: %s", exc)
+            _previous_active_order_ids = set(active_order_ids)
+
+        logger.debug(
+            "Position mark sync: positions=%d tokens=%d",
+            len(active_order_ids),
+            len(token_ids_to_subscribe),
+        )
+
+    except Exception as exc:
+        logger.warning("Position mark sync failed", exc_info=exc)
 
 
 async def _run_reconciliation_cycle(
@@ -525,6 +765,9 @@ async def run_worker_loop() -> None:
                     provider_pass=provider_pass,
                 )
                 consecutive_db_failures = 0
+
+                # Sync position marks and exit registry for event-driven updates
+                await _sync_position_marks_and_exit_registry()
                 last_open_positions = int(cycle_summary.get("inventory_open_positions", 0) or 0)
                 if provider_pass:
                     last_provider_pass_at = time.monotonic()

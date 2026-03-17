@@ -76,7 +76,7 @@ from utils.market_urls import build_polymarket_market_url
 logger = get_logger(__name__)
 
 ORCHESTRATOR_CONTROL_ID = "default"
-ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS = 5
+ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS = 30
 _UNSET = object()  # Sentinel: distinguish "not provided" from explicit None
 ORCHESTRATOR_SNAPSHOT_ID = "latest"
 OPEN_ORDER_STATUSES = {"submitted", "executed", "open"}
@@ -112,7 +112,7 @@ DEFAULT_LIVE_MARKET_CONTEXT = {
     "max_history_points": 120,
     "timeout_seconds": 4.0,
     "strict_ws_pricing_only": True,
-    "max_market_data_age_ms": 100,
+    "max_market_data_age_ms": 10000,
 }
 DEFAULT_LIVE_PROVIDER_HEALTH = {
     "window_seconds": 180,

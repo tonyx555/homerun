@@ -635,11 +635,25 @@ class WorkerHost:
         def _request_stop() -> None:
             self._stop_event.set()
 
+        _signal_handlers_installed = False
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
                 loop.add_signal_handler(sig, _request_stop)
+                _signal_handlers_installed = True
             except (NotImplementedError, RuntimeError, ValueError):
                 pass
+
+        if not _signal_handlers_installed and os.name == "nt":
+            # Windows: loop.add_signal_handler is not supported.
+            # Use signal.signal for SIGINT (Ctrl+C) and call_soon_threadsafe
+            # to set the stop event from the signal handler thread.
+            def _win_sigint_handler(signum: int, frame: Any) -> None:
+                try:
+                    loop.call_soon_threadsafe(_request_stop)
+                except RuntimeError:
+                    pass  # loop already closed
+
+            signal.signal(signal.SIGINT, _win_sigint_handler)
 
         await self._stop_event.wait()
 

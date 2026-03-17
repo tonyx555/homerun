@@ -401,6 +401,16 @@ export function useRealtimeInvalidation(
     if (messageType === 'prices_update' && lastMessage.data) {
       applyPricesUpdateToOpportunityCaches(lastMessage.data)
     }
+    if (messageType === 'position_marks_update' && lastMessage.data) {
+      // Apply live position marks from event-driven WS push to cached overview
+      const marks = lastMessage.data.marks
+      if (Array.isArray(marks) && marks.length > 0) {
+        queryClient.setQueryData(['position-marks-live'], marks)
+        // Also trigger a lightweight invalidation of the overview so the UI
+        // picks up the latest mark prices without a full REST round-trip
+        queueInvalidations([['trader-orchestrator-overview']])
+      }
+    }
     if (messageType === 'tracked_trader_signal') {
       queueInvalidations([
         ['opportunities', 'traders'],

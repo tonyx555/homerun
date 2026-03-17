@@ -578,7 +578,7 @@ _ORCHESTRATOR_CYCLE_LOCK_KEY = 0x54524F5243485354  # "TRORCHST"
 _ORCHESTRATOR_CRYPTO_CYCLE_LOCK_KEY = 0x54524F5243484352  # "TRORCHCR"
 _orchestrator_lock_connection: asyncpg.Connection | None = None
 _TRADER_IDLE_MAINTENANCE_INTERVAL_SECONDS = 60
-_TRADER_LIVE_MAINTENANCE_INTERVAL_SECONDS = 15
+_TRADER_LIVE_MAINTENANCE_INTERVAL_SECONDS = 30
 _TRADER_SHADOW_MAINTENANCE_INTERVAL_SECONDS = 60
 _HIGH_FREQUENCY_CRYPTO_MAINTENANCE_INTERVAL_SECONDS = 1.0
 _STANDARD_MAX_SIGNALS_PER_CYCLE = 500
@@ -4325,10 +4325,10 @@ async def _run_trader_once(
             max(
                 25,
                 min(
-                    10_000,
+                    30_000,
                     safe_int(
                         live_market_context_settings.get("max_market_data_age_ms"),
-                        int(DEFAULT_LIVE_MARKET_CONTEXT.get("max_market_data_age_ms", 100)),
+                        int(DEFAULT_LIVE_MARKET_CONTEXT.get("max_market_data_age_ms", 10000)),
                     ),
                 ),
             )
@@ -4731,20 +4731,24 @@ async def _run_trader_once(
             live_contexts: dict[str, dict[str, Any]] = {}
             if enable_live_market_context:
                 context_candidates: list[Any] = []
+                fallback_candidates: list[Any] = []
                 for sig in signals:
-                    if strict_ws_pricing_enforced:
+                    sig_source = normalize_source_key(getattr(sig, "source", ""))
+                    if strict_ws_pricing_enforced and sig_source == "crypto":
                         context_candidates.append(sig)
                         continue
-                    source_key = normalize_source_key(getattr(sig, "source", ""))
-                    source_config = source_configs.get(source_key)
+                    if strict_ws_pricing_enforced:
+                        fallback_candidates.append(sig)
+                        continue
+                    source_config = source_configs.get(sig_source)
                     if _supports_live_market_context(sig, source_config):
                         context_candidates.append(sig)
                 try:
-                    if strict_ws_pricing_enforced:
+                    if strict_ws_pricing_enforced and context_candidates:
                         live_contexts = await build_cached_live_signal_contexts(
                             context_candidates,
                             max_history_points=max_history_points,
-                            strict_ws_only=strict_ws_pricing_enforced,
+                            strict_ws_only=True,
                         )
                     elif stream_trigger_mode:
                         live_contexts = await build_cached_live_signal_contexts(
@@ -4763,11 +4767,11 @@ async def _run_trader_once(
                                         market_fetch_timeout_seconds=live_market_context_request_timeout_seconds,
                                         prices_batch_timeout_seconds=live_market_context_request_timeout_seconds,
                                         history_fetch_timeout_seconds=live_market_context_request_timeout_seconds,
-                                        strict_ws_only=strict_ws_pricing_enforced,
+                                        strict_ws_only=False,
                                     ),
                                     timeout=live_market_context_timeout_seconds,
                                 )
-                    else:
+                    elif context_candidates:
                         async with release_conn(session):
                             live_contexts = await asyncio.wait_for(
                                 build_live_signal_contexts(
@@ -4778,10 +4782,31 @@ async def _run_trader_once(
                                     market_fetch_timeout_seconds=live_market_context_request_timeout_seconds,
                                     prices_batch_timeout_seconds=live_market_context_request_timeout_seconds,
                                     history_fetch_timeout_seconds=live_market_context_request_timeout_seconds,
-                                    strict_ws_only=strict_ws_pricing_enforced,
+                                    strict_ws_only=False,
                                 ),
                                 timeout=live_market_context_timeout_seconds,
                             )
+                    if fallback_candidates:
+                        try:
+                            async with release_conn(session):
+                                fallback_contexts = await asyncio.wait_for(
+                                    build_live_signal_contexts(
+                                        fallback_candidates,
+                                        history_window_seconds=history_window_seconds,
+                                        history_fidelity_seconds=history_fidelity_seconds,
+                                        max_history_points=max_history_points,
+                                        market_fetch_timeout_seconds=live_market_context_request_timeout_seconds,
+                                        prices_batch_timeout_seconds=live_market_context_request_timeout_seconds,
+                                        history_fetch_timeout_seconds=live_market_context_request_timeout_seconds,
+                                        strict_ws_only=False,
+                                    ),
+                                    timeout=live_market_context_timeout_seconds,
+                                )
+                            live_contexts.update(fallback_contexts)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as fb_exc:
+                            logger.warning("Fallback live market context failed (%s)", type(fb_exc).__name__)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -4862,7 +4887,7 @@ async def _run_trader_once(
                     strict_age_budget_ms = strict_market_data_age_ms
                     if signal_source == "scanner":
                         strict_age_budget_ms = scanner_strict_market_data_age_ms
-                    if strict_ws_pricing_enforced:
+                    if strict_ws_pricing_enforced and signal_source == "crypto":
                         strategy_params = _enforce_strict_ws_strategy_params(
                             strategy_params,
                             strict_age_budget_ms=strict_age_budget_ms,
@@ -4899,7 +4924,7 @@ async def _run_trader_once(
                         str(prefetched_source_runtime.get("requested_strategy_version_error") or "").strip() or None
                     )
                     live_context = live_contexts.get(signal_id, {})
-                    if strict_ws_pricing_enforced:
+                    if strict_ws_pricing_enforced and signal_source == "crypto":
                         live_source = str(
                             live_context.get("market_data_source")
                             or live_context.get("live_selected_price_source")
@@ -6426,15 +6451,36 @@ async def _run_trader_once(
                         )
                 elif processed_signals == 0:
                     if not stream_trigger_mode:
+                        _no_signal_payload: dict[str, Any] = {
+                            "processed_signals": processed_signals,
+                            "decisions_written": decisions_written,
+                            "orders_written": orders_written,
+                        }
+                        _no_signal_message = "Idle cycle: no pending signals."
+                        if _is_crypto_source_trader(trader):
+                            try:
+                                from services.strategies.btc_eth_highfreq import get_crypto_filter_diagnostics
+                                _cfd = get_crypto_filter_diagnostics()
+                                if _cfd:
+                                    _no_signal_payload["crypto_filter_diagnostics"] = _cfd
+                                    _summary = _cfd.get("summary", {})
+                                    _scanned = _cfd.get("markets_scanned", 0)
+                                    _emitted = _cfd.get("signals_emitted", 0)
+                                    _oracle = _summary.get("oracle_move", 0)
+                                    _repriced = _summary.get("repriced", 0)
+                                    _max_move = _summary.get("max_oracle_move_pct", 0.0)
+                                    _no_signal_message = (
+                                        f"Scanned {_scanned} markets, {_emitted} signals"
+                                        f" \u2014 {_oracle} below oracle threshold (max {_max_move}%),"
+                                        f" {_repriced} already repriced"
+                                    )
+                            except Exception:
+                                pass
                         await _emit_cycle_heartbeat_if_due(
                             session,
                             trader_id=trader_id,
-                            message="Idle cycle: no pending signals.",
-                            payload={
-                                "processed_signals": processed_signals,
-                                "decisions_written": decisions_written,
-                                "orders_written": orders_written,
-                            },
+                            message=_no_signal_message,
+                            payload=_no_signal_payload,
                         )
             if stream_trigger_mode and prefetched_signals:
                 deferred_signal_ids_by_source: dict[str, list[str]] = {}

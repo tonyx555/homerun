@@ -351,6 +351,215 @@ async def lifespan(app: FastAPI):
         for wallet in settings.TRACKED_WALLETS:
             await wallet_tracker.add_wallet(wallet)
 
+        # ── Event-driven price & position mark infrastructure ──
+        # Capture the event loop BEFORE starting FeedManager so that
+        # thread-based price callbacks can schedule async pushes immediately.
+        from api.websocket import set_marks_event_loop, start_marks_refresh_loop
+        set_marks_event_loop(asyncio.get_running_loop())
+        start_marks_refresh_loop()
+
+        _feed_manager_started = False
+        try:
+            from services.ws_feeds import get_feed_manager
+
+            _api_feed_manager = get_feed_manager()
+            if not getattr(_api_feed_manager, "_started", False):
+                await _api_feed_manager.start()
+                _feed_manager_started = True
+                logger.info("FeedManager started in API process for live WS price push")
+        except Exception as exc:
+            logger.warning("FeedManager start failed in API process", exc_info=exc)
+
+        # ── Seed PositionMarkState + subscribe tokens immediately ──
+        async def _seed_position_marks() -> None:
+            """One-shot seed of open positions into PositionMarkState on startup."""
+            from models.database import AsyncSessionLocal as _ASL, TraderOrder
+            from services.position_mark_state import get_position_mark_state
+            from services.ws_feeds import get_feed_manager
+            from sqlalchemy import select
+
+            OPEN_STATUSES = {"submitted", "open", "executed", "working", "pending"}
+            pms = get_position_mark_state()
+            fm = get_feed_manager()
+            try:
+                async with _ASL() as session:
+                    rows = list(
+                        (await session.execute(
+                            select(TraderOrder).where(
+                                TraderOrder.mode == "live",
+                                TraderOrder.status.in_(tuple(OPEN_STATUSES)),
+                            )
+                        )).scalars().all()
+                    )
+                token_ids: set[str] = set()
+                for row in rows:
+                    oid = str(row.id)
+                    payload = dict(row.payload_json or {})
+                    lm = payload.get("live_market") if isinstance(payload.get("live_market"), dict) else {}
+                    tid = str(
+                        payload.get("selected_token_id")
+                        or payload.get("token_id")
+                        or lm.get("selected_token_id")
+                        or ""
+                    ).strip()
+                    if not tid:
+                        continue
+                    entry = float(row.effective_price or row.entry_price or 0)
+                    notional = float(row.notional_usd or 0)
+                    if entry <= 0 or notional <= 0:
+                        continue
+                    direction = str(row.direction or "yes").strip().lower()
+                    edge_pct = float(row.edge_percent or 0)
+                    token_ids.add(tid)
+                    pms.register_position(
+                        order_id=oid,
+                        market_id=str(row.market_id or ""),
+                        token_id=tid,
+                        direction=direction,
+                        entry_price=entry,
+                        notional=notional,
+                        edge_percent=edge_pct,
+                    )
+                if token_ids and getattr(fm, "_started", False):
+                    await fm.polymarket_feed.subscribe(sorted(token_ids))
+                    # Pre-fill marks from PriceCache for any tokens already cached
+                    await asyncio.sleep(2)  # brief wait for WS feed to populate
+                    cache = fm.cache
+                    for tid in token_ids:
+                        mid = cache.get_mid_price(tid)
+                        if mid and mid > 0:
+                            bid_ask = cache.get_best_bid_ask(tid)
+                            bid = bid_ask[0] if bid_ask else mid
+                            ask = bid_ask[1] if bid_ask else mid
+                            obs = cache.get_observed_at_epoch(tid) or 0
+                            seq = cache.get_sequence(tid) or 0
+                            pms.on_price_update(tid, mid, bid, ask, 0.0, obs, seq)
+                logger.info("Seeded PositionMarkState: %d positions, %d tokens", len(rows), len(token_ids))
+            except Exception as exc:
+                logger.warning("Initial position mark seed failed", exc_info=exc)
+
+        if _feed_manager_started:
+            await _seed_position_marks()
+
+        # ── Event-driven position sync via PG LISTEN + 30s safety net ──
+        async def _do_position_mark_sync() -> None:
+            """One-shot sync of PositionMarkState from DB (shared by listener and safety-net)."""
+            from models.database import AsyncSessionLocal as _ASL, TraderOrder
+            from services.position_mark_state import get_position_mark_state
+            from services.ws_feeds import get_feed_manager
+            from sqlalchemy import select as _sel
+
+            OPEN_STATUSES = {"submitted", "open", "executed", "working", "pending"}
+            pms = get_position_mark_state()
+            fm = get_feed_manager()
+            async with _ASL() as session:
+                rows = list(
+                    (await session.execute(
+                        _sel(TraderOrder).where(
+                            TraderOrder.mode == "live",
+                            TraderOrder.status.in_(tuple(OPEN_STATUSES)),
+                        )
+                    )).scalars().all()
+                )
+            active_ids: set[str] = set()
+            token_ids: set[str] = set()
+            for row in rows:
+                oid = str(row.id)
+                active_ids.add(oid)
+                payload = dict(row.payload_json or {})
+                lm = payload.get("live_market") if isinstance(payload.get("live_market"), dict) else {}
+                tid = str(
+                    payload.get("selected_token_id")
+                    or payload.get("token_id")
+                    or lm.get("selected_token_id")
+                    or ""
+                ).strip()
+                if not tid:
+                    continue
+                entry = float(row.effective_price or row.entry_price or 0)
+                notional = float(row.notional_usd or 0)
+                if entry <= 0 or notional <= 0:
+                    continue
+                direction = str(row.direction or "yes").strip().lower()
+                edge_pct = float(row.edge_percent or 0)
+                token_ids.add(tid)
+                pms.register_position(
+                    order_id=oid,
+                    market_id=str(row.market_id or ""),
+                    token_id=tid,
+                    direction=direction,
+                    entry_price=entry,
+                    notional=notional,
+                    edge_percent=edge_pct,
+                )
+            for existing_oid in list(pms.get_marks().keys()):
+                if existing_oid not in active_ids:
+                    pms.unregister_position(existing_oid)
+            if token_ids and getattr(fm, "_started", False):
+                try:
+                    await fm.polymarket_feed.subscribe(sorted(token_ids))
+                except Exception:
+                    pass
+            logger.debug("API position mark sync: positions=%d tokens=%d", len(active_ids), len(token_ids))
+
+        async def _pg_listen_position_changes() -> None:
+            """Listen for PG NOTIFY 'position_change' and trigger immediate sync."""
+            import asyncpg as _asyncpg
+
+            dsn = str(settings.DATABASE_URL).replace("+asyncpg", "")
+            while True:
+                conn = None
+                try:
+                    conn = await _asyncpg.connect(dsn=dsn)
+
+                    def _on_notify(conn_ref, pid, channel, payload):
+                        """Schedule sync on the event loop from the notification callback."""
+                        logger.debug("PG LISTEN position_change: %s", payload)
+                        loop = asyncio.get_event_loop()
+                        loop.call_soon_threadsafe(
+                            lambda: asyncio.ensure_future(_do_position_mark_sync_safe())
+                        )
+
+                    await conn.add_listener("position_change", _on_notify)
+                    logger.info("PG LISTEN started on channel 'position_change'")
+
+                    # Keep connection alive - wait forever (or until cancelled)
+                    while True:
+                        await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    break
+                except Exception as exc:
+                    logger.warning("PG LISTEN connection failed, retrying in 5s: %s", exc)
+                    await asyncio.sleep(5)
+                finally:
+                    if conn is not None:
+                        try:
+                            await conn.close()
+                        except Exception:
+                            pass
+
+        async def _do_position_mark_sync_safe() -> None:
+            """Wrapper with error handling for notification-triggered syncs."""
+            try:
+                await _do_position_mark_sync()
+            except Exception as exc:
+                logger.warning("Notification-triggered position mark sync failed", exc_info=exc)
+
+        async def _position_mark_safety_net_loop() -> None:
+            """30-second safety-net poll to catch any missed notifications."""
+            while True:
+                await asyncio.sleep(30)
+                try:
+                    await _do_position_mark_sync()
+                except Exception as exc:
+                    logger.warning("Safety-net position mark sync failed", exc_info=exc)
+
+        if _feed_manager_started:
+            _listen_task = asyncio.create_task(_pg_listen_position_changes())
+            tasks.append(_listen_task)
+            _mark_sync_task = asyncio.create_task(_position_mark_safety_net_loop())
+            tasks.append(_mark_sync_task)
+
         # API-owned background tasks. The worker plane runs in the dedicated
         # workers.host process and writes durable snapshots back to the DB.
 
@@ -469,6 +678,13 @@ async def lifespan(app: FastAPI):
     finally:
         # Cleanup
         logger.info("Shutting down...")
+
+        if _feed_manager_started:
+            try:
+                from services.ws_feeds import get_feed_manager
+                await get_feed_manager().stop()
+            except Exception:
+                pass
 
         await snapshot_broadcaster.stop()
         wallet_tracker.stop()
@@ -665,6 +881,66 @@ async def health_check():
 async def liveness_check():
     """Liveness probe - is the service running?"""
     return {"status": "alive", "timestamp": utcnow().isoformat()}
+
+
+@app.get("/debug/feeds")
+async def debug_feeds():
+    """Temporary diagnostic: check FeedManager and PositionMarkState."""
+    from api.websocket import _marks_loop, _marks_callback_count, _marks_push_count
+    from services.position_mark_state import get_position_mark_state
+    from services.ws_feeds import get_feed_manager
+
+    fm = get_feed_manager()
+    pms = get_position_mark_state()
+    cache = fm.cache
+    import time as _time
+    now = _time.time()
+    now_mono = _time.monotonic()
+
+    # Per-token cache ages
+    cache_entries = getattr(cache, "_entries", {})
+    cache_ages = {}
+    for tid, entry in cache_entries.items():
+        age_mono = now_mono - entry.updated_at if hasattr(entry, "updated_at") else -1
+        age_epoch = now - entry.updated_at_epoch if hasattr(entry, "updated_at_epoch") and entry.updated_at_epoch > 0 else -1
+        mid = cache.get_mid_price(tid)
+        cache_ages[tid[:16]] = {
+            "mid": round(mid, 4) if mid else 0,
+            "age_mono_s": round(age_mono, 1),
+            "age_epoch_s": round(age_epoch, 1),
+        }
+
+    # Per-position mark ages
+    mark_ages = {}
+    for oid, mark in pms._positions.items():
+        age = now - mark.mark_updated_at if mark.mark_updated_at > 0 else -1
+        mark_ages[oid[:8]] = {
+            "token": mark.token_id[:16],
+            "mark_price": round(mark.mark_price, 4),
+            "age_s": round(age, 1),
+            "pnl_pct": round(mark.unrealized_pnl_pct, 2),
+        }
+
+    poly_feed = fm.polymarket_feed
+    poly_stats = getattr(poly_feed, "stats", None)
+
+    return {
+        "feed_manager_started": getattr(fm, "_started", False),
+        "price_cache_entries": len(cache_entries),
+        "pms_positions": len(pms._positions),
+        "pms_update_count": getattr(pms, "_update_count", 0),
+        "pms_miss_count": getattr(pms, "_miss_count", 0),
+        "marks_callback_count": _marks_callback_count,
+        "marks_push_count": _marks_push_count,
+        "polymarket_ws_state": poly_feed.state.value if hasattr(poly_feed, "state") else "?",
+        "polymarket_msgs_received": poly_stats.messages_received if poly_stats else 0,
+        "polymarket_msgs_parsed": poly_stats.messages_parsed if poly_stats else 0,
+        "polymarket_last_msg_age_s": round(now_mono - poly_stats.last_message_at, 1) if poly_stats and poly_stats.last_message_at > 0 else -1,
+        "polymarket_subscribed_tokens": len(getattr(poly_feed, "_subscribed_assets", set())),
+        "ws_push_clients": len(getattr(fm, "_ws_push_clients", {})),
+        "cache_ages": cache_ages,
+        "mark_ages": mark_ages,
+    }
 
 
 @app.get("/health/ready")

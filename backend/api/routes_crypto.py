@@ -26,3 +26,10 @@ async def get_crypto_markets(viewer_active: bool = False) -> list[dict]:
 async def get_oracle_prices() -> dict[str, dict]:
     stats = await _read_crypto_stats()
     return dict(stats.get("oracle_prices") or {})
+
+
+@router.get("/crypto/filter-diagnostics")
+async def get_filter_diagnostics() -> dict:
+    from services.strategies.btc_eth_highfreq import get_crypto_filter_diagnostics
+
+    return get_crypto_filter_diagnostics()

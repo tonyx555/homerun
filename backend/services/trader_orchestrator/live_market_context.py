@@ -699,6 +699,8 @@ def _build_cached_signal_contexts(
     unresolved: list[dict[str, Any]] = []
     history_cache: dict[str, list[dict[str, float]]] = {}
     now_epoch = time.time()
+    # Collect tokens that need WS subscription for future cycles
+    tokens_to_subscribe: set[str] = set()
 
     for row in signal_rows:
         signal = row["signal"]
@@ -734,6 +736,8 @@ def _build_cached_signal_contexts(
             except Exception:
                 return None, None, None
             if mid is None:
+                # Token not in cache — needs WS subscription
+                tokens_to_subscribe.add(token_id)
                 return None, None, None
             if age_s is not None and age_s > strict_ttl:
                 if strict_ws_only:
@@ -775,6 +779,16 @@ def _build_cached_signal_contexts(
             selected_history=selected_history,
             max_history_seconds=max_history_seconds,
         )
+
+    # Auto-subscribe unresolved signal tokens so they'll be cached for next cycle
+    if tokens_to_subscribe and getattr(feed_manager, "_started", False):
+        try:
+            import asyncio as _asyncio
+            poly_feed = getattr(feed_manager, "polymarket_feed", None)
+            if poly_feed is not None:
+                _asyncio.ensure_future(poly_feed.subscribe(sorted(tokens_to_subscribe)))
+        except Exception:
+            pass
 
     return resolved, unresolved
 

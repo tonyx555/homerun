@@ -11,6 +11,7 @@ from models.database import AsyncSessionLocal, EventsSnapshot
 from sqlalchemy import select
 from services import shared_state
 from services.news import shared_state as news_shared_state
+from services.position_mark_state import get_position_mark_state
 from services.signal_bus import read_trade_signal_source_stats
 from services.trader_orchestrator_state import (
     list_serialized_execution_sessions,
@@ -22,7 +23,10 @@ from services.worker_state import list_worker_snapshots, summarize_worker_stats
 from services.ui_lock import UI_LOCK_SESSION_COOKIE, ui_lock_service
 from services.weather import shared_state as weather_shared_state
 from services.ws_feeds import get_feed_manager
+from utils.logger import get_logger
 from utils.market_urls import serialize_opportunity_with_links
+
+logger = get_logger("websocket")
 
 
 class ConnectionManager:
@@ -43,7 +47,13 @@ class ConnectionManager:
         }
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.pop(websocket, None)
+        state = self.active_connections.pop(websocket, None)
+        if state:
+            # Unregister from FeedManager price push
+            try:
+                get_feed_manager().unregister_ws_client(id(websocket))
+            except Exception:
+                pass
 
     def update_presence(self, websocket: WebSocket, *, visible: bool | None = None) -> None:
         state = self.active_connections.get(websocket)
@@ -106,6 +116,7 @@ class ConnectionManager:
             "opportunity_events": "opportunities",
             "opportunity_update": "opportunities",
             "prices_update": "opportunities",
+            "position_marks_update": "trading",
             "crypto_markets_update": "crypto",
             "weather_update": "weather",
             "weather_status": "weather",
@@ -133,6 +144,8 @@ class ConnectionManager:
             return "opportunities.detail"
         if message_type == "prices_update":
             return "prices"
+        if message_type == "position_marks_update":
+            return "position_marks"
         return None
 
     @staticmethod
@@ -143,6 +156,7 @@ class ConnectionManager:
             "opportunity_events",
             "opportunity_update",
             "prices_update",
+            "position_marks_update",
             "crypto_markets_update",
             "weather_update",
             "news_workflow_update",
@@ -271,15 +285,196 @@ async def _get_market_token_cache() -> dict[str, tuple[str, str]]:
         return _market_token_cache
 
 
-async def _price_stream_loop(websocket: WebSocket) -> None:
-    interval_seconds = max(0.2, float(getattr(settings, "MARKET_DATA_PRICE_STREAM_INTERVAL_SECONDS", 1.0) or 1.0))
+# Reverse lookup: token_id -> market_id (built lazily from _market_token_cache)
+_token_to_market: dict[str, str] = {}
+_token_to_market_built_at_mono = 0.0
+
+
+def _rebuild_token_to_market(token_cache: dict[str, tuple[str, str]]) -> dict[str, str]:
+    """Build reverse map from token_id -> market_id."""
+    global _token_to_market, _token_to_market_built_at_mono
+    now = time.monotonic()
+    if _token_to_market and (now - _token_to_market_built_at_mono) < 5.0:
+        return _token_to_market
+    result: dict[str, str] = {}
+    for market_id, (yes_tok, no_tok) in token_cache.items():
+        if yes_tok:
+            result[yes_tok] = market_id
+        if no_tok:
+            result[no_tok] = market_id
+    _token_to_market = result
+    _token_to_market_built_at_mono = now
+    return result
+
+
+async def _resolve_subscribed_token_ids(websocket: WebSocket) -> set[str]:
+    """Resolve the set of token_ids this websocket wants price updates for."""
+    state = manager.active_connections.get(websocket)
+    if state is None:
+        return set()
+    market_ids: set[str] = set()
+    explicit_ids = state.get("price_market_ids")
+    if isinstance(explicit_ids, set):
+        market_ids.update(str(mid or "").strip().lower() for mid in explicit_ids if str(mid or "").strip())
+    token_cache = await _get_market_token_cache()
+    all_market_cap = 250
+    if bool(state.get("all_price_topics", False)):
+        market_ids.update(list(token_cache.keys())[:all_market_cap])
+    token_ids: set[str] = set()
+    for mid in market_ids:
+        tokens = token_cache.get(mid, ())
+        for t in tokens:
+            if t:
+                token_ids.add(t)
+    return token_ids
+
+
+async def _on_price_push(websocket: WebSocket, token_updates: dict[str, dict[str, Any]]) -> None:
+    """Callback from FeedManager: push coalesced price updates to one frontend WS.
+
+    *token_updates* is ``{token_id: {mid, bid, ask, exchange_ts, ingest_ts, sequence, is_fresh}}``.
+    We group by market and send one ``prices_update`` per market, with signature dedup.
+    """
+    state = manager.active_connections.get(websocket)
+    if state is None:
+        return
+    if not bool(state.get("visible", True)):
+        return
+
+    token_cache = await _get_market_token_cache()
+    token_to_market = _rebuild_token_to_market(token_cache)
+
+    signatures = state.get("price_signatures")
+    if not isinstance(signatures, dict):
+        signatures = {}
+        state["price_signatures"] = signatures
+
+    # Collect which markets were affected
+    affected_markets: set[str] = set()
+    for token_id in token_updates:
+        mid = token_to_market.get(token_id)
+        if mid:
+            affected_markets.add(mid)
+
+    # Check topic filtering
+    topics = state.get("topics")
+    topics = topics if isinstance(topics, set) else {"*"}
+
+    for market_id in affected_markets:
+        if not manager._topic_allowed(topics, f"prices:{market_id}"):
+            continue
+        yes_token, no_token = token_cache.get(market_id, ("", ""))
+
+        # Get price data from the push batch or from cache
+        feed_manager = get_feed_manager()
+        cache = feed_manager.cache
+
+        yes_data = token_updates.get(yes_token)
+        no_data = token_updates.get(no_token)
+
+        # For tokens not in this batch, read from cache
+        if yes_data is None and yes_token:
+            entry_mid = cache.get_mid_price(yes_token)
+            if entry_mid is not None:
+                ba = cache.get_best_bid_ask(yes_token)
+                yes_data = {
+                    "mid": entry_mid,
+                    "bid": ba[0] if ba else entry_mid,
+                    "ask": ba[1] if ba else entry_mid,
+                    "ingest_ts": cache.get_observed_at_epoch(yes_token) or 0.0,
+                    "exchange_ts": 0.0,
+                    "sequence": cache.get_sequence(yes_token) or 0,
+                    "is_fresh": cache.is_fresh(yes_token),
+                }
+        if no_data is None and no_token:
+            entry_mid = cache.get_mid_price(no_token)
+            if entry_mid is not None:
+                ba = cache.get_best_bid_ask(no_token)
+                no_data = {
+                    "mid": entry_mid,
+                    "bid": ba[0] if ba else entry_mid,
+                    "ask": ba[1] if ba else entry_mid,
+                    "ingest_ts": cache.get_observed_at_epoch(no_token) or 0.0,
+                    "exchange_ts": 0.0,
+                    "sequence": cache.get_sequence(no_token) or 0,
+                    "is_fresh": cache.is_fresh(no_token),
+                }
+
+        yes_mid = float(yes_data["mid"]) if yes_data and yes_data.get("mid") is not None else None
+        no_mid = float(no_data["mid"]) if no_data and no_data.get("mid") is not None else None
+        yes_seq = int(yes_data.get("sequence") or 0) if yes_data else 0
+        no_seq = int(no_data.get("sequence") or 0) if no_data else 0
+
+        # Signature dedup using actual cache sequence numbers (not time.time())
+        signature = (yes_mid, no_mid, yes_seq, no_seq)
+        if signatures.get(market_id) == signature:
+            continue
+        signatures[market_id] = signature
+
+        yes_ingest = float(yes_data.get("ingest_ts") or 0) if yes_data else None
+        no_ingest = float(no_data.get("ingest_ts") or 0) if no_data else None
+        yes_exchange = float(yes_data.get("exchange_ts") or 0) if yes_data else None
+        no_exchange = float(no_data.get("exchange_ts") or 0) if no_data else None
+
+        await manager.send_personal(
+            websocket,
+            {
+                "type": "prices_update",
+                "topic": f"prices:{market_id}",
+                "data": {
+                    "market_id": market_id,
+                    "yes_token_id": yes_token,
+                    "no_token_id": no_token,
+                    "yes_price": yes_mid,
+                    "no_price": no_mid,
+                    "yes_ingest_ts": yes_ingest,
+                    "no_ingest_ts": no_ingest,
+                    "yes_exchange_ts": yes_exchange,
+                    "no_exchange_ts": no_exchange,
+                    "yes_sequence": yes_seq,
+                    "no_sequence": no_seq,
+                    "is_fresh": bool(
+                        yes_data and no_data
+                        and yes_data.get("is_fresh")
+                        and no_data.get("is_fresh")
+                    ),
+                },
+            },
+        )
+
+
+async def _register_price_push(websocket: WebSocket) -> None:
+    """Register this websocket with FeedManager for event-driven price pushes."""
+    token_ids = await _resolve_subscribed_token_ids(websocket)
+    feed_manager = get_feed_manager()
+
+    async def push_callback(token_updates: dict[str, dict[str, Any]]) -> None:
+        await _on_price_push(websocket, token_updates)
+
+    feed_manager.register_ws_client(id(websocket), token_ids, push_callback)
+
+
+async def _update_price_push_tokens(websocket: WebSocket) -> None:
+    """Update the FeedManager registration after topic changes."""
+    token_ids = await _resolve_subscribed_token_ids(websocket)
+    get_feed_manager().update_ws_client_tokens(id(websocket), token_ids)
+
+
+async def _price_safety_net_loop(websocket: WebSocket) -> None:
+    """Slow safety-net fallback that pushes prices every 30s.
+
+    The primary path is event-driven via FeedManager._on_price_update ->
+    coalesced push. This loop exists only to catch any prices that slip
+    through (e.g. if FeedManager is not started).
+    """
+    interval = max(10.0, float(settings.MARKET_DATA_PRICE_STREAM_INTERVAL_SECONDS or 30.0))
     all_market_cap = 250
     while True:
+        await asyncio.sleep(interval)
         state = manager.active_connections.get(websocket)
         if state is None:
             return
         if not bool(state.get("visible", True)):
-            await asyncio.sleep(interval_seconds)
             continue
 
         market_ids: set[str] = set()
@@ -292,49 +487,16 @@ async def _price_stream_loop(websocket: WebSocket) -> None:
             market_ids.update(list(token_cache.keys())[:all_market_cap])
 
         if not market_ids:
-            await asyncio.sleep(interval_seconds)
             continue
 
         requested_market_ids = sorted(mid for mid in market_ids if mid in token_cache)
         if not requested_market_ids:
-            await asyncio.sleep(interval_seconds)
             continue
 
-        token_ids = sorted(
-            {
-                token
-                for market_id in requested_market_ids
-                for token in token_cache.get(market_id, ())
-                if token
-            }
-        )
-        prices: dict[str, dict[str, Any]] = {}
-        try:
-            feed_manager = get_feed_manager()
-            if getattr(feed_manager, "_started", False):
-                for token_id in token_ids:
-                    if not feed_manager.cache.is_fresh(token_id):
-                        continue
-                    mid = feed_manager.cache.get_mid_price(token_id)
-                    if mid is None:
-                        continue
-                    bid_ask = feed_manager.cache.get_best_bid_ask(token_id)
-                    bid = mid
-                    ask = mid
-                    if isinstance(bid_ask, tuple):
-                        bid, ask = bid_ask
-                    now_ts = time.time()
-                    prices[token_id] = {
-                        "mid": float(mid),
-                        "bid": float(bid),
-                        "ask": float(ask),
-                        "ingest_ts": float(now_ts),
-                        "exchange_ts": float(now_ts),
-                        "sequence": 0,
-                        "is_fresh": True,
-                    }
-        except Exception:
-            prices = {}
+        feed_manager = get_feed_manager()
+        if not getattr(feed_manager, "_started", False):
+            continue
+
         signatures = state.get("price_signatures")
         if not isinstance(signatures, dict):
             signatures = {}
@@ -342,18 +504,21 @@ async def _price_stream_loop(websocket: WebSocket) -> None:
 
         for market_id in requested_market_ids:
             yes_token, no_token = token_cache.get(market_id, ("", ""))
-            yes_price = prices.get(yes_token)
-            no_price = prices.get(no_token)
-            yes_mid = float(yes_price.get("mid")) if isinstance(yes_price, dict) and yes_price.get("mid") is not None else None
-            no_mid = float(no_price.get("mid")) if isinstance(no_price, dict) and no_price.get("mid") is not None else None
-            yes_ts = float(yes_price.get("ingest_ts")) if isinstance(yes_price, dict) and yes_price.get("ingest_ts") else None
-            no_ts = float(no_price.get("ingest_ts")) if isinstance(no_price, dict) and no_price.get("ingest_ts") else None
-            yes_seq = int(yes_price.get("sequence") or 0) if isinstance(yes_price, dict) else 0
-            no_seq = int(no_price.get("sequence") or 0) if isinstance(no_price, dict) else 0
-            signature = (yes_mid, no_mid, yes_ts, no_ts, yes_seq, no_seq)
+            cache = feed_manager.cache
+
+            yes_mid = cache.get_mid_price(yes_token) if yes_token else None
+            no_mid = cache.get_mid_price(no_token) if no_token else None
+            yes_seq = cache.get_sequence(yes_token) or 0 if yes_token else 0
+            no_seq = cache.get_sequence(no_token) or 0 if no_token else 0
+
+            signature = (yes_mid, no_mid, yes_seq, no_seq)
             if signatures.get(market_id) == signature:
                 continue
             signatures[market_id] = signature
+
+            yes_ingest = cache.get_observed_at_epoch(yes_token) if yes_token else None
+            no_ingest = cache.get_observed_at_epoch(no_token) if no_token else None
+
             await manager.send_personal(
                 websocket,
                 {
@@ -363,29 +528,149 @@ async def _price_stream_loop(websocket: WebSocket) -> None:
                         "market_id": market_id,
                         "yes_token_id": yes_token,
                         "no_token_id": no_token,
-                        "yes_price": yes_mid,
-                        "no_price": no_mid,
-                        "yes_ingest_ts": yes_ts,
-                        "no_ingest_ts": no_ts,
+                        "yes_price": float(yes_mid) if yes_mid is not None else None,
+                        "no_price": float(no_mid) if no_mid is not None else None,
+                        "yes_ingest_ts": float(yes_ingest) if yes_ingest else None,
+                        "no_ingest_ts": float(no_ingest) if no_ingest else None,
                         "yes_sequence": yes_seq,
                         "no_sequence": no_seq,
                         "is_fresh": bool(
-                            isinstance(yes_price, dict)
-                            and isinstance(no_price, dict)
-                            and yes_price.get("is_fresh")
-                            and no_price.get("is_fresh")
+                            yes_token and no_token
+                            and cache.is_fresh(yes_token)
+                            and cache.is_fresh(no_token)
                         ),
                     },
                 },
             )
 
-        await asyncio.sleep(interval_seconds)
+
+# ---------------------------------------------------------------------------
+# Position marks push via PositionMarkState
+# ---------------------------------------------------------------------------
+
+_marks_push_task: asyncio.Task | None = None
+_marks_push_pending = False
+_marks_loop: asyncio.AbstractEventLoop | None = None
+
+_marks_callback_count = 0
+_marks_push_count = 0
+
+
+def set_marks_event_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """Set the event loop for position marks push.
+
+    Must be called from the API process lifespan BEFORE FeedManager starts,
+    so that price callbacks can schedule mark pushes immediately.
+    """
+    global _marks_loop
+    _marks_loop = loop
+    logger.info("Position marks event loop captured")
+
+
+def _on_position_marks_changed(changed_marks: list) -> None:
+    """Synchronous callback from PositionMarkState. Schedules an async push.
+
+    NOTE: This is called from WS receive threads (not the asyncio loop),
+    so we must use call_soon_threadsafe to schedule the push task.
+    """
+    global _marks_push_pending, _marks_callback_count
+    _marks_callback_count += 1
+    _marks_push_pending = True
+    if _marks_loop is None:
+        if _marks_callback_count <= 3:
+            logger.warning("position marks callback fired but _marks_loop is None (callback #%d)", _marks_callback_count)
+        return
+    try:
+        _marks_loop.call_soon_threadsafe(_schedule_marks_push)
+    except RuntimeError:
+        pass  # loop closed
+
+
+def _schedule_marks_push() -> None:
+    """Create the marks push task from the event loop thread."""
+    global _marks_push_task
+    if _marks_push_task is None or _marks_push_task.done():
+        _marks_push_task = _marks_loop.create_task(_push_position_marks())
+
+
+async def _push_position_marks() -> None:
+    """Coalesced push of position marks to all subscribed frontends."""
+    global _marks_push_pending, _marks_push_count
+    # Brief coalescing delay to batch rapid-fire updates
+    await asyncio.sleep(0.1)
+    _marks_push_pending = False
+    _do_push_marks()
+
+
+def _do_push_marks() -> None:
+    """Actually broadcast marks to all clients. Shared by event push + periodic refresh."""
+    global _marks_push_count
+    pms = get_position_mark_state()
+    marks = pms.get_marks()
+    if not marks:
+        return
+    if not manager.active_connections:
+        return
+    _marks_push_count += 1
+    if _marks_push_count <= 5:
+        logger.info("Pushing position marks to %d clients (%d marks, push #%d)",
+                     len(manager.active_connections), len(marks), _marks_push_count)
+    asyncio.ensure_future(manager.broadcast(
+        {
+            "type": "position_marks_update",
+            "data": {
+                "marks": list(marks.values()),
+            },
+        }
+    ))
+
+
+_marks_refresh_task: asyncio.Task | None = None
+
+async def _marks_periodic_refresh() -> None:
+    """Re-broadcast current marks every 2s even when prices haven't changed.
+
+    For illiquid markets, Polymarket WS may not send new orderbook data
+    for 10-60+ seconds. Without this refresh, the UI would show growing
+    mark ages even though the price data IS the latest available.
+    """
+    while True:
+        await asyncio.sleep(2)
+        try:
+            _do_push_marks()
+        except Exception:
+            pass
+
+
+def start_marks_refresh_loop() -> None:
+    """Start the periodic marks refresh. Call from lifespan after event loop is running."""
+    global _marks_refresh_task
+    if _marks_refresh_task is None or _marks_refresh_task.done():
+        _marks_refresh_task = asyncio.ensure_future(_marks_periodic_refresh())
+
+
+def _setup_position_marks_push() -> None:
+    """Wire PositionMarkState to broadcast marks via WS."""
+    pms = get_position_mark_state()
+    pms.set_on_marks_changed(_on_position_marks_changed)
+
+
+# Run setup at import time so the callback is wired before any prices arrive
+_setup_position_marks_push()
 
 
 async def handle_websocket(websocket: WebSocket):
     """Main WebSocket handler"""
+
     await manager.connect(websocket)
-    price_stream_task = asyncio.create_task(_price_stream_loop(websocket), name="ws-price-stream")
+
+    # Register for event-driven price push
+    await _register_price_push(websocket)
+
+    # Safety-net fallback loop (slow, 30s cadence)
+    safety_net_task = asyncio.create_task(
+        _price_safety_net_loop(websocket), name="ws-price-safety-net"
+    )
 
     # Send current state from the in-process runtimes plus durable projections.
     async with AsyncSessionLocal() as session:
@@ -485,6 +770,8 @@ async def handle_websocket(websocket: WebSocket):
                 visible = message.get("visible")
                 if isinstance(visible, bool):
                     manager.update_presence(websocket, visible=visible)
+                # Update FeedManager token subscriptions for event-driven push
+                await _update_price_push_tokens(websocket)
                 await manager.send_personal(
                     websocket,
                     {
@@ -532,12 +819,12 @@ async def handle_websocket(websocket: WebSocket):
     except WebSocketDisconnect:
         manager.disconnect(websocket)
     except Exception as e:
-        print(f"WebSocket error: {e}")
+        logger.error("WebSocket error", exc_info=e)
         manager.disconnect(websocket)
     finally:
-        price_stream_task.cancel()
+        safety_net_task.cancel()
         try:
-            await price_stream_task
+            await safety_net_task
         except asyncio.CancelledError:
             pass
         except Exception:
@@ -624,5 +911,5 @@ async def broadcast_events_status(status: dict):
 
 
 # Register callbacks (scanner runs in worker process; no scanner callbacks here)
-# Frontend gets opportunities/status via polling or init; or add API polling→broadcast later
+# Frontend gets opportunities/status via polling or init; or add API polling->broadcast later
 wallet_tracker.add_callback(broadcast_wallet_trade)

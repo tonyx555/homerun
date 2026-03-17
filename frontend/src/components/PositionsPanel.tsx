@@ -1553,15 +1553,13 @@ export default function PositionsPanel() {
                               <div className="text-[9px] text-muted-foreground">{exposureShare.toFixed(1)}%</div>
                             </TableCell>
                             <TableCell className="text-right font-mono py-1">{formatOptionalPrice(row.entryPrice)}</TableCell>
-                            <TableCell className={cn('text-right font-mono py-1', row.markFresh && 'text-sky-300')}>
+                            <TableCell className="text-right font-mono py-1">
                               {row.currentPrice !== null ? (
                                 hasLiveMark ? (
                                   <FlashNumber
                                     value={row.currentPrice}
                                     decimals={4}
-                                    className={cn('font-mono text-xs', row.markFresh && 'data-glow-blue')}
-                                    positiveClass="data-glow-green"
-                                    negativeClass="data-glow-red"
+                                    className="font-mono text-xs"
                                   />
                                 ) : formatOptionalPrice(row.currentPrice)
                               ) : formatOptionalPrice(row.currentPrice)}
