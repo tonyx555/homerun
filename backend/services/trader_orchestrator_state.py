@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from config import settings
+from services.execution_latency_metrics import execution_latency_metrics
 from sqlalchemy import and_, case, desc, func, or_, select, text as sa_text, update as sa_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError
@@ -94,16 +95,6 @@ DEFAULT_PENDING_LIVE_EXIT_GUARD = {
     "max_pending_exits": 0,
     "identity_guard_enabled": True,
     "terminal_statuses": sorted(PENDING_LIVE_EXIT_TERMINAL_STATUSES),
-}
-DEFAULT_LIVE_RISK_CLAMPS = {
-    "enforce_allow_averaging_off": True,
-    "min_cooldown_seconds": 90,
-    "max_consecutive_losses_cap": 3,
-    "max_open_orders_cap": 6,
-    "max_open_positions_cap": 4,
-    "max_trade_notional_usd_cap": 200.0,
-    "max_orders_per_cycle_cap": 4,
-    "enforce_halt_on_consecutive_losses": True,
 }
 DEFAULT_LIVE_MARKET_CONTEXT = {
     "enabled": True,
@@ -210,63 +201,27 @@ def _normalize_pending_live_exit_guard(value: Any) -> dict[str, Any]:
 
 
 def _normalize_live_risk_clamps(value: Any) -> dict[str, Any]:
+    """Normalize live risk clamps.  Only fields explicitly present in *value*
+    are included -- missing fields mean "no clamp"."""
     source = value if isinstance(value, dict) else {}
-    return {
-        "enforce_allow_averaging_off": bool(
-            source.get("enforce_allow_averaging_off", DEFAULT_LIVE_RISK_CLAMPS["enforce_allow_averaging_off"])
-        ),
-        "min_cooldown_seconds": max(
-            0,
-            min(
-                86400,
-                safe_int(source.get("min_cooldown_seconds"), DEFAULT_LIVE_RISK_CLAMPS["min_cooldown_seconds"]),
-            ),
-        ),
-        "max_consecutive_losses_cap": max(
-            1,
-            min(
-                1000,
-                safe_int(
-                    source.get("max_consecutive_losses_cap"),
-                    DEFAULT_LIVE_RISK_CLAMPS["max_consecutive_losses_cap"],
-                ),
-            ),
-        ),
-        "max_open_orders_cap": max(
-            1,
-            min(1000, safe_int(source.get("max_open_orders_cap"), DEFAULT_LIVE_RISK_CLAMPS["max_open_orders_cap"])),
-        ),
-        "max_open_positions_cap": max(
-            1,
-            min(
-                1000,
-                safe_int(source.get("max_open_positions_cap"), DEFAULT_LIVE_RISK_CLAMPS["max_open_positions_cap"]),
-            ),
-        ),
-        "max_trade_notional_usd_cap": max(
-            1.0,
-            min(
-                1_000_000.0,
-                safe_float(
-                    source.get("max_trade_notional_usd_cap"),
-                    DEFAULT_LIVE_RISK_CLAMPS["max_trade_notional_usd_cap"],
-                ),
-            ),
-        ),
-        "max_orders_per_cycle_cap": max(
-            1,
-            min(
-                1000,
-                safe_int(source.get("max_orders_per_cycle_cap"), DEFAULT_LIVE_RISK_CLAMPS["max_orders_per_cycle_cap"]),
-            ),
-        ),
-        "enforce_halt_on_consecutive_losses": bool(
-            source.get(
-                "enforce_halt_on_consecutive_losses",
-                DEFAULT_LIVE_RISK_CLAMPS["enforce_halt_on_consecutive_losses"],
-            )
-        ),
-    }
+    out: dict[str, Any] = {}
+    if "enforce_allow_averaging_off" in source:
+        out["enforce_allow_averaging_off"] = bool(source["enforce_allow_averaging_off"])
+    if "min_cooldown_seconds" in source:
+        out["min_cooldown_seconds"] = max(0, min(86400, safe_int(source["min_cooldown_seconds"], 0)))
+    if "max_consecutive_losses_cap" in source:
+        out["max_consecutive_losses_cap"] = max(1, min(1000, safe_int(source["max_consecutive_losses_cap"], 1000)))
+    if "max_open_orders_cap" in source:
+        out["max_open_orders_cap"] = max(1, min(1000, safe_int(source["max_open_orders_cap"], 1000)))
+    if "max_open_positions_cap" in source:
+        out["max_open_positions_cap"] = max(1, min(1000, safe_int(source["max_open_positions_cap"], 1000)))
+    if "max_trade_notional_usd_cap" in source:
+        out["max_trade_notional_usd_cap"] = max(1.0, min(1_000_000.0, safe_float(source["max_trade_notional_usd_cap"], 1_000_000.0)))
+    if "max_orders_per_cycle_cap" in source:
+        out["max_orders_per_cycle_cap"] = max(1, min(1000, safe_int(source["max_orders_per_cycle_cap"], 1000)))
+    if "enforce_halt_on_consecutive_losses" in source:
+        out["enforce_halt_on_consecutive_losses"] = bool(source["enforce_halt_on_consecutive_losses"])
+    return out
 
 
 def _normalize_live_market_context(value: Any) -> dict[str, Any]:

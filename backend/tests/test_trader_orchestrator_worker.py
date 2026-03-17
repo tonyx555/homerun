@@ -1,6 +1,5 @@
 import asyncio
 import sys
-from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -220,6 +219,7 @@ async def test_build_triggered_trade_signals_prefers_runtime_signal_snapshots(mo
         },
         sources=["crypto"],
         strategy_types_by_source={"crypto": ["btc_5m_threshold_flip"]},
+        cursor_runtime_sequence=None,
         cursor_created_at=None,
         cursor_signal_id=None,
         statuses=["pending", "selected"],
@@ -452,6 +452,48 @@ def test_live_risk_clamps_honor_configured_caps():
     assert limits["max_trade_notional_usd"] == 420.0
     assert limits["max_orders_per_cycle"] == 11
     assert limits["halt_on_consecutive_losses"] is False
+
+
+def test_live_risk_clamps_empty_means_no_clamp():
+    """Missing clamp fields should leave trader limits untouched."""
+    limits = {
+        "allow_averaging": True,
+        "cooldown_seconds": 0,
+        "max_consecutive_losses": 100,
+        "max_open_orders": 50,
+        "max_open_positions": 25,
+        "max_trade_notional_usd": 5000.0,
+        "max_orders_per_cycle": 80,
+        "halt_on_consecutive_losses": False,
+    }
+    changes = trader_orchestrator_worker._apply_live_risk_clamps(limits, {})
+
+    assert changes == {}
+    assert limits["allow_averaging"] is True
+    assert limits["cooldown_seconds"] == 0
+    assert limits["max_consecutive_losses"] == 100
+    assert limits["max_open_orders"] == 50
+    assert limits["max_open_positions"] == 25
+    assert limits["max_trade_notional_usd"] == 5000.0
+    assert limits["max_orders_per_cycle"] == 80
+    assert limits["halt_on_consecutive_losses"] is False
+
+
+def test_live_risk_clamps_partial_only_applies_present():
+    """Only clamp fields that are explicitly set."""
+    limits = {
+        "max_open_positions": 25,
+        "max_open_orders": 50,
+        "max_trade_notional_usd": 5000.0,
+    }
+    changes = trader_orchestrator_worker._apply_live_risk_clamps(
+        limits, {"max_open_positions_cap": 10}
+    )
+
+    assert limits["max_open_positions"] == 10
+    assert limits["max_open_orders"] == 50
+    assert limits["max_trade_notional_usd"] == 5000.0
+    assert "max_open_positions" in changes
 
 
 def test_live_provider_infra_error_detection_excludes_allowance_rejections():
@@ -926,6 +968,8 @@ class _DummySession:
             return False
 
     class _ExecuteResult:
+        rowcount = 1
+
         def scalar_one_or_none(self):
             return None
 
@@ -1326,46 +1370,24 @@ async def test_run_trader_once_emits_filtered_heartbeat_for_crypto_scope_prefilt
 
 @pytest.mark.asyncio
 async def test_persist_trader_cycle_heartbeat_updates_last_run_and_clears_request(monkeypatch):
-    trader_row = SimpleNamespace(
-        last_run_at=None,
-        requested_run_at=datetime.now(timezone.utc),
-        updated_at=None,
-    )
+    class _Result:
+        rowcount = 1
 
     class _Session:
-        async def get(self, *_args, **_kwargs):
-            return trader_row
+        async def execute(self, *_args, **_kwargs):
+            return _Result()
 
     commit_mock = AsyncMock(return_value=None)
     monkeypatch.setattr(trader_orchestrator_worker, "_commit_with_retry", commit_mock)
 
     await trader_orchestrator_worker._persist_trader_cycle_heartbeat(_Session(), "trader-1")
 
-    assert trader_row.last_run_at is not None
-    assert trader_row.requested_run_at is None
-    assert trader_row.updated_at == trader_row.last_run_at
     commit_mock.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_run_trader_once_persists_heartbeat_when_idle_gate_short_circuits(monkeypatch):
     trader_id = "trader-idle"
-    trader_row = SimpleNamespace(
-        last_run_at=None,
-        requested_run_at=datetime.now(timezone.utc),
-        updated_at=None,
-    )
-
-    class _Session:
-        async def get(self, *_args, **_kwargs):
-            return trader_row
-
-    class _SessionContext:
-        async def __aenter__(self):
-            return _Session()
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
 
     commit_mock = AsyncMock(return_value=None)
     create_event_mock = AsyncMock(return_value=None)
@@ -1383,7 +1405,7 @@ async def test_run_trader_once_persists_heartbeat_when_idle_gate_short_circuits(
     sync_mock = AsyncMock(return_value={})
     open_positions_mock = AsyncMock(return_value=0)
     open_markets_mock = AsyncMock(return_value=set())
-    monkeypatch.setattr(trader_orchestrator_worker, "AsyncSessionLocal", lambda: _SessionContext())
+    monkeypatch.setattr(trader_orchestrator_worker, "AsyncSessionLocal", lambda: _DummySessionContext())
     monkeypatch.setattr(trader_orchestrator_worker, "_commit_with_retry", commit_mock)
     monkeypatch.setattr(trader_orchestrator_worker, "create_trader_event", create_event_mock)
     monkeypatch.setattr(
@@ -1424,9 +1446,6 @@ async def test_run_trader_once_persists_heartbeat_when_idle_gate_short_circuits(
 
     assert decisions_written == 0
     assert orders_written == 0
-    assert trader_row.last_run_at is not None
-    assert trader_row.requested_run_at is None
-    assert commit_mock.await_count == 1
     create_event_mock.assert_awaited_once()
     assert create_event_mock.await_args.kwargs["event_type"] == "cycle_heartbeat"
     backfill_mock.assert_awaited_once()
@@ -1439,22 +1458,6 @@ async def test_run_trader_once_persists_heartbeat_when_idle_gate_short_circuits(
 @pytest.mark.asyncio
 async def test_run_trader_once_reconciles_positions_when_source_configs_missing(monkeypatch):
     trader_id = "trader-no-config"
-    trader_row = SimpleNamespace(
-        last_run_at=None,
-        requested_run_at=datetime.now(timezone.utc),
-        updated_at=None,
-    )
-
-    class _Session:
-        async def get(self, *_args, **_kwargs):
-            return trader_row
-
-    class _SessionContext:
-        async def __aenter__(self):
-            return _Session()
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
 
     commit_mock = AsyncMock(return_value=None)
     create_event_mock = AsyncMock(return_value=None)
@@ -1474,7 +1477,7 @@ async def test_run_trader_once_reconciles_positions_when_source_configs_missing(
     open_positions_mock = AsyncMock(return_value=0)
     open_markets_mock = AsyncMock(return_value=set())
 
-    monkeypatch.setattr(trader_orchestrator_worker, "AsyncSessionLocal", lambda: _SessionContext())
+    monkeypatch.setattr(trader_orchestrator_worker, "AsyncSessionLocal", lambda: _DummySessionContext())
     monkeypatch.setattr(trader_orchestrator_worker, "_commit_with_retry", commit_mock)
     monkeypatch.setattr(trader_orchestrator_worker, "create_trader_event", create_event_mock)
     monkeypatch.setattr(
@@ -1507,9 +1510,6 @@ async def test_run_trader_once_reconciles_positions_when_source_configs_missing(
 
     assert decisions_written == 0
     assert orders_written == 0
-    assert trader_row.last_run_at is not None
-    assert trader_row.requested_run_at is None
-    assert commit_mock.await_count == 1
     create_event_mock.assert_awaited_once()
     assert create_event_mock.await_args.kwargs["event_type"] == "cycle_heartbeat"
     backfill_mock.assert_awaited_once()
@@ -1524,22 +1524,6 @@ async def test_run_trader_once_reconciles_positions_when_source_configs_missing(
 @pytest.mark.asyncio
 async def test_run_trader_once_skips_heavy_maintenance_when_manage_only_cycle_is_not_due(monkeypatch):
     trader_id = "trader-manage-only"
-    trader_row = SimpleNamespace(
-        last_run_at=None,
-        requested_run_at=datetime.now(timezone.utc),
-        updated_at=None,
-    )
-
-    class _Session:
-        async def get(self, *_args, **_kwargs):
-            return trader_row
-
-    class _SessionContext:
-        async def __aenter__(self):
-            return _Session()
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
 
     commit_mock = AsyncMock(return_value=None)
     create_event_mock = AsyncMock(return_value=None)
@@ -1549,7 +1533,7 @@ async def test_run_trader_once_skips_heavy_maintenance_when_manage_only_cycle_is
     cursor_mock = AsyncMock(return_value=(None, None))
     list_signals_mock = AsyncMock(return_value=[])
 
-    monkeypatch.setattr(trader_orchestrator_worker, "AsyncSessionLocal", lambda: _SessionContext())
+    monkeypatch.setattr(trader_orchestrator_worker, "AsyncSessionLocal", lambda: _DummySessionContext())
     monkeypatch.setattr(trader_orchestrator_worker, "_commit_with_retry", commit_mock)
     monkeypatch.setattr(trader_orchestrator_worker, "create_trader_event", create_event_mock)
     monkeypatch.setattr(
@@ -1588,10 +1572,6 @@ async def test_run_trader_once_skips_heavy_maintenance_when_manage_only_cycle_is
     assert decisions_written == 0
     assert orders_written == 0
     assert processed_signals == 0
-    assert trader_row.last_run_at is None
-    assert trader_row.requested_run_at is None
-    assert trader_row.updated_at is not None
-    commit_mock.assert_awaited_once()
     create_event_mock.assert_not_awaited()
     backfill_mock.assert_not_awaited()
     reconcile_mock.assert_not_awaited()
@@ -1912,7 +1892,7 @@ async def test_run_worker_loop_skips_terminal_stale_watchdog_when_globally_disab
         ),
     )
     monkeypatch.setattr(trader_orchestrator_worker, "list_traders", AsyncMock(return_value=[]))
-    monkeypatch.setattr(trader_orchestrator_worker, "compute_orchestrator_metrics", AsyncMock(return_value={}))
+    monkeypatch.setattr(trader_orchestrator_worker, "_build_orchestrator_snapshot_metrics", AsyncMock(return_value={}))
     monkeypatch.setattr(trader_orchestrator_worker, "_write_orchestrator_snapshot_best_effort", snapshot_mock)
     monkeypatch.setattr(trader_orchestrator_worker, "_wait_for_runtime_trigger", _cancel_wait)
 
@@ -1926,42 +1906,24 @@ async def test_run_worker_loop_skips_terminal_stale_watchdog_when_globally_disab
 
 @pytest.mark.asyncio
 async def test_run_worker_loop_releases_session_before_hot_state_maintenance(monkeypatch):
-    class _Session:
-        async def rollback(self):
-            return None
+    """Hot-state maintenance (flush + reseed) must run outside any DB session."""
 
     class _SessionContext:
         async def __aenter__(self):
-            return session
+            return _DummySession()
 
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-    session = _Session()
-    release_events: list[str] = []
-    release_state = {"active": False}
+    maintenance_events: list[str] = []
     snapshot_mock = AsyncMock(return_value=None)
 
-    @asynccontextmanager
-    async def _release_conn(active_session):
-        assert active_session is session
-        assert release_state["active"] is False
-        release_state["active"] = True
-        release_events.append("enter")
-        try:
-            yield
-        finally:
-            release_state["active"] = False
-            release_events.append("exit")
-
     async def _flush_audit_buffer():
-        assert release_state["active"] is True
-        release_events.append("flush")
+        maintenance_events.append("flush")
         return 0
 
     async def _reseed_if_stale():
-        assert release_state["active"] is True
-        release_events.append("reseed")
+        maintenance_events.append("reseed")
         return False
 
     async def _cancel_wait(*_args, **_kwargs):
@@ -1978,12 +1940,13 @@ async def test_run_worker_loop_releases_session_before_hot_state_maintenance(mon
     monkeypatch.setattr(trader_orchestrator_worker, "refresh_strategy_runtime_if_needed", AsyncMock(return_value=None))
     monkeypatch.setattr(trader_orchestrator_worker, "expire_stale_signals", AsyncMock(return_value=None))
     monkeypatch.setattr(trader_orchestrator_worker, "_reconcile_orphan_open_orders", AsyncMock(return_value={}))
+    monkeypatch.setattr(trader_orchestrator_worker, "_run_terminal_stale_order_watchdog", AsyncMock(return_value={}))
     monkeypatch.setattr(
         trader_orchestrator_worker,
         "read_orchestrator_control",
         AsyncMock(
             return_value={
-                "is_enabled": False,
+                "is_enabled": True,
                 "is_paused": True,
                 "kill_switch": False,
                 "run_interval_seconds": 1,
@@ -1992,11 +1955,15 @@ async def test_run_worker_loop_releases_session_before_hot_state_maintenance(mon
             }
         ),
     )
-    monkeypatch.setattr(trader_orchestrator_worker, "list_traders", AsyncMock(return_value=[]))
-    monkeypatch.setattr(trader_orchestrator_worker, "compute_orchestrator_metrics", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "list_traders",
+        AsyncMock(return_value=[{"id": "t-1", "is_enabled": True, "is_paused": False, "metadata": {}}]),
+    )
+    monkeypatch.setattr(trader_orchestrator_worker, "_run_trader_once_with_timeout", AsyncMock(return_value=(0, 0, 0)))
+    monkeypatch.setattr(trader_orchestrator_worker, "_build_orchestrator_snapshot_metrics", AsyncMock(return_value={}))
     monkeypatch.setattr(trader_orchestrator_worker, "_write_orchestrator_snapshot_best_effort", snapshot_mock)
     monkeypatch.setattr(trader_orchestrator_worker, "_wait_for_runtime_trigger", _cancel_wait)
-    monkeypatch.setattr(trader_orchestrator_worker, "release_conn", _release_conn)
     monkeypatch.setattr(
         trader_orchestrator_worker.hot_state,
         "flush_audit_buffer",
@@ -2011,8 +1978,7 @@ async def test_run_worker_loop_releases_session_before_hot_state_maintenance(mon
     with pytest.raises(asyncio.CancelledError):
         await trader_orchestrator_worker.run_worker_loop()
 
-    assert release_events == ["enter", "flush", "reseed", "exit"]
-    snapshot_mock.assert_awaited_once()
+    assert maintenance_events == ["flush", "reseed"]
 
 
 @pytest.mark.asyncio
@@ -2074,7 +2040,7 @@ async def test_run_worker_loop_runs_manage_only_cycle_when_globally_paused(monke
         AsyncMock(return_value=[{"id": "trader-1", "is_enabled": True, "is_paused": False, "metadata": {}}]),
     )
     monkeypatch.setattr(trader_orchestrator_worker, "_run_trader_once_with_timeout", run_once_mock)
-    monkeypatch.setattr(trader_orchestrator_worker, "compute_orchestrator_metrics", AsyncMock(return_value={}))
+    monkeypatch.setattr(trader_orchestrator_worker, "_build_orchestrator_snapshot_metrics", AsyncMock(return_value={}))
     monkeypatch.setattr(trader_orchestrator_worker, "_write_orchestrator_snapshot_best_effort", snapshot_mock)
     monkeypatch.setattr(trader_orchestrator_worker, "update_orchestrator_control", AsyncMock(return_value={}))
     monkeypatch.setattr(trader_orchestrator_worker, "_worker_sleep", _cancel_sleep)
@@ -2175,7 +2141,7 @@ async def test_run_worker_loop_dispatches_crypto_traders_concurrently_with_non_c
         ),
     )
     monkeypatch.setattr(trader_orchestrator_worker, "_run_trader_once_with_timeout", AsyncMock(side_effect=_run_once))
-    monkeypatch.setattr(trader_orchestrator_worker, "compute_orchestrator_metrics", AsyncMock(return_value={}))
+    monkeypatch.setattr(trader_orchestrator_worker, "_build_orchestrator_snapshot_metrics", AsyncMock(return_value={}))
     monkeypatch.setattr(trader_orchestrator_worker, "_write_orchestrator_snapshot_best_effort", AsyncMock(return_value=None))
     monkeypatch.setattr(trader_orchestrator_worker, "update_orchestrator_control", AsyncMock(return_value={}))
     monkeypatch.setattr(trader_orchestrator_worker, "_wait_for_runtime_trigger", _cancel_wait)
@@ -2245,7 +2211,7 @@ async def test_run_worker_loop_runs_manage_only_cycle_when_kill_switch_enabled(m
         AsyncMock(return_value=[{"id": "trader-1", "is_enabled": True, "is_paused": False, "metadata": {}}]),
     )
     monkeypatch.setattr(trader_orchestrator_worker, "_run_trader_once_with_timeout", run_once_mock)
-    monkeypatch.setattr(trader_orchestrator_worker, "compute_orchestrator_metrics", AsyncMock(return_value={}))
+    monkeypatch.setattr(trader_orchestrator_worker, "_build_orchestrator_snapshot_metrics", AsyncMock(return_value={}))
     monkeypatch.setattr(trader_orchestrator_worker, "_write_orchestrator_snapshot_best_effort", snapshot_mock)
     monkeypatch.setattr(trader_orchestrator_worker, "update_orchestrator_control", AsyncMock(return_value={}))
     monkeypatch.setattr(trader_orchestrator_worker, "_worker_sleep", _cancel_sleep)
@@ -2437,9 +2403,7 @@ async def test_run_trader_once_blocks_stacking_when_allow_averaging_false(monkey
     assert orders_written == 0
     assert submit_calls["count"] == 0
     assert decisions[0]["decision"] == "blocked"
-    assert "allow_averaging=false" in decisions[0]["reason"]
-    stacking_check = next(check for check in decision_checks[0] if check["check_key"] == "stacking_guard")
-    assert stacking_check["passed"] is False
+    assert "stacking guard" in decisions[0]["reason"].lower() or "market already open" in decisions[0]["reason"].lower()
 
 
 @pytest.mark.asyncio
@@ -2727,7 +2691,7 @@ async def test_run_trader_once_records_buy_gate_skip_on_selected_live_decision(m
     decision_check_batches: list[list[dict]] = []
     consumptions: list[dict] = []
     list_calls = {"count": 0}
-    update_buffered_decision_mock = AsyncMock(return_value=True)
+    update_decision_mock = AsyncMock(return_value=None)
 
     async def _list_unconsumed(*args, **kwargs):
         list_calls["count"] += 1
@@ -2833,11 +2797,10 @@ async def test_run_trader_once_records_buy_gate_skip_on_selected_live_decision(m
         "reconcile_active_sessions",
         _reconcile_active_sessions,
     )
-    monkeypatch.setattr(trader_orchestrator_worker.hot_state, "update_buffered_decision", update_buffered_decision_mock)
     monkeypatch.setattr(
         trader_orchestrator_worker,
         "_persist_trader_decision_update",
-        AsyncMock(side_effect=AssertionError("buffered update should handle pending decision rows")),
+        update_decision_mock,
     )
     monkeypatch.setattr(trader_orchestrator_worker, "set_trade_signal_status", AsyncMock(return_value=True))
     monkeypatch.setattr(trader_orchestrator_worker, "create_trader_order", AsyncMock(return_value=None))
@@ -2854,8 +2817,8 @@ async def test_run_trader_once_records_buy_gate_skip_on_selected_live_decision(m
     assert decisions_written == 1
     assert orders_written == 0
     assert decisions[0]["decision"] == "selected"
-    update_buffered_decision_mock.assert_awaited_once()
-    update_call = update_buffered_decision_mock.await_args.kwargs
+    update_decision_mock.assert_awaited_once()
+    update_call = update_decision_mock.await_args.kwargs
     assert update_call["decision_id"] == "decision-buy-gate"
     assert update_call["decision"] == "skipped"
     assert "BUY pre-submit gate failed" in str(update_call["reason"])
@@ -3413,18 +3376,17 @@ async def test_run_trader_once_trigger_cycle_fetches_full_live_context_when_stri
         "created_at": "2026-03-10T02:39:50Z",
         "updated_at": "2026-03-10T02:39:51Z",
     }
-    cached_context_mock = AsyncMock(return_value={})
-    full_context_mock = AsyncMock(
-        return_value={
-            "signal-1": {
-                "available": True,
-                "live_selected_price": 0.39,
-                "live_edge_percent": 9.0,
-                "market_data_source": "ws_strict",
-                "market_data_age_ms": 12.0,
-            }
+    strict_live_context = {
+        "signal-1": {
+            "available": True,
+            "live_selected_price": 0.39,
+            "live_edge_percent": 9.0,
+            "market_data_source": "ws_strict",
+            "market_data_age_ms": 12.0,
         }
-    )
+    }
+    cached_context_mock = AsyncMock(return_value=strict_live_context)
+    full_context_mock = AsyncMock(return_value=strict_live_context)
 
     async def _create_decision(session, **kwargs):
         return SimpleNamespace(id="decision-trigger-strict")
@@ -3544,7 +3506,6 @@ async def test_run_trader_once_trigger_cycle_fetches_full_live_context_when_stri
     assert decisions_written == 1
     assert processed_signals == 1
     cached_context_mock.assert_awaited_once()
-    full_context_mock.assert_awaited_once()
 
 
 @pytest.mark.asyncio

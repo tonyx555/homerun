@@ -12,8 +12,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select, text, update as sa_update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import and_, func, select, text, update as sa_update
 from sqlalchemy.exc import OperationalError
 
 from config import settings
@@ -21,7 +20,6 @@ from models.database import (
     AppSettings,
     AsyncSessionLocal,
     DiscoveredWallet,
-    TraderDecision,
     TraderEvent,
     TraderOrder,
     TraderOrchestratorSnapshot,
@@ -66,7 +64,6 @@ from services.strategy_experiments import (
 from services.strategy_loader import StrategyValidationError, strategy_loader
 from services.intent_runtime import get_intent_runtime
 from services.execution_latency_metrics import execution_latency_metrics
-from services.runtime_status import runtime_status
 from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.strategy_sdk import StrategySDK
 from services.strategies.news_edge import validate_news_edge_config
@@ -78,7 +75,6 @@ from services.trader_orchestrator_state import (
     DEFAULT_TIMEOUT_TAKER_RESCUE_TIME_IN_FORCE,
     DEFAULT_LIVE_MARKET_CONTEXT,
     DEFAULT_LIVE_PROVIDER_HEALTH,
-    DEFAULT_LIVE_RISK_CLAMPS,
     DEFAULT_PENDING_LIVE_EXIT_GUARD,
     ORCHESTRATOR_SNAPSHOT_ID,
     ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS,
@@ -694,7 +690,7 @@ def _seed_lane_snapshot_metrics(snapshot: dict[str, Any] | None) -> None:
 
 async def _build_orchestrator_snapshot_metrics(
     *,
-    session: AsyncSession,
+    session: Any,
     lane: str,
     traders: list[dict[str, Any]] | None,
     decisions_delta: int = 0,
@@ -2956,130 +2952,76 @@ def _apply_live_risk_clamps(
     effective_risk_limits: dict[str, Any],
     live_risk_clamps: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
+    """Apply global live-risk clamps to trader effective limits.
+
+    Only clamps that are **explicitly present** in *live_risk_clamps* are
+    applied.  Missing keys mean "no clamp for this field".
+    """
     changes: dict[str, dict[str, Any]] = {}
 
-    enforce_allow_averaging_off = bool(
-        live_risk_clamps.get(
-            "enforce_allow_averaging_off",
-            DEFAULT_LIVE_RISK_CLAMPS["enforce_allow_averaging_off"],
-        )
-    )
-    if enforce_allow_averaging_off:
+    if live_risk_clamps.get("enforce_allow_averaging_off"):
         configured_allow_averaging = bool(effective_risk_limits.get("allow_averaging", False))
         if configured_allow_averaging:
             changes["allow_averaging"] = {"configured": configured_allow_averaging, "effective": False}
         effective_risk_limits["allow_averaging"] = False
 
-    configured_cooldown_seconds = max(0, safe_int(effective_risk_limits.get("cooldown_seconds"), 0))
-    min_cooldown_seconds = max(
-        0,
-        safe_int(
-            live_risk_clamps.get("min_cooldown_seconds"),
-            DEFAULT_LIVE_RISK_CLAMPS["min_cooldown_seconds"],
-        ),
-    )
-    clamped_cooldown_seconds = max(configured_cooldown_seconds, min_cooldown_seconds)
-    if clamped_cooldown_seconds != configured_cooldown_seconds:
-        changes["cooldown_seconds"] = {
-            "configured": configured_cooldown_seconds,
-            "effective": clamped_cooldown_seconds,
-        }
-    effective_risk_limits["cooldown_seconds"] = clamped_cooldown_seconds
+    if "min_cooldown_seconds" in live_risk_clamps:
+        configured_cooldown_seconds = max(0, safe_int(effective_risk_limits.get("cooldown_seconds"), 0))
+        min_cooldown_seconds = max(0, safe_int(live_risk_clamps["min_cooldown_seconds"], 0))
+        clamped_cooldown_seconds = max(configured_cooldown_seconds, min_cooldown_seconds)
+        if clamped_cooldown_seconds != configured_cooldown_seconds:
+            changes["cooldown_seconds"] = {
+                "configured": configured_cooldown_seconds,
+                "effective": clamped_cooldown_seconds,
+            }
+        effective_risk_limits["cooldown_seconds"] = clamped_cooldown_seconds
 
-    configured_max_consecutive_losses = max(1, safe_int(effective_risk_limits.get("max_consecutive_losses"), 4))
-    max_consecutive_losses_cap = max(
-        1,
-        safe_int(
-            live_risk_clamps.get("max_consecutive_losses_cap"),
-            DEFAULT_LIVE_RISK_CLAMPS["max_consecutive_losses_cap"],
-        ),
-    )
-    clamped_max_consecutive_losses = min(configured_max_consecutive_losses, max_consecutive_losses_cap)
-    if clamped_max_consecutive_losses != configured_max_consecutive_losses:
-        changes["max_consecutive_losses"] = {
-            "configured": configured_max_consecutive_losses,
-            "effective": clamped_max_consecutive_losses,
-        }
-    effective_risk_limits["max_consecutive_losses"] = clamped_max_consecutive_losses
+    if "max_consecutive_losses_cap" in live_risk_clamps:
+        configured = max(1, safe_int(effective_risk_limits.get("max_consecutive_losses"), 4))
+        cap = max(1, safe_int(live_risk_clamps["max_consecutive_losses_cap"], 1000))
+        clamped = min(configured, cap)
+        if clamped != configured:
+            changes["max_consecutive_losses"] = {"configured": configured, "effective": clamped}
+        effective_risk_limits["max_consecutive_losses"] = clamped
 
-    configured_max_open_orders = max(1, safe_int(effective_risk_limits.get("max_open_orders"), 20))
-    max_open_orders_cap = max(
-        1,
-        safe_int(
-            live_risk_clamps.get("max_open_orders_cap"),
-            DEFAULT_LIVE_RISK_CLAMPS["max_open_orders_cap"],
-        ),
-    )
-    clamped_max_open_orders = min(configured_max_open_orders, max_open_orders_cap)
-    if clamped_max_open_orders != configured_max_open_orders:
-        changes["max_open_orders"] = {
-            "configured": configured_max_open_orders,
-            "effective": clamped_max_open_orders,
-        }
-    effective_risk_limits["max_open_orders"] = clamped_max_open_orders
+    if "max_open_orders_cap" in live_risk_clamps:
+        configured = max(1, safe_int(effective_risk_limits.get("max_open_orders"), 20))
+        cap = max(1, safe_int(live_risk_clamps["max_open_orders_cap"], 1000))
+        clamped = min(configured, cap)
+        if clamped != configured:
+            changes["max_open_orders"] = {"configured": configured, "effective": clamped}
+        effective_risk_limits["max_open_orders"] = clamped
 
-    configured_max_open_positions = max(1, safe_int(effective_risk_limits.get("max_open_positions"), 12))
-    max_open_positions_cap = max(
-        1,
-        safe_int(
-            live_risk_clamps.get("max_open_positions_cap"),
-            DEFAULT_LIVE_RISK_CLAMPS["max_open_positions_cap"],
-        ),
-    )
-    clamped_max_open_positions = min(configured_max_open_positions, max_open_positions_cap)
-    if clamped_max_open_positions != configured_max_open_positions:
-        changes["max_open_positions"] = {
-            "configured": configured_max_open_positions,
-            "effective": clamped_max_open_positions,
-        }
-    effective_risk_limits["max_open_positions"] = clamped_max_open_positions
+    if "max_open_positions_cap" in live_risk_clamps:
+        configured = max(1, safe_int(effective_risk_limits.get("max_open_positions"), 12))
+        cap = max(1, safe_int(live_risk_clamps["max_open_positions_cap"], 1000))
+        clamped = min(configured, cap)
+        if clamped != configured:
+            changes["max_open_positions"] = {"configured": configured, "effective": clamped}
+        effective_risk_limits["max_open_positions"] = clamped
 
-    configured_max_trade_notional = max(1.0, safe_float(effective_risk_limits.get("max_trade_notional_usd"), 350.0))
-    max_trade_notional_usd_cap = max(
-        1.0,
-        safe_float(
-            live_risk_clamps.get("max_trade_notional_usd_cap"),
-            DEFAULT_LIVE_RISK_CLAMPS["max_trade_notional_usd_cap"],
-        ),
-    )
-    clamped_max_trade_notional = min(float(configured_max_trade_notional), float(max_trade_notional_usd_cap))
-    if clamped_max_trade_notional != float(configured_max_trade_notional):
-        changes["max_trade_notional_usd"] = {
-            "configured": float(configured_max_trade_notional),
-            "effective": clamped_max_trade_notional,
-        }
-    effective_risk_limits["max_trade_notional_usd"] = clamped_max_trade_notional
+    if "max_trade_notional_usd_cap" in live_risk_clamps:
+        configured = max(1.0, safe_float(effective_risk_limits.get("max_trade_notional_usd"), 350.0))
+        cap = max(1.0, safe_float(live_risk_clamps["max_trade_notional_usd_cap"], 1_000_000.0))
+        clamped = min(float(configured), float(cap))
+        if clamped != float(configured):
+            changes["max_trade_notional_usd"] = {"configured": float(configured), "effective": clamped}
+        effective_risk_limits["max_trade_notional_usd"] = clamped
 
-    configured_max_orders_per_cycle = max(1, safe_int(effective_risk_limits.get("max_orders_per_cycle"), 50))
-    max_orders_per_cycle_cap = max(
-        1,
-        safe_int(
-            live_risk_clamps.get("max_orders_per_cycle_cap"),
-            DEFAULT_LIVE_RISK_CLAMPS["max_orders_per_cycle_cap"],
-        ),
-    )
-    clamped_max_orders_per_cycle = min(configured_max_orders_per_cycle, max_orders_per_cycle_cap)
-    if clamped_max_orders_per_cycle != configured_max_orders_per_cycle:
-        changes["max_orders_per_cycle"] = {
-            "configured": configured_max_orders_per_cycle,
-            "effective": clamped_max_orders_per_cycle,
-        }
-    effective_risk_limits["max_orders_per_cycle"] = clamped_max_orders_per_cycle
+    if "max_orders_per_cycle_cap" in live_risk_clamps:
+        configured = max(1, safe_int(effective_risk_limits.get("max_orders_per_cycle"), 50))
+        cap = max(1, safe_int(live_risk_clamps["max_orders_per_cycle_cap"], 1000))
+        clamped = min(configured, cap)
+        if clamped != configured:
+            changes["max_orders_per_cycle"] = {"configured": configured, "effective": clamped}
+        effective_risk_limits["max_orders_per_cycle"] = clamped
 
-    enforce_halt_on_consecutive_losses = bool(
-        live_risk_clamps.get(
-            "enforce_halt_on_consecutive_losses",
-            DEFAULT_LIVE_RISK_CLAMPS["enforce_halt_on_consecutive_losses"],
-        )
-    )
-    if enforce_halt_on_consecutive_losses:
+    if live_risk_clamps.get("enforce_halt_on_consecutive_losses"):
         configured_halt = bool(effective_risk_limits.get("halt_on_consecutive_losses", False))
         if not configured_halt:
-            changes["halt_on_consecutive_losses"] = {
-                "configured": configured_halt,
-                "effective": True,
-            }
+            changes["halt_on_consecutive_losses"] = {"configured": configured_halt, "effective": True}
         effective_risk_limits["halt_on_consecutive_losses"] = True
+
     return changes
 
 
@@ -4421,7 +4363,7 @@ async def _run_trader_once(
                 effective_risk_limits["max_daily_loss_usd"] = fallback_daily_loss
         live_risk_clamp_changes: dict[str, dict[str, Any]] = {}
         if run_mode == "live":
-            live_risk_clamp_settings = dict(global_runtime_settings.get("live_risk_clamps") or DEFAULT_LIVE_RISK_CLAMPS)
+            live_risk_clamp_settings = dict(global_runtime_settings.get("live_risk_clamps") or {})
             live_risk_clamp_changes = _apply_live_risk_clamps(
                 effective_risk_limits,
                 live_risk_clamp_settings,
@@ -4713,6 +4655,22 @@ async def _run_trader_once(
             if prefiltered > 0:
                 await _commit_with_retry(session)
             if not scoped_signals:
+                if prefiltered_signals > 0 and decisions_written == 0 and orders_written == 0 and process_signals:
+                    payload = {
+                        "processed_signals": processed_signals,
+                        "decisions_written": decisions_written,
+                        "orders_written": orders_written,
+                        "prefiltered_signals": prefiltered_signals,
+                        "prefiltered_by_reason": prefiltered_by_reason,
+                    }
+                    if crypto_scope_prefiltered_dimensions:
+                        payload["crypto_scope_prefiltered_dimensions"] = crypto_scope_prefiltered_dimensions
+                    await _emit_cycle_heartbeat_if_due(
+                        session,
+                        trader_id=trader_id,
+                        message="Idle cycle: pending signals filtered before strategy evaluation.",
+                        payload=payload,
+                    )
                 continue
             signals = scoped_signals
             await _ensure_prefetched_source_runtime_state(
@@ -7033,18 +6991,20 @@ async def run_worker_loop(*, lane: str = _LANE_GENERAL, write_snapshot: bool = T
                             manage_only_cycle = True
                             manage_only_reasons.append("global_disabled")
                         else:
-                            await _write_orchestrator_snapshot_best_effort(
-                                session,
-                                running=False,
-                                enabled=False,
-                                current_activity="Disabled",
-                                interval_seconds=cycle_interval,
-                                stats=await _build_orchestrator_snapshot_metrics(
-                                    session=session,
-                                    lane=lane_key,
-                                    traders=traders,
-                                ),
+                            disabled_stats = await _build_orchestrator_snapshot_metrics(
+                                session=session,
+                                lane=lane_key,
+                                traders=traders,
                             )
+                            if write_snapshot:
+                                await _write_orchestrator_snapshot_best_effort(
+                                    session,
+                                    running=False,
+                                    enabled=False,
+                                    current_activity="Disabled",
+                                    interval_seconds=cycle_interval,
+                                    stats=disabled_stats,
+                                )
                             skip_cycle = True
 
                     if not skip_cycle and bool(control.get("is_paused")):
@@ -7106,19 +7066,21 @@ async def run_worker_loop(*, lane: str = _LANE_GENERAL, write_snapshot: bool = T
                         if not skip_cycle and mode == "live":
                             app_settings = await session.get(AppSettings, "default")
                             if not _is_live_credentials_configured(app_settings):
-                                await _write_orchestrator_snapshot_best_effort(
-                                    session,
-                                    running=False,
-                                    enabled=True,
-                                    current_activity="Blocked: live credentials missing",
-                                    interval_seconds=cycle_interval,
-                                    last_error=None,
-                                    stats=await _build_orchestrator_snapshot_metrics(
-                                        session=session,
-                                        lane=lane_key,
-                                        traders=traders,
-                                    ),
+                                creds_stats = await _build_orchestrator_snapshot_metrics(
+                                    session=session,
+                                    lane=lane_key,
+                                    traders=traders,
                                 )
+                                if write_snapshot:
+                                    await _write_orchestrator_snapshot_best_effort(
+                                        session,
+                                        running=False,
+                                        enabled=True,
+                                        current_activity="Blocked: live credentials missing",
+                                        interval_seconds=cycle_interval,
+                                        last_error=None,
+                                        stats=creds_stats,
+                                    )
                                 skip_cycle = True
                             else:
                                 needs_live_execution_init = True
@@ -7135,19 +7097,21 @@ async def run_worker_loop(*, lane: str = _LANE_GENERAL, write_snapshot: bool = T
 
                 if not skip_cycle and needs_live_execution_init and not await live_execution_service.ensure_initialized():
                     async with AsyncSessionLocal() as session:
-                        await _write_orchestrator_snapshot_best_effort(
-                            session,
-                            running=False,
-                            enabled=True,
-                            current_activity="Blocked: live trading service failed to initialize",
-                            interval_seconds=cycle_interval,
-                            last_error=None,
-                            stats=await _build_orchestrator_snapshot_metrics(
-                                session=session,
-                                lane=lane_key,
-                                traders=traders,
-                            ),
+                        init_stats = await _build_orchestrator_snapshot_metrics(
+                            session=session,
+                            lane=lane_key,
+                            traders=traders,
                         )
+                        if write_snapshot:
+                            await _write_orchestrator_snapshot_best_effort(
+                                session,
+                                running=False,
+                                enabled=True,
+                                current_activity="Blocked: live trading service failed to initialize",
+                                interval_seconds=cycle_interval,
+                                last_error=None,
+                                stats=init_stats,
+                            )
                     skip_cycle = True
 
                 if skip_cycle:
@@ -7187,6 +7151,14 @@ async def run_worker_loop(*, lane: str = _LANE_GENERAL, write_snapshot: bool = T
                                 lane=lane_key,
                                 traders=traders,
                             ),
+                        )
+                else:
+                    # Update lane metrics so the writing lane can merge them
+                    async with AsyncSessionLocal() as session:
+                        await _build_orchestrator_snapshot_metrics(
+                            session=session,
+                            lane=lane_key,
+                            traders=traders,
                         )
 
                 total_decisions = 0
@@ -7399,6 +7371,16 @@ async def run_worker_loop(*, lane: str = _LANE_GENERAL, write_snapshot: bool = T
                             last_run_at=utcnow(),
                             stats=metrics,
                         )
+                else:
+                    # Update lane metrics so the writing lane can merge them
+                    async with AsyncSessionLocal() as session:
+                        await _build_orchestrator_snapshot_metrics(
+                            session=session,
+                            lane=lane_key,
+                            traders=traders,
+                            decisions_delta=total_decisions,
+                            orders_delta=total_orders,
+                        )
 
                 (
                     runtime_trigger_event,
@@ -7417,21 +7399,23 @@ async def run_worker_loop(*, lane: str = _LANE_GENERAL, write_snapshot: bool = T
                 try:
                     async with AsyncSessionLocal() as session:
                         control = await read_orchestrator_control(session)
-                        await _write_orchestrator_snapshot_best_effort(
-                            session,
-                            running=False,
-                            enabled=bool(control.get("is_enabled", False)),
-                            current_activity="Worker error",
-                            interval_seconds=max(
-                                1, int(control.get("run_interval_seconds") or ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS)
-                            ),
-                            last_error=str(exc),
-                            stats=await _build_orchestrator_snapshot_metrics(
-                                session=session,
-                                lane=lane_key,
-                                traders=traders,
-                            ),
+                        error_stats = await _build_orchestrator_snapshot_metrics(
+                            session=session,
+                            lane=lane_key,
+                            traders=traders,
                         )
+                        if write_snapshot:
+                            await _write_orchestrator_snapshot_best_effort(
+                                session,
+                                running=False,
+                                enabled=bool(control.get("is_enabled", False)),
+                                current_activity="Worker error",
+                                interval_seconds=max(
+                                    1, int(control.get("run_interval_seconds") or ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS)
+                                ),
+                                last_error=str(exc),
+                                stats=error_stats,
+                            )
                 except Exception as snapshot_exc:
                     logger.warning(
                         "Failed to persist orchestrator worker error state",

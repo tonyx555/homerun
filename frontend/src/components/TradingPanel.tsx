@@ -443,14 +443,14 @@ const DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME = {
     terminal_statuses: ['filled', 'superseded_resolution', 'superseded_external', 'cancelled'],
   },
   live_risk_clamps: {
-    enforce_allow_averaging_off: true,
-    min_cooldown_seconds: 90,
-    max_consecutive_losses_cap: 3,
-    max_open_orders_cap: 6,
-    max_open_positions_cap: 4,
-    max_trade_notional_usd_cap: 200,
-    max_orders_per_cycle_cap: 4,
-    enforce_halt_on_consecutive_losses: true,
+    enforce_allow_averaging_off: null as boolean | null,
+    min_cooldown_seconds: null as number | null,
+    max_consecutive_losses_cap: null as number | null,
+    max_open_orders_cap: null as number | null,
+    max_open_positions_cap: null as number | null,
+    max_trade_notional_usd_cap: null as number | null,
+    max_orders_per_cycle_cap: null as number | null,
+    enforce_halt_on_consecutive_losses: null as boolean | null,
   },
   live_market_context: {
     enabled: true,
@@ -639,14 +639,9 @@ function buildGlobalSettingsDraft(
   const marketContext = runtime.live_market_context || DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_market_context
   const providerHealth = runtime.live_provider_health || DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_provider_health
   const pendingTerminalStatuses = toStringList(pending.terminal_statuses)
-  const maxOpenPositions = Math.trunc(
-    clampNumber(
-      toNumber(clamps.max_open_positions_cap ?? DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.max_open_positions_cap),
-      1,
-      1000,
-      DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.max_open_positions_cap,
-    )
-  )
+  const maxOpenPositions = clamps.max_open_positions_cap != null
+    ? Math.trunc(clampNumber(toNumber(clamps.max_open_positions_cap), 1, 1000, 1000))
+    : null
   return {
     runIntervalSeconds: String(config?.run_interval_seconds ?? 5),
     maxGrossExposureUsd: String(globalRisk.max_gross_exposure_usd ?? DEFAULT_ORCHESTRATOR_GLOBAL_RISK.max_gross_exposure_usd),
@@ -659,7 +654,7 @@ function buildGlobalSettingsDraft(
     minAccountBalanceUsd: String(
       liveExecutionSettings?.min_account_balance_usd ?? DEFAULT_LIVE_EXECUTION_LIMITS.min_account_balance_usd
     ),
-    maxOpenPositions: String(maxOpenPositions),
+    maxOpenPositions: maxOpenPositions != null ? String(maxOpenPositions) : '',
     maxSlippagePercent: String(
       liveExecutionSettings?.max_slippage_percent ?? DEFAULT_LIVE_EXECUTION_LIMITS.max_slippage_percent
     ),
@@ -672,24 +667,13 @@ function buildGlobalSettingsDraft(
         ? pendingTerminalStatuses
         : [...DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.pending_live_exit_guard.terminal_statuses]
     ).join(', '),
-    enforceAllowAveragingOff: Boolean(
-      clamps.enforce_allow_averaging_off ?? DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.enforce_allow_averaging_off
-    ),
-    minCooldownSeconds: String(clamps.min_cooldown_seconds ?? DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.min_cooldown_seconds),
-    maxConsecutiveLossesCap: String(
-      clamps.max_consecutive_losses_cap ?? DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.max_consecutive_losses_cap
-    ),
-    maxOpenOrdersCap: String(clamps.max_open_orders_cap ?? DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.max_open_orders_cap),
-    maxTradeNotionalUsdCap: String(
-      clamps.max_trade_notional_usd_cap ?? DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.max_trade_notional_usd_cap
-    ),
-    maxOrdersPerCycleCap: String(
-      clamps.max_orders_per_cycle_cap ?? DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.max_orders_per_cycle_cap
-    ),
-    enforceHaltOnConsecutiveLosses: Boolean(
-      clamps.enforce_halt_on_consecutive_losses
-      ?? DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.enforce_halt_on_consecutive_losses
-    ),
+    enforceAllowAveragingOff: Boolean(clamps.enforce_allow_averaging_off),
+    minCooldownSeconds: clamps.min_cooldown_seconds != null ? String(clamps.min_cooldown_seconds) : '',
+    maxConsecutiveLossesCap: clamps.max_consecutive_losses_cap != null ? String(clamps.max_consecutive_losses_cap) : '',
+    maxOpenOrdersCap: clamps.max_open_orders_cap != null ? String(clamps.max_open_orders_cap) : '',
+    maxTradeNotionalUsdCap: clamps.max_trade_notional_usd_cap != null ? String(clamps.max_trade_notional_usd_cap) : '',
+    maxOrdersPerCycleCap: clamps.max_orders_per_cycle_cap != null ? String(clamps.max_orders_per_cycle_cap) : '',
+    enforceHaltOnConsecutiveLosses: Boolean(clamps.enforce_halt_on_consecutive_losses),
     liveMarketContextEnabled: Boolean(
       marketContext.enabled ?? DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_market_context.enabled
     ),
@@ -5765,44 +5749,21 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
           DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.pending_live_exit_guard.max_pending_exits,
         )
       )
-      const minCooldownSeconds = Math.trunc(
-        clampNumber(
-          toNumber(globalSettingsDraft.minCooldownSeconds),
-          0,
-          86400,
-          DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.min_cooldown_seconds,
-        )
-      )
-      const maxConsecutiveLossesCap = Math.trunc(
-        clampNumber(
-          toNumber(globalSettingsDraft.maxConsecutiveLossesCap),
-          1,
-          1000,
-          DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.max_consecutive_losses_cap,
-        )
-      )
-      const maxOpenOrdersCap = Math.trunc(
-        clampNumber(
-          toNumber(globalSettingsDraft.maxOpenOrdersCap),
-          1,
-          1000,
-          DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.max_open_orders_cap,
-        )
-      )
-      const maxTradeNotionalUsdCap = clampNumber(
-        toNumber(globalSettingsDraft.maxTradeNotionalUsdCap),
-        1,
-        1_000_000,
-        DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.max_trade_notional_usd_cap,
-      )
-      const maxOrdersPerCycleCap = Math.trunc(
-        clampNumber(
-          toNumber(globalSettingsDraft.maxOrdersPerCycleCap),
-          1,
-          1000,
-          DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.max_orders_per_cycle_cap,
-        )
-      )
+      const minCooldownSeconds = globalSettingsDraft.minCooldownSeconds.trim()
+        ? Math.trunc(clampNumber(toNumber(globalSettingsDraft.minCooldownSeconds), 0, 86400, 0))
+        : null
+      const maxConsecutiveLossesCap = globalSettingsDraft.maxConsecutiveLossesCap.trim()
+        ? Math.trunc(clampNumber(toNumber(globalSettingsDraft.maxConsecutiveLossesCap), 1, 1000, 1000))
+        : null
+      const maxOpenOrdersCap = globalSettingsDraft.maxOpenOrdersCap.trim()
+        ? Math.trunc(clampNumber(toNumber(globalSettingsDraft.maxOpenOrdersCap), 1, 1000, 1000))
+        : null
+      const maxTradeNotionalUsdCap = globalSettingsDraft.maxTradeNotionalUsdCap.trim()
+        ? clampNumber(toNumber(globalSettingsDraft.maxTradeNotionalUsdCap), 1, 1_000_000, 1_000_000)
+        : null
+      const maxOrdersPerCycleCap = globalSettingsDraft.maxOrdersPerCycleCap.trim()
+        ? Math.trunc(clampNumber(toNumber(globalSettingsDraft.maxOrdersPerCycleCap), 1, 1000, 1000))
+        : null
       const liveMarketHistoryWindowSeconds = Math.trunc(
         clampNumber(
           toNumber(globalSettingsDraft.liveMarketHistoryWindowSeconds),
@@ -5879,14 +5840,9 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         1_000_000,
         DEFAULT_LIVE_EXECUTION_LIMITS.min_account_balance_usd,
       )
-      const maxOpenPositions = Math.trunc(
-        clampNumber(
-          toNumber(globalSettingsDraft.maxOpenPositions),
-          1,
-          1000,
-          DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_risk_clamps.max_open_positions_cap,
-        )
-      )
+      const maxOpenPositions = globalSettingsDraft.maxOpenPositions.trim()
+        ? Math.trunc(clampNumber(toNumber(globalSettingsDraft.maxOpenPositions), 1, 1000, 1000))
+        : null
       const maxSlippagePercent = clampNumber(
         toNumber(globalSettingsDraft.maxSlippagePercent),
         0.1,
@@ -5907,16 +5863,18 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
             identity_guard_enabled: globalSettingsDraft.pendingExitIdentityGuardEnabled,
             terminal_statuses: normalizePendingExitTerminalStatusesCsv(globalSettingsDraft.pendingExitTerminalStatuses),
           },
-          live_risk_clamps: {
-            enforce_allow_averaging_off: globalSettingsDraft.enforceAllowAveragingOff,
-            min_cooldown_seconds: minCooldownSeconds,
-            max_consecutive_losses_cap: maxConsecutiveLossesCap,
-            max_open_orders_cap: maxOpenOrdersCap,
-            max_open_positions_cap: maxOpenPositions,
-            max_trade_notional_usd_cap: maxTradeNotionalUsdCap,
-            max_orders_per_cycle_cap: maxOrdersPerCycleCap,
-            enforce_halt_on_consecutive_losses: globalSettingsDraft.enforceHaltOnConsecutiveLosses,
-          },
+          live_risk_clamps: Object.fromEntries(
+            Object.entries({
+              enforce_allow_averaging_off: globalSettingsDraft.enforceAllowAveragingOff,
+              min_cooldown_seconds: minCooldownSeconds,
+              max_consecutive_losses_cap: maxConsecutiveLossesCap,
+              max_open_orders_cap: maxOpenOrdersCap,
+              max_open_positions_cap: maxOpenPositions,
+              max_trade_notional_usd_cap: maxTradeNotionalUsdCap,
+              max_orders_per_cycle_cap: maxOrdersPerCycleCap,
+              enforce_halt_on_consecutive_losses: globalSettingsDraft.enforceHaltOnConsecutiveLosses,
+            }).filter(([, v]) => v != null)
+          ),
           live_market_context: {
             enabled: globalSettingsDraft.liveMarketContextEnabled,
             history_window_seconds: liveMarketHistoryWindowSeconds,

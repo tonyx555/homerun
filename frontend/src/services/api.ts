@@ -1518,14 +1518,14 @@ export interface TraderOrchestratorConfig {
       terminal_statuses: string[]
     }
     live_risk_clamps: {
-      enforce_allow_averaging_off: boolean
-      min_cooldown_seconds: number
-      max_consecutive_losses_cap: number
-      max_open_orders_cap: number
-      max_open_positions_cap: number
-      max_trade_notional_usd_cap: number
-      max_orders_per_cycle_cap: number
-      enforce_halt_on_consecutive_losses: boolean
+      enforce_allow_averaging_off?: boolean | null
+      min_cooldown_seconds?: number | null
+      max_consecutive_losses_cap?: number | null
+      max_open_orders_cap?: number | null
+      max_open_positions_cap?: number | null
+      max_trade_notional_usd_cap?: number | null
+      max_orders_per_cycle_cap?: number | null
+      enforce_halt_on_consecutive_losses?: boolean | null
     }
     live_market_context: {
       enabled: boolean

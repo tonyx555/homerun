@@ -104,14 +104,14 @@ class PendingLiveExitGuardSettingsRequest(BaseModel):
 
 
 class LiveRiskClampsSettingsRequest(BaseModel):
-    enforce_allow_averaging_off: bool = True
-    min_cooldown_seconds: int = Field(default=90, ge=0, le=86400)
-    max_consecutive_losses_cap: int = Field(default=3, ge=1, le=1000)
-    max_open_orders_cap: int = Field(default=6, ge=1, le=1000)
-    max_open_positions_cap: int = Field(default=4, ge=1, le=1000)
-    max_trade_notional_usd_cap: float = Field(default=200.0, ge=1.0, le=1_000_000.0)
-    max_orders_per_cycle_cap: int = Field(default=4, ge=1, le=1000)
-    enforce_halt_on_consecutive_losses: bool = True
+    enforce_allow_averaging_off: bool | None = None
+    min_cooldown_seconds: int | None = Field(default=None, ge=0, le=86400)
+    max_consecutive_losses_cap: int | None = Field(default=None, ge=1, le=1000)
+    max_open_orders_cap: int | None = Field(default=None, ge=1, le=1000)
+    max_open_positions_cap: int | None = Field(default=None, ge=1, le=1000)
+    max_trade_notional_usd_cap: float | None = Field(default=None, ge=1.0, le=1_000_000.0)
+    max_orders_per_cycle_cap: int | None = Field(default=None, ge=1, le=1000)
+    enforce_halt_on_consecutive_losses: bool | None = None
 
 
 class LiveMarketContextSettingsRequest(BaseModel):
@@ -204,7 +204,10 @@ async def update_orchestrator_settings(
     if request.global_risk is not None:
         settings_updates["global_risk"] = request.global_risk.model_dump()
     if request.global_runtime is not None:
-        settings_updates["global_runtime"] = request.global_runtime.model_dump()
+        runtime_dump = request.global_runtime.model_dump()
+        # Only persist clamp fields that were explicitly set (non-None)
+        runtime_dump["live_risk_clamps"] = request.global_runtime.live_risk_clamps.model_dump(exclude_none=True)
+        settings_updates["global_runtime"] = runtime_dump
     if settings_updates:
         update_kwargs["settings_json"] = settings_updates
 

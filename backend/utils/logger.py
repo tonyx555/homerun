@@ -101,8 +101,17 @@ def setup_logging(level: str = "INFO", json_format: bool = True, log_file: str =
     # Clear existing handlers
     root_logger.handlers = []
 
-    # Console handler
-    console_handler = logging.StreamHandler(sys.stdout)
+    # Console handler — force UTF-8 on Windows to avoid charmap encode errors
+    # for Unicode characters like → (U+2192) in log messages.
+    if sys.platform == "win32" and hasattr(sys.stdout, "buffer") and not sys.stdout.closed:
+        import io
+        try:
+            utf8_stream = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+            console_handler = logging.StreamHandler(utf8_stream)
+        except ValueError:
+            console_handler = logging.StreamHandler(sys.stderr)
+    else:
+        console_handler = logging.StreamHandler(sys.stdout if not sys.stdout.closed else sys.stderr)
     if json_format:
         console_handler.setFormatter(JSONFormatter())
     else:
@@ -113,7 +122,7 @@ def setup_logging(level: str = "INFO", json_format: bool = True, log_file: str =
     if log_file:
         log_path = Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(log_file)
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setFormatter(JSONFormatter())
         root_logger.addHandler(file_handler)
 

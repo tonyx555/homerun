@@ -5,21 +5,6 @@ from typing import Any
 
 from utils.converters import safe_float, safe_int
 
-# ---------------------------------------------------------------------------
-# ABSOLUTE SAFETY CEILINGS FOR LIVE TRADING
-#
-# These hard-coded constants are non-configurable safety limits that cap the
-# user-supplied values when the system is operating in live mode.  No
-# database configuration, environment variable, or operator action can
-# exceed these ceilings.  They exist to prevent catastrophic loss from
-# misconfiguration (e.g. setting max_gross_exposure_usd to 999999999).
-#
-# To change these values a code deploy is required -- that is by design.
-# ---------------------------------------------------------------------------
-ABSOLUTE_MAX_GROSS_EXPOSURE_USD: float = 50_000.0
-ABSOLUTE_MAX_DAILY_LOSS_USD: float = 10_000.0
-ABSOLUTE_MAX_TRADE_NOTIONAL_USD: float = 10_000.0
-ABSOLUTE_MAX_PER_MARKET_EXPOSURE_USD: float = 25_000.0
 
 
 @dataclass
@@ -70,15 +55,10 @@ def evaluate_risk(
 ) -> RiskResult:
     global_limits = global_limits or {}
     trader_limits = trader_limits or {}
-    is_live = str(mode).strip().lower() == "live"
-
     checks: list[RiskCheck] = []
 
     # --- Daily loss limits ---
     global_max_daily_loss = abs(safe_float(global_limits.get("max_daily_loss_usd"), 500.0))
-    # Safety ceiling: in live mode, cap at the hard-coded absolute maximum.
-    if is_live:
-        global_max_daily_loss = min(global_max_daily_loss, ABSOLUTE_MAX_DAILY_LOSS_USD)
     checks.append(
         RiskCheck(
             key="global_daily_loss",
@@ -94,9 +74,6 @@ def evaluate_risk(
             global_max_daily_loss,
         )
     )
-    # Safety ceiling: in live mode, cap at the hard-coded absolute maximum.
-    if is_live:
-        trader_max_daily_loss = min(trader_max_daily_loss, ABSOLUTE_MAX_DAILY_LOSS_USD)
     checks.append(
         RiskCheck(
             key="trader_daily_loss",
@@ -177,9 +154,6 @@ def evaluate_risk(
     _gross_cap = safe_float(global_limits.get("max_gross_exposure_usd"), 5000.0)
     _notional_default = max(50.0, _gross_cap * 0.10)
     max_trade_notional = max(1.0, safe_float(trader_limits.get("max_trade_notional_usd"), _notional_default))
-    # Safety ceiling: in live mode, cap at the hard-coded absolute maximum.
-    if is_live:
-        max_trade_notional = min(max_trade_notional, ABSOLUTE_MAX_TRADE_NOTIONAL_USD)
     checks.append(
         RiskCheck(
             key="trader_trade_notional",
@@ -191,9 +165,6 @@ def evaluate_risk(
 
     # --- Gross exposure limit ---
     max_gross = safe_float(global_limits.get("max_gross_exposure_usd"), 5000.0)
-    # Safety ceiling: in live mode, cap at the hard-coded absolute maximum.
-    if is_live:
-        max_gross = min(max_gross, ABSOLUTE_MAX_GROSS_EXPOSURE_USD)
     next_gross = max(0.0, gross_exposure_usd) + max(0.0, size_usd)
     checks.append(
         RiskCheck(
@@ -231,9 +202,6 @@ def evaluate_risk(
 
     # --- Per-market exposure limit ---
     max_per_market = safe_float(trader_limits.get("max_per_market_exposure_usd"), 500.0)
-    # Safety ceiling: in live mode, cap at the hard-coded absolute maximum.
-    if is_live:
-        max_per_market = min(max_per_market, ABSOLUTE_MAX_PER_MARKET_EXPOSURE_USD)
     next_market = max(0.0, market_exposure_usd) + max(0.0, size_usd)
     checks.append(
         RiskCheck(

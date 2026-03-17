@@ -232,6 +232,7 @@ def _is_rapid_close_trigger(close_trigger: Any) -> bool:
         "underwater",
         "resolution risk flatten",
         "force flatten",
+        "manual mark to market",
     )
     return any(marker in normalized for marker in rapid_markers)
 
@@ -1631,14 +1632,6 @@ async def reconcile_paper_positions(
             else:
                 lowest_price = min(lowest_price, current_price)
 
-        mark_changed = bool(
-            current_price is not None
-            and (
-                prev_last_mark is None
-                or abs(prev_last_mark - current_price) > 1e-9
-                or prev_mark_source != str(current_price_source or "")
-            )
-        )
         mark_updated_at_value = (
             _iso_utc(now)
             if current_price is not None
@@ -2418,14 +2411,6 @@ async def reconcile_live_positions(
                 pending_lowest_price = pending_current_price
             else:
                 pending_lowest_price = min(pending_lowest_price, pending_current_price)
-        pending_mark_changed = bool(
-            pending_current_price is not None
-            and (
-                pending_prev_last_mark is None
-                or abs(pending_prev_last_mark - pending_current_price) > 1e-9
-                or pending_prev_mark_source != str(pending_current_price_source or "")
-            )
-        )
         pending_mark_updated_at_value = (
             _iso_utc(now)
             if pending_current_price is not None
@@ -2574,6 +2559,28 @@ async def reconcile_live_positions(
         def _attach_pending_state(target_payload: dict[str, Any]) -> None:
             if pending_state_changed:
                 target_payload["position_state"] = pending_next_state
+
+        # ── Force mark-to-market: supersede any existing pending exit ──
+        # When a manual sell is requested, override whatever exit state
+        # exists so the force_mark_to_market path is always reached below.
+        if force_mark_to_market and isinstance(pending_exit, dict) and pending_exit_status:
+            provider_clob_id = _pending_exit_provider_clob_id(pending_exit)
+            if provider_clob_id and pending_exit_status in {"submitted", "pending"}:
+                try:
+                    async with release_conn(session):
+                        await live_execution_service.cancel_order(provider_clob_id)
+                except Exception:
+                    pass
+            pending_exit["status"] = "superseded_manual_sell"
+            pending_exit["superseded_at"] = _iso_utc(now)
+            payload["superseded_pending_exit"] = pending_exit
+            payload.pop("pending_live_exit", None)
+            if not dry_run:
+                row.payload_json = payload
+                row.updated_at = now
+            pending_exit = None
+            pending_exit_status = ""
+            pending_exit_kind = ""
 
         # ── Submitted/pending exit reconciliation ──────────────────────
         # For live exits we trust provider fill truth; a terminal local close
@@ -3802,14 +3809,6 @@ async def reconcile_live_positions(
             else:
                 lowest_price = min(lowest_price, current_price)
 
-        mark_changed = bool(
-            current_price is not None
-            and (
-                prev_last_mark is None
-                or abs(prev_last_mark - current_price) > 1e-9
-                or prev_mark_source != str(current_price_source or "")
-            )
-        )
         mark_updated_at_value = (
             _iso_utc(now)
             if current_price is not None
