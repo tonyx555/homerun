@@ -1,7 +1,10 @@
 import asyncio
 import re
-from utils.utcnow import utcnow
 from typing import Optional
+
+from utils.logger import get_logger
+
+logger = get_logger("wallet_tracker")
 from sqlalchemy import select, update
 
 from services.polymarket import polymarket_client
@@ -108,7 +111,7 @@ class WalletTracker:
                 self._username_cache[address_lower] = username
                 return username
         except Exception as e:
-            print(f"Username lookup failed for {address}: {e}")
+            logger.warning("Username lookup failed for %s", address, exc_info=e)
 
         return None
 
@@ -223,7 +226,7 @@ class WalletTracker:
                 wallet["last_trade_id"] = trades[0].get("id", "")
 
         except Exception as e:
-            print(f"Error updating wallet {address}: {e}")
+            logger.warning("Error updating wallet %s", address, exc_info=e)
 
         return new_trades
 
@@ -242,7 +245,7 @@ class WalletTracker:
             )
             for address, result in zip(addresses, results):
                 if isinstance(result, Exception):
-                    print(f"  Wallet update error for {address}: {result}")
+                    logger.warning("Wallet update error for %s", address, exc_info=result)
                     continue
                 if result:
                     wallet = self.tracked_wallets.get(address)
@@ -258,23 +261,23 @@ class WalletTracker:
                 try:
                     await callback(trade)
                 except Exception as e:
-                    print(f"Wallet callback error: {e}")
+                    logger.warning("Wallet callback error", exc_info=e)
 
         return all_new_trades
 
     async def start_monitoring(self, interval_seconds: int = 30):
         """Start continuous wallet monitoring"""
         self._running = True
-        print(f"Starting wallet monitor (interval: {interval_seconds}s)")
+        logger.info("Starting wallet monitor (interval: %ds)", interval_seconds)
 
         while self._running:
             if not global_pause_state.is_paused:
                 try:
                     new_trades = await self.check_all_wallets()
                     if new_trades:
-                        print(f"[{utcnow().isoformat()}] {len(new_trades)} new trades detected")
+                        logger.info("%d new trades detected", len(new_trades))
                 except Exception as e:
-                    print(f"Wallet monitor error: {e}")
+                    logger.warning("Wallet monitor error", exc_info=e)
 
             await asyncio.sleep(interval_seconds)
 

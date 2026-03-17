@@ -7,7 +7,6 @@ Run from backend dir:
 from __future__ import annotations
 
 import asyncio
-import os
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.exc import DBAPIError
@@ -22,10 +21,9 @@ from services.discovery_shared_state import (
 from services.pause_state import global_pause_state
 from services.wallet_discovery import wallet_discovery
 from services.worker_state import write_worker_snapshot
-from utils.logger import get_logger, setup_logging
+from utils.logger import get_logger
 from utils.retry import is_retryable_db_error, db_retry_delay
 
-setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"), json_format=False)
 logger = get_logger("discovery_worker")
 PRIORITY_BACKLOG_INTERVAL_MINUTES = 10
 _DISCOVERY_DB_RETRY_ATTEMPTS = 3

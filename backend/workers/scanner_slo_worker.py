@@ -19,11 +19,10 @@ from services.shared_state import (
     upsert_scanner_slo_incident,
 )
 from services.worker_state import clear_worker_run_request, read_worker_control, write_worker_snapshot
-from utils.logger import setup_logging
+from utils.logger import get_logger
 from utils.utcnow import utcnow
 
-setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"), json_format=False)
-logger = logging.getLogger("scanner_slo_worker")
+logger = get_logger("scanner_slo_worker")
 
 
 def _as_float(value: Any) -> float | None:

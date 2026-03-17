@@ -240,7 +240,7 @@ class MarketMonitor:
     Usage:
         alerts = await market_monitor.get_fresh_opportunities()
         for alert in alerts:
-            print(alert.to_dict())
+            logger.info(alert.to_dict())
     """
 
     def __init__(

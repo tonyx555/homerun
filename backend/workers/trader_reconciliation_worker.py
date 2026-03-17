@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json as _json
-import logging
-import os
 import time
 from typing import Any
 
@@ -41,11 +39,10 @@ from services.worker_state import (
     read_worker_control,
     write_worker_snapshot,
 )
-from utils.logger import setup_logging
+from utils.logger import get_logger
 from utils.utcnow import utcnow
 
-setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"), json_format=False)
-logger = logging.getLogger("trader_reconciliation_worker")
+logger = get_logger("trader_reconciliation_worker")
 
 WORKER_NAME = "trader_reconciliation"
 DEFAULT_INTERVAL_SECONDS = 1

@@ -6716,6 +6716,14 @@ async def _run_trader_once_with_timeout(
             process_signals,
         )
         return 0, 0, 0
+    except Exception as exc:
+        logger.exception(
+            "Trader cycle raised unexpected exception for trader=%s process_signals=%s: %s",
+            trader_id,
+            process_signals,
+            exc,
+        )
+        return 0, 0, 0
 
 
 async def _build_runtime_trigger_specs(
@@ -6840,7 +6848,16 @@ async def run_runtime_trigger_loop(*, lane: str = _LANE_GENERAL) -> None:
                 for spec in specs
             ]
             if tasks:
-                await asyncio.gather(*tasks)
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for idx, result in enumerate(results):
+                    if isinstance(result, BaseException):
+                        failed_trader_id = str(specs[idx]["trader"].get("id") or "")
+                        logger.warning(
+                            "Runtime trigger trader cycle raised uncaught exception for trader=%s: %s",
+                            failed_trader_id,
+                            result,
+                            exc_info=result,
+                        )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -7255,7 +7272,19 @@ async def run_worker_loop(*, lane: str = _LANE_GENERAL, write_snapshot: bool = T
                     for spec in crypto_trader_specs + non_crypto_trader_specs
                 ]
                 if all_trader_tasks:
-                    for decisions, orders, processed_signals in await asyncio.gather(*all_trader_tasks):
+                    results = await asyncio.gather(*all_trader_tasks, return_exceptions=True)
+                    for idx, result in enumerate(results):
+                        if isinstance(result, BaseException):
+                            spec = (crypto_trader_specs + non_crypto_trader_specs)[idx]
+                            failed_trader_id = str(spec["trader"].get("id") or "")
+                            logger.warning(
+                                "Trader cycle raised uncaught exception for trader=%s: %s",
+                                failed_trader_id,
+                                result,
+                                exc_info=result,
+                            )
+                            continue
+                        decisions, orders, processed_signals = result
                         total_decisions += decisions
                         total_orders += orders
                         total_processed_signals += processed_signals

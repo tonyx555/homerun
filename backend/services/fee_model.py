@@ -15,6 +15,9 @@ from decimal import Decimal
 from typing import Optional
 
 from utils.kelly import polymarket_taker_fee, kalshi_taker_fee
+from utils.logger import get_logger
+
+logger = get_logger("fee_model")
 
 
 ZERO = Decimal("0")
@@ -55,8 +58,8 @@ class FeeModel:
             spread_bps=40.0,
             total_cost=0.96,
         )
-        print(f"Total fees: ${breakdown.total_fees:.4f}")
-        print(f"Fees as % of payout: {breakdown.fee_as_pct_of_payout:.2f}%")
+        logger.info("Total fees: $%.4f", breakdown.total_fees)
+        logger.info("Fees as %% of payout: %.2f%%", breakdown.fee_as_pct_of_payout)
     """
 
     # Per-leg slippage rate: each leg adds ~0.3% compounding slippage

@@ -7,7 +7,6 @@ Run from backend dir:
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import socket
 import time
@@ -25,10 +24,9 @@ from services.strategy_signal_bridge import bridge_opportunities_to_signals
 from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.news.workflow_orchestrator import workflow_orchestrator
 from services.worker_state import write_worker_snapshot
-from utils.logger import setup_logging
+from utils.logger import get_logger
 
-setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"), json_format=False)
-logger = logging.getLogger("news_worker")
+logger = get_logger("news_worker")
 
 _IDLE_SLEEP_SECONDS = 5
 _RUN_CYCLE_DB_RETRY_ATTEMPTS = 2

@@ -7,8 +7,6 @@ Builds strategy-owned trader opportunities and writes them to shared snapshot st
 from __future__ import annotations
 
 import asyncio
-import logging
-import os
 from datetime import timedelta
 from typing import Any, Awaitable, Callable, TypeVar
 from sqlalchemy import select
@@ -37,10 +35,9 @@ from services.worker_state import (
     read_worker_control,
     write_worker_snapshot,
 )
-from utils.logger import setup_logging
+from utils.logger import get_logger
 
-setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"), json_format=False)
-logger = logging.getLogger("tracked_traders_worker")
+logger = get_logger("tracked_traders_worker")
 
 _TRACKED_TRADERS_DB_POOL_SIZE = max(
     1,

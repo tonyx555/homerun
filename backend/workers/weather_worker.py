@@ -7,8 +7,6 @@ Run from backend dir:
 from __future__ import annotations
 
 import asyncio
-import logging
-import os
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.exc import InterfaceError, OperationalError
@@ -23,10 +21,9 @@ from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.weather.workflow_orchestrator import weather_workflow_orchestrator
 from services.weather import shared_state
 from services.worker_state import write_worker_snapshot
-from utils.logger import setup_logging
+from utils.logger import get_logger
 
-setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"), json_format=False)
-logger = logging.getLogger("weather_worker")
+logger = get_logger("weather_worker")
 
 
 def _is_retryable_db_disconnect_error(exc: Exception) -> bool:

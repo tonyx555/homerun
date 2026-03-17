@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import logging
-import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -36,11 +34,10 @@ from services.worker_state import (
     read_worker_snapshot,
     write_worker_snapshot,
 )
-from utils.logger import setup_logging
+from utils.logger import get_logger
 from utils.utcnow import utcnow
 
-setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"), json_format=False)
-logger = logging.getLogger("events_worker")
+logger = get_logger("events_worker")
 
 _IDLE_SLEEP_SECONDS = 5
 _MAX_CONSECUTIVE_DB_FAILURES = 3

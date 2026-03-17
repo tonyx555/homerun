@@ -272,8 +272,9 @@ class TelegramNotifier:
         logger.info("Telegram notifier stopped")
 
     async def shutdown(self) -> None:
-        """Stop and close network resources."""
+        """Stop and close network resources.  Resets _started so start() can re-initialize."""
         self.stop()
+        self._started = False
         if self._http_client:
             await self._http_client.aclose()
             self._http_client = None

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
-import os
 from typing import Any
 
 from sqlalchemy.exc import OperationalError
@@ -18,11 +16,10 @@ from services.worker_state import (
     read_worker_control,
     write_worker_snapshot,
 )
-from utils.logger import setup_logging
+from utils.logger import get_logger
 from utils.utcnow import utcnow
 
-setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"), json_format=False)
-logger = logging.getLogger("redeemer_worker")
+logger = get_logger("redeemer_worker")
 
 WORKER_NAME = "redeemer"
 DEFAULT_INTERVAL_SECONDS = 120

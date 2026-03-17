@@ -41,11 +41,10 @@ from services.shared_state import (
 from services.strategy_signal_bridge import bridge_opportunities_to_signals
 from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.worker_state import write_worker_snapshot
-from utils.logger import get_logger, setup_logging
+from utils.logger import get_logger
 from utils.retry import is_retryable_db_error, db_retry_delay, DB_RETRY_ATTEMPTS
 from utils.utcnow import utcnow
 
-setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"), json_format=False)
 logger = get_logger("scanner_worker")
 _CANCEL_GRACE_SECONDS = 5.0
 _abandoned_tasks: set[asyncio.Task] = set()

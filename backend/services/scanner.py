@@ -180,7 +180,7 @@ class ArbitrageScanner:
     def set_auto_ai_scoring(self, enabled: bool):
         """Enable or disable automatic AI scoring of all opportunities after each scan."""
         self._auto_ai_scoring = enabled
-        print(f"Auto AI scoring {'enabled' if enabled else 'disabled'}")
+        logger.info(f"Auto AI scoring {'enabled' if enabled else 'disabled'}")
 
     @property
     def auto_ai_scoring(self) -> bool:
@@ -1825,8 +1825,8 @@ class ArbitrageScanner:
                     _apply_backfill_results([(market_id, merged_points, market_fetch_success)])
 
         if updated > 0:
-            print(
-                f"  Sparkline backfill: hydrated {updated}/{total_candidates} markets "
+            logger.info(
+                f"Sparkline backfill: hydrated {updated}/{total_candidates} markets "
                 f"({completed} successful history fetches)"
             )
 
@@ -1849,7 +1849,7 @@ class ArbitrageScanner:
                     await self._backfill_market_history_for_opportunities(batch, datetime.now(timezone.utc))
                     await self._persist_market_history_for_opportunities(batch)
                 except Exception as e:
-                    print(f"  Async sparkline backfill queue error: {e}")
+                    logger.warning(f"  Async sparkline backfill queue error: {e}", exc_info=e)
 
         backfill_task = asyncio.create_task(_run_queue(), name="scanner_market_history_backfill")
         self._market_history_backfill_task = backfill_task
@@ -1986,9 +1986,9 @@ class ArbitrageScanner:
                     await self._backfill_market_history_for_opportunities(opportunities, ts)
                 await self._persist_market_history_for_opportunities(opportunities)
             except asyncio.TimeoutError:
-                print("  Sparkline backfill timed out (shared attach)")
+                logger.warning("  Sparkline backfill timed out (shared attach)")
             except Exception as e:
-                print(f"  Sparkline backfill error in shared attach: {e}")
+                logger.warning(f"  Sparkline backfill error in shared attach: {e}", exc_info=e)
         else:
             self._queue_market_history_backfill(opportunities)
 
@@ -2077,7 +2077,7 @@ class ArbitrageScanner:
             try:
                 await callback(status)
             except Exception as e:
-                print(f"  Status callback error: {e}")
+                logger.warning(f"  Status callback error: {e}", exc_info=e)
 
     async def load_settings(self):
         """Load scanner settings from database"""
@@ -2094,7 +2094,7 @@ class ArbitrageScanner:
                         global_pause_state.resume()
                     else:
                         global_pause_state.pause()
-                    print(f"Loaded scanner settings: enabled={self._enabled}, interval={self._interval_seconds}s")
+                    logger.info(f"Loaded scanner settings: enabled={self._enabled}, interval={self._interval_seconds}s")
                 else:
                     # Create default settings
                     new_settings = ScannerSettings(
@@ -2104,9 +2104,9 @@ class ArbitrageScanner:
                     )
                     session.add(new_settings)
                     await session.commit()
-                    print("Created default scanner settings")
+                    logger.info("Created default scanner settings")
         except Exception as e:
-            print(f"Error loading scanner settings: {e}")
+            logger.warning(f"Error loading scanner settings: {e}", exc_info=e)
 
     async def save_settings(self):
         """Save scanner settings to database"""
@@ -2128,9 +2128,9 @@ class ArbitrageScanner:
                     session.add(settings_row)
 
                 await session.commit()
-                print(f"Saved scanner settings: enabled={self._enabled}, interval={self._interval_seconds}s")
+                logger.info(f"Saved scanner settings: enabled={self._enabled}, interval={self._interval_seconds}s")
         except Exception as e:
-            print(f"Error saving scanner settings: {e}")
+            logger.warning(f"Error saving scanner settings: {e}", exc_info=e)
 
     async def load_plugins(self, source_keys: Optional[list[str]] = None):
         """Load all enabled strategies from the database via unified loader."""
@@ -2145,7 +2145,7 @@ class ArbitrageScanner:
 
             self._plugins_loaded = True
         except Exception as e:
-            print(f"Error loading strategies: {e}")
+            logger.warning(f"Error loading strategies: {e}", exc_info=e)
 
     async def _ensure_runtime_strategies_loaded(self) -> None:
         if self._strategy_overrides is not None:
@@ -2238,7 +2238,7 @@ class ArbitrageScanner:
                     opportunities.append(opportunity)
             except Exception as e:
                 strategy_name = str(getattr(strategy, "name", self._strategy_key(strategy) or "unknown"))
-                print(f"  Strategy {strategy_name} failed: {e}")
+                logger.warning(f"  Strategy {strategy_name} failed: {e}", exc_info=e)
         return opportunities
 
     def _strategy_runtime_status_rows(self) -> list[dict]:
@@ -2296,7 +2296,7 @@ class ArbitrageScanner:
         import time as _time
 
         _t0 = _time.monotonic()
-        print(f"[{utcnow().isoformat()}] Refreshing market catalog...")
+        logger.info("Refreshing market catalog...")
         await self._set_activity("Catalog refresh: fetching Polymarket events and markets...")
 
         try:
@@ -2319,7 +2319,7 @@ class ArbitrageScanner:
                 ),
                 timeout=core_fetch_timeout,
             )
-            print(f"  [timing] Polymarket fetch: {_time.monotonic() - _phase_t:.1f}s")
+            logger.debug(f"  [timing] Polymarket fetch: {_time.monotonic() - _phase_t:.1f}s")
 
             now = datetime.now(timezone.utc)
 
@@ -2351,16 +2351,16 @@ class ArbitrageScanner:
                     events.extend(kalshi_events)
 
                     if kalshi_markets:
-                        print(f"  Fetched {len(kalshi_events)} Kalshi events and {len(kalshi_markets)} Kalshi markets")
-                        print(f"  [timing] Kalshi fetch: {_time.monotonic() - _phase_t:.1f}s")
+                        logger.info(f"  Fetched {len(kalshi_events)} Kalshi events and {len(kalshi_markets)} Kalshi markets")
+                        logger.debug(f"  [timing] Kalshi fetch: {_time.monotonic() - _phase_t:.1f}s")
                 except Exception as e:
-                    print(f"  Kalshi fetch failed (non-fatal): {e}")
+                    logger.warning(f"  Kalshi fetch failed (non-fatal): {e}", exc_info=e)
 
             # Phase 2b — prune closed/resolved/expired, then enforce hard caps.
             events, markets = self._prune_active_catalog(events, markets, now)
             events, markets = self._enforce_catalog_caps(events, markets)
             dedup_msg = f" (+{extra_from_events} from events)" if extra_from_events else ""
-            print(f"  Fetched {len(events)} events and {len(markets)} active markets{dedup_msg}")
+            logger.info(f"  Fetched {len(events)} events and {len(markets)} active markets{dedup_msg}")
             await self._set_activity(f"Catalog: {len(events)} events, {len(markets)} active markets")
 
             # Phase 3 — Read live prices from the WS cache for ALL tokens
@@ -2385,9 +2385,9 @@ class ArbitrageScanner:
                     )
                 except asyncio.TimeoutError:
                     prices = {}
-                    print(f"  Price load timed out after {optional_stage_timeout:.1f}s; continuing with cached market prices")
-                print(f"  Loaded prices for {len(prices)}/{len(all_token_ids)} tokens from WS cache")
-                print(f"  [timing] Price load: {_time.monotonic() - _phase_t:.1f}s")
+                    logger.warning(f"  Price load timed out after {optional_stage_timeout:.1f}s; continuing with cached market prices")
+                logger.warning(f"  Loaded prices for {len(prices)}/{len(all_token_ids)} tokens from WS cache")
+                logger.debug(f"  [timing] Price load: {_time.monotonic() - _phase_t:.1f}s")
             # Phase 4 — Update in-memory caches (offloaded to thread)
             def _update_caches_after_catalog(scanner, evts, mkts, prc, ts):
                 scanner._apply_live_prices_to_markets(mkts, prc)
@@ -2412,7 +2412,7 @@ class ArbitrageScanner:
                         if poly_tokens:
                             await feed_mgr.polymarket_feed.subscribe(token_ids=poly_tokens[:200])
                 except Exception as e:
-                    print(f"  WS subscription failed (non-critical): {e}")
+                    logger.warning(f"  WS subscription failed (non-critical): {e}", exc_info=e)
 
             # Keep MarketMonitor priorities current without triggering extra upstream fetches.
             try:
@@ -2442,7 +2442,7 @@ class ArbitrageScanner:
                         timeout=persist_timeout,
                     )
             except Exception as e:
-                print(f"  Catalog DB persist failed (non-fatal): {e}")
+                logger.warning(f"  Catalog DB persist failed (non-fatal): {e}", exc_info=e)
 
             self._last_catalog_refresh = now
             self._last_full_scan = now
@@ -2453,8 +2453,8 @@ class ArbitrageScanner:
                 self._background_tasks.add(t)
                 t.add_done_callback(self._background_tasks.discard)
 
-            print(
-                f"[{utcnow().isoformat()}] Catalog refresh complete: "
+            logger.info(
+                f"Catalog refresh complete: "
                 f"{len(events)} events, {len(markets)} markets in {duration:.1f}s"
             )
             await self._set_activity(f"Catalog refresh complete — {len(events)} events, {len(markets)} markets")
@@ -2470,7 +2470,7 @@ class ArbitrageScanner:
                     await write_market_catalog(session, [], [], error=str(e))
             except Exception as exc:
                 logger.warning("Failed to persist scanner catalog refresh error", exc_info=exc)
-            print(f"[{utcnow().isoformat()}] Catalog refresh error: {e}")
+            logger.warning("Catalog refresh error", exc_info=exc)
             await self._set_activity(f"Catalog refresh error: {e}")
             raise
 
@@ -2534,7 +2534,7 @@ class ArbitrageScanner:
                 timeout=delta_fetch_timeout,
             )
         except Exception as e:
-            print(f"  Incremental market fetch failed, falling back to full refresh: {e}")
+            logger.warning(f"  Incremental market fetch failed, falling back to full refresh: {e}", exc_info=e)
             market_count = await self.refresh_catalog()
             return {
                 "mode": "full",
@@ -2575,8 +2575,8 @@ class ArbitrageScanner:
                     timeout=event_fetch_timeout,
                 )
             except asyncio.TimeoutError:
-                print(
-                    f"  Incremental event fetch timed out after {event_fetch_timeout:.1f}s "
+                logger.warning(
+                    f"Incremental event fetch timed out after {event_fetch_timeout:.1f}s "
                     f"for {len(event_fetch_candidates)} uncached event slugs; continuing with cached/derived events"
                 )
                 delta_events = []
@@ -2584,9 +2584,9 @@ class ArbitrageScanner:
                 error_name = type(e).__name__
                 error_message = str(e).strip()
                 if error_message:
-                    print(f"  Incremental event fetch failed (non-fatal) [{error_name}]: {error_message}")
+                    logger.warning(f"  Incremental event fetch failed (non-fatal) [{error_name}]: {error_message}")
                 else:
-                    print(f"  Incremental event fetch failed (non-fatal) [{error_name}]")
+                    logger.warning(f"  Incremental event fetch failed (non-fatal) [{error_name}]")
                 delta_events = []
 
         market_map: dict[str, object] = {}
@@ -2677,8 +2677,8 @@ class ArbitrageScanner:
                 )
             except asyncio.TimeoutError:
                 prices = {}
-                print(
-                    f"  Incremental price load timed out after {optional_stage_timeout:.1f}s; continuing without fresh WS snapshot"
+                logger.warning(
+                    f"Incremental price load timed out after {optional_stage_timeout:.1f}s; continuing without fresh WS snapshot"
                 )
 
         def _update_incremental_caches(scanner, evts, mkts, prc, ts):
@@ -2703,7 +2703,7 @@ class ArbitrageScanner:
                     if poly_tokens:
                         await feed_mgr.polymarket_feed.subscribe(token_ids=poly_tokens[:200])
             except Exception as e:
-                print(f"  WS subscription sync failed (non-critical): {e}")
+                logger.warning(f"  WS subscription sync failed (non-critical): {e}", exc_info=e)
 
         try:
             from services.market_monitor import market_monitor
@@ -2730,7 +2730,7 @@ class ArbitrageScanner:
                     timeout=persist_timeout,
                 )
         except Exception as e:
-            print(f"  Incremental catalog DB persist failed (non-fatal): {e}")
+            logger.warning(f"  Incremental catalog DB persist failed (non-fatal): {e}", exc_info=e)
 
         self._last_catalog_refresh = now
         return {
@@ -2779,7 +2779,7 @@ class ArbitrageScanner:
                 )
             relink_event_markets(events, markets)
         except Exception as e:
-            print(f"  Catalog hydration from DB failed: {e}")
+            logger.warning(f"  Catalog hydration from DB failed: {e}", exc_info=e)
             return 0
 
         if not markets:
@@ -2808,8 +2808,8 @@ class ArbitrageScanner:
             if self._last_full_scan is None:
                 self._last_full_scan = catalog_age
 
-        print(
-            f"  Hydrated catalog from DB: {len(events)} events, {len(markets)} markets"
+        logger.info(
+            f"Hydrated catalog from DB: {len(events)} events, {len(markets)} markets"
             + (" (updated snapshot)" if only_if_newer else "")
         )
         return len(markets)
@@ -2833,13 +2833,13 @@ class ArbitrageScanner:
             reactive_tokens = [str(t or "").strip() for t in (reactive_token_ids or []) if str(t or "").strip()]
             reactive_mode = bool(reactive_tokens)
             mode_label = "reactive" if reactive_mode else "timer"
-            print(f"[{now.isoformat()}] Starting fast scan ({mode_label})...")
+            logger.info(f"Starting fast scan ({mode_label})...")
 
             if not self._cached_markets:
-                print("  Fast scan cache empty; attempting DB catalog hydration...")
+                logger.info("  Fast scan cache empty; attempting DB catalog hydration...")
                 await self._hydrate_catalog_from_db()
                 if not self._cached_markets:
-                    print("  No catalog available yet (DB empty too); skipping scan cycle")
+                    logger.info("  No catalog available yet (DB empty too); skipping scan cycle")
                     await self._set_activity("Waiting for catalog refresh...")
                     return self._opportunities
 
@@ -2851,9 +2851,9 @@ class ArbitrageScanner:
                     try:
                         new_markets = await self.market_data.get_recent_markets(since_minutes=5)
                         if new_markets:
-                            print(f"  Incremental: {len(new_markets)} recently created markets")
+                            logger.info(f"  Incremental: {len(new_markets)} recently created markets")
                     except Exception as e:
-                        print(f"  Incremental fetch failed (non-fatal): {e}")
+                        logger.warning(f"  Incremental fetch failed (non-fatal): {e}", exc_info=e)
 
                 cached_market_ids = {m.id for m in self._cached_markets}
                 truly_new = [m for m in new_markets if m.id not in cached_market_ids and self._is_market_active(m, now)]
@@ -2879,7 +2879,7 @@ class ArbitrageScanner:
                         )
 
                     await loop.run_in_executor(None, _refresh_catalog_after_new_markets, self, now)
-                    print(f"  Added {len(truly_new)} brand-new markets to cache")
+                    logger.info(f"  Added {len(truly_new)} brand-new markets to cache")
 
                 affected_market_ids: list[str] = []
                 candidate_markets: list = []
@@ -2893,8 +2893,8 @@ class ArbitrageScanner:
                     ]
                     candidate_markets = [m for m in candidate_markets if self._is_market_active(m, now)]
                     if not candidate_markets:
-                        print(
-                            "  Reactive batch had no currently cached/active markets; falling back to HOT-tier timer path"
+                        logger.info(
+                            "Reactive batch had no currently cached/active markets; falling back to HOT-tier timer path"
                         )
                         reactive_mode = False
 
@@ -2911,7 +2911,7 @@ class ArbitrageScanner:
                     candidate_markets = [m for m in tier_map[MarketTier.HOT] if self._is_market_active(m, now)]
                     affected_market_ids = [str(getattr(m, "id", "") or "") for m in candidate_markets]
                     if not candidate_markets:
-                        print("  No HOT-tier markets, skipping fast scan")
+                        logger.info("  No HOT-tier markets, skipping fast scan")
                         self._opportunities = await self.refresh_opportunity_prices(
                             self._opportunities,
                             now=now,
@@ -2943,7 +2943,7 @@ class ArbitrageScanner:
                     ]
                     candidate_markets = [m for m in candidate_markets if self._is_market_active(m, now)]
                     affected_market_ids = [str(getattr(m, "id", "") or "") for m in candidate_markets]
-                    print(f"  Targeted scan: narrowed to {len(candidate_markets)} markets")
+                    logger.info(f"  Targeted scan: narrowed to {len(candidate_markets)} markets")
                 elif not reactive_mode:
                     timer_cap = max(10, int(settings.REALTIME_SCAN_MAX_BATCH_MARKETS or 800))
                     if len(candidate_markets) > timer_cap:
@@ -2958,7 +2958,7 @@ class ArbitrageScanner:
                     ws_prices = await self._snapshot_ws_prices(candidate_token_ids)
                     live_prices.update(ws_prices)
                     if ws_prices:
-                        print(f"  Reactive WS overlay: {len(ws_prices)}/{len(candidate_token_ids)} tokens")
+                        logger.info(f"  Reactive WS overlay: {len(ws_prices)}/{len(candidate_token_ids)} tokens")
                 else:
                     token_sample = candidate_token_ids
                     if token_sample:
@@ -2966,7 +2966,7 @@ class ArbitrageScanner:
                             f"Fast scan: reading live prices for {len(token_sample)} hot-tier tokens..."
                         )
                         live_prices = await self._snapshot_ws_prices(token_sample)
-                        print(f"  Loaded prices for {len(live_prices)} hot-tier tokens from WS cache")
+                        logger.info(f"  Loaded prices for {len(live_prices)} hot-tier tokens from WS cache")
 
                 merged_prices = dict(live_prices)
                 self._cached_prices.update(live_prices)
@@ -2981,7 +2981,7 @@ class ArbitrageScanner:
                     None, self._prioritizer.get_changed_markets, candidate_markets
                 )
                 if not changed_markets:
-                    print(f"  All {len(candidate_markets)} candidate markets unchanged, skipping strategies")
+                    logger.info(f"  All {len(candidate_markets)} candidate markets unchanged, skipping strategies")
                     await self._set_activity(f"Fast scan: {len(candidate_markets)} markets unchanged, skipping")
                     await loop.run_in_executor(None, self._prioritizer.update_after_evaluation, candidate_markets, now)
                     self._opportunities = await self.refresh_opportunity_prices(
@@ -3006,15 +3006,15 @@ class ArbitrageScanner:
                 changed_market_ids = [str(getattr(m, "id", "") or "") for m in changed_markets]
                 affected_ids_payload = [str(getattr(m, "id", "") or "") for m in markets_for_strategies]
 
-                print(
-                    f"  Fast scan batch: {len(changed_market_ids)} changed / "
+                logger.info(
+                    f"Fast scan batch: {len(changed_market_ids)} changed / "
                     f"{len(affected_ids_payload)} dispatched markets ({scan_mode})"
                 )
 
                 await self._ensure_runtime_strategies_loaded()
                 incremental_slugs, _ = self._partition_market_refresh_strategies()
                 if not incremental_slugs:
-                    print("  No incremental MARKET_DATA_REFRESH strategies enabled; skipping dispatch")
+                    logger.info("  No incremental MARKET_DATA_REFRESH strategies enabled; skipping dispatch")
                     self._opportunities = await self.refresh_opportunity_prices(
                         self._opportunities,
                         now=now,
@@ -3108,10 +3108,10 @@ class ArbitrageScanner:
                     try:
                         await callback(fast_opportunities)
                     except Exception as e:
-                        print(f"  Callback error: {e}")
+                        logger.warning(f"  Callback error: {e}", exc_info=e)
 
-                print(
-                    f"[{now.isoformat()}] Fast scan complete ({scan_mode}). "
+                logger.info(
+                    f"Fast scan complete ({scan_mode}). "
                     f"{len(fast_opportunities)} detected, "
                     f"{len(self._opportunities)} total in pool "
                     f"({unchanged} unchanged markets skipped)"
@@ -3123,7 +3123,7 @@ class ArbitrageScanner:
 
             except Exception as e:
                 self._fast_lane_error = str(e)
-                print(f"[{utcnow().isoformat()}] Fast scan error: {e}")
+                logger.warning("Fast scan error", exc_info=e)
                 await self._set_activity(f"Fast scan error: {e}")
                 raise
             finally:
@@ -3361,7 +3361,7 @@ class ArbitrageScanner:
                     try:
                         await callback(full_filtered)
                     except Exception as e:
-                        print(f"  Callback error: {e}")
+                        logger.warning(f"  Callback error: {e}", exc_info=e)
 
                 cycle_suffix = " full coverage cycle complete." if cycle_completed else ""
                 await self._set_activity(
@@ -3440,13 +3440,13 @@ class ArbitrageScanner:
                 settings.NEWS_SIMILARITY_THRESHOLD,
             )
 
-            print(
-                f"  News prefetch: {len(all_articles)} articles, "
+            logger.info(
+                f"News prefetch: {len(all_articles)} articles, "
                 f"{len(market_infos)} markets, {len(matches)} matches "
                 f"(LLM analysis deferred to manual trigger)"
             )
         except Exception as e:
-            print(f"  News prefetch error: {e}")
+            logger.warning(f"  News prefetch error: {e}", exc_info=e)
 
     def _deduplicate_cross_strategy(self, opportunities: list[Opportunity]) -> list[Opportunity]:
         """Remove duplicate opportunities that cover the same underlying markets.
@@ -3478,7 +3478,7 @@ class ArbitrageScanner:
         deduped = list(seen.values()) + protected
         removed = len(opportunities) - len(deduped)
         if removed > 0:
-            print(f"  Deduplicated: removed {removed} cross-strategy duplicates")
+            logger.info(f"  Deduplicated: removed {removed} cross-strategy duplicates")
         return deduped
 
     @staticmethod
@@ -3590,8 +3590,8 @@ class ArbitrageScanner:
 
         removed = len(opportunities) - len(kept)
         if removed > 0:
-            print(
-                "  Opportunity caps applied: "
+            logger.info(
+                "Opportunity caps applied: "
                 f"{len(kept)} kept, {removed} removed "
                 f"(total_cap={total_cap or 'off'}, per_strategy_cap={per_strategy_cap or 'off'})"
             )
@@ -3722,7 +3722,7 @@ class ArbitrageScanner:
         if expired_count:
             parts.append(f"{expired_count} expired removed")
         if parts:
-            print(f"  Merge: {', '.join(parts)} -> {len(merged)} total")
+            logger.info(f"  Merge: {', '.join(parts)} -> {len(merged)} total")
 
         return merged
 
@@ -3760,7 +3760,7 @@ class ArbitrageScanner:
             # Cap the number of LLM calls per scan cycle
             candidates = candidates[: self.AI_SCORE_MAX_PER_SCAN]
 
-            print(f"  AI Judge: scoring {len(candidates)} unscored opportunities...")
+            logger.info(f"  AI Judge: scoring {len(candidates)} unscored opportunities...")
 
             sem = asyncio.Semaphore(self.AI_SCORE_CONCURRENCY)
             persist_lock = asyncio.Lock()
@@ -3796,9 +3796,9 @@ class ArbitrageScanner:
                     try:
                         await _persist_inline_analysis(opp)
                     except Exception as e:
-                        print(f"  AI Judge persist warning: {e}")
-                    print(
-                        f"  AI Judge: {opp.title[:50]}... "
+                        logger.warning(f"  AI Judge persist warning: {e}", exc_info=e)
+                    logger.info(
+                        f"AI Judge: {opp.title[:50]}... "
                         f"-> {result.get('recommendation', 'unknown')} "
                         f"(score: {result.get('overall_score', 0):.2f})"
                     )
@@ -3813,13 +3813,13 @@ class ArbitrageScanner:
                         t.cancel()
                     raise
                 except Exception as e:
-                    print(f"  AI Judge error: {e}")
+                    logger.warning(f"  AI Judge error: {e}", exc_info=e)
 
         except asyncio.CancelledError:
-            print("  AI scoring cancelled")
+            logger.warning("  AI scoring cancelled")
             raise
         except Exception as e:
-            print(f"  AI scoring error: {e}")
+            logger.warning(f"  AI scoring error: {e}", exc_info=e)
 
     def _register_reactive_scanning(self):
         """Register reactive token queueing from price-change signals."""
@@ -3852,9 +3852,9 @@ class ArbitrageScanner:
                 )
 
             self._reactive_scan_registered = True
-            print("  Reactive scanning registered (PRICE_CHANGE + local WS callbacks)")
+            logger.info("  Reactive scanning registered (PRICE_CHANGE + local WS callbacks)")
         except Exception as e:
-            print(f"  Reactive scanning registration failed: {e}")
+            logger.warning(f"  Reactive scanning registration failed: {e}", exc_info=e)
 
     async def _scan_loop(self):
         """Internal scan loop with reactive + tiered polling.
@@ -3881,7 +3881,7 @@ class ArbitrageScanner:
                 reactive_tokens = await self.consume_reactive_tokens()
                 await self.scan_fast(reactive_token_ids=reactive_tokens)
             except Exception as e:
-                print(f"Scan error: {e}")
+                logger.warning(f"Scan error: {e}", exc_info=e)
 
             # Wait for either the timer OR a reactive price-change trigger
             reactive_trigger = self._get_reactive_trigger()
@@ -3934,11 +3934,11 @@ class ArbitrageScanner:
                 if mode == "full":
                     next_full_reconcile_at = now + timedelta(seconds=full_reconcile_interval)
             except asyncio.TimeoutError:
-                print(f"  Catalog refresh timed out after {timeout:.0f}s")
+                logger.warning(f"  Catalog refresh timed out after {timeout:.0f}s")
             except asyncio.CancelledError:
                 return
             except Exception as e:
-                print(f"  Catalog refresh failed: {e}")
+                logger.warning(f"  Catalog refresh failed: {e}", exc_info=e)
             await asyncio.sleep(interval)
 
     async def _attach_ai_judgments(self, opportunities: list):
@@ -4016,7 +4016,7 @@ class ArbitrageScanner:
                     attached += 1
 
         except Exception as e:
-            print(f"  Error loading AI judgments from DB: {e}")
+            logger.warning(f"  Error loading AI judgments from DB: {e}", exc_info=e)
 
     async def start_continuous_scan(self, interval_seconds: int = None):
         """Start continuous scanning loop"""
@@ -4030,7 +4030,7 @@ class ArbitrageScanner:
             self._interval_seconds = interval_seconds
 
         self._running = True
-        print(f"Starting continuous scan (interval: {self._interval_seconds}s, enabled: {self._enabled})")
+        logger.info(f"Starting continuous scan (interval: {self._interval_seconds}s, enabled: {self._enabled})")
 
         # Run the scan loop
         await self._scan_loop()
@@ -4077,7 +4077,7 @@ class ArbitrageScanner:
                     raise
             except Exception as exc:
                 logger.debug("Scanner AI scoring task raised during cancellation", exc_info=exc)
-            print("  AI scoring task cancelled")
+            logger.warning("  AI scoring task cancelled")
 
     async def set_interval(self, seconds: int):
         """Update scan interval"""
@@ -4290,7 +4290,7 @@ class ArbitrageScanner:
         """Clear all opportunities from memory. Returns count of cleared opportunities."""
         count = len(self._opportunities)
         self._opportunities = []
-        print(f"Cleared {count} opportunities from memory")
+        logger.info(f"Cleared {count} opportunities from memory")
         return count
 
     def remove_expired_opportunities(self) -> int:
@@ -4304,7 +4304,7 @@ class ArbitrageScanner:
 
         removed = before_count - len(self._opportunities)
         if removed > 0:
-            print(f"Removed {removed} expired opportunities")
+            logger.info(f"Removed {removed} expired opportunities")
         return removed
 
     def remove_old_opportunities(self, max_age_minutes: int = 60) -> int:
@@ -4320,7 +4320,7 @@ class ArbitrageScanner:
 
         removed = before_count - len(self._opportunities)
         if removed > 0:
-            print(f"Removed {removed} opportunities older than {max_age_minutes} minutes")
+            logger.info(f"Removed {removed} opportunities older than {max_age_minutes} minutes")
         return removed
 
 

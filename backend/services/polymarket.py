@@ -573,7 +573,7 @@ class PolymarketClient:
         except Exception as e:
             if isinstance(e, httpx.HTTPStatusError) and e.response is not None and e.response.status_code == 429:
                 self._market_lookup_cooldown_until[requested] = time.monotonic() + 60.0
-            print(f"Market lookup failed for {condition_id}: {e}")
+            _logger.warning("Market lookup failed for %s", condition_id, exc_info=e)
 
         # Fallback path: the Data API reliably accepts ``market=<condition_id>``
         # and returns trade rows with title/slug metadata.
@@ -602,7 +602,7 @@ class PolymarketClient:
 
                 return info
         except Exception as e:
-            print(f"Data API market lookup failed for {condition_id}: {e}")
+            _logger.warning("Data API market lookup failed for %s", condition_id, exc_info=e)
 
         return None
 
@@ -671,7 +671,7 @@ class PolymarketClient:
 
                 return info
         except Exception as e:
-            print(f"Market lookup by token_id failed for {token_id}: {e}")
+            _logger.warning("Market lookup by token_id failed for %s", token_id, exc_info=e)
 
         return None
 
