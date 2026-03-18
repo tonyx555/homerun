@@ -175,29 +175,29 @@ def test_loader_reconfigure_loaded_updates_runtime_without_recompile():
 async def test_loader_isolates_error_rows_and_loads_valid_rows(tmp_path):
     engine, session_factory = await _build_session_factory(tmp_path)
     try:
-        async with session_factory() as session:
-            valid_source = "\n".join(
-                [
-                    "from services.strategies.base import BaseStrategy, StrategyDecision",
-                    "",
-                    "class UnitGoodStrategy(BaseStrategy):",
-                    "    key = 'unit_good_strategy'",
-                    "    def evaluate(self, signal, context):",
-                    "        return StrategyDecision(decision='skipped', reason='ok', score=0.0, checks=[], payload={})",
-                ]
-            )
-            invalid_source = "\n".join(
-                [
-                    "import os",
-                    "from services.strategies.base import BaseStrategy, StrategyDecision",
-                    "",
-                    "class UnitBadStrategy(BaseStrategy):",
-                    "    key = 'unit_bad_strategy'",
-                    "    def evaluate(self, signal, context):",
-                    "        return StrategyDecision(decision='skipped', reason='bad', score=0.0, checks=[], payload={})",
-                ]
-            )
+        valid_source = "\n".join(
+            [
+                "from services.strategies.base import BaseStrategy, StrategyDecision",
+                "",
+                "class UnitGoodStrategy(BaseStrategy):",
+                "    key = 'unit_good_strategy'",
+                "    def evaluate(self, signal, context):",
+                "        return StrategyDecision(decision='skipped', reason='ok', score=0.0, checks=[], payload={})",
+            ]
+        )
+        invalid_source = "\n".join(
+            [
+                "import os",
+                "from services.strategies.base import BaseStrategy, StrategyDecision",
+                "",
+                "class UnitBadStrategy(BaseStrategy):",
+                "    key = 'unit_bad_strategy'",
+                "    def evaluate(self, signal, context):",
+                "        return StrategyDecision(decision='skipped', reason='bad', score=0.0, checks=[], payload={})",
+            ]
+        )
 
+        async with session_factory() as session:
             session.add(
                 Strategy(
                     id="unit-good-row",
@@ -230,14 +230,24 @@ async def test_loader_isolates_error_rows_and_loads_valid_rows(tmp_path):
             )
             await session.commit()
 
+        # refresh_all_from_db creates its own sessions via a local import of
+        # AsyncSessionLocal from models.database; patch the source so both the
+        # read and write sessions use the test DB.
+        import models.database as _db_mod
+        original_session_local = _db_mod.AsyncSessionLocal
+        _db_mod.AsyncSessionLocal = session_factory
+        try:
             loader = StrategyDBLoader()
-            result = await loader.refresh_from_db(session=session)
+            result = await loader.refresh_all_from_db()
+        finally:
+            _db_mod.AsyncSessionLocal = original_session_local
 
-            assert "unit_good_strategy" in result["loaded"]
-            assert "unit_bad_strategy" in result["errors"]
-            assert loader.get_strategy("unit_good_strategy") is not None
-            assert loader.get_strategy("unit_bad_strategy") is None
+        assert "unit_good_strategy" in result["loaded"]
+        assert "unit_bad_strategy" in result["errors"]
+        assert loader.get_strategy("unit_good_strategy") is not None
+        assert loader.get_strategy("unit_bad_strategy") is None
 
+        async with session_factory() as session:
             good_row = await session.get(Strategy, "unit-good-row")
             bad_row = await session.get(Strategy, "unit-bad-row")
             assert good_row is not None and good_row.status == "loaded"

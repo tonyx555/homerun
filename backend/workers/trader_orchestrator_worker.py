@@ -2869,11 +2869,10 @@ async def _live_provider_failure_snapshot(
     now = utcnow()
     cutoff = now - timedelta(seconds=normalized_window_seconds)
     cache_key = f"{trader_id}:{normalized_window_seconds}"
+    cached = _live_provider_failure_snapshot_cache.get(cache_key)
     for key, (cached_at, _cached_payload) in list(_live_provider_failure_snapshot_cache.items()):
         if (now - cached_at).total_seconds() > _LIVE_PROVIDER_FAILURE_SNAPSHOT_CACHE_TTL_SECONDS:
             _live_provider_failure_snapshot_cache.pop(key, None)
-
-    cached = _live_provider_failure_snapshot_cache.get(cache_key)
     if cached is not None:
         cached_at, cached_payload = cached
         if (now - cached_at).total_seconds() <= _LIVE_PROVIDER_FAILURE_SNAPSHOT_CACHE_TTL_SECONDS:
@@ -3029,12 +3028,11 @@ async def _build_traders_scope_context(session: Any, traders_scope: dict[str, An
     normalized_scope = StrategySDK.validate_trader_scope_config(traders_scope)
     now_utc = utcnow()
 
+    scope_cache_key = _traders_scope_cache_key(normalized_scope)
+    cached_row = _traders_scope_context_cache.get(scope_cache_key)
     for key, (cached_at, _cached_context) in list(_traders_scope_context_cache.items()):
         if (now_utc - cached_at).total_seconds() > _TRADERS_SCOPE_CONTEXT_CACHE_TTL_SECONDS:
             _traders_scope_context_cache.pop(key, None)
-
-    scope_cache_key = _traders_scope_cache_key(normalized_scope)
-    cached_row = _traders_scope_context_cache.get(scope_cache_key)
     if cached_row is not None:
         cached_at, cached_context = cached_row
         if (now_utc - cached_at).total_seconds() <= _TRADERS_SCOPE_CONTEXT_CACHE_TTL_SECONDS:
@@ -3114,13 +3112,12 @@ async def _build_traders_scope_context(session: Any, traders_scope: dict[str, An
         _traders_scope_context_cache[scope_cache_key] = (now_utc, dict(context))
         return context
     except Exception as exc:
-        stale = _traders_scope_context_cache.get(scope_cache_key)
-        if stale is not None:
+        if cached_row is not None:
             logger.warning(
                 "Using cached traders scope context after refresh failure",
                 exc_info=exc,
             )
-            return copy.deepcopy(stale[1])
+            return copy.deepcopy(cached_row[1])
         raise
 
 

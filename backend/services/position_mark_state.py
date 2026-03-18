@@ -8,7 +8,7 @@ in-memory and push to frontend via WS immediately.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from threading import Lock
 from typing import Callable, Optional
 

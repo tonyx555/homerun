@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
-from models.database import AsyncSessionLocal, MarketCatalog, ScannerSnapshot, Trader, TraderOrder, get_db_session
+from models.database import AsyncSessionLocal, MarketCatalog, ScannerSnapshot, TraderOrder, get_db_session
 from services.live_price_snapshot import normalize_binary_price_history
 from services.pause_state import global_pause_state
 from services.traders_copy_trade_signal_service import traders_copy_trade_signal_service

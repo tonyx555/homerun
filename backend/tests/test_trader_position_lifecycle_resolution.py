@@ -1290,7 +1290,7 @@ async def test_live_blocked_retry_exhausted_resolves_when_market_is_terminal(tmp
             assert result["closed"] == 1
             assert order is not None
             assert order.status == "resolved_win"
-            assert (order.payload_json or {}).get("pending_live_exit", {}).get("status") == "superseded_resolution"
+            assert (order.payload_json or {}).get("superseded_pending_exit", {}).get("status") == "superseded_manual_sell"
     finally:
         await engine.dispose()
 

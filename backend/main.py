@@ -1,10 +1,9 @@
 import os
 import asyncio
 import signal
-import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime
 from utils.utcnow import utcnow
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -904,7 +903,7 @@ async def liveness_check():
 @app.get("/debug/feeds")
 async def debug_feeds():
     """Temporary diagnostic: check FeedManager and PositionMarkState."""
-    from api.websocket import _marks_loop, _marks_callback_count, _marks_push_count
+    from api.websocket import _marks_callback_count, _marks_push_count
     from services.position_mark_state import get_position_mark_state
     from services.ws_feeds import get_feed_manager
 
@@ -1438,7 +1437,6 @@ if frontend_dist.exists():
 def kill_port(port: int):
     """Kill any process currently using the given port."""
     import subprocess
-    import signal
 
     try:
         result = subprocess.run(["lsof", "-ti", f":{port}"], capture_output=True, text=True, timeout=5)

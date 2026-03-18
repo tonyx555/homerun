@@ -49,7 +49,11 @@ def _wallet(
     anomaly_score: float = 0.0,
     cluster_id: Optional[str] = None,
     is_profitable: bool = False,
+    metrics_source_version: Optional[str] = "accuracy_v2_closed_positions",
+    last_analyzed_at=None,
 ):
+    from utils.utcnow import utcnow as _utcnow
+
     return SimpleNamespace(
         rank_score=rank_score,
         win_rate=win_rate,
@@ -61,6 +65,8 @@ def _wallet(
         anomaly_score=anomaly_score,
         cluster_id=cluster_id,
         is_profitable=is_profitable,
+        metrics_source_version=metrics_source_version,
+        last_analyzed_at=last_analyzed_at if last_analyzed_at is not None else _utcnow(),
     )
 
 

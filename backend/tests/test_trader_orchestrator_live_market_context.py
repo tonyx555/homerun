@@ -531,6 +531,10 @@ async def test_build_live_signal_contexts_rejects_relaxed_ws_prices(monkeypatch)
         "services.trader_orchestrator.live_market_context.get_feed_manager",
         lambda: SimpleNamespace(_started=True, cache=_Cache()),
     )
+    monkeypatch.setattr(
+        "services.trader_orchestrator.live_market_context.settings",
+        SimpleNamespace(WS_EXECUTION_PRICE_STALE_SECONDS=1.0, SCANNER_STRICT_WS_MAX_AGE_MS=30000),
+    )
 
     async def _fake_market_lookup(_market_id: str):
         return {

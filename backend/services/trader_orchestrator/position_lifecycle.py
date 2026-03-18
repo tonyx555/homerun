@@ -1281,7 +1281,6 @@ async def _load_execution_wallet_recent_sell_trades_by_token() -> dict[str, dict
     market_cache_by_condition: dict[str, Optional[dict[str, Any]]] = {}
 
     # Pre-fetch all unique condition_ids in parallel to avoid sequential API calls.
-    needs_inference: list[dict[str, Any]] = []
     condition_ids_to_fetch: set[str] = set()
     for trade in trades:
         if not isinstance(trade, dict):

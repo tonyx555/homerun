@@ -264,7 +264,7 @@ async def _pg_notify_position_changes(
 
     for payload in payloads:
         try:
-            await conn.execute(f"SELECT pg_notify('position_change', $1)", payload)
+            await conn.execute("SELECT pg_notify('position_change', $1)", payload)
         except Exception as exc:
             logger.debug("pg_notify failed: %s", exc)
             # Reset connection on failure so it reconnects next cycle

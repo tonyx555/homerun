@@ -795,7 +795,6 @@ def record_order_resolved(
     notional_to_remove = leg.notional if leg else 0.0
 
     status_key = _normalize_status_key(status)
-    was_active_before = True  # assume it was active
     if str(order_id or "").strip():
         snap.open_order_ids.discard(str(order_id or "").strip())
         snap.open_order_count = len(snap.open_order_ids)

@@ -1470,7 +1470,6 @@ class FeedManager:
         # Event-driven exit evaluation for open positions on significant moves
         try:
             from services.trader_orchestrator.position_lifecycle import (
-                evaluate_exit_for_token,
                 get_registered_token_ids,
             )
 

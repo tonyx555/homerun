@@ -55,9 +55,10 @@ async def _reset_database_state(postgres_session_factory):
 async def test_overview_does_not_seed_default_traders(postgres_session_factory):
     async with postgres_session_factory() as session:
         overview = await get_orchestrator_overview(session)
+        traders = await list_traders(session)
         count = int((await session.execute(select(func.count(Trader.id)))).scalar() or 0)
 
-    assert overview["traders"] == []
+    assert traders == []
     assert int(overview["metrics"]["traders_total"]) == 0
     assert count == 0
 
@@ -80,10 +81,11 @@ async def test_overview_stays_empty_after_deleting_last_trader(postgres_session_
         )
         deleted = await delete_trader(session, trader["id"])
         overview = await get_orchestrator_overview(session)
+        traders = await list_traders(session)
         count = int((await session.execute(select(func.count(Trader.id)))).scalar() or 0)
 
     assert deleted is True
-    assert overview["traders"] == []
+    assert traders == []
     assert int(overview["metrics"]["traders_total"]) == 0
     assert count == 0
 
@@ -94,7 +96,7 @@ async def test_worker_loop_does_not_seed_default_traders(postgres_session_factor
     monkeypatch.setattr(trader_orchestrator_worker, "expire_stale_signals", AsyncMock())
     monkeypatch.setattr(trader_orchestrator_worker, "ensure_all_strategies_seeded", AsyncMock())
     monkeypatch.setattr(trader_orchestrator_worker, "refresh_strategy_runtime_if_needed", AsyncMock())
-    monkeypatch.setattr(trader_orchestrator_worker, "compute_orchestrator_metrics", AsyncMock(return_value={}))
+    monkeypatch.setattr(trader_orchestrator_worker, "_build_orchestrator_snapshot_metrics", AsyncMock(return_value={}))
     monkeypatch.setattr(
         trader_orchestrator_worker,
         "read_orchestrator_control",

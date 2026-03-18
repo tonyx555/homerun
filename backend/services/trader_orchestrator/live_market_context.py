@@ -121,10 +121,6 @@ def _extract_market_timing(market_info: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _normalize_identifier(value: Any) -> str:
-    return str(value or "").strip().lower()
-
-
 def _iso_from_epoch_seconds(epoch_seconds: float | None) -> Optional[str]:
     if epoch_seconds is None:
         return None
@@ -624,7 +620,6 @@ def _build_context_from_cached_market_state(
         live_edge = (model_probability - selected_live) * 100.0
 
     timing = _extract_market_timing(market_info)
-    strict_sources = {"ws_strict"}
 
     return {
         "available": bool(selected_live is not None),
@@ -1105,7 +1100,6 @@ async def build_live_signal_contexts(
                 exc_info=exc,
             )
             feed_manager = None
-        polymarket_ws_tokens = [token_id for token_id in token_list if _is_token_id(token_id)]
         if feed_manager is not None and getattr(feed_manager, "_started", False):
             for token_id in token_list:
                 token_norm = _normalize_identifier(token_id)

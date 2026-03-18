@@ -33,7 +33,6 @@ from services.weather import shared_state as weather_shared_state
 from services.worker_state import (
     clear_worker_run_request,
     list_worker_snapshots,
-    read_worker_control,
     request_worker_run,
     set_worker_interval,
     set_worker_paused,
@@ -189,6 +188,14 @@ async def _discovery_control_payload(session: AsyncSession) -> dict:
         "priority_backlog_mode": bool(row.priority_backlog_mode),
         "requested_run_at": row.requested_run_at.isoformat() if row.requested_run_at else None,
     }
+
+
+async def _worker_detail(session: AsyncSession, name: str) -> dict:
+    workers = await _collect_workers(session)
+    for w in workers:
+        if w.get("worker_name") == name:
+            return w
+    return {"worker_name": name}
 
 
 async def _collect_workers(session: AsyncSession) -> list[dict]:

@@ -3305,7 +3305,7 @@ async def delete_trader(session: AsyncSession, trader_id: str, *, force: bool = 
             "Flatten active exposure first, or pass force=True to delete anyway."
         )
 
-    if force and open_total_orders > 0:
+    if force and (open_total_orders > 0 or open_total_positions > 0):
         # Force-delete is an explicit operator override. Skip provider calls and
         # close local active orders immediately so manual Polymarket cleanup does
         # not block account hygiene.
@@ -3355,8 +3355,6 @@ async def delete_trader(session: AsyncSession, trader_id: str, *, force: bool = 
                 copy_source_wallet=_extract_copy_source_wallet_from_payload(payload),
             )
         await _commit_with_retry(session)
-        await sync_trader_position_inventory(session, trader_id=trader_id)
-    elif force and open_total_positions > 0:
         await sync_trader_position_inventory(session, trader_id=trader_id)
 
     # Re-fetch the row: sync_trader_position_inventory may rollback the
@@ -5782,8 +5780,11 @@ async def sync_trader_position_inventory(
         row.updated_at = now
         closures += 1
 
-    if commit and (inserts > 0 or updates > 0 or closures > 0):
-        await _commit_with_retry(session)
+    if commit:
+        if inserts > 0 or updates > 0 or closures > 0:
+            await _commit_with_retry(session)
+        elif session.in_transaction():
+            await session.rollback()
 
     return {
         "trader_id": trader_id,
@@ -5965,7 +5966,7 @@ async def get_open_order_count_for_trader(
             func.count(TraderOrder.id).label("count"),
         )
         .where(TraderOrder.trader_id == trader_id)
-        .where(status_key_expr.in_(tuple(OPEN_ORDER_STATUSES)))
+        .where(status_key_expr.in_(tuple(UNFILLED_ORDER_STATUSES)))
         .group_by(TraderOrder.mode)
     )
     if mode is not None:

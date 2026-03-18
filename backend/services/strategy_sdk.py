@@ -2105,8 +2105,14 @@ class StrategySDK:
                         continue
                     ts_raw = snapshot.get("timestamp") or snapshot.get("t")
                     mid_raw = snapshot.get("mid") or snapshot.get("p")
-                    ts = _as_float(ts_raw, None)
-                    mid = _as_float(mid_raw, None)
+                    try:
+                        ts = float(ts_raw)
+                    except (TypeError, ValueError):
+                        ts = None
+                    try:
+                        mid = float(mid_raw)
+                    except (TypeError, ValueError):
+                        mid = None
                     if ts is None or mid is None:
                         continue
                     if ts < 10_000_000_000:

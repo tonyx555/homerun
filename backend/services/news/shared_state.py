@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 from utils.utcnow import utcnow
 from typing import Any, Optional
 

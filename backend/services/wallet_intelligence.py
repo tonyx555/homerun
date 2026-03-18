@@ -20,7 +20,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from itertools import combinations
 from utils.utcnow import as_utc, as_utc_naive, utcnow
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from sqlalchemy import and_, select, text, update, func, or_, tuple_
 from sqlalchemy.orm import load_only

@@ -2,14 +2,14 @@ import asyncio
 import re
 from typing import Optional
 
+from sqlalchemy import select, update
+
+from models.database import AsyncSessionLocal, TrackedWallet, WalletTrade, release_conn
+from services.pause_state import global_pause_state
+from services.polymarket import polymarket_client
 from utils.logger import get_logger
 
 logger = get_logger("wallet_tracker")
-from sqlalchemy import select, update
-
-from services.polymarket import polymarket_client
-from services.pause_state import global_pause_state
-from models.database import TrackedWallet, WalletTrade, AsyncSessionLocal, release_conn
 
 
 _ETH_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")

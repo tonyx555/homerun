@@ -163,8 +163,8 @@ def _looks_like_crypto_market(
     if category_text and ("crypto" in category_text or CRYPTO_MARKET_PATTERN.search(category_text)):
         return True
 
-    for text in texts:
-        normalized = str(text or "").strip()
+    for item in texts:
+        normalized = str(item or "").strip()
         if normalized and CRYPTO_MARKET_PATTERN.search(normalized):
             return True
 
@@ -1755,6 +1755,7 @@ class SmartWalletPoolService:
                 trades_24h,
                 last_trade_at,
                 now,
+                wallet=wallet,
             )
             stability = self._score_stability(wallet)
             composite = clamp(0.45 * quality + 0.35 * activity + 0.20 * stability, 0.0, 1.0)
@@ -2564,6 +2565,7 @@ class SmartWalletPoolService:
         trades_24h: int,
         last_trade_at: Optional[datetime],
         now: datetime,
+        wallet: Optional[object] = None,
     ) -> float:
         flow_1h = clamp(trades_1h / 6.0, 0.0, 1.0)
         flow_24h = clamp(trades_24h / 40.0, 0.0, 1.0)
@@ -2575,7 +2577,14 @@ class SmartWalletPoolService:
             recency = clamp(1.0 - (age_hours / ACTIVE_WINDOW_HOURS), 0.0, 1.0)
 
         base_score = clamp(0.50 * flow_1h + 0.30 * flow_24h + 0.20 * recency, 0.0, 1.0)
-        return base_score
+
+        if wallet is not None:
+            source_version = str(getattr(wallet, "metrics_source_version", None) or "").strip()
+            last_analyzed_at = getattr(wallet, "last_analyzed_at", None)
+            if last_analyzed_at is None or source_version != QUALITY_METRICS_SOURCE_VERSION:
+                base_score *= 0.80
+
+        return clamp(base_score, 0.0, 1.0)
 
     def _score_stability(self, wallet: DiscoveredWallet) -> float:
         drawdown = wallet.max_drawdown

@@ -24,6 +24,7 @@ from typing import Optional, List, Tuple
 from dataclasses import dataclass
 
 from utils.logger import get_logger
+from .constraint_solver import Dependency, DependencyType
 
 try:
     import httpx
@@ -75,8 +76,6 @@ def _anthropic_response_content(payload: object) -> str | None:
     if isinstance(text, str) and text.strip():
         return text
     return None
-
-from .constraint_solver import Dependency, DependencyType
 
 
 @dataclass

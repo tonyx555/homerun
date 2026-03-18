@@ -13,7 +13,6 @@ from services.live_execution_adapter import execute_live_order
 from services.live_execution_service import live_execution_service
 from services.signal_bus import set_trade_signal_status
 from services.strategy_sdk import StrategySDK
-from services.worker_state import _commit_with_retry
 from services.trader_orchestrator.strategies.registry import get_strategy
 from services.trader_orchestrator.execution_policies import (
     allocate_leg_notionals,
@@ -41,10 +40,7 @@ from services.trader_orchestrator_state import (
     _new_id,
     build_execution_session_rows,
     build_trader_order_row,
-    create_execution_session,
     create_execution_session_event,
-    create_execution_session_order,
-    create_trader_order,
     get_execution_session_detail,
     get_execution_session_leg_rollups,
     list_active_execution_sessions,

@@ -72,7 +72,7 @@ async def test_runtime_signal_queue_coalesces_runtime_batches_for_all_lanes() ->
     assert isinstance(starting_depth, dict)
     assert all(int(value) == 0 for value in starting_depth.values())
 
-    batch_id = await publish_signal_batch(
+    crypto_batch_id = await publish_signal_batch(
         event_type="upsert_insert",
         source="crypto",
         signal_ids=["sig-1", "sig-2", "sig-1"],
@@ -82,8 +82,19 @@ async def test_runtime_signal_queue_coalesces_runtime_batches_for_all_lanes() ->
             "sig-2": {"id": "sig-2", "source": "crypto"},
         },
     )
+    general_batch_id = await publish_signal_batch(
+        event_type="upsert_insert",
+        source="scanner",
+        signal_ids=["sig-3", "sig-4", "sig-3"],
+        trigger="strategy_signal_bridge",
+        signal_snapshots={
+            "sig-3": {"id": "sig-3", "source": "scanner"},
+            "sig-4": {"id": "sig-4", "source": "scanner"},
+        },
+    )
 
-    assert isinstance(batch_id, str)
+    assert isinstance(crypto_batch_id, str)
+    assert isinstance(general_batch_id, str)
 
     general_payload = await wait_for_signal_batch(lane="general", timeout_seconds=0.5)
     crypto_payload = await wait_for_signal_batch(lane="crypto", timeout_seconds=0.5)
@@ -92,9 +103,9 @@ async def test_runtime_signal_queue_coalesces_runtime_batches_for_all_lanes() ->
     assert crypto_payload is not None
     assert general_payload["event_type"] == "runtime_signal_batch"
     assert crypto_payload["event_type"] == "runtime_signal_batch"
-    assert general_payload["source"] == "crypto"
+    assert general_payload["source"] == "scanner"
     assert crypto_payload["source"] == "crypto"
-    assert general_payload["source_signal_ids"]["crypto"] == ["sig-1", "sig-2"]
+    assert general_payload["source_signal_ids"]["scanner"] == ["sig-3", "sig-4"]
     assert crypto_payload["source_signal_ids"]["crypto"] == ["sig-1", "sig-2"]
     assert get_queue_depth() == {"general": 0, "crypto": 0}
 

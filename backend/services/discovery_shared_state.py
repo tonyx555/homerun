@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from utils.utcnow import utcnow
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession

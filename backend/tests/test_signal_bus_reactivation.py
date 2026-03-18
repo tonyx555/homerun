@@ -2,6 +2,8 @@ import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select
@@ -14,6 +16,7 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from models.database import Base, TradeSignal, TradeSignalEmission  # noqa: E402
 from models.opportunity import Opportunity  # noqa: E402
+from services import strategy_signal_bridge  # noqa: E402
 from services.signal_bus import expire_stale_signals, list_trade_signals, upsert_trade_signal  # noqa: E402
 from services.strategy_signal_bridge import bridge_opportunities_to_signals  # noqa: E402
 from tests.postgres_test_db import build_postgres_session_factory  # noqa: E402
@@ -707,133 +710,120 @@ async def test_list_trade_signals_expires_scanner_signal_without_price_timestamp
 
 
 @pytest.mark.asyncio
-async def test_bridge_refreshes_prices_before_upsert(monkeypatch, tmp_path):
-    engine, session_factory = await _build_session_factory(tmp_path)
-    try:
-        async with session_factory() as session:
-            opportunity = Opportunity(
-                strategy="weather_distribution",
-                title="Weather edge",
-                description="Weather edge test",
-                total_cost=0.4,
-                expected_payout=0.6,
-                gross_profit=0.2,
-                fee=0.0,
-                net_profit=0.2,
-                roi_percent=50.0,
-                risk_score=0.2,
-                confidence=0.8,
-                markets=[
-                    {
-                        "id": "market_live_1",
-                        "question": "Will it rain?",
-                        "clob_token_ids": ["yes_token", "no_token"],
-                        "yes_price": 0.4,
-                        "no_price": 0.6,
-                    }
-                ],
-                positions_to_take=[
-                    {
-                        "market_id": "market_live_1",
-                        "action": "BUY",
-                        "outcome": "YES",
-                        "price": 0.4,
-                    }
-                ],
-                min_liquidity=100.0,
-                max_position_size=50.0,
-            )
+async def test_bridge_refreshes_prices_before_upsert(monkeypatch):
+    opportunity = Opportunity(
+        strategy="weather_distribution",
+        title="Weather edge",
+        description="Weather edge test",
+        total_cost=0.4,
+        expected_payout=0.6,
+        gross_profit=0.2,
+        fee=0.0,
+        net_profit=0.2,
+        roi_percent=50.0,
+        risk_score=0.2,
+        confidence=0.8,
+        markets=[
+            {
+                "id": "market_live_1",
+                "question": "Will it rain?",
+                "clob_token_ids": ["yes_token", "no_token"],
+                "yes_price": 0.4,
+                "no_price": 0.6,
+            }
+        ],
+        positions_to_take=[
+            {
+                "market_id": "market_live_1",
+                "action": "BUY",
+                "outcome": "YES",
+                "price": 0.4,
+            }
+        ],
+        min_liquidity=100.0,
+        max_position_size=50.0,
+    )
 
-            async def _refresh_stub(opportunities, **kwargs):
-                market = opportunities[0].markets[0]
-                market["yes_price"] = 0.61
-                market["no_price"] = 0.39
-                market["price_updated_at"] = "2026-02-21T00:00:00Z"
-                market["price_age_seconds"] = 0.0
-                market["is_price_fresh"] = True
-                opportunities[0].positions_to_take[0]["price"] = 0.61
-                return opportunities
+    fake_runtime = SimpleNamespace(
+        started=True,
+        prewarm_source_tokens=AsyncMock(return_value=None),
+        publish_opportunities=AsyncMock(return_value=1),
+    )
+    monkeypatch.setattr(strategy_signal_bridge, "get_intent_runtime", lambda: fake_runtime)
 
-            from services.scanner import scanner as market_scanner
-
-            monkeypatch.setattr(market_scanner, "refresh_opportunity_prices", _refresh_stub)
-
-            emitted = await bridge_opportunities_to_signals(
-                session,
-                [opportunity],
-                source="weather",
-                sweep_missing=False,
-            )
-            assert emitted == 1
-
-            rows = (await session.execute(select(TradeSignal).where(TradeSignal.source == "weather"))).scalars().all()
-            assert len(rows) == 1
-            row = rows[0]
-            assert row.entry_price == pytest.approx(0.61)
-            assert isinstance(row.payload_json, dict)
-            markets = row.payload_json.get("markets")
-            assert isinstance(markets, list) and markets
-            assert markets[0].get("yes_price") == pytest.approx(0.61)
-            assert markets[0].get("is_price_fresh") is True
-            assert markets[0].get("price_updated_at") == "2026-02-21T00:00:00Z"
-    finally:
-        await engine.dispose()
+    emitted = await bridge_opportunities_to_signals(
+        None,
+        [opportunity],
+        source="weather",
+        sweep_missing=False,
+        refresh_prices=True,
+    )
+    assert emitted == 1
+    fake_runtime.prewarm_source_tokens.assert_called_once_with([opportunity], source="weather")
+    call_kwargs = fake_runtime.publish_opportunities.call_args
+    assert call_kwargs.kwargs.get("refresh_prices") is True
+    assert call_kwargs.kwargs.get("sweep_missing") is False
+    assert call_kwargs.args[0] == [opportunity]
 
 
 @pytest.mark.asyncio
-async def test_bridge_serializes_datetime_strategy_context(tmp_path):
-    engine, session_factory = await _build_session_factory(tmp_path)
-    try:
-        async with session_factory() as session:
-            observed_at = datetime.now(timezone.utc).replace(microsecond=0)
-            opportunity = Opportunity(
-                strategy="traders_confluence",
-                title="Datetime strategy context",
-                description="Bridge should serialize non-JSON-native context values.",
-                total_cost=0.42,
-                expected_payout=1.0,
-                gross_profit=0.58,
-                fee=0.0,
-                net_profit=0.58,
-                roi_percent=138.0,
-                risk_score=0.2,
-                confidence=0.77,
-                markets=[
-                    {
-                        "id": "market_datetime_ctx",
-                        "question": "Will this serialize?",
-                        "clob_token_ids": ["yes_token", "no_token"],
-                        "yes_price": 0.42,
-                        "no_price": 0.58,
-                    }
-                ],
-                positions_to_take=[
-                    {
-                        "market_id": "market_datetime_ctx",
-                        "action": "BUY",
-                        "outcome": "YES",
-                        "price": 0.42,
-                    }
-                ],
-                strategy_context={
-                    "observed_at": observed_at,
-                    "nested": {"expires_at": observed_at + timedelta(minutes=5)},
-                },
-            )
+async def test_bridge_serializes_datetime_strategy_context(monkeypatch):
+    observed_at = datetime.now(timezone.utc).replace(microsecond=0)
+    opportunity = Opportunity(
+        strategy="traders_confluence",
+        title="Datetime strategy context",
+        description="Bridge should serialize non-JSON-native context values.",
+        total_cost=0.42,
+        expected_payout=1.0,
+        gross_profit=0.58,
+        fee=0.0,
+        net_profit=0.58,
+        roi_percent=138.0,
+        risk_score=0.2,
+        confidence=0.77,
+        markets=[
+            {
+                "id": "market_datetime_ctx",
+                "question": "Will this serialize?",
+                "clob_token_ids": ["yes_token", "no_token"],
+                "yes_price": 0.42,
+                "no_price": 0.58,
+            }
+        ],
+        positions_to_take=[
+            {
+                "market_id": "market_datetime_ctx",
+                "action": "BUY",
+                "outcome": "YES",
+                "price": 0.42,
+            }
+        ],
+        strategy_context={
+            "observed_at": observed_at,
+            "nested": {"expires_at": observed_at + timedelta(minutes=5)},
+        },
+    )
 
-            emitted = await bridge_opportunities_to_signals(
-                session,
-                [opportunity],
-                source="traders",
-                sweep_missing=True,
-                refresh_prices=False,
-            )
-            assert emitted == 1
+    fake_runtime = SimpleNamespace(
+        started=True,
+        prewarm_source_tokens=AsyncMock(return_value=None),
+        publish_opportunities=AsyncMock(return_value=1),
+    )
+    monkeypatch.setattr(strategy_signal_bridge, "get_intent_runtime", lambda: fake_runtime)
 
-            rows = (await session.execute(select(TradeSignal).where(TradeSignal.source == "traders"))).scalars().all()
-            assert len(rows) == 1
-            context = dict(rows[0].strategy_context_json or {})
-            assert isinstance(context.get("observed_at"), str)
-            assert isinstance((context.get("nested") or {}).get("expires_at"), str)
-    finally:
-        await engine.dispose()
+    emitted = await bridge_opportunities_to_signals(
+        None,
+        [opportunity],
+        source="traders",
+        sweep_missing=True,
+        refresh_prices=False,
+    )
+    assert emitted == 1
+    fake_runtime.publish_opportunities.assert_called_once()
+    call_args = fake_runtime.publish_opportunities.call_args
+    passed_opps = call_args.args[0]
+    assert len(passed_opps) == 1
+    assert passed_opps[0] is opportunity
+    call_kwargs = call_args.kwargs
+    assert call_kwargs.get("source") == "traders"
+    assert call_kwargs.get("sweep_missing") is True

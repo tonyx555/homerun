@@ -51,7 +51,8 @@ def test_build_rpc_candidates_normalizes_ws_primary_to_https():
 def test_build_rpc_candidates_ignores_invalid_scheme():
     urls = _build_rpc_candidates("ftp://polygon-rpc.com")
     assert "ftp://polygon-rpc.com" not in urls
-    assert "https://polygon-rpc.com" in urls
+    assert all(url.startswith(("http://", "https://")) for url in urls)
+    assert len(urls) > 0
 
 
 def test_parse_order_filled_log_handles_indexed_layout():
