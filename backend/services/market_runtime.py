@@ -701,10 +701,16 @@ class MarketRuntime:
                 self._dispatch_last_error = None
                 # Capture cross-process filter diagnostics
                 try:
-                    from services.strategies.btc_eth_highfreq import get_crypto_filter_diagnostics
-                    diag = get_crypto_filter_diagnostics()
-                    if diag:
-                        self._dispatch_filter_diagnostics = diag
+                    import sys
+                    from services.strategy_loader import strategy_loader as _sl
+                    _loaded = _sl.get_strategy("btc_eth_highfreq")
+                    if _loaded:
+                        _mod = sys.modules.get(getattr(_loaded, "module_name", ""))
+                        _diag_fn = getattr(_mod, "get_crypto_filter_diagnostics", None) if _mod else None
+                        if callable(_diag_fn):
+                            diag = _diag_fn()
+                            if diag:
+                                self._dispatch_filter_diagnostics = diag
                 except Exception:
                     pass
             except asyncio.CancelledError:

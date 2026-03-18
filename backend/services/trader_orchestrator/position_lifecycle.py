@@ -6,7 +6,7 @@ import time as _time_mod
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from sqlalchemy import func, select, update
+from sqlalchemy import bindparam, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
@@ -4484,19 +4484,30 @@ async def reconcile_live_positions(
         touched_rows = [row for row in candidates if row.updated_at == now]
         if touched_rows:
             _lc_t3a = _time.monotonic()
-            for row in touched_rows:
-                await session.execute(
-                    update(TraderOrder)
-                    .where(TraderOrder.id == row.id)
-                    .values(
-                        status=row.status,
-                        actual_profit=row.actual_profit,
-                        updated_at=row.updated_at,
-                        payload_json=row.payload_json,
-                        reason=row.reason,
-                    )
-                    .execution_options(synchronize_session=None)
+            stmt = (
+                update(TraderOrder)
+                .where(TraderOrder.id == bindparam("_id"))
+                .values(
+                    status=bindparam("_status"),
+                    actual_profit=bindparam("_actual_profit"),
+                    updated_at=bindparam("_updated_at"),
+                    payload_json=bindparam("_payload_json"),
+                    reason=bindparam("_reason"),
                 )
+                .execution_options(synchronize_session=None)
+            )
+            params = [
+                {
+                    "_id": row.id,
+                    "_status": row.status,
+                    "_actual_profit": row.actual_profit,
+                    "_updated_at": row.updated_at,
+                    "_payload_json": row.payload_json,
+                    "_reason": row.reason,
+                }
+                for row in touched_rows
+            ]
+            await session.execute(stmt, params)
             _lc_t3b = _time.monotonic()
             await session.commit()
             _lc_t3c = _time.monotonic()

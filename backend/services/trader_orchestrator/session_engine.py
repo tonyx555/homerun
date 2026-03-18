@@ -13,7 +13,7 @@ from services.live_execution_adapter import execute_live_order
 from services.live_execution_service import live_execution_service
 from services.signal_bus import set_trade_signal_status
 from services.strategy_sdk import StrategySDK
-from services.trader_orchestrator.strategies.registry import get_strategy
+from services.strategy_loader import strategy_loader
 from services.trader_orchestrator.execution_policies import (
     allocate_leg_notionals,
     execution_waves,
@@ -75,10 +75,7 @@ def _strategy_instance_for_execution(strategy_key: str) -> Any | None:
     key = str(strategy_key or "").strip().lower()
     if not key:
         return None
-    try:
-        return get_strategy(key)
-    except Exception:
-        return None
+    return strategy_loader.get_instance(key)
 
 
 def _strategy_supports_entry_take_profit_exit(strategy_instance: Any) -> bool:

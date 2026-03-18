@@ -16,6 +16,7 @@ Setup:
 """
 
 import asyncio
+import time as _time
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from utils.utcnow import utcnow
@@ -52,6 +53,9 @@ INITIALIZATION_RETRY_BACKOFF_SECONDS = 60.0
 MISSING_DEPENDENCY_RELOG_SECONDS = 300.0
 PENDING_RECONCILIATION_MAX_ATTEMPTS = 6
 _ORDER_SUBMIT_TIMEOUT_SECONDS = 10.0
+_CLOB_READ_CIRCUIT_BREAKER_THRESHOLD = 3  # consecutive failures before opening
+_CLOB_READ_CIRCUIT_BREAKER_COOLDOWN = 30.0  # seconds to wait before retrying
+_CLOB_READ_FAILURE_LOG_INTERVAL = 30.0  # seconds between repeated failure logs
 
 
 def _to_decimal(value) -> Decimal:
@@ -366,6 +370,10 @@ class LiveExecutionService:
         self._background_tasks: set[asyncio.Task] = set()
         self._reconciliation_tasks: dict[str, asyncio.Task] = {}
         self._pending_reconciliations: list[dict[str, Any]] = []
+        # Circuit breaker for CLOB API read operations (order sync, balance fetch)
+        self._clob_read_consecutive_failures: int = 0
+        self._clob_read_circuit_open_until: Optional[float] = None
+        self._clob_read_last_failure_logged: float = 0.0
 
     def _get_stats_lock(self) -> asyncio.Lock:
         if self._stats_lock is None:
@@ -2173,18 +2181,64 @@ class LiveExecutionService:
 
         return snapshots
 
+    def _clob_read_circuit_open(self) -> bool:
+        """Check if the CLOB API read circuit breaker is open (API known unreachable)."""
+        if self._clob_read_circuit_open_until is None:
+            return False
+        now_mono = _time.monotonic()
+        if now_mono >= self._clob_read_circuit_open_until:
+            self._clob_read_circuit_open_until = None
+            return False
+        return True
+
+    def _clob_read_record_failure(self, exc: Exception, operation: str) -> None:
+        """Record a CLOB API read failure and open circuit breaker if threshold met."""
+        now_mono = _time.monotonic()
+        self._clob_read_consecutive_failures += 1
+        if self._clob_read_consecutive_failures >= _CLOB_READ_CIRCUIT_BREAKER_THRESHOLD:
+            self._clob_read_circuit_open_until = now_mono + _CLOB_READ_CIRCUIT_BREAKER_COOLDOWN
+        if now_mono - self._clob_read_last_failure_logged >= _CLOB_READ_FAILURE_LOG_INTERVAL:
+            self._clob_read_last_failure_logged = now_mono
+            if _is_transient_transport_error(exc):
+                logger.warning(
+                    "%s failed",
+                    operation,
+                    consecutive_failures=self._clob_read_consecutive_failures,
+                    circuit_open=self._clob_read_circuit_open_until is not None,
+                )
+            else:
+                logger.error(
+                    "%s failed",
+                    operation,
+                    consecutive_failures=self._clob_read_consecutive_failures,
+                    exc_info=exc,
+                )
+
+    def _clob_read_record_success(self, operation: str) -> None:
+        """Record a successful CLOB API read and reset circuit breaker."""
+        if self._clob_read_consecutive_failures > 0:
+            logger.info(
+                "%s recovered",
+                operation,
+                after_failures=self._clob_read_consecutive_failures,
+            )
+        self._clob_read_consecutive_failures = 0
+        self._clob_read_circuit_open_until = None
+
     async def _sync_provider_open_orders(self) -> list[Order]:
         if not self.is_ready() and not await self.ensure_initialized():
+            return []
+
+        if self._clob_read_circuit_open():
             return []
 
         try:
             provider_response = await self._run_client_io(self._client.get_orders)
         except Exception as exc:
-            if _is_transient_transport_error(exc):
-                logger.warning("Failed to fetch provider open orders", exc_info=exc)
-            else:
-                logger.error("Failed to fetch provider open orders", exc_info=exc)
+            self._clob_read_record_failure(exc, "Provider open orders sync")
             return []
+
+        self._clob_read_record_success("Provider open orders sync")
 
         provider_orders = self._extract_server_orders(provider_response)
         updated_orders: list[Order] = []
@@ -3427,6 +3481,9 @@ class LiveExecutionService:
         if not self.is_ready():
             return {"error": "Polymarket credentials not configured"}
 
+        if self._clob_read_circuit_open():
+            return {"error": "CLOB API temporarily unreachable (circuit breaker open)"}
+
         try:
             address = self._execution_wallet_address()
             if not address:
@@ -3455,19 +3512,11 @@ class LiveExecutionService:
                 try:
                     await self._run_client_io(self._client.update_balance_allowance, params)
                 except Exception as exc:
-                    logger.warning(
-                        "Balance allowance refresh failed; using cached values",
-                        signature_type=signature_type,
-                        exc_info=exc,
-                    )
+                    self._clob_read_record_failure(exc, "Balance allowance refresh")
                 try:
                     payload = await self._run_client_io(self._client.get_balance_allowance, params)
                 except Exception as exc:
-                    logger.warning(
-                        "Balance allowance fetch failed",
-                        signature_type=signature_type,
-                        exc_info=exc,
-                    )
+                    self._clob_read_record_failure(exc, "Balance allowance fetch")
                     return None, None
                 if not isinstance(payload, dict):
                     return None, "Unexpected balance response"
@@ -3553,6 +3602,7 @@ class LiveExecutionService:
             if best_snapshot is None:
                 return {"error": "Could not fetch balance from CLOB API"}
 
+            self._clob_read_record_success("Balance fetch")
             selected_signature_type = int(best_snapshot["signature_type"])
             self._balance_signature_type = selected_signature_type
             self._apply_signature_type_to_client(selected_signature_type)

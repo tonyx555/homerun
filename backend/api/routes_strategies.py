@@ -51,10 +51,7 @@ from services.strategy_versioning import (
     serialize_strategy_version,
 )
 from services.strategy_sdk import StrategySDK
-from services.strategies.btc_eth_highfreq import (
-    crypto_highfreq_scope_config_schema,
-    crypto_highfreq_scope_defaults,
-)
+from services.strategy_loader import strategy_loader as _strategy_loader
 from services.strategies.late_favorite_alpha import (
     late_favorite_alpha_config_schema,
     late_favorite_alpha_defaults,
@@ -81,6 +78,22 @@ router = APIRouter(prefix="/strategy-manager", tags=["Strategies (Unified)"])
 # ---------------------------------------------------------------------------
 
 _SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{1,48}[a-z0-9]$")
+
+
+def _get_crypto_module_fn(fn_name: str) -> dict:
+    """Call a function from the loaded btc_eth_highfreq strategy module."""
+    import sys
+
+    loaded = _strategy_loader.get_strategy("btc_eth_highfreq")
+    if loaded is None:
+        return {}
+    mod = sys.modules.get(getattr(loaded, "module_name", ""))
+    if mod is None:
+        return {}
+    fn = getattr(mod, fn_name, None)
+    if callable(fn):
+        return fn()
+    return {}
 
 
 def _validate_slug(slug: str) -> str:
@@ -1074,8 +1087,8 @@ async def get_unified_docs():
                 "StrategySDK.get_trader_tags()": "Tag definitions and wallet counts",
                 "StrategySDK.get_traders_by_tag(tag_name, limit)": "Wallets for a tag",
             },
-            "crypto_highfreq_scope_defaults": crypto_highfreq_scope_defaults(),
-            "crypto_highfreq_scope_schema": crypto_highfreq_scope_config_schema(),
+            "crypto_highfreq_scope_defaults": _get_crypto_module_fn("crypto_highfreq_scope_defaults"),
+            "crypto_highfreq_scope_schema": _get_crypto_module_fn("crypto_highfreq_scope_config_schema"),
             "news_edge_defaults": news_edge_defaults(),
             "news_edge_schema": news_edge_config_schema(),
             "late_favorite_alpha_defaults": late_favorite_alpha_defaults(),

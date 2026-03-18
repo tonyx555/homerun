@@ -52,9 +52,6 @@ from services.worker_state import _commit_with_retry, _is_retryable_db_error
 from services.trader_orchestrator.sources.registry import (
     normalize_source_key,
 )
-from services.trader_orchestrator.strategies.registry import (
-    get_strategy as resolve_strategy_instance,
-)
 from services.opportunity_strategy_catalog import ensure_all_strategies_seeded
 from services.strategy_experiments import (
     get_active_strategy_experiment,
@@ -1349,17 +1346,27 @@ def _strategy_instance_for_source_config(source_config: dict[str, Any] | None) -
     strategy_key = str(source_config.get("strategy_key") or "").strip().lower()
     if not strategy_key:
         return None
-    loaded = strategy_loader.get_strategy(strategy_key)
-    if loaded is None:
-        try:
-            return resolve_strategy_instance(strategy_key)
-        except Exception as exc:
-            logger.debug("Failed to resolve strategy instance for source config", strategy_key=strategy_key, exc_info=exc)
-            return None
-    instance = getattr(loaded, "instance", None)
-    if instance is not None:
-        return instance
-    return loaded
+    return strategy_loader.get_instance(strategy_key)
+
+
+def _get_crypto_filter_diagnostics() -> dict[str, Any] | None:
+    """Get crypto filter diagnostics from any loaded crypto strategy's module."""
+    import sys
+
+    for slug in ("btc_eth_highfreq",):
+        loaded = strategy_loader.get_strategy(slug)
+        if loaded is None:
+            continue
+        module_name = getattr(loaded, "module_name", "")
+        if not module_name:
+            continue
+        mod = sys.modules.get(module_name)
+        if mod is None:
+            continue
+        fn = getattr(mod, "get_crypto_filter_diagnostics", None)
+        if callable(fn):
+            return fn()
+    return None
 
 
 def _merged_strategy_params_for_source_config(source_config: dict[str, Any]) -> dict[str, Any]:
@@ -3760,8 +3767,7 @@ async def _run_trader_once(
                                     except Exception:
                                         pass
                                     try:
-                                        from services.strategies.btc_eth_highfreq import get_crypto_filter_diagnostics
-                                        _cfd = get_crypto_filter_diagnostics()
+                                        _cfd = _get_crypto_filter_diagnostics()
                                         if _cfd:
                                             _idle_payload["crypto_filter_diagnostics"] = _cfd
                                             _summary = _cfd.get("summary", {})
@@ -6457,8 +6463,7 @@ async def _run_trader_once(
                         _no_signal_message = "Idle cycle: no pending signals."
                         if _is_crypto_source_trader(trader):
                             try:
-                                from services.strategies.btc_eth_highfreq import get_crypto_filter_diagnostics
-                                _cfd = get_crypto_filter_diagnostics()
+                                _cfd = _get_crypto_filter_diagnostics()
                                 if _cfd:
                                     _no_signal_payload["crypto_filter_diagnostics"] = _cfd
                                     _summary = _cfd.get("summary", {})
