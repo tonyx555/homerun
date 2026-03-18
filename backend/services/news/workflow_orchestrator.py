@@ -347,9 +347,9 @@ class WorkflowOrchestrator:
             wf_settings = await shared_state.get_news_settings(session)
             await self._release_session_connection(session)
 
-            # 1) Sync articles from provider feeds.
+            # 1) Sync articles from provider feeds (bounded to 60s).
             try:
-                fetched = await news_feed_service.fetch_all()
+                fetched = await asyncio.wait_for(news_feed_service.fetch_all(), timeout=60)
                 if fetched:
                     await news_feed_service.persist_to_db(fetched)
                     await news_feed_service.prune_db()
@@ -470,9 +470,18 @@ class WorkflowOrchestrator:
             ]
 
             loop = asyncio.get_running_loop()
-            if not market_watcher_index._initialized:
-                await loop.run_in_executor(_EMBED_EXECUTOR, market_watcher_index.initialize)
-            await loop.run_in_executor(_EMBED_EXECUTOR, market_watcher_index.rebuild, indexed_markets)
+            try:
+                if not market_watcher_index._initialized:
+                    await asyncio.wait_for(
+                        loop.run_in_executor(_EMBED_EXECUTOR, market_watcher_index.initialize),
+                        timeout=30,
+                    )
+                await asyncio.wait_for(
+                    loop.run_in_executor(_EMBED_EXECUTOR, market_watcher_index.rebuild, indexed_markets),
+                    timeout=30,
+                )
+            except (asyncio.TimeoutError, Exception) as exc:
+                logger.warning("Market watcher index init/rebuild failed (continuing without ML): %s", exc)
 
             # 4) Budget guardrails (global LLM accounting + cycle/hour caps).
             llm_manager = None

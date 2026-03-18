@@ -75,7 +75,9 @@ def test_handle_message_parses_payload_list_and_respects_source_priority():
     assert first is not None
     assert first.price == 1940.5
     assert first.source == "binance"
-    assert list(feed._history.get("ETH") or []) == []
+    # Binance prices are now stored in history as a fallback for
+    # price_to_beat lookups when Chainlink WS updates are absent.
+    assert list(feed._history.get("ETH") or []) == [(ts_binance * 1000, 1940.5)]
 
     feed._handle_message(json.dumps(chainlink_msg))
     latest = feed.get_price("ETH")
@@ -87,7 +89,10 @@ def test_handle_message_parses_payload_list_and_respects_source_priority():
     assert set(by_source.keys()) == {"binance", "chainlink"}
     assert by_source["binance"].price == 1940.5
     assert by_source["chainlink"].price == 1939.8
-    assert list(feed._history.get("ETH") or []) == [(ts_chainlink * 1000, 1939.8)]
+    assert list(feed._history.get("ETH") or []) == [
+        (ts_binance * 1000, 1940.5),
+        (ts_chainlink * 1000, 1939.8),
+    ]
 
 
 def test_get_price_at_or_after_time_returns_first_point_within_delay():

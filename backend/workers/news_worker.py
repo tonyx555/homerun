@@ -307,18 +307,39 @@ async def _run_loop() -> None:
                     stats={"pending_intents": pending},
                 )
 
+            async def _mid_cycle_heartbeat() -> None:
+                while True:
+                    await asyncio.sleep(60)
+                    try:
+                        async with AsyncSessionLocal() as _hb_session:
+                            await write_worker_snapshot(
+                                _hb_session,
+                                "news",
+                                running=True,
+                                enabled=enabled and not paused,
+                                current_activity="Running news workflow cycle...",
+                                interval_seconds=interval,
+                            )
+                    except Exception:
+                        pass
+
+            _heartbeat_task = asyncio.create_task(_mid_cycle_heartbeat())
             result: dict = {}
-            for attempt in range(_RUN_CYCLE_DB_RETRY_ATTEMPTS):
-                try:
-                    async with AsyncSessionLocal() as session:
-                        result = await workflow_orchestrator.run_cycle(session)
-                    break
-                except Exception as exc:
-                    is_disconnect = _is_db_disconnect_error(exc)
-                    is_last_attempt = attempt >= _RUN_CYCLE_DB_RETRY_ATTEMPTS - 1
-                    if not is_disconnect or is_last_attempt:
-                        raise
-                    logger.warning("News workflow DB connection dropped; retrying cycle: %s", exc)
+            try:
+                for attempt in range(_RUN_CYCLE_DB_RETRY_ATTEMPTS):
+                    try:
+                        async with AsyncSessionLocal() as session:
+                            result = await asyncio.wait_for(
+                            workflow_orchestrator.run_cycle(session),
+                            timeout=300,
+                        )
+                        break
+                    except Exception as exc:
+                        is_disconnect = _is_db_disconnect_error(exc)
+                        is_last_attempt = attempt >= _RUN_CYCLE_DB_RETRY_ATTEMPTS - 1
+                        if not is_disconnect or is_last_attempt:
+                            raise
+                        logger.warning("News workflow DB connection dropped; retrying cycle: %s", exc)
                     now_monotonic = time.monotonic()
                     if now_monotonic - _last_pool_recovery_at_monotonic >= _DB_POOL_RECOVERY_COOLDOWN_SECONDS:
                         try:
@@ -328,6 +349,13 @@ async def _run_loop() -> None:
                         except Exception as pool_exc:
                             logger.warning("News workflow DB pool recovery failed: %s", pool_exc)
                     await asyncio.sleep(_RUN_CYCLE_DB_RETRY_BASE_DELAY_SECONDS * (attempt + 1))
+
+            finally:
+                _heartbeat_task.cancel()
+                try:
+                    await _heartbeat_task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
             completed_at = datetime.now(timezone.utc).replace(microsecond=0)
             next_scheduled_run_at = completed_at + timedelta(seconds=interval)

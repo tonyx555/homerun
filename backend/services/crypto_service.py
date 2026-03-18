@@ -909,6 +909,14 @@ class CryptoService:
                 float(self._price_to_beat_retry_after.get(slug) or 0.0),
                 now + _PRICE_TO_BEAT_RETRY_SECONDS,
             )
+            logger.warning(
+                "CryptoService: all price_to_beat sources failed for %s (%s), "
+                "elapsed=%.0fs, retrying in %.0fs",
+                m.asset,
+                slug,
+                elapsed,
+                _PRICE_TO_BEAT_RETRY_SECONDS,
+            )
 
         # Clean up old entries
         active_slugs = {m.slug for m in markets}
@@ -918,8 +926,21 @@ class CryptoService:
         for slug in list(self._price_to_beat_retry_after.keys()):
             if slug not in active_slugs or slug in self._price_to_beat:
                 del self._price_to_beat_retry_after[slug]
+        resolved = 0
+        missing = 0
         for market in markets:
             market.price_to_beat = self._price_to_beat.get(market.slug)
+            if market.price_to_beat is not None:
+                resolved += 1
+            else:
+                missing += 1
+        if missing > 0:
+            logger.warning(
+                "CryptoService: price_to_beat resolved=%d, missing=%d out of %d markets",
+                resolved,
+                missing,
+                len(markets),
+            )
 
     async def _broadcast_markets(self) -> None:
         """Push live crypto market data to all connected frontends via WS.

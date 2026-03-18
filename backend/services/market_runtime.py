@@ -100,6 +100,15 @@ class MarketRuntime:
         self._pending_opportunity_trigger: str | None = None
         self._pending_opportunity_full_source_sweep = False
         self._pending_opportunity_lock = asyncio.Lock()
+        # Dispatch telemetry — visible via worker snapshot stats
+        self._dispatch_count: int = 0
+        self._dispatch_last_at: str | None = None
+        self._dispatch_last_trigger: str | None = None
+        self._dispatch_last_handlers: int = 0
+        self._dispatch_last_opportunities: int = 0
+        self._dispatch_last_signals_published: int = 0
+        self._dispatch_last_error: str | None = None
+        self._dispatch_filter_diagnostics: dict[str, Any] = {}
 
     @property
     def started(self) -> bool:
@@ -170,6 +179,16 @@ class MarketRuntime:
                 "trigger": self._last_crypto_trigger,
                 "ws_feeds": ws_status,
                 **self._reference_runtime.get_status(),
+                "dispatch": {
+                    "total_dispatches": self._dispatch_count,
+                    "last_at": self._dispatch_last_at,
+                    "last_trigger": self._dispatch_last_trigger,
+                    "last_handlers": self._dispatch_last_handlers,
+                    "last_opportunities": self._dispatch_last_opportunities,
+                    "last_signals_published": self._dispatch_last_signals_published,
+                    "last_error": self._dispatch_last_error,
+                },
+                "filter_diagnostics": self._dispatch_filter_diagnostics,
             },
         }
 
@@ -380,28 +399,21 @@ class MarketRuntime:
         return out
 
     async def _run_loop(self) -> None:
+        _LOOP_ITERATION_TIMEOUT_SECONDS = 30.0
         while not self._stop_event.is_set():
             try:
-                if (time.monotonic() - self._last_catalog_refresh_mono) >= _CATALOG_REFRESH_SECONDS:
-                    await self._refresh_event_catalog()
-                control = await self._read_crypto_control()
-                enabled = bool(control.get("is_enabled", True))
-                paused = bool(control.get("is_paused", False))
-                interval_seconds = max(_FULL_REFRESH_FLOOR_SECONDS, float(control.get("interval_seconds") or 1.0))
-                if enabled and not paused:
-                    await self._refresh_crypto_markets(
-                        trigger="periodic_scan",
-                        full_source_sweep=True,
-                        force_refresh=_near_market_boundary(),
-                    )
-                    self._current_activity = "Live"
-                else:
-                    self._current_activity = "Paused" if paused else "Disabled"
-                    try:
-                        await self._persist_crypto_worker_snapshot(control=control, force=True)
-                    except Exception as snapshot_exc:
-                        logger.warning("Failed to persist crypto worker snapshot", exc_info=snapshot_exc)
-                await asyncio.sleep(interval_seconds)
+                await asyncio.wait_for(
+                    self._run_loop_iteration(),
+                    timeout=_LOOP_ITERATION_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                self._last_error = "Loop iteration timed out"
+                self._current_activity = "Error: loop iteration timeout"
+                logger.warning(
+                    "Market runtime loop iteration timed out after %.0fs",
+                    _LOOP_ITERATION_TIMEOUT_SECONDS,
+                )
+                await asyncio.sleep(1.0)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -416,6 +428,28 @@ class MarketRuntime:
                 except Exception as snapshot_exc:
                     logger.warning("Failed to persist crypto worker snapshot after runtime error", exc_info=snapshot_exc)
                 await asyncio.sleep(1.0)
+
+    async def _run_loop_iteration(self) -> None:
+        if (time.monotonic() - self._last_catalog_refresh_mono) >= _CATALOG_REFRESH_SECONDS:
+            await self._refresh_event_catalog()
+        control = await self._read_crypto_control()
+        enabled = bool(control.get("is_enabled", True))
+        paused = bool(control.get("is_paused", False))
+        interval_seconds = max(_FULL_REFRESH_FLOOR_SECONDS, float(control.get("interval_seconds") or 1.0))
+        if enabled and not paused:
+            await self._refresh_crypto_markets(
+                trigger="periodic_scan",
+                full_source_sweep=True,
+                force_refresh=_near_market_boundary(),
+            )
+            self._current_activity = "Live"
+        else:
+            self._current_activity = "Paused" if paused else "Disabled"
+            try:
+                await self._persist_crypto_worker_snapshot(control=control, force=True)
+            except Exception as snapshot_exc:
+                logger.warning("Failed to persist crypto worker snapshot", exc_info=snapshot_exc)
+        await asyncio.sleep(interval_seconds)
 
     async def _read_crypto_control(self) -> dict[str, Any]:
         try:
@@ -514,8 +548,36 @@ class MarketRuntime:
             row["oracle_updated_at_ms"] = oracle.get("updated_at_ms") if oracle else None
             row["oracle_age_seconds"] = oracle.get("age_seconds") if oracle else None
             row["oracle_prices_by_source"] = reference_runtime.get_oracle_prices_by_source(asset) if asset else {}
-            row["oracle_history"] = reference_runtime.get_oracle_history(asset, points=80) if asset else []
+            oracle_history = reference_runtime.get_oracle_history(asset, points=80) if asset else []
+            row["oracle_history"] = oracle_history
             row["price_updated_at"] = now_iso
+
+            # Fallback: if CryptoService couldn't resolve price_to_beat,
+            # derive it from oracle history at the market's start_time.
+            if row.get("price_to_beat") is None and oracle_history and row.get("start_time"):
+                try:
+                    start_dt = datetime.fromisoformat(
+                        str(row["start_time"]).replace("Z", "+00:00")
+                    )
+                    if start_dt.tzinfo is None:
+                        start_dt = start_dt.replace(tzinfo=timezone.utc)
+                    target_ms = int(start_dt.timestamp() * 1000)
+                    best_price = None
+                    best_dist = float("inf")
+                    for point in oracle_history:
+                        ts_ms = int(point.get("t") or 0)
+                        price = point.get("p")
+                        if not ts_ms or price is None:
+                            continue
+                        dist = abs(ts_ms - target_ms)
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_price = float(price)
+                    # Accept if within 120 seconds of market start
+                    if best_price is not None and best_price > 0 and best_dist <= 120_000:
+                        row["price_to_beat"] = best_price
+                except Exception:
+                    pass
 
             token_ids = [str(token_id or "").strip() for token_id in (row.get("clob_token_ids") or []) if str(token_id or "").strip()]
             if feed_manager is not None and getattr(feed_manager, "_started", False):
@@ -622,16 +684,33 @@ class MarketRuntime:
                     timestamp=utcnow(),
                     payload={"markets": copy.deepcopy(payload), "trigger": str(trigger)},
                 )
+                handler_count = len(event_dispatcher._handlers.get(EventType.CRYPTO_UPDATE, []))
                 opportunities = await event_dispatcher.dispatch(event)
-                await get_intent_runtime().publish_opportunities(
+                signals_published = await get_intent_runtime().publish_opportunities(
                     opportunities,
                     source="crypto",
                     sweep_missing=bool(full_source_sweep),
                     refresh_prices=False,
                 )
+                self._dispatch_count += 1
+                self._dispatch_last_at = utcnow().isoformat().replace("+00:00", "Z")
+                self._dispatch_last_trigger = str(trigger)
+                self._dispatch_last_handlers = handler_count
+                self._dispatch_last_opportunities = len(opportunities)
+                self._dispatch_last_signals_published = int(signals_published or 0)
+                self._dispatch_last_error = None
+                # Capture cross-process filter diagnostics
+                try:
+                    from services.strategies.btc_eth_highfreq import get_crypto_filter_diagnostics
+                    diag = get_crypto_filter_diagnostics()
+                    if diag:
+                        self._dispatch_filter_diagnostics = diag
+                except Exception:
+                    pass
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                self._dispatch_last_error = f"{type(exc).__name__}: {exc}"
                 logger.warning("Crypto opportunity dispatch failed", trigger=str(trigger), exc_info=exc)
 
     def _on_ws_price_update(

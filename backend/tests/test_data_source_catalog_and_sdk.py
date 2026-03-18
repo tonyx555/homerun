@@ -22,56 +22,27 @@ async def _build_session_factory(_tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_catalog_seeds_events_and_stories_and_removes_legacy_rows(tmp_path):
+async def test_catalog_seeds_insert_only_and_preserves_existing(tmp_path):
     engine, session_factory = await _build_session_factory(tmp_path)
-    legacy_seed_code = (
-        "# System data source seed\n"
-        "from services.data_source_sdk import BaseDataSource\n\n"
-        "class LegacySource(BaseDataSource):\n"
-        "    name = 'Legacy Source'\n"
-        "    async def fetch_async(self):\n"
-        "        return []\n"
-    )
 
+    # Pre-existing user source should never be touched by seeding.
     async with session_factory() as session:
-        session.add_all(
-            [
-                DataSource(
-                    id="legacy_seed",
-                    slug="news_custom_legacy",
-                    source_key="news",
-                    source_kind="rss",
-                    name="Legacy Seed",
-                    source_code=legacy_seed_code,
-                    is_system=True,
-                    enabled=True,
-                ),
-                DataSource(
-                    id="legacy_world_seed",
-                    slug="world_legacy_seed",
-                    source_key="events",
-                    source_kind="bridge",
-                    name="Legacy World Seed",
-                    source_code="class SomethingElse:\n    pass\n",
-                    is_system=True,
-                    enabled=True,
-                ),
-                DataSource(
-                    id="legacy_story_import",
-                    slug="stories_custom_custom_https_example_com_feed_a1b2c3",
-                    source_key="stories",
-                    source_kind="rss",
-                    name="Stories: Custom - Legacy Feed",
-                    description="Imported custom RSS source (Legacy Feed) from legacy app settings",
-                    source_code="",
-                    is_system=False,
-                    enabled=True,
-                    config={"url": "https://example.com/feed.xml", "feed_source": "custom_rss"},
-                ),
-            ]
+        session.add(
+            DataSource(
+                id="user_custom",
+                slug="my_custom_source",
+                source_key="stories",
+                source_kind="rss",
+                name="My Custom Source",
+                source_code="class MySource:\n    pass\n",
+                is_system=False,
+                enabled=True,
+                config={"url": "https://example.com/feed.xml"},
+            ),
         )
         await session.commit()
 
+    # First seed: inserts all system sources.
     async with session_factory() as session:
         seeded_count = await ensure_system_data_sources_seeded(session)
         rows = (await session.execute(select(DataSource).order_by(DataSource.slug.asc()))).scalars().all()
@@ -80,15 +51,34 @@ async def test_catalog_seeds_events_and_stories_and_removes_legacy_rows(tmp_path
     source_keys = {str(row.source_key) for row in rows if bool(row.is_system)}
 
     assert seeded_count > 0
-    assert "news_custom_legacy" not in slugs
-    assert "world_legacy_seed" not in slugs
-    assert "stories_custom_custom_https_example_com_feed_a1b2c3" not in slugs
     assert {"events", "stories"}.issubset(source_keys)
-    assert "news" not in source_keys
-    assert "events_all" not in slugs
     assert any(slug.startswith("stories_google_") for slug in slugs)
     assert any(slug.startswith("stories_gdelt_") for slug in slugs)
     assert "events_acled" in slugs
+    assert "my_custom_source" in slugs  # user source preserved
+
+    # Second seed: nothing to insert (all already exist).
+    async with session_factory() as session:
+        re_seeded = await ensure_system_data_sources_seeded(session)
+    assert re_seeded == 0  # idempotent, no overwrites
+
+    # User edits to a system source survive re-seeding.
+    async with session_factory() as session:
+        acled = (
+            await session.execute(select(DataSource).where(DataSource.slug == "events_acled"))
+        ).scalar_one()
+        acled.name = "My Renamed ACLED"
+        acled.enabled = False
+        await session.commit()
+
+    async with session_factory() as session:
+        await ensure_system_data_sources_seeded(session)
+        acled = (
+            await session.execute(select(DataSource).where(DataSource.slug == "events_acled"))
+        ).scalar_one()
+
+    assert acled.name == "My Renamed ACLED"  # not overwritten
+    assert acled.enabled is False  # not re-enabled
 
     await engine.dispose()
 

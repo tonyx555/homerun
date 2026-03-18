@@ -219,6 +219,15 @@ class ChainlinkFeed:
                 except Exception:
                     pass
 
+        # Store in history so get_price_at_time() can resolve price_to_beat
+        # even when Chainlink WS updates are absent.
+        if asset not in self._history:
+            self._history[asset] = deque(maxlen=HISTORY_MAX_ENTRIES)
+        self._history[asset].append((int(timestamp_ms), float(mid)))
+        cutoff = int(time.time() * 1000) - HISTORY_MAX_AGE_MS
+        while self._history[asset] and self._history[asset][0][0] < cutoff:
+            self._history[asset].popleft()
+
     def on_update(self, callback: Callable[[OraclePrice], None]) -> None:
         """Register a callback for price updates."""
         self._on_update = callback
@@ -406,17 +415,18 @@ class ChainlinkFeed:
                     except Exception:
                         pass
 
-            # Always store in history (for price-to-beat lookups)
-            # Only store Chainlink prices in history since that's the resolution source
-            if is_chainlink:
-                if asset not in self._history:
-                    self._history[asset] = deque(maxlen=HISTORY_MAX_ENTRIES)
-                self._history[asset].append((updated_at_ms, price))
+            # Store in history for price-to-beat lookups.
+            # Chainlink is the canonical resolution source, but Binance
+            # prices are stored as a fallback so get_price_at_time() can
+            # still resolve when Chainlink WS updates are absent.
+            if asset not in self._history:
+                self._history[asset] = deque(maxlen=HISTORY_MAX_ENTRIES)
+            self._history[asset].append((updated_at_ms, price))
 
-                # Prune old entries
-                cutoff = int(time.time() * 1000) - HISTORY_MAX_AGE_MS
-                while self._history[asset] and self._history[asset][0][0] < cutoff:
-                    self._history[asset].popleft()
+            # Prune old entries
+            cutoff = int(time.time() * 1000) - HISTORY_MAX_AGE_MS
+            while self._history[asset] and self._history[asset][0][0] < cutoff:
+                self._history[asset].popleft()
 
 
 # ---------------------------------------------------------------------------

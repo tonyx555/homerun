@@ -224,6 +224,7 @@ class TelegramNotifier:
         self._delivery_ready = False
 
         self._autotrader_active: bool = False
+        self._pending_active_message: tuple[str, ...] | None = None
         self._last_summary_at: Optional[datetime] = None
         self._last_snapshot_error: Optional[str] = None
         self._last_settings_reload_monotonic: float = 0.0
@@ -446,16 +447,26 @@ class TelegramNotifier:
                     traders_total = int(getattr(snapshot, "traders_total", 0) if snapshot else 0)
 
                     if active and not self._autotrader_active:
+                        # Defer the "Active" message by one poll cycle so the
+                        # orchestrator has time to run its first cycle and write
+                        # a snapshot with real trader counts (otherwise we read
+                        # stale 0/0 from the previous snapshot).
+                        self._autotrader_active = True
+                        self._pending_active_message = (mode,)
+                        self._last_summary_at = utcnow()
+                    elif active and getattr(self, "_pending_active_message", None):
+                        pending_mode = self._pending_active_message[0]
+                        self._pending_active_message = None
                         await self._enqueue(
                             self._format_runtime_state_message(
                                 title="Autotrader Active",
-                                mode=mode,
+                                mode=pending_mode,
                                 traders_running=traders_running,
                                 traders_total=traders_total,
                             )
                         )
-                        self._last_summary_at = utcnow()
                     elif not active and self._autotrader_active:
+                        self._pending_active_message = None
                         await self._enqueue(
                             self._format_runtime_state_message(
                                 title="Autotrader Paused",
@@ -748,8 +759,12 @@ class TelegramNotifier:
         for row in orders:
             if not self._is_realized_order(row):
                 continue
-            updated_at = _to_utc(row.updated_at) or _to_utc(row.created_at) or utcnow()
-            marker = f"{str(row.status or '').lower()}@{updated_at.isoformat()}"
+            # Dedup by order_id + terminal status only (not updated_at).
+            # Two workers can resolve the same order concurrently, producing
+            # different updated_at values.  Including the timestamp in the
+            # marker caused duplicate notifications whenever the second
+            # commit bumped updated_at.
+            marker = str(row.status or "").lower()
             order_id = str(row.id)
             if self._close_alert_markers.get(order_id) == marker:
                 continue

@@ -31,6 +31,7 @@ _FAILED_EXIT_MIN_RETRY_INTERVAL_SECONDS = 15
 _WALLET_SIZE_EPSILON = 1e-9
 _MARK_TOUCH_INTERVAL_SECONDS = 0.5
 _MAX_LIVE_EXIT_FALLBACK_MARK_AGE_SECONDS = 20.0
+_LIVE_EXIT_ORDER_TIMEOUT_SECONDS = 12.0
 
 
 def _iso_utc(value: datetime) -> str:
@@ -1279,13 +1280,38 @@ async def _load_execution_wallet_recent_sell_trades_by_token() -> dict[str, dict
     latest_by_token: dict[str, dict[str, Any]] = {}
     market_cache_by_condition: dict[str, Optional[dict[str, Any]]] = {}
 
-    async def _infer_trade_token_id(trade: dict[str, Any]) -> str:
+    # Pre-fetch all unique condition_ids in parallel to avoid sequential API calls.
+    needs_inference: list[dict[str, Any]] = []
+    condition_ids_to_fetch: set[str] = set()
+    for trade in trades:
+        if not isinstance(trade, dict):
+            continue
+        if not _extract_wallet_trade_token_id(trade):
+            cid = str(trade.get("conditionId") or trade.get("condition_id") or trade.get("market") or "").strip()
+            if cid:
+                condition_ids_to_fetch.add(cid)
+
+    if condition_ids_to_fetch:
+        _BATCH = 10
+
+        async def _fetch_condition(cid: str) -> tuple[str, Optional[dict[str, Any]]]:
+            try:
+                return cid, await polymarket_client.get_market_by_condition_id(cid)
+            except Exception:
+                return cid, None
+
+        cid_list = sorted(condition_ids_to_fetch)
+        for i in range(0, len(cid_list), _BATCH):
+            batch = cid_list[i : i + _BATCH]
+            results = await asyncio.gather(*[_fetch_condition(c) for c in batch])
+            for cid, info in results:
+                market_cache_by_condition[cid] = info
+
+    def _infer_trade_token_id(trade: dict[str, Any]) -> str:
         condition_id = str(trade.get("conditionId") or trade.get("condition_id") or trade.get("market") or "").strip()
         if not condition_id:
             return ""
 
-        if condition_id not in market_cache_by_condition:
-            market_cache_by_condition[condition_id] = await polymarket_client.get_market_by_condition_id(condition_id)
         market_info = market_cache_by_condition.get(condition_id)
         if not isinstance(market_info, dict):
             return ""
@@ -1325,7 +1351,7 @@ async def _load_execution_wallet_recent_sell_trades_by_token() -> dict[str, dict
             continue
         token_id = _extract_wallet_trade_token_id(trade)
         if not token_id:
-            token_id = await _infer_trade_token_id(trade)
+            token_id = _infer_trade_token_id(trade)
         if not token_id:
             continue
         if _extract_wallet_trade_side(trade) != "sell":
@@ -2230,10 +2256,12 @@ async def reconcile_live_positions(
 
     await session.commit()
     async with release_conn(session):
-        market_info_by_id = await load_market_info_for_orders(candidates)
-        wallet_positions_by_token = await _load_execution_wallet_positions_by_token()
+        market_info_by_id, wallet_positions_by_token, wallet_sell_trades_by_token = await asyncio.gather(
+            load_market_info_for_orders(candidates),
+            _load_execution_wallet_positions_by_token(),
+            _load_execution_wallet_recent_sell_trades_by_token(),
+        )
         wallet_positions_loaded = bool(wallet_positions_by_token)
-        wallet_sell_trades_by_token = await _load_execution_wallet_recent_sell_trades_by_token()
         ws_mid_prices: dict[str, float] = {}
         clob_mid_prices: dict[str, float] = {}
         token_ids_for_prices = sorted(
@@ -2327,6 +2355,33 @@ async def reconcile_live_positions(
             except Exception:
                 pending_exit_snapshots = {}
 
+        # Backfill: fetch entry fill snapshots for orders missing entry price.
+        # IOC/FAK orders may have average_fill_price=0 in LiveTradingOrder because
+        # the venue response didn't include fill price and the order completed before
+        # the sync loop caught it.
+        entry_backfill_snapshots: dict[str, dict[str, Any]] = {}
+        entry_backfill_clob_ids: list[str] = []
+        for row in candidates:
+            _bf_payload = dict(row.payload_json or {})
+            _bf_price = safe_float(row.effective_price) or safe_float(row.entry_price) or 0.0
+            if _bf_price > 0:
+                continue
+            _bf_recon = _bf_payload.get("provider_reconciliation")
+            if isinstance(_bf_recon, dict):
+                _bf_price = safe_float(_bf_recon.get("average_fill_price")) or 0.0
+            if _bf_price > 0:
+                continue
+            _bf_clob = str(_bf_payload.get("provider_clob_order_id") or "").strip()
+            if _bf_clob:
+                entry_backfill_clob_ids.append(_bf_clob)
+        if entry_backfill_clob_ids:
+            try:
+                entry_backfill_snapshots = await live_execution_service.get_order_snapshots_by_clob_ids(
+                    entry_backfill_clob_ids
+                )
+            except Exception:
+                entry_backfill_snapshots = {}
+
     _lc_t2 = _time.monotonic()
 
     for row in candidates:
@@ -2344,6 +2399,50 @@ async def reconcile_live_positions(
             entry_fill_price = safe_float(row.effective_price)
         if entry_fill_price is None or entry_fill_price <= 0.0:
             entry_fill_price = safe_float(row.entry_price)
+        # Backfill entry price from venue snapshot for orders that were
+        # persisted without fill price data (e.g. IOC/FAK orders whose fill
+        # price was not in the placement response).
+        if entry_fill_price is None or entry_fill_price <= 0.0:
+            _bf_clob = str(payload.get("provider_clob_order_id") or "").strip()
+            _bf_snap = entry_backfill_snapshots.get(_bf_clob) if _bf_clob else None
+            if isinstance(_bf_snap, dict):
+                _bf_avg = safe_float(_bf_snap.get("average_fill_price"))
+                _bf_filled = max(0.0, safe_float(_bf_snap.get("filled_size"), 0.0) or 0.0)
+                _bf_notional = max(0.0, safe_float(_bf_snap.get("filled_notional_usd"), 0.0) or 0.0)
+                if _bf_avg is not None and _bf_avg > 0:
+                    entry_fill_price = _bf_avg
+                elif _bf_notional > 0 and _bf_filled > 0:
+                    entry_fill_price = _bf_notional / _bf_filled
+                else:
+                    _bf_limit = safe_float(_bf_snap.get("limit_price"))
+                    if _bf_limit is not None and _bf_limit > 0:
+                        entry_fill_price = _bf_limit
+                if entry_fill_price is not None and entry_fill_price > 0:
+                    if _bf_filled > 0:
+                        entry_fill_size = max(entry_fill_size, _bf_filled)
+                    if _bf_notional > 0:
+                        entry_fill_notional = max(entry_fill_notional, _bf_notional)
+                    # Persist backfilled price so future cycles don't need to
+                    # re-fetch from the venue.
+                    if not dry_run:
+                        row.effective_price = float(entry_fill_price)
+                        if row.entry_price is None or float(row.entry_price or 0) <= 0:
+                            row.entry_price = float(entry_fill_price)
+                        recon = payload.get("provider_reconciliation")
+                        if isinstance(recon, dict) and not safe_float(recon.get("average_fill_price")):
+                            recon["average_fill_price"] = float(entry_fill_price)
+                            if _bf_filled > 0:
+                                recon["filled_size"] = _bf_filled
+                            if _bf_notional > 0:
+                                recon["filled_notional_usd"] = _bf_notional
+                            payload["provider_reconciliation"] = recon
+                        row.payload_json = payload
+                        row.updated_at = now
+                        state_updates += 1
+                        logger.info(
+                            "Backfilled entry price for order=%s price=%.4f source=venue_snapshot",
+                            row.id, entry_fill_price,
+                        )
         if entry_fill_notional <= 0.0:
             entry_fill_notional = max(0.0, safe_float(row.notional_usd) or 0.0)
         if entry_fill_size <= 0.0 and entry_fill_notional > 0.0 and entry_fill_price and entry_fill_price > 0.0:
@@ -2991,16 +3090,19 @@ async def reconcile_live_positions(
                                         await live_execution_service.prepare_sell_balance_allowance(token_id)
                                     except Exception:
                                         pass
-                                    exec_result = await execute_live_order(
-                                        token_id=token_id,
-                                        side="SELL",
-                                        size=remaining_exit_size,
-                                        fallback_price=fallback_exit_price,
-                                        min_order_size_usd=min_order_size_usd,
-                                        time_in_force="IOC",
-                                        post_only=False,
-                                        resolve_live_price=True,
-                                        enforce_fallback_bound=True,
+                                    exec_result = await asyncio.wait_for(
+                                        execute_live_order(
+                                            token_id=token_id,
+                                            side="SELL",
+                                            size=remaining_exit_size,
+                                            fallback_price=fallback_exit_price,
+                                            min_order_size_usd=min_order_size_usd,
+                                            time_in_force="IOC",
+                                            post_only=False,
+                                            resolve_live_price=True,
+                                            enforce_fallback_bound=True,
+                                        ),
+                                        timeout=_LIVE_EXIT_ORDER_TIMEOUT_SECONDS,
                                     )
                             else:
                                 if take_profit_floor_price is not None:
@@ -3013,16 +3115,19 @@ async def reconcile_live_positions(
                                         await live_execution_service.prepare_sell_balance_allowance(token_id)
                                     except Exception:
                                         pass
-                                    exec_result = await execute_live_order(
-                                        token_id=token_id,
-                                        side="SELL",
-                                        size=remaining_exit_size,
-                                        fallback_price=fallback_exit_price,
-                                        min_order_size_usd=min_order_size_usd,
-                                        time_in_force="IOC" if requote_as_rapid_exit else "GTC",
-                                        post_only=bool(take_profit_requote_enabled and not requote_as_rapid_exit),
-                                        resolve_live_price=requote_as_rapid_exit,
-                                        enforce_fallback_bound=True,
+                                    exec_result = await asyncio.wait_for(
+                                        execute_live_order(
+                                            token_id=token_id,
+                                            side="SELL",
+                                            size=remaining_exit_size,
+                                            fallback_price=fallback_exit_price,
+                                            min_order_size_usd=min_order_size_usd,
+                                            time_in_force="IOC" if requote_as_rapid_exit else "GTC",
+                                            post_only=bool(take_profit_requote_enabled and not requote_as_rapid_exit),
+                                            resolve_live_price=requote_as_rapid_exit,
+                                            enforce_fallback_bound=True,
+                                        ),
+                                        timeout=_LIVE_EXIT_ORDER_TIMEOUT_SECONDS,
                                     )
                             if exec_result.status in {"executed", "open", "submitted"}:
                                 pending_exit["status"] = "submitted"
@@ -3362,16 +3467,19 @@ async def reconcile_live_positions(
                             await live_execution_service.prepare_sell_balance_allowance(token_id)
                         except Exception:
                             pass
-                        exec_result = await execute_live_order(
-                            token_id=token_id,
-                            side="SELL",
-                            size=exit_size,
-                            fallback_price=exit_price,
-                            min_order_size_usd=min_order_size_usd,
-                            time_in_force="IOC" if rapid_retry_exit else "GTC",
-                            post_only=post_only_retry,
-                            resolve_live_price=rapid_retry_exit,
-                            enforce_fallback_bound=True,
+                        exec_result = await asyncio.wait_for(
+                            execute_live_order(
+                                token_id=token_id,
+                                side="SELL",
+                                size=exit_size,
+                                fallback_price=exit_price,
+                                min_order_size_usd=min_order_size_usd,
+                                time_in_force="IOC" if rapid_retry_exit else "GTC",
+                                post_only=post_only_retry,
+                                resolve_live_price=rapid_retry_exit,
+                                enforce_fallback_bound=True,
+                            ),
+                            timeout=_LIVE_EXIT_ORDER_TIMEOUT_SECONDS,
                         )
                     if exec_result.status in {"executed", "open", "submitted"}:
                         logger.info(
@@ -4188,15 +4296,18 @@ async def reconcile_live_positions(
                                 await live_execution_service.prepare_sell_balance_allowance(token_id)
                             except Exception:
                                 pass
-                            exec_result = await execute_live_order(
-                                token_id=token_id,
-                                side="SELL",
-                                size=exit_size,
-                                fallback_price=close_price,
-                                min_order_size_usd=min_order_size_usd,
-                                time_in_force="IOC" if rapid_close_exit else "GTC",
-                                resolve_live_price=rapid_close_exit,
-                                enforce_fallback_bound=True,
+                            exec_result = await asyncio.wait_for(
+                                execute_live_order(
+                                    token_id=token_id,
+                                    side="SELL",
+                                    size=exit_size,
+                                    fallback_price=close_price,
+                                    min_order_size_usd=min_order_size_usd,
+                                    time_in_force="IOC" if rapid_close_exit else "GTC",
+                                    resolve_live_price=rapid_close_exit,
+                                    enforce_fallback_bound=True,
+                                ),
+                                timeout=_LIVE_EXIT_ORDER_TIMEOUT_SECONDS,
                             )
                         if exec_result.status in {"executed", "open", "submitted"}:
                             exit_record["status"] = "submitted"

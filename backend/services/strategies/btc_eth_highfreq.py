@@ -6833,14 +6833,20 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 2.5,
             )
             if oracle_move_pct < min_oracle_move:
-                rejections.append({
+                rejection_detail: dict[str, Any] = {
                     "market": market.get("slug") or market_id,
                     "asset": asset or "?",
                     "timeframe": timeframe or "?",
                     "gate": "oracle_move",
                     "oracle_move_pct": round(oracle_move_pct, 4),
                     "threshold_pct": round(min_oracle_move, 2),
-                })
+                }
+                if not has_oracle:
+                    rejection_detail["oracle_unavailable"] = True
+                    rejection_detail["oracle_reasons"] = oracle_status.get("availability_reasons", [])
+                    rejection_detail["oracle_price"] = oracle_price
+                    rejection_detail["price_to_beat"] = price_to_beat
+                rejections.append(rejection_detail)
                 continue
 
             # Gate 2: Price lag detection — only enter when Polymarket hasn't

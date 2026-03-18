@@ -3741,15 +3741,58 @@ async def _run_trader_once(
                         elapsed_seconds = (now - last_idle_maintenance).total_seconds()
                         if elapsed_seconds < idle_maintenance_interval_seconds:
                             if not stream_trigger_mode:
+                                _idle_payload: dict[str, Any] = {
+                                    "idle_maintenance_interval_seconds": idle_maintenance_interval_seconds,
+                                    "elapsed_seconds": elapsed_seconds,
+                                    "triggered_cycle": stream_trigger_mode,
+                                }
+                                _idle_message = "Idle cycle: no pending signals."
+                                if _is_crypto_source_trader(trader):
+                                    try:
+                                        from services.market_runtime import get_market_runtime as _get_mrt
+                                        _mrt = _get_mrt()
+                                        if _mrt:
+                                            _idle_payload["dispatch"] = {
+                                                "total": getattr(_mrt, "_dispatch_count", 0),
+                                                "last_at": getattr(_mrt, "_dispatch_last_at", None),
+                                                "handlers": getattr(_mrt, "_dispatch_last_handlers", 0),
+                                                "opportunities": getattr(_mrt, "_dispatch_last_opportunities", 0),
+                                                "signals_published": getattr(_mrt, "_dispatch_last_signals_published", 0),
+                                                "last_error": getattr(_mrt, "_dispatch_last_error", None),
+                                            }
+                                    except Exception:
+                                        pass
+                                    try:
+                                        from services.strategies.btc_eth_highfreq import get_crypto_filter_diagnostics
+                                        _cfd = get_crypto_filter_diagnostics()
+                                        if _cfd:
+                                            _idle_payload["crypto_filter_diagnostics"] = _cfd
+                                            _summary = _cfd.get("summary", {})
+                                            _scanned = _cfd.get("markets_scanned", 0)
+                                            _emitted = _cfd.get("signals_emitted", 0)
+                                            _oracle = _summary.get("oracle_move", 0)
+                                            _repriced = _summary.get("repriced", 0)
+                                            _max_move = _summary.get("max_oracle_move_pct", 0.0)
+                                            _idle_message = (
+                                                f"Scanned {_scanned} markets, {_emitted} signals"
+                                                f" \u2014 {_oracle} below oracle threshold (max {_max_move}%),"
+                                                f" {_repriced} already repriced"
+                                            )
+                                        else:
+                                            _disp = _idle_payload.get("dispatch") or {}
+                                            _idle_message = (
+                                                f"Dispatched {_disp.get('total', '?')}x, "
+                                                f"handlers={_disp.get('handlers', '?')}, "
+                                                f"opps={_disp.get('opportunities', '?')}, "
+                                                f"signals={_disp.get('signals_published', '?')}"
+                                            )
+                                    except Exception:
+                                        pass
                                 await _emit_cycle_heartbeat_if_due(
                                     session,
                                     trader_id=trader_id,
-                                    message="Idle cycle: no pending signals.",
-                                    payload={
-                                        "idle_maintenance_interval_seconds": idle_maintenance_interval_seconds,
-                                        "elapsed_seconds": elapsed_seconds,
-                                        "triggered_cycle": stream_trigger_mode,
-                                    },
+                                    message=_idle_message,
+                                    payload=_idle_payload,
                                 )
                             effective_process_signals = False
                     if effective_process_signals:

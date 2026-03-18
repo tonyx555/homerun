@@ -2470,7 +2470,7 @@ class ArbitrageScanner:
                     await write_market_catalog(session, [], [], error=str(e))
             except Exception as exc:
                 logger.warning("Failed to persist scanner catalog refresh error", exc_info=exc)
-            logger.warning("Catalog refresh error", exc_info=exc)
+            logger.warning("Catalog refresh error", exc_info=e)
             await self._set_activity(f"Catalog refresh error: {e}")
             raise
 

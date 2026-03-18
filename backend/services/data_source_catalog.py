@@ -16,8 +16,6 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 _SEED_MARKER = "# System data source seed"
-_LEGACY_SYSTEM_SOURCE_KEYS = {"news"}
-_LEGACY_SYSTEM_SOURCE_KINDS = {"bridge", "gdelt"}
 
 _GOOGLE_NEWS_TOPICS: tuple[str, ...] = (
     "breaking news",
@@ -2441,26 +2439,6 @@ BASE_SYSTEM_DATA_SOURCE_SEEDS: list[SystemDataSourceSeed] = [
 ]
 
 
-def _is_seed_source_code(source_code: str) -> bool:
-    return _SEED_MARKER in str(source_code or "")
-
-
-def _is_legacy_system_source_row(row: DataSource) -> bool:
-    source_key = str(row.source_key or "").strip().lower()
-    source_kind = str(row.source_kind or "").strip().lower()
-    return source_key in _LEGACY_SYSTEM_SOURCE_KEYS or source_kind in _LEGACY_SYSTEM_SOURCE_KINDS
-
-
-def _is_legacy_imported_story_source_row(row: DataSource) -> bool:
-    source_key = str(row.source_key or "").strip().lower()
-    if source_key != "stories":
-        return False
-    slug = str(row.slug or "").strip().lower()
-    if not slug.startswith("stories_custom_") and not slug.startswith("stories_gov_"):
-        return False
-    description = str(row.description or "").strip().lower()
-    return "from legacy app settings" in description
-
 
 def _build_row_from_seed(seed: SystemDataSourceSeed, ts: datetime) -> dict:
     return {
@@ -2497,6 +2475,14 @@ def build_system_data_source_rows(*, now: datetime | None = None) -> list[dict]:
 
 
 async def ensure_system_data_sources_seeded(session: AsyncSession) -> int:
+    """Insert-only seeding: add new system sources that don't exist yet.
+
+    Once a source is in the DB it is fully user-owned.  We never overwrite
+    user edits (name, config, enabled, retention, source_code, etc.) and
+    never delete sources that were removed from the hardcoded seed list.
+    The DB is the single source of truth — the seed list is just a
+    one-time bootstrap for fresh installs.
+    """
     rows = build_system_data_source_rows()
     seed_by_slug = {row["slug"]: row for row in rows}
 
@@ -2513,67 +2499,26 @@ async def ensure_system_data_sources_seeded(session: AsyncSession) -> int:
     except (ProgrammingError, OperationalError):
         tombstoned_slugs = set()
 
-    all_rows = (await session.execute(select(DataSource))).scalars().all()
-    existing_rows = [row for row in all_rows if bool(row.is_system)]
-    existing = {str(row.slug or "").strip().lower(): row for row in existing_rows if str(row.slug or "").strip()}
+    existing_slugs = set(
+        (await session.execute(select(DataSource.slug))).scalars().all()
+    )
+    existing_slugs = {str(s or "").strip().lower() for s in existing_slugs if s}
 
     inserted = 0
-    updated = 0
-    deleted = 0
-
-    for row in all_rows:
-        slug = str(row.slug or "").strip().lower()
-        if not slug or slug in seed_by_slug:
-            continue
-        if _is_legacy_imported_story_source_row(row):
-            await session.delete(row)
-            deleted += 1
-            continue
-        if bool(row.is_system) and (
-            _is_seed_source_code(str(row.source_code or "")) or _is_legacy_system_source_row(row)
-        ):
-            await session.delete(row)
-            deleted += 1
 
     for slug, row in seed_by_slug.items():
         if slug in tombstoned_slugs:
             continue
-
-        current = existing.get(slug)
-        if current is None:
-            session.add(DataSource(**row))
-            inserted += 1
+        if slug in existing_slugs:
             continue
+        session.add(DataSource(**row))
+        inserted += 1
 
-        if not bool(current.is_system):
-            continue
-
-        current.source_key = row["source_key"]
-        current.source_kind = row["source_kind"]
-        current.name = row["name"]
-        current.description = row["description"]
-        current.class_name = None
-        current.enabled = bool(row["enabled"])
-        current.retention = dict(row.get("retention") or {})
-        current.config = dict(row["config"] or {})
-        current.config_schema = dict(row["config_schema"] or {})
-        current.sort_order = int(row["sort_order"])
-        current.updated_at = row["updated_at"]
-
-        if not str(current.source_code or "").strip() or _is_seed_source_code(str(current.source_code or "")):
-            if str(current.source_code or "") != row["source_code"]:
-                current.source_code = row["source_code"]
-                current.version = int(current.version or 1) + 1
-                current.status = "unloaded"
-                current.error_message = None
-
-        updated += 1
-
-    if inserted == 0 and updated == 0 and deleted == 0:
+    if inserted == 0:
         return 0
 
     await session.commit()
-    return inserted + updated + deleted
+    return inserted
 
 
 async def ensure_all_data_sources_seeded(session: AsyncSession) -> dict:

@@ -184,6 +184,11 @@ _global_daily_pnl_date: dict[str, str] = {}
 _seeded = False
 _seed_lock = asyncio.Lock()
 
+# Recently-closed markets — prevents re-entry churn.
+# Keyed by (trader_id, mode, market_id) → monotonic close timestamp.
+_recently_closed_markets: dict[tuple[str, str, str], float] = {}
+_REENTRY_COOLDOWN_SECONDS = 600.0  # 10 minutes
+
 
 # ── Write-behind audit buffer ──────────────────────────────────────
 
@@ -288,6 +293,13 @@ async def _seed_from_db(session: AsyncSession) -> None:
     _global_gross.clear()
     _global_daily_pnl.clear()
     _global_daily_pnl_date.clear()
+
+    # Prune expired re-entry cooldown entries
+    now = time.monotonic()
+    cooldown = _effective_reentry_cooldown()
+    expired = [k for k, ts in _recently_closed_markets.items() if (now - ts) >= cooldown]
+    for k in expired:
+        del _recently_closed_markets[k]
 
     today_str = utcnow().strftime("%Y-%m-%d")
     today_start = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -555,11 +567,25 @@ def get_open_order_count(trader_id: str, mode: str) -> int:
     return snap.open_order_count
 
 
+def _effective_reentry_cooldown() -> float:
+    try:
+        from config import settings
+        return max(0.0, float(getattr(settings, "MARKET_REENTRY_COOLDOWN_SECONDS", _REENTRY_COOLDOWN_SECONDS) or _REENTRY_COOLDOWN_SECONDS))
+    except Exception:
+        return _REENTRY_COOLDOWN_SECONDS
+
+
 def get_open_market_ids(trader_id: str, mode: str) -> set[str]:
-    snap = _snapshots.get((trader_id, _normalize_mode_key(mode)))
-    if snap is None:
-        return set()
-    return set(snap.open_market_ids)
+    mode_key = _normalize_mode_key(mode)
+    snap = _snapshots.get((trader_id, mode_key))
+    result = set(snap.open_market_ids) if snap is not None else set()
+    # Include recently-closed markets to prevent re-entry churn
+    now = time.monotonic()
+    cooldown = _effective_reentry_cooldown()
+    for (tid, m, mid), closed_at in _recently_closed_markets.items():
+        if tid == trader_id and m == mode_key and (now - closed_at) < cooldown:
+            result.add(mid)
+    return result
 
 
 def get_gross_exposure(mode: str) -> float:
@@ -793,6 +819,11 @@ def record_order_resolved(
                 0.0, snap.copy_leader_notional.get(wallet, 0.0) - notional_to_remove
             )
 
+    # Track recently-closed market to prevent re-entry churn
+    market_id_clean = str(market_id or "").strip()
+    if market_id_clean:
+        _recently_closed_markets[(trader_id, mode_key, market_id_clean)] = time.monotonic()
+
     # Update PnL / loss streak
     if status_key in REALIZED_ORDER_STATUSES:
         today_str = utcnow().strftime("%Y-%m-%d")
@@ -833,6 +864,11 @@ def record_order_cancelled(
     if str(order_id or "").strip():
         snap.open_order_ids.discard(str(order_id or "").strip())
         snap.open_order_count = len(snap.open_order_ids)
+
+    # Track recently-closed market to prevent re-entry churn
+    market_id_clean = str(market_id or "").strip()
+    if market_id_clean:
+        _recently_closed_markets[(trader_id, mode_key, market_id_clean)] = time.monotonic()
 
     if notional_to_remove > 0:
         snap.gross_notional = max(0.0, snap.gross_notional - notional_to_remove)

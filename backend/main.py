@@ -405,8 +405,17 @@ async def lifespan(app: FastAPI):
                     if not tid:
                         continue
                     entry = float(row.effective_price or row.entry_price or 0)
+                    # Try payload fill data when row-level price is missing
+                    if entry <= 0:
+                        _recon = payload.get("provider_reconciliation")
+                        if isinstance(_recon, dict):
+                            entry = float(_recon.get("average_fill_price") or 0)
+                        if entry <= 0:
+                            _snap = _recon.get("snapshot") if isinstance(_recon, dict) else None
+                            if isinstance(_snap, dict):
+                                entry = float(_snap.get("limit_price") or _snap.get("average_fill_price") or 0)
                     notional = float(row.notional_usd or 0)
-                    if entry <= 0 or notional <= 0:
+                    if notional <= 0:
                         continue
                     direction = str(row.direction or "yes").strip().lower()
                     edge_pct = float(row.edge_percent or 0)
@@ -477,8 +486,17 @@ async def lifespan(app: FastAPI):
                 if not tid:
                     continue
                 entry = float(row.effective_price or row.entry_price or 0)
+                # Try payload fill data when row-level price is missing
+                if entry <= 0:
+                    _recon = payload.get("provider_reconciliation")
+                    if isinstance(_recon, dict):
+                        entry = float(_recon.get("average_fill_price") or 0)
+                    if entry <= 0:
+                        _snap = _recon.get("snapshot") if isinstance(_recon, dict) else None
+                        if isinstance(_snap, dict):
+                            entry = float(_snap.get("limit_price") or _snap.get("average_fill_price") or 0)
                 notional = float(row.notional_usd or 0)
-                if entry <= 0 or notional <= 0:
+                if notional <= 0:
                     continue
                 direction = str(row.direction or "yes").strip().lower()
                 edge_pct = float(row.edge_percent or 0)

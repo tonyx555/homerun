@@ -55,12 +55,11 @@ DEFAULT_HTTP_RPC_URL = settings.POLYGON_RPC_URL
 
 # Fallback RPC endpoints (tried in order after the configured primary).
 FALLBACK_HTTP_RPC_URLS = (
-    "https://polygon-rpc.com",
     "https://polygon-bor-rpc.publicnode.com",
-    "https://rpc.ankr.com/polygon",
+    "https://polygon.llamarpc.com",
 )
 
-DEFAULT_HTTP_TIMEOUT = httpx.Timeout(connect=7.5, read=12.0, write=10.0, pool=12.0)
+DEFAULT_HTTP_TIMEOUT = httpx.Timeout(connect=7.5, read=20.0, write=10.0, pool=12.0)
 RPC_ATTEMPTS_PER_ENDPOINT = 2
 
 
@@ -897,6 +896,10 @@ class WalletWebSocketMonitor:
                     endpoint_error = e
                     if _should_reset_http_client(e):
                         await self._close_rpc_client()
+                    # 401/403 = auth required or forbidden — skip retries on this endpoint
+                    _status = getattr(getattr(e, "response", None), "status_code", None)
+                    if _status in (401, 403):
+                        break
                     if endpoint_attempt < RPC_ATTEMPTS_PER_ENDPOINT - 1:
                         await asyncio.sleep(0.2 * (endpoint_attempt + 1))
                         continue

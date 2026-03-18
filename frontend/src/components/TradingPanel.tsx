@@ -2713,11 +2713,6 @@ function strategyLabelForKey(key: string, sourceCatalog: TraderSource[] = []): s
   return STRATEGY_LABELS[normalized] || normalized || key
 }
 
-function isCryptoSourceKey(key: string): boolean {
-  const k = normalizeSourceKey(key)
-  return k === 'crypto'
-}
-
 function sourceStrategyDetails(source: TraderSource): StrategyOptionDetail[] {
   const options = (source.strategy_options || [])
     .filter((item) => item && typeof item === 'object')
@@ -4943,14 +4938,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     sourceStrategyDetailsLookup,
   ])
 
-  const cryptoStrategyKeyDraft = useMemo(
-    () => effectiveSourceStrategies.crypto || DEFAULT_STRATEGY_KEY,
-    [effectiveSourceStrategies]
-  )
-  const isCryptoStrategyDraft = useMemo(
-    () => selectedSourceKeySet.has('crypto'),
-    [selectedSourceKeySet]
-  )
   const riskFormSchema = useMemo(
     () => ({
       param_fields: Array.isArray(traderConfigSchema?.shared_risk_fields) ? traderConfigSchema.shared_risk_fields : [],
@@ -8192,22 +8179,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     () => traders.filter((trader) => isTraderExecutionEnabled(trader)).length,
     [traders]
   )
-  const activeCryptoTraderCount = useMemo(
-    () =>
-      traders.filter((trader) => {
-        if (!isTraderExecutionEnabled(trader)) return false
-        return traderSourceKeys(trader).some((sourceKey) => isCryptoSourceKey(sourceKey))
-      }).length,
-    [traders]
-  )
-  const highFrequencyCryptoLoopActive = orchestratorEnabled && !killSwitchOn && activeCryptoTraderCount > 0
-  const effectiveGlobalLoopLabel = highFrequencyCryptoLoopActive
-    ? 'REAL-TIME (event-driven + high-frequency monitor)'
-    : 'REAL-TIME (event-driven)'
-  const effectiveGlobalLoopDetail = highFrequencyCryptoLoopActive
-    ? 'Signal events wake matching bots immediately, with high-frequency monitoring active for crypto bots.'
-    : 'Signal events wake matching bots immediately; fallback intervals apply when no new events arrive.'
-
   const inactiveTraderCount = useMemo(
     () => Math.max(0, traders.length - activeTraderCount),
     [traders.length, activeTraderCount]
@@ -12097,56 +12068,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                 </FlyoutSection>
 
                 <FlyoutSection
-                  title="Fallback Interval"
-                  icon={Clock3}
-                  iconClassName="text-sky-500"
-                  count={`${Number(draftInterval || 0)}s`}
-                  subtitle="Idle-sweep fallback cadence. Real-time signal events can trigger this bot sooner."
-                >
-                  <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-                    <div>
-                      <Label>Fallback Interval Seconds</Label>
-                      <Input
-                        type="number"
-                        min={1}
-                        value={draftInterval}
-                        onChange={(event) => setDraftInterval(event.target.value)}
-                        className="mt-1"
-                      />
-                      <p className="mt-1 text-[10px] text-muted-foreground/70">
-                        Saves to this bot&apos;s <span className="font-mono">interval_seconds</span>.
-                      </p>
-                      <p className="mt-1 text-[10px] text-muted-foreground/70">
-                        Real-time trade-signal events wake matching bots immediately. If no new events arrive, this bot still runs when this fallback interval elapses.
-                      </p>
-                    </div>
-                    <div className="rounded-md border border-border/60 bg-muted/15 px-3 py-2">
-                      <p className="text-[11px] font-medium">Global Orchestrator Runtime</p>
-                      <p className="mt-2 text-[11px] font-medium">Execution Mode</p>
-                      <p className="mt-1 text-sm font-mono">{effectiveGlobalLoopLabel}</p>
-                      <p className="mt-1 text-[10px] text-muted-foreground/70">
-                        {effectiveGlobalLoopDetail}
-                      </p>
-                      {highFrequencyCryptoLoopActive ? (
-                        <p className="mt-1 text-[10px] text-emerald-600 dark:text-emerald-300">
-                          High-frequency mode active ({activeCryptoTraderCount} crypto bot
-                          {activeCryptoTraderCount === 1 ? '' : 's'} enabled).
-                        </p>
-                      ) : (
-                        <p className="mt-1 text-[10px] text-amber-600 dark:text-amber-300">
-                          Enable an active crypto bot to activate high-frequency monitoring.
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                  {isCryptoStrategyDraft && cryptoStrategyKeyDraft === 'btc_eth_highfreq' && Number(draftInterval || 0) >= 60 ? (
-                    <p className="text-xs text-amber-700 dark:text-amber-100">
-                      60s is too slow for short-horizon crypto execution. Recommended cadence is 2s to 10s.
-                    </p>
-                  ) : null}
-                </FlyoutSection>
-
-                <FlyoutSection
                   title="Trading Schedule"
                   icon={Clock3}
                   iconClassName="text-cyan-500"
@@ -12337,32 +12258,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                       />
                     </div>
                   </div>
-                </FlyoutSection>
-
-                <FlyoutSection
-                  title="Advanced JSON Editors"
-                  icon={Square}
-                  iconClassName="text-slate-500"
-                  count="2 editors"
-                  defaultOpen={false}
-                >
-                  <details className="rounded-md border border-border p-2">
-                    <summary className="cursor-pointer text-xs font-medium">Strategy Params JSON</summary>
-                    <textarea
-                      className="mt-2 w-full min-h-[190px] rounded-md border bg-background p-2 text-xs font-mono"
-                      value={draftParams}
-                      onChange={(event) => setDraftParams(event.target.value)}
-                    />
-                  </details>
-
-                  <details className="rounded-md border border-border p-2">
-                    <summary className="cursor-pointer text-xs font-medium">Risk Limits JSON</summary>
-                    <textarea
-                      className="mt-2 w-full min-h-[190px] rounded-md border bg-background p-2 text-xs font-mono"
-                      value={draftRisk}
-                      onChange={(event) => setDraftRisk(event.target.value)}
-                    />
-                  </details>
                 </FlyoutSection>
 
                 {traderFlyoutMode === 'edit' && selectedTrader ? (

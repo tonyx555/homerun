@@ -13,7 +13,7 @@ from config import settings
 from services.execution_latency_metrics import execution_latency_metrics
 from sqlalchemy import and_, case, desc, func, or_, select, text as sa_text, update as sa_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import (
@@ -1891,6 +1891,29 @@ async def recover_missing_live_trader_orders(
     else:
         await session.flush()
 
+    # Notify hot state so the stacking guard blocks re-entry immediately
+    try:
+        import services.trader_hot_state as _hs
+        for row in recovered_rows:
+            payload = dict(row.payload_json or {})
+            token_id = str(payload.get("token_id") or payload.get("selected_token_id") or "").strip()
+            _hs.record_order_created(
+                trader_id=str(row.trader_id or ""),
+                mode=str(row.mode or "live"),
+                order_id=str(row.id or ""),
+                status=str(row.status or "open"),
+                market_id=str(row.market_id or ""),
+                direction=str(row.direction or ""),
+                source=str(row.source or ""),
+                notional_usd=float(row.notional_usd or 0.0),
+                entry_price=float(row.entry_price or row.effective_price or 0.0),
+                token_id=token_id,
+                filled_shares=0.0,
+                payload=payload,
+            )
+    except Exception:
+        pass
+
     if broadcast:
         for row in recovered_rows:
             try:
@@ -3438,13 +3461,26 @@ async def create_trader_event(
         except Exception:
             pass
     if commit:
-        await _commit_with_retry(session)
+        try:
+            await _commit_with_retry(session)
+        except IntegrityError:
+            await session.rollback()
+            row.trader_id = None
+            session.add(row)
+            await _commit_with_retry(session)
+            serialized_row = _serialize_event(row)
         try:
             await event_bus.publish("trader_event", serialized_row)
         except Exception:
             pass
     else:
-        await session.flush()
+        try:
+            await session.flush()
+        except IntegrityError:
+            await session.rollback()
+            row.trader_id = None
+            session.add(row)
+            await session.flush()
 
     return row
 

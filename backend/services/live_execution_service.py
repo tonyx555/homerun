@@ -51,6 +51,7 @@ POST_ONLY_REPRICE_TICK = 0.01
 INITIALIZATION_RETRY_BACKOFF_SECONDS = 60.0
 MISSING_DEPENDENCY_RELOG_SECONDS = 300.0
 PENDING_RECONCILIATION_MAX_ATTEMPTS = 6
+_ORDER_SUBMIT_TIMEOUT_SECONDS = 10.0
 
 
 def _to_decimal(value) -> Decimal:
@@ -148,6 +149,8 @@ _TRANSIENT_TRANSPORT_MARKERS = (
 
 def _is_transient_transport_error(exc: Exception) -> bool:
     """Check if an exception is a transient network/proxy error worth retrying."""
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return True
     try:
         import httpx as _httpx
 
@@ -2586,7 +2589,10 @@ class LiveExecutionService:
                                 price=submit_price,
                                 order_type=provider_order_type,
                             )
-                            signed_order = await asyncio.to_thread(self._client.create_market_order, order_args)
+                            signed_order = await asyncio.wait_for(
+                                asyncio.to_thread(self._client.create_market_order, order_args),
+                                timeout=_ORDER_SUBMIT_TIMEOUT_SECONDS,
+                            )
                         else:
                             order_args = OrderArgs(
                                 price=submit_price,
@@ -2594,12 +2600,18 @@ class LiveExecutionService:
                                 side=order_side,
                                 token_id=token_key,
                             )
-                            signed_order = await asyncio.to_thread(self._client.create_order, order_args)
-                        response = await asyncio.to_thread(
-                            self._client.post_order,
-                            signed_order,
-                            provider_order_type,
-                            post_only=post_only,
+                            signed_order = await asyncio.wait_for(
+                                asyncio.to_thread(self._client.create_order, order_args),
+                                timeout=_ORDER_SUBMIT_TIMEOUT_SECONDS,
+                            )
+                        response = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                self._client.post_order,
+                                signed_order,
+                                provider_order_type,
+                                post_only=post_only,
+                            ),
+                            timeout=_ORDER_SUBMIT_TIMEOUT_SECONDS,
                         )
                     if not isinstance(response, dict):
                         raise RuntimeError("Trading provider returned malformed order response")
@@ -2679,6 +2691,37 @@ class LiveExecutionService:
                     immediate_snapshot = self._parse_provider_order_snapshot(response)
                     if immediate_snapshot is not None:
                         self._apply_snapshot_to_order(order, immediate_snapshot)
+                    # IOC/FAK orders fill immediately but the placement response
+                    # often lacks average_fill_price.  Fetch the full order from
+                    # the venue so the fill price is persisted before the order
+                    # disappears from the active-orders list.
+                    if (
+                        order.filled_size > 0
+                        and order.average_fill_price <= 0
+                        and order.clob_order_id
+                        and normalized_order_type in {OrderType.IOC, OrderType.FAK, OrderType.FOK}
+                        and hasattr(self._client, "get_order")
+                    ):
+                        try:
+                            detail = await self._run_client_io(
+                                self._client.get_order, order.clob_order_id
+                            )
+                            for srv in self._extract_server_orders(
+                                detail if isinstance(detail, (list, dict)) else {}
+                            ):
+                                snap = self._parse_provider_order_snapshot(srv)
+                                if (
+                                    snap is not None
+                                    and str(snap.get("clob_order_id")) == order.clob_order_id
+                                ):
+                                    self._apply_snapshot_to_order(order, snap)
+                                    break
+                        except Exception as exc:
+                            logger.debug(
+                                "Post-placement fill-price fetch failed for %s: %s",
+                                order.clob_order_id,
+                                exc,
+                            )
                     stats_lock = self._get_stats_lock()
                     async with stats_lock:
                         self._stats.total_trades += 1
