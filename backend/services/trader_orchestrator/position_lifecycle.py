@@ -809,7 +809,21 @@ def _market_has_terminal_resolution_signal(market_info: Optional[dict[str, Any]]
     end_dt = polymarket_client._coerce_datetime(
         market_info.get("end_date") if market_info.get("end_date") is not None else market_info.get("endDate")
     )
-    if end_dt is not None and end_dt <= utcnow():
+    ended = end_dt is not None and end_dt <= utcnow()
+    accepting_orders_value = (
+        market_info.get("accepting_orders")
+        if market_info.get("accepting_orders") is not None
+        else market_info.get("acceptingOrders")
+    )
+    enable_order_book_value = (
+        market_info.get("enable_order_book")
+        if market_info.get("enable_order_book") is not None
+        else market_info.get("enableOrderBook")
+    )
+    if ended and (
+        _safe_bool(accepting_orders_value, True) is False
+        or _safe_bool(enable_order_book_value, True) is False
+    ):
         return True
 
     return False
@@ -1442,8 +1456,12 @@ async def load_market_info_for_orders(orders: list[TraderOrder]) -> dict[str, Op
         info: Optional[dict[str, Any]] = None
         if lookup_id.startswith("0x"):
             info = await polymarket_client.get_market_by_condition_id(lookup_id, force_refresh=True)
+            if info is None:
+                info = await polymarket_client.get_market_by_condition_id(lookup_id)
         if info is None:
             info = await polymarket_client.get_market_by_token_id(lookup_id, force_refresh=True)
+            if info is None:
+                info = await polymarket_client.get_market_by_token_id(lookup_id)
 
         _market_info_cache[lookup_id] = (now_mono, info)
         return lookup_id, info
