@@ -29,12 +29,12 @@ def format_resolution_analysis(result: dict) -> str:
     question = _escape(result.get("question", "Unknown market"))
 
     lines = [
-        f'root = Stack([header, scores, rec])',
+        'root = Stack([header, scores, rec])',
         f'header = Card("{_escape(question)}", "Resolution Analysis", "purple", [clarityG, riskG, confG])',
         f'clarityG = ScoreGauge("Clarity", {clarity}, "percent")',
         f'riskG = ScoreGauge("Risk", {risk}, "percent")',
         f'confG = ScoreGauge("Confidence", {confidence}, "percent")',
-        f'scores = Card("Findings", "", "cyan", [findingsList])',
+        'scores = Card("Findings", "", "cyan", [findingsList])',
     ]
 
     if findings:
@@ -65,7 +65,7 @@ def format_sentiment_analysis(result: dict) -> str:
 
     if takeaways:
         items_str = ", ".join(f'"{_escape(str(t))}"' for t in takeaways[:6])
-        lines.append(f'takeawayCard = Card("Key Takeaways", "", "purple", [takeawayList])')
+        lines.append('takeawayCard = Card("Key Takeaways", "", "purple", [takeawayList])')
         lines.append(f"takeawayList = BulletList([{items_str}])")
     else:
         lines.append('takeawayCard = Card("Key Takeaways", "", "purple", [noTakeaways])')
