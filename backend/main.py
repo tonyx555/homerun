@@ -49,6 +49,7 @@ from api.routes_strategies import router as strategies_router
 from api.routes_ml import router as ml_router
 from api.routes_data_sources import router as data_sources_router
 from api.routes_traders import router as traders_router
+from api.routes_agents import router as agents_router, tools_router as ai_tools_router, seed_builtin_agents
 from services.wallet_tracker import wallet_tracker
 from services.live_execution_service import live_execution_service
 from services.wallet_discovery import wallet_discovery
@@ -186,6 +187,12 @@ async def lifespan(app: FastAPI):
         # Initialize database
         await init_database()
         logger.info("Database initialized")
+
+        # Seed builtin AI agents
+        try:
+            await seed_builtin_agents()
+        except Exception as exc:
+            logger.warning("Failed to seed builtin agents", exc_info=exc)
 
         # Start pool watchdog — reaps connections held too long and
         # recovers the pool when near-exhaustion is detected.
@@ -865,6 +872,8 @@ app.include_router(workers_router, prefix="/api", tags=["Workers"])
 app.include_router(validation_router, prefix="/api", tags=["Validation"])
 app.include_router(events_router, prefix="/api", tags=["Events"])
 app.include_router(ml_router, prefix="/api", tags=["ML Training Pipeline"])
+app.include_router(agents_router, prefix="/api", tags=["AI Agents"])
+app.include_router(ai_tools_router, prefix="/api", tags=["AI Tools"])
 
 
 # WebSocket endpoint

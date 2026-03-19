@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
@@ -51,9 +52,16 @@ from services.trader_orchestrator_state import (
     transfer_open_trades,
     update_trader,
 )
+from services.live_execution_service import (
+    live_execution_service,
+    OrderSide,
+    OrderType,
+    OrderStatus,
+)
 from utils.converters import normalize_market_id, to_iso
 from utils.market_urls import infer_market_platform
 from utils.logger import get_logger
+from utils.utcnow import utcnow
 
 router = APIRouter(prefix="/traders", tags=["Traders"])
 _LOSS_STREAK_RESET_AT_KEY = "loss_streak_reset_at"
@@ -210,6 +218,21 @@ class TraderTuneAgentRequest(BaseModel):
 class TraderOrderManualCloseRequest(BaseModel):
     requested_by: Optional[str] = None
     reason: Optional[str] = None
+
+
+class ManualBuyPosition(BaseModel):
+    token_id: str
+    side: str = Field(default="BUY")
+    price: float = Field(ge=0.01, le=0.99)
+    market_id: str = ""
+    market_question: str = ""
+    outcome: str = ""
+
+
+class TraderManualBuyRequest(BaseModel):
+    positions: list[ManualBuyPosition] = Field(..., min_length=1)
+    size_usd: float = Field(..., gt=0)
+    opportunity_id: Optional[str] = None
 
 
 class TraderStartRequest(BaseModel):
@@ -1618,6 +1641,133 @@ async def sell_trader_order_now(
         "order_id": order_id,
         "mode": mode_key,
         "result": payload,
+    }
+
+
+@router.post("/{trader_id}/manual-buy")
+async def manual_buy(
+    trader_id: str,
+    request: TraderManualBuyRequest,
+    session: AsyncSession = Depends(get_db_session),
+):
+    _assert_not_globally_paused()
+    trader = await get_trader(session, trader_id)
+    if trader is None:
+        raise HTTPException(status_code=404, detail="Trader not found")
+
+    mode = str(trader.mode or "shadow").strip().lower()
+    if mode == "paper":
+        mode = "shadow"
+    now = utcnow()
+    created_orders = []
+
+    per_position_usd = request.size_usd / len(request.positions)
+
+    for pos in request.positions:
+        order_id = uuid.uuid4().hex
+        side_str = str(pos.side or "BUY").strip().upper()
+        size_shares = per_position_usd / pos.price if pos.price > 0 else 0.0
+        direction = f"buy_{pos.outcome.lower()}" if pos.outcome else f"buy_{side_str.lower()}"
+
+        live_order_result = None
+        order_status = "submitted"
+        error_message = None
+
+        if mode == "live":
+            if not live_execution_service.is_ready():
+                raise HTTPException(status_code=400, detail="Live trading service not initialized")
+            try:
+                side = OrderSide(side_str)
+            except ValueError:
+                side = OrderSide.BUY
+            live_order = await live_execution_service.place_order(
+                token_id=pos.token_id,
+                side=side,
+                price=pos.price,
+                size=size_shares,
+                order_type=OrderType.GTC,
+                market_question=pos.market_question or None,
+            )
+            if live_order.status == OrderStatus.FAILED:
+                order_status = "failed"
+                error_message = live_order.error_message
+            else:
+                order_status = "executed"
+            live_order_result = {
+                "order_id": live_order.id,
+                "status": str(live_order.status),
+                "size": live_order.size,
+                "price": live_order.price,
+            }
+
+        row = TraderOrder(
+            id=order_id,
+            trader_id=trader_id,
+            signal_id=None,
+            decision_id=None,
+            source="manual",
+            strategy_key="manual_buy",
+            strategy_version=None,
+            market_id=pos.market_id or pos.token_id,
+            market_question=pos.market_question or None,
+            direction=direction,
+            event_id=None,
+            trace_id=None,
+            mode=mode,
+            status=order_status,
+            notional_usd=per_position_usd,
+            entry_price=pos.price,
+            effective_price=pos.price,
+            edge_percent=None,
+            confidence=None,
+            reason="Manual buy from UI",
+            payload_json={
+                "manual": True,
+                "opportunity_id": request.opportunity_id,
+                "token_id": pos.token_id,
+                "side": side_str,
+                "outcome": pos.outcome,
+                "size_shares": size_shares,
+                "live_order": live_order_result,
+            },
+            error_message=error_message,
+            created_at=now,
+            executed_at=now if order_status == "executed" else None,
+        )
+        session.add(row)
+        created_orders.append({
+            "order_id": order_id,
+            "market_id": pos.market_id or pos.token_id,
+            "market_question": pos.market_question,
+            "direction": direction,
+            "status": order_status,
+            "notional_usd": per_position_usd,
+            "entry_price": pos.price,
+            "size_shares": size_shares,
+            "error": error_message,
+            "live_order": live_order_result,
+        })
+
+    await session.commit()
+
+    await sync_trader_position_inventory(session, trader_id=trader_id, mode=mode)
+
+    await create_trader_event(
+        session,
+        trader_id=trader_id,
+        event_type="manual_buy",
+        source="operator",
+        message=f"Manual buy: {len(created_orders)} position(s), ${request.size_usd:.2f}",
+        payload={"orders": created_orders, "opportunity_id": request.opportunity_id},
+    )
+
+    failed = [o for o in created_orders if o["status"] == "failed"]
+    return {
+        "status": "partial_failure" if failed else "success",
+        "trader_id": trader_id,
+        "mode": mode,
+        "orders": created_orders,
+        "message": f"{len(failed)} of {len(created_orders)} orders failed" if failed else f"{len(created_orders)} order(s) placed",
     }
 
 

@@ -1772,6 +1772,41 @@ class SkillExecution(Base):
     )
 
 
+class UserAgent(Base):
+    """User-defined AI agent configuration."""
+
+    __tablename__ = "user_agents"
+
+    id = Column(String, primary_key=True)
+    name = Column(String, nullable=False)
+    description = Column(String, nullable=True)
+    system_prompt = Column(Text, nullable=False)
+    tools = Column(JSON, nullable=False, default=list)
+    model = Column(String, nullable=True)
+    temperature = Column(Float, nullable=False, default=0.0)
+    max_iterations = Column(Integer, nullable=False, default=10)
+    is_builtin = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class UserTool(Base):
+    """User-defined or builtin tool that can be assigned to AI agents."""
+
+    __tablename__ = "user_tools"
+
+    id = Column(String, primary_key=True, default=lambda: str(__import__("uuid").uuid4()))
+    name = Column(String, nullable=False, unique=True)
+    description = Column(Text, nullable=True)
+    tool_type = Column(String, default="function")  # function, api, etc
+    parameters_schema = Column(JSON, nullable=True)  # JSON schema for params
+    implementation = Column(Text, nullable=True)  # Python code or API config
+    is_builtin = Column(Boolean, default=False)
+    enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
 class LLMUsageLog(Base):
     """Tracks LLM API usage for cost management and observability.
 

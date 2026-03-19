@@ -5,7 +5,6 @@ import {
   Brain,
   RefreshCw,
   MessageCircle,
-  Play,
   Shield,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
@@ -22,7 +21,7 @@ import type { LivelineSeries } from 'liveline'
 import { useAtomValue } from 'jotai'
 import { themeAtom } from '../store/atoms'
 import { Badge } from './ui/badge'
-import { Button } from './ui/button'
+import BuyButton from './BuyButton'
 import {
   STRATEGY_COLORS,
   STRATEGY_ABBREV,
@@ -46,7 +45,6 @@ const SPARKLINE_COLORS = [
 
 interface Props {
   opportunities: Opportunity[]
-  onExecute?: (opportunity: Opportunity) => void
   onOpenCopilot?: (opportunity: Opportunity) => void
 }
 
@@ -79,7 +77,7 @@ function formatOutcomePriceSummary(market: Opportunity['markets'][number]): stri
   return `${visible.join(' ')}${suffix}`
 }
 
-export default function OpportunityTable({ opportunities, onExecute, onOpenCopilot }: Props) {
+export default function OpportunityTable({ opportunities, onOpenCopilot }: Props) {
   return (
     <div className="border border-border/50 rounded-lg overflow-hidden">
       {/* Table Header */}
@@ -102,7 +100,6 @@ export default function OpportunityTable({ opportunities, onExecute, onOpenCopil
           <TableRow
             key={opp.stable_id || opp.id}
             opportunity={opp}
-            onExecute={onExecute}
             onOpenCopilot={onOpenCopilot}
           />
         ))}
@@ -113,11 +110,9 @@ export default function OpportunityTable({ opportunities, onExecute, onOpenCopil
 
 const TableRow = memo(function TableRow({
   opportunity,
-  onExecute,
   onOpenCopilot,
 }: {
   opportunity: Opportunity
-  onExecute?: (opportunity: Opportunity) => void
   onOpenCopilot?: (opportunity: Opportunity) => void
 }) {
   const [expanded, setExpanded] = useState(false)
@@ -453,15 +448,7 @@ const TableRow = memo(function TableRow({
                     <Brain className="w-2 h-2" /> {judgeMutation.isPending ? '...' : 'Analyze'}
                   </button>
                 )}
-                {onExecute && (
-                  <Button
-                    onClick={(e) => { e.stopPropagation(); onExecute(opportunity) }}
-                    size="sm"
-                    className="h-5 px-2 text-[9px] bg-gradient-to-r from-blue-500 to-green-500 hover:from-blue-600 hover:to-green-600 ml-auto"
-                  >
-                    <Play className="w-2 h-2 mr-0.5" /> Execute
-                  </Button>
-                )}
+                <BuyButton opportunity={opportunity} className="ml-auto w-24" />
               </div>
             </div>
           </div>

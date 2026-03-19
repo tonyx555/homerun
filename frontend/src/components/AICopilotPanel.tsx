@@ -1,18 +1,29 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQueryClient, useQuery } from '@tanstack/react-query'
+import { useAtom, useSetAtom } from 'jotai'
 import {
   X,
   Send,
   Bot,
   User,
-  RefreshCw,
   Minimize2,
   Maximize2,
   Trash2,
   Sparkles,
+  ExternalLink,
+  ChevronRight,
+  ChevronLeft,
+  Loader2,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
-import { sendAIChat, AIChatMessage, getAIChatSession, archiveAIChatSession } from '../services/api'
+import {
+  AIChatMessage,
+  getAIChatSession,
+  archiveAIChatSession,
+  listAIChatSessions,
+  AIChatSession,
+} from '../services/api'
+import { activeChatSessionIdAtom, aiTabSubtabAtom } from '../store/atoms'
 import { Button } from './ui/button'
 import { Card } from './ui/card'
 import { ScrollArea } from './ui/scroll-area'
@@ -45,14 +56,31 @@ export default function AICopilotPanel({
   const [input, setInput] = useState('')
   const [isExpanded, setIsExpanded] = useState(false)
   const [isSessionReady, setIsSessionReady] = useState(false)
+  const [isStreaming, setIsStreaming] = useState(false)
+  const [streamingContent, setStreamingContent] = useState('')
+  const [showSessionPills, setShowSessionPills] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const lastSeedPromptIdRef = useRef<number | null>(null)
+  const abortControllerRef = useRef<AbortController | null>(null)
+  const [activeChatSessionId, setActiveChatSessionId] = useAtom(activeChatSessionIdAtom)
+  const setAiTabSubtab = useSetAtom(aiTabSubtabAtom)
+
   const sessionStorageKey = useMemo(() => {
     const ctxType = contextType || 'general'
     const ctxId = contextId || 'default'
     return `ai-copilot-session:${ctxType}:${ctxId}`
   }, [contextType, contextId])
+
+  const { data: recentSessions = [] } = useQuery({
+    queryKey: ['ai-chat-sessions-recent', 5],
+    queryFn: async () => {
+      const result = await listAIChatSessions({ limit: 5 })
+      return result.sessions
+    },
+    enabled: isOpen,
+    staleTime: 10_000,
+  })
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -60,7 +88,7 @@ export default function AICopilotPanel({
 
   useEffect(() => {
     scrollToBottom()
-  }, [messages, scrollToBottom])
+  }, [messages, streamingContent, scrollToBottom])
 
   useEffect(() => {
     if (isOpen) {
@@ -68,6 +96,25 @@ export default function AICopilotPanel({
     }
   }, [isOpen])
 
+  const loadSession = useCallback(async (loadSessionId: string) => {
+    try {
+      const data = await getAIChatSession(loadSessionId)
+      setSessionId(data.session_id)
+      setActiveChatSessionId(data.session_id)
+      const restored = (data.messages || [])
+        .filter((m) => m.role === 'user' || m.role === 'assistant')
+        .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }))
+      setMessages(restored)
+      setIsSessionReady(true)
+    } catch {
+      setSessionId(null)
+      setActiveChatSessionId(null)
+      setMessages([])
+      setIsSessionReady(true)
+    }
+  }, [setActiveChatSessionId])
+
+  // Load session on open — from localStorage key or activeChatSessionId
   useEffect(() => {
     if (!isOpen) {
       setIsSessionReady(false)
@@ -75,8 +122,11 @@ export default function AICopilotPanel({
     }
     let cancelled = false
     setIsSessionReady(false)
+
     const existingSessionId = window.localStorage.getItem(sessionStorageKey)
-    if (!existingSessionId) {
+    const targetSessionId = existingSessionId || activeChatSessionId
+
+    if (!targetSessionId) {
       setSessionId(null)
       setMessages([])
       setIsSessionReady(true)
@@ -84,10 +134,11 @@ export default function AICopilotPanel({
     }
 
     setMessages([])
-    getAIChatSession(existingSessionId)
+    getAIChatSession(targetSessionId)
       .then((data) => {
         if (cancelled) return
         setSessionId(data.session_id)
+        setActiveChatSessionId(data.session_id)
         const restored = (data.messages || [])
           .filter((m) => m.role === 'user' || m.role === 'assistant')
           .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }))
@@ -98,6 +149,7 @@ export default function AICopilotPanel({
         if (cancelled) return
         window.localStorage.removeItem(sessionStorageKey)
         setSessionId(null)
+        setActiveChatSessionId(null)
         setMessages([])
         setIsSessionReady(true)
       })
@@ -105,67 +157,128 @@ export default function AICopilotPanel({
     return () => {
       cancelled = true
     }
-  }, [isOpen, sessionStorageKey])
+  }, [isOpen, sessionStorageKey, activeChatSessionId, setActiveChatSessionId])
 
-  const chatMutation = useMutation({
-    mutationFn: async (message: string) => {
-      const result = await sendAIChat({
-        message,
-        session_id: sessionId || undefined,
-        context_type: contextType,
-        context_id: contextId,
-        allow_actions: true,
+  // React to external session changes (e.g., AI tab switched session)
+  useEffect(() => {
+    if (!isOpen || !isSessionReady || !activeChatSessionId) return
+    if (activeChatSessionId === sessionId) return
+    loadSession(activeChatSessionId)
+  }, [isOpen, isSessionReady, activeChatSessionId, sessionId, loadSession])
+
+  const sendStreamingMessage = useCallback(async (message: string) => {
+    setIsStreaming(true)
+    setStreamingContent('')
+
+    abortControllerRef.current?.abort()
+    const controller = new AbortController()
+    abortControllerRef.current = controller
+
+    try {
+      const response = await fetch('/api/ai/chat/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message,
+          session_id: sessionId || undefined,
+          context_type: contextType,
+          context_id: contextId,
+          allow_actions: true,
+        }),
+        signal: controller.signal,
       })
-      return result
-    },
-    onSuccess: (data) => {
-      if (data.session_id) {
-        setSessionId(data.session_id)
-        window.localStorage.setItem(sessionStorageKey, data.session_id)
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => 'Unknown error')
+        let detail = errorText
+        try {
+          const parsed = JSON.parse(errorText)
+          detail = parsed.detail || errorText
+        } catch { /* not JSON */ }
+        throw new Error(detail)
       }
-      const applied = Array.isArray(data.actions_applied) ? data.actions_applied : []
-      if (applied.length > 0) {
-        for (const action of applied) {
-          const actionType = String(action?.type || '').trim().toLowerCase()
-          if (actionType === 'update_strategy') {
-            queryClient.invalidateQueries({ queryKey: ['unified-strategies'] })
-            queryClient.invalidateQueries({ queryKey: ['unified-strategy-versions'] })
-            queryClient.invalidateQueries({ queryKey: ['strategies'] })
-            queryClient.invalidateQueries({ queryKey: ['plugins'] })
-            queryClient.invalidateQueries({ queryKey: ['trader-config-schema'] })
-            queryClient.invalidateQueries({ queryKey: ['trader-sources'] })
-          } else if (actionType === 'update_data_source') {
-            queryClient.invalidateQueries({ queryKey: ['unified-data-sources'] })
-            queryClient.invalidateQueries({ queryKey: ['unified-data-source'] })
-            queryClient.invalidateQueries({ queryKey: ['unified-data-source-runs'] })
-            queryClient.invalidateQueries({ queryKey: ['unified-data-source-records-preview'] })
-            queryClient.invalidateQueries({ queryKey: ['events-sources'] })
+
+      const reader = response.body?.getReader()
+      if (!reader) throw new Error('No response body')
+
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let accumulated = ''
+      let receivedSessionId: string | null = null
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+
+        const lines = buffer.split('\n')
+        // Keep the last potentially incomplete line in buffer
+        buffer = lines.pop() || ''
+
+        let currentEvent = ''
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            currentEvent = line.slice(7).trim()
+          } else if (line.startsWith('data: ') && currentEvent) {
+            const jsonStr = line.slice(6)
+            try {
+              const payload = JSON.parse(jsonStr)
+              if (currentEvent === 'token') {
+                accumulated += payload.text || ''
+                setStreamingContent(accumulated)
+              } else if (currentEvent === 'done') {
+                receivedSessionId = payload.session_id || null
+              } else if (currentEvent === 'error') {
+                throw new Error(payload.error || 'Stream error')
+              }
+            } catch (parseErr) {
+              if (parseErr instanceof SyntaxError) continue
+              throw parseErr
+            }
+            currentEvent = ''
+          } else if (line.trim() === '') {
+            currentEvent = ''
           }
         }
       }
-      setMessages((prev) => [
-        ...prev,
-        { role: 'assistant', content: data.response },
-      ])
-    },
-    onError: (error: any) => {
+
+      // Finalize: add the completed assistant message
+      const finalContent = accumulated || '(No response)'
+      setMessages((prev) => [...prev, { role: 'assistant', content: finalContent }])
+      setStreamingContent('')
+
+      if (receivedSessionId) {
+        setSessionId(receivedSessionId)
+        setActiveChatSessionId(receivedSessionId)
+        window.localStorage.setItem(sessionStorageKey, receivedSessionId)
+      }
+
+      // Invalidate session list so pills update
+      queryClient.invalidateQueries({ queryKey: ['ai-chat-sessions-recent'] })
+    } catch (err: any) {
+      if (err?.name === 'AbortError') return
+      setStreamingContent('')
       setMessages((prev) => [
         ...prev,
         {
           role: 'assistant',
-          content: `Error: ${error?.response?.data?.detail || error?.message || 'Failed to get response'}`,
+          content: `Error: ${err?.message || 'Failed to get response'}`,
         },
       ])
-    },
-  })
+    } finally {
+      setIsStreaming(false)
+      abortControllerRef.current = null
+    }
+  }, [sessionId, contextType, contextId, sessionStorageKey, setActiveChatSessionId, queryClient])
 
-  const handleSend = () => {
+  const handleSend = useCallback(() => {
     const trimmed = input.trim()
-    if (!trimmed || chatMutation.isPending) return
+    if (!trimmed || isStreaming) return
     setMessages((prev) => [...prev, { role: 'user', content: trimmed }])
     setInput('')
-    chatMutation.mutate(trimmed)
-  }
+    sendStreamingMessage(trimmed)
+  }, [input, isStreaming, sendStreamingMessage])
 
   useEffect(() => {
     if (!isOpen || !isSessionReady || !seedPrompt) return
@@ -175,15 +288,15 @@ export default function AICopilotPanel({
     const prompt = String(seedPrompt.prompt || '').trim()
     if (!prompt) return
 
-    if (!seedPrompt.autoSend || chatMutation.isPending) {
+    if (!seedPrompt.autoSend || isStreaming) {
       setInput(prompt)
       setTimeout(() => inputRef.current?.focus(), 40)
       return
     }
 
     setMessages((prev) => [...prev, { role: 'user', content: prompt }])
-    chatMutation.mutate(prompt)
-  }, [isOpen, isSessionReady, seedPrompt, chatMutation])
+    sendStreamingMessage(prompt)
+  }, [isOpen, isSessionReady, seedPrompt, isStreaming, sendStreamingMessage])
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -191,6 +304,37 @@ export default function AICopilotPanel({
       handleSend()
     }
   }
+
+  const handleOpenInAITab = useCallback(() => {
+    setAiTabSubtab('chat')
+    window.dispatchEvent(new CustomEvent('navigate-to-tab', { detail: 'ai' }))
+    onClose()
+  }, [setAiTabSubtab, onClose])
+
+  const handleClearChat = useCallback(async () => {
+    if (sessionId) {
+      try {
+        await archiveAIChatSession(sessionId)
+      } catch {
+        // ignore archive failures; local clear still proceeds
+      }
+    }
+    setMessages([])
+    setSessionId(null)
+    setActiveChatSessionId(null)
+    setStreamingContent('')
+    window.localStorage.removeItem(sessionStorageKey)
+    queryClient.invalidateQueries({ queryKey: ['ai-chat-sessions-recent'] })
+  }, [sessionId, sessionStorageKey, setActiveChatSessionId, queryClient])
+
+  const handleSwitchSession = useCallback((session: AIChatSession) => {
+    // Abort any active stream
+    abortControllerRef.current?.abort()
+    setIsStreaming(false)
+    setStreamingContent('')
+    setActiveChatSessionId(session.session_id)
+    loadSession(session.session_id)
+  }, [setActiveChatSessionId, loadSession])
 
   const quickActions = useMemo(() => {
     if (contextType === 'strategy') {
@@ -217,6 +361,13 @@ export default function AICopilotPanel({
     ]
   }, [contextType])
 
+  // Cleanup abort controller on unmount
+  useEffect(() => {
+    return () => {
+      abortControllerRef.current?.abort()
+    }
+  }, [])
+
   if (!isOpen) return null
 
   return (
@@ -242,20 +393,18 @@ export default function AICopilotPanel({
           </div>
         </div>
         <div className="flex items-center gap-1">
+          <Button
+            onClick={handleOpenInAITab}
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            title="Open in AI tab"
+          >
+            <ExternalLink className="w-3.5 h-3.5 text-muted-foreground" />
+          </Button>
           {messages.length > 0 && (
             <Button
-              onClick={async () => {
-                if (sessionId) {
-                  try {
-                    await archiveAIChatSession(sessionId)
-                  } catch {
-                    // ignore archive failures; local clear still proceeds
-                  }
-                }
-                setMessages([])
-                setSessionId(null)
-                window.localStorage.removeItem(sessionStorageKey)
-              }}
+              onClick={handleClearChat}
               variant="ghost"
               size="icon"
               className="h-7 w-7"
@@ -289,10 +438,52 @@ export default function AICopilotPanel({
 
       <Separator />
 
+      {/* Session pills */}
+      {recentSessions.length > 0 && (
+        <div className="px-3 py-1.5 flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-5 w-5 flex-shrink-0"
+            onClick={() => setShowSessionPills(!showSessionPills)}
+          >
+            {showSessionPills ? (
+              <ChevronLeft className="w-3 h-3 text-muted-foreground" />
+            ) : (
+              <ChevronRight className="w-3 h-3 text-muted-foreground" />
+            )}
+          </Button>
+          {showSessionPills && (
+            <div className="flex-1 overflow-x-auto flex gap-1 scrollbar-none">
+              {recentSessions.map((s) => (
+                <button
+                  key={s.session_id}
+                  onClick={() => handleSwitchSession(s)}
+                  className={cn(
+                    'flex-shrink-0 px-2 py-0.5 rounded-full text-[10px] border transition-colors truncate max-w-[120px]',
+                    s.session_id === sessionId
+                      ? 'border-purple-500/50 bg-purple-500/10 text-purple-300'
+                      : 'border-border bg-muted/50 text-muted-foreground hover:border-purple-500/30 hover:text-foreground'
+                  )}
+                  title={s.title || s.session_id}
+                >
+                  {s.title || s.context_type || 'Chat'}
+                </button>
+              ))}
+            </div>
+          )}
+          {!showSessionPills && (
+            <span className="text-[10px] text-muted-foreground">
+              {recentSessions.length} session{recentSessions.length !== 1 ? 's' : ''}
+            </span>
+          )}
+        </div>
+      )}
+
       {/* Messages */}
       <ScrollArea className="flex-1">
         <div className="px-4 py-3 space-y-3">
-          {messages.length === 0 && (
+          {messages.length === 0 && !isStreaming && (
             <div className="flex flex-col items-center justify-center h-full text-center">
               <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-purple-500/20 to-blue-500/20 flex items-center justify-center mb-3">
                 <Bot className="w-6 h-6 text-purple-400" />
@@ -321,7 +512,7 @@ export default function AICopilotPanel({
                       className="cursor-pointer text-left text-xs p-2.5 rounded-xl hover:border-purple-500/30 hover:bg-purple-500/5 transition-colors text-muted-foreground hover:text-foreground shadow-none"
                       onClick={() => {
                         setMessages((prev) => [...prev, { role: 'user', content: action.prompt }])
-                        chatMutation.mutate(action.prompt)
+                        sendStreamingMessage(action.prompt)
                       }}
                     >
                       {action.label}
@@ -360,13 +551,18 @@ export default function AICopilotPanel({
             </div>
           ))}
 
-          {chatMutation.isPending && (
-            <div className="flex gap-2">
+          {/* Streaming response in progress */}
+          {isStreaming && (
+            <div className="flex gap-2 justify-start">
               <div className="w-6 h-6 rounded-lg bg-purple-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
                 <Bot className="w-3.5 h-3.5 text-purple-400" />
               </div>
-              <Card className="rounded-xl px-3 py-2 bg-muted border border-border shadow-none">
-                <RefreshCw className="w-4 h-4 text-purple-400 animate-spin" />
+              <Card className="max-w-[80%] rounded-xl px-3 py-2 text-sm bg-muted text-muted-foreground border border-border shadow-none">
+                {streamingContent ? (
+                  <p className="whitespace-pre-wrap">{streamingContent}<span className="inline-block w-1.5 h-4 bg-purple-400 animate-pulse ml-0.5 align-text-bottom" /></p>
+                ) : (
+                  <Loader2 className="w-4 h-4 text-purple-400 animate-spin" />
+                )}
               </Card>
             </div>
           )}
@@ -391,12 +587,12 @@ export default function AICopilotPanel({
           />
           <Button
             onClick={handleSend}
-            disabled={!input.trim() || chatMutation.isPending}
+            disabled={!input.trim() || isStreaming}
             size="icon"
-            variant={input.trim() && !chatMutation.isPending ? "default" : "ghost"}
+            variant={input.trim() && !isStreaming ? "default" : "ghost"}
             className={cn(
               "h-8 w-8 flex-shrink-0",
-              input.trim() && !chatMutation.isPending
+              input.trim() && !isStreaming
                 ? "bg-purple-500 hover:bg-purple-600"
                 : ""
             )}

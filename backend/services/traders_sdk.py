@@ -8,6 +8,19 @@ from typing import Any
 class TradersSDK:
     """High-level APIs for trader intelligence datasets."""
 
+    _ai_instance = None
+
+    class _AIDescriptor:
+        def __get__(self, obj, objtype=None):
+            if TradersSDK._ai_instance is None:
+                from services.ai import get_llm_manager
+                from services.ai_sdk import AISDK
+
+                TradersSDK._ai_instance = AISDK(get_llm_manager(), purpose="trader_intelligence")
+            return TradersSDK._ai_instance
+
+    ai = _AIDescriptor()
+
     @staticmethod
     async def get_firehose_signals(
         *,

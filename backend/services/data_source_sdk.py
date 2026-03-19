@@ -526,6 +526,19 @@ class BaseDataSource:
 class DataSourceSDK:
     """High-level APIs for strategy code and source code."""
 
+    _ai_instance = None
+
+    class _AIDescriptor:
+        def __get__(self, obj, objtype=None):
+            if DataSourceSDK._ai_instance is None:
+                from services.ai import get_llm_manager
+                from services.ai_sdk import AISDK
+
+                DataSourceSDK._ai_instance = AISDK(get_llm_manager(), purpose="data_source")
+            return DataSourceSDK._ai_instance
+
+    ai = _AIDescriptor()
+
     @staticmethod
     async def get_records(
         *,

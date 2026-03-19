@@ -210,7 +210,7 @@ function AnalyzeSection({
   const [showSearchResults, setShowSearchResults] = useState(false)
   const [showResolutionAdvanced, setShowResolutionAdvanced] = useState(false)
   const searchRef = useRef<HTMLDivElement>(null)
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>()
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined)
 
   const [marketQuery, setMarketQuery] = useState('')
   const [marketAnalysisId, setMarketAnalysisId] = useState('')

@@ -140,6 +140,7 @@ class Settings(BaseSettings):
     EVENT_HANDLER_TIMEOUT_SECONDS: float = 60.0
 
     CRYPTO_WS_REACTIVE_DEBOUNCE_SECONDS: float = 0.05
+    CRYPTO_WS_BROADCAST_MIN_INTERVAL_SECONDS: float = 0.20
 
     # Production Settings
     LOG_LEVEL: str = "INFO"

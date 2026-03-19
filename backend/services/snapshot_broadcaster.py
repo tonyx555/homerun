@@ -14,6 +14,7 @@ net so data is never lost even if a worker forgets (or fails) to publish.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime
 from typing import Any, Optional
 
@@ -44,11 +45,19 @@ _DEDUP_EVENT_TYPES = frozenset(
         "scanner_status",
         "scanner_activity",
         "worker_status_update",
-        "crypto_markets_update",
         "weather_status",
         "news_workflow_status",
         "trader_orchestrator_status",
     }
+)
+
+# Crypto uses time-based rate limiting instead of signature dedup so that
+# real-time price ticks always flow through at sub-second cadence.
+from config import settings as _cfg  # noqa: E402
+
+_CRYPTO_BROADCAST_MIN_INTERVAL_S = max(
+    0.05,
+    float(getattr(_cfg, "CRYPTO_WS_BROADCAST_MIN_INTERVAL_SECONDS", 0.20) or 0.20),
 )
 
 
@@ -70,6 +79,7 @@ class SnapshotBroadcaster:
         self._last_news_update_sig: Optional[tuple] = None
         self._last_worker_status_sig: Optional[tuple] = None
         self._last_crypto_markets_sig: Optional[tuple] = None
+        self._last_crypto_broadcast_mono: float = 0.0
         self._last_signals_sig: Optional[tuple] = None
         self._last_world_status_sig: Optional[tuple] = None
         self._last_world_update_sig: Optional[tuple] = None
@@ -302,6 +312,7 @@ class SnapshotBroadcaster:
         self._last_news_update_sig = None
         self._last_worker_status_sig = None
         self._last_crypto_markets_sig = None
+        self._last_crypto_broadcast_mono = 0.0
         self._last_signals_sig = None
         self._last_world_status_sig = None
         self._last_world_update_sig = None
@@ -339,6 +350,16 @@ class SnapshotBroadcaster:
 
     async def _broadcast_event(self, event_type: str, data: dict[str, Any]) -> None:
         """Broadcast a single event, applying dedup for high-frequency types."""
+        # Crypto uses time-based rate limiting (not signature dedup) so every
+        # real-time price tick reaches the frontend.
+        if event_type == "crypto_markets_update":
+            now_mono = time.monotonic()
+            if (now_mono - self._last_crypto_broadcast_mono) < _CRYPTO_BROADCAST_MIN_INTERVAL_S:
+                return  # rate-limited
+            self._last_crypto_broadcast_mono = now_mono
+            await manager.broadcast({"type": event_type, "data": data})
+            return
+
         # For dedup-eligible events, check signature first.
         if event_type in _DEDUP_EVENT_TYPES:
             sig = self._compute_dedup_sig(event_type, data)
@@ -594,9 +615,10 @@ class SnapshotBroadcaster:
                 if not isinstance(crypto_markets, list):
                     crypto_markets = []
 
-                crypto_sig = self._compute_dedup_sig("crypto_markets_update", {"markets": crypto_markets})
-                if crypto_sig != self._last_crypto_markets_sig:
-                    self._last_crypto_markets_sig = crypto_sig
+                # Fallback always broadcasts crypto (rate limiting only
+                # applies to the high-frequency event-driven path).
+                if crypto_markets:
+                    self._last_crypto_broadcast_mono = time.monotonic()
                     await manager.broadcast(
                         {
                             "type": "crypto_markets_update",

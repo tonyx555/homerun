@@ -43,3 +43,7 @@ export const selectedLivePlatformAtom = atom((get) => {
   if (!id?.startsWith('live:')) return null
   return id.replace('live:', '') as 'polymarket' | 'kalshi'
 })
+
+// AI Chat shared session state
+export const activeChatSessionIdAtom = atomWithStorage<string | null>('activeChatSessionId', null)
+export const aiTabSubtabAtom = atomWithStorage<'chat' | 'agents' | 'tools' | 'providers' | 'models' | 'activity' | 'system'>('aiTabSubtab', 'chat')

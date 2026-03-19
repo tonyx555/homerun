@@ -9,7 +9,6 @@ import {
   ChevronRight,
   Zap,
   Shield,
-  ArrowRight,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { getOpportunities, Opportunity } from '../services/api'
@@ -20,6 +19,7 @@ import OpportunityTable from './OpportunityTable'
 import OpportunityTerminal from './OpportunityTerminal'
 import OpportunityEmptyState from './OpportunityEmptyState'
 import OpportunityCard from './OpportunityCard'
+import BuyButton from './BuyButton'
 
 // ─── Constants ────────────────────────────────────────────
 
@@ -98,10 +98,8 @@ function extractSportFromQuestion(question: string): string {
 
 function SportsGameCard({
   opportunity,
-  onExecute,
 }: {
   opportunity: Opportunity
-  onExecute?: (opportunity: Opportunity) => void
 }) {
   const ctx = (opportunity.strategy_context || {}) as Record<string, unknown>
   const entryPrice = Number(ctx.entry_price || 0)
@@ -274,17 +272,8 @@ function SportsGameCard({
           </span>
         </div>
 
-        {/* Execute Button */}
-        {onExecute && (
-          <Button
-            size="sm"
-            className="w-full h-8 text-xs font-medium bg-emerald-600 hover:bg-emerald-500 text-white"
-            onClick={() => onExecute(opportunity)}
-          >
-            <ArrowRight className="w-3.5 h-3.5 mr-1.5" />
-            Execute Fade @ {formatPrice(entryPrice)}
-          </Button>
-        )}
+        {/* Buy Button */}
+        <BuyButton opportunity={opportunity} />
       </div>
     </div>
   )
@@ -293,7 +282,6 @@ function SportsGameCard({
 // ─── Main Panel ───────────────────────────────────────────
 
 interface SportsOpportunitiesPanelProps {
-  onExecute?: (opportunity: Opportunity) => void
   onOpenCopilot?: (opportunity: Opportunity) => void
   viewMode?: 'card' | 'list' | 'terminal'
   showSettingsButton?: boolean
@@ -301,7 +289,6 @@ interface SportsOpportunitiesPanelProps {
 }
 
 export default function SportsOpportunitiesPanel({
-  onExecute,
   onOpenCopilot,
   viewMode = 'card',
   onAnalyzeTargetsChange,
@@ -380,7 +367,6 @@ export default function SportsOpportunitiesPanel({
       {viewMode === 'terminal' ? (
         <OpportunityTerminal
           opportunities={opportunities}
-          onExecute={onExecute}
           onOpenCopilot={onOpenCopilot}
           isConnected={isConnected}
           totalCount={total}
@@ -388,7 +374,6 @@ export default function SportsOpportunitiesPanel({
       ) : viewMode === 'list' ? (
         <OpportunityTable
           opportunities={opportunities}
-          onExecute={onExecute}
           onOpenCopilot={onOpenCopilot}
         />
       ) : (
@@ -398,13 +383,11 @@ export default function SportsOpportunitiesPanel({
               <SportsGameCard
                 key={opp.stable_id || opp.id}
                 opportunity={opp}
-                onExecute={onExecute}
               />
             ) : (
               <OpportunityCard
                 key={opp.stable_id || opp.id}
                 opportunity={opp}
-                onExecute={onExecute}
                 onOpenCopilot={onOpenCopilot}
               />
             )

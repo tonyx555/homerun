@@ -77,7 +77,7 @@ import { useWebSocket } from './hooks/useWebSocket'
 import { useKeyboardShortcuts, Shortcut } from './hooks/useKeyboardShortcuts'
 import { useRealtimeInvalidation } from './hooks/useRealtimeInvalidation'
 import { useDisplayedOpportunityRefresh } from './hooks/useDisplayedOpportunityRefresh'
-import { shortcutsHelpOpenAtom, selectedAccountIdAtom } from './store/atoms'
+import { shortcutsHelpOpenAtom, selectedAccountIdAtom, activeChatSessionIdAtom, aiTabSubtabAtom } from './store/atoms'
 import { buildNewsSearchKeywords, processPolymarketSearchResults } from './lib/opportunitySearch'
 
 // shadcn/ui components
@@ -92,7 +92,6 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrig
 import OpportunityCard from './components/OpportunityCard'
 import OpportunityTable from './components/OpportunityTable'
 import OpportunityTerminal from './components/OpportunityTerminal'
-import TradeExecutionModal from './components/TradeExecutionModal'
 import AccountsPanel from './components/AccountsPanel'
 import WalletAnalysisPanel from './components/WalletAnalysisPanel'
 import TradingPanel from './components/TradingPanel'
@@ -100,7 +99,15 @@ import RecentTradesPanel from './components/RecentTradesPanel'
 import TrackedTradersPanel from './components/TrackedTradersPanel'
 import SettingsPanel from './components/SettingsPanel'
 import StrategiesPanel from './components/StrategiesPanel'
-import AIPanel, { type AICopilotLaunchOptions } from './components/AIPanel'
+import AITab from './components/ai/AITab'
+
+interface AICopilotLaunchOptions {
+  contextType?: string
+  contextId?: string
+  label?: string
+  prompt?: string
+  autoSend?: boolean
+}
 import AICopilotPanel from './components/AICopilotPanel'
 import AICommandBar from './components/AICommandBar'
 import PositionsPanel from './components/PositionsPanel'
@@ -397,7 +404,6 @@ function App() {
   const [searchSort, setSearchSort] = useState<string>('competitive')
   const [analyzeScope, setAnalyzeScope] = useState<'visible' | 'all'>('visible')
   const [analyzeMenuOpen, setAnalyzeMenuOpen] = useState(false)
-  const [executingOpportunity, setExecutingOpportunity] = useState<Opportunity | null>(null)
   const [copilotOpen, setCopilotOpen] = useState(false)
   const [copilotContext, setCopilotContext] = useState<{ type?: string; id?: string; label?: string }>({})
   const [copilotSeedPrompt, setCopilotSeedPrompt] = useState<CopilotSeedPrompt | null>(null)
@@ -417,6 +423,8 @@ function App() {
   const analyzeMenuRef = useRef<HTMLDivElement>(null)
   const copilotSeedCounterRef = useRef(0)
   const [shortcutsHelpOpen, setShortcutsHelpOpen] = useAtom(shortcutsHelpOpenAtom)
+  const [activeChatSessionId] = useAtom(activeChatSessionIdAtom)
+  const [, setAiTabSubtab] = useAtom(aiTabSubtabAtom)
   const queryClient = useQueryClient()
   const [localUiLocked, setLocalUiLocked] = useState(false)
   const [uiUnlockError, setUiUnlockError] = useState<string | null>(null)
@@ -583,8 +591,26 @@ function App() {
   // Navigate to AI tab with specific section
   const handleNavigateToAI = useCallback((section: string) => {
     setActiveTab('ai')
+    if (section === 'chat') {
+      setAiTabSubtab('chat')
+    } else if (section === 'agents') {
+      setAiTabSubtab('agents')
+    } else if (section === 'tools') {
+      setAiTabSubtab('tools')
+    } else if (section === 'providers' || section === 'llm') {
+      setAiTabSubtab('providers')
+    } else if (section === 'models') {
+      setAiTabSubtab('models')
+    } else if (section === 'judgments' || section === 'activity' || section === 'usage') {
+      setAiTabSubtab('activity')
+    } else if (section === 'resolution' || section === 'market' || section === 'news' || section === 'analyze') {
+      // Analysis can be done via chat now
+      setAiTabSubtab('chat')
+    } else if (section === 'system' || section === 'skills' || section === 'sessions' || section === 'status') {
+      setAiTabSubtab('system')
+    }
     window.dispatchEvent(new CustomEvent('navigate-ai-section', { detail: section }))
-  }, [])
+  }, [setAiTabSubtab])
 
 
   // Navigate to news tab with a keyword search from an opportunity
@@ -658,9 +684,17 @@ function App() {
       const tab = (e as CustomEvent<string>).detail
       if (tab) setActiveTab(tab as Tab)
     }
+    const aiSectionHandler = (e: Event) => {
+      const section = (e as CustomEvent<string>).detail
+      if (section) handleNavigateToAI(section)
+    }
     window.addEventListener('navigate-to-tab', handler as EventListener)
-    return () => window.removeEventListener('navigate-to-tab', handler as EventListener)
-  }, [])
+    window.addEventListener('navigate-ai-section', aiSectionHandler as EventListener)
+    return () => {
+      window.removeEventListener('navigate-to-tab', handler as EventListener)
+      window.removeEventListener('navigate-ai-section', aiSectionHandler as EventListener)
+    }
+  }, [handleNavigateToAI])
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -1645,7 +1679,6 @@ function App() {
       setShortcutsHelpOpen(false)
       setCommandBarOpen(false)
       setCopilotOpen(false)
-      setExecutingOpportunity(null)
       setAccountSettingsOpen(false)
       setSearchFiltersOpen(false)
       setNewsSettingsOpen(false)
@@ -2299,7 +2332,7 @@ function App() {
                           {oppsViewMode === 'terminal' ? (
                             <OpportunityTerminal
                               opportunities={paginatedPolymarketResults}
-                              onExecute={setExecutingOpportunity}
+
                               onOpenCopilot={handleOpenCopilotForOpportunity}
                               isConnected={isConnected}
                               totalCount={polymarketTotalFiltered}
@@ -2307,7 +2340,7 @@ function App() {
                           ) : oppsViewMode === 'list' ? (
                             <OpportunityTable
                               opportunities={paginatedPolymarketResults}
-                              onExecute={setExecutingOpportunity}
+
                               onOpenCopilot={handleOpenCopilotForOpportunity}
                             />
                           ) : (
@@ -2316,7 +2349,7 @@ function App() {
                                 <OpportunityCard
                                   key={opp.id}
                                   opportunity={opp}
-                                  onExecute={setExecutingOpportunity}
+    
                                   onOpenCopilot={handleOpenCopilotForOpportunity}
                                 />
                               ))}
@@ -2365,8 +2398,6 @@ function App() {
                     </>
                   ) : opportunitiesView === 'crypto' ? (
                     <CryptoMarketsPanel
-                      onExecute={setExecutingOpportunity}
-                      onOpenCopilot={handleOpenCopilotForOpportunity}
                       onOpenCryptoSettings={() => setCryptoSettingsOpen(true)}
                       showSettingsButton={false}
                     />
@@ -2374,7 +2405,7 @@ function App() {
                     <NewsIntelligencePanel initialSearchQuery={newsSearchQuery} mode="workflow" />
                   ) : opportunitiesView === 'weather' ? (
                     <WeatherOpportunitiesPanel
-                      onExecute={setExecutingOpportunity}
+
                       viewMode={oppsViewMode}
                       showSettingsButton={false}
                       onAnalyzeTargetsChange={setWeatherAnalyzeTargets}
@@ -2394,7 +2425,7 @@ function App() {
                     />
                   ) : opportunitiesView === 'sports' ? (
                     <SportsOpportunitiesPanel
-                      onExecute={setExecutingOpportunity}
+
                       onOpenCopilot={handleOpenCopilotForOpportunity}
                       viewMode={oppsViewMode}
                     />
@@ -2415,7 +2446,7 @@ function App() {
                       {oppsViewMode === 'terminal' ? (
                         <OpportunityTerminal
                           opportunities={displayOpportunities}
-                          onExecute={setExecutingOpportunity}
+    
                           onOpenCopilot={handleOpenCopilotForOpportunity}
                           isConnected={isConnected}
                           totalCount={totalOpportunities}
@@ -2423,7 +2454,7 @@ function App() {
                       ) : oppsViewMode === 'list' ? (
                         <OpportunityTable
                           opportunities={displayOpportunities}
-                          onExecute={setExecutingOpportunity}
+    
                           onOpenCopilot={handleOpenCopilotForOpportunity}
                         />
                       ) : (
@@ -2432,7 +2463,7 @@ function App() {
                             <OpportunityCard
                               key={opp.stable_id || opp.id}
                               opportunity={opp}
-                              onExecute={setExecutingOpportunity}
+
                               onOpenCopilot={handleOpenCopilotForOpportunity}
                               onSearchNews={handleSearchNewsForOpportunity}
                             />
@@ -2670,7 +2701,7 @@ function App() {
                               {oppsViewMode === 'terminal' ? (
                                 <OpportunityTerminal
                                   opportunities={displayOpportunities}
-                                  onExecute={setExecutingOpportunity}
+    
                                   onOpenCopilot={handleOpenCopilotForOpportunity}
                                   isConnected={isConnected}
                                   totalCount={totalOpportunities}
@@ -2678,7 +2709,7 @@ function App() {
                               ) : oppsViewMode === 'list' ? (
                                 <OpportunityTable
                                   opportunities={displayOpportunities}
-                                  onExecute={setExecutingOpportunity}
+    
                                   onOpenCopilot={handleOpenCopilotForOpportunity}
                                 />
                               ) : (
@@ -2687,7 +2718,7 @@ function App() {
                                     <OpportunityCard
                                       key={opp.stable_id || opp.id}
                                       opportunity={opp}
-                                      onExecute={setExecutingOpportunity}
+        
                                       onOpenCopilot={handleOpenCopilotForOpportunity}
                                       onSearchNews={handleSearchNewsForOpportunity}
                                     />
@@ -2926,8 +2957,8 @@ function App() {
             {/* ==================== AI ==================== */}
             {activeTab === 'ai' && (
               <div className="flex-1 overflow-hidden flex flex-col section-enter">
-                <div className="flex-1 overflow-hidden px-6 py-4 min-h-0">
-                  <AIPanel onOpenCopilot={handleOpenCopilotRequest} />
+                <div className="flex-1 overflow-hidden min-h-0">
+                  <AITab />
                 </div>
               </div>
             )}
@@ -2941,16 +2972,8 @@ function App() {
           </main>
         </div>
 
-        {/* Trade Execution Modal */}
-        {executingOpportunity && (
-          <TradeExecutionModal
-            opportunity={executingOpportunity}
-            onClose={() => setExecutingOpportunity(null)}
-          />
-        )}
-
         {/* Floating AI FAB — bottom-right */}
-        {!copilotOpen && !(activeTab === 'data' && dataView === 'map') && (
+        {!copilotOpen && activeTab !== 'ai' && !(activeTab === 'data' && dataView === 'map') && (
           <div className="fixed bottom-5 right-5 z-40 flex flex-col items-end gap-2">
             <Tooltip>
               <TooltipTrigger asChild>
@@ -2959,6 +2982,9 @@ function App() {
                   className="group relative w-11 h-11 rounded-full bg-gradient-to-br from-purple-600 to-blue-600 text-white shadow-lg shadow-purple-500/25 hover:shadow-purple-500/40 hover:scale-105 transition-all flex items-center justify-center"
                 >
                   <Sparkles className="w-5 h-5 group-hover:scale-110 transition-transform" />
+                  {activeChatSessionId && (
+                    <span className="absolute top-0 left-0 w-2.5 h-2.5 rounded-full bg-emerald-400 border border-background" />
+                  )}
                   <kbd className="absolute -top-1 -right-1 px-1 py-0.5 text-[8px] font-data bg-background/90 rounded border border-border/60 text-muted-foreground leading-none">
                     <Command className="w-2 h-2 inline" />K
                   </kbd>
@@ -2969,9 +2995,9 @@ function App() {
           </div>
         )}
 
-        {/* AI Copilot Panel (floating) */}
+        {/* AI Copilot Panel (floating) — hidden on AI tab */}
         <AICopilotPanel
-          isOpen={copilotOpen}
+          isOpen={copilotOpen && activeTab !== 'ai'}
           onClose={() => setCopilotOpen(false)}
           contextType={copilotContext.type}
           contextId={copilotContext.id}

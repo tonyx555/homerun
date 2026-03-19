@@ -128,6 +128,23 @@ class ChatMemoryService:
                     s.title = content.strip()[:120]
             await session.commit()
 
+    async def rename_session(self, session_id: str, title: str) -> dict | None:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(AIChatSession).where(
+                    AIChatSession.id == session_id,
+                    AIChatSession.archived == False,  # noqa: E712
+                )
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                return None
+            row.title = title
+            row.updated_at = utcnow()
+            await session.commit()
+            await session.refresh(row)
+        return self._session_to_dict(row)
+
     async def archive_session(self, session_id: str) -> bool:
         async with AsyncSessionLocal() as session:
             result = await session.execute(select(AIChatSession).where(AIChatSession.id == session_id))

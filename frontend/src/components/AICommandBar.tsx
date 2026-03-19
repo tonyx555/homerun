@@ -46,7 +46,7 @@ export default function AICommandBar({
   const [marketResults, setMarketResults] = useState<MarketSearchResult[]>([])
   const [selectedIndex, setSelectedIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>()
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined)
 
   // Global keyboard shortcut
   useEffect(() => {

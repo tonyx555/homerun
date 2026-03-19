@@ -43,7 +43,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from utils.utcnow import utcnow
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, AsyncGenerator, Optional
 
 import httpx
 from sqlalchemy import case, func, select
@@ -478,6 +478,37 @@ class BaseLLMProvider(ABC):
         """
         pass
 
+    async def chat_stream(
+        self,
+        messages: list[LLMMessage],
+        model: str,
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+    ) -> AsyncGenerator[str, None]:
+        """Stream chat completion tokens from the provider.
+
+        Default implementation falls back to non-streaming chat and yields
+        the complete response as a single chunk. Providers that support
+        native streaming should override this method.
+
+        Args:
+            messages: Conversation messages.
+            model: Model identifier.
+            temperature: Sampling temperature.
+            max_tokens: Maximum response tokens.
+
+        Yields:
+            Text chunks as they arrive from the provider.
+        """
+        response = await self.chat(
+            messages=messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        if response.content:
+            yield response.content
+
     async def list_models(self) -> list[dict[str, str]]:
         """Fetch available models from the provider API.
 
@@ -811,6 +842,71 @@ class OpenAIProvider(BaseLLMProvider):
             latency_ms=latency_ms,
         )
 
+    async def chat_stream(
+        self,
+        messages: list[LLMMessage],
+        model: str,
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+    ) -> AsyncGenerator[str, None]:
+        """Stream chat completion tokens from the OpenAI API.
+
+        Uses the OpenAI streaming API (stream=true) and yields text
+        delta chunks as they arrive.
+
+        Args:
+            messages: Conversation messages.
+            model: Model identifier.
+            temperature: Sampling temperature.
+            max_tokens: Maximum response tokens.
+
+        Yields:
+            Text chunks from the streaming response.
+        """
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": self._format_messages(messages),
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True,
+        }
+
+        client = self._get_shared_client(timeout=120.0)
+        async with client.stream(
+            "POST",
+            f"{self.base_url}/chat/completions",
+            headers=self._build_headers(),
+            json=payload,
+        ) as response:
+            if response.status_code != 200:
+                body = await response.aread()
+                data = {}
+                try:
+                    data = json.loads(body)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+                error_msg = _extract_error_message(data, body.decode("utf-8", errors="replace"))
+                raise RuntimeError(f"OpenAI API error ({response.status_code}): {error_msg}")
+
+            async for line in response.aiter_lines():
+                line = line.strip()
+                if not line or not line.startswith("data: "):
+                    continue
+                data_str = line[6:]
+                if data_str == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
+                choices = chunk.get("choices", [])
+                if not choices:
+                    continue
+                delta = choices[0].get("delta", {})
+                text = delta.get("content")
+                if text:
+                    yield text
+
     async def structured_output(
         self,
         messages: list[LLMMessage],
@@ -1112,6 +1208,75 @@ class AnthropicProvider(BaseLLMProvider):
             provider=self.provider.value,
             latency_ms=latency_ms,
         )
+
+    async def chat_stream(
+        self,
+        messages: list[LLMMessage],
+        model: str,
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+    ) -> AsyncGenerator[str, None]:
+        """Stream chat completion tokens from the Anthropic API.
+
+        Uses the Anthropic streaming API (stream=true) and yields text
+        delta chunks as they arrive.
+
+        Args:
+            messages: Conversation messages.
+            model: Model identifier.
+            temperature: Sampling temperature.
+            max_tokens: Maximum response tokens.
+
+        Yields:
+            Text chunks from the streaming response.
+        """
+        system_prompt, formatted_messages = self._format_messages(messages)
+
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": formatted_messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True,
+        }
+        if system_prompt:
+            payload["system"] = system_prompt
+
+        client = self._get_shared_client(timeout=120.0)
+        async with client.stream(
+            "POST",
+            f"{self.base_url}/messages",
+            headers=self._build_headers(),
+            json=payload,
+        ) as response:
+            if response.status_code != 200:
+                body = await response.aread()
+                data = {}
+                try:
+                    data = json.loads(body)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+                error_msg = _extract_error_message(data, body.decode("utf-8", errors="replace"))
+                raise RuntimeError(f"Anthropic API error ({response.status_code}): {error_msg}")
+
+            async for line in response.aiter_lines():
+                line = line.strip()
+                if not line or not line.startswith("data: "):
+                    continue
+                data_str = line[6:]
+                try:
+                    event = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
+                event_type = event.get("type", "")
+                if event_type == "content_block_delta":
+                    delta = event.get("delta", {})
+                    if delta.get("type") == "text_delta":
+                        text = delta.get("text", "")
+                        if text:
+                            yield text
+                elif event_type == "message_stop":
+                    break
 
     async def structured_output(
         self,
@@ -2292,6 +2457,68 @@ class LLMManager:
                 error=str(exc),
             )
             raise RuntimeError(f"LLM request failed: {exc}") from exc
+
+    async def chat_stream(
+        self,
+        messages: list[LLMMessage],
+        model: Optional[str] = None,
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+        purpose: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> AsyncGenerator[str, None]:
+        """Stream chat completion tokens from the appropriate provider.
+
+        Detects the provider from the model name, checks spend limits,
+        and delegates to the provider's streaming method. Usage is not
+        logged per-token; callers should log aggregate usage after the
+        stream completes.
+
+        Args:
+            messages: Conversation messages.
+            model: Model identifier. Defaults to the configured default model.
+            temperature: Sampling temperature.
+            max_tokens: Maximum response tokens.
+            purpose: Purpose label (for error logging only).
+            session_id: Session ID (for error logging only).
+
+        Yields:
+            Text chunks as they arrive from the provider.
+        """
+        if not self._initialized:
+            raise RuntimeError("LLM manager not initialized. Call initialize() first.")
+
+        requested_model = model or self._default_model
+        provider_enum = self.detect_provider(requested_model)
+        model_for_provider = _normalize_model_name_for_provider(requested_model, provider_enum)
+        provider = self._get_provider(provider_enum)
+        self._check_global_pause()
+        self._check_spend_limit()
+
+        try:
+            async for chunk in provider.chat_stream(
+                messages=messages,
+                model=model_for_provider,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            ):
+                yield chunk
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            await self._log_usage(
+                provider=provider_enum.value,
+                model=model_for_provider,
+                input_tokens=0,
+                output_tokens=0,
+                cost_usd=0.0,
+                latency_ms=0,
+                purpose=purpose,
+                session_id=session_id,
+                success=False,
+                error=str(exc),
+            )
+            raise RuntimeError(f"LLM streaming request failed: {exc}") from exc
 
     async def structured_output(
         self,

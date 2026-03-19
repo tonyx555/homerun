@@ -673,6 +673,63 @@ async def get_ai_usage():
     return await manager.get_usage_stats()
 
 
+# === Usage Log ===
+
+
+@router.get("/ai/usage-log")
+async def get_ai_usage_log(
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    purpose: Optional[str] = Query(default=None),
+    provider: Optional[str] = Query(default=None),
+    success: Optional[bool] = Query(default=None),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Return recent LLM usage log entries with optional filters."""
+    from sqlalchemy import select, func
+    from models.database import LLMUsageLog
+
+    query = select(LLMUsageLog)
+    count_query = select(func.count(LLMUsageLog.id))
+
+    if purpose is not None:
+        query = query.where(LLMUsageLog.purpose == purpose)
+        count_query = count_query.where(LLMUsageLog.purpose == purpose)
+    if provider is not None:
+        query = query.where(LLMUsageLog.provider == provider)
+        count_query = count_query.where(LLMUsageLog.provider == provider)
+    if success is not None:
+        query = query.where(LLMUsageLog.success == success)
+        count_query = count_query.where(LLMUsageLog.success == success)
+
+    total_result = await db.execute(count_query)
+    total = total_result.scalar() or 0
+
+    query = query.order_by(LLMUsageLog.requested_at.desc()).offset(offset).limit(limit)
+    result = await db.execute(query)
+    rows = result.scalars().all()
+
+    entries = [
+        {
+            "id": row.id,
+            "provider": row.provider,
+            "model": row.model,
+            "input_tokens": row.input_tokens,
+            "output_tokens": row.output_tokens,
+            "cost_usd": row.cost_usd,
+            "purpose": row.purpose,
+            "session_id": row.session_id,
+            "requested_at": row.requested_at.isoformat() if row.requested_at else None,
+            "latency_ms": row.latency_ms,
+            "success": row.success,
+            "error": row.error,
+        }
+        for row in rows
+    ]
+
+    return {"entries": entries, "total": total}
+
+
 # === AI Status ===
 
 
@@ -1631,6 +1688,21 @@ async def archive_ai_chat_session(session_id: str):
     return {"status": "archived", "session_id": session_id}
 
 
+class RenameChatSessionRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+
+
+@router.patch("/ai/chat/sessions/{session_id}")
+async def rename_chat_session(session_id: str, request: RenameChatSessionRequest):
+    """Rename a persistent AI chat session."""
+    from services.ai.chat_memory import chat_memory_service
+
+    updated = await chat_memory_service.rename_session(session_id, request.title)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+    return updated
+
+
 _EDIT_INTENT_RE = re.compile(
     r"\b(apply|update|change|modify|edit|rewrite|patch|save|implement|refactor|add|remove|tweak|adjust)\b",
     re.IGNORECASE,
@@ -2039,3 +2111,150 @@ async def ai_chat(
     except Exception as e:
         logger.error("AI chat failed", exc_info=e)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/ai/chat/stream")
+async def ai_chat_stream(
+    request: AIChatRequest,
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Streaming conversational AI copilot.
+
+    Same inputs as /ai/chat but returns an SSE stream of token events
+    instead of a single JSON response.
+    """
+    from fastapi.responses import StreamingResponse
+
+    from services.ai import get_llm_manager
+    from services.ai.chat_memory import chat_memory_service
+    from services.ai.llm_provider import LLMMessage
+
+    manager = get_llm_manager()
+    if not manager.is_available():
+        raise HTTPException(
+            status_code=503,
+            detail="No AI provider configured. Configure an LLM provider in Settings.",
+        )
+
+    chat_session = None
+    if request.session_id:
+        chat_session = await chat_memory_service.get_session(request.session_id, message_limit=1)
+    if chat_session is None and request.context_type and request.context_id:
+        chat_session = await chat_memory_service.find_latest_for_context(request.context_type, request.context_id)
+    if chat_session is None:
+        chat_session = await chat_memory_service.create_session(
+            context_type=request.context_type or "general",
+            context_id=request.context_id,
+            title=(request.message or "").strip()[:120] or "AI chat",
+        )
+    session_id = chat_session["session_id"]
+
+    persisted = await chat_memory_service.get_recent_messages(session_id, limit=20)
+
+    context_pack = await _build_context_pack(
+        session,
+        context_type=request.context_type,
+        context_id=request.context_id,
+        include_news=True,
+        news_limit=5,
+    )
+
+    context_type = str(request.context_type or "general").strip().lower() or "general"
+
+    system_prompt = (
+        "You are the AI copilot for Homerun, a Polymarket prediction market "
+        "arbitrage trading platform. You help traders understand opportunities, "
+        "analyze resolution criteria, assess risk, and make trading decisions.\n\n"
+        "General rules:\n"
+        "- Be concise, specific, and data-driven.\n"
+        "- Reference only context provided in the context pack.\n"
+        "- If context is insufficient, state what is missing.\n"
+    )
+
+    compact_context = {
+        "context_type": context_pack.get("context_type"),
+        "context_id": context_pack.get("context_id"),
+        "opportunity": context_pack.get("opportunity"),
+        "trader_signal": context_pack.get("trader_signal"),
+        "latest_judgment": context_pack.get("latest_judgment"),
+        "resolution_analyses": context_pack.get("resolution_analyses", [])[:3],
+        "news_findings": context_pack.get("news_findings", [])[:3],
+        "news_intents": context_pack.get("news_intents", [])[:3],
+    }
+
+    if context_type == "strategy":
+        compact_context["strategy"] = context_pack.get("strategy")
+        compact_context["strategy_versions"] = (context_pack.get("strategy_versions") or [])[:10]
+        compact_context["strategy_docs"] = context_pack.get("strategy_docs") or {}
+        compact_context["available_data_sources"] = (context_pack.get("available_data_sources") or [])[:100]
+        system_prompt += (
+            "\nYou are acting as a strategy engineering copilot. "
+            "Use the strategy source code and SDK documentation in context to reason precisely.\n"
+            "Action execution is disabled for streaming. Respond with plain text guidance only.\n"
+        )
+    elif context_type == "data_source":
+        compact_context["data_source"] = context_pack.get("data_source")
+        compact_context["data_source_docs"] = context_pack.get("data_source_docs") or {}
+        compact_context["available_data_sources"] = (context_pack.get("available_data_sources") or [])[:100]
+        system_prompt += (
+            "\nYou are acting as a data-source engineering copilot. "
+            "Use BaseDataSource docs and source registry context.\n"
+            "Action execution is disabled for streaming. Respond with plain text guidance only.\n"
+        )
+
+    system_prompt += "\nCurrent context pack (JSON):\n" + json.dumps(compact_context, ensure_ascii=True)
+
+    messages = [LLMMessage(role="system", content=system_prompt)]
+    history_source = persisted if persisted else request.history[-10:]
+    for msg in history_source:
+        role = msg.get("role", "user")
+        if role not in ("user", "assistant"):
+            continue
+        messages.append(LLMMessage(role=role, content=msg.get("content", "")))
+    messages.append(LLMMessage(role="user", content=request.message))
+
+    await chat_memory_service.append_message(
+        session_id=session_id,
+        role="user",
+        content=request.message,
+    )
+
+    model_name = request.model
+
+    async def _generate_sse():
+        full_response: list[str] = []
+        try:
+            async for chunk in manager.chat_stream(
+                messages=messages,
+                model=model_name,
+                max_tokens=1600 if context_type in {"strategy", "data_source"} else 1024,
+                purpose="ai_chat_stream",
+                session_id=session_id,
+            ):
+                full_response.append(chunk)
+                yield f"event: token\ndata: {json.dumps({'text': chunk})}\n\n"
+
+            complete_text = "".join(full_response)
+
+            await chat_memory_service.append_message(
+                session_id=session_id,
+                role="assistant",
+                content=complete_text,
+                model_used=model_name,
+            )
+
+            yield f"event: done\ndata: {json.dumps({'session_id': session_id, 'model_used': model_name or ''})}\n\n"
+
+        except Exception as exc:
+            logger.error("AI chat stream failed", exc_info=exc)
+            yield f"event: error\ndata: {json.dumps({'error': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        _generate_sse(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )

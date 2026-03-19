@@ -12,7 +12,6 @@ import {
   EyeOff,
   Lock,
   MessageSquare,
-  DollarSign,
   Shield,
   ChevronDown,
   Loader2,
@@ -231,7 +230,7 @@ export default function SettingsPanel({
   })
 
   const [availableModels, setAvailableModels] = useState<Record<string, LLMModelOption[]>>({})
-  const [isRefreshingModels, setIsRefreshingModels] = useState(false)
+  const [_isRefreshingModels, setIsRefreshingModels] = useState(false)
 
   const [notificationsForm, setNotificationsForm] = useState({
     enabled: false,
@@ -428,7 +427,8 @@ export default function SettingsPanel({
     }).catch(() => {})
   }, [])
 
-  const handleRefreshModels = async () => {
+  // LLM model refresh — moved to AI tab Providers subtab, kept for save handler compat
+  const _handleRefreshModels = async () => {
     setIsRefreshingModels(true)
     try {
       const provider = llmForm.provider !== 'none' ? llmForm.provider : undefined
@@ -440,9 +440,11 @@ export default function SettingsPanel({
       setIsRefreshingModels(false)
     }
   }
+  void _handleRefreshModels // suppress unused warning
 
   // Get models for the currently selected provider
-  const modelsForProvider = availableModels[llmForm.provider] || []
+  const _modelsForProvider = availableModels[llmForm.provider] || []
+  void _modelsForProvider // suppress unused warning
 
   const saveMutation = useMutation({
     mutationFn: updateSettings,
@@ -469,9 +471,10 @@ export default function SettingsPanel({
     mutationFn: testTradingProxy,
   })
 
-  const testLlmMutation = useMutation({
+  const _testLlmMutation = useMutation({
     mutationFn: () => testLLMConnection(),
   })
+  void _testLlmMutation // suppress unused — LLM config moved to AI tab
 
   const flushDataMutation = useMutation({
     mutationFn: (target: DatabaseFlushTarget) => flushDatabaseData(target),
@@ -858,7 +861,7 @@ export default function SettingsPanel({
   }
 
   const sections: { id: SettingsSection; icon: any; label: string; description: string }[] = [
-    { id: 'llm', icon: Bot, label: 'AI / LLM Services', description: 'Configure AI providers' },
+    { id: 'llm', icon: Bot, label: 'AI / LLM Services', description: 'Moved to AI tab → Providers & Models' },
     { id: 'scanner', icon: Database, label: 'Scanner', description: 'Scan limits, thresholds, and pool caps' },
     { id: 'notifications', icon: Bell, label: 'Notifications', description: 'Telegram alerts' },
     { id: 'security', icon: Lock, label: 'UI Lock', description: 'Local screen lock and inactivity timeout' },
@@ -947,225 +950,31 @@ export default function SettingsPanel({
               >
                 <div className="p-4 pt-1 border-t border-border/30">
 
-                  {/* LLM Settings */}
+                  {/* LLM Settings — redirects to AI tab */}
                   {section.id === 'llm' && (
                     <div className="space-y-4">
-                      <div className="space-y-3">
-                        <div>
-                          <Label className="text-xs text-muted-foreground">LLM Provider</Label>
-                          <select
-                            value={llmForm.provider}
-                            onChange={(e) => setLlmForm(p => ({ ...p, provider: e.target.value, model: '' }))}
-                            className="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm mt-1"
-                          >
-                            <option value="none">None (Disabled)</option>
-                            <option value="openai">OpenAI</option>
-                            <option value="anthropic">Anthropic</option>
-                            <option value="google">Google (Gemini)</option>
-                            <option value="xai">xAI (Grok)</option>
-                            <option value="deepseek">DeepSeek</option>
-                            <option value="ollama">Ollama (Local)</option>
-                            <option value="lmstudio">LM Studio (Local)</option>
-                          </select>
-                        </div>
-
-                        {(llmForm.provider === 'openai' || llmForm.provider === 'none') && (
-                          <SecretInput
-                            label="OpenAI API Key"
-                            value={llmForm.openai_api_key}
-                            placeholder={settings?.llm.openai_api_key || 'sk-...'}
-                            onChange={(v) => setLlmForm(p => ({ ...p, openai_api_key: v }))}
-                            showSecret={showSecrets['openai_key']}
-                            onToggle={() => toggleSecret('openai_key')}
-                          />
-                        )}
-
-                        {(llmForm.provider === 'anthropic' || llmForm.provider === 'none') && (
-                          <SecretInput
-                            label="Anthropic API Key"
-                            value={llmForm.anthropic_api_key}
-                            placeholder={settings?.llm.anthropic_api_key || 'sk-ant-...'}
-                            onChange={(v) => setLlmForm(p => ({ ...p, anthropic_api_key: v }))}
-                            showSecret={showSecrets['anthropic_key']}
-                            onToggle={() => toggleSecret('anthropic_key')}
-                          />
-                        )}
-
-                        {(llmForm.provider === 'google' || llmForm.provider === 'none') && (
-                          <SecretInput
-                            label="Google (Gemini) API Key"
-                            value={llmForm.google_api_key}
-                            placeholder={settings?.llm.google_api_key || 'AIza...'}
-                            onChange={(v) => setLlmForm(p => ({ ...p, google_api_key: v }))}
-                            showSecret={showSecrets['google_key']}
-                            onToggle={() => toggleSecret('google_key')}
-                          />
-                        )}
-
-                        {(llmForm.provider === 'xai' || llmForm.provider === 'none') && (
-                          <SecretInput
-                            label="xAI (Grok) API Key"
-                            value={llmForm.xai_api_key}
-                            placeholder={settings?.llm.xai_api_key || 'xai-...'}
-                            onChange={(v) => setLlmForm(p => ({ ...p, xai_api_key: v }))}
-                            showSecret={showSecrets['xai_key']}
-                            onToggle={() => toggleSecret('xai_key')}
-                          />
-                        )}
-
-                        {(llmForm.provider === 'deepseek' || llmForm.provider === 'none') && (
-                          <SecretInput
-                            label="DeepSeek API Key"
-                            value={llmForm.deepseek_api_key}
-                            placeholder={settings?.llm.deepseek_api_key || 'sk-...'}
-                            onChange={(v) => setLlmForm(p => ({ ...p, deepseek_api_key: v }))}
-                            showSecret={showSecrets['deepseek_key']}
-                            onToggle={() => toggleSecret('deepseek_key')}
-                          />
-                        )}
-
-                        {(llmForm.provider === 'ollama' || llmForm.provider === 'none') && (
-                          <>
-                            <div>
-                              <Label className="text-xs text-muted-foreground">Ollama Base URL</Label>
-                              <Input
-                                type="text"
-                                value={llmForm.ollama_base_url}
-                                onChange={(e) => setLlmForm(p => ({ ...p, ollama_base_url: e.target.value }))}
-                                placeholder="http://localhost:11434"
-                                className="mt-1 text-sm font-mono"
-                              />
-                              <p className="text-[11px] text-muted-foreground/70 mt-1">
-                                Uses the OpenAI-compatible endpoint at /v1. Leave blank for default localhost URL.
-                              </p>
-                            </div>
-                            <SecretInput
-                              label="Ollama API Key (Optional)"
-                              value={llmForm.ollama_api_key}
-                              placeholder={settings?.llm.ollama_api_key || 'Optional'}
-                              onChange={(v) => setLlmForm(p => ({ ...p, ollama_api_key: v }))}
-                              showSecret={showSecrets['ollama_key']}
-                              onToggle={() => toggleSecret('ollama_key')}
-                            />
-                          </>
-                        )}
-
-                        {(llmForm.provider === 'lmstudio' || llmForm.provider === 'none') && (
-                          <>
-                            <div>
-                              <Label className="text-xs text-muted-foreground">LM Studio Base URL</Label>
-                              <Input
-                                type="text"
-                                value={llmForm.lmstudio_base_url}
-                                onChange={(e) => setLlmForm(p => ({ ...p, lmstudio_base_url: e.target.value }))}
-                                placeholder="http://localhost:1234/v1"
-                                className="mt-1 text-sm font-mono"
-                              />
-                              <p className="text-[11px] text-muted-foreground/70 mt-1">
-                                OpenAI-compatible server URL. Leave blank for default localhost URL.
-                              </p>
-                            </div>
-                            <SecretInput
-                              label="LM Studio API Key (Optional)"
-                              value={llmForm.lmstudio_api_key}
-                              placeholder={settings?.llm.lmstudio_api_key || 'Optional'}
-                              onChange={(v) => setLlmForm(p => ({ ...p, lmstudio_api_key: v }))}
-                              showSecret={showSecrets['lmstudio_key']}
-                              onToggle={() => toggleSecret('lmstudio_key')}
-                            />
-                          </>
-                        )}
-
-                        <div>
-                          <Label className="text-xs text-muted-foreground">Model</Label>
-                          <div className="flex gap-2 mt-1">
-                            <select
-                              value={llmForm.model}
-                              onChange={(e) => setLlmForm(p => ({ ...p, model: e.target.value }))}
-                              className="flex-1 bg-muted border border-border rounded-lg px-3 py-2 text-sm"
-                            >
-                              <option value="">Select a model...</option>
-                              {modelsForProvider.map(m => (
-                                <option key={m.id} value={m.id}>{m.name}</option>
-                              ))}
-                              {llmForm.model && !modelsForProvider.find(m => m.id === llmForm.model) && (
-                                <option value={llmForm.model}>{llmForm.model} (current)</option>
-                              )}
-                            </select>
-                            <Button
-                              variant="secondary"
-                              size="icon"
-                              onClick={handleRefreshModels}
-                              disabled={isRefreshingModels || llmForm.provider === 'none'}
-                              title="Refresh models from provider API"
-                            >
-                              <RefreshCw className={cn("w-4 h-4", isRefreshingModels && "animate-spin")} />
-                            </Button>
-                          </div>
-                          <p className="text-[11px] text-muted-foreground/70 mt-1">
-                            {modelsForProvider.length > 0
-                              ? `${modelsForProvider.length} models available`
-                              : llmForm.provider !== 'none'
-                                ? 'Click refresh to fetch available models from the API'
-                                : 'Select a provider first'}
-                          </p>
-                        </div>
-                      </div>
-
-                      <Separator className="opacity-30" />
-
-                      <div>
-                        <Label className="text-xs text-muted-foreground">Monthly Spend Limit (USD)</Label>
-                        <div className="flex items-center gap-3 mt-1">
-                          <DollarSign className="w-4 h-4 text-muted-foreground" />
-                          <Input
-                            type="number"
-                            min={0}
-                            step={5}
-                            value={llmForm.max_monthly_spend}
-                            onChange={(e) => setLlmForm(p => ({ ...p, max_monthly_spend: parseFloat(e.target.value) || 0 }))}
-                            className="w-40 text-sm"
-                          />
-                        </div>
-                        <p className="text-[11px] text-muted-foreground/70 mt-1">
-                          LLM requests will be blocked once monthly spend reaches this limit. Set to 0 to disable the limit.
+                      <div className="rounded-lg border border-purple-500/20 bg-purple-500/5 p-4">
+                        <p className="text-sm text-foreground mb-2">
+                          AI provider and model configuration has moved to the <strong>AI tab</strong>.
                         </p>
-                      </div>
-
-                      <Separator className="opacity-30" />
-
-                      <div className="flex items-center gap-2">
-                        <Button size="sm" onClick={() => handleSaveSection('llm')} disabled={saveMutation.isPending}>
-                          <Save className="w-3.5 h-3.5 mr-1.5" />
-                          Save
-                        </Button>
+                        <p className="text-xs text-muted-foreground mb-3">
+                          Use the <strong>Providers</strong> subtab to connect API keys and the <strong>Models</strong> subtab to assign models per feature.
+                        </p>
                         <Button
-                          variant="secondary"
                           size="sm"
-                          onClick={() => testLlmMutation.mutate()}
-                          disabled={testLlmMutation.isPending}
+                          className="h-8 gap-1.5 text-xs bg-purple-500/20 text-purple-300 border border-purple-500/30 hover:bg-purple-500/30"
+                          onClick={() => {
+                            window.dispatchEvent(new CustomEvent('navigate-to-tab', { detail: 'ai' }))
+                            window.dispatchEvent(new CustomEvent('navigate-ai-section', { detail: 'providers' }))
+                          }}
                         >
-                          <MessageSquare className="w-3.5 h-3.5 mr-1.5" />
-                          Test
+                          <Bot className="w-3.5 h-3.5" />
+                          Open AI Providers
                         </Button>
-                        {testLlmMutation.data && (
-                          <Badge
-                            variant={testLlmMutation.data.status === 'success' ? "default" : "outline"}
-                            className={cn(
-                              "text-xs",
-                              testLlmMutation.data.status === 'success'
-                                ? "bg-green-500/10 text-green-400"
-                                : testLlmMutation.data.status === 'warning'
-                                  ? "bg-yellow-500/10 text-yellow-400"
-                                  : "bg-red-500/10 text-red-400"
-                            )}
-                          >
-                            {testLlmMutation.data.message}
-                          </Badge>
-                        )}
                       </div>
                     </div>
                   )}
+
 
                   {/* Scanner Settings */}
                   {section.id === 'scanner' && (

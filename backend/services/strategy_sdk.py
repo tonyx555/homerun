@@ -41,6 +41,19 @@ class StrategySDK:
         )
     """
 
+    _ai_instance = None
+
+    class _AIDescriptor:
+        def __get__(self, obj, objtype=None):
+            if StrategySDK._ai_instance is None:
+                from services.ai import get_llm_manager
+                from services.ai_sdk import AISDK
+
+                StrategySDK._ai_instance = AISDK(get_llm_manager(), purpose="custom_strategy")
+            return StrategySDK._ai_instance
+
+    ai = _AIDescriptor()
+
     TRADER_TIER_CANONICAL = ("low", "medium", "high", "extreme")
     TRADER_SIDE_CANONICAL = ("all", "buy", "sell")
     TRADER_SOURCE_SCOPE_CANONICAL = ("all", "tracked", "pool")

@@ -8,7 +8,6 @@ import {
   AlertTriangle,
   TrendingUp,
   ExternalLink,
-  Play,
   Brain,
   Shield,
   RefreshCw,
@@ -36,8 +35,8 @@ import { useAtomValue } from 'jotai'
 import { themeAtom } from '../store/atoms'
 import { Card } from './ui/card'
 import { Badge } from './ui/badge'
-import { Button } from './ui/button'
 import { Separator } from './ui/separator'
+import BuyButton from './BuyButton'
 
 // ─── Constants ────────────────────────────────────────────
 
@@ -374,7 +373,6 @@ function formatOutcomePriceSummary(
 
 interface Props {
   opportunity: Opportunity
-  onExecute?: (opportunity: Opportunity) => void
   onOpenCopilot?: (opportunity: Opportunity) => void
   onSearchNews?: (opportunity: Opportunity) => void
   isModalView?: boolean
@@ -385,7 +383,6 @@ interface Props {
 
 function OpportunityCard({
   opportunity,
-  onExecute,
   onOpenCopilot,
   onSearchNews,
   isModalView = false,
@@ -1472,16 +1469,9 @@ function OpportunityCard({
               </div>
             )}
 
-            {/* Execute Button */}
-            {onExecute && !isSearch && opportunity.max_position_size > 0 && (
-              <Button
-                onClick={(e) => { e.stopPropagation(); onExecute(opportunity) }}
-                size="sm"
-                className="w-full bg-gradient-to-r from-blue-500 to-green-500 hover:from-blue-600 hover:to-green-600 shadow-lg shadow-blue-500/20 h-8 text-xs"
-              >
-                <Play className="w-3 h-3 mr-1.5" />
-                Execute Trade
-              </Button>
+            {/* Buy Button */}
+            {!isSearch && (
+              <BuyButton opportunity={opportunity} />
             )}
           </div>
         </>
@@ -1518,7 +1508,6 @@ function OpportunityCard({
               >
                 <OpportunityCard
                   opportunity={opportunity}
-                  onExecute={onExecute}
                   onOpenCopilot={onOpenCopilot}
                   onSearchNews={onSearchNews}
                   isModalView

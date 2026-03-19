@@ -2396,6 +2396,45 @@ export const runTraderOnce = async (traderId: string): Promise<Trader> => {
   return unwrapApiData(data)
 }
 
+export interface TraderManualBuyPosition {
+  token_id: string
+  side: string
+  price: number
+  market_id?: string
+  market_question?: string
+  outcome?: string
+}
+
+export interface TraderManualBuyResponse {
+  status: string
+  trader_id: string
+  mode: string
+  orders: Array<{
+    order_id: string
+    market_id: string
+    market_question: string
+    direction: string
+    status: string
+    notional_usd: number
+    entry_price: number
+    size_shares: number
+    error: string | null
+  }>
+  message: string
+}
+
+export const traderManualBuy = async (
+  traderId: string,
+  params: {
+    positions: TraderManualBuyPosition[]
+    size_usd: number
+    opportunity_id?: string
+  }
+): Promise<TraderManualBuyResponse> => {
+  const { data } = await api.post(`/traders/${traderId}/manual-buy`, params)
+  return unwrapApiData(data)
+}
+
 export const getTraderDecisions = async (
   traderId: string,
   params?: { decision?: string; limit?: number }
@@ -4893,4 +4932,146 @@ export interface CryptoFilterDiagnostics {
 export const getCryptoFilterDiagnostics = async (): Promise<CryptoFilterDiagnostics> => {
   const { data } = await api.get('/crypto/filter-diagnostics')
   return data
+}
+
+// ==================== AI AGENTS ====================
+
+export interface UserAgent {
+  id: string
+  name: string
+  description: string
+  system_prompt: string
+  tools: string[]
+  model: string | null
+  temperature: number
+  max_iterations: number
+  is_builtin: boolean
+  created_at?: string
+  updated_at?: string
+}
+
+export async function listAgents(): Promise<{ agents: UserAgent[] }> {
+  const response = await api.get('/ai/agents')
+  return response.data
+}
+
+export async function getAgent(agentId: string): Promise<UserAgent> {
+  const response = await api.get(`/ai/agents/${agentId}`)
+  return response.data
+}
+
+export async function createAgent(data: Omit<UserAgent, 'id' | 'is_builtin' | 'created_at' | 'updated_at'>): Promise<UserAgent> {
+  const response = await api.post('/ai/agents', data)
+  return response.data
+}
+
+export async function updateAgent(agentId: string, data: Partial<UserAgent>): Promise<UserAgent> {
+  const response = await api.put(`/ai/agents/${agentId}`, data)
+  return response.data
+}
+
+export async function deleteAgent(agentId: string): Promise<void> {
+  await api.delete(`/ai/agents/${agentId}`)
+}
+
+export async function listAvailableTools(): Promise<{ tools: { name: string; description: string }[] }> {
+  const response = await api.get('/ai/agents/meta/available-tools')
+  return response.data
+}
+
+// ==================== AI STREAMING CHAT ====================
+
+export function streamAIChat(
+  params: {
+    message: string
+    session_id?: string
+    context_type?: string
+    context_id?: string
+    model?: string
+  },
+  onToken: (text: string) => void,
+  onDone: (data: { session_id: string; model_used: string }) => void,
+  onError: (error: string) => void,
+  signal?: AbortSignal,
+): void {
+  fetch('/api/ai/chat/stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+    signal,
+  }).then(response => {
+    const reader = response.body?.getReader()
+    const decoder = new TextDecoder()
+    if (!reader) { onError('No response body'); return }
+
+    let buffer = ''
+    const read = (): void => {
+      reader.read().then(({ done, value }) => {
+        if (done) return
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            continue
+          }
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6))
+              if (data.text !== undefined) onToken(data.text)
+              if (data.session_id && data.model_used) onDone(data)
+              if (data.error) onError(data.error)
+            } catch { /* skip malformed SSE lines */ }
+          }
+        }
+        read()
+      }).catch(err => {
+        if (err.name !== 'AbortError') onError(err.message)
+      })
+    }
+    read()
+  }).catch(err => {
+    if (err.name !== 'AbortError') onError(err.message)
+  })
+}
+
+// ==================== LLM USAGE LOG ====================
+
+export interface LLMUsageLogEntry {
+  id: string
+  provider: string
+  model: string
+  input_tokens: number
+  output_tokens: number
+  cost_usd: number
+  purpose: string | null
+  session_id: string | null
+  requested_at: string
+  latency_ms: number | null
+  success: boolean
+  error: string | null
+}
+
+export const listLLMUsageLog = async (params: {
+  limit?: number
+  offset?: number
+  purpose?: string
+  provider?: string
+  success?: boolean
+}): Promise<{ entries: LLMUsageLogEntry[]; total: number }> => {
+  const searchParams = new URLSearchParams()
+  if (params.limit) searchParams.set('limit', String(params.limit))
+  if (params.offset) searchParams.set('offset', String(params.offset))
+  if (params.purpose) searchParams.set('purpose', params.purpose)
+  if (params.provider) searchParams.set('provider', params.provider)
+  if (params.success !== undefined) searchParams.set('success', String(params.success))
+  const { data } = await api.get(`/ai/usage-log?${searchParams.toString()}`)
+  return data
+}
+
+// ==================== AI CHAT SESSION MANAGEMENT ====================
+
+export async function renameChatSession(sessionId: string, title: string): Promise<AIChatSession> {
+  const response = await api.patch(`/ai/chat/sessions/${sessionId}`, { title })
+  return response.data
 }

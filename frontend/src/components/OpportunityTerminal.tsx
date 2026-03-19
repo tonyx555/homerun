@@ -11,16 +11,16 @@ import {
   timeAgo,
   formatCompact,
 } from './OpportunityCard'
+import BuyButton from './BuyButton'
 
 interface Props {
   opportunities: Opportunity[]
-  onExecute?: (opportunity: Opportunity) => void
   onOpenCopilot?: (opportunity: Opportunity) => void
   isConnected?: boolean
   totalCount?: number
 }
 
-export default function OpportunityTerminal({ opportunities, onExecute, onOpenCopilot, isConnected, totalCount }: Props) {
+export default function OpportunityTerminal({ opportunities, onOpenCopilot, isConnected, totalCount }: Props) {
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -73,7 +73,6 @@ export default function OpportunityTerminal({ opportunities, onExecute, onOpenCo
             opportunity={opp}
             isSelected={selectedIdx === idx}
             onSelect={() => setSelectedIdx(selectedIdx === idx ? null : idx)}
-            onExecute={onExecute}
             onOpenCopilot={onOpenCopilot}
           />
         ))}
@@ -96,13 +95,11 @@ function TerminalEntry({
   opportunity,
   isSelected,
   onSelect,
-  onExecute,
   onOpenCopilot,
 }: {
   opportunity: Opportunity
   isSelected: boolean
   onSelect: () => void
-  onExecute?: (opportunity: Opportunity) => void
   onOpenCopilot?: (opportunity: Opportunity) => void
 }) {
   const queryClient = useQueryClient()
@@ -299,14 +296,7 @@ function TerminalEntry({
                 [{judgeMutation.isPending ? 'analyzing...' : 'analyze'}]
               </button>
             )}
-            {onExecute && (
-              <button
-                onClick={(e) => { e.stopPropagation(); onExecute(opportunity) }}
-                className="text-[10px] text-green-400 hover:text-green-300 transition-colors font-bold underline underline-offset-2"
-              >
-                [EXECUTE]
-              </button>
-            )}
+            <BuyButton opportunity={opportunity} className="w-20" />
           </div>
 
           <div className="text-green-500/15">{'─'.repeat(72)}</div>

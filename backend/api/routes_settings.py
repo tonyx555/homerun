@@ -97,6 +97,18 @@ class LLMSettings(BaseModel):
     model: Optional[str] = Field(default=None, description="Model to use (e.g., gpt-4o, gemini-2.0-flash)")
     max_monthly_spend: Optional[float] = Field(default=None, ge=0, description="Monthly LLM cost cap in USD")
 
+    # Per-purpose model assignments — allows user to pick different models for different tasks
+    model_assignments: Optional[dict[str, str]] = Field(
+        default=None,
+        description="Per-purpose model assignments. Keys: chat, news_analysis, resolution_analysis, opportunity_judgment, market_analysis, agent, strategy. Values: model name strings.",
+    )
+
+    # Per-area LLM enable/disable toggles
+    enabled_features: Optional[dict[str, bool]] = Field(
+        default=None,
+        description="Enable/disable LLM for specific features. Keys: chat, news_analysis, resolution_analysis, opportunity_judgment, market_analysis, agents. Default: all true.",
+    )
+
 
 class NotificationSettings(BaseModel):
     """Notification configuration"""

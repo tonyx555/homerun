@@ -88,12 +88,10 @@ function formatDateButtonLabel(value: string): string {
 }
 
 export default function WeatherOpportunitiesPanel({
-  onExecute,
   viewMode = 'card',
   showSettingsButton = true,
   onAnalyzeTargetsChange,
 }: {
-  onExecute: (opportunity: Opportunity) => void
   viewMode?: 'card' | 'list' | 'terminal'
   showSettingsButton?: boolean
   onAnalyzeTargetsChange?: (targets: { visibleIds: string[]; allIds: string[] }) => void
@@ -526,14 +524,12 @@ export default function WeatherOpportunitiesPanel({
         ) : viewMode === 'terminal' ? (
           <OpportunityTerminal
             opportunities={opportunities}
-            onExecute={onExecute}
             isConnected={workflowConnected}
             totalCount={totalOpportunities}
           />
         ) : viewMode === 'list' ? (
           <OpportunityTable
             opportunities={opportunities}
-            onExecute={onExecute}
           />
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3 card-stagger">
@@ -541,7 +537,6 @@ export default function WeatherOpportunitiesPanel({
               <OpportunityCard
                 key={opp.stable_id || opp.id}
                 opportunity={opp}
-                onExecute={onExecute}
               />
             ))}
           </div>

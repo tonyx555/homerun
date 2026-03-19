@@ -811,7 +811,14 @@ class MarketRuntime:
         self._last_crypto_refresh_at = utcnow().isoformat().replace("+00:00", "Z")
         trigger = "reference_ws" if assets and not tokens else "crypto_ws" if tokens and not assets else "crypto_reference_ws"
         self._last_crypto_trigger = trigger
-        await self._publish_crypto_snapshot(refreshed_rows, trigger=trigger)
+        # Publish a lightweight payload for reactive WS pushes: strip
+        # oracle_history (80-point arrays) to cut payload size on sub-second
+        # ticks.  Full history is included in the periodic scan payload.
+        lightweight_rows = [
+            {k: v for k, v in row.items() if k not in ("oracle_history", "history_tail")}
+            for row in refreshed_rows
+        ]
+        await self._publish_crypto_snapshot(lightweight_rows, trigger=trigger)
         await self._queue_opportunity_dispatch(
             refreshed_rows,
             trigger=trigger,

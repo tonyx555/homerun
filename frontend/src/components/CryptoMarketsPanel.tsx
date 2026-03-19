@@ -27,7 +27,7 @@ import { themeAtom } from '../store/atoms'
 
 // ─── Constants ────────────────────────────────────────────
 
-const WS_MARKETS_STALE_MS = 30000
+const WS_MARKETS_STALE_MS = 5000
 
 const ASSET_BAR: Record<string, string> = {
   BTC: 'bg-orange-400',
@@ -888,15 +888,11 @@ export function CryptoMarketCard({
 // ─── Main Panel ──────────────────────────────────────────
 
 interface Props {
-  onExecute?: (opportunity: any) => void
-  onOpenCopilot?: (opportunity: any) => void
   onOpenCryptoSettings?: () => void
   showSettingsButton?: boolean
 }
 
 export default function CryptoMarketsPanel({
-  onExecute,
-  onOpenCopilot,
   onOpenCryptoSettings,
   showSettingsButton = true,
 }: Props) {
@@ -907,9 +903,6 @@ export default function CryptoMarketsPanel({
     () => (typeof document === 'undefined' ? true : document.visibilityState === 'visible')
   )
   const [isPanelInViewport, setIsPanelInViewport] = useState(true)
-  // Intentionally kept for interface parity with other panels and App wiring.
-  void onExecute
-  void onOpenCopilot
   const { isConnected, lastMessage } = useWebSocket('/ws')
   const [wsMarkets, setWsMarkets] = useState<CryptoMarket[]>([])
   const [wsMarketsUpdatedAtMs, setWsMarketsUpdatedAtMs] = useState<number | null>(null)
@@ -984,7 +977,7 @@ export default function CryptoMarketsPanel({
     queryKey: ['crypto-live-markets'],
     queryFn: () => getCryptoMarkets({ viewer_active: true }),
     enabled: isViewerActive,
-    refetchInterval: isViewerActive ? (hasFreshWsMarkets ? 5000 : 2000) : false,
+    refetchInterval: isViewerActive ? (hasFreshWsMarkets ? 15000 : 2000) : false,
     refetchIntervalInBackground: false,
     staleTime: 1000,
   })
