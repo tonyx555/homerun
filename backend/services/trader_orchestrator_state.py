@@ -1801,6 +1801,11 @@ async def recover_missing_live_trader_orders(
                 existing_rows_by_live_order_id[live_order_id] = existing_row
             continue
 
+        age_seconds = (now - created_at).total_seconds() if created_at else 0
+        if age_seconds < 90:
+            ambiguous_orders += 1
+            continue
+
         candidate = await _infer_live_order_authority_candidate(
             session,
             market_question=market_question,
@@ -3366,6 +3371,71 @@ async def delete_trader(session: AsyncSession, trader_id: str, *, force: bool = 
     await session.delete(row)
     await _commit_with_retry(session)
     return True
+
+
+async def transfer_open_trades(
+    session: AsyncSession,
+    from_trader_id: str,
+    to_trader_id: str,
+) -> dict[str, int]:
+    """Reassign all open orders and open positions from one trader to another."""
+    now = _now()
+
+    # Transfer open orders
+    open_orders = list(
+        (
+            await session.execute(
+                select(TraderOrder).where(
+                    TraderOrder.trader_id == from_trader_id,
+                    func.lower(func.coalesce(TraderOrder.status, "")).in_(tuple(OPEN_ORDER_STATUSES)),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for order in open_orders:
+        payload = dict(order.payload_json or {})
+        payload["transferred"] = {
+            "from_trader_id": from_trader_id,
+            "to_trader_id": to_trader_id,
+            "transferred_at": to_iso(now),
+        }
+        order.trader_id = to_trader_id
+        order.payload_json = payload
+        order.updated_at = now
+
+    # Transfer open positions
+    open_positions = list(
+        (
+            await session.execute(
+                select(TraderPosition).where(
+                    TraderPosition.trader_id == from_trader_id,
+                    TraderPosition.status == "open",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for position in open_positions:
+        payload = dict(position.payload_json or {})
+        payload["transferred"] = {
+            "from_trader_id": from_trader_id,
+            "to_trader_id": to_trader_id,
+            "transferred_at": to_iso(now),
+        }
+        position.trader_id = to_trader_id
+        position.payload_json = payload
+        position.updated_at = now
+
+    await _commit_with_retry(session)
+
+    # Resync inventory for both traders
+    await sync_trader_position_inventory(session, trader_id=from_trader_id)
+    await sync_trader_position_inventory(session, trader_id=to_trader_id)
+
+    return {"orders": len(open_orders), "positions": len(open_positions)}
 
 
 async def set_trader_paused(session: AsyncSession, trader_id: str, paused: bool) -> Optional[dict[str, Any]]:

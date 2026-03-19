@@ -790,11 +790,13 @@ class PolymarketWSFeed:
                     self.stats.messages_received += 1
                     self.stats.last_message_at = recv_time
 
-                    # Reset failure counters only after the connection has
-                    # been stable for 30s.  Resetting immediately on connect
-                    # (as the old code did) prevents backoff from escalating
-                    # when the server drops connections every 10-30 seconds.
-                    if reconnect_at_connect > 0 and (recv_time - connect_time) >= 30.0:
+                    # Reset failure counters after the connection has been
+                    # stable for 10s.  This is long enough to confirm the
+                    # connection is healthy, but short enough that backoff
+                    # resets reasonably fast after transient outages (the
+                    # previous 30s threshold meant backoff never reset when
+                    # the server dropped connections every 20-30 seconds).
+                    if reconnect_at_connect > 0 and (recv_time - connect_time) >= 10.0:
                         was_failing = self.stats.consecutive_failures >= MAX_RECONNECT_ATTEMPTS
                         self._reconnect_attempt = 0
                         self.stats.consecutive_failures = 0

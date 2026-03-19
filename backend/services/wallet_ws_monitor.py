@@ -560,8 +560,8 @@ class WalletWebSocketMonitor:
 
                 async with websockets.connect(
                     self._ws_url,
-                    ping_interval=20,
-                    ping_timeout=30,
+                    ping_interval=30,
+                    ping_timeout=60,
                     open_timeout=10,
                     close_timeout=10,
                 ) as ws:

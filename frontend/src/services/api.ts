@@ -2365,15 +2365,18 @@ export const deactivateTrader = async (traderId: string, payload?: { requested_b
   return normalizeTraderFields(data)
 }
 
-export type TraderDeleteAction = 'block' | 'disable' | 'force_delete'
+export type TraderDeleteAction = 'block' | 'disable' | 'force_delete' | 'transfer_delete'
 
 export const deleteTrader = async (
   traderId: string,
-  options?: { action?: TraderDeleteAction }
+  options?: { action?: TraderDeleteAction; transfer_to_trader_id?: string }
 ): Promise<{
   status: string
   trader_id: string
   action?: TraderDeleteAction
+  transfer_to_trader_id?: string
+  orders_transferred?: number
+  positions_transferred?: number
   open_live_positions?: number
   open_shadow_positions?: number
   open_other_positions?: number

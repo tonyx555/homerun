@@ -307,22 +307,6 @@
   animation: border-glow-pulse 0.8s ease-out;
 }
 
-/* ============================================
-   GRID BACKGROUND PATTERN
-   ============================================ */
-
-.grid-bg {
-  background-image:
-    linear-gradient(hsl(var(--border) / 0.15) 1px, transparent 1px),
-    linear-gradient(90deg, hsl(var(--border) / 0.15) 1px, transparent 1px);
-  background-size: 32px 32px;
-}
-
-/* Dot grid variant */
-.dot-grid-bg {
-  background-image: radial-gradient(circle, hsl(var(--border) / 0.3) 1px, transparent 1px);
-  background-size: 20px 20px;
-}
 
 /* ============================================
    METRIC VALUE EFFECTS

@@ -420,7 +420,13 @@ class TelegramNotifier:
             try:
                 now_monotonic = time.monotonic()
                 if now_monotonic - self._last_settings_reload_monotonic >= SETTINGS_REFRESH_SECONDS:
-                    await self._load_settings()
+                    try:
+                        await asyncio.wait_for(
+                            self._load_settings(),
+                            timeout=TELEGRAM_SETTINGS_LOAD_TIMEOUT_SECONDS,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning("Telegram settings reload timed out; keeping current settings")
                     self._last_settings_reload_monotonic = now_monotonic
 
                 delivery_ready = bool(self._notifications_enabled and self._bot_token and self._chat_id)

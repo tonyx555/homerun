@@ -809,21 +809,7 @@ def _market_has_terminal_resolution_signal(market_info: Optional[dict[str, Any]]
     end_dt = polymarket_client._coerce_datetime(
         market_info.get("end_date") if market_info.get("end_date") is not None else market_info.get("endDate")
     )
-    ended = end_dt is not None and end_dt <= utcnow()
-    accepting_orders_value = (
-        market_info.get("accepting_orders")
-        if market_info.get("accepting_orders") is not None
-        else market_info.get("acceptingOrders")
-    )
-    enable_order_book_value = (
-        market_info.get("enable_order_book")
-        if market_info.get("enable_order_book") is not None
-        else market_info.get("enableOrderBook")
-    )
-    if ended and (
-        _safe_bool(accepting_orders_value, True) is False
-        or _safe_bool(enable_order_book_value, True) is False
-    ):
+    if end_dt is not None and end_dt <= utcnow():
         return True
 
     return False
@@ -1456,17 +1442,20 @@ async def load_market_info_for_orders(orders: list[TraderOrder]) -> dict[str, Op
         info: Optional[dict[str, Any]] = None
         if lookup_id.startswith("0x"):
             info = await polymarket_client.get_market_by_condition_id(lookup_id, force_refresh=True)
-            if info is None:
-                info = await polymarket_client.get_market_by_condition_id(lookup_id)
         if info is None:
             info = await polymarket_client.get_market_by_token_id(lookup_id, force_refresh=True)
-            if info is None:
-                info = await polymarket_client.get_market_by_token_id(lookup_id)
 
         _market_info_cache[lookup_id] = (now_mono, info)
         return lookup_id, info
 
-    pairs = await asyncio.gather(*[_fetch(lookup_id) for lookup_id in lookup_ids], return_exceptions=True)
+    # Limit concurrency to avoid overwhelming the Gamma API rate limiter.
+    _fetch_sem = asyncio.Semaphore(8)
+
+    async def _fetch_limited(lookup_id: str) -> tuple[str, Optional[dict[str, Any]]]:
+        async with _fetch_sem:
+            return await _fetch(lookup_id)
+
+    pairs = await asyncio.gather(*[_fetch_limited(lookup_id) for lookup_id in lookup_ids], return_exceptions=True)
     info_by_lookup_id: dict[str, Optional[dict[str, Any]]] = {}
     for item in pairs:
         if isinstance(item, Exception):
@@ -4498,6 +4487,7 @@ async def reconcile_live_positions(
             )
             params = [
                 {
+                    "id": row.id,
                     "_id": row.id,
                     "_status": row.status,
                     "_actual_profit": row.actual_profit,

@@ -7,6 +7,7 @@ import asyncpg
 import copy
 import json
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -128,7 +129,12 @@ def _is_transient_db_error(exc: Exception) -> bool:
 _STRATEGY_EVAL_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="strategy-eval")
 _abandoned_trader_cycle_tasks: set[asyncio.Task] = set()
 _inflight_trader_cycle_tasks: dict[str, asyncio.Task] = {}
+_inflight_trader_cycle_start: dict[str, float] = {}  # trader_id -> monotonic start time
 _pending_runtime_cycle_specs: dict[str, dict[str, Any]] = {}
+_skip_log_last_at: dict[str, float] = {}  # trader_id -> last log monotonic time
+_skip_log_suppressed: dict[str, int] = {}  # trader_id -> suppressed count
+_SKIP_LOG_INTERVAL_SECONDS = 60.0  # only log once per minute per trader
+_STUCK_TASK_HARD_KILL_SECONDS = 300.0  # force-kill tasks stuck longer than 5 minutes
 
 
 def _discard_abandoned_trader_cycle(task: asyncio.Task) -> None:
@@ -264,6 +270,9 @@ async def _launch_pending_runtime_cycle_if_any(trader_id: str) -> None:
 
 def _handle_trader_cycle_task_done(trader_id: str, task: asyncio.Task) -> None:
     _clear_inflight_trader_cycle_task(trader_id, task)
+    _inflight_trader_cycle_start.pop(trader_id, None)
+    _skip_log_last_at.pop(trader_id, None)
+    _skip_log_suppressed.pop(trader_id, None)
     if not trader_id or trader_id not in _pending_runtime_cycle_specs:
         return
     try:
@@ -4449,6 +4458,7 @@ async def _run_trader_once(
         # subsequent risk checks account for intra-cycle exposure even
         # before PnL is realized in the database.
         intra_cycle_committed_usd: float = 0.0
+        intra_cycle_seen_market_ids: set[str] = set()
         trader_loss_streak = await get_consecutive_loss_count(session, trader_id=trader_id, mode=run_mode)
         last_loss_at = await get_last_resolved_loss_at(session, trader_id=trader_id, mode=run_mode)
         cooldown_seconds = max(0, safe_int(effective_risk_limits.get("cooldown_seconds"), 0))
@@ -5699,7 +5709,10 @@ async def _run_trader_once(
                     _pre_gate_blocked = (
                         _pre_gate_market_id
                         and not allow_averaging
-                        and _pre_gate_market_id in open_market_ids
+                        and (
+                            _pre_gate_market_id in open_market_ids
+                            or _pre_gate_market_id in intra_cycle_seen_market_ids
+                        )
                         and str(getattr(decision_obj, "decision", "") or "").strip() == "selected"
                     )
                     if _pre_gate_blocked:
@@ -5731,7 +5744,7 @@ async def _run_trader_once(
                             global_limits=global_limits,
                             effective_risk_limits=effective_risk_limits,
                             allow_averaging=allow_averaging,
-                            open_market_ids=open_market_ids,
+                            open_market_ids=open_market_ids | intra_cycle_seen_market_ids,
                             pending_live_exit_count=pending_live_exit_count,
                             pending_live_exit_summary=pending_live_exit_summary,
                             pending_live_exit_max_allowed=pending_live_exit_max_allowed,
@@ -5945,6 +5958,8 @@ async def _run_trader_once(
 
                     order_status = None
                     if final_decision == "selected":
+                        if _pre_gate_market_id:
+                            intra_cycle_seen_market_ids.add(_pre_gate_market_id)
                         await _commit_with_retry(session)
                         submit_started_at = utcnow()
                         submit_result = await submit_order(
@@ -6629,27 +6644,67 @@ async def _run_trader_once_with_timeout(
     trader_id = str(trader.get("id") or "")
     existing = _inflight_trader_cycle_tasks.get(trader_id) if trader_id else None
     if existing is not None and not existing.done():
-        has_runtime_trigger = bool(trigger_signal_ids_by_source) or bool(trigger_signal_snapshots_by_source)
-        if process_signals and has_runtime_trigger:
-            _queue_pending_runtime_cycle(
-                trader=trader,
-                control=control,
-                process_signals=process_signals,
-                trigger_signal_ids_by_source=trigger_signal_ids_by_source,
-                trigger_signal_snapshots_by_source=trigger_signal_snapshots_by_source,
-                timeout_seconds=timeout,
-            )
-            logger.warning(
-                "Queued pending runtime trigger because prior trader run is still finishing for trader=%s",
+        # Hard-kill tasks stuck far too long (prevents indefinite DB
+        # connection leaks from abandoned tasks that ignore cancellation).
+        started_at = _inflight_trader_cycle_start.get(trader_id, 0.0)
+        stuck_seconds = time.monotonic() - started_at if started_at else 0.0
+        if started_at and stuck_seconds > _STUCK_TASK_HARD_KILL_SECONDS:
+            logger.error(
+                "Force-killing stuck trader cycle task trader=%s stuck_seconds=%.0f",
                 trader_id,
+                stuck_seconds,
             )
+            existing.cancel()
+            _clear_inflight_trader_cycle_task(trader_id, existing)
+            _inflight_trader_cycle_start.pop(trader_id, None)
+            _skip_log_last_at.pop(trader_id, None)
+            _skip_log_suppressed.pop(trader_id, None)
+            # Fall through to start a fresh task below
         else:
-            logger.warning(
-                "Trader cycle skipped because prior run is still finishing for trader=%s process_signals=%s",
-                trader_id,
-                process_signals,
-            )
-        return 0, 0, 0
+            has_runtime_trigger = bool(trigger_signal_ids_by_source) or bool(trigger_signal_snapshots_by_source)
+            # Rate-limit the "still finishing" warnings to once per minute per trader
+            now_mono = time.monotonic()
+            last_log = _skip_log_last_at.get(trader_id, 0.0)
+            if now_mono - last_log >= _SKIP_LOG_INTERVAL_SECONDS:
+                suppressed = _skip_log_suppressed.get(trader_id, 0)
+                suffix = f" (suppressed {suppressed} duplicates)" if suppressed else ""
+                if process_signals and has_runtime_trigger:
+                    _queue_pending_runtime_cycle(
+                        trader=trader,
+                        control=control,
+                        process_signals=process_signals,
+                        trigger_signal_ids_by_source=trigger_signal_ids_by_source,
+                        trigger_signal_snapshots_by_source=trigger_signal_snapshots_by_source,
+                        timeout_seconds=timeout,
+                    )
+                    logger.warning(
+                        "Queued pending runtime trigger because prior trader run is still finishing for trader=%s stuck=%.0fs%s",
+                        trader_id,
+                        stuck_seconds,
+                        suffix,
+                    )
+                else:
+                    logger.warning(
+                        "Trader cycle skipped because prior run is still finishing for trader=%s process_signals=%s stuck=%.0fs%s",
+                        trader_id,
+                        process_signals,
+                        stuck_seconds,
+                        suffix,
+                    )
+                _skip_log_last_at[trader_id] = now_mono
+                _skip_log_suppressed[trader_id] = 0
+            else:
+                _skip_log_suppressed[trader_id] = _skip_log_suppressed.get(trader_id, 0) + 1
+                if process_signals and has_runtime_trigger:
+                    _queue_pending_runtime_cycle(
+                        trader=trader,
+                        control=control,
+                        process_signals=process_signals,
+                        trigger_signal_ids_by_source=trigger_signal_ids_by_source,
+                        trigger_signal_snapshots_by_source=trigger_signal_snapshots_by_source,
+                        timeout_seconds=timeout,
+                    )
+            return 0, 0, 0
 
     task = asyncio.create_task(
         _run_trader_once(
@@ -6663,6 +6718,7 @@ async def _run_trader_once_with_timeout(
     )
     if trader_id:
         _inflight_trader_cycle_tasks[trader_id] = task
+        _inflight_trader_cycle_start[trader_id] = time.monotonic()
         task.add_done_callback(
             lambda done_task, current_trader_id=trader_id: _handle_trader_cycle_task_done(
                 current_trader_id,
@@ -7107,20 +7163,16 @@ async def run_worker_loop(*, lane: str = _LANE_GENERAL, write_snapshot: bool = T
                                 manage_only_reasons.append("ws_feed_down")
                             elif _ws_auto_paused and poly_failures == 0:
                                 _ws_auto_paused = False
+                                await update_orchestrator_control(session, is_paused=False)
                                 await create_trader_event(
                                     session,
                                     trader_id=None,
                                     event_type="ws_feed_recovery",
                                     source="worker",
-                                    severity="warning",
-                                    message=(
-                                        "Polymarket WS feed recovered. "
-                                        "Orchestrator remains paused — resume manually when ready."
-                                    ),
+                                    severity="info",
+                                    message="Polymarket WS feed recovered. Auto-trader resumed.",
                                 )
-                                logger.warning(
-                                    "Polymarket WS recovered; orchestrator remains paused (manual resume required)"
-                                )
+                                logger.info("Polymarket WS recovered; auto-resuming orchestrator")
                         except Exception as exc:
                             logger.debug("WS health check skipped: %s", exc)
 

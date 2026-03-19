@@ -855,6 +855,16 @@ class StrategyLoader:
                 for loaded_slug in list(next_loaded.keys()):
                     if loaded_slug in selected_slugs:
                         continue
+                    # When pruning a source-filtered refresh, only unload
+                    # strategies whose source_key matches the filter.
+                    # Otherwise strategies from other sources (e.g. "crypto")
+                    # get killed when the scanner refreshes "scanner" strategies.
+                    if source_filter:
+                        loaded_source = str(
+                            getattr(next_loaded[loaded_slug].instance, "source_key", "") or ""
+                        ).strip().lower()
+                        if loaded_source and loaded_source not in source_filter:
+                            continue
                     self.unload(loaded_slug)
                     next_loaded.pop(loaded_slug, None)
                     next_errors.pop(loaded_slug, None)

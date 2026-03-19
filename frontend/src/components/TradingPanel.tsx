@@ -4402,8 +4402,9 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   } | null>(null)
   const [traderTogglePendingById, setTraderTogglePendingById] = useState<Record<string, TraderToggleAction>>({})
   const [saveError, setSaveError] = useState<string | null>(null)
-  const [deleteAction, setDeleteAction] = useState<'block' | 'disable' | 'force_delete'>('disable')
+  const [deleteAction, setDeleteAction] = useState<'block' | 'disable' | 'force_delete' | 'transfer_delete'>('disable')
   const [deleteForceConfirm, setDeleteForceConfirm] = useState(false)
+  const [deleteTransferTargetId, setDeleteTransferTargetId] = useState<string | null>(null)
   const [tuneDraftTraderId, setTuneDraftTraderId] = useState<string | null>(null)
   const [tuneDraftDirty, setTuneDraftDirty] = useState(false)
   const [tuneSaveError, setTuneSaveError] = useState<string | null>(null)
@@ -6322,12 +6323,13 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   })
 
   const deleteTraderMutation = useMutation({
-    mutationFn: async ({ traderId, action }: { traderId: string; action: 'block' | 'disable' | 'force_delete' }) => {
-      return deleteTrader(traderId, { action })
+    mutationFn: async ({ traderId, action, transferToTraderId }: { traderId: string; action: 'block' | 'disable' | 'force_delete' | 'transfer_delete'; transferToTraderId?: string }) => {
+      return deleteTrader(traderId, { action, transfer_to_trader_id: transferToTraderId })
     },
     onSuccess: (result, variables) => {
       setSaveError(null)
       setDeleteForceConfirm(false)
+      setDeleteTransferTargetId(null)
       if (result.status === 'deleted') {
         if (selectedTraderId === variables.traderId) {
           const fallback = traders.find((row) => row.id !== variables.traderId)
@@ -12278,8 +12280,9 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                     <Select
                       value={deleteAction}
                       onValueChange={(value) => {
-                        setDeleteAction(value as 'block' | 'disable' | 'force_delete')
+                        setDeleteAction(value as 'block' | 'disable' | 'force_delete' | 'transfer_delete')
                         setDeleteForceConfirm(false)
+                        if (value !== 'transfer_delete') setDeleteTransferTargetId(null)
                       }}
                     >
                       <SelectTrigger className="h-8">
@@ -12287,10 +12290,38 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value="disable">Disable (Recommended)</SelectItem>
+                        <SelectItem value="transfer_delete">Delete &amp; Transfer Trades</SelectItem>
                         <SelectItem value="block">Delete (No Open Positions)</SelectItem>
                         <SelectItem value="force_delete">Force Delete (Override Live Checks)</SelectItem>
                       </SelectContent>
                     </Select>
+                    {deleteAction === 'transfer_delete' ? (
+                      <div className="space-y-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
+                        <p className="text-xs font-medium text-amber-700 dark:text-amber-100">
+                          Transfer open trades to another bot before deleting
+                        </p>
+                        <p className="text-[11px] text-amber-700/90 dark:text-amber-100/90">
+                          All open positions and active orders from {selectedTrader.name} will be reassigned to the selected bot, then {selectedTrader.name} will be permanently deleted.
+                        </p>
+                        <Select
+                          value={deleteTransferTargetId || ''}
+                          onValueChange={(value) => setDeleteTransferTargetId(value || null)}
+                        >
+                          <SelectTrigger className="h-8">
+                            <SelectValue placeholder="Select target bot..." />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {traders
+                              .filter((t) => t.id !== selectedTrader.id)
+                              .map((t) => (
+                                <SelectItem key={t.id} value={t.id}>
+                                  {t.name}
+                                </SelectItem>
+                              ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    ) : null}
                     {deleteAction === 'force_delete' ? (
                       <div className="space-y-2 rounded-md border border-red-500/40 bg-red-500/10 p-3">
                         <p className="text-xs font-medium text-red-700 dark:text-red-100">
@@ -12324,17 +12355,26 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                       className="h-8 text-xs"
                       disabled={
                         deleteTraderMutation.isPending ||
-                        (deleteAction === 'force_delete' && !deleteForceConfirm)
+                        (deleteAction === 'force_delete' && !deleteForceConfirm) ||
+                        (deleteAction === 'transfer_delete' && !deleteTransferTargetId)
                       }
-                      onClick={() => deleteTraderMutation.mutate({ traderId: selectedTrader.id, action: deleteAction })}
+                      onClick={() => deleteTraderMutation.mutate({
+                        traderId: selectedTrader.id,
+                        action: deleteAction,
+                        ...(deleteAction === 'transfer_delete' && deleteTransferTargetId
+                          ? { transferToTraderId: deleteTransferTargetId }
+                          : {}),
+                      })}
                     >
                       {deleteTraderMutation.isPending
                         ? 'Processing...'
                         : deleteAction === 'disable'
                           ? 'Disable Bot'
-                          : deleteAction === 'force_delete'
-                            ? 'Force Delete Bot'
-                            : 'Delete Bot'}
+                          : deleteAction === 'transfer_delete'
+                            ? 'Delete & Transfer'
+                            : deleteAction === 'force_delete'
+                              ? 'Force Delete Bot'
+                              : 'Delete Bot'}
                     </Button>
                   </FlyoutSection>
                 ) : null}

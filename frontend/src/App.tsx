@@ -1992,7 +1992,7 @@ function App() {
           </nav>
 
           {/* Content Area */}
-          <main className="flex-1 overflow-hidden flex flex-col dot-grid-bg">
+          <main className="flex-1 overflow-hidden flex flex-col">
             {/* ==================== Opportunities ==================== */}
             {activeTab === 'opportunities' && (
               <div className="flex-1 section-enter overflow-y-auto">

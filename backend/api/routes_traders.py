@@ -48,6 +48,7 @@ from services.trader_orchestrator_state import (
     request_trader_run,
     set_trader_paused,
     sync_trader_position_inventory,
+    transfer_open_trades,
     update_trader,
 )
 from utils.converters import normalize_market_id, to_iso
@@ -165,6 +166,7 @@ class TraderDeleteAction(str, Enum):
     block = "block"
     disable = "disable"
     force_delete = "force_delete"
+    transfer_delete = "transfer_delete"
 
 
 class TraderPositionCleanupScope(str, Enum):
@@ -953,6 +955,7 @@ async def update_trader_route(
 async def delete_trader_route(
     trader_id: str,
     action: TraderDeleteAction = Query(default=TraderDeleteAction.block),
+    transfer_to_trader_id: Optional[str] = Query(default=None),
     session: AsyncSession = Depends(get_db_session),
 ):
     trader = await get_trader(session, trader_id)
@@ -1008,6 +1011,67 @@ async def delete_trader_route(
             "open_shadow_orders": open_shadow_orders,
             "open_other_orders": open_other_orders,
             "message": "Trader disabled and paused. Resolve active exposure before permanent deletion.",
+        }
+
+    if action == TraderDeleteAction.transfer_delete:
+        if not transfer_to_trader_id:
+            raise HTTPException(status_code=400, detail="transfer_to_trader_id is required for transfer_delete action")
+        if transfer_to_trader_id == trader_id:
+            raise HTTPException(status_code=400, detail="Cannot transfer trades to the same bot being deleted")
+        target_trader = await get_trader(session, transfer_to_trader_id)
+        if target_trader is None:
+            raise HTTPException(status_code=404, detail="Target trader not found")
+        transferred = await transfer_open_trades(session, trader_id, transfer_to_trader_id)
+        await create_trader_event(
+            session,
+            trader_id=transfer_to_trader_id,
+            event_type="trades_transferred_in",
+            severity="info",
+            source="operator",
+            message=f"Received {transferred['orders']} order(s) and {transferred['positions']} position(s) from deleted bot",
+            payload={
+                "from_trader_id": trader_id,
+                "orders_transferred": transferred["orders"],
+                "positions_transferred": transferred["positions"],
+            },
+        )
+        try:
+            ok = await delete_trader(session, trader_id, force=True)
+        except Exception as exc:
+            logger.error("delete_trader failed after transfer for %s: %s", trader_id, exc, exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to delete trader after transfer: {exc}")
+        if not ok:
+            raise HTTPException(status_code=404, detail="Trader not found after transfer")
+        await create_trader_event(
+            session,
+            trader_id=None,
+            event_type="trader_deleted",
+            severity="info",
+            source="operator",
+            message="Trader deleted with trades transferred",
+            payload={
+                "deleted_trader_id": trader_id,
+                "action": action.value,
+                "transfer_to_trader_id": transfer_to_trader_id,
+                "orders_transferred": transferred["orders"],
+                "positions_transferred": transferred["positions"],
+            },
+        )
+        return {
+            "status": "deleted",
+            "trader_id": trader_id,
+            "action": action.value,
+            "transfer_to_trader_id": transfer_to_trader_id,
+            "orders_transferred": transferred["orders"],
+            "positions_transferred": transferred["positions"],
+            "open_live_positions": 0,
+            "open_shadow_positions": 0,
+            "open_other_positions": 0,
+            "open_live_orders": 0,
+            "open_shadow_orders": 0,
+            "open_other_orders": 0,
+            "open_total_positions": 0,
+            "open_total_orders": 0,
         }
 
     if (
