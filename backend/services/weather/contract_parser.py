@@ -66,7 +66,7 @@ def _parse_date_from_question(question: str) -> Optional[datetime]:
             parsed = datetime.strptime(raw, fmt)
             if "%Y" not in fmt:
                 parsed = parsed.replace(year=now.year)
-            return parsed.replace(tzinfo=timezone.utc)
+            return parsed.replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
         except ValueError:
             continue
     return None

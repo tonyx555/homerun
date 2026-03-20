@@ -208,7 +208,9 @@ async def _search_markets(args: dict) -> dict:
         limit = args.get("limit", 10)
         active_only = args.get("active_only", True)
 
-        params: dict[str, Any] = {"limit": limit}
+        # Fetch more results for client-side filtering when a query is specified.
+        fetch_limit = max(limit * 5, 100) if query else limit
+        params: dict[str, Any] = {"limit": fetch_limit}
         if active_only:
             params["active"] = "true"
             params["closed"] = "false"
@@ -219,13 +221,18 @@ async def _search_markets(args: dict) -> dict:
             return {"error": f"Gamma API returned {resp.status_code}"}
 
         all_markets = resp.json()
-        # Client-side filter by query
-        query_lower = query.lower()
-        matched = [
-            m for m in all_markets
-            if query_lower in m.get("question", "").lower()
-            or query_lower in m.get("description", "").lower()
-        ][:limit]
+        # Client-side filter by query (each word must match)
+        if query:
+            query_words = query.lower().split()
+            matched = []
+            for m in all_markets:
+                text = (m.get("question", "") + " " + m.get("description", "")).lower()
+                if all(w in text for w in query_words):
+                    matched.append(m)
+                if len(matched) >= limit:
+                    break
+        else:
+            matched = all_markets[:limit]
 
         results = []
         for m in matched:
@@ -255,18 +262,21 @@ async def _get_market_details(args: dict) -> dict:
         resp = await client.get(f"{GAMMA_API_URL}/markets/{market_id}")
         if resp.status_code == 200:
             data = resp.json()
-        elif resp.status_code == 404:
-            # Try by condition_id
-            resp2 = await client.get(
-                f"{GAMMA_API_URL}/markets",
-                params={"condition_id": market_id, "limit": 1},
-            )
-            if resp2.status_code == 200 and resp2.json():
-                data = resp2.json()[0]
-            else:
-                return {"error": f"Market not found: {market_id}"}
         else:
-            return {"error": f"Gamma API returned {resp.status_code}"}
+            # Fallback: try by slug, then by condition_id
+            data = None
+            for param in ("slug", "condition_id"):
+                resp2 = await client.get(
+                    f"{GAMMA_API_URL}/markets",
+                    params={param: market_id, "limit": 1},
+                )
+                if resp2.status_code == 200:
+                    results = resp2.json()
+                    if results:
+                        data = results[0] if isinstance(results, list) else results
+                        break
+            if data is None:
+                return {"error": f"Market not found: {market_id}"}
 
         return {
             "question": data.get("question", ""),
@@ -290,9 +300,9 @@ async def _get_market_details(args: dict) -> dict:
 
 async def _get_live_prices(args: dict) -> dict:
     try:
-        from services.market_runtime import MarketRuntime
+        from services.market_runtime import get_market_runtime
 
-        runtime = MarketRuntime.instance()
+        runtime = get_market_runtime()
         if runtime is None:
             return {"error": "MarketRuntime not initialized"}
 
@@ -448,9 +458,9 @@ async def _get_market_regime(args: dict) -> dict:
 
 async def _get_active_markets_summary(args: dict) -> dict:
     try:
-        from services.market_runtime import MarketRuntime
+        from services.market_runtime import get_market_runtime
 
-        runtime = MarketRuntime.instance()
+        runtime = get_market_runtime()
         if runtime is None:
             return {"error": "MarketRuntime not initialized"}
 

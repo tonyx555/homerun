@@ -86,11 +86,13 @@ const TOOL_ICONS: Record<string, React.ElementType> = {
   get_market_regime: Brain,
   get_active_markets_summary: Globe,
   get_open_positions: Wallet,
+  get_open_orders: Wallet,
   get_trade_history: DollarSign,
   get_account_balance: Wallet,
   get_portfolio_performance: TrendingUp,
   place_order: Zap,
   cancel_order: XCircle,
+  cancel_all_orders: XCircle,
   search_news: Newspaper,
   get_news_edges: Newspaper,
   analyze_market_sentiment: Brain,
@@ -99,10 +101,37 @@ const TOOL_ICONS: Record<string, React.ElementType> = {
   fetch_webpage: Globe,
   get_system_status: Activity,
   get_settings: Wrench,
+  update_setting: Wrench,
   query_database: Database,
   list_strategies: Target,
   get_strategy_details: Target,
   get_strategy_performance: TrendingUp,
+  update_strategy_config: Wrench,
+  validate_strategy_code: CheckCircle,
+  run_strategy_backtest: Activity,
+  create_strategy: Zap,
+  get_wallet_profile: Wallet,
+  get_wallet_leaderboard: TrendingUp,
+  get_smart_pool_stats: BarChart3,
+  get_confluence_signals: Zap,
+  get_tracked_wallets: Wallet,
+  get_trader_groups: Target,
+  get_whale_clusters: TrendingUp,
+  get_active_signals: Zap,
+  get_recent_decisions: Brain,
+  get_trader_overview: BarChart3,
+  detect_anomalies: AlertTriangle,
+  get_cross_platform_arb: DollarSign,
+  get_llm_usage_stats: Activity,
+  get_data_sources: Database,
+  query_data_source: Database,
+  cortex_recall: Brain,
+  cortex_remember: Brain,
+  cortex_expire_memory: Brain,
+  cortex_get_fleet_status: Activity,
+  cortex_pause_trader: AlertTriangle,
+  cortex_enable_strategy: Target,
+  cortex_update_risk_clamps: Wrench,
 }
 
 const TOOL_LABELS: Record<string, string> = {
@@ -115,11 +144,13 @@ const TOOL_LABELS: Record<string, string> = {
   get_market_regime: 'Analyzing market regime',
   get_active_markets_summary: 'Summarizing active markets',
   get_open_positions: 'Loading positions',
+  get_open_orders: 'Loading open orders',
   get_trade_history: 'Fetching trade history',
   get_account_balance: 'Checking balance',
   get_portfolio_performance: 'Loading performance',
   place_order: 'Placing order',
   cancel_order: 'Cancelling order',
+  cancel_all_orders: 'Cancelling all orders',
   search_news: 'Searching news',
   get_news_edges: 'Finding news edges',
   analyze_market_sentiment: 'Analyzing sentiment',
@@ -128,10 +159,37 @@ const TOOL_LABELS: Record<string, string> = {
   fetch_webpage: 'Fetching webpage',
   get_system_status: 'Checking system status',
   get_settings: 'Loading settings',
+  update_setting: 'Updating setting',
   query_database: 'Querying database',
   list_strategies: 'Listing strategies',
   get_strategy_details: 'Loading strategy',
   get_strategy_performance: 'Checking performance',
+  update_strategy_config: 'Updating strategy config',
+  validate_strategy_code: 'Validating strategy',
+  run_strategy_backtest: 'Running backtest',
+  create_strategy: 'Creating strategy',
+  get_wallet_profile: 'Loading wallet profile',
+  get_wallet_leaderboard: 'Fetching leaderboard',
+  get_smart_pool_stats: 'Loading smart pool stats',
+  get_confluence_signals: 'Checking confluence signals',
+  get_tracked_wallets: 'Loading tracked wallets',
+  get_trader_groups: 'Fetching trader groups',
+  get_whale_clusters: 'Detecting whale clusters',
+  get_active_signals: 'Loading active signals',
+  get_recent_decisions: 'Fetching recent decisions',
+  get_trader_overview: 'Loading trader overview',
+  detect_anomalies: 'Detecting anomalies',
+  get_cross_platform_arb: 'Checking cross-platform arb',
+  get_llm_usage_stats: 'Loading LLM usage stats',
+  get_data_sources: 'Listing data sources',
+  query_data_source: 'Querying data source',
+  cortex_recall: 'Recalling from memory',
+  cortex_remember: 'Saving to memory',
+  cortex_expire_memory: 'Expiring memory',
+  cortex_get_fleet_status: 'Loading fleet status',
+  cortex_pause_trader: 'Pausing trader',
+  cortex_enable_strategy: 'Enabling strategy',
+  cortex_update_risk_clamps: 'Updating risk clamps',
 }
 
 export function ToolStartWidget({ tool, input }: ToolStartProps) {
@@ -207,6 +265,9 @@ export function ToolResultWidget({ tool, output }: ToolWidgetProps) {
   if (tool === 'list_strategies') return <StrategiesWidget data={output} />
   if (tool === 'get_portfolio_performance') return <PerformanceWidget data={output} />
   if (tool === 'check_orderbook') return <OrderbookWidget data={output} />
+  if (tool === 'get_trader_overview') return <TraderOverviewWidget data={output} />
+  if (tool === 'cortex_get_fleet_status') return <FleetStatusWidget data={output} />
+  if (tool === 'get_active_signals') return <SignalsWidget data={output} />
 
   // Generic fallback
   return <GenericResultWidget tool={tool} data={output} />
@@ -618,26 +679,171 @@ function OrderbookWidget({ data }: { data: Record<string, unknown> }) {
 }
 
 // ---------------------------------------------------------------------------
-// Generic fallback
+// Trader overview
 // ---------------------------------------------------------------------------
 
-function GenericResultWidget({ tool, data }: { tool: string; data: Record<string, unknown> }) {
-  const Icon = TOOL_ICONS[tool] || CheckCircle
-  const entries = Object.entries(data).filter(([, v]) => v !== null && v !== undefined)
-  const summary = entries.slice(0, 3).map(([k, v]) => {
-    const val = typeof v === 'object' ? (Array.isArray(v) ? `${v.length} items` : 'object') : String(v)
-    return `${k}: ${val.length > 30 ? val.slice(0, 30) + '...' : val}`
-  }).join(' | ')
+function TraderOverviewWidget({ data }: { data: Record<string, unknown> }) {
+  const traders = (data.traders as any[]) || []
+  const count = (data.count as number) || traders.length
+
+  if (count === 0) {
+    return <CompactResultCard icon={BarChart3} label="No traders found" color="amber" />
+  }
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 4 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="my-1.5 rounded-lg border border-border/30 bg-muted/10 overflow-hidden"
+    >
+      <div className="px-2.5 py-1.5 border-b border-border/20 flex items-center gap-2">
+        <BarChart3 className="w-3 h-3 text-cyan-400" />
+        <span className="text-[10px] font-medium text-muted-foreground">
+          {count} trader{count !== 1 ? 's' : ''}
+        </span>
+      </div>
+      {traders.slice(0, 6).map((t: any, i: number) => (
+        <div key={i} className="px-2.5 py-1.5 border-b border-border/10 last:border-0 flex items-center justify-between">
+          <span className="text-xs text-foreground/80 truncate flex-1 mr-2">
+            {t.name || t.id || `Trader ${i + 1}`}
+          </span>
+          <div className="flex items-center gap-2 shrink-0">
+            {t.status && (
+              <span className={cn('text-[10px]', t.status === 'active' ? 'text-emerald-400' : 'text-muted-foreground/50')}>
+                {t.status}
+              </span>
+            )}
+            {t.pnl !== undefined && (
+              <span className={cn('text-[10px] font-mono', Number(t.pnl) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                {Number(t.pnl) >= 0 ? '+' : ''}${Number(t.pnl).toFixed(2)}
+              </span>
+            )}
+            {t.open_positions !== undefined && (
+              <span className="text-[10px] text-muted-foreground/50">{t.open_positions} pos</span>
+            )}
+          </div>
+        </div>
+      ))}
+    </motion.div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Fleet status (cortex)
+// ---------------------------------------------------------------------------
+
+function FleetStatusWidget({ data }: { data: Record<string, unknown> }) {
+  const strategies = (data.strategies as any[]) || (data.active_strategies as any[]) || []
+
+  const items: { label: string; value: string; color: string }[] = []
+  if (data.total_traders !== undefined) items.push({ label: 'Traders', value: String(data.total_traders), color: 'cyan' })
+  if (data.active_traders !== undefined) items.push({ label: 'Active', value: String(data.active_traders), color: 'emerald' })
+  if (strategies.length) items.push({ label: 'Strategies', value: String(strategies.length), color: 'purple' })
+  if (data.total_pnl !== undefined) items.push({ label: 'PnL', value: `$${Number(data.total_pnl).toFixed(2)}`, color: Number(data.total_pnl) >= 0 ? 'emerald' : 'red' })
+
+  if (items.length === 0) {
+    // Fallback: summarize whatever keys we got
+    const keys = Object.keys(data).filter(k => k !== 'error')
+    return <CompactResultCard icon={Activity} label={`Fleet status: ${keys.length} fields`} color="cyan" />
+  }
 
   return (
     <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
-      className="my-1 flex items-center gap-2 py-1 px-2.5 rounded-lg bg-muted/20 border border-border/20"
+      className="my-1.5 flex flex-wrap gap-1.5"
     >
-      <Icon className="w-3 h-3 text-muted-foreground/60 shrink-0" />
-      <span className="text-[10px] text-muted-foreground/70 truncate">{tool.replace(/_/g, ' ')}: {summary}</span>
+      {items.map(({ label, value, color }) => (
+        <span key={label} className={cn(
+          'inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px]',
+          color === 'emerald' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' :
+          color === 'red' ? 'bg-red-500/10 text-red-400 border-red-500/20' :
+          color === 'cyan' ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20' :
+          color === 'purple' ? 'bg-purple-500/10 text-purple-400 border-purple-500/20' :
+          'bg-muted/30 text-muted-foreground/60 border-border/20'
+        )}>
+          {label}: <span className="font-mono font-bold">{value}</span>
+        </span>
+      ))}
     </motion.div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Active signals
+// ---------------------------------------------------------------------------
+
+function SignalsWidget({ data }: { data: Record<string, unknown> }) {
+  const signals = (data.signals as any[]) || []
+  const count = signals.length || (data.count as number) || 0
+
+  if (count === 0) {
+    return <CompactResultCard icon={Zap} label="No active signals" color="muted" />
+  }
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 4 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="my-1.5 rounded-lg border border-border/30 bg-muted/10 overflow-hidden"
+    >
+      <div className="px-2.5 py-1.5 border-b border-border/20 flex items-center gap-2">
+        <Zap className="w-3 h-3 text-amber-400" />
+        <span className="text-[10px] font-medium text-muted-foreground">
+          {count} active signal{count !== 1 ? 's' : ''}
+        </span>
+      </div>
+      {signals.slice(0, 5).map((s: any, i: number) => (
+        <div key={i} className="px-2.5 py-1.5 border-b border-border/10 last:border-0 flex items-center justify-between">
+          <span className="text-xs text-foreground/80 truncate flex-1 mr-2">
+            {s.type || s.signal_type || s.name || `Signal ${i + 1}`}
+          </span>
+          <div className="flex items-center gap-2 shrink-0">
+            {s.strength !== undefined && (
+              <span className={cn('text-[10px] font-mono font-bold',
+                Number(s.strength) > 0.7 ? 'text-emerald-400' :
+                Number(s.strength) > 0.4 ? 'text-amber-400' : 'text-muted-foreground/50'
+              )}>
+                {(Number(s.strength) * 100).toFixed(0)}%
+              </span>
+            )}
+            {s.market && <span className="text-[10px] text-muted-foreground/50 truncate max-w-[120px]">{s.market}</span>}
+          </div>
+        </div>
+      ))}
+    </motion.div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Generic fallback — compact summary
+// ---------------------------------------------------------------------------
+
+function GenericResultWidget({ tool, data }: { tool: string; data: Record<string, unknown> }) {
+  const Icon = TOOL_ICONS[tool] || CheckCircle
+  const label = TOOL_LABELS[tool] || tool.replace(/_/g, ' ')
+  const entries = Object.entries(data).filter(([, v]) => v !== null && v !== undefined)
+
+  // Build a smart summary: count arrays, show scalars
+  const parts: string[] = []
+  for (const [k, v] of entries.slice(0, 4)) {
+    if (Array.isArray(v)) {
+      parts.push(`${v.length} ${k}`)
+    } else if (typeof v === 'number') {
+      parts.push(`${k}: ${v}`)
+    } else if (typeof v === 'string' && v.length < 40) {
+      parts.push(`${k}: ${v}`)
+    } else if (typeof v === 'boolean') {
+      parts.push(`${k}: ${v ? 'yes' : 'no'}`)
+    }
+  }
+
+  return (
+    <CompactResultCard
+      icon={Icon}
+      label={parts.length > 0 ? `${label} — ${parts.join(', ')}` : `${label} complete`}
+      color="muted"
+    />
   )
 }
 

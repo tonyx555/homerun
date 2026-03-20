@@ -88,11 +88,10 @@ def build_tools() -> list:
 
 async def _place_order(args: dict) -> dict:
     try:
-        from services.trading_proxy import TradingProxy
+        from services.live_execution_service import live_execution_service
 
-        proxy = TradingProxy.instance()
-        if proxy is None:
-            return {"error": "TradingProxy not initialized — trading is not enabled"}
+        if not live_execution_service.is_ready():
+            return {"error": "Live execution not initialized — configure Polymarket credentials in Settings"}
 
         token_id = args["token_id"]
         side = args["side"].upper()
@@ -107,13 +106,22 @@ async def _place_order(args: dict) -> dict:
         if size <= 0:
             return {"error": f"Size must be positive, got {size}"}
 
-        result = await proxy.place_order(
+        from services.live_execution_service import OrderSide
+
+        order = await live_execution_service.place_order(
             token_id=token_id,
-            side=side,
+            side=OrderSide.BUY if side == "BUY" else OrderSide.SELL,
             price=price,
             size=size,
         )
-        return result if isinstance(result, dict) else {"result": result}
+        return {
+            "order_id": order.id,
+            "status": str(order.status),
+            "token_id": token_id,
+            "side": side,
+            "price": price,
+            "size": size,
+        }
     except Exception as exc:
         logger.error("place_order failed: %s", exc)
         return {"error": str(exc)}
@@ -121,15 +129,14 @@ async def _place_order(args: dict) -> dict:
 
 async def _cancel_order(args: dict) -> dict:
     try:
-        from services.trading_proxy import TradingProxy
+        from services.live_execution_service import live_execution_service
 
-        proxy = TradingProxy.instance()
-        if proxy is None:
-            return {"error": "TradingProxy not initialized"}
+        if not live_execution_service.is_ready():
+            return {"error": "Live execution not initialized — configure Polymarket credentials in Settings"}
 
         order_id = args["order_id"]
-        result = await proxy.cancel_order(order_id)
-        return result if isinstance(result, dict) else {"result": result, "order_id": order_id}
+        success = await live_execution_service.cancel_order(order_id)
+        return {"order_id": order_id, "cancelled": success}
     except Exception as exc:
         logger.error("cancel_order failed: %s", exc)
         return {"error": str(exc)}
@@ -137,13 +144,12 @@ async def _cancel_order(args: dict) -> dict:
 
 async def _cancel_all_orders(args: dict) -> dict:
     try:
-        from services.trading_proxy import TradingProxy
+        from services.live_execution_service import live_execution_service
 
-        proxy = TradingProxy.instance()
-        if proxy is None:
-            return {"error": "TradingProxy not initialized"}
+        if not live_execution_service.is_ready():
+            return {"error": "Live execution not initialized — configure Polymarket credentials in Settings"}
 
-        result = await proxy.cancel_all_orders()
+        result = await live_execution_service.cancel_all_orders()
         return result if isinstance(result, dict) else {"result": result}
     except Exception as exc:
         logger.error("cancel_all_orders failed: %s", exc)

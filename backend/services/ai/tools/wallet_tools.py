@@ -145,9 +145,7 @@ async def _get_wallet_profile(args: dict) -> dict:
     try:
         from services.wallet_discovery import WalletDiscoveryEngine
 
-        engine = WalletDiscoveryEngine.instance()
-        if engine is None:
-            return {"error": "WalletDiscoveryEngine not initialized"}
+        engine = WalletDiscoveryEngine()
 
         wallet = args["wallet_address"]
         profile = await engine.get_wallet_profile(wallet)
@@ -161,9 +159,7 @@ async def _get_wallet_leaderboard(args: dict) -> dict:
     try:
         from services.wallet_discovery import WalletDiscoveryEngine
 
-        engine = WalletDiscoveryEngine.instance()
-        if engine is None:
-            return {"error": "WalletDiscoveryEngine not initialized"}
+        engine = WalletDiscoveryEngine()
 
         category = args.get("category", "overall")
         time_period = args.get("time_period", "30d")

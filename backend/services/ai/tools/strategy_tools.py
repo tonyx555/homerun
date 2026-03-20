@@ -201,8 +201,8 @@ async def _list_strategies(args: dict) -> dict:
 
         # Also get runtime statuses
         try:
-            from services.strategy_loader import StrategyLoader
-            loader = StrategyLoader.instance()
+            from services.strategy_loader import strategy_loader
+            loader = strategy_loader
             if loader:
                 for s in strategies:
                     slug = s.get("slug") or s.get("id")
@@ -250,8 +250,8 @@ async def _get_strategy_details(args: dict) -> dict:
 
         # Runtime status
         try:
-            from services.strategy_loader import StrategyLoader
-            loader = StrategyLoader.instance()
+            from services.strategy_loader import strategy_loader
+            loader = strategy_loader
             if loader:
                 slug = detail.get("slug") or detail.get("id")
                 detail["runtime_status"] = loader.get_runtime_status(slug)
@@ -338,8 +338,8 @@ async def _update_strategy_config(args: dict) -> dict:
 
         # Hot-reload
         try:
-            from services.strategy_loader import StrategyLoader
-            loader = StrategyLoader.instance()
+            from services.strategy_loader import strategy_loader
+            loader = strategy_loader
             if loader:
                 await loader.reload_from_db(strategy_slug)
         except Exception as e:
@@ -357,12 +357,12 @@ async def _update_strategy_config(args: dict) -> dict:
 
 async def _validate_strategy_code(args: dict) -> dict:
     try:
-        from services.strategy_loader import StrategyLoader
+        from services.strategy_loader import strategy_loader
 
         source_code = args["source_code"]
         class_name = args.get("class_name")
 
-        loader = StrategyLoader.instance()
+        loader = strategy_loader
         if loader is None:
             # Fallback: basic AST validation
             import ast

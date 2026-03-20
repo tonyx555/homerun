@@ -724,7 +724,7 @@ export default function AIChatView() {
 
   // Auto-select latest session on first mount, or restore active session after tab switch
   const { data: sessionsData } = useQuery({
-    queryKey: ['ai-chat-sessions'],
+    queryKey: ['ai-chat-sessions', 'auto-select'],
     queryFn: () => listAIChatSessions({ limit: 1 }),
   })
 

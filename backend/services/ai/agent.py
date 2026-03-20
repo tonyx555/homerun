@@ -280,14 +280,14 @@ class Agent:
                     output_tokens=output_tokens,
                 )
 
-                if response.content:
-                    yield AgentEvent(
-                        type=AgentEventType.THINKING,
-                        data={"content": response.content},
-                    )
-
                 # --- Tool calls ---
                 if response.tool_calls:
+                    # Emit thinking text that accompanies tool calls
+                    if response.content:
+                        yield AgentEvent(
+                            type=AgentEventType.THINKING,
+                            data={"content": response.content},
+                        )
                     # Append the assistant's message (with tool_calls) to
                     # the conversation so the LLM sees its own request.
                     self._messages.append(
@@ -313,20 +313,70 @@ class Agent:
                     # Loop back for next iteration
                     continue
 
-                # --- No tool calls: final answer ---
+                # --- No tool calls: check if this is narration or final answer ---
+                if not response.content or not response.content.strip():
+                    # Empty response with no tool calls — nudge the LLM to answer
+                    logger.info(
+                        "Agent got empty response (iter %d), nudging for answer",
+                        iteration,
+                    )
+                    self._messages.append(
+                        LLMMessage(
+                            role="user",
+                            content="Please provide your answer based on the data gathered so far.",
+                        )
+                    )
+                    continue
+
                 if response.content:
+                    content = response.content.strip()
+                    # Heuristic: short text that reads like thinking/narration
+                    # rather than a complete answer — continue the loop so the
+                    # LLM can issue more tool calls in the next turn.
+                    lower = content.lower()
+                    _narration_signals = (
+                        content.endswith(":")
+                        or "let me " in lower
+                        or "i'll " in lower
+                        or "i will " in lower
+                        or lower.startswith("trying")
+                        or lower.startswith("looking")
+                        or lower.startswith("checking")
+                        or lower.startswith("searching")
+                    )
+                    is_narration = (
+                        iteration < self.max_iterations - 1
+                        and len(content) < 300
+                        and _narration_signals
+                    )
+                    if is_narration:
+                        logger.info(
+                            "Agent narration detected (iter %d), continuing: %s",
+                            iteration,
+                            content[:80],
+                        )
+                        # Emit as thinking so the user sees narration
+                        yield AgentEvent(
+                            type=AgentEventType.THINKING,
+                            data={"content": content},
+                        )
+                        self._messages.append(
+                            LLMMessage(role="assistant", content=content)
+                        )
+                        continue
+
                     yield AgentEvent(
                         type=AgentEventType.ANSWER_START,
-                        data={"content": response.content},
+                        data={"content": content},
                     )
 
                     await self._scratchpad.add_entry(
                         session_id=session_id,
                         entry_type="answer",
-                        output_data={"content": response.content},
+                        output_data={"content": content},
                     )
 
-                    result = {"answer": response.content}
+                    result = {"answer": content}
                     await self._scratchpad.complete_session(session_id=session_id, result=result)
 
                     yield AgentEvent(
@@ -530,7 +580,9 @@ class Agent:
             purpose=self.session_type,
         )
 
-        answer_text = final_response.content or ""
+        answer_text = (final_response.content or "").strip()
+        if not answer_text:
+            answer_text = "I gathered the data above but was unable to generate a summary. Please review the tool results directly."
         result = {"answer": answer_text, "max_iterations_reached": True}
 
         if answer_text:

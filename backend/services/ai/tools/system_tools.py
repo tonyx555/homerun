@@ -145,8 +145,8 @@ async def _get_system_status(args: dict) -> dict:
 
         # Market runtime
         try:
-            from services.market_runtime import MarketRuntime
-            runtime = MarketRuntime.instance()
+            from services.market_runtime import get_market_runtime
+            runtime = get_market_runtime()
             if runtime:
                 crypto_status = runtime.get_crypto_status()
                 status["market_runtime"] = {
@@ -160,10 +160,10 @@ async def _get_system_status(args: dict) -> dict:
 
         # WS feeds
         try:
-            from services.ws_feeds import WSFeedManager
-            ws = WSFeedManager.instance()
+            from services.ws_feeds import FeedManager
+            ws = FeedManager.get_instance()
             if ws:
-                status["ws_feeds"] = {"active": True, "connected": getattr(ws, "connected", None)}
+                status["ws_feeds"] = {"active": True, "started": getattr(ws, "_started", False)}
             else:
                 status["ws_feeds"] = {"active": False}
         except Exception as e:
@@ -171,10 +171,9 @@ async def _get_system_status(args: dict) -> dict:
 
         # Strategy loader
         try:
-            from services.strategy_loader import StrategyLoader
-            loader = StrategyLoader.instance()
-            if loader:
-                all_statuses = loader.get_all_statuses()
+            from services.strategy_loader import strategy_loader
+            if strategy_loader:
+                all_statuses = strategy_loader.get_all_statuses()
                 status["strategies"] = {
                     "loaded_count": len(all_statuses) if all_statuses else 0,
                 }

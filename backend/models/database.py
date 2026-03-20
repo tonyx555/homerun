@@ -3813,12 +3813,36 @@ def _run_alembic_upgrade(connection) -> None:
 
 
 async def init_database():
-    """Initialize database and apply Alembic migrations."""
+    """Initialize database and apply Alembic migrations.
+
+    Retries the initial connection up to 30 times (≈30s) to handle the
+    race where PostgreSQL is still starting when the backend launches.
+    """
+    import asyncio as _asyncio
+    import logging as _logging
+
+    _log = _logging.getLogger(__name__)
+
     from models.model_registry import register_all_models
 
     register_all_models()
-    async with async_engine.begin() as conn:
-        await conn.run_sync(_run_alembic_upgrade)
+
+    max_retries = 30
+    for attempt in range(max_retries):
+        try:
+            async with async_engine.begin() as conn:
+                await conn.run_sync(_run_alembic_upgrade)
+            return
+        except Exception as exc:
+            if attempt >= max_retries - 1:
+                raise
+            _log.warning(
+                "Database connection failed (attempt %d/%d), retrying in 1s: %s",
+                attempt + 1,
+                max_retries,
+                exc,
+            )
+            await _asyncio.sleep(1)
 
 
 async def get_db_session() -> AsyncSession:
