@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, type ChangeEvent } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
-  Bot,
   Bell,
   Database,
   RefreshCw,
@@ -20,6 +19,7 @@ import {
   Download,
   Upload,
   Wifi,
+  Search,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { Card, CardContent } from './ui/card'
@@ -33,19 +33,15 @@ import {
   getSettings,
   updateSettings,
   testTelegramConnection,
-  testLLMConnection,
   testTradingProxy,
   flushDatabaseData,
   getDatabaseMaintenanceStats,
   runVacuumAnalyze,
   runReindexTables,
-  getLLMModels,
-  refreshLLMModels,
   exportSettingsBundle,
   importSettingsBundle,
   runWorkerOnce,
   type DatabaseFlushTarget,
-  type LLMModelOption,
   type DiscoverySettings,
   type UILockSettings,
   type SettingsTransferCategory,
@@ -53,7 +49,7 @@ import {
 } from '../services/api'
 
 type SettingsSection =
-  | 'llm'
+  | 'search'
   | 'scanner'
   | 'notifications'
   | 'security'
@@ -214,24 +210,6 @@ export default function SettingsPanel({
   const [activeFlushTarget, setActiveFlushTarget] = useState<DatabaseFlushTarget | null>(null)
 
   // Form state for each section
-  const [llmForm, setLlmForm] = useState({
-    provider: 'none',
-    openai_api_key: '',
-    anthropic_api_key: '',
-    google_api_key: '',
-    xai_api_key: '',
-    deepseek_api_key: '',
-    ollama_api_key: '',
-    ollama_base_url: '',
-    lmstudio_api_key: '',
-    lmstudio_base_url: '',
-    model: '',
-    max_monthly_spend: 50.0
-  })
-
-  const [availableModels, setAvailableModels] = useState<Record<string, LLMModelOption[]>>({})
-  const [_isRefreshingModels, setIsRefreshingModels] = useState(false)
-
   const [notificationsForm, setNotificationsForm] = useState({
     enabled: false,
     telegram_bot_token: '',
@@ -299,6 +277,12 @@ export default function SettingsPanel({
     allow_network_access: false,
   })
 
+  const [searchForm, setSearchForm] = useState({
+    search_polymarket_enabled: true,
+    search_kalshi_enabled: false,
+    search_max_results: 50,
+  })
+
   const transferFileInputRef = useRef<HTMLInputElement | null>(null)
   const [transferCategories, setTransferCategories] = useState<Record<SettingsTransferCategory, boolean>>(() => {
     const initial: Record<SettingsTransferCategory, boolean> = {
@@ -332,21 +316,6 @@ export default function SettingsPanel({
   // Sync form state with loaded settings
   useEffect(() => {
     if (settings) {
-      setLlmForm({
-        provider: settings.llm?.provider || 'none',
-        openai_api_key: '',
-        anthropic_api_key: '',
-        google_api_key: '',
-        xai_api_key: '',
-        deepseek_api_key: '',
-        ollama_api_key: '',
-        ollama_base_url: settings.llm?.ollama_base_url || '',
-        lmstudio_api_key: '',
-        lmstudio_base_url: settings.llm?.lmstudio_base_url || '',
-        model: settings.llm?.model || '',
-        max_monthly_spend: settings.llm?.max_monthly_spend ?? 50.0
-      })
-
       setNotificationsForm({
         enabled: settings.notifications?.enabled ?? false,
         telegram_bot_token: '',
@@ -417,34 +386,15 @@ export default function SettingsPanel({
         allow_network_access: settings.network?.allow_network_access ?? false,
       })
 
+      setSearchForm({
+        search_polymarket_enabled: settings.search_filters?.search_polymarket_enabled ?? true,
+        search_kalshi_enabled: settings.search_filters?.search_kalshi_enabled ?? false,
+        search_max_results: settings.search_filters?.search_max_results ?? 50,
+      })
+
     }
   }, [settings])
 
-  // Load available models on mount
-  useEffect(() => {
-    getLLMModels().then(res => {
-      if (res.models) setAvailableModels(res.models)
-    }).catch(() => {})
-  }, [])
-
-  // LLM model refresh — moved to AI tab Providers subtab, kept for save handler compat
-  const _handleRefreshModels = async () => {
-    setIsRefreshingModels(true)
-    try {
-      const provider = llmForm.provider !== 'none' ? llmForm.provider : undefined
-      const res = await refreshLLMModels(provider)
-      if (res.models) setAvailableModels(res.models)
-    } catch {
-      // ignore
-    } finally {
-      setIsRefreshingModels(false)
-    }
-  }
-  void _handleRefreshModels // suppress unused warning
-
-  // Get models for the currently selected provider
-  const _modelsForProvider = availableModels[llmForm.provider] || []
-  void _modelsForProvider // suppress unused warning
 
   const saveMutation = useMutation({
     mutationFn: updateSettings,
@@ -470,11 +420,6 @@ export default function SettingsPanel({
   const testVpnMutation = useMutation({
     mutationFn: testTradingProxy,
   })
-
-  const _testLlmMutation = useMutation({
-    mutationFn: () => testLLMConnection(),
-  })
-  void _testLlmMutation // suppress unused — LLM config moved to AI tab
 
   const flushDataMutation = useMutation({
     mutationFn: (target: DatabaseFlushTarget) => flushDatabaseData(target),
@@ -671,21 +616,12 @@ export default function SettingsPanel({
     const updates: any = {}
 
     switch (section) {
-      case 'llm':
-        updates.llm = {
-          provider: llmForm.provider,
-          model: llmForm.model || null,
-          max_monthly_spend: llmForm.max_monthly_spend,
-          ollama_base_url: llmForm.ollama_base_url || null,
-          lmstudio_base_url: llmForm.lmstudio_base_url || null,
+      case 'search':
+        updates.search_filters = {
+          search_polymarket_enabled: searchForm.search_polymarket_enabled,
+          search_kalshi_enabled: searchForm.search_kalshi_enabled,
+          search_max_results: searchForm.search_max_results,
         }
-        if (llmForm.openai_api_key) updates.llm.openai_api_key = llmForm.openai_api_key
-        if (llmForm.anthropic_api_key) updates.llm.anthropic_api_key = llmForm.anthropic_api_key
-        if (llmForm.google_api_key) updates.llm.google_api_key = llmForm.google_api_key
-        if (llmForm.xai_api_key) updates.llm.xai_api_key = llmForm.xai_api_key
-        if (llmForm.deepseek_api_key) updates.llm.deepseek_api_key = llmForm.deepseek_api_key
-        if (llmForm.ollama_api_key) updates.llm.ollama_api_key = llmForm.ollama_api_key
-        if (llmForm.lmstudio_api_key) updates.llm.lmstudio_api_key = llmForm.lmstudio_api_key
         break
       case 'notifications':
         updates.notifications = {
@@ -808,8 +744,13 @@ export default function SettingsPanel({
   // Compute status summaries for each collapsed section
   const getSectionStatus = (id: SettingsSection): string => {
     switch (id) {
-      case 'llm':
-        return llmForm.provider !== 'none' ? `${llmForm.provider}` : 'Disabled'
+      case 'search': {
+        const platforms = [
+          searchForm.search_polymarket_enabled && 'Poly',
+          searchForm.search_kalshi_enabled && 'Kalshi',
+        ].filter(Boolean)
+        return platforms.length ? platforms.join(' + ') : 'Disabled'
+      }
       case 'notifications':
         return notificationsForm.enabled ? 'Enabled' : 'Disabled'
       case 'security':
@@ -835,8 +776,9 @@ export default function SettingsPanel({
 
   const getStatusColor = (id: SettingsSection): string => {
     switch (id) {
-      case 'llm':
-        return llmForm.provider !== 'none' ? 'text-purple-400 bg-purple-500/10' : 'text-muted-foreground bg-muted'
+      case 'search':
+        return (searchForm.search_polymarket_enabled || searchForm.search_kalshi_enabled)
+          ? 'text-orange-400 bg-orange-500/10' : 'text-muted-foreground bg-muted'
       case 'notifications':
         return notificationsForm.enabled ? 'text-blue-400 bg-blue-500/10' : 'text-muted-foreground bg-muted'
       case 'security':
@@ -861,7 +803,7 @@ export default function SettingsPanel({
   }
 
   const sections: { id: SettingsSection; icon: any; label: string; description: string }[] = [
-    { id: 'llm', icon: Bot, label: 'AI / LLM Services', description: 'Moved to AI tab → Providers & Models' },
+    { id: 'search', icon: Search, label: 'Search', description: 'Platforms, result limits' },
     { id: 'scanner', icon: Database, label: 'Scanner', description: 'Scan limits, thresholds, and pool caps' },
     { id: 'notifications', icon: Bell, label: 'Notifications', description: 'Telegram alerts' },
     { id: 'security', icon: Lock, label: 'UI Lock', description: 'Local screen lock and inactivity timeout' },
@@ -950,26 +892,57 @@ export default function SettingsPanel({
               >
                 <div className="p-4 pt-1 border-t border-border/30">
 
-                  {/* LLM Settings — redirects to AI tab */}
-                  {section.id === 'llm' && (
+                  {/* Search Settings */}
+                  {section.id === 'search' && (
                     <div className="space-y-4">
-                      <div className="rounded-lg border border-purple-500/20 bg-purple-500/5 p-4">
-                        <p className="text-sm text-foreground mb-2">
-                          AI provider and model configuration has moved to the <strong>AI tab</strong>.
-                        </p>
-                        <p className="text-xs text-muted-foreground mb-3">
-                          Use the <strong>Providers</strong> subtab to connect API keys and the <strong>Models</strong> subtab to assign models per feature.
-                        </p>
-                        <Button
-                          size="sm"
-                          className="h-8 gap-1.5 text-xs bg-purple-500/20 text-purple-300 border border-purple-500/30 hover:bg-purple-500/30"
-                          onClick={() => {
-                            window.dispatchEvent(new CustomEvent('navigate-to-tab', { detail: 'ai' }))
-                            window.dispatchEvent(new CustomEvent('navigate-ai-section', { detail: 'providers' }))
-                          }}
-                        >
-                          <Bot className="w-3.5 h-3.5" />
-                          Open AI Providers
+                      <Card className="bg-muted border-orange-500/30">
+                        <CardContent className="flex items-center justify-between p-3">
+                          <div>
+                            <p className="font-medium text-sm">Polymarket</p>
+                            <p className="text-xs text-muted-foreground">
+                              Native full-text search via Gamma API
+                            </p>
+                          </div>
+                          <Switch
+                            checked={searchForm.search_polymarket_enabled}
+                            onCheckedChange={(checked) => setSearchForm(p => ({ ...p, search_polymarket_enabled: checked }))}
+                          />
+                        </CardContent>
+                      </Card>
+
+                      <Card className="bg-muted border-orange-500/30">
+                        <CardContent className="flex items-center justify-between p-3">
+                          <div>
+                            <p className="font-medium text-sm">Kalshi</p>
+                            <p className="text-xs text-muted-foreground">
+                              Client-side filtering (slower, no native search API)
+                            </p>
+                          </div>
+                          <Switch
+                            checked={searchForm.search_kalshi_enabled}
+                            onCheckedChange={(checked) => setSearchForm(p => ({ ...p, search_kalshi_enabled: checked }))}
+                          />
+                        </CardContent>
+                      </Card>
+
+                      <div>
+                        <Label className="text-xs text-muted-foreground">Max Results</Label>
+                        <Input
+                          type="number"
+                          value={searchForm.search_max_results}
+                          onChange={(e) => setSearchForm(p => ({ ...p, search_max_results: Math.max(5, Math.min(200, parseInt(e.target.value) || 50)) }))}
+                          min={5}
+                          max={200}
+                          className="h-8 text-xs mt-1 w-32"
+                        />
+                      </div>
+
+                      <Separator className="opacity-30" />
+
+                      <div className="flex items-center gap-2">
+                        <Button size="sm" onClick={() => handleSaveSection('search')} disabled={saveMutation.isPending}>
+                          <Save className="w-3.5 h-3.5 mr-1.5" />
+                          Save
                         </Button>
                       </div>
                     </div>

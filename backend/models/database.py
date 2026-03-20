@@ -974,6 +974,8 @@ class AppSettings(Base):
     ai_max_monthly_spend = Column(Float, default=50.0)  # Monthly LLM cost cap
     ai_default_model = Column(String, default="gpt-4o-mini")  # Default model for AI tasks
     ai_premium_model = Column(String, default="gpt-4o")  # Model for high-value analysis
+    llm_model_assignments = Column(JSON, nullable=True)  # Per-purpose model overrides
+    llm_enabled_features = Column(JSON, nullable=True)  # Per-feature LLM enable/disable
 
     # Notification Settings
     telegram_bot_token = Column(String, nullable=True)
@@ -1053,6 +1055,11 @@ class AppSettings(Base):
     max_open_positions = Column(Integer, default=10)
     max_slippage_percent = Column(Float, default=2.0)
     min_account_balance_usd = Column(Float, default=0.0)
+
+    # Search Settings (which platforms to query, result limits)
+    search_polymarket_enabled = Column(Boolean, default=True)
+    search_kalshi_enabled = Column(Boolean, default=False)
+    search_max_results = Column(Integer, default=50)
 
     # Opportunity Search Filters (hard rejection thresholds)
     min_liquidity_hard = Column(Float, default=1000.0)
@@ -1275,6 +1282,17 @@ class AppSettings(Base):
     weather_workflow_max_size_usd = Column(Float, default=50.0)
     weather_workflow_model = Column(String, nullable=True)
     weather_workflow_temperature_unit = Column(String, default="F")
+
+    # Cortex Agent (autonomous fleet commander)
+    cortex_enabled = Column(Boolean, default=False)
+    cortex_model = Column(String, nullable=True)  # LLM model override; None = use ai_default_model
+    cortex_interval_seconds = Column(Integer, default=300)  # run every N seconds
+    cortex_max_iterations = Column(Integer, default=15)
+    cortex_temperature = Column(Float, default=0.1)
+    cortex_mandate = Column(Text, nullable=True)  # custom system prompt override
+    cortex_memory_limit = Column(Integer, default=20)  # max memories injected per run
+    cortex_write_actions_enabled = Column(Boolean, default=False)  # allow strategy/trader mutations
+    cortex_notify_telegram = Column(Boolean, default=False)  # send Telegram on actions
 
     # Timestamps
     created_at = Column(DateTime, default=_utcnow)
@@ -1844,6 +1862,63 @@ class LLMUsageLog(Base):
         Index("idx_llm_usage_time", "requested_at"),
         Index("idx_llm_usage_time_success", "requested_at", "success"),
         Index("idx_llm_usage_purpose", "purpose"),
+    )
+
+
+# ==================== CORTEX AGENT ====================
+
+
+class CortexMemory(Base):
+    """Persistent memory entry for the Cortex fleet commander agent.
+
+    Stores observations, lessons, rules, and preferences that the agent
+    accumulates over time to improve its fleet management decisions.
+    """
+
+    __tablename__ = "cortex_memory"
+
+    id = Column(String, primary_key=True, default=lambda: str(__import__("uuid").uuid4()))
+    category = Column(String, nullable=False, default="observation")  # observation, lesson, rule, preference
+    content = Column(Text, nullable=False)
+    context_json = Column(JSON, nullable=True)  # structured metadata at time of writing
+    importance = Column(Float, nullable=False, default=0.5)  # 0-1 relevance score
+    access_count = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    expired = Column(Boolean, nullable=False, default=False)
+
+    __table_args__ = (
+        Index("idx_cortex_memory_category", "category"),
+        Index("idx_cortex_memory_importance", "importance"),
+        Index("idx_cortex_memory_expired", "expired"),
+    )
+
+
+class CortexRunLog(Base):
+    """Full audit trail for every autonomous Cortex agent run.
+
+    Captures the complete reasoning trace, tool calls, actions taken,
+    learnings saved, and cost for each cycle.
+    """
+
+    __tablename__ = "cortex_run_log"
+
+    id = Column(String, primary_key=True, default=lambda: str(__import__("uuid").uuid4()))
+    started_at = Column(DateTime, default=_utcnow)
+    finished_at = Column(DateTime, nullable=True)
+    status = Column(String, nullable=False, default="running")  # running, completed, error, timeout
+    thinking_log = Column(Text, nullable=True)  # full reasoning trace
+    actions_taken = Column(JSON, nullable=True)  # [{tool, input, output}, ...]
+    learnings_saved = Column(JSON, nullable=True)  # [{id, category, content}, ...]
+    summary = Column(Text, nullable=True)  # agent's final summary
+    tokens_used = Column(Integer, nullable=True, default=0)
+    cost_usd = Column(Float, nullable=True, default=0.0)
+    model_used = Column(String, nullable=True)
+    trigger = Column(String, nullable=False, default="scheduled")  # scheduled, manual
+
+    __table_args__ = (
+        Index("idx_cortex_run_started", "started_at"),
+        Index("idx_cortex_run_status", "status"),
     )
 
 
@@ -3290,6 +3365,94 @@ class EventsSnapshot(Base):
     signals_json = Column(JSON, nullable=True)  # last batch of signals
     stats = Column(JSON, nullable=True)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+# ==================== DISCOVERY PROFILES ====================
+
+
+class DiscoveryProfileTombstone(Base):
+    """Permanent suppression records for seeded system discovery profiles."""
+
+    __tablename__ = "discovery_profile_tombstones"
+
+    slug = Column(String, primary_key=True)
+    deleted_at = Column(DateTime, default=_utcnow, nullable=False)
+    reason = Column(String, nullable=True)
+
+
+class DiscoveryProfile(Base):
+    """User-editable discovery scoring and pool selection profile.
+
+    Each row defines a Python class extending BaseDiscoveryProfile with
+    score_wallet() and select_pool() methods that control how wallets are
+    ranked and how the smart pool is populated.
+    """
+
+    __tablename__ = "discovery_profiles"
+
+    id = Column(String, primary_key=True)
+    slug = Column(String, unique=True, nullable=False)
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    source_code = Column(Text, nullable=False)
+    class_name = Column(String, nullable=True)
+    is_system = Column(Boolean, default=False, nullable=False)
+    enabled = Column(Boolean, default=True)
+    is_active = Column(Boolean, default=False, nullable=False)
+    status = Column(String, default="unloaded")  # unloaded, loaded, error
+    error_message = Column(Text, nullable=True)
+    config = Column(JSON, default=dict)
+    config_schema = Column(JSON, default=dict)
+    profile_kind = Column(String, default="python")  # python, form
+    version = Column(Integer, default=1)
+    sort_order = Column(Integer, default=0)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+    __table_args__ = (
+        Index("idx_discovery_profile_slug", "slug"),
+        Index("idx_discovery_profile_enabled", "enabled"),
+        Index("idx_discovery_profile_is_active", "is_active"),
+        Index("idx_discovery_profile_status", "status"),
+    )
+
+
+class DiscoveryProfileVersion(Base):
+    """Immutable discovery profile snapshots for versioned rollbacks."""
+
+    __tablename__ = "discovery_profile_versions"
+
+    id = Column(String, primary_key=True)
+    profile_id = Column(
+        String,
+        ForeignKey("discovery_profiles.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    profile_slug = Column(String, nullable=False, index=True)
+    version = Column(Integer, nullable=False)
+    is_latest = Column(Boolean, nullable=False, default=False)
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    source_code = Column(Text, nullable=False)
+    class_name = Column(String, nullable=True)
+    config = Column(JSON, default=dict)
+    config_schema = Column(JSON, default=dict)
+    profile_kind = Column(String, default="python")
+    enabled = Column(Boolean, default=True)
+    is_system = Column(Boolean, default=False, nullable=False)
+    sort_order = Column(Integer, default=0)
+    parent_version = Column(Integer, nullable=True)
+    created_by = Column(String, nullable=True)
+    reason = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("profile_id", "version", name="uq_discovery_profile_versions_profile_version"),
+        Index("idx_discovery_profile_versions_slug_version", "profile_slug", "version"),
+        Index("idx_discovery_profile_versions_profile_created", "profile_id", "created_at"),
+        Index("idx_discovery_profile_versions_latest", "profile_id", "is_latest"),
+    )
 
 
 # ==================== DATABASE SETUP ====================

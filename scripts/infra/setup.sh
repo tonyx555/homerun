@@ -5,6 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 POSTGRES_ONLY=0
+NO_BANNER=0
 PYTHON_MIN_MINOR=10
 PYTHON_MAX_MINOR=13
 for arg in "$@"; do
@@ -12,8 +13,83 @@ for arg in "$@"; do
         --postgres-only)
             POSTGRES_ONLY=1
             ;;
+        --no-banner)
+            NO_BANNER=1
+            ;;
     esac
 done
+
+# ── Colors ───────────────────────────────────────────────────────────
+
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+DARK_CYAN='\033[0;36m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+WHITE='\033[1;37m'
+DIM='\033[2m'
+NC='\033[0m'
+
+# ── Banner & UI Helpers ──────────────────────────────────────────────
+
+show_banner() {
+    echo ""
+    echo -e "${DARK_CYAN}    ██   ██  ██████  ███    ███ ███████ ██████  ██    ██ ███    ██${NC}"
+    echo -e "${DARK_CYAN}    ██   ██ ██    ██ ████  ████ ██      ██   ██ ██    ██ ████   ██${NC}"
+    echo -e "${CYAN}    ███████ ██    ██ ██ ████ ██ █████   ██████  ██    ██ ██ ██  ██${NC}"
+    echo -e "${CYAN}    ██   ██ ██    ██ ██  ██  ██ ██      ██   ██ ██    ██ ██  ██ ██${NC}"
+    echo -e "${WHITE}    ██   ██  ██████  ██      ██ ███████ ██   ██  ██████  ██   ████${NC}"
+    echo ""
+    echo -e "${DIM}                    Autonomous Trading Platform${NC}"
+    echo ""
+}
+
+STEP_NUM=0
+TOTAL_STEPS=8
+
+show_step() {
+    STEP_NUM=$((STEP_NUM + 1))
+    local text="$1"
+    local text_len=${#text}
+    local pad=$((46 - text_len))
+    [ "$pad" -lt 2 ] && pad=2
+    local dots
+    dots=$(printf '.%.0s' $(seq 1 "$pad"))
+    printf "    [%d/%d]  %s %s " "$STEP_NUM" "$TOTAL_STEPS" "$text" "$dots"
+}
+
+show_step_ok() {
+    local detail="${1:-}"
+    if [ -n "$detail" ]; then
+        echo -e "${GREEN}OK  ${detail}${NC}"
+    else
+        echo -e "${GREEN}OK${NC}"
+    fi
+}
+
+show_step_warn() {
+    local detail="${1:-}"
+    if [ -n "$detail" ]; then
+        echo -e "${YELLOW}!!  ${detail}${NC}"
+    else
+        echo -e "${YELLOW}!!${NC}"
+    fi
+}
+
+show_step_fail() {
+    local detail="${1:-}"
+    if [ -n "$detail" ]; then
+        echo -e "${RED}FAIL  ${detail}${NC}"
+    else
+        echo -e "${RED}FAIL${NC}"
+    fi
+}
+
+show_sub_info() {
+    echo -e "${DIM}             $1${NC}"
+}
+
+# ── Utility Functions ────────────────────────────────────────────────
 
 python_version_supported() {
     local python_cmd="$1"
@@ -32,7 +108,7 @@ find_supported_python() {
 }
 
 install_supported_python() {
-    echo "No supported Python 3.10-3.13 interpreter found. Attempting automatic install..."
+    show_sub_info "No Python 3.10-3.13 found. Attempting automatic install..."
 
     if command -v brew >/dev/null 2>&1; then
         brew install python@3.13 || brew install python@3.12 || brew install python@3.11
@@ -100,11 +176,15 @@ has_postgres_runtime() {
 
 ensure_postgres_runtime() {
     if has_postgres_runtime; then
-        echo "Postgres runtime prerequisite found (docker or initdb+pg_ctl)."
+        if command -v docker >/dev/null 2>&1; then
+            echo "docker"
+        else
+            echo "initdb+pg_ctl"
+        fi
         return 0
     fi
 
-    echo "Postgres runtime prerequisite missing. Attempting to install PostgreSQL tools..."
+    show_sub_info "Postgres runtime missing. Attempting to install PostgreSQL tools..."
     if command -v brew >/dev/null 2>&1; then
         if ! brew list postgresql@16 >/dev/null 2>&1 && ! brew list postgresql >/dev/null 2>&1; then
             brew install postgresql@16 || brew install postgresql
@@ -119,129 +199,146 @@ ensure_postgres_runtime() {
     elif command -v pacman >/dev/null 2>&1; then
         run_with_optional_sudo pacman -Sy --noconfirm postgresql
     else
-        echo "Error: no supported package manager found to install PostgreSQL."
-        echo "Install Docker or PostgreSQL tools (initdb + pg_ctl) manually, then rerun setup."
         return 1
     fi
 
     if has_postgres_runtime; then
-        echo "Postgres runtime prerequisite is now available."
+        echo "installed"
         return 0
     fi
 
-    echo "Error: automatic PostgreSQL installation completed but initdb/pg_ctl is still unavailable."
-    echo "Install Docker or PostgreSQL tools manually, then rerun setup."
     return 1
 }
 
-echo "========================================="
-echo "  Autonomous Prediction Market Trading Platform Setup"
-echo "========================================="
-echo ""
+# ── PostgresOnly Mode ────────────────────────────────────────────────
 
 if [ "$POSTGRES_ONLY" -eq 1 ]; then
-    ensure_postgres_runtime
+    pg_result="$(ensure_postgres_runtime 2>/dev/null || true)"
+    if [ -z "$pg_result" ]; then
+        echo "Error: no supported package manager found to install PostgreSQL."
+        echo "Install Docker or PostgreSQL tools (initdb + pg_ctl) manually, then rerun setup."
+        exit 1
+    fi
     exit 0
 fi
 
-# Check Python version
+# ── Main Setup Flow ─────────────────────────────────────────────────
+
+if [ "$NO_BANNER" -eq 0 ]; then
+    show_banner
+fi
+
+# ── Step 1: Detect Python ───────────────────────────────────────────
+
+show_step "Detecting Python"
+
 PYTHON_CMD="$(find_supported_python || true)"
 if [ -z "$PYTHON_CMD" ]; then
     install_supported_python || true
     PYTHON_CMD="$(find_supported_python || true)"
 fi
 if [ -z "$PYTHON_CMD" ]; then
-    echo "Error: Python 3.10-3.13 is required for full Homerun setup."
+    show_step_fail "Python 3.10-3.13 required"
     if command -v python3 >/dev/null 2>&1; then
-        echo "Detected python3: $(python3 -c 'import platform; print(platform.python_version())')"
+        show_sub_info "Detected: $(python3 -c 'import platform; print(platform.python_version())')"
     fi
-    echo "Install Python 3.12 or 3.11 (with venv support) and rerun setup."
+    show_sub_info "Install Python 3.12 or 3.11 (with venv support) and rerun setup."
     exit 1
 fi
 PYTHON_VERSION="$($PYTHON_CMD -c 'import platform; print(platform.python_version())')"
-echo "Found Python $PYTHON_VERSION via $PYTHON_CMD"
+show_step_ok "$PYTHON_VERSION ($PYTHON_CMD)"
 
-# Check Node.js
+# ── Step 2: Detect Node.js ──────────────────────────────────────────
+
+show_step "Detecting Node.js"
+
 if ! command -v node &> /dev/null; then
-    echo "Error: Node.js is required but not installed."
-    echo "On Mac: brew install node"
+    show_step_fail "not found"
+    show_sub_info "On Mac: brew install node"
     exit 1
 fi
 
 NODE_VERSION=$(node -v)
-echo "Found Node.js $NODE_VERSION"
+show_step_ok "$NODE_VERSION"
 
-# Setup backend
-echo ""
-echo "Setting up backend..."
+# ── Step 3: Backend environment ──────────────────────────────────────
+
+show_step "Preparing backend environment"
+
 cd backend
 
 if [ -d "venv" ]; then
     if [ ! -x "venv/bin/python" ]; then
-        echo "Existing backend/venv is missing Python. Recreating virtual environment..."
         rm -rf venv
     elif ! venv/bin/python -c "import sys; raise SystemExit(0 if sys.version_info.major == 3 and $PYTHON_MIN_MINOR <= sys.version_info.minor <= $PYTHON_MAX_MINOR else 1)" >/dev/null 2>&1; then
-        EXISTING_VENV_PYTHON_VERSION="$(venv/bin/python -c 'import platform; print(platform.python_version())' 2>/dev/null || echo "unknown")"
-        echo "Existing backend/venv uses unsupported Python $EXISTING_VENV_PYTHON_VERSION. Recreating virtual environment..."
         rm -rf venv
     fi
 fi
 
 if [ ! -d "venv" ]; then
-    echo "Creating Python virtual environment..."
     "$PYTHON_CMD" -m venv venv
 fi
 
-echo "Activating virtual environment..."
 source venv/bin/activate
 
 VENV_PYTHON_VERSION="$(python -c 'import platform; print(platform.python_version())')"
 if ! python -c "import sys; raise SystemExit(0 if sys.version_info.major == 3 and $PYTHON_MIN_MINOR <= sys.version_info.minor <= $PYTHON_MAX_MINOR else 1)" >/dev/null 2>&1; then
-    echo "Error: backend virtualenv uses Python $VENV_PYTHON_VERSION but 3.10-3.13 is required."
-    echo "Delete backend/venv and rerun setup."
+    cd ..
+    show_step_fail "venv Python $VENV_PYTHON_VERSION unsupported"
+    show_sub_info "Delete backend/venv and rerun setup."
     exit 1
 fi
 
-echo "Installing Python dependencies..."
+show_step_ok "venv ready"
+
+# ── Step 4: Python dependencies ──────────────────────────────────────
+
+show_step "Installing Python dependencies"
+
 PIP_USER=0 python -m pip install -q --no-user --upgrade pip
 PIP_USER=0 python -m pip install -q --no-user -r requirements.txt
 if ! python -c "import socksio" >/dev/null 2>&1; then
-    echo "Error: SOCKS5 proxy support dependency 'socksio' is missing after install."
-    echo "Run: python -m pip install --no-user \"httpx[socks]>=0.27.0,<1.0\""
+    show_step_fail "socksio missing"
+    show_sub_info "Run: python -m pip install --no-user \"httpx[socks]>=0.27.0,<1.0\""
     exit 1
 fi
 
 # Check for OpenSSL/LibreSSL compatibility and attempt fix
 SSL_LIB=$(python -c "import ssl; print(ssl.OPENSSL_VERSION)" 2>/dev/null || echo "unknown")
 if echo "$SSL_LIB" | grep -qi "libressl"; then
-    echo ""
-    echo "Detected $SSL_LIB (macOS default)."
-    echo "Installing pyopenssl for better SSL compatibility..."
-    PIP_USER=0 python -m pip install -q --no-user pyopenssl cryptography 2>/dev/null || echo "  (pyopenssl install skipped - non-critical)"
+    PIP_USER=0 python -m pip install -q --no-user pyopenssl cryptography 2>/dev/null || true
 fi
 
-echo "Installing trading dependencies..."
+show_step_ok
+
+# ── Step 5: Trading dependencies ─────────────────────────────────────
+
+show_step "Installing trading packages"
+
 PIP_USER=0 python -m pip install -q --no-user -r requirements-trading.txt
 if ! python -c "import py_clob_client, eth_account" >/dev/null 2>&1; then
-    echo "Error: trading dependencies are missing after install."
-    echo "Expected imports: py_clob_client, eth_account"
+    show_step_fail "trading imports missing"
+    show_sub_info "Expected: py_clob_client, eth_account"
     exit 1
 fi
 
 cd ..
+show_step_ok
 
-# Setup frontend
-echo ""
-echo "Setting up frontend..."
+# ── Step 6: Frontend dependencies ────────────────────────────────────
+
+show_step "Installing frontend packages"
+
 cd frontend
-
-echo "Installing Node.js dependencies..."
 npm install --silent 2>/dev/null || npm install
-
 cd ..
 
-echo ""
-echo "Setting up launcher tooling..."
+show_step_ok
+
+# ── Step 7: Launcher tooling ────────────────────────────────────────
+
+show_step "Setting up launcher tooling"
+
 export CXXFLAGS="${CXXFLAGS:-} -std=c++20"
 TOOLING_OK=0
 npm --prefix scripts/infra/tooling install --silent 2>/dev/null || npm --prefix scripts/infra/tooling install 2>/dev/null || true
@@ -250,20 +347,32 @@ if [ -d "scripts/infra/tooling/node_modules/tree-sitter" ]; then
 fi
 
 if [ "$TOOLING_OK" -eq 1 ]; then
-    echo "Verifying PowerShell launcher syntax..."
-    node scripts/infra/tooling/check_powershell_syntax.mjs scripts/infra/run.ps1 scripts/infra/setup.ps1 || echo "PowerShell syntax verification failed (non-fatal)."
+    if node scripts/infra/tooling/check_powershell_syntax.mjs scripts/infra/run.ps1 scripts/infra/setup.ps1 2>/dev/null; then
+        show_step_ok
+    else
+        show_step_warn "syntax check failed (non-fatal)"
+    fi
 else
-    echo "Launcher tooling install failed (native module build issue); skipping syntax check."
-    echo "This is non-fatal - the application will still run."
+    show_step_warn "skipped (non-fatal)"
 fi
 
-# Create data directory
+# ── Step 8: Postgres runtime ────────────────────────────────────────
+
 mkdir -p data
 
-echo "Ensuring Postgres runtime prerequisites..."
-ensure_postgres_runtime
+show_step "Verifying Postgres runtime"
 
-# Write setup fingerprint so run.sh can detect drift and auto-rerun setup.
+pg_result="$(ensure_postgres_runtime 2>/dev/null || true)"
+if [ -z "$pg_result" ]; then
+    show_step_fail "no runtime found"
+    show_sub_info "Install Docker or PostgreSQL tools (initdb + pg_ctl), then rerun setup."
+    exit 1
+fi
+
+show_step_ok "$pg_result"
+
+# ── Write setup fingerprint ─────────────────────────────────────────
+
 if [ -x "backend/venv/bin/python" ]; then
     FINGERPRINT_PY_VERSION="$(backend/venv/bin/python -c 'import platform; print(platform.python_version())')"
 else
@@ -299,26 +408,26 @@ stamp = {
 }
 
 (root / ".setup-stamp.json").write_text(json.dumps(stamp, indent=2), encoding="utf-8")
-print("Wrote .setup-stamp.json")
 PY
 
+# ── Completion ───────────────────────────────────────────────────────
+
 echo ""
-echo "========================================="
-echo "  Setup Complete!"
-echo "========================================="
+echo -e "${DIM}    ─────────────────────────────────────────────────────────────────${NC}"
 echo ""
-echo "To start the application, run:"
-echo "  ./scripts/infra/run.sh"
+echo -e "${GREEN}    Setup complete!${NC}"
 echo ""
-echo "Or run runtime validation only:"
-echo "  ./scripts/infra/run.sh --services-smoke-test"
+echo -e "${WHITE}    Start the application:${NC}"
+echo -e "${CYAN}      ./scripts/infra/run.sh${NC}"
 echo ""
-echo "Or start services individually:"
-echo "  Backend:  cd backend && source venv/bin/activate && uvicorn main:app --reload"
-echo "  Frontend: cd frontend && npm run dev"
+echo -e "${DIM}    Or start services individually:${NC}"
+echo -e "${DIM}      Backend:  cd backend && source venv/bin/activate && uvicorn main:app --reload${NC}"
+echo -e "${DIM}      Frontend: cd frontend && npm run dev${NC}"
 echo ""
-echo "The app will be available at:"
-echo "  Frontend: http://localhost:3000"
-echo "  Backend:  http://localhost:8000"
-echo "  API Docs: http://localhost:8000/docs"
+echo -e "${WHITE}    Endpoints:${NC}"
+echo -e "${CYAN}      Frontend  http://localhost:3000${NC}"
+echo -e "${CYAN}      Backend   http://localhost:8000${NC}"
+echo -e "${CYAN}      API Docs  http://localhost:8000/docs${NC}"
+echo ""
+echo -e "${DIM}    ─────────────────────────────────────────────────────────────────${NC}"
 echo ""

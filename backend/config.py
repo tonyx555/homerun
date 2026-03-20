@@ -55,6 +55,8 @@ class Settings(BaseSettings):
     WS_EXECUTION_PRICE_STALE_SECONDS: float = 10.0  # Trader execution staleness budget for cached WS prices
     EXECUTION_MARKET_DATA_MAX_AGE_MS: int = 10000  # Hard freshness gate before trader decisions (ms)
     WS_HEARTBEAT_INTERVAL: float = 5.0  # Ping interval to keep connection alive
+    WS_HEARTBEAT_PONG_TIMEOUT: float = 30.0  # Seconds to wait for pong before counting a miss
+    WS_HEARTBEAT_MAX_MISSES: int = 3  # Consecutive pong misses before closing connection
     WS_STRICT_CONTEXT_WARMUP_SECONDS: float = 0.75  # Strict context WS subscribe warmup before evaluation
     SCANNER_STRICT_WS_MAX_AGE_MS: int = 30000  # WS-only max age for scanner-source strict execution
 
@@ -297,10 +299,11 @@ class Settings(BaseSettings):
     REALTIME_SCAN_MAX_BATCH_MARKETS: int = 800  # Max affected markets evaluated per fast scan
     REALTIME_SCAN_HTTP_PRICE_FALLBACK_CAP: int = 200  # Max HTTP token lookups in reactive scans
     # Opportunity card sparkline history (longer-term trend, not tick-level noise)
-    SCANNER_SPARKLINE_WINDOW_HOURS: int = 24
+    SCANNER_SPARKLINE_WINDOW_HOURS: int = 6
     SCANNER_SPARKLINE_SAMPLE_SECONDS: int = 120
-    SCANNER_SPARKLINE_MAX_POINTS: int = 960
-    SCANNER_SPARKLINE_EXPORT_POINTS: int = 960
+    SCANNER_SPARKLINE_MAX_POINTS: int = 180
+    SCANNER_SPARKLINE_EXPORT_POINTS: int = 180
+    SCANNER_SPARKLINE_MAX_MARKETS: int = 500  # Hard cap on markets tracked in price history
     HOT_TIER_MAX_AGE_SECONDS: int = 300  # Markets younger than this = HOT
     WARM_TIER_MAX_AGE_SECONDS: int = 1800  # Markets younger than this = WARM
     COLD_TIER_UNCHANGED_CYCLES: int = 5  # Consecutive unchanged cycles before COLD

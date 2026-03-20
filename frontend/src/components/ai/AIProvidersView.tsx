@@ -294,7 +294,7 @@ export default function AIProvidersView() {
     saveMutation.mutate({
       llm: {
         provider: primaryProvider,
-        model: primaryModel || null,
+        model: primaryModel || '',
         max_monthly_spend: maxMonthlySpend,
       },
     })

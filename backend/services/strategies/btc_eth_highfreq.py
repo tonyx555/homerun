@@ -1403,10 +1403,6 @@ CRYPTO_HF_SCOPE_CONFIG_SCHEMA: dict[str, Any] = {
     ]
 }
 
-def crypto_highfreq_scope_defaults() -> dict[str, Any]:
-    return dict(CRYPTO_HF_SCOPE_DEFAULTS)
-
-
 def crypto_highfreq_scope_config_schema() -> dict[str, Any]:
     return dict(CRYPTO_HF_SCOPE_CONFIG_SCHEMA)
 
@@ -1421,7 +1417,7 @@ def crypto_highfreq_direction_allowed(
     seconds_left: Optional[float] = None,
 ) -> tuple[bool, str]:
     cfg = params if isinstance(params, dict) else {}
-    defaults = crypto_highfreq_scope_defaults()
+    defaults = CRYPTO_HF_SCOPE_DEFAULTS
     normalized_regime = str(regime or "").strip().lower()
     mode = str(active_mode or "").strip().lower()
     normalized_direction = str(direction or "").strip().lower()
@@ -2670,7 +2666,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         max_resolution_months=0.1,
     )
 
-    default_config = crypto_highfreq_scope_defaults()
+    default_config = dict(CRYPTO_HF_SCOPE_DEFAULTS)
 
     def __init__(self) -> None:
         super().__init__()
@@ -5547,7 +5543,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         state = market_state if isinstance(market_state, dict) else {}
         base_config = getattr(position, "config", None)
         config = dict(base_config) if isinstance(base_config, dict) else {}
-        defaults = crypto_highfreq_scope_defaults()
+        defaults = self.config
 
         strategy_context = getattr(position, "strategy_context", None)
         if isinstance(strategy_context, dict):
@@ -6643,7 +6639,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             self._paused_until_ms = 0
         else:
             self._consecutive_losses += 1
-            defaults = crypto_highfreq_scope_defaults()
+            defaults = self.config
             max_streak = max(
                 1,
                 int(to_float(defaults.get("max_consecutive_losses_before_pause"), 3.0)),
@@ -6662,7 +6658,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 )
 
     def _circuit_breaker_active(self) -> bool:
-        defaults = crypto_highfreq_scope_defaults()
+        defaults = self.config
         if not to_bool(defaults.get("consecutive_loss_pause_enabled"), True):
             return False
         if self._paused_until_ms <= 0:
@@ -6827,7 +6823,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             oracle_move_pct = abs(diff_pct)
 
             # Gate 1: Minimum oracle move — small moves are noise, not signal.
-            defaults = crypto_highfreq_scope_defaults()
+            defaults = self.config
             min_oracle_move = to_float(
                 _crypto_hf_param_value(defaults, "min_oracle_move_pct", timeframe),
                 2.5,

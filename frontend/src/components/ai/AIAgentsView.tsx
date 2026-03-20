@@ -19,7 +19,6 @@ import { Button } from '../ui/button'
 import { Input } from '../ui/input'
 import { Badge } from '../ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card'
-import { ScrollArea } from '../ui/scroll-area'
 import {
   listAgents,
   createAgent,
@@ -193,7 +192,7 @@ export default function AIAgentsView() {
   return (
     <div className="flex gap-4 h-full">
       {/* Agent List */}
-      <div className="w-72 shrink-0 flex flex-col">
+      <div className="w-72 max-w-72 shrink-0 flex flex-col overflow-hidden">
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-sm font-semibold text-foreground">Agents</h3>
           <Button
@@ -216,14 +215,14 @@ export default function AIAgentsView() {
             <p className="text-xs text-muted-foreground/50">No agents configured</p>
           </div>
         ) : (
-          <ScrollArea className="flex-1">
-            <div className="space-y-1.5 pr-2">
+          <div className="flex-1 overflow-y-auto overflow-x-hidden">
+            <div className="space-y-1.5 pr-1">
               {agents.map(agent => (
                 <button
                   key={agent.id}
                   onClick={() => handleSelectAgent(agent)}
                   className={cn(
-                    'w-full text-left p-3 rounded-lg border transition-colors',
+                    'w-full min-w-0 text-left p-3 rounded-lg border transition-colors overflow-hidden',
                     selectedAgentId === agent.id
                       ? 'bg-cyan-500/10 border-cyan-500/30'
                       : 'bg-background/30 border-border/55 hover:border-border/80'
@@ -263,7 +262,7 @@ export default function AIAgentsView() {
                 </button>
               ))}
             </div>
-          </ScrollArea>
+          </div>
         )}
       </div>
 
@@ -362,25 +361,40 @@ export default function AIAgentsView() {
                   <Wrench className="w-3 h-3 inline mr-1" />
                   Tools ({form.tools.length} selected)
                 </label>
-                <div className="grid grid-cols-2 lg:grid-cols-3 gap-1.5 max-h-48 overflow-y-auto rounded-lg border border-border/40 p-2">
-                  {availableTools.map(tool => {
-                    const isSelected = form.tools.includes(tool.name)
-                    return (
-                      <button
-                        key={tool.name}
-                        onClick={() => toggleTool(tool.name)}
-                        className={cn(
-                          'text-left p-2 rounded-md border transition-colors text-xs',
-                          isSelected
-                            ? 'bg-cyan-500/10 border-cyan-500/30 text-cyan-300'
-                            : 'bg-background/30 border-border/40 text-muted-foreground hover:border-border/80'
-                        )}
-                      >
-                        <p className="font-medium truncate">{tool.name}</p>
-                        <p className="text-[10px] text-muted-foreground truncate mt-0.5">{tool.description}</p>
-                      </button>
-                    )
-                  })}
+                <div className="max-h-64 overflow-y-auto rounded-lg border border-border/40 p-2 space-y-2">
+                  {(() => {
+                    const grouped: Record<string, typeof availableTools> = {}
+                    for (const tool of availableTools) {
+                      const cat = (tool as any).category || 'general'
+                      if (!grouped[cat]) grouped[cat] = []
+                      grouped[cat].push(tool)
+                    }
+                    return Object.entries(grouped).map(([cat, tools]) => (
+                      <div key={cat}>
+                        <p className="text-[9px] uppercase tracking-wider text-muted-foreground/60 mb-1 px-1">{cat.replace('_', ' ')}</p>
+                        <div className="grid grid-cols-2 lg:grid-cols-3 gap-1">
+                          {tools.map(tool => {
+                            const isSelected = form.tools.includes(tool.name)
+                            return (
+                              <button
+                                key={tool.name}
+                                onClick={() => toggleTool(tool.name)}
+                                className={cn(
+                                  'text-left p-1.5 rounded-md border transition-colors text-xs',
+                                  isSelected
+                                    ? 'bg-cyan-500/10 border-cyan-500/30 text-cyan-300'
+                                    : 'bg-background/30 border-border/40 text-muted-foreground hover:border-border/80'
+                                )}
+                              >
+                                <p className="font-medium truncate text-[11px]">{tool.name}</p>
+                                <p className="text-[9px] text-muted-foreground truncate mt-0.5">{tool.description}</p>
+                              </button>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    ))
+                  })()}
                   {availableTools.length === 0 && (
                     <p className="text-xs text-muted-foreground col-span-full py-2 text-center">No tools available</p>
                   )}

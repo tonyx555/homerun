@@ -1,9 +1,16 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ShoppingCart, ChevronDown, Check, AlertTriangle, Loader2, Bot } from 'lucide-react'
+import { ShoppingCart, Check, AlertTriangle, Loader2, Bot } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { getTraders, traderManualBuy, Opportunity, Trader } from '../services/api'
 import { Button } from './ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from './ui/dialog'
 
 interface BuyButtonProps {
   opportunity: Opportunity
@@ -13,7 +20,6 @@ interface BuyButtonProps {
 export default function BuyButton({ opportunity, className }: BuyButtonProps) {
   const [open, setOpen] = useState(false)
   const [result, setResult] = useState<{ success: boolean; message: string } | null>(null)
-  const ref = useRef<HTMLDivElement>(null)
   const queryClient = useQueryClient()
 
   const { data: traders = [] } = useQuery({
@@ -57,19 +63,10 @@ export default function BuyButton({ opportunity, className }: BuyButtonProps) {
     },
   })
 
-  useEffect(() => {
-    if (!open) return
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [open])
-
   const hasPositions = opportunity.positions_to_take && opportunity.positions_to_take.length > 0
 
   return (
-    <div ref={ref} className={cn('relative', className)}>
+    <div className={cn('relative', className)}>
       {result && (
         <div className={cn(
           'absolute bottom-full mb-1 left-0 right-0 rounded-md px-2 py-1 text-[10px] z-50 flex items-center gap-1',
@@ -83,7 +80,7 @@ export default function BuyButton({ opportunity, className }: BuyButtonProps) {
       )}
 
       <Button
-        onClick={(e) => { e.stopPropagation(); setOpen(!open) }}
+        onClick={(e) => { e.stopPropagation(); setOpen(true) }}
         disabled={!hasPositions || mutation.isPending}
         size="sm"
         className={cn(
@@ -98,49 +95,54 @@ export default function BuyButton({ opportunity, className }: BuyButtonProps) {
           <ShoppingCart className="w-3 h-3 mr-1.5" />
         )}
         Buy
-        <ChevronDown className={cn('w-3 h-3 ml-1 transition-transform', open && 'rotate-180')} />
       </Button>
 
-      {open && (
-        <div className="absolute top-full mt-1 left-0 right-0 z-[110] bg-popover border border-border rounded-lg shadow-xl shadow-black/30 overflow-hidden">
-          <div className="px-2 py-1.5 border-b border-border">
-            <p className="text-[10px] text-muted-foreground font-medium">Select a bot</p>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-w-sm p-0 gap-0">
+          <DialogHeader className="p-4 pb-0">
+            <DialogTitle className="text-sm">Buy Opportunity</DialogTitle>
+            <DialogDescription className="text-xs truncate">
+              {opportunity.title}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="p-2">
+            <p className="px-2 py-1.5 text-[10px] text-muted-foreground font-medium">Select a bot</p>
+            <div className="max-h-64 overflow-y-auto">
+              {enabledTraders.length === 0 ? (
+                <div className="px-3 py-6 text-center">
+                  <Bot className="w-6 h-6 mx-auto mb-2 text-muted-foreground/50" />
+                  <p className="text-xs text-muted-foreground">No enabled bots</p>
+                </div>
+              ) : (
+                enabledTraders.map((trader: Trader) => (
+                  <button
+                    key={trader.id}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      if (trader.mode === 'live') {
+                        if (!confirm(`Send LIVE buy order via "${trader.name}" with REAL MONEY?`)) return
+                      }
+                      mutation.mutate(trader.id)
+                    }}
+                    className="w-full px-3 py-2.5 text-left hover:bg-accent/50 transition-colors flex items-center gap-3 rounded-lg"
+                  >
+                    <div className={cn(
+                      'w-2 h-2 rounded-full flex-shrink-0',
+                      trader.mode === 'live' ? 'bg-green-400' : 'bg-amber-400'
+                    )} />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-foreground truncate">{trader.name}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {trader.mode === 'live' ? 'Live' : 'Shadow'}
+                      </p>
+                    </div>
+                  </button>
+                ))
+              )}
+            </div>
           </div>
-          <div className="max-h-48 overflow-y-auto">
-            {enabledTraders.length === 0 ? (
-              <div className="px-3 py-4 text-center">
-                <Bot className="w-5 h-5 mx-auto mb-1 text-muted-foreground/50" />
-                <p className="text-xs text-muted-foreground">No enabled bots</p>
-              </div>
-            ) : (
-              enabledTraders.map((trader: Trader) => (
-                <button
-                  key={trader.id}
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    if (trader.mode === 'live') {
-                      if (!confirm(`Send LIVE buy order via "${trader.name}" with REAL MONEY?`)) return
-                    }
-                    mutation.mutate(trader.id)
-                  }}
-                  className="w-full px-3 py-2 text-left hover:bg-accent/50 transition-colors flex items-center gap-2"
-                >
-                  <div className={cn(
-                    'w-1.5 h-1.5 rounded-full flex-shrink-0',
-                    trader.mode === 'live' ? 'bg-green-400' : 'bg-amber-400'
-                  )} />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs font-medium text-foreground truncate">{trader.name}</p>
-                    <p className="text-[10px] text-muted-foreground">
-                      {trader.mode === 'live' ? 'Live' : 'Shadow'}
-                    </p>
-                  </div>
-                </button>
-              ))
-            )}
-          </div>
-        </div>
-      )}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

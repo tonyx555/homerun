@@ -46,4 +46,4 @@ export const selectedLivePlatformAtom = atom((get) => {
 
 // AI Chat shared session state
 export const activeChatSessionIdAtom = atomWithStorage<string | null>('activeChatSessionId', null)
-export const aiTabSubtabAtom = atomWithStorage<'chat' | 'agents' | 'tools' | 'providers' | 'models' | 'activity' | 'system'>('aiTabSubtab', 'chat')
+export const aiTabSubtabAtom = atomWithStorage<'chat' | 'agents' | 'tools' | 'providers' | 'models' | 'activity'>('aiTabSubtab', 'chat')

@@ -55,8 +55,8 @@ const Card = defineComponent({
     return (
       <div className={cn('rounded-lg border p-4', cls)}>
         <div className="mb-2">
-          <h3 className="text-sm font-semibold text-white">{props.title}</h3>
-          {props.subtitle && <p className="text-xs text-white/50">{props.subtitle}</p>}
+          <h3 className="text-sm font-semibold text-foreground">{props.title}</h3>
+          {props.subtitle && <p className="text-xs text-foreground/50">{props.subtitle}</p>}
         </div>
         <div className="flex flex-col gap-2">
           {props.children.map((child, i) => <div key={i}>{renderNode(child)}</div>)}
@@ -89,10 +89,10 @@ const ScoreGauge = defineComponent({
       <div className="flex items-center gap-3">
         <div className="flex-1">
           <div className="flex items-center justify-between mb-1">
-            <span className="text-xs text-white/60">{props.label}</span>
+            <span className="text-xs text-foreground/60">{props.label}</span>
             <span className={cn('text-xs font-mono font-bold', textColor)}>{display}</span>
           </div>
-          <div className="h-1.5 rounded-full bg-white/10 overflow-hidden">
+          <div className="h-1.5 rounded-full bg-muted/40 overflow-hidden">
             <div
               className={cn('h-full rounded-full transition-all', color)}
               style={{ width: `${pct}%` }}
@@ -120,7 +120,7 @@ const Badge = defineComponent({
       warning: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
       danger: 'bg-red-500/20 text-red-400 border-red-500/30',
       info: 'bg-cyan-500/20 text-cyan-400 border-cyan-500/30',
-      neutral: 'bg-white/10 text-white/60 border-white/20',
+      neutral: 'bg-muted/40 text-foreground/60 border-border/40',
     }
     const cls = variants[props.variant || 'neutral'] || variants.neutral
     return (
@@ -144,8 +144,8 @@ const KeyValue = defineComponent({
   }),
   component: ({ props }: ComponentRenderProps<{ label: string; value: string; mono?: boolean }>) => (
     <div className="flex items-center justify-between py-1">
-      <span className="text-xs text-white/50">{props.label}</span>
-      <span className={cn('text-xs text-white/90', props.mono && 'font-mono')}>{props.value}</span>
+      <span className="text-xs text-foreground/50">{props.label}</span>
+      <span className={cn('text-xs text-foreground/90', props.mono && 'font-mono')}>{props.value}</span>
     </div>
   ),
 })
@@ -161,20 +161,20 @@ const DataTable = defineComponent({
     rows: z.array(z.array(z.string())),
   }),
   component: ({ props }: ComponentRenderProps<{ headers: string[]; rows: string[][] }>) => (
-    <div className="overflow-x-auto rounded border border-white/10">
+    <div className="overflow-x-auto rounded border border-border/30">
       <table className="w-full text-xs">
         <thead>
-          <tr className="border-b border-white/10 bg-white/5">
+          <tr className="border-b border-border/30 bg-muted/20">
             {props.headers.map((h: string, i: number) => (
-              <th key={i} className="px-3 py-1.5 text-left font-medium text-white/60">{h}</th>
+              <th key={i} className="px-3 py-1.5 text-left font-medium text-foreground/60">{h}</th>
             ))}
           </tr>
         </thead>
         <tbody>
           {props.rows.map((row: string[], ri: number) => (
-            <tr key={ri} className="border-b border-white/5 last:border-0">
+            <tr key={ri} className="border-b border-border/20 last:border-0">
               {row.map((cell: string, ci: number) => (
-                <td key={ci} className="px-3 py-1.5 text-white/80">{cell}</td>
+                <td key={ci} className="px-3 py-1.5 text-foreground/80">{cell}</td>
               ))}
             </tr>
           ))}
@@ -204,12 +204,12 @@ const SentimentBar = defineComponent({
     return (
       <div>
         <div className="flex items-center justify-between mb-1">
-          <span className="text-xs text-white/60">{props.label}</span>
+          <span className="text-xs text-foreground/60">{props.label}</span>
           <span className={cn('text-xs font-bold', sentimentColor)}>
             {sentimentLabel} ({props.score > 0 ? '+' : ''}{props.score.toFixed(2)})
           </span>
         </div>
-        <div className="relative h-2 rounded-full bg-white/10 overflow-hidden">
+        <div className="relative h-2 rounded-full bg-muted/40 overflow-hidden">
           <div className="absolute inset-0 flex">
             <div className="w-1/2 bg-red-500/20" />
             <div className="w-1/2 bg-emerald-500/20" />
@@ -220,7 +220,7 @@ const SentimentBar = defineComponent({
           />
         </div>
         {props.confidence !== undefined && (
-          <p className="text-[10px] text-white/40 mt-0.5">
+          <p className="text-[10px] text-foreground/40 mt-0.5">
             Confidence: {Math.round(props.confidence * 100)}%
           </p>
         )}
@@ -245,24 +245,24 @@ const MarketCard = defineComponent({
   }),
   component: ({ props }: ComponentRenderProps<{ question: string; yesPrice: number; noPrice: number; volume?: string; liquidity?: string; platform?: string }>) => (
     <div className="rounded-lg border border-purple-500/20 bg-purple-500/5 p-3">
-      <p className="text-xs font-medium text-white mb-2">{props.question}</p>
+      <p className="text-xs font-medium text-foreground mb-2">{props.question}</p>
       <div className="flex gap-4 mb-2">
         <div className="flex items-center gap-1.5">
           <div className="w-2 h-2 rounded-full bg-emerald-500" />
-          <span className="text-xs text-white/60">YES</span>
+          <span className="text-xs text-foreground/60">YES</span>
           <span className="text-xs font-mono font-bold text-emerald-400">
             {(props.yesPrice * 100).toFixed(0)}¢
           </span>
         </div>
         <div className="flex items-center gap-1.5">
           <div className="w-2 h-2 rounded-full bg-red-500" />
-          <span className="text-xs text-white/60">NO</span>
+          <span className="text-xs text-foreground/60">NO</span>
           <span className="text-xs font-mono font-bold text-red-400">
             {(props.noPrice * 100).toFixed(0)}¢
           </span>
         </div>
       </div>
-      <div className="flex gap-3 text-[10px] text-white/40">
+      <div className="flex gap-3 text-[10px] text-foreground/40">
         {props.volume && <span>Vol: {props.volume}</span>}
         {props.liquidity && <span>Liq: {props.liquidity}</span>}
         {props.platform && <span>{props.platform}</span>}
@@ -303,7 +303,7 @@ const Recommendation = defineComponent({
             {props.verdict.replace(/_/g, ' ')}
           </span>
         </div>
-        <p className="text-xs text-white/70 leading-relaxed">{props.reasoning}</p>
+        <p className="text-xs text-foreground/70 leading-relaxed">{props.reasoning}</p>
       </div>
     )
   },
@@ -322,7 +322,7 @@ const BulletList = defineComponent({
   component: ({ props }: ComponentRenderProps<{ items: string[]; ordered?: boolean }>) => {
     const Tag = props.ordered ? 'ol' : 'ul'
     return (
-      <Tag className={cn('text-xs text-white/70 space-y-1 pl-4', props.ordered ? 'list-decimal' : 'list-disc')}>
+      <Tag className={cn('text-xs text-foreground/70 space-y-1 pl-4', props.ordered ? 'list-decimal' : 'list-disc')}>
         {props.items.map((item: string, i: number) => (
           <li key={i}>{item}</li>
         ))}
@@ -343,10 +343,10 @@ const TextBlock = defineComponent({
   }),
   component: ({ props }: ComponentRenderProps<{ text: string; variant?: string }>) => {
     const styles: Record<string, string> = {
-      body: 'text-xs text-white/70 leading-relaxed',
-      heading: 'text-sm font-semibold text-white',
-      caption: 'text-[10px] text-white/40',
-      code: 'text-xs font-mono text-cyan-300 bg-white/5 px-2 py-1 rounded',
+      body: 'text-xs text-foreground/70 leading-relaxed',
+      heading: 'text-sm font-semibold text-foreground',
+      caption: 'text-[10px] text-foreground/40',
+      code: 'text-xs font-mono text-cyan-300 bg-muted/20 px-2 py-1 rounded',
     }
     return <p className={styles[props.variant || 'body'] || styles.body}>{props.text}</p>
   },

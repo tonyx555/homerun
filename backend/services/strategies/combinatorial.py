@@ -382,6 +382,7 @@ class DependencyValidator:
 
     def __init__(self, accuracy_tracker: Optional[DependencyAccuracyTracker] = None):
         self.accuracy_tracker = accuracy_tracker or DependencyAccuracyTracker()
+        self._contradiction_warned: set[tuple[str, str]] = set()
 
     # -- Public API ----------------------------------------------------------
 
@@ -433,11 +434,16 @@ class DependencyValidator:
         has_contradictions = len(contradictions) > 0
 
         if has_contradictions:
-            logger.warning(
-                f"Dependency contradictions detected between "
-                f"'{market_a_question[:40]}' and '{market_b_question[:40]}': "
-                f"{contradictions}"
-            )
+            pair_key = (market_a_question[:40], market_b_question[:40])
+            if pair_key not in self._contradiction_warned:
+                if len(self._contradiction_warned) > 500:
+                    self._contradiction_warned.clear()
+                self._contradiction_warned.add(pair_key)
+                logger.warning(
+                    f"Dependency contradictions detected between "
+                    f"'{pair_key[0]}' and '{pair_key[1]}': "
+                    f"{contradictions}"
+                )
             return [], 0.0, "REJECT"
 
         # Step 6: Filter to structurally valid dependencies only

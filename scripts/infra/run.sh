@@ -7,7 +7,10 @@ cd "$(dirname "$0")/../.."
 # Colors
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
+DARK_CYAN='\033[0;36m'
 YELLOW='\033[1;33m'
+WHITE='\033[1;37m'
+DIM='\033[2m'
 NC='\033[0m' # No Color
 
 RUN_SERVICE_SMOKE_TEST=0
@@ -365,7 +368,7 @@ cleanup_started_services() {
 
 auto_update_repository() {
     if ! command -v git >/dev/null 2>&1; then
-        echo -e "${YELLOW}Git is not installed; skipping repository auto-update.${NC}"
+        echo -e "${DIM}    Git not installed; skipping auto-update.${NC}"
         return 0
     fi
 
@@ -376,14 +379,14 @@ auto_update_repository() {
     local branch
     branch="$(git branch --show-current 2>/dev/null || true)"
     if [ -z "$branch" ]; then
-        echo -e "${YELLOW}Detached HEAD detected; skipping repository auto-update.${NC}"
+        echo -e "${DIM}    Detached HEAD; skipping auto-update.${NC}"
         return 0
     fi
 
     local dirty
     dirty="$(git status --porcelain --untracked-files=no 2>/dev/null || true)"
     if [ -n "$dirty" ]; then
-        echo -e "${YELLOW}Local tracked changes detected; skipping repository auto-update.${NC}"
+        echo -e "${DIM}    Local changes detected; skipping auto-update.${NC}"
         return 0
     fi
 
@@ -399,28 +402,28 @@ auto_update_repository() {
         remote_branch="${upstream#*/}"
     else
         if ! git show-ref --verify --quiet "refs/remotes/${remote_name}/${remote_branch}"; then
-            echo -e "${YELLOW}No upstream branch configured for '${branch}'; skipping repository auto-update.${NC}"
+            echo -e "${DIM}    No upstream for '${branch}'; skipping auto-update.${NC}"
             return 0
         fi
     fi
 
-    echo -e "${CYAN}Checking for code updates from ${remote_name}/${remote_branch}...${NC}"
+    echo -e "${DIM}    Checking for updates from ${remote_name}/${remote_branch}...${NC}"
     if ! git -c credential.interactive=never fetch --quiet "$remote_name" "$remote_branch" >/dev/null 2>&1; then
-        echo -e "${YELLOW}Unable to fetch updates; continuing with local copy.${NC}"
+        echo -e "${DIM}    Unable to fetch; continuing with local copy.${NC}"
         return 0
     fi
 
     local pull_output
     if pull_output="$(git -c credential.interactive=never pull --ff-only --no-rebase "$remote_name" "$remote_branch" 2>&1)"; then
         if echo "$pull_output" | grep -Eq "Already up[ -]to date\\."; then
-            echo -e "${GREEN}Code is up to date.${NC}"
+            echo -e "${DIM}    Code is up to date.${NC}"
         else
-            echo -e "${GREEN}Code updated from ${remote_name}/${remote_branch}.${NC}"
+            echo -e "${GREEN}    Code updated from ${remote_name}/${remote_branch}.${NC}"
         fi
         return 0
     fi
 
-    echo -e "${YELLOW}Auto-update skipped (non fast-forward or local commits). Continuing with local copy.${NC}"
+    echo -e "${DIM}    Auto-update skipped (non-ff). Continuing with local copy.${NC}"
     return 0
 }
 
@@ -495,11 +498,24 @@ sys.exit(1)
 PY
 }
 
+# Show banner before any pre-flight output
+echo ""
+echo -e "${DARK_CYAN}    ██   ██  ██████  ███    ███ ███████ ██████  ██    ██ ███    ██${NC}"
+echo -e "${DARK_CYAN}    ██   ██ ██    ██ ████  ████ ██      ██   ██ ██    ██ ████   ██${NC}"
+echo -e "${CYAN}    ███████ ██    ██ ██ ████ ██ █████   ██████  ██    ██ ██ ██  ██${NC}"
+echo -e "${CYAN}    ██   ██ ██    ██ ██  ██  ██ ██      ██   ██ ██    ██ ██  ██ ██${NC}"
+echo -e "${WHITE}    ██   ██  ██████  ██      ██ ███████ ██   ██  ██████  ██   ████${NC}"
+echo ""
+echo -e "${DIM}                    Autonomous Trading Platform${NC}"
+echo -e "${DIM}    ─────────────────────────────────────────────────────────────────${NC}"
+echo ""
+
 auto_update_repository
 
 if needs_setup; then
-    echo -e "${YELLOW}Setup missing or stale. Running setup...${NC}"
-    ./scripts/infra/setup.sh
+    echo -e "${YELLOW}    Setup needed — running now...${NC}"
+    echo ""
+    ./scripts/infra/setup.sh --no-banner
 fi
 
 # Kill orphaned workers from a previous crashed run before starting services.

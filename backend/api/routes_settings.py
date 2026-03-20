@@ -77,6 +77,8 @@ class KalshiSettings(BaseModel):
 class LLMSettings(BaseModel):
     """LLM service configuration"""
 
+    model_config = {"protected_namespaces": ()}
+
     provider: str = Field(
         default="none",
         description="LLM provider: none, openai, anthropic, google, xai, deepseek, ollama, lmstudio",
@@ -610,6 +612,11 @@ class EventsSettings(BaseModel):
 
 class SearchFilterSettings(BaseModel):
     """Opportunity search filter thresholds — controls which opportunities are shown"""
+
+    # Search platform toggles & limits
+    search_polymarket_enabled: bool = Field(default=True, description="Include Polymarket in search results")
+    search_kalshi_enabled: bool = Field(default=False, description="Include Kalshi in search results")
+    search_max_results: int = Field(default=50, ge=5, le=200, description="Maximum search results to return")
 
     # Hard rejection filters
     min_liquidity_hard: float = Field(default=1000.0, ge=0, description="Hard reject below this liquidity ($)")

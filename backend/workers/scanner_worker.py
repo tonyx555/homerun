@@ -23,6 +23,8 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 os.environ.setdefault("NEWS_FAISS_THREADS", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("EMBEDDING_DEVICE", "cpu")
+os.environ.setdefault("TQDM_DISABLE", "1")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
 from sqlalchemy.exc import DBAPIError
 
@@ -303,6 +305,7 @@ async def _run_scan_loop() -> None:
     heartbeat_stop_event = asyncio.Event()
 
     async def _heartbeat_loop() -> None:
+        _mem_warn_threshold_mb = 1500
         while not heartbeat_stop_event.is_set():
             try:
                 status = scanner.get_status()
@@ -343,6 +346,58 @@ async def _run_scan_loop() -> None:
                             "heavy_lane_degraded_reason": heartbeat_state.get("heavy_lane_degraded_reason"),
                         },
                         publish_event=False,
+                    )
+
+                # Process memory + scanner data structure monitoring
+                try:
+                    import resource as _resource
+                    rss_mb = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss / 1024
+                except Exception:
+                    try:
+                        import ctypes
+                        import ctypes.wintypes
+                        _k32 = ctypes.windll.kernel32
+                        class _PMC(ctypes.Structure):
+                            _fields_ = [
+                                ("cb", ctypes.wintypes.DWORD),
+                                ("PageFaultCount", ctypes.wintypes.DWORD),
+                                ("PeakWorkingSetSize", ctypes.c_size_t),
+                                ("WorkingSetSize", ctypes.c_size_t),
+                                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                                ("PagefileUsage", ctypes.c_size_t),
+                                ("PeakPagefileUsage", ctypes.c_size_t),
+                            ]
+                        _psapi = ctypes.windll.psapi
+                        pmc = _PMC()
+                        pmc.cb = ctypes.sizeof(_PMC)
+                        handle = _k32.GetCurrentProcess()
+                        if _psapi.GetProcessMemoryInfo(handle, ctypes.byref(pmc), pmc.cb):
+                            rss_mb = pmc.WorkingSetSize / (1024 * 1024)
+                        else:
+                            rss_mb = 0
+                    except Exception:
+                        rss_mb = 0
+
+                mem_stats = scanner.get_memory_stats()
+                if rss_mb > _mem_warn_threshold_mb:
+                    logger.warning(
+                        "Scanner process memory high",
+                        rss_mb=round(rss_mb),
+                        price_history_markets=mem_stats["price_history_markets"],
+                        price_history_points=mem_stats["price_history_points"],
+                        cached_markets=mem_stats["cached_markets"],
+                        cached_prices=mem_stats["cached_prices"],
+                        opportunity_market_ids=mem_stats["opportunity_market_ids"],
+                    )
+                else:
+                    logger.debug(
+                        "Scanner memory stats",
+                        rss_mb=round(rss_mb),
+                        price_history_markets=mem_stats["price_history_markets"],
+                        price_history_points=mem_stats["price_history_points"],
                     )
             except Exception as exc:
                 heartbeat_state["last_error"] = str(exc)

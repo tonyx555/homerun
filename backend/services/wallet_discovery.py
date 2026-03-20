@@ -1396,6 +1396,51 @@ class WalletDiscoveryEngine:
             closed_positions,
         )
 
+        # If a custom discovery profile is active, delegate scoring to it.
+        try:
+            from services.discovery_profile_loader import discovery_profile_loader
+
+            active_profile = discovery_profile_loader.get_active_instance()
+            if active_profile is not None:
+                wallet_dict = {
+                    "address": address,
+                    "total_trades": stats["total_trades"],
+                    "wins": stats["wins"],
+                    "losses": stats["losses"],
+                    "win_rate": stats["win_rate"],
+                    "total_pnl": stats["total_pnl"],
+                    "avg_roi": stats["avg_roi"],
+                    "sharpe_ratio": risk_metrics.get("sharpe_ratio"),
+                    "sortino_ratio": risk_metrics.get("sortino_ratio"),
+                    "max_drawdown": risk_metrics.get("max_drawdown"),
+                    "profit_factor": risk_metrics.get("profit_factor"),
+                    "calmar_ratio": risk_metrics.get("calmar_ratio"),
+                    "anomaly_score": classification.get("anomaly_score", 0.0),
+                    "is_bot": classification.get("is_bot", False),
+                    "trades_per_day": stats.get("trades_per_day", 0.0),
+                    "days_active": stats.get("days_active", 0),
+                    "timing_skill_composite": timing_skill.get("timing_skill_composite", 0.5),
+                    "execution_quality_score": execution_quality.get("execution_quality_score", 0.5),
+                    "roi_std": stats.get("roi_std", 0.0),
+                    "cluster_id": None,
+                }
+                rolling_dict = {
+                    "rolling_pnl": rolling.get("rolling_pnl", {}),
+                    "rolling_roi": rolling.get("rolling_roi", {}),
+                    "rolling_win_rate": rolling.get("rolling_win_rate", {}),
+                    "rolling_trade_count": rolling.get("rolling_trade_count", {}),
+                }
+                profile_result = active_profile.score_wallet(wallet_dict, trades, rolling_dict)
+                if isinstance(profile_result, dict):
+                    if "rank_score" in profile_result:
+                        rank_score = float(profile_result["rank_score"])
+                    if "tags" in profile_result and isinstance(profile_result["tags"], list):
+                        classification["tags"] = profile_result["tags"]
+                    if "recommendation" in profile_result:
+                        classification["recommendation"] = str(profile_result["recommendation"])
+        except Exception as exc:
+            logger.debug("Discovery profile scoring skipped: %s", exc)
+
         username = profile.get("username") if profile else None
 
         return {

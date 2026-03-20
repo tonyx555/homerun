@@ -311,31 +311,14 @@ end tell
 
 
 def _resize_windows_terminal_window_to_quarter_screen() -> bool:
+    """Maximize the terminal window on Windows."""
     if sys.platform != "win32":
         return False
     try:
-        import ctypes.wintypes
-
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
 
-        class RECT(ctypes.Structure):
-            _fields_ = [
-                ("left", ctypes.c_long),
-                ("top", ctypes.c_long),
-                ("right", ctypes.c_long),
-                ("bottom", ctypes.c_long),
-            ]
-
-        class MONITORINFO(ctypes.Structure):
-            _fields_ = [
-                ("cbSize", ctypes.wintypes.DWORD),
-                ("rcMonitor", RECT),
-                ("rcWork", RECT),
-                ("dwFlags", ctypes.wintypes.DWORD),
-            ]
-
-        MONITOR_DEFAULTTONEAREST = 2
+        SW_MAXIMIZE = 3
 
         hwnd = user32.GetForegroundWindow()
         if not hwnd:
@@ -343,35 +326,7 @@ def _resize_windows_terminal_window_to_quarter_screen() -> bool:
         if not hwnd:
             return False
 
-        monitor = user32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
-        if not monitor:
-            return False
-
-        info = MONITORINFO()
-        info.cbSize = ctypes.sizeof(MONITORINFO)
-        if not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
-            return False
-
-        work = info.rcWork
-        work_width = max(1, work.right - work.left)
-        work_height = max(1, work.bottom - work.top)
-        target_width = max(1, work_width // 2)
-        target_height = max(1, work_height // 2)
-        target_left = work.left + 40
-        target_top = work.top + 40
-
-        max_left = work.right - target_width
-        max_top = work.bottom - target_height
-        if target_left > max_left:
-            target_left = max_left
-        if target_top > max_top:
-            target_top = max_top
-        if target_left < work.left:
-            target_left = work.left
-        if target_top < work.top:
-            target_top = work.top
-
-        return bool(user32.MoveWindow(hwnd, target_left, target_top, target_width, target_height, True))
+        return bool(user32.ShowWindow(hwnd, SW_MAXIMIZE))
     except Exception:
         return False
 
@@ -462,6 +417,12 @@ def _ensure_startup_terminal_size() -> None:
     if sys.platform == "darwin" and _resize_macos_terminal_window_to_quarter_screen():
         return
     if sys.platform == "win32":
+        _resize_windows_terminal_window_to_quarter_screen()
+        # Brief pause so the new window geometry propagates before we
+        # query terminal size and set the console buffer to match.
+        time.sleep(0.15)
+        cols, lines = _target_terminal_size()
+        _resize_windows_console(cols, lines)
         return
     cols, lines = _target_terminal_size()
     _resize_posix_terminal(cols, lines)
@@ -469,6 +430,7 @@ def _ensure_startup_terminal_size() -> None:
 
 _WINDOWS_CONSOLE_INPUT_MODE: int | None = None
 STD_INPUT_HANDLE = -10
+ENABLE_WINDOW_INPUT = 0x0008
 ENABLE_QUICK_EDIT_MODE = 0x0040
 ENABLE_EXTENDED_FLAGS = 0x0080
 ENABLE_MOUSE_INPUT = 0x0010
@@ -487,7 +449,7 @@ def _configure_windows_console_for_tui() -> None:
         if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
             return
         _WINDOWS_CONSOLE_INPUT_MODE = int(mode.value)
-        new_mode = (_WINDOWS_CONSOLE_INPUT_MODE | ENABLE_EXTENDED_FLAGS | ENABLE_MOUSE_INPUT) & ~ENABLE_QUICK_EDIT_MODE
+        new_mode = (_WINDOWS_CONSOLE_INPUT_MODE | ENABLE_EXTENDED_FLAGS | ENABLE_MOUSE_INPUT | ENABLE_WINDOW_INPUT) & ~ENABLE_QUICK_EDIT_MODE
         kernel32.SetConsoleMode(handle, new_mode)
     except Exception:
         return
@@ -646,15 +608,13 @@ HOME_NON_GRID_HEIGHT = 20
 MIN_TERMINAL_COLUMNS = 80
 MIN_TERMINAL_LINES = 24
 
-LOGO = r"""
- _   _  ___  __  __ _____ ____  _   _ _   _
-| | | |/ _ \|  \/  | ____|  _ \| | | | \ | |
-| |_| | | | | |\/| |  _| | |_) | | | |  \| |
-|  _  | |_| | |  | | |___|  _ <| |_| | |\  |
-|_| |_|\___/|_|  |_|_____|_| \_\\___/|_| \_|
-""".strip(
-    "\n"
-)
+LOGO = "\n".join([
+    "[#1e6b45]██   ██  ██████  ███    ███ ███████ ██████  ██    ██ ███    ██[/]",
+    "[#238a55]██   ██ ██    ██ ████  ████ ██      ██   ██ ██    ██ ████   ██[/]",
+    "[#2aac68]███████ ██    ██ ██ ████ ██ █████   ██████  ██    ██ ██ ██  ██[/]",
+    "[#35d47a]██   ██ ██    ██ ██  ██  ██ ██      ██   ██ ██    ██ ██  ██ ██[/]",
+    "[#58f1c1]██   ██  ██████  ██      ██ ███████ ██   ██  ██████  ██   ████[/]",
+])
 
 
 # ---------------------------------------------------------------------------
@@ -666,16 +626,10 @@ Screen {
     color: #d8e5ef;
 }
 
-#logo {
-    color: #58f1c1;
-    text-style: bold;
-    text-align: left;
-    padding: 0 0 0 1;
-}
-
 #subtitle {
     color: #87a9bf;
     text-align: left;
+    height: 1;
     padding: 0 0 0 1;
 }
 
@@ -683,14 +637,21 @@ Screen {
 #hero-row {
     layout: horizontal;
     margin: 1 1 0 1;
-    height: 11;
+    height: 14;
 }
 
 #brand-panel {
     width: 2fr;
+    height: 100%;
     background: #0e1a28;
     border: round #28445f;
     margin: 0 1 0 0;
+    overflow: hidden hidden;
+}
+
+#logo {
+    height: auto;
+    padding: 1 1 0 1;
 }
 
 #action-bar {
@@ -701,15 +662,17 @@ Screen {
 }
 
 #action-bar Button {
-    margin: 0 1 0 1;
-    min-width: 14;
+    margin: 0 1 0 0;
+    min-width: 12;
 }
 
 #platform-panel {
     width: 1fr;
+    height: 100%;
     background: #112333;
     border: round #325b77;
     padding: 0 1;
+    overflow: hidden hidden;
 }
 
 #platform-title {
@@ -931,7 +894,7 @@ Screen.light-mode {
 }
 
 Screen.light-mode #logo {
-    color: #0d7a52;
+    /* Rich markup handles colors */
 }
 
 Screen.light-mode #subtitle {
@@ -1369,7 +1332,7 @@ class HomerunApp(App):
             with Vertical(id="brand-panel"):
                 yield Static(LOGO, id="logo")
                 yield Static(
-                    "Autonomous Prediction Market Trading Platform",
+                    "[#87a9bf]Autonomous Prediction Market Trading Platform[/]",
                     id="subtitle",
                 )
                 with Horizontal(id="action-bar"):
@@ -1453,7 +1416,11 @@ class HomerunApp(App):
         self._update_worker_filter_display()
         self._update_log_header()
         self._apply_responsive_layout()
-        self.set_timer(0.0, self._finalize_initial_layout)
+        # On Windows, nudge the terminal window after Textual has started so it
+        # picks up the correct post-resize dimensions instead of stale ones.
+        if sys.platform == "win32":
+            self.set_timer(0.1, self._nudge_windows_viewport)
+        self.call_later(self._finalize_initial_layout)
         self.set_timer(0.2, self._finalize_initial_layout)
         self.set_timer(1.0, self._finalize_delayed_startup_layout)
         self.set_timer(2.0, self._finalize_delayed_startup_layout)
@@ -1519,6 +1486,11 @@ class HomerunApp(App):
                 handle.write(json.dumps(payload, sort_keys=True) + "\n")
         except Exception:
             pass
+
+    def _nudge_windows_viewport(self) -> None:
+        """Nudge the Windows terminal window to force Textual to re-read the real size."""
+        _nudge_windows_terminal_window()
+        self._finalize_initial_layout()
 
     def _apply_responsive_layout(self, viewport_width: int | None = None) -> None:
         try:
@@ -1614,7 +1586,7 @@ class HomerunApp(App):
             self._last_known_viewport_size = current_size
         self._apply_responsive_layout(viewport_width if isinstance(viewport_width, int) else None)
         self.refresh(layout=True)
-        self.set_timer(0.0, self._rerender_all_worker_panels)
+        self.call_later(self._rerender_all_worker_panels)
 
     def action_show_tab(self, tab: str) -> None:
         self.query_one(TabbedContent).active = tab

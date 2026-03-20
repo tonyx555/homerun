@@ -1,15 +1,27 @@
-import { useState, useCallback, useRef, useMemo } from 'react'
+import { useState, useCallback, useRef, useMemo, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useAtom } from 'jotai'
 import {
   useLocalRuntime,
   AssistantRuntimeProvider,
   type ChatModelAdapter,
+  type ThreadMessageLike,
   ThreadPrimitive,
   ComposerPrimitive,
   MessagePrimitive,
 } from '@assistant-ui/react'
 import { MarkdownTextPrimitive } from '@assistant-ui/react-markdown'
+import ReactMarkdown from 'react-markdown'
+import { useMessagePartText } from '@assistant-ui/react'
+import { Renderer } from '@openuidev/react-lang'
+import { motion, AnimatePresence } from 'framer-motion'
+import {
+  ThinkingIndicator,
+  ToolStartWidget,
+  ToolResultWidget,
+  ToolErrorWidget,
+} from './ChatToolWidgets'
+import { homerunLibrary } from './openui-library'
 import {
   MessageSquare,
   Plus,
@@ -27,13 +39,14 @@ import {
 } from 'lucide-react'
 import { cn } from '../../lib/utils'
 import { Button } from '../ui/button'
-import { ScrollArea } from '../ui/scroll-area'
 import {
   listAIChatSessions,
   archiveAIChatSession,
   renameChatSession,
+  getAIChatSession,
   streamAIChat,
   type AIChatSession,
+  type ChatStreamEvent,
 } from '../../services/api'
 import { activeChatSessionIdAtom } from '../../store/atoms'
 
@@ -118,16 +131,16 @@ function SessionSidebar({
 
   if (collapsed) {
     return (
-      <div className="w-10 border-r border-white/10 flex flex-col items-center py-3 gap-2 shrink-0">
+      <div className="w-10 border-r border-border/40 flex flex-col items-center py-3 gap-2 shrink-0">
         <button
           onClick={onToggleCollapse}
-          className="p-1.5 rounded-md hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
+          className="p-1.5 rounded-md hover:bg-muted/60 text-muted-foreground hover:text-foreground transition-colors"
         >
           <ChevronRight className="w-4 h-4" />
         </button>
         <button
           onClick={onNewChat}
-          className="p-1.5 rounded-md hover:bg-purple-500/20 text-muted-foreground hover:text-purple-300 transition-colors"
+          className="p-1.5 rounded-md hover:bg-purple-500/20 text-muted-foreground hover:text-purple-700 dark:text-purple-300 transition-colors"
         >
           <Plus className="w-4 h-4" />
         </button>
@@ -136,24 +149,24 @@ function SessionSidebar({
   }
 
   return (
-    <div className="w-64 border-r border-white/10 flex flex-col shrink-0">
-      <div className="p-3 flex items-center justify-between border-b border-white/5">
+    <div className="w-64 border-r border-border/40 flex flex-col shrink-0 min-w-0 max-w-64 overflow-hidden">
+      <div className="p-3 flex items-center justify-between border-b border-border/20">
         <Button
           size="sm"
           onClick={onNewChat}
-          className="h-8 gap-1.5 text-xs bg-purple-500/20 text-purple-300 border border-purple-500/30 hover:bg-purple-500/30"
+          className="h-8 gap-1.5 text-xs bg-purple-500/20 text-purple-700 dark:text-purple-300 border border-purple-500/30 hover:bg-purple-500/30"
         >
           <Plus className="w-3.5 h-3.5" />
           New Chat
         </Button>
         <button
           onClick={onToggleCollapse}
-          className="p-1.5 rounded-md hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
+          className="p-1.5 rounded-md hover:bg-muted/60 text-muted-foreground hover:text-foreground transition-colors"
         >
           <ChevronLeft className="w-4 h-4" />
         </button>
       </div>
-      <ScrollArea className="flex-1">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden">
         <div className="p-2 space-y-3">
           {groupOrder.map(group => {
             const items = grouped[group]
@@ -167,10 +180,10 @@ function SessionSidebar({
                       key={session.session_id}
                       onClick={() => onSelectSession(session.session_id)}
                       className={cn(
-                        'group flex items-center gap-2 px-2 py-2 rounded-lg cursor-pointer transition-colors',
+                        'group flex items-center gap-2 px-2 py-2 rounded-lg cursor-pointer transition-colors min-w-0 max-w-full overflow-hidden',
                         activeSessionId === session.session_id
-                          ? 'bg-purple-500/15 text-purple-200'
-                          : 'hover:bg-white/5 text-muted-foreground hover:text-foreground'
+                          ? 'bg-purple-500/15 text-purple-700 dark:text-purple-200'
+                          : 'hover:bg-muted/40 text-muted-foreground hover:text-foreground'
                       )}
                     >
                       <MessageSquare className="w-3.5 h-3.5 shrink-0 opacity-60" />
@@ -202,7 +215,7 @@ function SessionSidebar({
                           <div className="hidden group-hover:flex items-center gap-0.5">
                             <button
                               onClick={e => startRename(session, e)}
-                              className="p-0.5 rounded hover:bg-white/10"
+                              className="p-0.5 rounded hover:bg-muted/60"
                             >
                               <Pencil className="w-3 h-3" />
                             </button>
@@ -228,19 +241,19 @@ function SessionSidebar({
             </div>
           )}
         </div>
-      </ScrollArea>
+      </div>
     </div>
   )
 }
 
 function UserMessage() {
   return (
-    <MessagePrimitive.Root className="flex gap-3 py-4 px-4">
+    <MessagePrimitive.Root className="flex gap-3 py-4 px-4 border-b border-border/20">
       <div className="w-7 h-7 rounded-full bg-blue-500/20 border border-blue-500/30 flex items-center justify-center shrink-0 mt-0.5">
-        <User className="w-3.5 h-3.5 text-blue-400" />
+        <User className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
       </div>
       <div className="flex-1 min-w-0">
-        <p className="text-[10px] uppercase tracking-wider text-blue-400/70 mb-1">You</p>
+        <p className="text-[10px] uppercase tracking-wider text-blue-600 dark:text-blue-400/70 mb-1">You</p>
         <MessagePrimitive.Parts
           components={{
             Text: () => (
@@ -255,21 +268,196 @@ function UserMessage() {
   )
 }
 
+// Segment delimiter used to encode structured content in the text stream.
+// Format: ‹‹SEG:type:json››
+const SEG_RE = /\u00AB\u00ABSEG:(thinking|tool_start|tool_end|tool_error):([^\u00BB]*)\u00BB\u00BB/g
+
+type ChatSegment =
+  | { type: 'thinking'; text: string }
+  | { type: 'tool_start'; tool: string; input: Record<string, unknown> }
+  | { type: 'tool_end'; tool: string; output: Record<string, unknown> }
+  | { type: 'tool_error'; tool: string; error: string }
+  | { type: 'text'; text: string }
+
+function parseSegments(raw: string): ChatSegment[] {
+  const segments: ChatSegment[] = []
+  let lastIndex = 0
+  let match: RegExpExecArray | null
+
+  const re = new RegExp(SEG_RE.source, 'g')
+  while ((match = re.exec(raw)) !== null) {
+    if (match.index > lastIndex) {
+      const text = raw.slice(lastIndex, match.index).trim()
+      if (text) segments.push({ type: 'text', text })
+    }
+    const segType = match[1] as 'thinking' | 'tool_start' | 'tool_end' | 'tool_error'
+    try {
+      const data = JSON.parse(match[2])
+      if (segType === 'thinking') {
+        segments.push({ type: 'thinking', text: data.content || '' })
+      } else if (segType === 'tool_start') {
+        segments.push({ type: 'tool_start', tool: data.tool || '', input: data.input || {} })
+      } else if (segType === 'tool_end') {
+        segments.push({ type: 'tool_end', tool: data.tool || '', output: data.output || {} })
+      } else if (segType === 'tool_error') {
+        segments.push({ type: 'tool_error', tool: data.tool || '', error: data.error || '' })
+      }
+    } catch {
+      // Skip malformed segments
+    }
+    lastIndex = match.index + match[0].length
+  }
+  if (lastIndex < raw.length) {
+    const text = raw.slice(lastIndex).trim()
+    if (text) segments.push({ type: 'text', text })
+  }
+  return segments
+}
+
+// Detect OpenUI Lang markup — looks for component tags like <Stack>, <Card>, <MarketCard> etc.
+const OPENUI_COMPONENTS = ['Stack', 'Card', 'ScoreGauge', 'Badge', 'KeyValue', 'DataTable', 'SentimentBar', 'MarketCard', 'Recommendation', 'BulletList', 'TextBlock'] as const
+const OPENUI_TAG_RE = new RegExp(`<(${OPENUI_COMPONENTS.join('|')})[\\s/>]`)
+const OPENUI_BLOCK_RE = new RegExp(
+  `(<(?:${OPENUI_COMPONENTS.join('|')})[\\s>][\\s\\S]*?<\\/(?:${OPENUI_COMPONENTS.join('|')})>|<(?:${OPENUI_COMPONENTS.join('|')})\\s[^>]*\\/>)`,
+  'g',
+)
+
+const PROSE_CLASSES = "text-sm text-foreground/90 leading-relaxed prose prose-invert prose-sm max-w-none prose-p:my-2 prose-headings:my-3 prose-li:my-0.5 prose-pre:bg-background/80 prose-pre:border prose-pre:border-border/40 prose-code:text-purple-700 dark:prose-code:text-purple-300 prose-code:text-xs"
+
+/** Splits text into alternating plain-text and OpenUI blocks */
+function splitOpenUI(text: string): { type: 'text' | 'openui'; content: string }[] {
+  const parts: { type: 'text' | 'openui'; content: string }[] = []
+  let lastIdx = 0
+  let m: RegExpExecArray | null
+  const re = new RegExp(OPENUI_BLOCK_RE.source, 'g')
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > lastIdx) {
+      const plain = text.slice(lastIdx, m.index).trim()
+      if (plain) parts.push({ type: 'text', content: plain })
+    }
+    parts.push({ type: 'openui', content: m[1] })
+    lastIdx = m.index + m[0].length
+  }
+  if (lastIdx < text.length) {
+    const plain = text.slice(lastIdx).trim()
+    if (plain) parts.push({ type: 'text', content: plain })
+  }
+  return parts
+}
+
+/**
+ * Renders a text block as markdown + OpenUI mixed content.
+ * @param standalone — if true, uses ReactMarkdown (for extracted segment text).
+ *                     if false, uses MarkdownTextPrimitive (reads from message context).
+ */
+function RichTextContent({ text, standalone }: { text: string; standalone?: boolean }) {
+  const hasOpenUI = OPENUI_TAG_RE.test(text)
+
+  if (!hasOpenUI) {
+    return (
+      <div className={PROSE_CLASSES}>
+        {standalone ? <ReactMarkdown>{text}</ReactMarkdown> : <MarkdownTextPrimitive />}
+      </div>
+    )
+  }
+
+  // Split and render OpenUI blocks with the Renderer, plain text as markdown.
+  // Once split, each text part MUST use ReactMarkdown (not MarkdownTextPrimitive)
+  // because MarkdownTextPrimitive renders the full raw message from context,
+  // not just the individual part.
+  const parts = splitOpenUI(text)
+  return (
+    <div className="space-y-2">
+      {parts.map((part, i) =>
+        part.type === 'openui' ? (
+          <motion.div
+            key={`oui-${i}`}
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.2 }}
+          >
+            <Renderer library={homerunLibrary} response={part.content} isStreaming={false} />
+          </motion.div>
+        ) : (
+          <div key={`md-${i}`} className={PROSE_CLASSES}>
+            <ReactMarkdown>{part.content}</ReactMarkdown>
+          </div>
+        )
+      )}
+    </div>
+  )
+}
+
+function AssistantTextContent() {
+  const part = useMessagePartText()
+  const raw = part.text
+
+  // If no structured segments, render as rich text using MarkdownTextPrimitive (context-aware)
+  if (!raw.includes('\u00AB\u00ABSEG:')) {
+    return (
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ duration: 0.15 }}
+      >
+        <RichTextContent text={raw} standalone={false} />
+      </motion.div>
+    )
+  }
+
+  const segments = parseSegments(raw)
+  // Check if the first segment is a transient thinking marker
+  const showThinking = segments.length > 0 && segments[0].type === 'thinking'
+  // Filter out thinking segments — they are transient UI indicators, not content
+  const visibleSegments = segments.filter(s => s.type !== 'thinking')
+
+  return (
+    <div className="space-y-0.5">
+      {/* Animated thinking dots — shown before content arrives */}
+      <AnimatePresence>
+        {showThinking && <ThinkingIndicator key="thinking-dots" />}
+      </AnimatePresence>
+      <AnimatePresence mode="popLayout">
+        {visibleSegments.map((seg, i) => {
+          switch (seg.type) {
+            case 'tool_start':
+              return <ToolStartWidget key={`ts-${i}`} tool={seg.tool} input={seg.input} />
+            case 'tool_end':
+              return <ToolResultWidget key={`te-${i}`} tool={seg.tool} output={seg.output} />
+            case 'tool_error':
+              return <ToolErrorWidget key={`err-${i}`} tool={seg.tool} error={seg.error} />
+            case 'text':
+              return (
+                <motion.div
+                  key={`txt-${i}`}
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.3, ease: 'easeOut' }}
+                  className="mt-2"
+                >
+                  <RichTextContent text={seg.text} standalone={true} />
+                </motion.div>
+              )
+            default:
+              return null
+          }
+        })}
+      </AnimatePresence>
+    </div>
+  )
+}
+
 function AssistantMessage() {
   return (
-    <MessagePrimitive.Root className="flex gap-3 py-4 px-4 bg-white/[0.02]">
+    <MessagePrimitive.Root className="flex gap-3 py-4 px-4 bg-muted/20 border-b border-border/20">
       <div className="w-7 h-7 rounded-full bg-purple-500/20 border border-purple-500/30 flex items-center justify-center shrink-0 mt-0.5">
-        <Bot className="w-3.5 h-3.5 text-purple-400" />
+        <Bot className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />
       </div>
       <div className="flex-1 min-w-0">
-        <p className="text-[10px] uppercase tracking-wider text-purple-400/70 mb-1">Homerun AI</p>
+        <p className="text-[10px] uppercase tracking-wider text-purple-600 dark:text-purple-400/70 mb-1">Homerun AI</p>
         <MessagePrimitive.Parts
           components={{
-            Text: () => (
-              <div className="text-sm text-foreground/90 leading-relaxed prose prose-invert prose-sm max-w-none prose-p:my-2 prose-headings:my-3 prose-li:my-0.5 prose-pre:bg-background/80 prose-pre:border prose-pre:border-border/40 prose-code:text-purple-300 prose-code:text-xs">
-                <MarkdownTextPrimitive />
-              </div>
-            ),
+            Text: AssistantTextContent,
           }}
         />
       </div>
@@ -279,8 +467,8 @@ function AssistantMessage() {
 
 function ChatThread() {
   return (
-    <ThreadPrimitive.Root className="flex flex-col h-full">
-      <ThreadPrimitive.Viewport className="flex-1 overflow-y-auto">
+    <ThreadPrimitive.Root className="flex flex-col h-full border-l border-border/20">
+      <ThreadPrimitive.Viewport className="flex-1 overflow-y-auto border-b border-border/20">
         <ThreadPrimitive.Empty>
           <WelcomeScreen />
         </ThreadPrimitive.Empty>
@@ -292,15 +480,15 @@ function ChatThread() {
         />
         <ThreadPrimitive.ViewportFooter className="sticky bottom-0 flex justify-center pb-2">
           <ThreadPrimitive.ScrollToBottom asChild>
-            <button className="p-2 rounded-full bg-purple-500/20 border border-purple-500/30 text-purple-300 hover:bg-purple-500/30 transition-colors shadow-lg">
+            <button className="p-2 rounded-full bg-purple-500/20 border border-purple-500/30 text-purple-700 dark:text-purple-300 hover:bg-purple-500/30 transition-colors shadow-lg opacity-0 data-[state=visible]:opacity-100 transition-opacity duration-200">
               <ArrowDown className="w-4 h-4" />
             </button>
           </ThreadPrimitive.ScrollToBottom>
         </ThreadPrimitive.ViewportFooter>
       </ThreadPrimitive.Viewport>
 
-      <div className="border-t border-white/10 p-4">
-        <ComposerPrimitive.Root className="flex items-end gap-2 rounded-xl border border-white/10 bg-white/[0.03] p-2 focus-within:border-purple-500/40 transition-colors">
+      <div className="border-t border-border/40 p-4 bg-background/50">
+        <ComposerPrimitive.Root className="flex items-end gap-2 rounded-xl border border-border/40 bg-muted/30 p-2 focus-within:border-purple-500/40 transition-colors">
           <ComposerPrimitive.Input
             placeholder="Ask about markets, strategies, opportunities..."
             className="flex-1 bg-transparent text-sm text-foreground resize-none outline-none min-h-[36px] max-h-[120px] px-2 py-1.5 placeholder:text-muted-foreground/50"
@@ -327,7 +515,7 @@ function WelcomeScreen() {
   return (
     <div className="flex flex-col items-center justify-center h-full px-8 py-12">
       <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-purple-500/20 to-blue-500/20 border border-purple-500/20 flex items-center justify-center mb-6">
-        <Sparkles className="w-8 h-8 text-purple-400" />
+        <Sparkles className="w-8 h-8 text-purple-600 dark:text-purple-400" />
       </div>
       <h2 className="text-xl font-semibold text-foreground mb-2">Homerun AI</h2>
       <p className="text-sm text-muted-foreground text-center max-w-md mb-8">
@@ -345,8 +533,9 @@ function WelcomeScreen() {
             prompt={item.label}
             method="replace"
             autoSend
+            asChild
           >
-            <button className="flex items-center gap-3 px-4 py-3 rounded-xl border border-white/10 bg-white/[0.03] hover:bg-white/[0.06] hover:border-purple-500/20 transition-colors text-left">
+            <button className="flex items-center gap-3 px-4 py-3 rounded-xl border border-border/40 bg-muted/30 hover:bg-muted/50 hover:border-purple-500/20 transition-colors text-left">
               <span className="text-lg">{item.icon}</span>
               <span className="text-sm text-muted-foreground">{item.label}</span>
             </button>
@@ -357,12 +546,24 @@ function WelcomeScreen() {
   )
 }
 
-export default function AIChatView() {
-  const [activeSessionId, setActiveSessionId] = useAtom(activeChatSessionIdAtom)
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+// Encode a structured segment into the text stream.
+// Uses «« »» delimiters that won't appear in normal text.
+function encodeSeg(type: string, data: Record<string, unknown>): string {
+  return `\u00AB\u00ABSEG:${type}:${JSON.stringify(data)}\u00BB\u00BB`
+}
+
+function ChatRuntime({
+  sessionId,
+  initialMessages,
+  onSessionChange,
+}: {
+  sessionId: string | null
+  initialMessages: readonly ThreadMessageLike[]
+  onSessionChange: (id: string) => void
+}) {
   const queryClient = useQueryClient()
-  const sessionIdRef = useRef<string | null>(activeSessionId)
-  sessionIdRef.current = activeSessionId
+  const sessionIdRef = useRef<string | null>(sessionId)
+  sessionIdRef.current = sessionId
 
   const chatModelAdapter = useMemo<ChatModelAdapter>(() => ({
     async *run({ messages, abortSignal }) {
@@ -374,94 +575,214 @@ export default function AIChatView() {
         .map(p => p.text)
         .join('\n')
 
-      let accumulated = ''
+      // Mutable state shared with SSE callbacks
+      const state = {
+        segments: [] as string[],      // Tool event segments (persisted)
+        answerChunks: [] as string[],   // Streaming answer text chunks
+        isThinking: true,               // Start true — show dots immediately while waiting
+        done: false,
+        error: null as string | null,
+        sessionId: null as string | null,
+        changed: true,                  // Trigger initial render with thinking dots
+      }
 
-      const tokenPromise = new Promise<void>((resolve, reject) => {
-        streamAIChat(
-          {
-            message: userText,
-            session_id: sessionIdRef.current || undefined,
-          },
-          (text) => {
-            accumulated += text
-          },
-          (data) => {
-            if (data.session_id && data.session_id !== sessionIdRef.current) {
-              setActiveSessionId(data.session_id)
-            }
-            queryClient.invalidateQueries({ queryKey: ['ai-chat-sessions'] })
-            resolve()
-          },
-          (error) => {
-            reject(new Error(error))
-          },
-          abortSignal,
-        )
-      })
+      // Thinking indicator segment (transient — shown during streaming, not persisted)
+      const THINKING_SEG = encodeSeg('thinking', { content: '' })
 
-      // Poll accumulated text and yield updates
-      const pollInterval = 50
+      streamAIChat(
+        {
+          message: userText,
+          session_id: sessionIdRef.current || undefined,
+        },
+        // onToken — receives partial chunks, accumulate them
+        (chunk) => {
+          state.isThinking = false  // Answer started, hide thinking
+          state.answerChunks.push(chunk)
+          state.changed = true
+        },
+        // onDone
+        (data) => {
+          if (data.session_id && data.session_id !== sessionIdRef.current) {
+            state.sessionId = data.session_id
+          }
+          state.isThinking = false
+          state.done = true
+          state.changed = true
+        },
+        // onError
+        (error) => {
+          state.isThinking = false
+          state.error = error
+          state.changed = true
+        },
+        abortSignal,
+        // onEvent — structured events for tool widgets
+        (event: ChatStreamEvent) => {
+          switch (event.event) {
+            case 'thinking':
+              // Just set the flag — don't add a segment (transient UI only)
+              state.isThinking = true
+              state.changed = true
+              break
+            case 'tool_start':
+              state.isThinking = false  // Tool started, hide thinking dots
+              state.segments.push(encodeSeg('tool_start', {
+                tool: event.data.tool,
+                input: event.data.input || {},
+              }))
+              state.changed = true
+              break
+            case 'tool_end':
+              state.segments.push(encodeSeg('tool_end', {
+                tool: event.data.tool,
+                output: event.data.output || {},
+              }))
+              // Show thinking again after tool completes (agent may call more tools)
+              state.isThinking = true
+              state.changed = true
+              break
+            case 'tool_error':
+              state.segments.push(encodeSeg('tool_error', {
+                tool: event.data.tool,
+                error: event.data.error || 'Unknown error',
+              }))
+              state.changed = true
+              break
+          }
+        },
+      )
+
+      // Poll and yield updates as they arrive
       let lastYielded = ''
       const startTime = Date.now()
-      const maxWait = 120_000
+      const maxWait = 180_000
 
       while (true) {
-        await new Promise(r => setTimeout(r, pollInterval))
+        await new Promise(r => setTimeout(r, 40))
 
-        if (accumulated !== lastYielded) {
-          lastYielded = accumulated
-          yield {
-            content: [{ type: 'text' as const, text: accumulated }],
+        if (state.error) {
+          // Yield error as part of the message — do NOT throw, or assistant-ui
+          // discards the entire message (including tool widgets already shown).
+          const errorDisplay = state.segments.join('') + `\n\n**Error:** ${state.error}`
+          yield { content: [{ type: 'text' as const, text: errorDisplay }] }
+          return
+        }
+
+        if (state.changed) {
+          state.changed = false
+          const answerSoFar = state.answerChunks.join('')
+          // Prepend transient thinking segment only while actively thinking
+          const thinkingPrefix = state.isThinking ? THINKING_SEG : ''
+          const display = thinkingPrefix + state.segments.join('') + answerSoFar
+
+          if (display && display !== lastYielded) {
+            lastYielded = display
+            yield { content: [{ type: 'text' as const, text: display }] }
           }
         }
 
-        // Check if the stream is done
-        try {
-          // Use Promise.race to check if done without blocking
-          const result = await Promise.race([
-            tokenPromise.then(() => 'done' as const),
-            new Promise<'pending'>(r => setTimeout(() => r('pending'), 10)),
-          ])
-          if (result === 'done') {
-            // yield final state
-            if (accumulated !== lastYielded) {
-              yield {
-                content: [{ type: 'text' as const, text: accumulated }],
-              }
-            }
-            return
-          }
-        } catch (err) {
-          // Stream errored — yield what we have, then throw
-          if (accumulated) {
-            yield {
-              content: [{ type: 'text' as const, text: accumulated }],
-            }
-          }
-          throw err
+        if (state.done) {
+          // Final display — NO thinking segment (it's done)
+          const finalAnswer = state.answerChunks.join('') || 'No response generated.'
+          const finalDisplay = state.segments.join('') + finalAnswer
+
+          // Always yield the final content to ensure the runtime has
+          // the correct completed message before we trigger side-effects.
+          yield { content: [{ type: 'text' as const, text: finalDisplay }] }
+
+          // Side-effects AFTER the final yield so re-renders can't
+          // race with message finalization.
+          if (state.sessionId) onSessionChange(state.sessionId)
+          queryClient.invalidateQueries({ queryKey: ['ai-chat-sessions'] })
+          return
         }
 
         if (Date.now() - startTime > maxWait) {
-          if (accumulated) {
-            yield {
-              content: [{ type: 'text' as const, text: accumulated }],
-            }
-          }
+          yield { content: [{ type: 'text' as const, text: state.segments.join('') + '*Request timed out.*' }] }
           return
         }
       }
     },
-  }), [setActiveSessionId, queryClient])
+  }), [onSessionChange, queryClient])
 
-  const runtime = useLocalRuntime(chatModelAdapter)
+  const runtime = useLocalRuntime(chatModelAdapter, { initialMessages })
+
+  return (
+    <AssistantRuntimeProvider runtime={runtime}>
+      <ChatThread />
+    </AssistantRuntimeProvider>
+  )
+}
+
+export default function AIChatView() {
+  const [activeSessionId, setActiveSessionId] = useAtom(activeChatSessionIdAtom)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [initialMessages, setInitialMessages] = useState<readonly ThreadMessageLike[]>([])
+  // Key forces full remount of runtime when session changes
+  const [runtimeKey, setRuntimeKey] = useState(0)
+  const didAutoSelect = useRef(false)
+
+  // Auto-select latest session on first mount, or restore active session after tab switch
+  const { data: sessionsData } = useQuery({
+    queryKey: ['ai-chat-sessions'],
+    queryFn: () => listAIChatSessions({ limit: 1 }),
+  })
+
+  useEffect(() => {
+    if (didAutoSelect.current) return
+
+    // Determine which session to load
+    const sessionToLoad = activeSessionId || sessionsData?.sessions?.[0]?.session_id
+    if (!sessionToLoad) {
+      // Only mark done if sessions data has loaded (empty list) — otherwise
+      // the query is still in flight and we should wait for it.
+      if (sessionsData) didAutoSelect.current = true
+      return
+    }
+
+    didAutoSelect.current = true
+    setActiveSessionId(sessionToLoad)
+    getAIChatSession(sessionToLoad)
+      .then(detail => {
+        const msgs: ThreadMessageLike[] = (detail.messages || [])
+          .filter((m: { role: string }) => m.role === 'user' || m.role === 'assistant')
+          .map((m: { role: string; content: string }) => ({
+            role: m.role as 'user' | 'assistant',
+            content: [{ type: 'text' as const, text: m.content }],
+          }))
+        setInitialMessages(msgs)
+        setRuntimeKey(k => k + 1)
+      })
+      .catch(() => {
+        setRuntimeKey(k => k + 1)
+      })
+  }, [sessionsData, activeSessionId, setActiveSessionId])
 
   const handleNewChat = useCallback(() => {
     setActiveSessionId(null)
-    // Runtime will naturally start fresh on next message since sessionId is null
+    setInitialMessages([])
+    setRuntimeKey(k => k + 1)
   }, [setActiveSessionId])
 
   const handleSelectSession = useCallback(async (sessionId: string) => {
     setActiveSessionId(sessionId)
+    try {
+      const detail = await getAIChatSession(sessionId)
+      const msgs: ThreadMessageLike[] = (detail.messages || [])
+        .filter(m => m.role === 'user' || m.role === 'assistant')
+        .map(m => ({
+          role: m.role as 'user' | 'assistant',
+          content: [{ type: 'text' as const, text: m.content }],
+        }))
+      setInitialMessages(msgs)
+    } catch {
+      setInitialMessages([])
+    }
+    setRuntimeKey(k => k + 1)
+  }, [setActiveSessionId])
+
+  const handleSessionChange = useCallback((id: string) => {
+    setActiveSessionId(id)
   }, [setActiveSessionId])
 
   return (
@@ -474,9 +795,12 @@ export default function AIChatView() {
         onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
       />
       <div className="flex-1 flex flex-col min-w-0">
-        <AssistantRuntimeProvider runtime={runtime}>
-          <ChatThread />
-        </AssistantRuntimeProvider>
+        <ChatRuntime
+          key={runtimeKey}
+          sessionId={activeSessionId}
+          initialMessages={initialMessages}
+          onSessionChange={handleSessionChange}
+        />
       </div>
     </div>
   )

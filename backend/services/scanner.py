@@ -139,6 +139,7 @@ class ArbitrageScanner:
         retention_points = int(self._market_history_retention_seconds / spark_sample_seconds) + 2
         self._market_history_max_points: int = max(spark_max_points, retention_points)
         self._market_history_export_points: int = min(self._market_history_max_points, spark_export_points)
+        self._market_history_max_markets: int = max(50, int(settings.SCANNER_SPARKLINE_MAX_MARKETS))
         # Keep one sample per interval even if price is unchanged, so cards
         # show multi-hour trend shape rather than a single refreshed point.
         self._market_history_sample_interval_ms: int = spark_sample_seconds * 1000
@@ -146,6 +147,9 @@ class ArbitrageScanner:
         self._market_outcome_token_ids: dict[str, tuple[str, ...]] = {}
         self._market_history_backfill_done: set[str] = set()
         self._market_history_backfill_attempt_ms: dict[str, int] = {}
+        # Set of market IDs that are in active opportunities — only these get
+        # price history recorded.  Updated after each scan cycle.
+        self._opportunity_market_ids: set[str] = set()
         self._market_history_backfill_retry_ms: int = 5 * 60 * 1000
         self._market_history_backfill_concurrency: int = 8
         self._market_history_backfill_max_markets: int = 120
@@ -428,9 +432,16 @@ class ArbitrageScanner:
         return float(yes), float(no)
 
     def _update_market_price_history(self, markets: list, prices: dict, ts: datetime) -> None:
-        """Append current real market prices to bounded in-memory history."""
+        """Append current real market prices to bounded in-memory history.
+
+        Only markets present in ``_opportunity_market_ids`` (or already tracked)
+        receive new data points.  A hard cap (``_market_history_max_markets``)
+        evicts the stalest entries when the dict grows too large.
+        """
         now_ms = int(ts.timestamp() * 1000)
         cutoff_ms = now_ms - int(self._market_history_retention_seconds * 1000)
+        allowed = self._opportunity_market_ids
+        history_dict = self._market_price_history
 
         for market in markets:
             market_ids = self._market_id_candidates_from_market(market)
@@ -444,7 +455,11 @@ class ArbitrageScanner:
             if not point_sig:
                 continue
             for market_id in market_ids:
-                history = self._market_price_history.setdefault(market_id, [])
+                # Only record history for opportunity markets or markets
+                # we already have history for (continuity during transitions).
+                if market_id not in allowed and market_id not in history_dict:
+                    continue
+                history = history_dict.setdefault(market_id, [])
                 if history:
                     last = history[-1]
                     last_sig = self._history_point_signature(last)
@@ -464,6 +479,28 @@ class ArbitrageScanner:
                     del history[:trim_idx]
                 if len(history) > self._market_history_max_points:
                     del history[: len(history) - self._market_history_max_points]
+
+        # Hard cap: evict markets with the oldest last-update timestamp.
+        cap = self._market_history_max_markets
+        if len(history_dict) > cap:
+            by_recency = sorted(
+                history_dict.keys(),
+                key=lambda mid: float(history_dict[mid][-1].get("t", 0)) if history_dict[mid] else 0.0,
+            )
+            evict_count = len(history_dict) - cap
+            for mid in by_recency[:evict_count]:
+                del history_dict[mid]
+                self._market_history_backfill_done.discard(mid)
+                self._market_history_backfill_attempt_ms.pop(mid, None)
+
+    def _rebuild_opportunity_market_ids(self) -> None:
+        """Rebuild the set of market IDs present in active opportunities."""
+        ids: set[str] = set()
+        for opp in self._opportunities:
+            for market in opp.markets:
+                for mid in self._market_history_lookup_ids(market):
+                    ids.add(mid)
+        self._opportunity_market_ids = ids
 
     def _remember_market_tokens(self, markets: list) -> None:
         """Cache token IDs per market for historical backfill calls."""
@@ -955,6 +992,7 @@ class ArbitrageScanner:
             for market_id, ts in self._market_history_backfill_attempt_ms.items()
             if market_id in active_with_aliases
         }
+        self._rebuild_opportunity_market_ids()
         self._prioritizer.cleanup_stale()
 
     @staticmethod
@@ -3098,6 +3136,7 @@ class ArbitrageScanner:
                 if self._opportunities:
                     self._opportunities.sort(key=lambda opp: opp.roi_percent, reverse=True)
                     self._opportunities = self._apply_opportunity_caps(self._opportunities)
+                    self._rebuild_opportunity_market_ids()
                     self._queue_market_history_backfill(self._opportunities)
 
                 self._last_scan = now
@@ -3353,6 +3392,7 @@ class ArbitrageScanner:
                 async with self._scan_lock:
                     self._opportunities = refreshed_opportunities
                     if self._opportunities:
+                        self._rebuild_opportunity_market_ids()
                         self._queue_market_history_backfill(self._opportunities)
                     self._last_scan = now
                     self._last_full_snapshot_strategy_scan = now
@@ -4249,6 +4289,24 @@ class ArbitrageScanner:
             status["full_coverage_completion_time"] = full_coverage_completion_seconds
 
         return status
+
+    def get_memory_stats(self) -> dict:
+        """Return sizes of key in-memory data structures for monitoring."""
+        history_points = sum(len(h) for h in self._market_price_history.values())
+        return {
+            "cached_markets": len(self._cached_markets),
+            "cached_events": len(self._cached_events),
+            "cached_prices": len(self._cached_prices),
+            "price_history_markets": len(self._market_price_history),
+            "price_history_points": history_points,
+            "price_history_max_markets": self._market_history_max_markets,
+            "opportunity_market_ids": len(self._opportunity_market_ids),
+            "backfill_done": len(self._market_history_backfill_done),
+            "backfill_attempts": len(self._market_history_backfill_attempt_ms),
+            "token_to_market_ids": len(self._token_to_market_ids),
+            "market_token_ids": len(self._market_token_ids),
+            "market_outcome_token_ids": len(self._market_outcome_token_ids),
+        }
 
     def get_opportunities(self, filter: Optional[OpportunityFilter] = None) -> list[Opportunity]:
         """Get current opportunities with optional filtering"""

@@ -852,14 +852,7 @@ _CANONICAL_TRADER_MODES = {"shadow", "live"}
 _LEGACY_MODE_ALIASES = {
     "paper": "shadow",
 }
-_LEGACY_CRYPTO_STRATEGY_TIMEFRAME_ALIASES: dict[str, str] = {
-    "crypto_5m": "5m",
-    "crypto_15m": "15m",
-    "crypto_1h": "1h",
-    "crypto_4h": "4h",
-}
 _LEGACY_STRATEGY_ALIASES: dict[str, str] = {
-    **{legacy: "btc_eth_highfreq" for legacy in _LEGACY_CRYPTO_STRATEGY_TIMEFRAME_ALIASES.keys()},
     "news_reaction": "news_edge",
 }
 
@@ -913,21 +906,6 @@ def _normalize_strategy_for_source(
     if not requested_key:
         return "", params, ""
     canonical_key = _LEGACY_STRATEGY_ALIASES.get(requested_key, requested_key)
-
-    if source_key == "crypto" and requested_key in _LEGACY_CRYPTO_STRATEGY_TIMEFRAME_ALIASES:
-        timeframe = _LEGACY_CRYPTO_STRATEGY_TIMEFRAME_ALIASES[requested_key]
-        include_timeframes = _normalize_timeframe_scope(params.get("include_timeframes"))
-        params["include_timeframes"] = [timeframe] if not include_timeframes else include_timeframes
-        exclude_timeframes = [token for token in _normalize_timeframe_scope(params.get("exclude_timeframes")) if token != timeframe]
-        if exclude_timeframes:
-            params["exclude_timeframes"] = exclude_timeframes
-        elif "exclude_timeframes" in params:
-            params.pop("exclude_timeframes", None)
-        params.setdefault("enable_live_market_context", False)
-        params.setdefault("require_live_market_revalidation", False)
-        params.setdefault("require_live_revalidation_for_sources", [])
-        params.setdefault("enforce_market_data_freshness", False)
-        params.setdefault("require_market_data_age_for_sources", [])
 
     return canonical_key, params, requested_key
 
@@ -1358,11 +1336,39 @@ def _strategy_instance_for_source_config(source_config: dict[str, Any] | None) -
     return strategy_loader.get_instance(strategy_key)
 
 
-def _get_crypto_filter_diagnostics() -> dict[str, Any] | None:
-    """Get crypto filter diagnostics from any loaded crypto strategy's module."""
+def _get_trader_crypto_strategy_key(trader: dict[str, Any]) -> str | None:
+    """Return the strategy_key configured for the trader's crypto source, if any."""
+    source_configs = _normalize_source_configs(trader)
+    crypto_config = source_configs.get("crypto")
+    if not crypto_config:
+        return None
+    return str(crypto_config.get("strategy_key") or "").strip().lower() or None
+
+
+def _get_crypto_filter_diagnostics(trader: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Get crypto filter diagnostics from the trader's configured strategy.
+
+    Checks the trader's actual strategy first.  Falls back to scanning all
+    loaded strategies for one that exposes ``get_crypto_filter_diagnostics``.
+    Returns None when no strategy publishes diagnostics — the caller should
+    fall through to generic dispatch stats.
+    """
     import sys
 
-    for slug in ("btc_eth_highfreq",):
+    # Prefer the trader's own strategy
+    preferred_slug: str | None = None
+    if trader is not None:
+        preferred_slug = _get_trader_crypto_strategy_key(trader)
+
+    slugs_to_check: list[str] = []
+    if preferred_slug:
+        slugs_to_check.append(preferred_slug)
+    # Fallback: scan all loaded strategies
+    for slug in list(strategy_loader._loaded.keys()):
+        if slug not in slugs_to_check:
+            slugs_to_check.append(slug)
+
+    for slug in slugs_to_check:
         loaded = strategy_loader.get_strategy(slug)
         if loaded is None:
             continue
@@ -2764,9 +2770,6 @@ def _crypto_signal_dimensions(signal: Any) -> tuple[str, str]:
         or body.get("cadence")
         or body.get("interval")
     )
-    if not timeframe_raw:
-        signal_strategy_type = str(getattr(signal, "strategy_type", "") or "").strip().lower()
-        timeframe_raw = _LEGACY_CRYPTO_STRATEGY_TIMEFRAME_ALIASES.get(signal_strategy_type)
     return _normalize_crypto_asset(asset_raw), _normalize_crypto_timeframe(timeframe_raw)
 
 
@@ -3776,7 +3779,7 @@ async def _run_trader_once(
                                     except Exception:
                                         pass
                                     try:
-                                        _cfd = _get_crypto_filter_diagnostics()
+                                        _cfd = _get_crypto_filter_diagnostics(trader=trader)
                                         if _cfd:
                                             _idle_payload["crypto_filter_diagnostics"] = _cfd
                                             _summary = _cfd.get("summary", {})
@@ -5962,19 +5965,20 @@ async def _run_trader_once(
                             intra_cycle_seen_market_ids.add(_pre_gate_market_id)
                         await _commit_with_retry(session)
                         submit_started_at = utcnow()
-                        submit_result = await submit_order(
-                            session_engine=session_engine,
-                            trader_id=trader_id,
-                            signal=runtime_signal,
-                            decision_id=decision_row.id,
-                            strategy_key=resolved_strategy_key,
-                            strategy_version=resolved_strategy_version,
-                            strategy_params=strategy_params,
-                            risk_limits=effective_risk_limits,
-                            mode=str(control.get("mode", "shadow")),
-                            size_usd=size_usd,
-                            reason=final_reason,
-                        )
+                        async with release_conn(session):
+                            submit_result = await submit_order(
+                                session_engine=session_engine,
+                                trader_id=trader_id,
+                                signal=runtime_signal,
+                                decision_id=decision_row.id,
+                                strategy_key=resolved_strategy_key,
+                                strategy_version=resolved_strategy_version,
+                                strategy_params=strategy_params,
+                                risk_limits=effective_risk_limits,
+                                mode=str(control.get("mode", "shadow")),
+                                size_usd=size_usd,
+                                reason=final_reason,
+                            )
                         submit_completed_at = utcnow()
                         submit_latency_payload = _compute_signal_latency_payload(
                             runtime_signal,
@@ -6478,7 +6482,7 @@ async def _run_trader_once(
                         _no_signal_message = "Idle cycle: no pending signals."
                         if _is_crypto_source_trader(trader):
                             try:
-                                _cfd = _get_crypto_filter_diagnostics()
+                                _cfd = _get_crypto_filter_diagnostics(trader=trader)
                                 if _cfd:
                                     _no_signal_payload["crypto_filter_diagnostics"] = _cfd
                                     _summary = _cfd.get("summary", {})
@@ -7507,6 +7511,15 @@ async def run_worker_loop(*, lane: str = _LANE_GENERAL, write_snapshot: bool = T
                             decisions_delta=total_decisions,
                             orders_delta=total_orders,
                         )
+
+                # Cortex fleet commander — check if a cycle is due
+                if lane_key == _LANE_GENERAL and not skip_cycle:
+                    try:
+                        from workers.cortex_worker import maybe_run_cortex_tick
+
+                        await maybe_run_cortex_tick()
+                    except Exception as cortex_exc:
+                        logger.debug("Cortex tick check failed (non-critical): %s", cortex_exc)
 
                 (
                     runtime_trigger_event,

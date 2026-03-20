@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, lazy, Suspense, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -8,6 +8,7 @@ import type { LivelinePoint, LivelineSeries } from 'liveline'
 import {
   AlertTriangle,
   BarChart3,
+  Brain,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
@@ -91,6 +92,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip'
 import { FlashNumber } from './AnimatedNumber'
 import { toTimeValueSeries } from '../lib/priceHistory'
 import StrategyConfigForm from './StrategyConfigForm'
+
+const CortexView = lazy(() => import('./ai/CortexView'))
 
 type FeedFilter = 'all' | 'decision' | 'order' | 'event'
 type TradeStatusFilter = 'all' | 'open_resolved' | 'open' | 'resolved' | 'failed'
@@ -4366,6 +4369,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const [stopConfirmLiveClose, setStopConfirmLiveClose] = useState(false)
   const [globalSettingsFlyoutOpen, setGlobalSettingsFlyoutOpen] = useState(false)
   const [globalSettingsSaveError, setGlobalSettingsSaveError] = useState<string | null>(null)
+  const [cortexFlyoutOpen, setCortexFlyoutOpen] = useState(false)
   const [controlActionError, setControlActionError] = useState<string | null>(null)
   const [globalSettingsDraft, setGlobalSettingsDraft] = useState<GlobalSettingsDraft>(() => buildGlobalSettingsDraft(null, null))
   const [workTab, setWorkTab] = useState<'trades' | 'terminal' | 'tune' | 'risk' | 'decisions' | 'performance'>('trades')
@@ -8597,7 +8601,27 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
           <span>Edge {formatPercent(displayAvgEdge)}</span>
         </div>
 
-        <div className="ml-auto flex items-center">
+        <div className="ml-auto flex items-center gap-1.5">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className={cn(
+                  'h-6 px-2 text-[10px]',
+                  cortexFlyoutOpen && 'bg-orange-500/20 text-orange-300 border-orange-500/30'
+                )}
+                onClick={() => setCortexFlyoutOpen(true)}
+              >
+                <Brain className="w-3 h-3 mr-1" />
+                Cortex
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" className="text-xs">
+              Autonomous fleet commander agent
+            </TooltipContent>
+          </Tooltip>
           <Button
             type="button"
             size="sm"
@@ -12409,6 +12433,29 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
               >
                 {traderFlyoutMode === 'create' ? 'Create Bot' : 'Save Bot'}
               </Button>
+            </div>
+          </div>
+        </SheetContent>
+      </Sheet>
+
+      <Sheet open={cortexFlyoutOpen} onOpenChange={setCortexFlyoutOpen}>
+        <SheetContent side="right" className="w-full sm:max-w-2xl p-0">
+          <div className="h-full min-h-0 flex flex-col">
+            <div className="border-b border-border px-4 py-3">
+              <SheetHeader className="space-y-1 text-left">
+                <SheetTitle className="text-base flex items-center gap-2">
+                  <Brain className="w-4 h-4 text-orange-400" />
+                  Cortex Fleet Commander
+                </SheetTitle>
+                <SheetDescription>
+                  Autonomous agent that observes fleet performance, adjusts strategies, and manages risk.
+                </SheetDescription>
+              </SheetHeader>
+            </div>
+            <div className="flex-1 min-h-0 overflow-y-auto p-4">
+              <Suspense fallback={<div className="flex items-center justify-center py-16"><Loader2 className="w-5 h-5 animate-spin text-orange-400" /></div>}>
+                <CortexView />
+              </Suspense>
             </div>
           </div>
         </SheetContent>

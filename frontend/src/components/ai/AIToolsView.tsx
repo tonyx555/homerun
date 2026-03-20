@@ -13,13 +13,15 @@ import {
   Newspaper,
   BookOpen,
   BarChart3,
+  Zap,
+  Globe,
+  Settings,
 } from 'lucide-react'
 import { cn } from '../../lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card'
 import { Button } from '../ui/button'
 import { Badge } from '../ui/badge'
 import { Input } from '../ui/input'
-import { ScrollArea } from '../ui/scroll-area'
 import {
   listAvailableTools,
 } from '../../services/api'
@@ -36,6 +38,20 @@ interface ToolItem {
   parameters_schema?: Record<string, unknown> | null
   implementation?: string | null
   id?: string
+  category?: string
+}
+
+const CATEGORY_ICONS: Record<string, React.ReactNode> = {
+  market_data: <BarChart3 className="w-4 h-4" />,
+  portfolio: <BookOpen className="w-4 h-4" />,
+  trading: <Zap className="w-4 h-4" />,
+  wallets: <Search className="w-4 h-4" />,
+  strategies: <Shield className="w-4 h-4" />,
+  news: <Newspaper className="w-4 h-4" />,
+  analytics: <BarChart3 className="w-4 h-4" />,
+  web: <Globe className="w-4 h-4" />,
+  system: <Settings className="w-4 h-4" />,
+  general: <Wrench className="w-4 h-4" />,
 }
 
 const TOOL_ICONS: Record<string, React.ReactNode> = {
@@ -80,6 +96,7 @@ export default function AIToolsView() {
     is_builtin: t.is_builtin ?? true,
     enabled: t.enabled ?? true,
     id: t.id || t.name,
+    category: t.category || 'general',
   }))
 
   const filteredTools = searchFilter
@@ -114,7 +131,7 @@ export default function AIToolsView() {
   return (
     <div className="flex gap-4 h-full">
       {/* Tool List */}
-      <div className="w-72 shrink-0 flex flex-col">
+      <div className="w-72 max-w-72 shrink-0 flex flex-col overflow-hidden">
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-sm font-semibold text-foreground">LLM Tools</h3>
           <Button
@@ -151,14 +168,28 @@ export default function AIToolsView() {
             </p>
           </div>
         ) : (
-          <ScrollArea className="flex-1">
-            <div className="space-y-1.5 pr-2">
-              {filteredTools.map(tool => (
+          <div className="flex-1 overflow-y-auto overflow-x-hidden">
+            <div className="space-y-3 pr-1">
+              {(() => {
+                const grouped: Record<string, ToolItem[]> = {}
+                for (const tool of filteredTools) {
+                  const cat = tool.category || 'general'
+                  if (!grouped[cat]) grouped[cat] = []
+                  grouped[cat].push(tool)
+                }
+                return Object.entries(grouped).map(([cat, catTools]) => (
+                  <div key={cat}>
+                    <div className="flex items-center gap-1.5 mb-1.5 px-1">
+                      <span className="text-muted-foreground/60">{CATEGORY_ICONS[cat] || <Wrench className="w-3.5 h-3.5" />}</span>
+                      <p className="text-[9px] uppercase tracking-wider text-muted-foreground/60 font-medium">{cat.replace('_', ' ')} ({catTools.length})</p>
+                    </div>
+                    <div className="space-y-1">
+              {catTools.map(tool => (
                 <button
                   key={tool.name}
                   onClick={() => handleSelectTool(tool)}
                   className={cn(
-                    'w-full text-left p-3 rounded-lg border transition-colors',
+                    'w-full min-w-0 text-left p-2.5 rounded-lg border transition-colors overflow-hidden',
                     selectedToolName === tool.name
                       ? 'bg-violet-500/10 border-violet-500/30'
                       : 'bg-background/30 border-border/55 hover:border-border/80'
@@ -172,7 +203,7 @@ export default function AIToolsView() {
                       <span className={cn(
                         selectedToolName === tool.name ? 'text-violet-400' : 'text-muted-foreground'
                       )}>
-                        {TOOL_ICONS[tool.name] || <Wrench className="w-3.5 h-3.5" />}
+                        {TOOL_ICONS[tool.name] || CATEGORY_ICONS[tool.category || 'general'] || <Wrench className="w-3.5 h-3.5" />}
                       </span>
                     </div>
                     <div className="flex-1 min-w-0 overflow-hidden">
@@ -198,8 +229,12 @@ export default function AIToolsView() {
                   </div>
                 </button>
               ))}
+                    </div>
+                  </div>
+                ))
+              })()}
             </div>
-          </ScrollArea>
+          </div>
         )}
       </div>
 

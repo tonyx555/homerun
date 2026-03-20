@@ -11,6 +11,9 @@ from utils.passwords import hash_password
 from utils.secrets import decrypt_secret, encrypt_secret
 
 SEARCH_FILTER_DEFAULTS: dict[str, Any] = {
+    "search_polymarket_enabled": True,
+    "search_kalshi_enabled": False,
+    "search_max_results": 50,
     "min_liquidity_hard": 1000.0,
     "min_position_size": 50.0,
     "min_absolute_profit": 10.0,
@@ -278,6 +281,8 @@ def llm_payload(settings: AppSettings) -> dict[str, Any]:
         "lmstudio_base_url": settings.lmstudio_base_url,
         "model": settings.llm_model,
         "max_monthly_spend": settings.ai_max_monthly_spend,
+        "model_assignments": settings.llm_model_assignments or {},
+        "enabled_features": settings.llm_enabled_features or {},
     }
 
 
@@ -681,6 +686,10 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
             settings.ai_default_model = llm.model or None
         if llm.max_monthly_spend is not None:
             settings.ai_max_monthly_spend = llm.max_monthly_spend
+        if llm.model_assignments is not None:
+            settings.llm_model_assignments = llm.model_assignments
+        if llm.enabled_features is not None:
+            settings.llm_enabled_features = llm.enabled_features
 
     if notifications:
         notif = notifications

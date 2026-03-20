@@ -1,0 +1,437 @@
+"""Strategy management tools — list, inspect, tune, backtest, create."""
+
+from __future__ import annotations
+
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def build_tools() -> list:
+    from services.ai.agent import AgentTool
+
+    return [
+        AgentTool(
+            name="list_strategies",
+            description=(
+                "List all loaded strategies with their current status — active, paused, "
+                "errored. Includes key config like max_positions, filters, and runtime stats."
+            ),
+            parameters={"type": "object", "properties": {}, "required": []},
+            handler=_list_strategies,
+            max_calls=3,
+            category="strategies",
+        ),
+        AgentTool(
+            name="get_strategy_details",
+            description=(
+                "Get full details for a specific strategy including its configuration, "
+                "source code, runtime status, and recent performance metrics."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "strategy_id": {
+                        "type": "string",
+                        "description": "Strategy ID or slug",
+                    },
+                },
+                "required": ["strategy_id"],
+            },
+            handler=_get_strategy_details,
+            max_calls=5,
+            category="strategies",
+        ),
+        AgentTool(
+            name="get_strategy_performance",
+            description=(
+                "Get performance metrics for a strategy — trades made, win rate, "
+                "P&L, average hold time, and recent decisions."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "strategy_id": {
+                        "type": "string",
+                        "description": "Strategy ID or slug",
+                    },
+                },
+                "required": ["strategy_id"],
+            },
+            handler=_get_strategy_performance,
+            max_calls=5,
+            category="strategies",
+        ),
+        AgentTool(
+            name="update_strategy_config",
+            description=(
+                "Update configuration parameters for a strategy. Pass a JSON object "
+                "of config keys to change (e.g. max_positions, min_edge, filters). "
+                "The strategy will be hot-reloaded with new config."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "strategy_id": {
+                        "type": "string",
+                        "description": "Strategy ID or slug",
+                    },
+                    "config_updates": {
+                        "type": "object",
+                        "description": "Key-value pairs of config to update",
+                    },
+                },
+                "required": ["strategy_id", "config_updates"],
+            },
+            handler=_update_strategy_config,
+            max_calls=5,
+            category="strategies",
+        ),
+        AgentTool(
+            name="validate_strategy_code",
+            description=(
+                "Validate strategy source code without deploying it. Checks syntax, "
+                "required methods, import safety, and config schema. Returns any "
+                "errors or warnings found."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "source_code": {
+                        "type": "string",
+                        "description": "Python source code of the strategy",
+                    },
+                    "class_name": {
+                        "type": "string",
+                        "description": "Expected class name in the source",
+                    },
+                },
+                "required": ["source_code"],
+            },
+            handler=_validate_strategy_code,
+            max_calls=5,
+            category="strategies",
+        ),
+        AgentTool(
+            name="run_strategy_backtest",
+            description=(
+                "Run a backtest for a strategy over historical data. Returns simulated "
+                "trades, P&L curve, win rate, Sharpe ratio, and max drawdown."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "strategy_id": {
+                        "type": "string",
+                        "description": "Strategy ID or slug to backtest",
+                    },
+                    "lookback_days": {
+                        "type": "integer",
+                        "description": "Days of history to backtest over (default 30)",
+                        "default": 30,
+                    },
+                },
+                "required": ["strategy_id"],
+            },
+            handler=_run_strategy_backtest,
+            max_calls=2,
+            category="strategies",
+        ),
+        AgentTool(
+            name="create_strategy",
+            description=(
+                "Create a new strategy from source code and configuration. The strategy "
+                "will be validated, saved to the database, and loaded into the runtime."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Human-readable strategy name",
+                    },
+                    "slug": {
+                        "type": "string",
+                        "description": "Unique slug identifier (lowercase, underscores)",
+                    },
+                    "source_code": {
+                        "type": "string",
+                        "description": "Python source code",
+                    },
+                    "config": {
+                        "type": "object",
+                        "description": "Initial configuration",
+                        "default": {},
+                    },
+                },
+                "required": ["name", "slug", "source_code"],
+            },
+            handler=_create_strategy,
+            max_calls=3,
+            category="strategies",
+        ),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Implementations
+# ---------------------------------------------------------------------------
+
+
+async def _list_strategies(args: dict) -> dict:
+    try:
+        from models.database import AsyncSessionLocal, Strategy
+        from sqlalchemy import select
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(Strategy))
+            rows = result.scalars().all()
+
+        strategies = []
+        for r in rows:
+            strategies.append({
+                "id": r.id,
+                "name": getattr(r, "name", None) or r.id,
+                "slug": getattr(r, "slug", None),
+                "enabled": getattr(r, "enabled", True),
+                "source_key": getattr(r, "source_key", None),
+                "config": getattr(r, "config", {}),
+                "created_at": r.created_at.isoformat() if getattr(r, "created_at", None) else None,
+            })
+
+        # Also get runtime statuses
+        try:
+            from services.strategy_loader import StrategyLoader
+            loader = StrategyLoader.instance()
+            if loader:
+                for s in strategies:
+                    slug = s.get("slug") or s.get("id")
+                    status = loader.get_runtime_status(slug)
+                    if status:
+                        s["runtime_status"] = status
+        except Exception:
+            pass
+
+        return {"strategies": strategies, "count": len(strategies)}
+    except Exception as exc:
+        logger.error("list_strategies failed: %s", exc)
+        return {"error": str(exc)}
+
+
+async def _get_strategy_details(args: dict) -> dict:
+    try:
+        from models.database import AsyncSessionLocal, Strategy
+        from sqlalchemy import select
+
+        sid = args["strategy_id"]
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Strategy).where(
+                    (Strategy.id == sid) | (Strategy.slug == sid)
+                )
+            )
+            row = result.scalar_one_or_none()
+
+        if not row:
+            return {"error": f"Strategy not found: {sid}"}
+
+        detail = {
+            "id": row.id,
+            "name": getattr(row, "name", None),
+            "slug": getattr(row, "slug", None),
+            "enabled": getattr(row, "enabled", True),
+            "source_code": getattr(row, "source_code", None),
+            "config": getattr(row, "config", {}),
+            "source_key": getattr(row, "source_key", None),
+            "created_at": row.created_at.isoformat() if getattr(row, "created_at", None) else None,
+            "updated_at": row.updated_at.isoformat() if getattr(row, "updated_at", None) else None,
+        }
+
+        # Runtime status
+        try:
+            from services.strategy_loader import StrategyLoader
+            loader = StrategyLoader.instance()
+            if loader:
+                slug = detail.get("slug") or detail.get("id")
+                detail["runtime_status"] = loader.get_runtime_status(slug)
+        except Exception:
+            pass
+
+        return detail
+    except Exception as exc:
+        logger.error("get_strategy_details failed: %s", exc)
+        return {"error": str(exc)}
+
+
+async def _get_strategy_performance(args: dict) -> dict:
+    try:
+        from models.database import AsyncSessionLocal, LiveTradingOrder
+        from sqlalchemy import select, func
+
+        sid = args["strategy_id"]
+
+        async with AsyncSessionLocal() as session:
+            # Count trades from this strategy
+            result = await session.execute(
+                select(func.count(LiveTradingOrder.id)).where(
+                    LiveTradingOrder.strategy_slug == sid
+                )
+            )
+            trade_count = result.scalar() or 0
+
+            # Get recent decisions
+            result2 = await session.execute(
+                select(LiveTradingOrder)
+                .where(LiveTradingOrder.strategy_slug == sid)
+                .order_by(LiveTradingOrder.created_at.desc())
+                .limit(10)
+            )
+            recent = result2.scalars().all()
+
+        recent_trades = []
+        for r in recent:
+            recent_trades.append({
+                "id": r.id,
+                "condition_id": r.condition_id,
+                "side": r.side,
+                "price": float(r.price) if getattr(r, "price", None) else None,
+                "size": float(r.size) if getattr(r, "size", None) else None,
+                "status": getattr(r, "status", None),
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            })
+
+        return {
+            "strategy_id": sid,
+            "total_trades": trade_count,
+            "recent_trades": recent_trades,
+        }
+    except Exception as exc:
+        logger.error("get_strategy_performance failed: %s", exc)
+        return {"error": str(exc)}
+
+
+async def _update_strategy_config(args: dict) -> dict:
+    try:
+        from models.database import AsyncSessionLocal, Strategy
+        from sqlalchemy import select
+
+        sid = args["strategy_id"]
+        updates = args["config_updates"]
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Strategy).where(
+                    (Strategy.id == sid) | (Strategy.slug == sid)
+                )
+            )
+            row = result.scalar_one_or_none()
+            if not row:
+                return {"error": f"Strategy not found: {sid}"}
+
+            current_config = dict(row.config or {})
+            current_config.update(updates)
+            row.config = current_config
+            await session.commit()
+
+            strategy_slug = getattr(row, "slug", None) or row.id
+
+        # Hot-reload
+        try:
+            from services.strategy_loader import StrategyLoader
+            loader = StrategyLoader.instance()
+            if loader:
+                await loader.reload_from_db(strategy_slug)
+        except Exception as e:
+            logger.warning("Hot-reload after config update failed: %s", e)
+
+        return {
+            "strategy_id": sid,
+            "updated_keys": list(updates.keys()),
+            "new_config": current_config,
+        }
+    except Exception as exc:
+        logger.error("update_strategy_config failed: %s", exc)
+        return {"error": str(exc)}
+
+
+async def _validate_strategy_code(args: dict) -> dict:
+    try:
+        from services.strategy_loader import StrategyLoader
+
+        source_code = args["source_code"]
+        class_name = args.get("class_name")
+
+        loader = StrategyLoader.instance()
+        if loader is None:
+            # Fallback: basic AST validation
+            import ast
+            try:
+                ast.parse(source_code)
+                return {"valid": True, "errors": [], "warnings": ["StrategyLoader not available for full validation"]}
+            except SyntaxError as se:
+                return {"valid": False, "errors": [f"Syntax error: {se}"]}
+
+        result = loader.validate_strategy_source(source_code, class_name)
+        return result if isinstance(result, dict) else {"valid": True, "result": result}
+    except Exception as exc:
+        logger.error("validate_strategy_code failed: %s", exc)
+        return {"error": str(exc)}
+
+
+async def _run_strategy_backtest(args: dict) -> dict:
+    try:
+        from services.strategy_backtester import StrategyBacktester
+
+        sid = args["strategy_id"]
+        lookback = args.get("lookback_days", 30)
+
+        backtester = StrategyBacktester()
+        result = await backtester.run_strategy_backtest(
+            strategy_slug=sid,
+            lookback_days=lookback,
+        )
+        return result if isinstance(result, dict) else {"result": result}
+    except Exception as exc:
+        logger.error("run_strategy_backtest failed: %s", exc)
+        return {"error": str(exc)}
+
+
+async def _create_strategy(args: dict) -> dict:
+    try:
+        from models.database import AsyncSessionLocal, Strategy
+        import uuid
+
+        name = args["name"]
+        slug = args["slug"]
+        source_code = args["source_code"]
+        config = args.get("config", {})
+
+        # Validate first
+        validation = await _validate_strategy_code({"source_code": source_code})
+        if isinstance(validation, dict) and not validation.get("valid", True):
+            return {"error": "Validation failed", "details": validation}
+
+        async with AsyncSessionLocal() as session:
+            strategy = Strategy(
+                id=str(uuid.uuid4()),
+                name=name,
+                slug=slug,
+                source_code=source_code,
+                config=config,
+                enabled=False,  # Start disabled for safety
+            )
+            session.add(strategy)
+            await session.commit()
+
+        return {
+            "created": True,
+            "id": strategy.id,
+            "slug": slug,
+            "name": name,
+            "enabled": False,
+            "note": "Strategy created in disabled state. Enable it via the UI or update_strategy_config when ready.",
+        }
+    except Exception as exc:
+        logger.error("create_strategy failed: %s", exc)
+        return {"error": str(exc)}

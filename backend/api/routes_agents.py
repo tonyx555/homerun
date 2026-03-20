@@ -26,56 +26,20 @@ router = APIRouter(prefix="/ai/agents", tags=["ai-agents"])
 
 
 # ---------------------------------------------------------------------------
-# Available tools registry
+# Available tools registry — powered by services.ai.tools
 # ---------------------------------------------------------------------------
 
-# Each entry describes a tool that can be assigned to a user agent.
-# The handler is resolved at runtime via _resolve_tool().
-AVAILABLE_TOOLS: list[dict] = [
-    {
-        "name": "get_market_details",
-        "description": "Fetch detailed information about a Polymarket market including question, prices, volume, and liquidity.",
-        "category": "market_data",
-    },
-    {
-        "name": "search_news",
-        "description": "Search for recent news articles related to a topic or market question with sentiment analysis.",
-        "category": "news",
-    },
-    {
-        "name": "analyze_resolution",
-        "description": "Deep analysis of a market's resolution criteria, checking for ambiguities, edge cases, and risks.",
-        "category": "analysis",
-    },
-    {
-        "name": "check_orderbook",
-        "description": "Check the order book depth and liquidity for a market's tokens.",
-        "category": "market_data",
-    },
-    {
-        "name": "find_related_markets",
-        "description": "Find other Polymarket markets related to the same event or topic.",
-        "category": "market_data",
-    },
-]
+
+def _get_available_tools() -> list[dict]:
+    """Dynamically build the available tools list from the tool registry."""
+    from services.ai.tools import get_available_tools_metadata
+    return get_available_tools_metadata()
 
 
 def _resolve_tools(tool_names: list[str]) -> list[AgentTool]:
-    """Resolve tool name strings into AgentTool instances backed by the MarketAnalyzer."""
-    from services.ai.market_analyzer import MarketAnalyzer
-
-    analyzer = MarketAnalyzer()
-    all_tools = analyzer._build_tools()
-    tool_map = {t.name: t for t in all_tools}
-
-    resolved = []
-    for name in tool_names:
-        tool = tool_map.get(name)
-        if tool:
-            resolved.append(tool)
-        else:
-            logger.warning("Unknown tool requested for agent: %s", name)
-    return resolved
+    """Resolve tool name strings into AgentTool instances from the tool registry."""
+    from services.ai.tools import resolve_tools
+    return resolve_tools(tool_names)
 
 
 def _agent_row_to_dict(row: UserAgent) -> dict:
@@ -131,7 +95,7 @@ class TestAgentRequest(BaseModel):
 @router.get("/meta/available-tools")
 async def list_available_tools() -> dict:
     """Return the list of tools that can be assigned to agents."""
-    return {"tools": AVAILABLE_TOOLS}
+    return {"tools": _get_available_tools()}
 
 
 @router.get("")
@@ -427,10 +391,13 @@ BUILTIN_AGENTS = [
             "You are a Market Analyst agent for a prediction market trading platform. "
             "Your job is to analyze prediction markets and provide actionable intelligence.\n\n"
             "When given a market or topic to analyze, you should:\n"
-            "1. Fetch market details to understand the question, current prices, volume, and liquidity.\n"
-            "2. Search for recent news that could impact the market outcome.\n"
-            "3. Evaluate the order book depth and spreads.\n"
-            "4. Look for related markets that could provide cross-market signals.\n\n"
+            "1. Search for markets matching the topic.\n"
+            "2. Fetch market details to understand the question, current prices, volume, and liquidity.\n"
+            "3. Search for recent news that could impact the market outcome.\n"
+            "4. Evaluate the order book depth and spreads.\n"
+            "5. Check the market regime (volatile, trending, etc.).\n"
+            "6. Look for related markets that could provide cross-market signals.\n"
+            "7. Search the web for additional context if needed.\n\n"
             "Provide a clear, structured analysis covering:\n"
             "- Current market state (prices, volume, liquidity)\n"
             "- News sentiment and its likely impact on the outcome\n"
@@ -439,10 +406,14 @@ BUILTIN_AGENTS = [
             "- Your probability estimate vs. the market price\n"
             "- A recommendation: BUY YES, BUY NO, or SKIP (with reasoning)"
         ),
-        "tools": ["get_market_details", "search_news", "check_orderbook", "find_related_markets"],
+        "tools": [
+            "search_markets", "get_market_details", "search_news", "check_orderbook",
+            "find_related_markets", "get_market_regime", "get_price_history",
+            "web_search", "analyze_market_sentiment",
+        ],
         "model": None,
         "temperature": 0.0,
-        "max_iterations": 10,
+        "max_iterations": 15,
     },
     {
         "id": "builtin_resolution_auditor",
@@ -454,7 +425,8 @@ BUILTIN_AGENTS = [
             "When given a market to audit, you should:\n"
             "1. Fetch the full market details including resolution source and description.\n"
             "2. Run a deep resolution analysis to identify ambiguities and edge cases.\n"
-            "3. Search for news that might create resolution ambiguity.\n\n"
+            "3. Search for news that might create resolution ambiguity.\n"
+            "4. Search the web to verify resolution sources and precedents.\n\n"
             "Provide a structured audit report covering:\n"
             "- Resolution criteria summary\n"
             "- Ambiguities found (specific language that could be interpreted multiple ways)\n"
@@ -463,10 +435,10 @@ BUILTIN_AGENTS = [
             "- Risk score (0-10, where 10 is most risky)\n"
             "- Recommendation: SAFE, CAUTION, or AVOID (with reasoning)"
         ),
-        "tools": ["analyze_resolution", "get_market_details", "search_news"],
+        "tools": ["analyze_resolution", "get_market_details", "search_news", "web_search", "fetch_webpage"],
         "model": None,
         "temperature": 0.0,
-        "max_iterations": 10,
+        "max_iterations": 12,
     },
     {
         "id": "builtin_news_sentinel",
@@ -477,78 +449,172 @@ BUILTIN_AGENTS = [
             "Your job is to monitor news and evaluate its impact on markets.\n\n"
             "When given a topic or market to monitor, you should:\n"
             "1. Search for the latest news on the topic.\n"
-            "2. Fetch current market prices to compare against news sentiment.\n"
-            "3. Identify any breaking developments that could shift probabilities.\n\n"
+            "2. Check for detected news edges that could move prices.\n"
+            "3. Search the web for breaking developments.\n"
+            "4. Fetch current market prices to compare against news sentiment.\n"
+            "5. Check our open positions to assess portfolio impact.\n\n"
             "Provide a structured intelligence brief covering:\n"
             "- Latest news developments (with sources and recency)\n"
             "- Sentiment assessment (bullish, bearish, neutral)\n"
             "- Impact analysis: how this news should affect market probabilities\n"
+            "- Portfolio impact: which of our positions are affected\n"
             "- Price dislocation: is the market reacting or is there an opportunity?\n"
             "- Urgency level: IMMEDIATE, WATCH, or INFORMATIONAL"
         ),
-        "tools": ["search_news", "get_market_details"],
+        "tools": [
+            "search_news", "get_news_edges", "web_search", "fetch_webpage",
+            "get_market_details", "get_open_positions", "analyze_market_sentiment",
+        ],
         "model": None,
         "temperature": 0.0,
-        "max_iterations": 10,
+        "max_iterations": 12,
     },
     {
         "id": "builtin_strategy_tuner",
         "name": "Strategy Tuner",
-        "description": "Analyzes market conditions and recommends strategy parameter adjustments for optimal trading performance.",
+        "description": "Analyzes strategy performance and market conditions to recommend and apply parameter adjustments.",
         "system_prompt": (
             "You are a Strategy Tuner agent for a prediction market trading platform. "
-            "Your job is to analyze market conditions and recommend strategy adjustments.\n\n"
-            "When asked to evaluate strategy performance or market conditions, you should:\n"
-            "1. Fetch current market data to understand the trading environment.\n"
-            "2. Search for news that could indicate regime changes.\n"
-            "3. Check order book conditions to assess liquidity.\n\n"
+            "Your job is to analyze strategy performance, market conditions, and recommend "
+            "or apply parameter adjustments.\n\n"
+            "When asked to evaluate or tune a strategy, you should:\n"
+            "1. List all strategies and their current status.\n"
+            "2. Get performance metrics for the target strategy.\n"
+            "3. Check current market conditions and regime.\n"
+            "4. Review recent trading decisions and their outcomes.\n"
+            "5. Analyze order book conditions and liquidity.\n"
+            "6. Look at the strategy's configuration.\n\n"
             "Provide a structured tuning recommendation covering:\n"
+            "- Current strategy status and key metrics\n"
             "- Current market regime (trending, range-bound, volatile, calm)\n"
             "- Liquidity conditions across key markets\n"
-            "- Recommended parameter adjustments (with reasoning)\n"
-            "- Risk considerations for the current environment\n"
-            "- Confidence level in recommendations: HIGH, MEDIUM, or LOW"
+            "- Specific parameter changes recommended (with reasoning)\n"
+            "- Expected impact of changes\n"
+            "- Confidence level: HIGH, MEDIUM, or LOW\n\n"
+            "You have the ability to directly update strategy config. Only do so "
+            "when the user explicitly asks you to apply changes, not just recommend."
         ),
-        "tools": ["get_market_details", "search_news", "check_orderbook"],
+        "tools": [
+            "list_strategies", "get_strategy_details", "get_strategy_performance",
+            "update_strategy_config", "run_strategy_backtest",
+            "get_active_markets_summary", "get_market_regime", "check_orderbook",
+            "get_recent_decisions", "get_active_signals",
+        ],
         "model": None,
         "temperature": 0.0,
-        "max_iterations": 10,
+        "max_iterations": 15,
+    },
+    {
+        "id": "builtin_portfolio_manager",
+        "name": "Portfolio Manager",
+        "description": "Monitors portfolio health, analyzes positions, and manages risk across all open trades.",
+        "system_prompt": (
+            "You are a Portfolio Manager agent for a prediction market trading platform. "
+            "Your job is to monitor portfolio health, analyze positions, and manage risk.\n\n"
+            "When asked to review the portfolio, you should:\n"
+            "1. Check the current account balance.\n"
+            "2. Get all open positions and their P&L.\n"
+            "3. Review recent trade history and performance.\n"
+            "4. Check open orders.\n"
+            "5. Assess market conditions for held positions.\n"
+            "6. Look for positions that may need attention (large drawdowns, "
+            "approaching resolution, etc.).\n\n"
+            "Provide a structured portfolio report covering:\n"
+            "- Account balance and utilization\n"
+            "- Open position summary (total P&L, count, largest positions)\n"
+            "- Risk assessment (concentrated positions, correlated exposures)\n"
+            "- Positions needing attention (losers, approaching expiry, etc.)\n"
+            "- Recent performance trends\n"
+            "- Actionable recommendations"
+        ),
+        "tools": [
+            "get_open_positions", "get_trade_history", "get_account_balance",
+            "get_portfolio_performance", "get_open_orders",
+            "get_market_details", "check_orderbook", "get_market_regime",
+            "search_news",
+        ],
+        "model": None,
+        "temperature": 0.0,
+        "max_iterations": 12,
+    },
+    {
+        "id": "builtin_research_analyst",
+        "name": "Research Analyst",
+        "description": "Deep-dives into topics using web search, news, and market data to produce comprehensive research reports.",
+        "system_prompt": (
+            "You are a Research Analyst agent for a prediction market trading platform. "
+            "Your job is to conduct deep research on topics and produce comprehensive reports.\n\n"
+            "When given a research topic, you should:\n"
+            "1. Search the web for the latest information on the topic.\n"
+            "2. Read relevant articles and sources.\n"
+            "3. Search for related prediction markets.\n"
+            "4. Analyze news sentiment.\n"
+            "5. Check if any tracked wallets or smart money is active in related markets.\n"
+            "6. Query internal data for additional context.\n\n"
+            "Produce a comprehensive research report covering:\n"
+            "- Executive summary\n"
+            "- Key facts and developments\n"
+            "- Multiple perspectives / scenarios\n"
+            "- Prediction market implications\n"
+            "- Trading opportunities identified\n"
+            "- Confidence assessment and key uncertainties\n"
+            "- Sources consulted"
+        ),
+        "tools": [
+            "web_search", "fetch_webpage", "search_news", "search_markets",
+            "get_market_details", "analyze_market_sentiment", "get_confluence_signals",
+            "get_wallet_leaderboard", "query_database",
+        ],
+        "model": None,
+        "temperature": 0.1,
+        "max_iterations": 20,
+    },
+    {
+        "id": "builtin_wallet_scout",
+        "name": "Wallet Scout",
+        "description": "Analyzes wallet activity, discovers smart money patterns, and monitors copy-trading signals.",
+        "system_prompt": (
+            "You are a Wallet Scout agent for a prediction market trading platform. "
+            "Your job is to analyze wallet activity and identify smart money patterns.\n\n"
+            "When asked to analyze wallets or traders, you should:\n"
+            "1. Check the wallet leaderboard for top performers.\n"
+            "2. Get detailed profiles for wallets of interest.\n"
+            "3. Check the Smart Pool composition and health.\n"
+            "4. Look for confluence signals (multiple smart wallets trading same market).\n"
+            "5. Review trader groups and whale clusters.\n"
+            "6. Check what tracked wallets are doing.\n\n"
+            "Provide a structured intelligence report covering:\n"
+            "- Top performing wallets and their recent activity\n"
+            "- Smart Pool health and any changes\n"
+            "- Active confluence signals\n"
+            "- Notable whale activity\n"
+            "- Emerging patterns or trends\n"
+            "- Recommendations for wallet tracking adjustments"
+        ),
+        "tools": [
+            "get_wallet_profile", "get_wallet_leaderboard", "get_smart_pool_stats",
+            "get_confluence_signals", "get_tracked_wallets", "get_trader_groups",
+            "get_whale_clusters", "get_active_signals", "query_database",
+        ],
+        "model": None,
+        "temperature": 0.0,
+        "max_iterations": 15,
     },
 ]
 
 
-BUILTIN_TOOLS = [
-    {
-        "id": "builtin_get_market_details",
-        "name": "get_market_details",
-        "description": "Fetch detailed information about a Polymarket market including question, prices, volume, and liquidity.",
-        "tool_type": "function",
-    },
-    {
-        "id": "builtin_search_news",
-        "name": "search_news",
-        "description": "Search for recent news articles related to a topic or market question with sentiment analysis.",
-        "tool_type": "function",
-    },
-    {
-        "id": "builtin_analyze_resolution",
-        "name": "analyze_resolution",
-        "description": "Deep analysis of a market's resolution criteria, checking for ambiguities, edge cases, and risks.",
-        "tool_type": "function",
-    },
-    {
-        "id": "builtin_check_orderbook",
-        "name": "check_orderbook",
-        "description": "Check the order book depth and liquidity for a market's tokens.",
-        "tool_type": "function",
-    },
-    {
-        "id": "builtin_find_related_markets",
-        "name": "find_related_markets",
-        "description": "Find other Polymarket markets related to the same event or topic.",
-        "tool_type": "function",
-    },
-]
+def _build_builtin_tools() -> list[dict]:
+    """Generate BUILTIN_TOOLS from the tool registry dynamically."""
+    from services.ai.tools import get_all_tools
+    tools = []
+    for name, tool in get_all_tools().items():
+        tools.append({
+            "id": f"builtin_{name}",
+            "name": name,
+            "description": tool.description,
+            "tool_type": "function",
+        })
+    return tools
 
 
 async def seed_builtin_agents() -> None:
@@ -575,7 +641,7 @@ async def seed_builtin_agents() -> None:
             session.add(row)
             logger.info("Seeded builtin agent: %s", agent_def["name"])
 
-        for tool_def in BUILTIN_TOOLS:
+        for tool_def in _build_builtin_tools():
             result = await session.execute(
                 select(UserTool).where(UserTool.id == tool_def["id"])
             )

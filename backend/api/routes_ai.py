@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from typing import Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
+import asyncio
 import json
 import logging
 import re
@@ -2118,16 +2119,26 @@ async def ai_chat_stream(
     request: AIChatRequest,
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Streaming conversational AI copilot.
+    """Streaming conversational AI copilot powered by the ReAct agent.
 
-    Same inputs as /ai/chat but returns an SSE stream of token events
-    instead of a single JSON response.
+    Uses the full agent loop with tool access so the LLM can search
+    markets, check portfolios, run analyses, etc. during the conversation.
+
+    SSE event types:
+    - token: Streaming text chunk (final answer)
+    - thinking: Agent reasoning / chain-of-thought
+    - tool_start: Tool invocation beginning
+    - tool_end: Tool invocation result
+    - tool_error: Tool invocation failed
+    - done: Agent finished
+    - error: Unrecoverable error
     """
     from fastapi.responses import StreamingResponse
 
     from services.ai import get_llm_manager
+    from services.ai.agent import Agent, AgentEventType
     from services.ai.chat_memory import chat_memory_service
-    from services.ai.llm_provider import LLMMessage
+    from services.ai.tools import get_all_tools
 
     manager = get_llm_manager()
     if not manager.is_available():
@@ -2149,8 +2160,6 @@ async def ai_chat_stream(
         )
     session_id = chat_session["session_id"]
 
-    persisted = await chat_memory_service.get_recent_messages(session_id, limit=20)
-
     context_pack = await _build_context_pack(
         session,
         context_type=request.context_type,
@@ -2165,10 +2174,38 @@ async def ai_chat_stream(
         "You are the AI copilot for Homerun, a Polymarket prediction market "
         "arbitrage trading platform. You help traders understand opportunities, "
         "analyze resolution criteria, assess risk, and make trading decisions.\n\n"
+        "You have access to tools that let you search markets, check portfolios, "
+        "analyze news, look up strategies, query the database, and search the web. "
+        "Use these tools proactively to provide data-driven, precise answers.\n\n"
         "General rules:\n"
         "- Be concise, specific, and data-driven.\n"
-        "- Reference only context provided in the context pack.\n"
-        "- If context is insufficient, state what is missing.\n"
+        "- Use tools to look up real data rather than guessing.\n"
+        "- When you use tools, incorporate the results into your answer.\n"
+        "- If a tool fails, explain what happened and try an alternative.\n\n"
+        "## Rich Output Format\n"
+        "You can embed rich UI components in your final answer using OpenUI Lang markup.\n"
+        "The available components are:\n"
+        "- <MarketCard question=\"...\" yesPrice={0.65} noPrice={0.35} volume=\"$1.2M\" liquidity=\"$50K\" />\n"
+        "- <Card title=\"...\" subtitle=\"...\" accent=\"purple|cyan|emerald|amber|red\">...children...</Card>\n"
+        "- <ScoreGauge label=\"...\" value={0.75} format=\"percent\" />\n"
+        "- <SentimentBar label=\"...\" score={0.4} confidence={0.8} />\n"
+        "- <DataTable headers={[\"Market\",\"Price\",\"Volume\"]} rows={[[\"...\",\"65c\",\"$1M\"],[...]]} />\n"
+        "- <KeyValue label=\"...\" value=\"...\" mono={true} />\n"
+        "- <Badge text=\"Active\" variant=\"success|warning|danger|info|neutral\" />\n"
+        "- <Recommendation verdict=\"execute|review|skip\" reasoning=\"...\" />\n"
+        "- <BulletList items={[\"item 1\",\"item 2\"]} />\n"
+        "- <Stack gap=\"gap-3\">...children...</Stack>\n"
+        "- <TextBlock text=\"...\" variant=\"body|heading|caption|code\" />\n\n"
+        "When presenting market data, analysis results, or recommendations, "
+        "USE these components to make your output visually rich and structured. "
+        "Wrap multiple components in a <Stack> container. "
+        "You can mix OpenUI components with normal markdown text.\n"
+        "Example:\n"
+        "Here's what I found:\n"
+        "<Stack>\n"
+        "<MarketCard question=\"Will X happen?\" yesPrice={0.72} noPrice={0.28} volume=\"$500K\" />\n"
+        "<Recommendation verdict=\"execute\" reasoning=\"Strong edge with 72c YES price...\" />\n"
+        "</Stack>\n\n"
     )
 
     compact_context = {
@@ -2190,7 +2227,6 @@ async def ai_chat_stream(
         system_prompt += (
             "\nYou are acting as a strategy engineering copilot. "
             "Use the strategy source code and SDK documentation in context to reason precisely.\n"
-            "Action execution is disabled for streaming. Respond with plain text guidance only.\n"
         )
     elif context_type == "data_source":
         compact_context["data_source"] = context_pack.get("data_source")
@@ -2199,19 +2235,22 @@ async def ai_chat_stream(
         system_prompt += (
             "\nYou are acting as a data-source engineering copilot. "
             "Use BaseDataSource docs and source registry context.\n"
-            "Action execution is disabled for streaming. Respond with plain text guidance only.\n"
         )
 
     system_prompt += "\nCurrent context pack (JSON):\n" + json.dumps(compact_context, ensure_ascii=True)
 
-    messages = [LLMMessage(role="system", content=system_prompt)]
+    # Build conversation history for the agent's context
+    persisted = await chat_memory_service.get_recent_messages(session_id, limit=20)
     history_source = persisted if persisted else request.history[-10:]
+    history_text_parts = []
     for msg in history_source:
         role = msg.get("role", "user")
         if role not in ("user", "assistant"):
             continue
-        messages.append(LLMMessage(role=role, content=msg.get("content", "")))
-    messages.append(LLMMessage(role="user", content=request.message))
+        history_text_parts.append(f"[{role}]: {msg.get('content', '')}")
+
+    if history_text_parts:
+        system_prompt += "\n\nConversation history:\n" + "\n".join(history_text_parts)
 
     await chat_memory_service.append_message(
         session_id=session_id,
@@ -2219,31 +2258,115 @@ async def ai_chat_stream(
         content=request.message,
     )
 
-    model_name = request.model
+    # Resolve all tools for the chat agent
+    all_tools = list(get_all_tools().values())
+
+    agent = Agent(
+        system_prompt=system_prompt,
+        tools=all_tools,
+        model=request.model,
+        max_iterations=10,
+        session_type="ai_chat_stream",
+        temperature=0.1,
+    )
+
+    def _strip_raw_tool_xml(text: str) -> str:
+        """Remove raw <tool_call>...</tool_call> XML that some models emit as text."""
+        import re
+        # Strip <tool_call>...</tool_call> blocks (single or multi-line)
+        text = re.sub(r"<tool_call>.*?</tool_call>", "", text, flags=re.DOTALL)
+        # Strip unclosed <tool_call> blocks at end of text
+        text = re.sub(r"<tool_call>.*$", "", text, flags=re.DOTALL)
+        # Strip lone closing tags
+        text = text.replace("</tool_call>", "")
+        return text.strip()
+
+    # Chunk size for simulated streaming of the final answer
+    _STREAM_CHUNK = 12  # characters per token event
 
     async def _generate_sse():
-        full_response: list[str] = []
+        final_answer = ""
+        # Track tool events for persistence (segment-encoded)
+        tool_event_segments: list[str] = []
+
         try:
-            async for chunk in manager.chat_stream(
-                messages=messages,
-                model=model_name,
-                max_tokens=1600 if context_type in {"strategy", "data_source"} else 1024,
-                purpose="ai_chat_stream",
-                session_id=session_id,
-            ):
-                full_response.append(chunk)
-                yield f"event: token\ndata: {json.dumps({'text': chunk})}\n\n"
+            async for event in agent.run(request.message):
+                etype = event.type
 
-            complete_text = "".join(full_response)
+                if etype == AgentEventType.THINKING:
+                    content = event.data.get("content", "")
+                    # Strip any raw XML from thinking too
+                    content = _strip_raw_tool_xml(content)
+                    if content:
+                        yield f"event: thinking\ndata: {json.dumps({'content': content}, default=str)}\n\n"
 
-            await chat_memory_service.append_message(
-                session_id=session_id,
-                role="assistant",
-                content=complete_text,
-                model_used=model_name,
-            )
+                elif etype == AgentEventType.TOOL_START:
+                    payload = {"tool": event.data.get("tool", ""), "input": event.data.get("input", {})}
+                    tool_event_segments.append(
+                        f"\u00ab\u00abSEG:tool_start:{json.dumps(payload, default=str)}\u00bb\u00bb"
+                    )
+                    yield f"event: tool_start\ndata: {json.dumps(payload, default=str)}\n\n"
 
-            yield f"event: done\ndata: {json.dumps({'session_id': session_id, 'model_used': model_name or ''})}\n\n"
+                elif etype == AgentEventType.TOOL_END:
+                    payload = {"tool": event.data.get("tool", ""), "output": event.data.get("output", {})}
+                    tool_event_segments.append(
+                        f"\u00ab\u00abSEG:tool_end:{json.dumps(payload, default=str)}\u00bb\u00bb"
+                    )
+                    yield f"event: tool_end\ndata: {json.dumps(payload, default=str)}\n\n"
+
+                elif etype == AgentEventType.TOOL_ERROR:
+                    payload = {"tool": event.data.get("tool", ""), "error": event.data.get("error", "")}
+                    tool_event_segments.append(
+                        f"\u00ab\u00abSEG:tool_error:{json.dumps(payload, default=str)}\u00bb\u00bb"
+                    )
+                    yield f"event: tool_error\ndata: {json.dumps(payload, default=str)}\n\n"
+
+                elif etype == AgentEventType.TOOL_LIMIT:
+                    tool_name = event.data.get("tool", "")
+                    max_calls = event.data.get("max", 0)
+                    payload = {"tool": tool_name, "error": f"Call limit reached ({max_calls})"}
+                    tool_event_segments.append(
+                        f"\u00ab\u00abSEG:tool_error:{json.dumps(payload, default=str)}\u00bb\u00bb"
+                    )
+                    yield f"event: tool_error\ndata: {json.dumps(payload, default=str)}\n\n"
+
+                elif etype == AgentEventType.ANSWER_START:
+                    content = _strip_raw_tool_xml(event.data.get("content", ""))
+                    final_answer = content
+                    # Stream the answer in small chunks for typing effect
+                    for i in range(0, len(content), _STREAM_CHUNK):
+                        chunk = content[i : i + _STREAM_CHUNK]
+                        yield f"event: token\ndata: {json.dumps({'text': chunk, 'partial': True})}\n\n"
+                        await asyncio.sleep(0.02)
+
+                elif etype == AgentEventType.DONE:
+                    result = event.data.get("result", {})
+                    answer = _strip_raw_tool_xml(result.get("answer", ""))
+                    if answer and not final_answer:
+                        final_answer = answer
+                        for i in range(0, len(answer), _STREAM_CHUNK):
+                            chunk = answer[i : i + _STREAM_CHUNK]
+                            yield f"event: token\ndata: {json.dumps({'text': chunk, 'partial': True})}\n\n"
+                            await asyncio.sleep(0.02)
+
+                    # Build the full content with embedded tool segments for persistence
+                    segments_prefix = "".join(tool_event_segments)
+                    persisted_content = segments_prefix + final_answer if segments_prefix else final_answer
+
+                    await chat_memory_service.append_message(
+                        session_id=session_id,
+                        role="assistant",
+                        content=persisted_content,
+                        model_used=request.model,
+                    )
+
+                    yield f"event: done\ndata: {json.dumps({'session_id': session_id, 'model_used': request.model or ''})}\n\n"
+                    return
+
+                elif etype == AgentEventType.ERROR:
+                    error_msg = event.data.get("error", "Unknown error")
+                    yield f"event: error\ndata: {json.dumps({'error': error_msg})}\n\n"
+                    return
 
         except Exception as exc:
             logger.error("AI chat stream failed", exc_info=exc)

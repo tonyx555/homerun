@@ -22,7 +22,6 @@ import json
 import time
 from dataclasses import dataclass
 from enum import Enum
-from threading import Lock
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Set
 
 from sqlalchemy import select
@@ -56,7 +55,9 @@ def _is_expected_close(exc: Exception) -> bool:
             received = getattr(exc, "rcvd", None)
             sent = getattr(exc, "sent", None)
             close_code = getattr(received, "code", None) or getattr(sent, "code", None)
-        return close_code in {1000, 1001, 1005}
+        # None means no close frame was received (raw TCP drop) — this is
+        # normal for WS servers that disconnect idle/overloaded clients.
+        return close_code is None or close_code in {1000, 1001, 1005}
     return False
 
 
@@ -69,8 +70,8 @@ KALSHI_WS_URL = settings.KALSHI_WS_URL
 
 DEFAULT_STALE_TTL = float(settings.WS_PRICE_STALE_SECONDS)
 DEFAULT_HEARTBEAT_INTERVAL = max(1.0, float(settings.WS_HEARTBEAT_INTERVAL))  # seconds between keep-alive pings
-DEFAULT_HEARTBEAT_PONG_TIMEOUT = 12.0
-DEFAULT_HEARTBEAT_MAX_MISSES = 2
+DEFAULT_HEARTBEAT_PONG_TIMEOUT = max(5.0, float(settings.WS_HEARTBEAT_PONG_TIMEOUT))
+DEFAULT_HEARTBEAT_MAX_MISSES = max(1, int(settings.WS_HEARTBEAT_MAX_MISSES))
 DEFAULT_RECONNECT_BASE_DELAY = 1.0  # initial backoff delay in seconds
 DEFAULT_RECONNECT_MAX_DELAY = 60.0  # maximum backoff ceiling
 DEFAULT_RECONNECT_MULTIPLIER = 2.0  # exponential multiplier per attempt
@@ -194,7 +195,9 @@ class PriceCache:
         self._stale_ttl = stale_ttl
         self._change_threshold_pct = change_threshold_pct
         self._history_max_snapshots = max(50, int(settings.WS_PRICE_HISTORY_MAX_SNAPSHOTS or 1500))
-        self._lock = Lock()
+        # No lock needed — all access is from the single-threaded asyncio
+        # event loop.  A threading.Lock was previously here but it added
+        # unnecessary overhead and is semantically incorrect for async code.
         self._entries: Dict[str, CachedEntry] = {}
         self._history: Dict[str, deque[tuple[float, float, float, float]]] = {}
         self._sequence: int = 0
@@ -244,33 +247,32 @@ class PriceCache:
         now_mono = time.monotonic()
         now_epoch = time.time()
         old_mid = 0.0
-        with self._lock:
-            prev = self._entries.get(token_id)
-            if prev:
-                old_mid = (
-                    (prev.best_bid + prev.best_ask) / 2.0
-                    if prev.best_bid > 0 and prev.best_ask > 0
-                    else prev.best_bid or prev.best_ask
-                )
-            self._sequence += 1
-            sequence = self._sequence
-            parsed_exchange_ts = float(exchange_ts) if exchange_ts is not None and exchange_ts > 0 else now_epoch
-            entry = CachedEntry(
-                best_bid=best_bid,
-                best_ask=best_ask,
-                order_book=book,
-                updated_at=now_mono,
-                updated_at_epoch=now_epoch,
-                exchange_ts=parsed_exchange_ts,
-                sequence=sequence,
+        prev = self._entries.get(token_id)
+        if prev:
+            old_mid = (
+                (prev.best_bid + prev.best_ask) / 2.0
+                if prev.best_bid > 0 and prev.best_ask > 0
+                else prev.best_bid or prev.best_ask
             )
-            self._entries[token_id] = entry
-            if new_mid > 0:
-                history = self._history.get(token_id)
-                if history is None:
-                    history = deque(maxlen=self._history_max_snapshots)
-                    self._history[token_id] = history
-                history.append((now_epoch, new_mid, best_bid, best_ask))
+        self._sequence += 1
+        sequence = self._sequence
+        parsed_exchange_ts = float(exchange_ts) if exchange_ts is not None and exchange_ts > 0 else now_epoch
+        entry = CachedEntry(
+            best_bid=best_bid,
+            best_ask=best_ask,
+            order_book=book,
+            updated_at=now_mono,
+            updated_at_epoch=now_epoch,
+            exchange_ts=parsed_exchange_ts,
+            sequence=sequence,
+        )
+        self._entries[token_id] = entry
+        if new_mid > 0:
+            history = self._history.get(token_id)
+            if history is None:
+                history = deque(maxlen=self._history_max_snapshots)
+                self._history[token_id] = history
+            history.append((now_epoch, new_mid, best_bid, best_ask))
 
         # Fire change callbacks outside the lock
         if (
@@ -302,10 +304,9 @@ class PriceCache:
 
     def remove(self, token_id: str) -> None:
         """Remove a token from the cache."""
-        with self._lock:
-            self._entries.pop(token_id, None)
-            self._history.pop(token_id, None)
-            self._trades.pop(token_id, None)
+        self._entries.pop(token_id, None)
+        self._history.pop(token_id, None)
+        self._trades.pop(token_id, None)
 
     def add_on_trade_callback(self, callback: Callable) -> None:
         """Register a callback invoked on each trade. Receives (token_id, TradeRecord)."""
@@ -314,10 +315,9 @@ class PriceCache:
     def record_trade(self, token_id: str, price: float, size: float, side: str, timestamp: float) -> None:
         """Record a trade execution."""
         trade = TradeRecord(price=price, size=size, side=side.upper(), timestamp=timestamp)
-        with self._lock:
-            if token_id not in self._trades:
-                self._trades[token_id] = deque(maxlen=self._trades_max)
-            self._trades[token_id].append(trade)
+        if token_id not in self._trades:
+            self._trades[token_id] = deque(maxlen=self._trades_max)
+        self._trades[token_id].append(trade)
         # Fire callbacks outside the lock
         for cb in self._on_trade_callbacks:
             try:
@@ -327,11 +327,10 @@ class PriceCache:
 
     def get_recent_trades(self, token_id: str, max_trades: int = 100) -> List["TradeRecord"]:
         """Return up to max_trades most recent trades for a token."""
-        with self._lock:
-            trades = self._trades.get(token_id)
-            if not trades:
-                return []
-            return list(trades)[-max_trades:]
+        trades = self._trades.get(token_id)
+        if not trades:
+            return []
+        return list(trades)[-max_trades:]
 
     def get_trade_volume(self, token_id: str, lookback_seconds: float = 300.0) -> Dict[str, float]:
         """Return buy/sell/total volume over the lookback window."""
@@ -339,16 +338,15 @@ class PriceCache:
         buy_vol = 0.0
         sell_vol = 0.0
         count = 0
-        with self._lock:
-            trades = self._trades.get(token_id)
-            if trades:
-                for t in trades:
-                    if t.timestamp >= cutoff:
-                        if t.side == "BUY":
-                            buy_vol += t.size * t.price
-                        else:
-                            sell_vol += t.size * t.price
-                        count += 1
+        trades = self._trades.get(token_id)
+        if trades:
+            for t in trades:
+                if t.timestamp >= cutoff:
+                    if t.side == "BUY":
+                        buy_vol += t.size * t.price
+                    else:
+                        sell_vol += t.size * t.price
+                    count += 1
         return {"buy_volume": buy_vol, "sell_volume": sell_vol, "total": buy_vol + sell_vol, "trade_count": count}
 
     def get_buy_sell_imbalance(self, token_id: str, lookback_seconds: float = 300.0) -> float:
@@ -369,28 +367,25 @@ class PriceCache:
         """
         cutoff = time.monotonic() - max_age_seconds
         to_remove: list[str] = []
-        with self._lock:
-            for token_id, entry in self._entries.items():
-                if entry.updated_at < cutoff:
-                    to_remove.append(token_id)
-            for token_id in to_remove:
-                self._entries.pop(token_id, None)
-                self._history.pop(token_id, None)
-                self._trades.pop(token_id, None)
+        for token_id, entry in self._entries.items():
+            if entry.updated_at < cutoff:
+                to_remove.append(token_id)
+        for token_id in to_remove:
+            self._entries.pop(token_id, None)
+            self._history.pop(token_id, None)
+            self._trades.pop(token_id, None)
         return to_remove
 
     def clear(self) -> None:
         """Drop everything."""
-        with self._lock:
-            self._entries.clear()
-            self._history.clear()
+        self._entries.clear()
+        self._history.clear()
 
     # -- queries ------------------------------------------------------------
 
     def get_mid_price(self, token_id: str) -> Optional[float]:
         """Return mid price or ``None`` if not cached."""
-        with self._lock:
-            entry = self._entries.get(token_id)
+        entry = self._entries.get(token_id)
         if entry is None:
             return None
         if entry.best_bid == 0.0 and entry.best_ask == 0.0:
@@ -403,16 +398,14 @@ class PriceCache:
 
     def get_spread(self, token_id: str) -> Optional[float]:
         """Return absolute bid-ask spread or ``None``."""
-        with self._lock:
-            entry = self._entries.get(token_id)
+        entry = self._entries.get(token_id)
         if entry is None or entry.best_bid == 0.0 or entry.best_ask == 0.0:
             return None
         return entry.best_ask - entry.best_bid
 
     def get_spread_bps(self, token_id: str) -> Optional[float]:
         """Return bid-ask spread in basis points or ``None``."""
-        with self._lock:
-            entry = self._entries.get(token_id)
+        entry = self._entries.get(token_id)
         if entry is None or entry.best_bid == 0.0 or entry.best_ask == 0.0:
             return None
         mid = (entry.best_bid + entry.best_ask) / 2.0
@@ -422,24 +415,21 @@ class PriceCache:
 
     def get_order_book(self, token_id: str) -> Optional[OrderBook]:
         """Return the full ``OrderBook`` or ``None``."""
-        with self._lock:
-            entry = self._entries.get(token_id)
+        entry = self._entries.get(token_id)
         if entry is None:
             return None
         return entry.order_book
 
     def get_best_bid_ask(self, token_id: str) -> Optional[tuple[float, float]]:
         """Return ``(best_bid, best_ask)`` or ``None``."""
-        with self._lock:
-            entry = self._entries.get(token_id)
+        entry = self._entries.get(token_id)
         if entry is None:
             return None
         return (entry.best_bid, entry.best_ask)
 
     def is_fresh(self, token_id: str, *, max_age_seconds: float | None = None) -> bool:
         """Return ``True`` if the cached data is within the staleness TTL."""
-        with self._lock:
-            entry = self._entries.get(token_id)
+        entry = self._entries.get(token_id)
         if entry is None or entry.updated_at == 0.0:
             return False
         ttl = self._stale_ttl if max_age_seconds is None else max(0.0, float(max_age_seconds))
@@ -447,38 +437,33 @@ class PriceCache:
 
     def get_observed_at_epoch(self, token_id: str) -> Optional[float]:
         """Return wall-clock ingest timestamp in epoch seconds, or ``None``."""
-        with self._lock:
-            entry = self._entries.get(token_id)
+        entry = self._entries.get(token_id)
         if entry is None or entry.updated_at_epoch <= 0.0:
             return None
         return float(entry.updated_at_epoch)
 
     def get_sequence(self, token_id: str) -> Optional[int]:
         """Return local cache update sequence, or ``None`` when unavailable."""
-        with self._lock:
-            entry = self._entries.get(token_id)
+        entry = self._entries.get(token_id)
         if entry is None or entry.sequence <= 0:
             return None
         return int(entry.sequence)
 
     def staleness(self, token_id: str) -> Optional[float]:
         """Return age in seconds of the cached data, or ``None``."""
-        with self._lock:
-            entry = self._entries.get(token_id)
+        entry = self._entries.get(token_id)
         if entry is None or entry.updated_at == 0.0:
             return None
         return time.monotonic() - entry.updated_at
 
     def all_token_ids(self) -> List[str]:
         """Return a snapshot of all cached token IDs."""
-        with self._lock:
-            return list(self._entries.keys())
+        return list(self._entries.keys())
 
     def get_price_history(self, token_id: str, max_snapshots: int = 60) -> List[dict]:
         """Return recent price snapshots for a token (newest first)."""
         limit = max(1, int(max_snapshots))
-        with self._lock:
-            raw = list(self._history.get(token_id, []))
+        raw = list(self._history.get(token_id, []))
         if not raw:
             return []
         out = [
@@ -497,8 +482,7 @@ class PriceCache:
         """Return absolute/percent price move over a lookback window."""
         lookback = max(1, int(lookback_seconds))
         cutoff = time.time() - lookback
-        with self._lock:
-            history = list(self._history.get(token_id, []))
+        history = list(self._history.get(token_id, []))
         if len(history) < 2:
             return None
         current_ts, current_mid, _, _ = history[-1]
@@ -763,8 +747,10 @@ class PolymarketWSFeed:
         async with websockets.connect(
             self._ws_url,
             ping_interval=None,  # we manage heartbeats ourselves
+            ping_timeout=None,
             open_timeout=10,
             close_timeout=5,
+            max_size=2**22,  # 4 MB — large book snapshots can exceed 1 MB default
         ) as ws:
             self._ws = ws
             self._state = ConnectionState.CONNECTED
@@ -774,10 +760,17 @@ class PolymarketWSFeed:
 
             logger.info("Polymarket WS connected", url=self._ws_url, attempt=reconnect_at_connect)
 
-            # Re-subscribe to everything tracked
+            # Re-subscribe to everything tracked, in chunks to avoid
+            # overwhelming the server with a single massive subscribe message.
             async with self._sub_lock:
                 if self._subscribed_assets:
-                    await self._send_subscribe(list(self._subscribed_assets))
+                    all_ids = list(self._subscribed_assets)
+                    _SUBSCRIBE_CHUNK = 100
+                    for i in range(0, len(all_ids), _SUBSCRIBE_CHUNK):
+                        chunk = all_ids[i : i + _SUBSCRIBE_CHUNK]
+                        await self._send_subscribe(chunk)
+                        if i + _SUBSCRIBE_CHUNK < len(all_ids):
+                            await asyncio.sleep(0.05)
 
             # Start heartbeat
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(ws), name="polymarket-ws-heartbeat")
@@ -1145,8 +1138,10 @@ class KalshiWSFeed:
         async with websockets.connect(
             self._ws_url,
             ping_interval=None,
+            ping_timeout=None,
             open_timeout=10,
             close_timeout=5,
+            max_size=2**22,
             extra_headers=extra_headers,
         ) as ws:
             self._ws = ws
@@ -1331,7 +1326,6 @@ class FeedManager:
     """
 
     _instance: Optional["FeedManager"] = None
-    _instance_lock = Lock()
 
     def __init__(self) -> None:
         self._cache = PriceCache()
@@ -1348,7 +1342,7 @@ class FeedManager:
         self._eviction_task: Optional[asyncio.Task] = None
         # -- WS price push state -----------------------------------------------
         # Registered frontends: ws_id -> {token_ids: set, callback: async callable}
-        self._ws_push_lock = Lock()
+        # No lock needed — all access from single-threaded asyncio event loop.
         self._ws_push_clients: Dict[int, Dict[str, Any]] = {}
         # token_id -> set of ws_ids wanting that token's prices
         self._token_to_ws_clients: Dict[str, Set[int]] = {}
@@ -1365,16 +1359,13 @@ class FeedManager:
     def get_instance(cls) -> "FeedManager":
         """Return the process-wide singleton, creating it on first call."""
         if cls._instance is None:
-            with cls._instance_lock:
-                if cls._instance is None:
-                    cls._instance = cls()
+            cls._instance = cls()
         return cls._instance
 
     @classmethod
     def reset_instance(cls) -> None:
         """Tear down the singleton (useful in tests)."""
-        with cls._instance_lock:
-            cls._instance = None
+        cls._instance = None
 
     # -- properties ---------------------------------------------------------
 
@@ -1433,10 +1424,9 @@ class FeedManager:
         await self._polymarket_feed.stop()
         await self._kalshi_feed.stop()
         self._cache.clear()
-        with self._ws_push_lock:
-            self._ws_push_clients.clear()
-            self._token_to_ws_clients.clear()
-            self._pending_price_updates.clear()
+        self._ws_push_clients.clear()
+        self._token_to_ws_clients.clear()
+        self._pending_price_updates.clear()
         self._started = False
         logger.info("FeedManager stopped")
 
@@ -1553,22 +1543,21 @@ class FeedManager:
         flushes them to registered WS clients.
         """
         should_schedule = False
-        with self._ws_push_lock:
-            ws_ids = self._token_to_ws_clients.get(token_id)
-            if not ws_ids:
-                return
-            self._pending_price_updates[token_id] = {
-                "mid": mid,
-                "bid": bid,
-                "ask": ask,
-                "exchange_ts": exchange_ts or 0.0,
-                "ingest_ts": ingest_ts or 0.0,
-                "sequence": sequence or 0,
-                "is_fresh": True,
-            }
-            # Check under the same lock to prevent duplicate task creation
-            if self._price_push_task is None or self._price_push_task.done():
-                should_schedule = True
+        ws_ids = self._token_to_ws_clients.get(token_id)
+        if not ws_ids:
+            return
+        self._pending_price_updates[token_id] = {
+            "mid": mid,
+            "bid": bid,
+            "ask": ask,
+            "exchange_ts": exchange_ts or 0.0,
+            "ingest_ts": ingest_ts or 0.0,
+            "sequence": sequence or 0,
+            "is_fresh": True,
+        }
+        # Check under the same lock to prevent duplicate task creation
+        if self._price_push_task is None or self._price_push_task.done():
+            should_schedule = True
         # Schedule outside the lock to avoid holding it during asyncio calls.
         # NOTE: This callback fires from WS receive threads, NOT the asyncio
         # event loop, so asyncio.get_running_loop() would raise RuntimeError.
@@ -1618,73 +1607,68 @@ class FeedManager:
         *push_callback* is an async callable ``(list[dict]) -> None`` that
         sends the batched price messages to the frontend.
         """
-        with self._ws_push_lock:
-            self._ws_push_clients[ws_id] = {
-                "token_ids": set(token_ids),
-                "callback": push_callback,
-            }
-            for tid in token_ids:
-                if tid not in self._token_to_ws_clients:
-                    self._token_to_ws_clients[tid] = set()
-                self._token_to_ws_clients[tid].add(ws_id)
+        self._ws_push_clients[ws_id] = {
+            "token_ids": set(token_ids),
+            "callback": push_callback,
+        }
+        for tid in token_ids:
+            if tid not in self._token_to_ws_clients:
+                self._token_to_ws_clients[tid] = set()
+            self._token_to_ws_clients[tid].add(ws_id)
 
     def unregister_ws_client(self, ws_id: int) -> None:
         """Remove a frontend WS connection from price push."""
-        with self._ws_push_lock:
-            client = self._ws_push_clients.pop(ws_id, None)
-            if client:
-                for tid in client.get("token_ids", set()):
-                    ws_set = self._token_to_ws_clients.get(tid)
-                    if ws_set:
-                        ws_set.discard(ws_id)
-                        if not ws_set:
-                            del self._token_to_ws_clients[tid]
-
-    def update_ws_client_tokens(self, ws_id: int, token_ids: Set[str]) -> None:
-        """Update the set of token_ids a frontend WS client is watching."""
-        with self._ws_push_lock:
-            client = self._ws_push_clients.get(ws_id)
-            if client is None:
-                return
-            old_tokens = client["token_ids"]
-            removed = old_tokens - token_ids
-            added = token_ids - old_tokens
-            client["token_ids"] = set(token_ids)
-            for tid in removed:
+        client = self._ws_push_clients.pop(ws_id, None)
+        if client:
+            for tid in client.get("token_ids", set()):
                 ws_set = self._token_to_ws_clients.get(tid)
                 if ws_set:
                     ws_set.discard(ws_id)
                     if not ws_set:
                         del self._token_to_ws_clients[tid]
-            for tid in added:
-                if tid not in self._token_to_ws_clients:
-                    self._token_to_ws_clients[tid] = set()
-                self._token_to_ws_clients[tid].add(ws_id)
+
+    def update_ws_client_tokens(self, ws_id: int, token_ids: Set[str]) -> None:
+        """Update the set of token_ids a frontend WS client is watching."""
+        client = self._ws_push_clients.get(ws_id)
+        if client is None:
+            return
+        old_tokens = client["token_ids"]
+        removed = old_tokens - token_ids
+        added = token_ids - old_tokens
+        client["token_ids"] = set(token_ids)
+        for tid in removed:
+            ws_set = self._token_to_ws_clients.get(tid)
+            if ws_set:
+                ws_set.discard(ws_id)
+                if not ws_set:
+                    del self._token_to_ws_clients[tid]
+        for tid in added:
+            if tid not in self._token_to_ws_clients:
+                self._token_to_ws_clients[tid] = set()
+            self._token_to_ws_clients[tid].add(ws_id)
 
     async def _coalesced_price_push(self) -> None:
         """Wait for the coalescing window, then push accumulated updates."""
         await asyncio.sleep(self._coalesce_ms / 1000.0)
-        with self._ws_push_lock:
-            pending = dict(self._pending_price_updates)
-            self._pending_price_updates.clear()
+        pending = dict(self._pending_price_updates)
+        self._pending_price_updates.clear()
         if not pending:
             return
         # Build per-client batch: for each client, collect updates for tokens they care about
         client_batches: Dict[int, Dict[str, Dict[str, Any]]] = {}
-        with self._ws_push_lock:
-            for token_id, price_data in pending.items():
-                ws_ids = self._token_to_ws_clients.get(token_id)
-                if not ws_ids:
-                    continue
-                for ws_id in ws_ids:
-                    if ws_id not in client_batches:
-                        client_batches[ws_id] = {}
-                    client_batches[ws_id][token_id] = price_data
-            callbacks = {
-                ws_id: self._ws_push_clients[ws_id]["callback"]
-                for ws_id in client_batches
-                if ws_id in self._ws_push_clients
-            }
+        for token_id, price_data in pending.items():
+            ws_ids = self._token_to_ws_clients.get(token_id)
+            if not ws_ids:
+                continue
+            for ws_id in ws_ids:
+                if ws_id not in client_batches:
+                    client_batches[ws_id] = {}
+                client_batches[ws_id][token_id] = price_data
+        callbacks = {
+            ws_id: self._ws_push_clients[ws_id]["callback"]
+            for ws_id in client_batches
+            if ws_id in self._ws_push_clients
+        }
         for ws_id, token_updates in client_batches.items():
             cb = callbacks.get(ws_id)
             if cb is None:

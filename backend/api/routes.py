@@ -492,7 +492,7 @@ async def get_opportunity_ids(
 @router.get("/opportunities/search-polymarket")
 async def search_polymarket_opportunities(
     q: str = Query(..., min_length=1, description="Search query for Polymarket and Kalshi markets"),
-    limit: int = Query(50, ge=1, le=100, description="Maximum results to return"),
+    limit: int = Query(50, ge=1, le=200, description="Maximum results to return"),
 ):
     """
     Fast keyword search across Polymarket and Kalshi.
@@ -504,23 +504,64 @@ async def search_polymarket_opportunities(
     """
 
     try:
-        # Search Polymarket markets directly (fastest) and Kalshi concurrently
-        poly_task = polymarket_client.search_markets(q, limit=limit)
-        kalshi_task = kalshi_client.search_events(q, limit=limit)
-        poly_markets, kalshi_events = await asyncio.gather(poly_task, kalshi_task, return_exceptions=True)
+        # Read search settings to decide which platforms to query
+        from api.routes_settings import get_or_create_settings
 
-        # Handle errors gracefully
+        settings = await get_or_create_settings()
+        poly_enabled = getattr(settings, "search_polymarket_enabled", True)
+        kalshi_enabled = getattr(settings, "search_kalshi_enabled", False)
+        max_results = getattr(settings, "search_max_results", 50)
+        limit = min(limit, max_results)
+
+        # Build tasks for enabled platforms only
+        tasks: dict[str, asyncio.Task] = {}
+        if poly_enabled:
+            tasks["poly"] = asyncio.ensure_future(polymarket_client.search_markets(q, limit=limit))
+            tasks["poly_events"] = asyncio.ensure_future(polymarket_client.search_events(q, limit=limit))
+        if kalshi_enabled:
+            tasks["kalshi"] = asyncio.ensure_future(
+                asyncio.wait_for(kalshi_client.search_events(q, limit=limit), timeout=5.0)
+            )
+
+        if not tasks:
+            from fastapi.responses import JSONResponse
+            response = JSONResponse(content=[])
+            response.headers["X-Total-Count"] = "0"
+            return response
+
+        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+        task_results = dict(zip(tasks.keys(), results))
+
+        poly_markets = task_results.get("poly", [])
+        poly_events = task_results.get("poly_events", [])
+        kalshi_events = task_results.get("kalshi", [])
+
+        # Handle errors gracefully (includes TimeoutError from Kalshi)
         if isinstance(poly_markets, BaseException):
             poly_markets = []
+        if isinstance(poly_events, BaseException):
+            poly_events = []
         if isinstance(kalshi_events, BaseException):
             kalshi_events = []
+
+        # Collect markets from Polymarket events
+        poly_event_markets = []
+        for event in poly_events or []:
+            poly_event_markets.extend(event.markets)
 
         # Collect Kalshi markets from events
         kalshi_markets = []
         for event in kalshi_events or []:
             kalshi_markets.extend(event.markets)
 
-        all_markets = list(poly_markets) + kalshi_markets
+        # Merge all markets, dedup by condition_id
+        seen_cids: set[str] = set()
+        all_markets: list = []
+        for m in list(poly_markets) + poly_event_markets + kalshi_markets:
+            cid = m.condition_id or m.question[:80]
+            if cid not in seen_cids:
+                seen_cids.add(cid)
+                all_markets.append(m)
 
         # Filter out expired markets
         now = datetime.now(timezone.utc)
@@ -532,14 +573,25 @@ async def search_polymarket_opportunities(
             and (m.end_date is None or m.end_date > now)
         ]
 
-        # Relevance filter: only keep markets where the query actually
-        # appears in the question text.  The Gamma API _q search and
-        # slug_contains both return markets from matching *events* (e.g.
-        # searching "trump" returns every market in a Trump-tagged event,
-        # including GTA VI markets).
+        # Relevance filter: keep markets where the query appears in any
+        # meaningful field (question, slug, event_slug, group_item_title,
+        # or tags).  The Gamma API returns markets from matching *events*,
+        # so we check broadly but still filter out completely unrelated
+        # markets that happen to share an event.
         q_lower = q.lower()
         q_words = q_lower.split()
-        all_markets = [m for m in all_markets if any(w in m.question.lower() for w in q_words)]
+
+        def _market_relevant(m) -> bool:
+            searchable = " ".join([
+                m.question.lower(),
+                (m.slug or "").lower().replace("-", " "),
+                (m.event_slug or "").lower().replace("-", " "),
+                (m.group_item_title or "").lower(),
+                " ".join(t.lower() for t in (m.tags or [])),
+            ])
+            return any(w in searchable for w in q_words)
+
+        all_markets = [m for m in all_markets if _market_relevant(m)]
 
         if not all_markets:
             from fastapi.responses import JSONResponse

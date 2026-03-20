@@ -68,7 +68,7 @@ export default function AIModelsView() {
         llm: {
           model_assignments: modelAssignments,
           enabled_features: enabledFeatures,
-        } as any,
+        },
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['settings'] })
@@ -79,9 +79,8 @@ export default function AIModelsView() {
   // Sync local state from settings
   useEffect(() => {
     if (settings?.llm) {
-      const llm = settings.llm as any
-      setModelAssignments(llm.model_assignments ?? {})
-      setEnabledFeatures(llm.enabled_features ?? {})
+      setModelAssignments(settings.llm.model_assignments ?? {})
+      setEnabledFeatures(settings.llm.enabled_features ?? {})
     }
   }, [settings])
 

@@ -37,6 +37,7 @@ import {
   ArrowUpDown,
   CloudRain,
   Trophy,
+  Code2,
 } from 'lucide-react'
 import { cn } from './lib/utils'
 import {
@@ -97,6 +98,7 @@ import WalletAnalysisPanel from './components/WalletAnalysisPanel'
 import TradingPanel from './components/TradingPanel'
 import RecentTradesPanel from './components/RecentTradesPanel'
 import TrackedTradersPanel from './components/TrackedTradersPanel'
+import DiscoveryProfilesManager from './components/DiscoveryProfilesManager'
 import SettingsPanel from './components/SettingsPanel'
 import StrategiesPanel from './components/StrategiesPanel'
 import AITab from './components/ai/AITab'
@@ -132,7 +134,7 @@ import UILockScreen from './components/UILockScreen'
 import TradersNetworkPanel from './components/TradersNetworkPanel'
 
 type Tab = 'opportunities' | 'data' | 'trading' | 'strategies' | 'accounts' | 'traders' | 'positions' | 'performance' | 'ai' | 'settings'
-type TradersSubTab = 'discovery' | 'pool' | 'tracked' | 'analysis' | 'graph'
+type TradersSubTab = 'discovery' | 'pool' | 'tracked' | 'analysis' | 'graph' | 'manage'
 type OpportunitiesView = string
 type CopilotSeedPrompt = { id: number; prompt: string; autoSend: boolean }
 
@@ -607,7 +609,7 @@ function App() {
       // Analysis can be done via chat now
       setAiTabSubtab('chat')
     } else if (section === 'system' || section === 'skills' || section === 'sessions' || section === 'status') {
-      setAiTabSubtab('system')
+      setAiTabSubtab('activity')
     }
     window.dispatchEvent(new CustomEvent('navigate-ai-section', { detail: section }))
   }, [setAiTabSubtab])
@@ -2219,7 +2221,7 @@ function App() {
                       {polySearchLoading ? (
                         <div className="flex items-center justify-center py-12">
                           <RefreshCw className="w-8 h-8 animate-spin text-blue-400" />
-                          <span className="ml-3 text-muted-foreground">Searching Polymarket &amp; Kalshi...</span>
+                          <span className="ml-3 text-muted-foreground">Searching...</span>
                         </div>
                       ) : polymarketResults.length === 0 ? (
                         <div className="text-center py-12">
@@ -2884,13 +2886,27 @@ function App() {
                     <Network className="w-3.5 h-3.5" />
                     Graph
                   </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setTradersSubTab('manage')}
+                    className={cn(
+                      "gap-1.5 text-xs h-8",
+                      tradersSubTab === 'manage'
+                        ? "bg-violet-500/20 text-violet-300 border-violet-500/30 hover:bg-violet-500/30 hover:text-violet-300"
+                        : "bg-card text-muted-foreground hover:text-foreground border-border"
+                    )}
+                  >
+                    <Code2 className="w-3.5 h-3.5" />
+                    Manage
+                  </Button>
                 </div>
                 <div
                   className={cn(
                     'flex-1 min-h-0',
                     tradersSubTab === 'graph'
                       ? 'overflow-hidden px-6 pt-4 pb-5'
-                      : tradersSubTab === 'analysis'
+                      : tradersSubTab === 'analysis' || tradersSubTab === 'manage'
                         ? 'overflow-hidden px-6 py-4'
                         : 'overflow-y-auto px-6 py-4',
                   )}
@@ -2931,6 +2947,9 @@ function App() {
                         setTradersSubTab('analysis')
                       }}
                     />
+                  </div>
+                  <div className={cn("h-full min-h-0", tradersSubTab === 'manage' ? '' : 'hidden')}>
+                    <DiscoveryProfilesManager />
                   </div>
                 </div>
               </div>

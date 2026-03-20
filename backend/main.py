@@ -23,6 +23,10 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 os.environ.setdefault("NEWS_FAISS_THREADS", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("EMBEDDING_DEVICE", "cpu")
+# Headless backend — disable tqdm progress bars to prevent spurious
+# tqdm_asyncio __del__ AttributeError tracebacks during GC.
+os.environ.setdefault("TQDM_DISABLE", "1")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
 from config import settings, RUNTIME_SETTINGS_PRECEDENCE
 from api import router, handle_websocket
@@ -48,8 +52,10 @@ from api.routes_trader_sources import router as trader_sources_router
 from api.routes_strategies import router as strategies_router
 from api.routes_ml import router as ml_router
 from api.routes_data_sources import router as data_sources_router
+from api.routes_discovery_profiles import router as discovery_profiles_router
 from api.routes_traders import router as traders_router
 from api.routes_agents import router as agents_router, tools_router as ai_tools_router, seed_builtin_agents
+from api.routes_cortex import router as cortex_router
 from services.wallet_tracker import wallet_tracker
 from services.live_execution_service import live_execution_service
 from services.wallet_discovery import wallet_discovery
@@ -233,6 +239,33 @@ async def lifespan(app: FastAPI):
             )
         except Exception as e:
             logger.warning(f"Failed to preload data source registries: {e}")
+
+        # Seed and load discovery profiles at startup.
+        try:
+            from services.discovery_profile_catalog import seed_discovery_profiles
+            from services.discovery_profile_loader import discovery_profile_loader
+
+            await seed_discovery_profiles()
+            async with AsyncSessionLocal() as session:
+                from models.database import DiscoveryProfile as _DP
+                rows = (await session.execute(
+                    select(_DP).where(_DP.enabled == True)
+                )).scalars().all()
+                loaded_count = 0
+                active_slug = None
+                for row in rows:
+                    try:
+                        discovery_profile_loader.load(row.slug, row.source_code, row.config)
+                        loaded_count += 1
+                        if row.is_active:
+                            active_slug = row.slug
+                    except Exception:
+                        pass
+                if active_slug:
+                    discovery_profile_loader.set_active_slug(active_slug)
+            logger.info("Discovery profiles loaded", loaded=loaded_count, active=active_slug)
+        except Exception as e:
+            logger.warning(f"Failed to preload discovery profiles: {e}")
 
         await event_bus.start()
         await event_dispatcher.start()
@@ -864,6 +897,7 @@ app.include_router(kalshi_router, prefix="/api", tags=["Kalshi"])
 # Unified strategies router at /api/strategies/* (registered after legacy routers)
 app.include_router(strategies_router, prefix="/api", tags=["Strategies (Unified)"])
 app.include_router(data_sources_router, prefix="/api", tags=["Data Sources"])
+app.include_router(discovery_profiles_router, prefix="/api", tags=["Discovery Profiles"])
 app.include_router(crypto_router, prefix="/api", tags=["Crypto Markets"])
 app.include_router(news_workflow_router, prefix="/api", tags=["News Workflow"])
 app.include_router(weather_workflow_router, prefix="/api", tags=["Weather Workflow"])
@@ -874,6 +908,7 @@ app.include_router(events_router, prefix="/api", tags=["Events"])
 app.include_router(ml_router, prefix="/api", tags=["ML Training Pipeline"])
 app.include_router(agents_router, prefix="/api", tags=["AI Agents"])
 app.include_router(ai_tools_router, prefix="/api", tags=["AI Tools"])
+app.include_router(cortex_router, prefix="/api", tags=["Cortex"])
 
 
 # WebSocket endpoint

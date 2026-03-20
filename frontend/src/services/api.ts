@@ -2911,6 +2911,8 @@ export interface LLMSettings {
   lmstudio_base_url: string | null
   model: string | null
   max_monthly_spend: number | null
+  model_assignments: Record<string, string>
+  enabled_features: Record<string, boolean>
 }
 
 export interface NotificationSettings {
@@ -3033,6 +3035,10 @@ export interface EventsSettings {
 }
 
 export interface SearchFilterSettings {
+  // Search platform toggles & limits
+  search_polymarket_enabled: boolean
+  search_kalshi_enabled: boolean
+  search_max_results: number
   // Hard rejection filters
   min_liquidity_hard: number
   min_position_size: number
@@ -4974,12 +4980,17 @@ export async function deleteAgent(agentId: string): Promise<void> {
   await api.delete(`/ai/agents/${agentId}`)
 }
 
-export async function listAvailableTools(): Promise<{ tools: { name: string; description: string }[] }> {
+export async function listAvailableTools(): Promise<{ tools: { name: string; description: string; category: string; parameters?: Record<string, unknown> }[] }> {
   const response = await api.get('/ai/agents/meta/available-tools')
   return response.data
 }
 
 // ==================== AI STREAMING CHAT ====================
+
+export interface ChatStreamEvent {
+  event: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'tool_error' | 'done' | 'error'
+  data: Record<string, unknown>
+}
 
 export function streamAIChat(
   params: {
@@ -4993,6 +5004,7 @@ export function streamAIChat(
   onDone: (data: { session_id: string; model_used: string }) => void,
   onError: (error: string) => void,
   signal?: AbortSignal,
+  onEvent?: (event: ChatStreamEvent) => void,
 ): void {
   fetch('/api/ai/chat/stream', {
     method: 'POST',
@@ -5005,6 +5017,7 @@ export function streamAIChat(
     if (!reader) { onError('No response body'); return }
 
     let buffer = ''
+    let currentEventType = ''
     const read = (): void => {
       reader.read().then(({ done, value }) => {
         if (done) return
@@ -5013,14 +5026,22 @@ export function streamAIChat(
         buffer = lines.pop() || ''
         for (const line of lines) {
           if (line.startsWith('event: ')) {
+            currentEventType = line.slice(7).trim()
             continue
           }
           if (line.startsWith('data: ')) {
             try {
               const data = JSON.parse(line.slice(6))
-              if (data.text !== undefined) onToken(data.text)
-              if (data.session_id && data.model_used) onDone(data)
-              if (data.error) onError(data.error)
+              const eventType = currentEventType || 'token'
+              currentEventType = ''
+
+              if (onEvent) {
+                onEvent({ event: eventType as ChatStreamEvent['event'], data })
+              }
+
+              if (eventType === 'token' && data.text !== undefined) onToken(data.text)
+              if (eventType === 'done' && data.session_id !== undefined) onDone(data as { session_id: string; model_used: string })
+              if (eventType === 'error' && data.error) onError(data.error as string)
             } catch { /* skip malformed SSE lines */ }
           }
         }
@@ -5074,4 +5095,337 @@ export const listLLMUsageLog = async (params: {
 export async function renameChatSession(sessionId: string, title: string): Promise<AIChatSession> {
   const response = await api.patch(`/ai/chat/sessions/${sessionId}`, { title })
   return response.data
+}
+
+// ==================== DISCOVERY PROFILES ====================
+
+export interface DiscoveryProfile {
+  id: string
+  slug: string
+  name: string
+  description: string | null
+  source_code: string
+  class_name: string | null
+  is_system: boolean
+  enabled: boolean
+  is_active: boolean
+  status: string
+  error_message: string | null
+  config: Record<string, unknown>
+  config_schema: Record<string, unknown>
+  profile_kind: string
+  version: number
+  sort_order: number
+  capabilities: { has_score_wallet: boolean; has_select_pool: boolean } | null
+  runtime: {
+    slug: string
+    class_name: string
+    source_hash: string
+    loaded_at: string
+    run_count: number
+    error_count: number
+    last_run: string | null
+    last_error: string | null
+  } | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface DiscoveryProfileVersion {
+  id: string
+  profile_id: string
+  profile_slug: string
+  version: number
+  is_latest: boolean
+  name: string
+  description: string | null
+  source_code: string
+  class_name: string | null
+  config: Record<string, unknown>
+  config_schema: Record<string, unknown>
+  profile_kind: string
+  enabled: boolean
+  is_system: boolean
+  sort_order: number
+  parent_version: number | null
+  created_by: string | null
+  reason: string | null
+  created_at: string | null
+}
+
+export interface DiscoveryProfileValidationResult {
+  valid: boolean
+  class_name: string | null
+  errors: string[]
+  warnings: string[]
+  capabilities: { has_score_wallet: boolean; has_select_pool: boolean } | null
+}
+
+export interface DiscoveryProfileTemplateResponse {
+  template: string
+  available_imports: Record<string, unknown>
+}
+
+export const getDiscoveryProfiles = async (params?: {
+  enabled?: boolean
+  profile_kind?: string
+}): Promise<DiscoveryProfile[]> => {
+  const searchParams = new URLSearchParams()
+  if (params?.enabled !== undefined) searchParams.set('enabled', String(params.enabled))
+  if (params?.profile_kind) searchParams.set('profile_kind', params.profile_kind)
+  const query = searchParams.toString()
+  const { data } = await api.get(`/discovery-profiles${query ? `?${query}` : ''}`)
+  return data
+}
+
+export const getDiscoveryProfile = async (id: string): Promise<DiscoveryProfile> => {
+  const { data } = await api.get(`/discovery-profiles/${id}`)
+  return data
+}
+
+export const createDiscoveryProfile = async (payload: {
+  slug: string
+  name?: string
+  description?: string
+  source_code?: string
+  profile_kind?: string
+  config?: Record<string, unknown>
+  config_schema?: Record<string, unknown>
+  enabled?: boolean
+}): Promise<DiscoveryProfile> => {
+  const { data } = await api.post('/discovery-profiles', payload)
+  return data
+}
+
+export const updateDiscoveryProfile = async (
+  id: string,
+  payload: Partial<{
+    name: string
+    description: string
+    source_code: string
+    config: Record<string, unknown>
+    config_schema: Record<string, unknown>
+    enabled: boolean
+    profile_kind: string
+  }>
+): Promise<DiscoveryProfile> => {
+  const { data } = await api.put(`/discovery-profiles/${id}`, payload)
+  return data
+}
+
+export const deleteDiscoveryProfile = async (id: string): Promise<void> => {
+  await api.delete(`/discovery-profiles/${id}`)
+}
+
+export const validateDiscoveryProfile = async (
+  sourceCode: string,
+  className?: string
+): Promise<DiscoveryProfileValidationResult> => {
+  const { data } = await api.post('/discovery-profiles/validate', {
+    source_code: sourceCode,
+    class_name: className,
+  })
+  return data
+}
+
+export const reloadDiscoveryProfile = async (id: string): Promise<DiscoveryProfile> => {
+  const { data } = await api.post(`/discovery-profiles/${id}/reload`)
+  return data
+}
+
+export const getDiscoveryProfileTemplate = async (): Promise<DiscoveryProfileTemplateResponse> => {
+  const { data } = await api.get('/discovery-profiles/template')
+  return data
+}
+
+export const getDiscoveryProfileDocs = async (): Promise<Record<string, unknown>> => {
+  const { data } = await api.get('/discovery-profiles/docs')
+  return data
+}
+
+export const getDiscoveryProfileVersions = async (id: string): Promise<DiscoveryProfileVersion[]> => {
+  const { data } = await api.get(`/discovery-profiles/${id}/versions`)
+  return data
+}
+
+export const restoreDiscoveryProfileVersion = async (
+  id: string,
+  version: number,
+  reason?: string
+): Promise<DiscoveryProfile> => {
+  const { data } = await api.post(`/discovery-profiles/${id}/versions/${version}/restore`, { reason })
+  return data
+}
+
+export const setActiveDiscoveryProfile = async (profileId: string): Promise<{ active_profile_id: string }> => {
+  const { data } = await api.put('/discovery-profiles/active', { profile_id: profileId })
+  return data
+}
+
+// ==================== CORTEX AGENT ====================
+
+export interface CortexRunSummary {
+  id: string
+  started_at: string | null
+  finished_at: string | null
+  status: string
+  actions_count: number
+  learnings_count: number
+  tokens_used: number | null
+  cost_usd: number | null
+  model_used: string | null
+  trigger: string
+  summary: string | null
+}
+
+export interface CortexRunDetail extends CortexRunSummary {
+  thinking_log: string | null
+  actions_taken: Array<{ tool: string; input: Record<string, unknown>; output: Record<string, unknown> | null }>
+  learnings_saved: Array<{ content: string; category: string }>
+}
+
+export interface CortexMemoryEntry {
+  id: string
+  category: string
+  content: string
+  importance: number
+  access_count: number
+  context: Record<string, unknown> | null
+  expired: boolean
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface CortexSettings {
+  enabled: boolean
+  model: string | null
+  interval_seconds: number
+  max_iterations: number
+  temperature: number
+  mandate: string | null
+  memory_limit: number
+  write_actions_enabled: boolean
+  notify_telegram: boolean
+}
+
+export interface CortexStatus {
+  enabled: boolean
+  write_actions_enabled: boolean
+  interval_seconds: number
+  memory_count: number
+  total_runs: number
+  last_run: CortexRunSummary | null
+}
+
+export async function getCortexStatus(): Promise<CortexStatus> {
+  const { data } = await api.get('/cortex/status')
+  return data
+}
+
+export async function listCortexRuns(params?: {
+  limit?: number
+  offset?: number
+  status?: string
+}): Promise<{ runs: CortexRunSummary[]; total: number }> {
+  const { data } = await api.get('/cortex/runs', { params })
+  return data
+}
+
+export async function getCortexRun(runId: string): Promise<CortexRunDetail> {
+  const { data } = await api.get(`/cortex/runs/${runId}`)
+  return data
+}
+
+export async function triggerCortexRun(): Promise<Record<string, unknown>> {
+  const { data } = await api.post('/cortex/runs/trigger')
+  return data
+}
+
+export function streamCortexRun(
+  onEvent: (event: ChatStreamEvent) => void,
+  onDone: () => void,
+  onError: (error: string) => void,
+  signal?: AbortSignal,
+): void {
+  fetch('/api/cortex/runs/trigger/stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    signal,
+  }).then(response => {
+    const reader = response.body?.getReader()
+    const decoder = new TextDecoder()
+    if (!reader) { onError('No response body'); return }
+
+    let buffer = ''
+    const read = (): void => {
+      reader.read().then(({ done, value }) => {
+        if (done) { onDone(); return }
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const parsed = JSON.parse(line.slice(6))
+              onEvent(parsed)
+              if (parsed.type === 'done' || parsed.type === 'error') {
+                onDone()
+                return
+              }
+            } catch { /* skip malformed */ }
+          }
+        }
+        read()
+      }).catch(err => {
+        if (err.name !== 'AbortError') onError(String(err))
+      })
+    }
+    read()
+  }).catch(err => {
+    if (err.name !== 'AbortError') onError(String(err))
+  })
+}
+
+export async function listCortexMemories(params?: {
+  limit?: number
+  offset?: number
+  category?: string
+  include_expired?: boolean
+}): Promise<{ memories: CortexMemoryEntry[]; total: number }> {
+  const { data } = await api.get('/cortex/memory', { params })
+  return data
+}
+
+export async function createCortexMemory(memory: {
+  content: string
+  category: string
+  importance?: number
+  context?: Record<string, unknown>
+}): Promise<CortexMemoryEntry> {
+  const { data } = await api.post('/cortex/memory', memory)
+  return data
+}
+
+export async function updateCortexMemory(id: string, updates: {
+  content?: string
+  category?: string
+  importance?: number
+  expired?: boolean
+}): Promise<CortexMemoryEntry> {
+  const { data } = await api.put(`/cortex/memory/${id}`, updates)
+  return data
+}
+
+export async function deleteCortexMemory(id: string): Promise<void> {
+  await api.delete(`/cortex/memory/${id}`)
+}
+
+export async function getCortexSettings(): Promise<CortexSettings> {
+  const { data } = await api.get('/cortex/settings')
+  return data
+}
+
+export async function updateCortexSettings(settings: Partial<CortexSettings>): Promise<{ status: string; updated: string[] }> {
+  const { data } = await api.put('/cortex/settings', settings)
+  return data
 }

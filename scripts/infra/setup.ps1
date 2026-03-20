@@ -1,8 +1,9 @@
-﻿# Homerun - Windows Setup Script
+# Homerun - Windows Setup Script
 # Run: .\scripts\infra\setup.ps1
 
 param(
-    [switch]$PostgresOnly
+    [switch]$PostgresOnly,
+    [switch]$NoBanner
 )
 
 $ErrorActionPreference = "Stop"
@@ -10,10 +11,66 @@ $ErrorActionPreference = "Stop"
 # Navigate to project root (grandparent of scripts\infra\)
 Set-Location (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)))
 
-Write-Host "=========================================" -ForegroundColor Green
-Write-Host "  Homerun Setup (Windows)" -ForegroundColor Green
-Write-Host "=========================================" -ForegroundColor Green
-Write-Host ""
+# ── Banner & UI Helpers ──────────────────────────────────────────────
+
+function Show-Banner {
+    Write-Host ""
+    Write-Host "    ██   ██  ██████  ███    ███ ███████ ██████  ██    ██ ███    ██" -ForegroundColor DarkCyan
+    Write-Host "    ██   ██ ██    ██ ████  ████ ██      ██   ██ ██    ██ ████   ██" -ForegroundColor DarkCyan
+    Write-Host "    ███████ ██    ██ ██ ████ ██ █████   ██████  ██    ██ ██ ██  ██" -ForegroundColor Cyan
+    Write-Host "    ██   ██ ██    ██ ██  ██  ██ ██      ██   ██ ██    ██ ██  ██ ██" -ForegroundColor Cyan
+    Write-Host "    ██   ██  ██████  ██      ██ ███████ ██   ██  ██████  ██   ████" -ForegroundColor White
+    Write-Host ""
+    Write-Host "                    Autonomous Trading Platform" -ForegroundColor DarkGray
+    Write-Host ""
+}
+
+$script:stepNum = 0
+$script:totalSteps = 8
+
+function Show-Step {
+    param([string]$Text)
+    $script:stepNum++
+    $num = "$($script:stepNum)/$($script:totalSteps)"
+    $pad = 46 - $Text.Length
+    if ($pad -lt 2) { $pad = 2 }
+    $dots = " " + ("." * $pad) + " "
+    Write-Host -NoNewline "    [$num]  $Text$dots"
+}
+
+function Show-StepOK {
+    param([string]$Detail = "")
+    if ($Detail) {
+        Write-Host "OK  $Detail" -ForegroundColor Green
+    } else {
+        Write-Host "OK" -ForegroundColor Green
+    }
+}
+
+function Show-StepWarn {
+    param([string]$Detail = "")
+    if ($Detail) {
+        Write-Host "!!  $Detail" -ForegroundColor Yellow
+    } else {
+        Write-Host "!!" -ForegroundColor Yellow
+    }
+}
+
+function Show-StepFail {
+    param([string]$Detail = "")
+    if ($Detail) {
+        Write-Host "FAIL  $Detail" -ForegroundColor Red
+    } else {
+        Write-Host "FAIL" -ForegroundColor Red
+    }
+}
+
+function Show-SubInfo {
+    param([string]$Text)
+    Write-Host "             $Text" -ForegroundColor DarkGray
+}
+
+# ── Utility Functions ────────────────────────────────────────────────
 
 function Get-InstallerLogDir {
     $logDir = Join-Path (Get-Location).Path "data\runtime\logs"
@@ -178,28 +235,23 @@ function Try-InstallDockerWithWinget {
 
     $logDir = Get-InstallerLogDir
     $logPath = Join-Path $logDir "docker-winget-install.log"
-    Write-Host "Installing Docker Desktop via winget..." -ForegroundColor Cyan
+    Show-SubInfo "Installing Docker Desktop via winget..."
     try {
         & winget install --id Docker.DockerDesktop --exact --silent --disable-interactivity --accept-source-agreements --accept-package-agreements 2>&1 | Tee-Object -FilePath $logPath | Out-Null
         $exitCode = $LASTEXITCODE
         if ($exitCode -ne 0 -and $exitCode -ne 3010) {
-            Write-Host "Winget Docker install failed (exit code $exitCode)." -ForegroundColor Yellow
-            Write-Host "Log: $logPath" -ForegroundColor Yellow
+            Show-SubInfo "Winget Docker install failed (exit code $exitCode). Log: $logPath"
             Show-LogTail -Path $logPath -Label "winget output"
             return $false
         }
         if (Wait-ForDockerRuntime -TimeoutSeconds 300) {
-            Write-Host "Docker runtime installed via winget (Docker.DockerDesktop)." -ForegroundColor Green
             return $true
         }
-        Write-Host "Docker install completed but Docker runtime is still not ready." -ForegroundColor Yellow
-        Write-Host "Log: $logPath" -ForegroundColor Yellow
+        Show-SubInfo "Docker install completed but runtime not ready. Log: $logPath"
         Show-LogTail -Path $logPath -Label "winget output"
         return $false
     } catch {
-        Write-Host "Winget Docker install threw an exception: $($_.Exception.Message)" -ForegroundColor Yellow
-        Write-Host "Log: $logPath" -ForegroundColor Yellow
-        Show-LogTail -Path $logPath -Label "winget output"
+        Show-SubInfo "Winget Docker install threw: $($_.Exception.Message)"
         return $false
     }
 }
@@ -212,28 +264,23 @@ function Try-InstallDockerWithChocolatey {
 
     $logDir = Get-InstallerLogDir
     $logPath = Join-Path $logDir "docker-choco-install.log"
-    Write-Host "Installing Docker Desktop via Chocolatey..." -ForegroundColor Cyan
+    Show-SubInfo "Installing Docker Desktop via Chocolatey..."
     try {
         & choco install docker-desktop -y --no-progress 2>&1 | Tee-Object -FilePath $logPath | Out-Null
         $exitCode = $LASTEXITCODE
         if ($exitCode -ne 0) {
-            Write-Host "Chocolatey Docker install failed (exit code $exitCode)." -ForegroundColor Yellow
-            Write-Host "Log: $logPath" -ForegroundColor Yellow
+            Show-SubInfo "Chocolatey Docker install failed (exit code $exitCode). Log: $logPath"
             Show-LogTail -Path $logPath -Label "choco output"
             return $false
         }
         if (Wait-ForDockerRuntime -TimeoutSeconds 300) {
-            Write-Host "Docker runtime installed via Chocolatey (docker-desktop)." -ForegroundColor Green
             return $true
         }
-        Write-Host "Docker install completed but Docker runtime is still not ready." -ForegroundColor Yellow
-        Write-Host "Log: $logPath" -ForegroundColor Yellow
+        Show-SubInfo "Docker install completed but runtime not ready. Log: $logPath"
         Show-LogTail -Path $logPath -Label "choco output"
         return $false
     } catch {
-        Write-Host "Chocolatey Docker install threw an exception: $($_.Exception.Message)" -ForegroundColor Yellow
-        Write-Host "Log: $logPath" -ForegroundColor Yellow
-        Show-LogTail -Path $logPath -Label "choco output"
+        Show-SubInfo "Chocolatey Docker install threw: $($_.Exception.Message)"
         return $false
     }
 }
@@ -246,7 +293,7 @@ function Ensure-DockerRuntime {
         return $true
     }
 
-    Write-Host "Docker runtime missing. Attempting to install Docker Desktop..." -ForegroundColor Cyan
+    Show-SubInfo "Docker runtime missing. Attempting to install Docker Desktop..."
     if (Try-InstallDockerWithWinget) {
         return $true
     }
@@ -263,16 +310,14 @@ function Test-PostgresRuntimeAvailable {
 
 function Ensure-PostgresRuntime {
     if (Test-DockerRuntimeAvailable) {
-        Write-Host "Postgres runtime prerequisite found (docker)." -ForegroundColor Green
-        return $true
+        return "docker"
     }
 
     if (Ensure-DockerRuntime) {
-        Write-Host "Postgres runtime prerequisite found (docker)." -ForegroundColor Green
-        return $true
+        return "docker"
     }
 
-    Write-Host "Docker runtime unavailable. Attempting PostgreSQL tools fallback..." -ForegroundColor Yellow
+    Show-SubInfo "Docker unavailable. Trying PostgreSQL tools fallback..."
 
     $winget = Get-Command winget -ErrorAction SilentlyContinue
     if ($winget) {
@@ -284,8 +329,7 @@ function Ensure-PostgresRuntime {
             try {
                 winget install --id $id --exact --silent --accept-source-agreements --accept-package-agreements *> $null
                 if (Test-PostgresRuntimeAvailable) {
-                    Write-Host "Postgres runtime installed via winget ($id)." -ForegroundColor Green
-                    return $true
+                    return "winget ($id)"
                 }
             } catch {
             }
@@ -297,23 +341,31 @@ function Ensure-PostgresRuntime {
         try {
             choco install postgresql -y *> $null
             if (Test-PostgresRuntimeAvailable) {
-                Write-Host "Postgres runtime installed via Chocolatey." -ForegroundColor Green
-                return $true
+                return "chocolatey"
             }
         } catch {
         }
     }
 
-    Write-Host "Failed to auto-install Postgres runtime prerequisites." -ForegroundColor Red
-    Write-Host "Install Docker Desktop (recommended) or PostgreSQL tools (initdb + pg_ctl), then rerun setup." -ForegroundColor Yellow
-    return $false
+    return $null
 }
 
+# ── PostgresOnly Mode ────────────────────────────────────────────────
+
 if ($PostgresOnly) {
-    if (-not (Ensure-PostgresRuntime)) {
+    $result = Ensure-PostgresRuntime
+    if (-not $result) {
+        Write-Host "Failed to install Postgres runtime prerequisites." -ForegroundColor Red
+        Write-Host "Install Docker Desktop (recommended) or PostgreSQL tools, then rerun setup." -ForegroundColor Yellow
         exit 1
     }
     exit 0
+}
+
+# ── Main Setup Flow ──────────────────────────────────────────────────
+
+if (-not $NoBanner) {
+    Show-Banner
 }
 
 $pythonMinMinor = 10
@@ -370,7 +422,7 @@ function Get-SupportedPythonCandidate {
 }
 
 function Install-SupportedPython {
-    Write-Host "No supported Python 3.10-3.12 interpreter found. Attempting automatic install..." -ForegroundColor Cyan
+    Show-SubInfo "No Python 3.10-3.12 found. Attempting automatic install..."
 
     $winget = Get-Command winget -ErrorAction SilentlyContinue
     if ($winget) {
@@ -401,18 +453,22 @@ function Install-SupportedPython {
     return $false
 }
 
+# ── Step 1: Detect Python ────────────────────────────────────────────
+
+Show-Step "Detecting Python"
+
 $pythonCandidate = Get-SupportedPythonCandidate
 if (-not $pythonCandidate) {
     Install-SupportedPython | Out-Null
     $pythonCandidate = Get-SupportedPythonCandidate
 }
 if (-not $pythonCandidate) {
-    Write-Host "Error: Python 3.10-3.12 is required for full Homerun setup." -ForegroundColor Red
+    Show-StepFail "Python 3.10-3.12 required"
     if (Get-Command python -ErrorAction SilentlyContinue) {
         $detected = python --version 2>&1
-        Write-Host "Detected python: $detected" -ForegroundColor Yellow
+        Show-SubInfo "Detected: $detected"
     }
-    Write-Host "Install Python 3.12 or 3.11 and rerun setup." -ForegroundColor Yellow
+    Show-SubInfo "Install Python 3.12 or 3.11 and rerun setup."
     exit 1
 }
 
@@ -424,28 +480,30 @@ $pythonCommandLabel = if ($pythonPrefixArgs.Count -gt 0) {
 } else {
     $pythonCommand
 }
-Write-Host "Found Python $pythonVersion via $pythonCommandLabel"
+Show-StepOK "$pythonVersion ($pythonCommandLabel)"
 
-# Check Node.js
+# ── Step 2: Detect Node.js ───────────────────────────────────────────
+
+Show-Step "Detecting Node.js"
+
 try {
     $nodeVersion = node --version 2>&1
-    Write-Host "Found Node.js $nodeVersion"
+    Show-StepOK "$nodeVersion"
 } catch {
-    Write-Host "Error: Node.js is required but not found in PATH." -ForegroundColor Red
-    Write-Host "Download from https://nodejs.org/" -ForegroundColor Yellow
+    Show-StepFail "not found"
+    Show-SubInfo "Download from https://nodejs.org/"
     exit 1
 }
 
-# Setup backend
-Write-Host ""
-Write-Host "Setting up backend..." -ForegroundColor Cyan
+# ── Step 3: Backend environment ──────────────────────────────────────
+
+Show-Step "Preparing backend environment"
 
 Push-Location backend
 
 if (Test-Path "venv") {
     $venvPython = ".\venv\Scripts\python.exe"
     if (-not (Test-Path $venvPython)) {
-        Write-Host "Existing backend\\venv is missing Python. Recreating virtual environment..." -ForegroundColor Yellow
         Remove-Item -Recurse -Force "venv"
     } else {
         try {
@@ -454,11 +512,9 @@ if (Test-Path "venv") {
             $venvMajor = [int]$venvMatch.Groups[1].Value
             $venvMinor = [int]$venvMatch.Groups[2].Value
             if ($venvMajor -ne 3 -or $venvMinor -lt $pythonMinMinor -or $venvMinor -gt $pythonMaxMinor) {
-                Write-Host "Existing backend\\venv uses unsupported Python $venvVersionRaw. Recreating virtual environment..." -ForegroundColor Yellow
                 Remove-Item -Recurse -Force "venv"
             }
         } catch {
-            Write-Host "Existing backend\\venv could not be validated. Recreating virtual environment..." -ForegroundColor Yellow
             if (Test-Path "venv") {
                 Remove-Item -Recurse -Force "venv"
             }
@@ -467,11 +523,9 @@ if (Test-Path "venv") {
 }
 
 if (-not (Test-Path "venv")) {
-    Write-Host "Creating Python virtual environment..."
     & $pythonCommand @pythonPrefixArgs -m venv venv
 }
 
-Write-Host "Activating virtual environment..."
 & .\venv\Scripts\Activate.ps1
 
 try {
@@ -480,71 +534,97 @@ try {
     $activeMajor = [int]$activeMatch.Groups[1].Value
     $activeMinor = [int]$activeMatch.Groups[2].Value
     if ($activeMajor -ne 3 -or $activeMinor -lt $pythonMinMinor -or $activeMinor -gt $pythonMaxMinor) {
-        Write-Host "Error: backend virtualenv uses unsupported Python $activePythonVersion (requires 3.10-3.12)." -ForegroundColor Red
-        Write-Host "Delete backend\\venv and rerun setup." -ForegroundColor Yellow
+        Pop-Location
+        Show-StepFail "venv Python $activePythonVersion unsupported"
+        Show-SubInfo "Delete backend\venv and rerun setup."
         exit 1
     }
 } catch {
-    Write-Host "Error: failed to verify backend virtualenv Python version." -ForegroundColor Red
+    Pop-Location
+    Show-StepFail "could not verify venv Python"
     exit 1
 }
 
-Write-Host "Installing Python dependencies..."
+Show-StepOK "venv ready"
+
+Pop-Location
+
+# ── Step 4: Python dependencies ──────────────────────────────────────
+
+Show-Step "Installing Python dependencies"
+
+Push-Location backend
+& .\venv\Scripts\Activate.ps1
+
 python -m pip install --quiet --upgrade pip
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "Error: Failed to upgrade pip in backend virtualenv." -ForegroundColor Red
+    Pop-Location
+    Show-StepFail "pip upgrade failed"
     exit 1
 }
 
 python -m pip install --quiet -r requirements.txt
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "Error: Failed to install backend dependencies from requirements.txt." -ForegroundColor Red
+    Pop-Location
+    Show-StepFail "requirements.txt install failed"
     exit 1
 }
 
 python -c "import socksio" *> $null
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "Error: SOCKS5 proxy support dependency 'socksio' is missing after install." -ForegroundColor Red
-    Write-Host "Run: python -m pip install `"httpx[socks]>=0.27.0,<1.0`"" -ForegroundColor Yellow
+    Pop-Location
+    Show-StepFail "socksio missing"
+    Show-SubInfo "Run: python -m pip install `"httpx[socks]>=0.27.0,<1.0`""
     exit 1
 }
 
-Write-Host "Installing trading dependencies..."
+Show-StepOK
+
+# ── Step 5: Trading dependencies ─────────────────────────────────────
+
+Show-Step "Installing trading packages"
+
 python -m pip install --quiet -r requirements-trading.txt
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "Error: Failed to install trading dependencies from requirements-trading.txt." -ForegroundColor Red
+    Pop-Location
+    Show-StepFail "requirements-trading.txt install failed"
     exit 1
 }
 
 python -c "import py_clob_client, eth_account" *> $null
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "Error: trading dependencies are missing after install." -ForegroundColor Red
-    Write-Host "Expected imports: py_clob_client, eth_account" -ForegroundColor Yellow
+    Pop-Location
+    Show-StepFail "trading imports missing"
+    Show-SubInfo "Expected: py_clob_client, eth_account"
     exit 1
 }
 
 Pop-Location
+Show-StepOK
 
-# Setup frontend
-Write-Host ""
-Write-Host "Setting up frontend..." -ForegroundColor Cyan
+# ── Step 6: Frontend dependencies ────────────────────────────────────
+
+Show-Step "Installing frontend packages"
 
 Push-Location frontend
 
-Write-Host "Installing Node.js dependencies..."
 npm install --silent 2>$null
 if ($LASTEXITCODE -ne 0) {
     npm install
 }
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "Error: Failed to install frontend dependencies." -ForegroundColor Red
+    Pop-Location
+    Show-StepFail "npm install failed"
     exit 1
 }
 
 Pop-Location
+Show-StepOK
 
-Write-Host ""
-Write-Host "Setting up launcher tooling..." -ForegroundColor Cyan
+# ── Step 7: Launcher tooling ────────────────────────────────────────
+
+Show-Step "Setting up launcher tooling"
+
 $toolingInstallOk = $false
 try {
     $originalCxxFlags = $env:CXXFLAGS
@@ -563,35 +643,43 @@ try {
 }
 
 if ($toolingInstallOk) {
-    Write-Host "Verifying PowerShell launcher syntax..." -ForegroundColor Cyan
     try {
         $ErrorActionPreference = "Continue"
         node .\scripts\infra\tooling\check_powershell_syntax.mjs .\scripts\infra\run.ps1 .\scripts\infra\setup.ps1
         $ErrorActionPreference = "Stop"
         if ($LASTEXITCODE -ne 0) {
-            Write-Host "PowerShell syntax verification failed (non-fatal)." -ForegroundColor Yellow
+            Show-StepWarn "syntax check failed (non-fatal)"
+        } else {
+            Show-StepOK
         }
     } catch {
         $ErrorActionPreference = "Stop"
-        Write-Host "PowerShell syntax verification failed (non-fatal)." -ForegroundColor Yellow
+        Show-StepWarn "syntax check failed (non-fatal)"
     }
 } else {
-    Write-Host "Launcher tooling install failed (native module build issue); skipping syntax check." -ForegroundColor Yellow
-    Write-Host "This is non-fatal - the application will still run." -ForegroundColor Yellow
+    Show-StepWarn "skipped (non-fatal)"
 }
+
+# ── Step 8: Postgres runtime ────────────────────────────────────────
 
 # Create data directory
 if (-not (Test-Path "data")) {
     New-Item -ItemType Directory -Path "data" | Out-Null
 }
 
-Write-Host ""
-Write-Host "Ensuring Postgres runtime prerequisites..." -ForegroundColor Cyan
-if (-not (Ensure-PostgresRuntime)) {
+Show-Step "Verifying Postgres runtime"
+
+$pgResult = Ensure-PostgresRuntime
+if (-not $pgResult) {
+    Show-StepFail "no runtime found"
+    Show-SubInfo "Install Docker Desktop (recommended) or PostgreSQL tools, then rerun setup."
     exit 1
 }
 
-# Write setup fingerprint so run.ps1 can detect drift and auto-rerun setup.
+Show-StepOK $pgResult
+
+# ── Write setup fingerprint ─────────────────────────────────────────
+
 function Get-HashOrMissing {
     param([string]$Path)
     if (-not (Test-Path $Path)) { return "missing" }
@@ -609,26 +697,25 @@ $stamp = @{
 }
 
 $stamp | ConvertTo-Json | Set-Content -Path ".setup-stamp.json" -Encoding UTF8
-Write-Host "Wrote .setup-stamp.json"
+
+# ── Completion ───────────────────────────────────────────────────────
 
 Write-Host ""
-Write-Host "=========================================" -ForegroundColor Green
-Write-Host "  Setup Complete!" -ForegroundColor Green
-Write-Host "=========================================" -ForegroundColor Green
+Write-Host "    ─────────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "To start the application, run:"
-Write-Host "  .\scripts\infra\run.ps1" -ForegroundColor Cyan
+Write-Host "    Setup complete!" -ForegroundColor Green
 Write-Host ""
-Write-Host "Or run runtime validation only:"
-Write-Host "  .\scripts\infra\run.ps1 --services-smoke-test" -ForegroundColor Cyan
+Write-Host "    Start the application:" -ForegroundColor White
+Write-Host "      .\scripts\infra\run.ps1" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "Or start services individually:"
-Write-Host "  Backend:  cd backend; .\venv\Scripts\Activate.ps1; uvicorn main:app --reload" -ForegroundColor Gray
-Write-Host "  Frontend: cd frontend; npm run dev" -ForegroundColor Gray
+Write-Host "    Or start services individually:" -ForegroundColor DarkGray
+Write-Host "      Backend:  cd backend; .\venv\Scripts\Activate.ps1; uvicorn main:app --reload" -ForegroundColor DarkGray
+Write-Host "      Frontend: cd frontend; npm run dev" -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "The app will be available at:"
-Write-Host "  Frontend: http://localhost:3000" -ForegroundColor Cyan
-Write-Host "  Backend:  http://localhost:8000" -ForegroundColor Cyan
-Write-Host "  API Docs: http://localhost:8000/docs" -ForegroundColor Cyan
+Write-Host "    Endpoints:" -ForegroundColor White
+Write-Host "      Frontend  http://localhost:3000" -ForegroundColor Cyan
+Write-Host "      Backend   http://localhost:8000" -ForegroundColor Cyan
+Write-Host "      API Docs  http://localhost:8000/docs" -ForegroundColor Cyan
 Write-Host ""
-
+Write-Host "    ─────────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
+Write-Host ""

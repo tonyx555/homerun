@@ -7,12 +7,11 @@ import {
   Zap,
   Activity,
   BarChart3,
-  ChevronDown,
-  ChevronRight,
-  Target,
   Clock,
   DollarSign,
+  FileText,
   Filter,
+  Shield,
   Bot,
 } from 'lucide-react'
 import { cn } from '../../lib/utils'
@@ -29,12 +28,12 @@ import {
 } from '../ui/select'
 import {
   listLLMUsageLog,
-  getJudgmentHistory,
-  getAgreementStats,
+  getAIStatus,
+  getAIUsage,
   type LLMUsageLogEntry,
 } from '../../services/api'
 
-// ── Shared metric components (from AIToolsView) ──
+// ── Shared metric helpers ──
 
 type MetricTone = 'good' | 'bad' | 'warn' | 'neutral' | 'info'
 
@@ -44,6 +43,12 @@ const TONE_CLASSES: Record<MetricTone, string> = {
   warn: 'border-amber-300 bg-amber-100 text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200',
   neutral: 'border-border/70 bg-background/35 text-foreground',
   info: 'border-purple-300 bg-purple-100 text-purple-900 dark:border-purple-500/30 dark:bg-purple-500/10 dark:text-purple-200',
+}
+
+function formatNumber(num: number): string {
+  if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(1)}M`
+  if (num >= 1_000) return `${(num / 1_000).toFixed(1)}K`
+  return num.toString()
 }
 
 function MetricTile({ label, value, icon, tone }: { label: string; value: string; icon: React.ReactNode; tone: MetricTone }) {
@@ -60,134 +65,159 @@ function MetricTile({ label, value, icon, tone }: { label: string; value: string
   )
 }
 
-function ScoreBadge({ label, value }: { label: string; value: number }) {
-  const color =
-    value >= 0.7
-      ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-      : value >= 0.4
-        ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
-        : 'bg-red-500/10 text-red-400 border-red-500/20'
-  return (
-    <Badge variant="outline" className={cn('rounded text-[10px]', color)}>
-      {label}: {typeof value === 'number' ? value.toFixed(2) : 'N/A'}
-    </Badge>
-  )
-}
+// ── Usage Overview (merged from AISystemView) ──
 
-// ── Judgments Panel (from AIToolsView) ──
-
-function JudgmentsPanel() {
-  const { data: history, isLoading } = useQuery({
-    queryKey: ['ai-judgment-history'],
+function UsageOverview() {
+  const { data: status, isLoading: statusLoading, error: statusError } = useQuery({
+    queryKey: ['ai-status'],
     queryFn: async () => {
-      const { data } = await getJudgmentHistory({ limit: 50 })
+      const { data } = await getAIStatus()
       return data
     },
+    refetchInterval: 30000,
   })
-
-  const { data: agreementStats } = useQuery({
-    queryKey: ['ai-agreement-stats'],
+  const { data: usageFallback, isLoading: usageLoading, error: usageError } = useQuery({
+    queryKey: ['ai-usage'],
     queryFn: async () => {
-      const { data } = await getAgreementStats()
+      const { data } = await getAIUsage()
       return data
     },
+    refetchInterval: 30000,
+    enabled: !!status?.enabled && status?.usage == null,
   })
+  const usage = status?.usage ?? usageFallback
+  const isLoading = statusLoading || (!!status?.enabled && usage == null && usageLoading)
 
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center py-8">
-        <RefreshCw className="w-6 h-6 animate-spin text-cyan-400" />
+      <div className="flex items-center justify-center py-6">
+        <RefreshCw className="w-5 h-5 animate-spin text-emerald-400" />
       </div>
     )
   }
 
-  const agRate = agreementStats?.agreement_rate ?? 0
-  const avgScore = agreementStats?.avg_score ?? 0
-
-  return (
-    <div className="space-y-4">
-      {agreementStats && (
-        <Card className="overflow-hidden border-border/60 bg-card/80">
-          <div className="h-0.5 bg-cyan-400" />
-          <CardHeader className="pb-3">
-            <CardTitle className="flex items-center gap-2 text-base font-semibold">
-              <Activity className="h-4 w-4 text-cyan-400" />
-              ML vs LLM Agreement
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 card-stagger">
-              <MetricTile label="Total Judged" value={String(agreementStats.total_judged ?? 0)} icon={<BarChart3 className="h-3.5 w-3.5" />} tone="info" />
-              <MetricTile label="Agreement Rate" value={`${(agRate * 100).toFixed(1)}%`} icon={<Target className="h-3.5 w-3.5" />} tone={agRate >= 0.7 ? 'good' : agRate >= 0.4 ? 'warn' : 'bad'} />
-              <MetricTile label="ML Overrides" value={String(agreementStats.ml_overrides ?? 0)} icon={<Zap className="h-3.5 w-3.5" />} tone="neutral" />
-              <MetricTile label="Avg Score" value={avgScore.toFixed(2)} icon={<Activity className="h-3.5 w-3.5" />} tone={avgScore >= 0.7 ? 'good' : avgScore >= 0.4 ? 'warn' : 'neutral'} />
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
+  if (statusError || usageError) {
+    return (
       <Card className="overflow-hidden border-border/60 bg-card/80">
-        <div className="h-0.5 bg-emerald-400" />
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2 text-base font-semibold">
-            <Target className="h-4 w-4 text-emerald-400" />
-            Recent Judgments
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          {!history || history.length === 0 ? (
-            <div className="text-center py-8">
-              <Bot className="w-10 h-10 text-muted-foreground/30 mx-auto mb-3" />
-              <p className="text-xs text-muted-foreground">No opportunity judgments yet. AI will judge opportunities during scans when enabled.</p>
-            </div>
-          ) : (
-            <ScrollArea className="h-[300px] pr-3">
-              <div className="space-y-2">
-                {(Array.isArray(history) ? history : []).map((j: any, i: number) => (
-                  <div
-                    key={j.opportunity_id || i}
-                    className="rounded-lg border border-border/55 bg-background/30 p-3 hover:border-border/80 transition-colors"
-                  >
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium truncate">{j.opportunity_id}</p>
-                        <div className="flex items-center gap-2 mt-1">
-                          <Badge variant="outline" className="text-[9px] h-4 px-1.5 bg-muted/30 border-border/40">
-                            {j.strategy_type ?? 'unknown'}
-                          </Badge>
-                          <Badge
-                            variant="outline"
-                            className={cn(
-                              'text-[9px] h-4 px-1.5',
-                              j.recommendation === 'take' || j.recommendation === 'buy'
-                                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                                : j.recommendation === 'skip' || j.recommendation === 'avoid'
-                                  ? 'bg-red-500/10 text-red-400 border-red-500/20'
-                                  : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
-                            )}
-                          >
-                            {j.recommendation}
-                          </Badge>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-1.5 ml-4 shrink-0">
-                        <ScoreBadge label="Score" value={j.overall_score} />
-                        <ScoreBadge label="Profit" value={j.profit_viability} />
-                        <ScoreBadge label="Safety" value={j.resolution_safety} />
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </ScrollArea>
-          )}
+        <CardContent className="p-4">
+          <div className="flex items-center gap-3 text-muted-foreground">
+            <AlertCircle className="w-4 h-4" />
+            <span className="text-sm">Unable to fetch usage stats.</span>
+          </div>
         </CardContent>
       </Card>
-    </div>
+    )
+  }
+
+  if (!usage) return null
+
+  const cost = usage.estimated_cost ?? usage.total_cost_usd ?? 0
+  const failedReq = usage.failed_requests ?? usage.error_count ?? 0
+
+  return (
+    <Card className="overflow-hidden border-border/60 bg-card/80">
+      <div className="h-0.5 bg-emerald-400" />
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center justify-between gap-3 text-base font-semibold">
+          <span className="flex items-center gap-2">
+            <BarChart3 className="h-4 w-4 text-emerald-400" />
+            Usage Overview
+          </span>
+          {usage.active_model && (
+            <Badge variant="outline" className="text-xs font-mono border-purple-500/25 bg-purple-500/10 text-purple-300">
+              {usage.active_model}
+            </Badge>
+          )}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 card-stagger">
+          <MetricTile label="Requests" value={String(usage.total_requests ?? 0)} icon={<Zap className="h-3.5 w-3.5" />} tone="info" />
+          <MetricTile label="Input Tokens" value={formatNumber(usage.total_input_tokens ?? 0)} icon={<FileText className="h-3.5 w-3.5" />} tone="info" />
+          <MetricTile label="Output Tokens" value={formatNumber(usage.total_output_tokens ?? 0)} icon={<FileText className="h-3.5 w-3.5" />} tone="info" />
+          <MetricTile label="Est. Cost" value={`$${cost.toFixed(4)}`} icon={<DollarSign className="h-3.5 w-3.5" />} tone={cost > 5 ? 'warn' : 'neutral'} />
+          <MetricTile label="Avg Latency" value={`${(usage.avg_latency_ms ?? 0).toFixed(0)}ms`} icon={<Clock className="h-3.5 w-3.5" />} tone={(usage.avg_latency_ms ?? 0) > 5000 ? 'warn' : 'good'} />
+          <MetricTile label="Total Tokens" value={formatNumber(usage.total_tokens ?? 0)} icon={<Activity className="h-3.5 w-3.5" />} tone="neutral" />
+          <MetricTile label="Successful" value={String(usage.successful_requests ?? usage.total_requests ?? 0)} icon={<CheckCircle className="h-3.5 w-3.5" />} tone="good" />
+          <MetricTile label="Failed" value={String(failedReq)} icon={<AlertCircle className="h-3.5 w-3.5" />} tone={failedReq > 0 ? 'bad' : 'good'} />
+        </div>
+
+        {usage.spend_limit_usd != null && (
+          <div className="rounded-lg border border-border/60 bg-muted/30 p-4">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <Shield className="w-3.5 h-3.5 text-blue-400" />
+                <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Monthly Spend Limit</span>
+              </div>
+              <span className="text-xs font-semibold font-data">
+                ${cost.toFixed(2)} / ${usage.spend_limit_usd.toFixed(2)}
+              </span>
+            </div>
+            <div className="w-full bg-background rounded-full h-2 border border-border">
+              <div
+                className={cn(
+                  'h-full rounded-full transition-all',
+                  (cost / usage.spend_limit_usd) >= 0.9
+                    ? 'bg-red-500'
+                    : (cost / usage.spend_limit_usd) >= 0.7
+                      ? 'bg-amber-500'
+                      : 'bg-emerald-500'
+                )}
+                style={{ width: `${Math.min(100, (cost / usage.spend_limit_usd) * 100)}%` }}
+              />
+            </div>
+            <div className="flex items-center justify-between mt-1.5">
+              <span className="text-[10px] text-muted-foreground font-data">
+                ${(usage.spend_remaining_usd ?? 0).toFixed(2)} remaining
+              </span>
+              <span className="text-[10px] text-muted-foreground">
+                {usage.month_start ? `Since ${new Date(usage.month_start).toLocaleDateString()}` : ''}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {usage.by_model && typeof usage.by_model === 'object' && Object.keys(usage.by_model).length > 0 && (
+          <div>
+            <p className="text-[10px] uppercase tracking-wide text-muted-foreground mb-2">By Model</p>
+            <div className="space-y-1.5">
+              {Object.entries(usage.by_model).map(([model, stats]: [string, any]) => {
+                const isActive = usage.active_model && model === usage.active_model
+                return (
+                  <div
+                    key={model}
+                    className={cn(
+                      'flex items-center justify-between p-3 rounded-lg border transition-colors',
+                      isActive
+                        ? 'bg-purple-500/5 border-purple-500/20 shadow-sm shadow-purple-500/5'
+                        : 'bg-background/30 border-border/55 hover:border-border/80'
+                    )}
+                  >
+                    <div className="flex items-center gap-2">
+                      <p className="text-xs font-medium font-mono">{model}</p>
+                      {isActive && (
+                        <Badge variant="outline" className="text-[9px] h-4 px-1.5 border-purple-500/20 bg-purple-500/10 text-purple-400">
+                          active
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-3 text-[11px] text-muted-foreground font-data">
+                      <span>{stats.requests ?? 0} req</span>
+                      <span>{formatNumber(stats.tokens ?? 0)} tok</span>
+                      <span className="font-medium text-foreground/80">${(stats.cost ?? 0).toFixed(4)}</span>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   )
 }
 
-// ── Usage Log Section ──
+// ── Call Log Section ──
 
 const PAGE_SIZE = 50
 
@@ -213,7 +243,7 @@ function formatLatency(ms: number | null) {
   return `${(ms / 1000).toFixed(1)}s`
 }
 
-function UsageLogSection() {
+function CallLogSection() {
   const [purposeFilter, setPurposeFilter] = useState<string>('__all__')
   const [providerFilter, setProviderFilter] = useState<string>('__all__')
   const [successFilter, setSuccessFilter] = useState<string>('__all__')
@@ -237,21 +267,10 @@ function UsageLogSection() {
   const entries = data?.entries ?? []
   const total = data?.total ?? 0
 
-  // Compute summary stats from visible entries
-  const totalCalls = total
-  const totalTokens = entries.reduce((s, e) => s + (e.input_tokens ?? 0) + (e.output_tokens ?? 0), 0)
-  const totalCost = entries.reduce((s, e) => s + (e.cost_usd ?? 0), 0)
-  const errorCount = entries.filter(e => !e.success).length
-  const errorRate = entries.length > 0 ? ((errorCount / entries.length) * 100).toFixed(1) : '0'
-
-  // Collect unique values for filters
   const purposes = [...new Set(entries.map(e => e.purpose).filter(Boolean))] as string[]
   const providers = [...new Set(entries.map(e => e.provider).filter(Boolean))] as string[]
 
-  const handleFilterChange = () => {
-    setOffset(0)
-  }
-
+  const resetOffset = () => setOffset(0)
   const hasPrev = offset > 0
   const hasNext = offset + PAGE_SIZE < total
 
@@ -267,40 +286,27 @@ function UsageLogSection() {
               <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Filters</span>
             </div>
 
-            <Select
-              value={purposeFilter}
-              onValueChange={(val) => { setPurposeFilter(val); handleFilterChange() }}
-            >
+            <Select value={purposeFilter} onValueChange={(v) => { setPurposeFilter(v); resetOffset() }}>
               <SelectTrigger className="h-7 w-[140px] text-xs bg-muted/60 border-border">
                 <SelectValue placeholder="Purpose" />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="__all__">All Purposes</SelectItem>
-                {purposes.map(p => (
-                  <SelectItem key={p} value={p}>{p}</SelectItem>
-                ))}
+                {purposes.map(p => <SelectItem key={p} value={p}>{p}</SelectItem>)}
               </SelectContent>
             </Select>
 
-            <Select
-              value={providerFilter}
-              onValueChange={(val) => { setProviderFilter(val); handleFilterChange() }}
-            >
+            <Select value={providerFilter} onValueChange={(v) => { setProviderFilter(v); resetOffset() }}>
               <SelectTrigger className="h-7 w-[140px] text-xs bg-muted/60 border-border">
                 <SelectValue placeholder="Provider" />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="__all__">All Providers</SelectItem>
-                {providers.map(p => (
-                  <SelectItem key={p} value={p}>{p}</SelectItem>
-                ))}
+                {providers.map(p => <SelectItem key={p} value={p}>{p}</SelectItem>)}
               </SelectContent>
             </Select>
 
-            <Select
-              value={successFilter}
-              onValueChange={(val) => { setSuccessFilter(val); handleFilterChange() }}
-            >
+            <Select value={successFilter} onValueChange={(v) => { setSuccessFilter(v); resetOffset() }}>
               <SelectTrigger className="h-7 w-[120px] text-xs bg-muted/60 border-border">
                 <SelectValue placeholder="Status" />
               </SelectTrigger>
@@ -311,12 +317,7 @@ function UsageLogSection() {
               </SelectContent>
             </Select>
 
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => refetch()}
-              className="h-7 gap-1.5 text-xs ml-auto"
-            >
+            <Button variant="outline" size="sm" onClick={() => refetch()} className="h-7 gap-1.5 text-xs ml-auto">
               <RefreshCw className="h-3 w-3" />
               Refresh
             </Button>
@@ -324,20 +325,7 @@ function UsageLogSection() {
         </CardContent>
       </Card>
 
-      {/* Summary stats */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 card-stagger">
-        <MetricTile label="Total Calls" value={String(totalCalls)} icon={<Activity className="h-3.5 w-3.5" />} tone="info" />
-        <MetricTile label="Page Tokens" value={totalTokens.toLocaleString()} icon={<Zap className="h-3.5 w-3.5" />} tone="neutral" />
-        <MetricTile label="Page Cost" value={formatCost(totalCost)} icon={<DollarSign className="h-3.5 w-3.5" />} tone="neutral" />
-        <MetricTile
-          label="Page Error Rate"
-          value={`${errorRate}%`}
-          icon={<AlertCircle className="h-3.5 w-3.5" />}
-          tone={Number(errorRate) >= 20 ? 'bad' : Number(errorRate) >= 5 ? 'warn' : 'good'}
-        />
-      </div>
-
-      {/* Log table */}
+      {/* Call log table */}
       <Card className="overflow-hidden border-border/60 bg-card/80">
         <div className="h-0.5 bg-blue-400" />
         <CardHeader className="pb-2">
@@ -359,7 +347,7 @@ function UsageLogSection() {
             </div>
           ) : (
             <ScrollArea className="h-[420px]">
-              {/* Table header */}
+              {/* Header */}
               <div className="sticky top-0 z-10 grid grid-cols-[100px_90px_80px_1fr_90px_70px_70px_60px] gap-2 px-4 py-2 text-[10px] uppercase tracking-wide text-muted-foreground bg-card border-b border-border/40">
                 <span>Time</span>
                 <span>Purpose</span>
@@ -383,9 +371,7 @@ function UsageLogSection() {
                         onClick={() => setExpandedRow(isExpanded ? null : entry.id)}
                         className={cn(
                           'w-full grid grid-cols-[100px_90px_80px_1fr_90px_70px_70px_60px] gap-2 px-4 py-2 text-left text-xs transition-colors',
-                          isError
-                            ? 'bg-red-500/5 hover:bg-red-500/10'
-                            : 'hover:bg-muted/40'
+                          isError ? 'bg-red-500/5 hover:bg-red-500/10' : 'hover:bg-muted/40'
                         )}
                       >
                         <span className="text-muted-foreground font-data truncate">{formatTime(entry.requested_at)}</span>
@@ -400,9 +386,7 @@ function UsageLogSection() {
                         </span>
                         <span className="truncate text-muted-foreground">{entry.provider}</span>
                         <span className="truncate font-data">{entry.model}</span>
-                        <span className="font-data text-muted-foreground">
-                          {entry.input_tokens}/{entry.output_tokens}
-                        </span>
+                        <span className="font-data text-muted-foreground">{entry.input_tokens}/{entry.output_tokens}</span>
                         <span className="font-data">{formatCost(entry.cost_usd)}</span>
                         <span className="font-data text-muted-foreground">{formatLatency(entry.latency_ms)}</span>
                         <span className="flex justify-center">
@@ -414,7 +398,6 @@ function UsageLogSection() {
                         </span>
                       </button>
 
-                      {/* Expanded details */}
                       {isExpanded && (
                         <div className={cn(
                           'px-4 py-3 text-xs border-t',
@@ -460,22 +443,10 @@ function UsageLogSection() {
                 Showing {offset + 1}-{Math.min(offset + PAGE_SIZE, total)} of {total}
               </p>
               <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={!hasPrev}
-                  onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
-                  className="h-7 text-xs"
-                >
+                <Button variant="outline" size="sm" disabled={!hasPrev} onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))} className="h-7 text-xs">
                   Previous
                 </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={!hasNext}
-                  onClick={() => setOffset(offset + PAGE_SIZE)}
-                  className="h-7 text-xs"
-                >
+                <Button variant="outline" size="sm" disabled={!hasNext} onClick={() => setOffset(offset + PAGE_SIZE)} className="h-7 text-xs">
                   Next
                 </Button>
               </div>
@@ -490,23 +461,10 @@ function UsageLogSection() {
 // ── Main Activity View ──
 
 export default function AIActivityView() {
-  const [judgmentsOpen, setJudgmentsOpen] = useState(true)
-
   return (
     <div className="space-y-4">
-      {/* Collapsible Judgments section */}
-      <button
-        onClick={() => setJudgmentsOpen(!judgmentsOpen)}
-        className="flex items-center gap-2 text-sm font-medium text-foreground hover:text-foreground/80 transition-colors w-full"
-      >
-        {judgmentsOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-        <Target className="w-4 h-4 text-cyan-400" />
-        AI Judgments
-      </button>
-      {judgmentsOpen && <JudgmentsPanel />}
-
-      {/* Usage Log */}
-      <UsageLogSection />
+      <UsageOverview />
+      <CallLogSection />
     </div>
   )
 }

@@ -126,14 +126,7 @@ _ORCHESTRATOR_SNAPSHOT_STALE_MIN_SECONDS = 120.0
 _TRADER_MODES = {"shadow", "live"}
 _MANUAL_LIVE_POSITION_SOURCE = "manual_wallet_position"
 _LIVE_ORDER_AUTHORITY_RECOVERY_LOCK_KEY = 674021913
-_LEGACY_CRYPTO_STRATEGY_TIMEFRAME_ALIASES: dict[str, str] = {
-    "crypto_5m": "5m",
-    "crypto_15m": "15m",
-    "crypto_1h": "1h",
-    "crypto_4h": "4h",
-}
 _LEGACY_STRATEGY_ALIASES: dict[str, str] = {
-    **{legacy: "btc_eth_highfreq" for legacy in _LEGACY_CRYPTO_STRATEGY_TIMEFRAME_ALIASES.keys()},
     "news_reaction": "news_edge",
 }
 
@@ -2198,22 +2191,6 @@ def _normalize_source_config(raw: Any) -> dict[str, Any]:
         source_key,
         requested_strategy_key,
     )
-    if source_key == "crypto" and requested_strategy_key in _LEGACY_CRYPTO_STRATEGY_TIMEFRAME_ALIASES:
-        timeframe = _LEGACY_CRYPTO_STRATEGY_TIMEFRAME_ALIASES[requested_strategy_key]
-        include_timeframes = _normalize_timeframe_scope(raw_strategy_params.get("include_timeframes"))
-        raw_strategy_params["include_timeframes"] = [timeframe] if not include_timeframes else include_timeframes
-        exclude_timeframes = [
-            token for token in _normalize_timeframe_scope(raw_strategy_params.get("exclude_timeframes")) if token != timeframe
-        ]
-        if exclude_timeframes:
-            raw_strategy_params["exclude_timeframes"] = exclude_timeframes
-        elif "exclude_timeframes" in raw_strategy_params:
-            raw_strategy_params.pop("exclude_timeframes", None)
-        raw_strategy_params.setdefault("enable_live_market_context", False)
-        raw_strategy_params.setdefault("require_live_market_revalidation", False)
-        raw_strategy_params.setdefault("require_live_revalidation_for_sources", [])
-        raw_strategy_params.setdefault("enforce_market_data_freshness", False)
-        raw_strategy_params.setdefault("require_market_data_age_for_sources", [])
     if requested_strategy_key and requested_strategy_key != strategy_key:
         accepted = raw_strategy_params.get("accepted_signal_strategy_types")
         if isinstance(accepted, list):

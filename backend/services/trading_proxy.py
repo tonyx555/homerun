@@ -38,8 +38,9 @@ _clob_patch_signature: Optional[tuple[bool, Optional[str], bool, float]] = None
 _pre_trade_vpn_signature: Optional[tuple[bool, Optional[str], bool, float, bool]] = None
 _pre_trade_vpn_cache_result: Optional[tuple[bool, str]] = None
 _pre_trade_vpn_cache_until: float = 0.0
-_PRE_TRADE_VPN_CACHE_TTL_SUCCESS_SECONDS = 12.0
-_PRE_TRADE_VPN_CACHE_TTL_FAILURE_SECONDS = 45.0
+_PRE_TRADE_VPN_CACHE_TTL_SUCCESS_SECONDS = 120.0
+_PRE_TRADE_VPN_CACHE_TTL_FAILURE_SECONDS = 10.0
+_VPN_BACKGROUND_REFRESH_TASK: Optional[asyncio.Task] = None
 
 
 @dataclass
@@ -49,7 +50,7 @@ class ProxyConfig:
     enabled: bool = False
     proxy_url: Optional[str] = None
     verify_ssl: bool = True
-    timeout: float = 30.0
+    timeout: float = 5.0
     require_vpn: bool = True
 
 
@@ -272,7 +273,7 @@ async def verify_vpn_active(cfg: Optional[ProxyConfig] = None) -> dict:
 
     async def _fetch_direct_ip() -> tuple[Optional[str], Optional[str]]:
         try:
-            async with httpx.AsyncClient(timeout=10.0) as direct_client:
+            async with httpx.AsyncClient(timeout=3.0) as direct_client:
                 resp = await direct_client.get(ip_check_url)
                 return str(resp.json().get("ip") or ""), None
         except Exception as exc:
@@ -360,7 +361,30 @@ async def pre_trade_vpn_check() -> tuple[bool, str]:
     _pre_trade_vpn_signature = signature
     _pre_trade_vpn_cache_result = result
     _pre_trade_vpn_cache_until = now + ttl_seconds
+    _schedule_vpn_background_refresh(ttl_seconds)
     return result
+
+
+def _schedule_vpn_background_refresh(ttl_seconds: float) -> None:
+    """Schedule a background task to refresh the VPN cache before it expires."""
+    global _VPN_BACKGROUND_REFRESH_TASK
+    if _VPN_BACKGROUND_REFRESH_TASK and not _VPN_BACKGROUND_REFRESH_TASK.done():
+        _VPN_BACKGROUND_REFRESH_TASK.cancel()
+    refresh_in = max(1.0, ttl_seconds - 10.0)
+    _VPN_BACKGROUND_REFRESH_TASK = asyncio.create_task(
+        _vpn_background_refresh(refresh_in), name="vpn-cache-refresh"
+    )
+
+
+async def _vpn_background_refresh(delay: float) -> None:
+    """Wait, then silently refresh the VPN cache so trades always hit cache."""
+    try:
+        await asyncio.sleep(delay)
+        await pre_trade_vpn_check()
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        pass
 
 
 async def reload_proxy_settings():

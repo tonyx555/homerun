@@ -238,7 +238,8 @@ def _extract_openai_choice_message(data: Any, *, provider_label: str) -> dict[st
 
 
 def _message_content_text(message: dict[str, Any], *, provider_label: str) -> str:
-    content = message.get("content", "")
+    # Some models (e.g. Qwen) place all output in reasoning_content
+    content = message.get("content") or message.get("reasoning_content", "")
     if content is None:
         return ""
     if isinstance(content, str):
@@ -903,7 +904,8 @@ class OpenAIProvider(BaseLLMProvider):
                 if not choices:
                     continue
                 delta = choices[0].get("delta", {})
-                text = delta.get("content")
+                # Some models (e.g. Qwen) use reasoning_content for CoT
+                text = delta.get("content") or delta.get("reasoning_content")
                 if text:
                     yield text
 
@@ -1971,6 +1973,17 @@ class LMStudioProvider(BaseLLMProvider):
         response.provider = self.provider.value
         return response
 
+    async def chat_stream(
+        self,
+        messages: list[LLMMessage],
+        model: str,
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+    ) -> AsyncGenerator[str, None]:
+        """Stream chat completion tokens via the OpenAI-compatible delegate."""
+        async for chunk in self._delegate.chat_stream(messages, model, temperature, max_tokens):
+            yield chunk
+
     async def structured_output(
         self,
         messages: list[LLMMessage],
@@ -2173,10 +2186,32 @@ class LLMManager:
                 else:
                     self._default_model = "gpt-4o-mini"
 
+                # If the user explicitly selected a provider but the stored
+                # default model belongs to a *different* provider (e.g.
+                # ai_default_model still has the column default "gpt-4o-mini"
+                # after switching to LM Studio), use the selected provider's
+                # default model instead.
+                default_provider = self.detect_provider(self._default_model)
+                if (
+                    selected_provider
+                    and selected_provider in self._providers
+                    and default_provider != selected_provider
+                ):
+                    fallback_model = _provider_default_models.get(selected_provider, self._default_model)
+                    logger.info(
+                        "Stored default model '%s' belongs to %s but selected provider is %s — "
+                        "using provider default '%s' instead.",
+                        self._default_model,
+                        default_provider.value,
+                        selected_provider.value,
+                        fallback_model,
+                    )
+                    self._default_model = fallback_model
+                    default_provider = selected_provider
+
                 # Validate that the default model's provider is actually
                 # configured.  If not, fall back to the first available
                 # provider's default model so we don't error at runtime.
-                default_provider = self.detect_provider(self._default_model)
                 if default_provider not in self._providers and self._providers:
                     for p, m in _provider_default_models.items():
                         if p in self._providers:

@@ -10,9 +10,9 @@ if str(BACKEND_ROOT) not in sys.path:
 from models.market import Market
 from services.strategy_sdk import StrategySDK
 from services.strategies.btc_eth_highfreq import (
+    CRYPTO_HF_SCOPE_DEFAULTS,
     crypto_highfreq_direction_allowed,
     crypto_highfreq_scope_config_schema,
-    crypto_highfreq_scope_defaults,
     crypto_highfreq_should_flatten_resolution_risk,
 )
 from services.strategies.late_favorite_alpha import (
@@ -218,7 +218,7 @@ def test_crypto_highfreq_scope_schema_contains_include_exclude_fields():
 
 
 def test_crypto_highfreq_scope_defaults_include_stop_loss_policy():
-    defaults = crypto_highfreq_scope_defaults()
+    defaults = dict(CRYPTO_HF_SCOPE_DEFAULTS)
     assert defaults["stop_loss_policy"] == "always"
     assert defaults["stop_loss_activation_seconds"] == 90
     assert defaults["min_liquidity_usd"] == 250.0

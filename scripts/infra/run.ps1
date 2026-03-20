@@ -43,7 +43,17 @@ function Ensure-ConsoleViewport {
         [int]$MinBufferRows = 60
 )
 
-    return
+    try {
+        $bufW = [Math]::Max($Host.UI.RawUI.BufferSize.Width, $MinCols)
+        $bufH = [Math]::Max($Host.UI.RawUI.BufferSize.Height, $MinBufferRows)
+        $Host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($bufW, $bufH)
+
+        $winW = [Math]::Min($MinCols, $bufW)
+        $winH = [Math]::Min($MinRows, $bufH)
+        $Host.UI.RawUI.WindowSize = New-Object System.Management.Automation.Host.Size($winW, $winH)
+    } catch {
+        # Silently ignore — Windows Terminal manages its own viewport
+    }
 }
 
 Ensure-ConsoleViewport
@@ -1474,7 +1484,7 @@ function Invoke-GitCommand {
 
 function Invoke-AutoUpdateRepository {
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-        Write-Host "Git is not installed; skipping repository auto-update." -ForegroundColor Yellow
+        Write-Host "    Git not installed; skipping auto-update." -ForegroundColor DarkGray
         return
     }
 
@@ -1487,17 +1497,17 @@ function Invoke-AutoUpdateRepository {
     $branchResult = Invoke-GitCommand -Arguments @("branch", "--show-current")
     $branch = ($branchResult.Output | Out-String).Trim()
     if ($branchResult.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($branch)) {
-        Write-Host "Detached HEAD detected; skipping repository auto-update." -ForegroundColor Yellow
+        Write-Host "    Detached HEAD; skipping auto-update." -ForegroundColor DarkGray
         return
     }
 
     $dirtyResult = Invoke-GitCommand -Arguments @("status", "--porcelain", "--untracked-files=no")
     if ($dirtyResult.ExitCode -ne 0) {
-        Write-Host "Could not read git working tree status; skipping repository auto-update." -ForegroundColor Yellow
+        Write-Host "    Could not read working tree; skipping auto-update." -ForegroundColor DarkGray
         return
     }
     if (-not [string]::IsNullOrWhiteSpace($dirtyResult.Output)) {
-        Write-Host "Local tracked changes detected; skipping repository auto-update." -ForegroundColor Yellow
+        Write-Host "    Local changes detected; skipping auto-update." -ForegroundColor DarkGray
         return
     }
 
@@ -1514,29 +1524,29 @@ function Invoke-AutoUpdateRepository {
     } else {
         $remoteRefCheck = Invoke-GitCommand -Arguments @("show-ref", "--verify", "--quiet", "refs/remotes/origin/$branch")
         if ($remoteRefCheck.ExitCode -ne 0) {
-            Write-Host "No upstream branch configured for '$branch'; skipping repository auto-update." -ForegroundColor Yellow
+            Write-Host "    No upstream for '$branch'; skipping auto-update." -ForegroundColor DarkGray
             return
         }
     }
 
-    Write-Host "Checking for code updates from ${remoteName}/${remoteBranch}..." -ForegroundColor Cyan
+    Write-Host "    Checking for updates from ${remoteName}/${remoteBranch}..." -ForegroundColor DarkGray
     $fetchResult = Invoke-GitCommand -Arguments @("-c", "credential.interactive=never", "fetch", "--quiet", $remoteName, $remoteBranch)
     if ($fetchResult.ExitCode -ne 0) {
-        Write-Host "Unable to fetch updates; continuing with local copy." -ForegroundColor Yellow
+        Write-Host "    Unable to fetch; continuing with local copy." -ForegroundColor DarkGray
         return
     }
 
     $pullResult = Invoke-GitCommand -Arguments @("-c", "credential.interactive=never", "pull", "--ff-only", "--no-rebase", $remoteName, $remoteBranch)
     if ($pullResult.ExitCode -eq 0) {
         if (($pullResult.Output | Out-String) -match "Already up[\s-]to date\.") {
-            Write-Host "Code is up to date." -ForegroundColor Green
+            Write-Host "    Code is up to date." -ForegroundColor DarkGray
         } else {
-            Write-Host "Code updated from ${remoteName}/${remoteBranch}." -ForegroundColor Green
+            Write-Host "    Code updated from ${remoteName}/${remoteBranch}." -ForegroundColor Green
         }
         return
     }
 
-    Write-Host "Auto-update skipped (non fast-forward or local commits). Continuing with local copy." -ForegroundColor Yellow
+    Write-Host "    Auto-update skipped (non-ff). Continuing with local copy." -ForegroundColor DarkGray
 }
 
 function Test-NeedsSetup {
@@ -1583,11 +1593,24 @@ function Test-NeedsSetup {
     return $false
 }
 
+# Show banner before any pre-flight output
+Write-Host ""
+Write-Host "    ██   ██  ██████  ███    ███ ███████ ██████  ██    ██ ███    ██" -ForegroundColor DarkCyan
+Write-Host "    ██   ██ ██    ██ ████  ████ ██      ██   ██ ██    ██ ████   ██" -ForegroundColor DarkCyan
+Write-Host "    ███████ ██    ██ ██ ████ ██ █████   ██████  ██    ██ ██ ██  ██" -ForegroundColor Cyan
+Write-Host "    ██   ██ ██    ██ ██  ██  ██ ██      ██   ██ ██    ██ ██  ██ ██" -ForegroundColor Cyan
+Write-Host "    ██   ██  ██████  ██      ██ ███████ ██   ██  ██████  ██   ████" -ForegroundColor White
+Write-Host ""
+Write-Host "                    Autonomous Trading Platform" -ForegroundColor DarkGray
+Write-Host "    ─────────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
+Write-Host ""
+
 Invoke-AutoUpdateRepository
 
 if (Test-NeedsSetup) {
-    Write-Host "Setup missing or stale. Running setup..." -ForegroundColor Yellow
-    & .\scripts\infra\setup.ps1
+    Write-Host "    Setup needed — running now..." -ForegroundColor Yellow
+    Write-Host ""
+    & .\scripts\infra\setup.ps1 -NoBanner
     if ($LASTEXITCODE -ne 0) {
         throw "Setup failed"
     }

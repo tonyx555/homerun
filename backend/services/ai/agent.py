@@ -117,6 +117,7 @@ class AgentTool:
     parameters: dict
     handler: Callable  # async (dict) -> dict
     max_calls: int = 5
+    category: str = "general"
 
 
 # ---------------------------------------------------------------------------

@@ -96,6 +96,22 @@ def _get_crypto_module_fn(fn_name: str) -> dict:
     return {}
 
 
+def _get_crypto_module_attr(attr_name: str) -> dict:
+    """Get a module-level dict from the loaded btc_eth_highfreq strategy module."""
+    import sys
+
+    loaded = _strategy_loader.get_strategy("btc_eth_highfreq")
+    if loaded is None:
+        return {}
+    mod = sys.modules.get(getattr(loaded, "module_name", ""))
+    if mod is None:
+        return {}
+    val = getattr(mod, attr_name, None)
+    if isinstance(val, dict):
+        return dict(val)
+    return {}
+
+
 def _validate_slug(slug: str) -> str:
     slug = slug.strip().lower()
     if not _SLUG_RE.match(slug):
@@ -1035,7 +1051,7 @@ async def get_unified_docs():
                 "news_edge_config_schema()": "Schema for news strategy filters",
                 "late_favorite_alpha_defaults()": "Default late-favorite alpha strategy params",
                 "late_favorite_alpha_config_schema()": "Schema for late-favorite alpha params",
-                "crypto_highfreq_scope_defaults()": "Default high-frequency crypto scope and exit controls",
+                "CRYPTO_HF_SCOPE_DEFAULTS": "Default high-frequency crypto scope and exit controls",
                 "crypto_highfreq_scope_config_schema()": "Schema for high-frequency crypto scope controls",
                 "StrategySDK.strategy_retention_config_schema()": "Schema for max_opportunities and retention_window",
             },
@@ -1087,7 +1103,7 @@ async def get_unified_docs():
                 "StrategySDK.get_trader_tags()": "Tag definitions and wallet counts",
                 "StrategySDK.get_traders_by_tag(tag_name, limit)": "Wallets for a tag",
             },
-            "crypto_highfreq_scope_defaults": _get_crypto_module_fn("crypto_highfreq_scope_defaults"),
+            "crypto_highfreq_scope_defaults": _get_crypto_module_attr("CRYPTO_HF_SCOPE_DEFAULTS"),
             "crypto_highfreq_scope_schema": _get_crypto_module_fn("crypto_highfreq_scope_config_schema"),
             "news_edge_defaults": news_edge_defaults(),
             "news_edge_schema": news_edge_config_schema(),
