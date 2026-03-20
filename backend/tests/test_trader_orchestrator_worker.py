@@ -1066,6 +1066,9 @@ def _base_trader_payload(*, allow_averaging: bool) -> dict:
                     "max_signals_per_cycle": 1,
                     "scan_batch_size": 1,
                     "enforce_directional_timeframe": False,
+                    "require_live_market_revalidation": False,
+                    "require_live_revalidation_for_sources": [],
+                    "enforce_market_data_freshness": False,
                 },
             }
         ],
