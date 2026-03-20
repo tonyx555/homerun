@@ -24,8 +24,6 @@ from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError, ProgrammingError
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from models.database import (
     AsyncSessionLocal,
     DiscoveryProfile,

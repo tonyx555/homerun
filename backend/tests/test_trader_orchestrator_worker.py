@@ -1018,7 +1018,7 @@ class _DummySessionContext:
 
 
 class _SelectedStrategy:
-    key = "crypto_15m"
+    key = "btc_eth_highfreq"
 
     def evaluate(self, signal, context):
         return StrategyDecision(
@@ -1032,7 +1032,7 @@ class _SelectedStrategy:
 
 
 class _SkippedStrategy:
-    key = "crypto_15m"
+    key = "btc_eth_highfreq"
 
     def evaluate(self, signal, context):
         return StrategyDecision(
@@ -1061,7 +1061,7 @@ def _base_trader_payload(*, allow_averaging: bool) -> dict:
         "source_configs": [
             {
                 "source_key": "crypto",
-                "strategy_key": "crypto_15m",
+                "strategy_key": "btc_eth_highfreq",
                 "strategy_params": {
                     "max_signals_per_cycle": 1,
                     "scan_batch_size": 1,
@@ -1092,7 +1092,7 @@ def _base_signal() -> SimpleNamespace:
         created_at=datetime.utcnow(),
         source="crypto",
         signal_type="crypto_worker_multistrat",
-        strategy_type="crypto_15m",
+        strategy_type="btc_eth_highfreq",
         market_id="market-1",
         market_question="Will BTC close higher?",
         direction="buy_yes",
@@ -3020,7 +3020,7 @@ async def test_run_trader_once_blocks_unavailable_strategy_only(monkeypatch):
         "source_configs": [
             {
                 "source_key": "crypto",
-                "strategy_key": "crypto_15m",
+                "strategy_key": "btc_eth_highfreq",
                 "strategy_params": {
                     "max_signals_per_cycle": 2,
                     "scan_batch_size": 2,
@@ -3073,7 +3073,7 @@ async def test_run_trader_once_blocks_unavailable_strategy_only(monkeypatch):
                 resolved_key=strategy_key,
                 reason=f"strategy_unavailable:{strategy_key}",
             )
-            if strategy_key == "crypto_15m"
+            if strategy_key == "btc_eth_highfreq"
             else SimpleNamespace(
                 available=True,
                 strategy_key=strategy_key,
@@ -3161,8 +3161,8 @@ async def test_run_trader_once_blocks_unavailable_strategy_only(monkeypatch):
     assert orders_written == 1
     assert submit_calls["count"] == 1
     assert len(blocked) == 1
-    assert blocked[0]["strategy_key"] == "crypto_15m"
-    assert blocked[0]["reason"].startswith("strategy_unavailable:crypto_15m")
+    assert blocked[0]["strategy_key"] == "btc_eth_highfreq"
+    assert blocked[0]["reason"].startswith("strategy_unavailable:btc_eth_highfreq")
     assert len(selected) == 1
     assert any(entry[0] == "signal-1" and entry[1] == "skipped" for entry in statuses)
     assert any(c.get("signal_id") == "signal-1" and c.get("outcome") == "blocked" for c in consumptions)
@@ -3175,7 +3175,7 @@ async def test_run_trader_once_uses_cached_live_context_builder_for_trigger_cycl
         "source": "crypto",
         "source_item_id": "signal-1",
         "signal_type": "crypto_worker_multistrat",
-        "strategy_type": "crypto_15m",
+        "strategy_type": "btc_eth_highfreq",
         "market_id": "market-1",
         "market_question": "Will BTC close higher?",
         "direction": "buy_yes",
@@ -3353,7 +3353,7 @@ async def test_run_trader_once_trigger_cycle_fetches_full_live_context_when_stri
         "source": "crypto",
         "source_item_id": "signal-1",
         "signal_type": "crypto_worker_multistrat",
-        "strategy_type": "crypto_15m",
+        "strategy_type": "btc_eth_highfreq",
         "market_id": "market-1",
         "market_question": "Will BTC close higher?",
         "direction": "buy_yes",

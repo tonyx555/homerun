@@ -73,7 +73,7 @@ async def test_overview_stays_empty_after_deleting_last_trader(postgres_session_
                 "source_configs": [
                     {
                         "source_key": "crypto",
-                        "strategy_key": "crypto_15m",
+                        "strategy_key": "btc_eth_highfreq",
                         "strategy_params": {},
                     }
                 ],
@@ -281,7 +281,7 @@ async def test_update_trader_rejects_unknown_strategy_key(postgres_session_facto
                 "source_configs": [
                     {
                         "source_key": "crypto",
-                        "strategy_key": "crypto_15m",
+                        "strategy_key": "btc_eth_highfreq",
                         "strategy_params": {},
                     }
                 ],

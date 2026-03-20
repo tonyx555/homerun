@@ -249,7 +249,7 @@ async def lifespan(app: FastAPI):
             async with AsyncSessionLocal() as session:
                 from models.database import DiscoveryProfile as _DP
                 rows = (await session.execute(
-                    select(_DP).where(_DP.enabled == True)
+                    select(_DP).where(_DP.enabled.is_(True))
                 )).scalars().all()
                 loaded_count = 0
                 active_slug = None

@@ -291,7 +291,6 @@ async def _cortex_get_fleet_status(arguments: dict) -> dict:
         Strategy,
         Trader,
         TraderDecision,
-        TraderOrder,
         TraderPosition,
     )
     from services.trader_orchestrator_state import (

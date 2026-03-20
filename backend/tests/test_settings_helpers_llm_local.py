@@ -57,6 +57,8 @@ def test_apply_update_request_sets_and_normalizes_local_llm_fields():
         lmstudio_base_url=" http://localhost:1234/v1 ",
         model="llama3.2:latest",
         max_monthly_spend=25.0,
+        model_assignments=None,
+        enabled_features=None,
     )
     request = _make_empty_request_with_llm(llm_section)
 
