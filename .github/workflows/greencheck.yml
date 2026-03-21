@@ -26,7 +26,7 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GREENCHECK_TOKEN }}
 
-      - uses: braedonsaunders/greencheck@0f9a12aa54c026487e17f4bc50d87ffce72ef7b8
+      - uses: braedonsaunders/greencheck@bb698b8c44495d6f9d0cad0dd20d1e8593e63f4d
         with:
           agent: claude
           agent-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
