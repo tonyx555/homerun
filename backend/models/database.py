@@ -1300,6 +1300,17 @@ class AppSettings(Base):
     cortex_write_actions_enabled = Column(Boolean, default=False)  # allow strategy/trader mutations
     cortex_notify_telegram = Column(Boolean, default=False)  # send Telegram on actions
 
+    # Autoresearch loop (Karpathy-inspired continuous param optimization)
+    autoresearch_model = Column(String, nullable=True)  # LLM model override; None = use ai_default_model
+    autoresearch_max_iterations = Column(Integer, default=50)  # max iterations per experiment
+    autoresearch_interval_seconds = Column(Integer, default=600)  # auto-trigger interval
+    autoresearch_temperature = Column(Float, default=0.2)
+    autoresearch_mandate = Column(Text, nullable=True)  # custom constraints/instructions
+    autoresearch_auto_apply = Column(Boolean, default=True)  # auto-apply kept params to trader
+    autoresearch_walk_forward_windows = Column(Integer, default=5)
+    autoresearch_train_ratio = Column(Float, default=0.7)
+    autoresearch_mode = Column(String, default="params")  # "params" or "code"
+
     # Timestamps
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
@@ -1925,6 +1936,78 @@ class CortexRunLog(Base):
     __table_args__ = (
         Index("idx_cortex_run_started", "started_at"),
         Index("idx_cortex_run_status", "status"),
+    )
+
+
+# ==================== AUTORESEARCH ====================
+
+
+class AutoresearchExperiment(Base):
+    """An autoresearch optimization experiment for a specific trader.
+
+    Each experiment runs a continuous loop: LLM proposes param changes,
+    the backtest harness evaluates, and improvements are kept while
+    regressions are reverted.
+    """
+
+    __tablename__ = "autoresearch_experiments"
+
+    id = Column(String, primary_key=True, default=lambda: str(__import__("uuid").uuid4()))
+    trader_id = Column(String, ForeignKey("traders.id"), nullable=False)
+    name = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="running")  # running, paused, completed, failed
+    mode = Column(String, default="params")  # "params" | "code"
+    strategy_id = Column(String, ForeignKey("strategies.id"), nullable=True)  # target strategy for code mode
+    baseline_score = Column(Float, default=0.0)
+    best_score = Column(Float, default=0.0)
+    best_params_json = Column(JSON, nullable=True)
+    best_source_code = Column(Text, nullable=True)  # best evolved source (code mode)
+    best_version = Column(Integer, nullable=True)  # StrategyVersion number of best code
+    iteration_count = Column(Integer, default=0)
+    kept_count = Column(Integer, default=0)
+    reverted_count = Column(Integer, default=0)
+    settings_json = Column(JSON, nullable=True)  # snapshot of model, mandate, walk-forward config
+    started_at = Column(DateTime, default=_utcnow)
+    finished_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+    __table_args__ = (
+        Index("idx_arx_trader_id", "trader_id"),
+        Index("idx_arx_status", "status"),
+    )
+
+
+class AutoresearchIteration(Base):
+    """A single iteration within an autoresearch experiment.
+
+    Records the proposed param changes, backtest result, score comparison,
+    and whether the change was kept or reverted.
+    """
+
+    __tablename__ = "autoresearch_iterations"
+
+    id = Column(String, primary_key=True, default=lambda: str(__import__("uuid").uuid4()))
+    experiment_id = Column(String, ForeignKey("autoresearch_experiments.id"), nullable=False)
+    iteration_number = Column(Integer, nullable=False)
+    proposed_params_json = Column(JSON, nullable=True)
+    baseline_score = Column(Float, default=0.0)
+    new_score = Column(Float, default=0.0)
+    score_delta = Column(Float, default=0.0)
+    decision = Column(String, nullable=False)  # "kept" | "reverted"
+    reasoning = Column(Text, nullable=True)
+    backtest_result_json = Column(JSON, nullable=True)
+    changed_params_json = Column(JSON, nullable=True)  # only the params that changed
+    source_code_snapshot = Column(Text, nullable=True)  # full proposed source (code mode)
+    source_diff = Column(Text, nullable=True)  # unified diff vs baseline (code mode)
+    validation_result_json = Column(JSON, nullable=True)  # AST validation output (code mode)
+    duration_seconds = Column(Float, default=0.0)
+    tokens_used = Column(Integer, default=0)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("idx_ari_experiment_id", "experiment_id"),
+        Index("idx_ari_experiment_iteration", "experiment_id", "iteration_number"),
     )
 
 

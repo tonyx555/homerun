@@ -161,24 +161,25 @@ def _is_stale_system_source(slug: str, source_code: str) -> bool:
 
 _COMMON_SCANNER_SCHEMA = {
     "param_fields": [
-        {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
-        {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
-        {"key": "max_risk_score", "label": "Max Risk Score", "type": "number", "min": 0, "max": 1},
+        {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100, "phase": "signal"},
+        {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1, "phase": "signal"},
+        {"key": "max_risk_score", "label": "Max Risk Score", "type": "number", "min": 0, "max": 1, "phase": "signal"},
     ]
 }
 
 _SCANNER_SCHEMA_NEGRISK = {
     "param_fields": [
         *_COMMON_SCANNER_SCHEMA["param_fields"][:3],
-        {"key": "min_markets", "label": "Min Markets", "type": "integer", "min": 1},
-        {"key": "min_total_yes", "label": "Min Total YES", "type": "number", "min": 0.5, "max": 1},
-        {"key": "warn_total_yes", "label": "Warn Total YES", "type": "number", "min": 0.5, "max": 1},
+        {"key": "min_markets", "label": "Min Markets", "type": "integer", "min": 1, "phase": "signal"},
+        {"key": "min_total_yes", "label": "Min Total YES", "type": "number", "min": 0.5, "max": 1, "phase": "signal"},
+        {"key": "warn_total_yes", "label": "Warn Total YES", "type": "number", "min": 0.5, "max": 1, "phase": "signal"},
         {
             "key": "election_min_total_yes",
             "label": "Election Min Total YES",
             "type": "number",
             "min": 0.5,
             "max": 1,
+            "phase": "signal",
         },
         {
             "key": "max_resolution_spread_days",
@@ -186,6 +187,7 @@ _SCANNER_SCHEMA_NEGRISK = {
             "type": "integer",
             "min": 0,
             "max": 365,
+            "phase": "signal",
         },
         *_COMMON_SCANNER_SCHEMA["param_fields"][3:],
     ]
@@ -194,13 +196,14 @@ _SCANNER_SCHEMA_NEGRISK = {
 _SCANNER_SCHEMA_COMBINATORIAL = {
     "param_fields": [
         *_COMMON_SCANNER_SCHEMA["param_fields"][:3],
-        {"key": "min_markets", "label": "Min Markets", "type": "integer", "min": 1},
+        {"key": "min_markets", "label": "Min Markets", "type": "integer", "min": 1, "phase": "signal"},
         {
             "key": "medium_confidence_threshold",
             "label": "Medium Confidence Threshold",
             "type": "number",
             "min": 0,
             "max": 1,
+            "phase": "signal",
         },
         {
             "key": "high_confidence_threshold",
@@ -208,6 +211,7 @@ _SCANNER_SCHEMA_COMBINATORIAL = {
             "type": "number",
             "min": 0,
             "max": 1,
+            "phase": "signal",
         },
         *_COMMON_SCANNER_SCHEMA["param_fields"][3:],
     ]
@@ -216,17 +220,18 @@ _SCANNER_SCHEMA_COMBINATORIAL = {
 _SCANNER_SCHEMA_SETTLEMENT_LAG = {
     "param_fields": [
         *_COMMON_SCANNER_SCHEMA["param_fields"][:3],
-        {"key": "min_liquidity", "label": "Min Liquidity", "type": "number", "min": 0},
+        {"key": "min_liquidity", "label": "Min Liquidity", "type": "number", "min": 0, "phase": "signal"},
         {
             "key": "max_days_to_resolution",
             "label": "Max Days To Resolution",
             "type": "integer",
             "min": 0,
             "max": 365,
+            "phase": "signal",
         },
-        {"key": "near_zero_threshold", "label": "Near-Zero Threshold", "type": "number", "min": 0.001, "max": 0.5},
-        {"key": "near_one_threshold", "label": "Near-One Threshold", "type": "number", "min": 0.5, "max": 0.999},
-        {"key": "min_sum_deviation", "label": "Min Sum Deviation", "type": "number", "min": 0.001, "max": 0.5},
+        {"key": "near_zero_threshold", "label": "Near-Zero Threshold", "type": "number", "min": 0.001, "max": 0.5, "phase": "signal"},
+        {"key": "near_one_threshold", "label": "Near-One Threshold", "type": "number", "min": 0.5, "max": 0.999, "phase": "signal"},
+        {"key": "min_sum_deviation", "label": "Min Sum Deviation", "type": "number", "min": 0.001, "max": 0.5, "phase": "signal"},
         *_COMMON_SCANNER_SCHEMA["param_fields"][3:],
     ]
 }
@@ -240,6 +245,7 @@ _SCANNER_SCHEMA_CROSS_PLATFORM = {
             "type": "number",
             "min": 0,
             "max": 1,
+            "phase": "signal",
         },
         *_COMMON_SCANNER_SCHEMA["param_fields"][3:],
     ]
@@ -248,13 +254,14 @@ _SCANNER_SCHEMA_CROSS_PLATFORM = {
 _SCANNER_SCHEMA_BAYESIAN = {
     "param_fields": [
         *_COMMON_SCANNER_SCHEMA["param_fields"][:3],
-        {"key": "min_propagation_edge", "label": "Min Propagation Edge", "type": "number", "min": 0, "max": 1},
+        {"key": "min_propagation_edge", "label": "Min Propagation Edge", "type": "number", "min": 0, "max": 1, "phase": "signal"},
         {
             "key": "max_propagation_depth",
             "label": "Max Propagation Depth",
             "type": "integer",
             "min": 1,
             "max": 10,
+            "phase": "signal",
         },
         *_COMMON_SCANNER_SCHEMA["param_fields"][3:],
     ]
@@ -263,9 +270,9 @@ _SCANNER_SCHEMA_BAYESIAN = {
 _SCANNER_SCHEMA_CORRELATION = {
     "param_fields": [
         *_COMMON_SCANNER_SCHEMA["param_fields"][:3],
-        {"key": "min_correlation", "label": "Min Correlation", "type": "number", "min": 0, "max": 1},
-        {"key": "min_divergence", "label": "Min Divergence", "type": "number", "min": 0, "max": 1},
-        {"key": "z_score_threshold", "label": "Z-Score Threshold", "type": "number", "min": 0},
+        {"key": "min_correlation", "label": "Min Correlation", "type": "number", "min": 0, "max": 1, "phase": "signal"},
+        {"key": "min_divergence", "label": "Min Divergence", "type": "number", "min": 0, "max": 1, "phase": "signal"},
+        {"key": "z_score_threshold", "label": "Z-Score Threshold", "type": "number", "min": 0, "phase": "signal"},
         *_COMMON_SCANNER_SCHEMA["param_fields"][3:],
     ]
 }
@@ -273,10 +280,10 @@ _SCANNER_SCHEMA_CORRELATION = {
 _SCANNER_SCHEMA_MARKET_MAKING = {
     "param_fields": [
         *_COMMON_SCANNER_SCHEMA["param_fields"][:3],
-        {"key": "min_liquidity", "label": "Min Liquidity", "type": "number", "min": 0},
-        {"key": "min_volume_24h", "label": "Min Volume 24h", "type": "number", "min": 0},
-        {"key": "min_spread", "label": "Min Spread", "type": "number", "min": 0, "max": 1},
-        {"key": "max_spread", "label": "Max Spread", "type": "number", "min": 0, "max": 1},
+        {"key": "min_liquidity", "label": "Min Liquidity", "type": "number", "min": 0, "phase": "signal"},
+        {"key": "min_volume_24h", "label": "Min Volume 24h", "type": "number", "min": 0, "phase": "signal"},
+        {"key": "min_spread", "label": "Min Spread", "type": "number", "min": 0, "max": 1, "phase": "signal"},
+        {"key": "max_spread", "label": "Max Spread", "type": "number", "min": 0, "max": 1, "phase": "signal"},
         {"key": "gamma", "label": "Risk Aversion (Gamma)", "type": "number", "min": 0.01, "max": 10},
         {"key": "max_inventory_usd", "label": "Max Inventory (USD)", "type": "number", "min": 0},
         {"key": "max_hold_minutes", "label": "Max Hold (min)", "type": "number", "min": 1},
@@ -375,8 +382,8 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         config_schema={
             "param_fields": [
                 *_COMMON_SCANNER_SCHEMA["param_fields"][:3],
-                {"key": "min_liquidity", "label": "Min Liquidity", "type": "number", "min": 0},
-                {"key": "min_markets", "label": "Min Markets", "type": "integer", "min": 1},
+                {"key": "min_liquidity", "label": "Min Liquidity", "type": "number", "min": 0, "phase": "signal"},
+                {"key": "min_markets", "label": "Min Markets", "type": "integer", "min": 1, "phase": "signal"},
                 *_COMMON_SCANNER_SCHEMA["param_fields"][3:],
             ]
         },
@@ -458,10 +465,10 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         sort_order=165,
         config_schema={
             "param_fields": [
-                {"key": "min_apy", "label": "Min APY (%)", "type": "number", "min": 0.1, "max": 50},
-                {"key": "min_liquidity", "label": "Min Liquidity (USD)", "type": "number", "min": 0},
-                {"key": "min_days_to_resolution", "label": "Min Days To Resolution", "type": "number", "min": 1},
-                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
+                {"key": "min_apy", "label": "Min APY (%)", "type": "number", "min": 0.1, "max": 50, "phase": "signal"},
+                {"key": "min_liquidity", "label": "Min Liquidity (USD)", "type": "number", "min": 0, "phase": "signal"},
+                {"key": "min_days_to_resolution", "label": "Min Days To Resolution", "type": "number", "min": 1, "phase": "signal"},
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100, "phase": "signal"},
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
                 {"key": "max_risk_score", "label": "Max Risk Score", "type": "number", "min": 0, "max": 1},
             ]
@@ -521,42 +528,55 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         sort_order=176,
         config_schema={
             "param_fields": [
-                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
-                {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
-                {"key": "max_risk_score", "label": "Max Risk Score", "type": "number", "min": 0, "max": 1},
-                {"key": "min_entry_price", "label": "Min Entry Price", "type": "number", "min": 0, "max": 1},
-                {"key": "max_entry_price", "label": "Max Entry Price", "type": "number", "min": 0, "max": 1},
-                {"key": "min_probability", "label": "Min Probability", "type": "number", "min": 0.5, "max": 1},
-                {"key": "max_probability", "label": "Max Probability", "type": "number", "min": 0.5, "max": 1},
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100, "phase": "signal"},
+                {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1, "phase": "signal"},
+                {"key": "max_risk_score", "label": "Max Risk Score", "type": "number", "min": 0, "max": 1, "phase": "signal"},
+                {"key": "min_entry_price", "label": "Min Entry Price", "type": "number", "min": 0, "max": 1, "phase": "signal"},
+                {"key": "max_entry_price", "label": "Max Entry Price", "type": "number", "min": 0, "max": 1, "phase": "signal"},
+                {"key": "min_probability", "label": "Min Probability", "type": "number", "min": 0.5, "max": 1, "phase": "signal"},
+                {"key": "max_probability", "label": "Max Probability", "type": "number", "min": 0.5, "max": 1, "phase": "signal"},
                 {
                     "key": "min_upside_percent",
                     "label": "Min Settlement Upside (%)",
                     "type": "number",
-                    "min": 10,
+                    "min": 5,
                     "max": 100,
+                    "phase": "signal",
                 },
-                {"key": "min_days_to_resolution", "label": "Min Days To Resolution", "type": "number", "min": 0},
-                {"key": "max_days_to_resolution", "label": "Max Days To Resolution", "type": "number", "min": 0},
+                {"key": "min_days_to_resolution", "label": "Min Days To Resolution", "type": "number", "min": 0, "phase": "signal"},
+                {"key": "max_days_to_resolution", "label": "Max Days To Resolution", "type": "number", "min": 0, "phase": "signal"},
                 {
                     "key": "exclude_market_keywords",
                     "label": "Exclude Market Name Contains",
                     "type": "list",
+                    "phase": "signal",
                 },
-                {"key": "min_liquidity", "label": "Min Liquidity", "type": "number", "min": 0},
-                {"key": "max_spread", "label": "Max Spread", "type": "number", "min": 0.005, "max": 0.2},
+                {"key": "min_liquidity", "label": "Min Liquidity", "type": "number", "min": 0, "phase": "signal"},
+                {"key": "max_spread", "label": "Max Spread", "type": "number", "min": 0.005, "max": 0.2, "phase": "signal"},
                 {
                     "key": "min_repricing_buffer",
                     "label": "Min Repricing Buffer",
                     "type": "number",
                     "min": 0.005,
                     "max": 0.1,
+                    "phase": "signal",
                 },
-                {"key": "repricing_weight", "label": "Repricing Weight", "type": "number", "min": 0.1, "max": 0.9},
+                {"key": "repricing_weight", "label": "Repricing Weight", "type": "number", "min": 0.1, "max": 0.9, "phase": "signal"},
                 {
                     "key": "sizing_policy",
                     "label": "Sizing Policy",
                     "type": "enum",
                     "options": ["fixed", "linear", "adaptive", "kelly"],
+                },
+                {"key": "block_spread_markets", "label": "Block Spread Markets", "type": "boolean", "phase": "signal"},
+                {"key": "skip_live_games", "label": "Skip Live Games", "type": "boolean", "phase": "signal"},
+                {
+                    "key": "live_game_buffer_minutes",
+                    "label": "Live Game Buffer (min)",
+                    "type": "number",
+                    "min": 0,
+                    "max": 120,
+                    "phase": "signal",
                 },
                 {"key": "take_profit_pct", "label": "Take Profit (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "trailing_stop_pct", "label": "Trailing Stop (%)", "type": "number", "min": 0, "max": 100},
@@ -614,14 +634,35 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                     "min": 0.1,
                     "max": 1.0,
                 },
-                {"key": "block_spread_markets", "label": "Block Spread Markets", "type": "boolean"},
-                {"key": "skip_live_games", "label": "Skip Live Games", "type": "boolean"},
                 {
-                    "key": "live_game_buffer_minutes",
-                    "label": "Live Game Buffer (min)",
+                    "key": "sports_min_probability",
+                    "label": "Sports: Min Probability",
+                    "type": "number",
+                    "min": 0.5,
+                    "max": 1,
+                    "phase": "signal",
+                },
+                {
+                    "key": "sports_max_days_to_resolution",
+                    "label": "Sports: Max Days To Resolution",
                     "type": "number",
                     "min": 0,
-                    "max": 120,
+                    "max": 2,
+                    "phase": "signal",
+                },
+                {
+                    "key": "sports_resolution_hold_minutes",
+                    "label": "Sports: Resolution Hold (min)",
+                    "type": "number",
+                    "min": 0,
+                    "max": 720,
+                },
+                {
+                    "key": "resolution_hold_max_loss_pct",
+                    "label": "Resolution Hold Max Loss (%)",
+                    "type": "number",
+                    "min": 5,
+                    "max": 80,
                 },
                 {"key": "resolution_hold_enabled", "label": "Resolution Hold Enabled", "type": "boolean"},
                 {

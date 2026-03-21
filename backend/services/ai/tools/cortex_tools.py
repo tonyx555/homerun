@@ -180,6 +180,28 @@ def build_tools() -> list:
             max_calls=3,
             category="cortex",
         ),
+        AgentTool(
+            name="cortex_get_autoresearch_status",
+            description=(
+                "Get the status of autoresearch parameter optimization experiments "
+                "across the fleet. Shows active experiments, best scores, iteration "
+                "counts, and recent improvements for each trader. Use this to see "
+                "what the autoresearch loop is doing before making param changes."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "trader_id": {
+                        "type": "string",
+                        "description": "Optional specific trader ID. If omitted, returns all recent experiments.",
+                    },
+                },
+                "required": [],
+            },
+            handler=_cortex_get_autoresearch_status,
+            max_calls=3,
+            category="cortex",
+        ),
     ]
 
 
@@ -467,6 +489,21 @@ async def _cortex_update_risk_clamps(arguments: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+async def _cortex_get_autoresearch_status(arguments: dict) -> dict:
+    from services.autoresearch_service import autoresearch_service
+
+    trader_id = arguments.get("trader_id")
+    try:
+        experiments = await autoresearch_service.get_fleet_autoresearch_status(trader_id=trader_id)
+        return {
+            "experiments": experiments,
+            "count": len(experiments),
+            "active_count": sum(1 for e in experiments if e.get("status") == "running"),
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
 async def _check_write_permission() -> bool:

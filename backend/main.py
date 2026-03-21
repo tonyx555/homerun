@@ -55,6 +55,7 @@ from api.routes_data_sources import router as data_sources_router
 from api.routes_discovery_profiles import router as discovery_profiles_router
 from api.routes_traders import router as traders_router
 from api.routes_agents import router as agents_router, tools_router as ai_tools_router, seed_builtin_agents
+from api.routes_autoresearch import router as autoresearch_router
 from api.routes_cortex import router as cortex_router
 from services.wallet_tracker import wallet_tracker
 from services.live_execution_service import live_execution_service
@@ -909,6 +910,7 @@ app.include_router(ml_router, prefix="/api", tags=["ML Training Pipeline"])
 app.include_router(agents_router, prefix="/api", tags=["AI Agents"])
 app.include_router(ai_tools_router, prefix="/api", tags=["AI Tools"])
 app.include_router(cortex_router, prefix="/api", tags=["Cortex"])
+app.include_router(autoresearch_router, prefix="/api", tags=["Autoresearch"])
 
 
 # WebSocket endpoint

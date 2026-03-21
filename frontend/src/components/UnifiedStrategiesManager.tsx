@@ -398,6 +398,7 @@ export default function UnifiedStrategiesManager({
   const [showSettings, setShowSettings] = useState(false)
   const [showConfig, setShowConfig] = useState(false)
   const [showHealth, setShowHealth] = useState(false)
+  const [showAutoresearch, setShowAutoresearch] = useState(false)
   const [showRawJson, setShowRawJson] = useState(false)
   const [showApiDocs, setShowApiDocs] = useState(false)
   const [showBacktest, setShowBacktest] = useState(false)
@@ -1494,27 +1495,6 @@ export default function UnifiedStrategiesManager({
                   <BookOpen className="w-3 h-3" />
                   API Docs
                 </Button>
-                {selectedStrategy && onOpenCopilot && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="h-7 gap-1 px-2 text-[11px]"
-                    onClick={() =>
-                      onOpenCopilot({
-                        contextType: 'strategy',
-                        contextId: selectedStrategy.id,
-                        label: selectedStrategy.name || selectedStrategy.slug || 'Strategy',
-                        prompt: 'Review this strategy and suggest concrete improvements based on current source code and SDK context.',
-                        autoSend: false,
-                      })
-                    }
-                    disabled={busy}
-                  >
-                    <Sparkles className="w-3 h-3" />
-                    Copilot
-                  </Button>
-                )}
                 <Button
                   type="button"
                   variant="outline"
@@ -1920,6 +1900,40 @@ export default function UnifiedStrategiesManager({
                         No health telemetry exists yet for key <span className="font-mono">{selectedStrategy?.slug || editorSlug || 'unknown'}</span>.
                       </p>
                     )}
+                  </div>
+                )}
+              </div>
+
+              {/* Autoresearch — code evolution */}
+              <div className="border-b border-border/40">
+                <button
+                  type="button"
+                  className="w-full flex items-center gap-2 px-4 py-2 hover:bg-muted/30 transition-colors"
+                  onClick={() => setShowAutoresearch(!showAutoresearch)}
+                >
+                  {showAutoresearch ? <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" /> : <ChevronRight className="w-3.5 h-3.5 text-muted-foreground" />}
+                  <FlaskConical className="w-3.5 h-3.5 text-purple-400" />
+                  <span className="text-xs font-medium">Autoresearch</span>
+                  <Badge variant="outline" className="text-[9px] h-4 px-1.5">code evolution</Badge>
+                </button>
+                {showAutoresearch && selectedStrategy && (
+                  <div className="px-4 pb-3 space-y-2">
+                    <p className="text-[10px] text-muted-foreground">
+                      Continuously evolve this strategy's source code using an LLM agent. Each iteration proposes code changes, validates via AST, backtests against market data, and keeps improvements.
+                    </p>
+                    <p className="text-[10px] text-muted-foreground">
+                      Open the <span className="font-medium text-foreground">Bots &rarr; Tune</span> tab, switch mode to <span className="font-medium text-purple-400">Code</span>, and select this strategy to start a code evolution experiment.
+                    </p>
+                    <div className="flex items-center gap-2 text-[10px]">
+                      <span className="text-muted-foreground">Strategy:</span>
+                      <span className="font-mono text-foreground">{selectedStrategy.slug}</span>
+                      <span className="text-muted-foreground">|</span>
+                      <span className="text-muted-foreground">ID:</span>
+                      <span className="font-mono text-foreground/80">{selectedStrategy.id.slice(0, 8)}</span>
+                      <span className="text-muted-foreground">|</span>
+                      <span className="text-muted-foreground">Version:</span>
+                      <span className="font-mono text-foreground">{selectedStrategy.version ?? 1}</span>
+                    </div>
                   </div>
                 )}
               </div>

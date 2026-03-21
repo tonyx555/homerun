@@ -585,6 +585,9 @@ async def run_strategy_tune_agent(
     system_prompt = (
         "You are the Homerun strategy tuning agent. "
         "Your job is to optimize trader strategy parameters for higher risk-adjusted PnL while preserving execution safety. "
+        "Parameters are split into two phases: signal detection params (controlling how opportunities are found — "
+        "market filters, timing windows, thresholds, asset scope) and decision params (controlling whether to trade — "
+        "min_edge, min_confidence, take_profit, stop_loss, sizing). Both are tuneable via params_patch. "
         "Use tools to inspect trader context and strategies before recommending changes. "
         "Return strict JSON with keys: summary, issues_identified, actions_taken, suggested_next_steps, param_updates. "
         "param_updates must be an array of objects with keys: source_key, strategy_key (optional), params_patch, reason. "

@@ -45,19 +45,20 @@ TRADERS_COPY_TRADE_DEFAULTS: dict[str, Any] = {
 
 TRADERS_COPY_TRADE_CONFIG_SCHEMA: dict[str, Any] = {
     "param_fields": [
-        {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
-        {"key": "min_source_notional_usd", "label": "Min Source Notional (USD)", "type": "number", "min": 0},
-        {"key": "max_entry_price", "label": "Max Entry Price", "type": "number", "min": 0, "max": 1},
-        {"key": "max_signal_age_seconds", "label": "Max Signal Age (sec)", "type": "integer", "min": 1, "max": 5},
-        {"key": "min_live_liquidity_usd", "label": "Min Live Liquidity (USD)", "type": "number", "min": 0},
+        {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1, "phase": "signal"},
+        {"key": "min_source_notional_usd", "label": "Min Source Notional (USD)", "type": "number", "min": 0, "phase": "signal"},
+        {"key": "max_entry_price", "label": "Max Entry Price", "type": "number", "min": 0, "max": 1, "phase": "signal"},
+        {"key": "max_signal_age_seconds", "label": "Max Signal Age (sec)", "type": "integer", "min": 1, "max": 5, "phase": "signal"},
+        {"key": "min_live_liquidity_usd", "label": "Min Live Liquidity (USD)", "type": "number", "min": 0, "phase": "signal"},
         {
             "key": "max_adverse_entry_drift_pct",
             "label": "Max Adverse Entry Drift (%)",
             "type": "number",
             "min": 0,
             "max": 100,
+            "phase": "signal",
         },
-        {"key": "copy_delay_seconds", "label": "Copy Delay (sec)", "type": "integer", "min": 0, "max": 300},
+        {"key": "copy_delay_seconds", "label": "Copy Delay (sec)", "type": "integer", "min": 0, "max": 300, "phase": "signal"},
         {"key": "copy_existing_positions_on_start", "label": "Copy Existing Open Positions On Start", "type": "boolean"},
         {"key": "copy_buys", "label": "Copy Buys", "type": "boolean"},
         {"key": "copy_sells", "label": "Copy Sells", "type": "boolean"},

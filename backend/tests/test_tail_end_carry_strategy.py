@@ -256,7 +256,29 @@ def test_sports_trailing_stop_uses_wider_threshold():
 
 
 def test_resolution_hold_overrides_inversion_stop():
-    """Within 120 min of resolution, hold regardless of price crash."""
+    """Within resolution hold window with moderate loss, hold to let it resolve."""
+    strategy = TailEndCarryStrategy()
+    position = _make_position(
+        entry_price=0.86,
+        current_price=0.72,
+        config={
+            "inversion_stop_enabled": True,
+            "inversion_price_threshold": 0.50,
+            "resolution_hold_enabled": True,
+            "resolution_hold_minutes": 120.0,
+            "resolution_hold_max_loss_pct": 25.0,
+        },
+    )
+
+    # 60 minutes left = within 120 minute hold window, loss ~16% < 25% threshold
+    decision = strategy.should_exit(position, _market_state(0.72, seconds_left=3600.0))
+
+    assert decision.action == "hold"
+    assert "resolution proximity hold" in decision.reason.lower()
+
+
+def test_resolution_hold_max_loss_override():
+    """Within resolution hold window but loss exceeds threshold — close anyway."""
     strategy = TailEndCarryStrategy()
     position = _make_position(
         entry_price=0.86,
@@ -266,14 +288,15 @@ def test_resolution_hold_overrides_inversion_stop():
             "inversion_price_threshold": 0.50,
             "resolution_hold_enabled": True,
             "resolution_hold_minutes": 120.0,
+            "resolution_hold_max_loss_pct": 25.0,
         },
     )
 
-    # 60 minutes left = within 120 minute hold window
+    # 60 minutes left, but 43% loss exceeds 25% threshold — max-loss override fires
     decision = strategy.should_exit(position, _market_state(0.49, seconds_left=3600.0))
 
-    assert decision.action == "hold"
-    assert "resolution proximity hold" in decision.reason.lower()
+    assert decision.action == "close"
+    assert "max-loss override" in decision.reason.lower()
 
 
 def test_resolution_hold_does_not_apply_when_far_from_resolution():

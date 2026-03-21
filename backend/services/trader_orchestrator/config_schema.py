@@ -257,13 +257,15 @@ async def _list_detection_strategies_with_evaluate(
         source_key = _normalize_strategy_source_key(row.source_key)
         if not source_key or source_key not in adapter_keys:
             continue
+        default_params = _resolved_default_params(row)
+        param_fields = _strategy_param_fields(row, default_params=default_params)
         by_source.setdefault(source_key, []).append(
             {
                 "key": row.slug,
                 "label": f"{row.name} (detection)",
                 "description": str(row.description or ""),
-                "default_params": {},
-                "param_fields": [],
+                "default_params": default_params,
+                "param_fields": param_fields,
                 "status": str(row.status or "unknown"),
                 "version": int(row.version or 1),
                 "is_system": bool(row.is_system),

@@ -92,6 +92,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip'
 import { FlashNumber } from './AnimatedNumber'
 import { toTimeValueSeries } from '../lib/priceHistory'
 import StrategyConfigForm from './StrategyConfigForm'
+import AutoresearchView from './AutoresearchView'
 
 const CortexView = lazy(() => import('./ai/CortexView'))
 
@@ -312,7 +313,7 @@ type LatencyGroupRow = {
   latencyLabel: string
 }
 
-type StrategyParamGroupKey = 'scope' | 'timing' | 'entry' | 'sizing' | 'exit' | 'risk' | 'advanced'
+type StrategyParamGroupKey = 'signal' | 'scope' | 'timing' | 'entry' | 'sizing' | 'exit' | 'risk' | 'advanced'
 
 type StrategyParamGroup = {
   key: StrategyParamGroupKey
@@ -367,6 +368,7 @@ const PERFORMANCE_MODE_ORDER: Record<string, number> = {
   directional_edge: 6,
 }
 const STRATEGY_PARAM_GROUP_ORDER = [
+  'signal',
   'scope',
   'timing',
   'entry',
@@ -376,6 +378,7 @@ const STRATEGY_PARAM_GROUP_ORDER = [
   'advanced',
 ] as const
 const STRATEGY_PARAM_GROUP_LABELS: Record<StrategyParamGroupKey, string> = {
+  signal: 'Signal Detection',
   scope: 'Scope & Modes',
   timing: 'Timing & Freshness',
   entry: 'Entry Filters',
@@ -4180,7 +4183,9 @@ function buildPerformanceBuckets(
   return rows
 }
 
-function classifyStrategyParamGroup(fieldKey: string): StrategyParamGroupKey {
+function classifyStrategyParamGroup(fieldKey: string, field?: Record<string, unknown>): StrategyParamGroupKey {
+  const phase = field ? String(field.phase || '').trim().toLowerCase() : ''
+  if (phase === 'signal') return 'signal'
   const key = String(fieldKey || '').trim().toLowerCase()
   if (!key) return 'advanced'
   if (
@@ -4259,7 +4264,7 @@ function groupStrategyParamFields(fields: Array<Record<string, unknown>>): Strat
   for (const field of fields) {
     const fieldKey = String(field.key || '').trim()
     if (!fieldKey) continue
-    const groupKey = classifyStrategyParamGroup(fieldKey)
+    const groupKey = classifyStrategyParamGroup(fieldKey, field)
     const current = grouped.get(groupKey) || []
     current.push(field)
     grouped.set(groupKey, current)
@@ -10246,322 +10251,32 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                 )}
 
                 {workTab === 'tune' && (
-                  <div className="h-full min-h-0 overflow-hidden px-1">
-                    <div className="h-full min-h-0 rounded-md border border-border/50 bg-muted/10 p-2">
-                      {!selectedTrader ? (
+                  selectedTrader ? (
+                    <AutoresearchView
+                      trader={selectedTrader}
+                      dynamicStrategyParamSections={dynamicStrategyParamSections}
+                      tuneParamSectionTab={tuneParamSectionTab}
+                      setTuneParamSectionTab={setTuneParamSectionTab}
+                      tuneDraftDirty={tuneDraftDirty}
+                      setTuneDraftDirty={setTuneDraftDirty}
+                      applyTraderDraftSettings={applyTraderDraftSettings}
+                      applyDynamicStrategyFormValues={applyDynamicStrategyFormValues}
+                      saveTuneParametersMutation={saveTuneParametersMutation}
+                      revertTuneParametersMutation={revertTuneParametersMutation}
+                      tuneRevertSnapshot={tuneRevertSnapshot}
+                      tuneSaveError={tuneSaveError}
+                      tuneRevertError={tuneRevertError}
+                      formatTimestamp={formatTimestamp}
+                    />
+                  ) : (
+                    <div className="h-full min-h-0 overflow-hidden px-1">
+                      <div className="h-full min-h-0 rounded-md border border-border/50 bg-muted/10 p-2">
                         <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-700 dark:text-amber-100">
-                          Select a bot to use the agent.
+                          Select a bot to use autoresearch.
                         </div>
-                      ) : (
-                        <div
-                          className="grid h-full min-h-0 gap-2"
-                          style={{ gridTemplateRows: 'minmax(0, calc(33.333% + 20px)) minmax(0, calc(66.667% - 20px))' }}
-                        >
-                          <div className="min-h-0 overflow-hidden rounded-md border border-cyan-500/30 bg-cyan-500/5 p-2.5">
-                            <div className="flex h-full min-h-0 flex-col gap-2">
-                              <div className="flex flex-wrap items-center justify-between gap-2">
-                                <div className="flex items-center gap-1.5">
-                                  <p className="text-[11px] font-medium">Agent</p>
-                                  <Badge variant="outline" className="h-4 px-1.5 text-[9px] font-mono">
-                                    {tuneIterateResponse?.session_id ? shortId(tuneIterateResponse.session_id) : 'idle'}
-                                  </Badge>
-                                  {runTuneIterateMutation.isPending ? (
-                                    <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-semibold text-amber-500">
-                                      RUNNING
-                                    </span>
-                                  ) : null}
-                                  {tuneAutoEnabled ? (
-                                    <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-500">
-                                      AUTO
-                                    </span>
-                                  ) : null}
-                                </div>
-                                <p className="text-[10px] text-muted-foreground">
-                                  Bot: <span className="font-mono text-foreground/85">{selectedTrader.name}</span>
-                                </p>
-                              </div>
-                              <p className="text-[10px] text-muted-foreground/80">
-                                Run the agent against the latest trader context. High-confidence parameter updates apply immediately.
-                              </p>
-                              <div
-                                className={cn(
-                                  'grid min-h-0 flex-1 gap-2 overflow-hidden',
-                                  tuneIterateResponse && !runTuneIterateMutation.isPending
-                                    ? 'xl:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]'
-                                    : ''
-                                )}
-                              >
-                                <div className="min-h-0 flex flex-col gap-1.5">
-                                  <details className="rounded-md border border-border/60 bg-background/80 px-2 py-1">
-                                    <summary className="cursor-pointer text-[10px] font-medium text-muted-foreground">
-                                      Agent Prompt
-                                    </summary>
-                                    <textarea
-                                      value={tuneIteratePrompt}
-                                      onChange={(event) => setTuneIteratePrompt(event.target.value)}
-                                      className="mt-1 min-h-[72px] max-h-[96px] w-full rounded-md border border-border/60 bg-background px-2 py-1.5 text-xs leading-relaxed"
-                                      placeholder="Describe optimization goal, constraints, and risk preferences..."
-                                    />
-                                  </details>
-                                  <div className="grid gap-1.5 sm:grid-cols-2 xl:grid-cols-4">
-                                    <div>
-                                      <Label className="text-[11px] text-muted-foreground">Model Override</Label>
-                                      <Input
-                                        value={tuneIterateModel}
-                                        onChange={(event) => setTuneIterateModel(event.target.value)}
-                                        placeholder="app default"
-                                        className="mt-1 h-8 text-xs font-mono"
-                                      />
-                                    </div>
-                                    <div>
-                                      <Label className="text-[11px] text-muted-foreground">Max Iterations</Label>
-                                      <Input
-                                        type="number"
-                                        min={1}
-                                        max={24}
-                                        value={tuneIterateMaxIterations}
-                                        onChange={(event) => setTuneIterateMaxIterations(event.target.value)}
-                                        className="mt-1 h-8 text-xs font-mono"
-                                      />
-                                    </div>
-                                    <div>
-                                      <Label className="text-[11px] text-muted-foreground">Auto Agent</Label>
-                                      <div className="mt-1 flex h-8 items-center justify-between rounded-md border border-border/60 bg-background px-2">
-                                        <span className="text-[10px] text-muted-foreground">
-                                          {selectedTraderExecutionEnabled ? 'while trading' : 'bot stopped/inactive'}
-                                        </span>
-                                        <Switch
-                                          checked={tuneAutoEnabled}
-                                          onCheckedChange={(checked) => {
-                                            setTuneAutoEnabled(checked)
-                                            setTuneAutoLastRunAt(checked ? Date.now() : null)
-                                          }}
-                                        />
-                                      </div>
-                                    </div>
-                                    <div>
-                                      <Label className="text-[11px] text-muted-foreground">Auto Interval (min)</Label>
-                                      <Input
-                                        type="number"
-                                        min={1}
-                                        max={360}
-                                        value={tuneAutoIntervalMinutes}
-                                        onChange={(event) => setTuneAutoIntervalMinutes(event.target.value)}
-                                        className="mt-1 h-8 text-xs font-mono"
-                                        disabled={!tuneAutoEnabled}
-                                      />
-                                    </div>
-                                  </div>
-                                  {tuneAutoEnabled ? (
-                                    <p className="text-[10px] text-muted-foreground/80">
-                                      Agent runs every {Math.max(1, Math.min(360, Math.trunc(toNumber(tuneAutoIntervalMinutes || 15) || 15)))} minute(s) while this bot is enabled.
-                                      {tuneAutoLastRunAt ? ` Last run: ${formatTimestamp(new Date(tuneAutoLastRunAt).toISOString())}.` : ''}
-                                    </p>
-                                  ) : null}
-                                  {tuneIterateError ? (
-                                    <p className="text-[10px] text-red-500">{tuneIterateError}</p>
-                                  ) : null}
-                                  <Button
-                                    size="sm"
-                                    className="h-8 shrink-0 text-xs"
-                                    onClick={() => runTuneIterateMutation.mutate({ trigger: 'manual' })}
-                                    disabled={runTuneIterateMutation.isPending || !selectedTrader}
-                                  >
-                                    {runTuneIterateMutation.isPending ? (
-                                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                                    ) : (
-                                      <Sparkles className="mr-1.5 h-3.5 w-3.5" />
-                                    )}
-                                    {runTuneIterateMutation.isPending ? 'Running...' : 'Run Agent'}
-                                  </Button>
-                                </div>
-
-                                {tuneIterateResponse && !runTuneIterateMutation.isPending ? (
-                                  <div className="min-h-0 rounded-md border border-border/60 bg-background/70 p-2">
-                                    <div className="flex h-full min-h-0 flex-col gap-1.5">
-                                      <div className="flex items-center justify-between gap-2">
-                                        <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Latest Agent Result</p>
-                                        <Badge variant="outline" className="h-4 px-1 text-[9px] font-mono">
-                                          {tuneIterateAppliedUpdates.length} updates
-                                        </Badge>
-                                      </div>
-                                      <div className="space-y-1.5">
-                                        <div className="space-y-1 rounded border border-border/50 bg-background/60 px-2 py-1.5">
-                                          <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Summary</p>
-                                          {tuneIterateParsed && typeof tuneIterateParsed.summary === 'string' ? (
-                                            <p className="line-clamp-3 text-[10px] text-foreground/90">
-                                              {String(tuneIterateParsed.summary)}
-                                            </p>
-                                          ) : (
-                                            <p className="text-[10px] text-muted-foreground/80">No summary returned by model.</p>
-                                          )}
-                                        </div>
-                                        <div className="grid grid-cols-3 gap-1">
-                                          <div className="rounded border border-border/50 bg-background/60 px-2 py-1">
-                                            <p className="text-[9px] uppercase text-muted-foreground">Issues</p>
-                                            <p className="text-[10px] font-mono">{tuneIterateIssues.length}</p>
-                                          </div>
-                                          <div className="rounded border border-border/50 bg-background/60 px-2 py-1">
-                                            <p className="text-[9px] uppercase text-muted-foreground">Actions</p>
-                                            <p className="text-[10px] font-mono">{tuneIterateActions.length}</p>
-                                          </div>
-                                          <div className="rounded border border-border/50 bg-background/60 px-2 py-1">
-                                            <p className="text-[9px] uppercase text-muted-foreground">Next</p>
-                                            <p className="text-[10px] font-mono">{tuneIterateNextSteps.length}</p>
-                                          </div>
-                                        </div>
-                                        {tuneIterateAppliedUpdates.length > 0 ? (
-                                          <p className="line-clamp-2 text-[10px] text-muted-foreground/90">
-                                            Latest: {tuneIterateAppliedUpdates[0].source_key}:{tuneIterateAppliedUpdates[0].strategy_key}{' -> '}
-                                            {tuneIterateAppliedUpdates[0].changed_keys.join(', ')}
-                                          </p>
-                                        ) : (
-                                          <p className="text-[10px] text-muted-foreground/80">No parameter changes were applied.</p>
-                                        )}
-                                      </div>
-                                    </div>
-                                  </div>
-                                ) : null}
-                              </div>
-                            </div>
-                          </div>
-
-                          <div className="min-h-0 rounded-md border border-border/60 bg-background/70 p-2.5">
-                            <div className="flex h-full min-h-0 flex-col gap-2">
-                              <div className="flex flex-wrap items-center justify-between gap-2">
-                                <div className="flex items-center gap-1.5">
-                                  <p className="text-[11px] font-medium">Parameter Workspace</p>
-                                  <Badge variant="outline" className="h-4 px-1.5 text-[9px] font-mono">
-                                    {dynamicStrategyParamSections.reduce((sum, section) => sum + section.fieldKeys.length, 0)} fields
-                                  </Badge>
-                                  {tuneDraftDirty ? (
-                                    <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-semibold text-amber-500">
-                                      UNSAVED
-                                    </span>
-                                  ) : null}
-                                </div>
-                                <div className="flex flex-wrap items-center gap-1.5">
-                                  <Button
-                                    type="button"
-                                    size="sm"
-                                    variant="outline"
-                                    className="h-6 px-2 text-[10px]"
-                                    onClick={() => {
-                                      if (!selectedTrader) return
-                                      applyTraderDraftSettings(selectedTrader)
-                                      setTuneDraftDirty(false)
-                                      setTuneSaveError(null)
-                                      setTuneRevertError(null)
-                                    }}
-                                  >
-                                    Discard Edits
-                                  </Button>
-                                  <Button
-                                    type="button"
-                                    size="sm"
-                                    variant="outline"
-                                    className="h-6 px-2 text-[10px]"
-                                    onClick={() => revertTuneParametersMutation.mutate()}
-                                    disabled={
-                                      revertTuneParametersMutation.isPending
-                                      || !tuneRevertSnapshot
-                                      || tuneRevertSnapshot.traderId !== selectedTrader.id
-                                    }
-                                  >
-                                    {revertTuneParametersMutation.isPending ? (
-                                      <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                                    ) : null}
-                                    Revert Last Applied
-                                  </Button>
-                                  <Button
-                                    type="button"
-                                    size="sm"
-                                    className="h-6 px-2 text-[10px]"
-                                    onClick={() => saveTuneParametersMutation.mutate()}
-                                    disabled={saveTuneParametersMutation.isPending || !tuneDraftDirty}
-                                  >
-                                    {saveTuneParametersMutation.isPending ? (
-                                      <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                                    ) : null}
-                                    Save Parameters
-                                  </Button>
-                                </div>
-                              </div>
-                              <p className="text-[10px] text-muted-foreground/80">
-                                Review and edit grouped strategy controls before committing.
-                              </p>
-                              {tuneRevertSnapshot && tuneRevertSnapshot.traderId === selectedTrader.id ? (
-                                <p className="text-[10px] text-muted-foreground/80">
-                                  Revert snapshot captured at {formatTimestamp(tuneRevertSnapshot.capturedAt)}.
-                                </p>
-                              ) : null}
-                              {tuneSaveError ? (
-                                <p className="text-[10px] text-red-500">{tuneSaveError}</p>
-                              ) : null}
-                              {tuneRevertError ? (
-                                <p className="text-[10px] text-red-500">{tuneRevertError}</p>
-                              ) : null}
-                              {dynamicStrategyParamSections.length === 0 ? (
-                                <p className="text-[10px] text-muted-foreground/80">No dynamic parameter fields available for this bot.</p>
-                              ) : (
-                                <Tabs
-                                  value={tuneParamSectionTab}
-                                  onValueChange={setTuneParamSectionTab}
-                                  className="flex min-h-0 flex-1 flex-col overflow-hidden"
-                                >
-                                  <div className="shrink-0 overflow-x-auto pb-1">
-                                    <TabsList className="h-auto w-max min-w-full justify-start gap-1 rounded-md border border-border/50 bg-background/60 p-1">
-                                      {dynamicStrategyParamSections.map((section) => (
-                                        <TabsTrigger key={section.sectionKey} value={section.sectionKey} className="h-6 gap-1 px-2 text-[10px]">
-                                          <span className="max-w-[220px] truncate">{section.sourceLabel} · {section.strategyLabel}</span>
-                                          <span className="text-[9px] text-muted-foreground">{section.fieldKeys.length}</span>
-                                        </TabsTrigger>
-                                      ))}
-                                    </TabsList>
-                                  </div>
-
-                                  {dynamicStrategyParamSections.map((section) => (
-                                    <TabsContent key={section.sectionKey} value={section.sectionKey} className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden">
-                                      {section.groups.length === 0 ? (
-                                        <p className="text-[10px] text-muted-foreground/80">No grouped parameter fields are available for this strategy.</p>
-                                      ) : (
-                                        <Tabs defaultValue={section.groups[0].key} className="flex min-h-0 flex-1 flex-col overflow-hidden">
-                                          <div className="shrink-0 overflow-x-auto pb-1">
-                                            <TabsList className="h-auto w-max min-w-full justify-start gap-1 rounded-md border border-border/50 bg-background/50 p-1">
-                                              {section.groups.map((group) => (
-                                                <TabsTrigger key={`${section.sectionKey}:${group.key}`} value={group.key} className="h-6 gap-1 px-2 text-[10px]">
-                                                  <span>{group.label}</span>
-                                                  <span className="text-[9px] text-muted-foreground">{group.fields.length}</span>
-                                                </TabsTrigger>
-                                              ))}
-                                            </TabsList>
-                                          </div>
-
-                                          {section.groups.map((group) => (
-                                            <TabsContent
-                                              key={`${section.sectionKey}:panel:${group.key}`}
-                                              value={group.key}
-                                              className="mt-0 min-h-0 flex-1 overflow-auto rounded-md border border-border/50 bg-background/65 p-2"
-                                            >
-                                              <StrategyConfigForm
-                                                schema={{ param_fields: group.fields as any[] }}
-                                                values={section.values}
-                                                onChange={(nextValues) => applyDynamicStrategyFormValues(section.fieldKeys, nextValues)}
-                                              />
-                                            </TabsContent>
-                                          ))}
-                                        </Tabs>
-                                      )}
-                                    </TabsContent>
-                                  ))}
-                                </Tabs>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      )}
+                      </div>
                     </div>
-                  </div>
+                  )
                 )}
 
                 {workTab === 'risk' && (

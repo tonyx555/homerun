@@ -412,47 +412,54 @@ CRYPTO_HF_SCOPE_CONFIG_SCHEMA: dict[str, Any] = {
             "label": "Include Assets",
             "type": "list",
             "options": ["BTC", "ETH", "SOL", "XRP"],
+            "phase": "signal",
         },
         {
             "key": "exclude_assets",
             "label": "Exclude Assets",
             "type": "list",
             "options": ["BTC", "ETH", "SOL", "XRP"],
+            "phase": "signal",
         },
         {
             "key": "include_timeframes",
             "label": "Include Timeframes",
             "type": "list",
             "options": ["5m", "15m", "1h", "4h"],
+            "phase": "signal",
         },
         {
             "key": "exclude_timeframes",
             "label": "Exclude Timeframes",
             "type": "list",
             "options": ["5m", "15m", "1h", "4h"],
+            "phase": "signal",
         },
         {
             "key": "enabled_sub_strategies",
             "label": "Enabled Sub-Strategies",
             "type": "array[string]",
             "options": ["maker_quote", "directional_edge", "convergence"],
+            "phase": "signal",
         },
         {
             "key": "auto_mode_priority",
             "label": "Auto Mode Priority",
             "type": "array[string]",
             "options": ["directional", "convergence", "maker_quote"],
+            "phase": "signal",
         },
         {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
         {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
         {"key": "max_risk_score", "label": "Max Risk Score", "type": "number", "min": 0, "max": 1},
-        {"key": "live_window_required", "label": "Live Window Required", "type": "boolean"},
+        {"key": "live_window_required", "label": "Live Window Required", "type": "boolean", "phase": "signal"},
         {
             "key": "min_liquidity_usd",
             "label": "Min Liquidity (USD)",
             "type": "number",
             "min": 0,
             "max": 1000000,
+            "phase": "signal",
         },
         {
             "key": "min_liquidity_usd_opening",
@@ -460,6 +467,7 @@ CRYPTO_HF_SCOPE_CONFIG_SCHEMA: dict[str, Any] = {
             "type": "number",
             "min": 0,
             "max": 1000000,
+            "phase": "signal",
         },
         {
             "key": "max_spread_pct",
@@ -467,6 +475,7 @@ CRYPTO_HF_SCOPE_CONFIG_SCHEMA: dict[str, Any] = {
             "type": "number",
             "min": 0,
             "max": 1,
+            "phase": "signal",
         },
         {
             "key": "max_signal_age_seconds",
@@ -474,6 +483,7 @@ CRYPTO_HF_SCOPE_CONFIG_SCHEMA: dict[str, Any] = {
             "type": "number",
             "min": 1,
             "max": 3600,
+            "phase": "signal",
         },
         {
             "key": "max_open_order_seconds",
@@ -488,6 +498,7 @@ CRYPTO_HF_SCOPE_CONFIG_SCHEMA: dict[str, Any] = {
             "type": "number",
             "min": 0.1,
             "max": 300,
+            "phase": "signal",
         },
         {
             "key": "max_signal_age_seconds_15m",
@@ -495,6 +506,7 @@ CRYPTO_HF_SCOPE_CONFIG_SCHEMA: dict[str, Any] = {
             "type": "number",
             "min": 0.1,
             "max": 900,
+            "phase": "signal",
         },
         {
             "key": "max_signal_age_seconds_1h",
@@ -502,6 +514,7 @@ CRYPTO_HF_SCOPE_CONFIG_SCHEMA: dict[str, Any] = {
             "type": "number",
             "min": 0.1,
             "max": 3600,
+            "phase": "signal",
         },
         {
             "key": "max_signal_age_seconds_4h",
@@ -509,6 +522,7 @@ CRYPTO_HF_SCOPE_CONFIG_SCHEMA: dict[str, Any] = {
             "type": "number",
             "min": 0.1,
             "max": 14400,
+            "phase": "signal",
         },
         {
             "key": "max_market_data_age_ms",
@@ -516,6 +530,7 @@ CRYPTO_HF_SCOPE_CONFIG_SCHEMA: dict[str, Any] = {
             "type": "integer",
             "min": 50,
             "max": 300000,
+            "phase": "signal",
         },
         {
             "key": "max_market_data_age_ms_5m",
@@ -523,6 +538,7 @@ CRYPTO_HF_SCOPE_CONFIG_SCHEMA: dict[str, Any] = {
             "type": "integer",
             "min": 50,
             "max": 300000,
+            "phase": "signal",
         },
         {
             "key": "max_market_data_age_ms_15m",
@@ -530,6 +546,7 @@ CRYPTO_HF_SCOPE_CONFIG_SCHEMA: dict[str, Any] = {
             "type": "integer",
             "min": 50,
             "max": 300000,
+            "phase": "signal",
         },
         {
             "key": "max_market_data_age_ms_1h",
@@ -537,6 +554,7 @@ CRYPTO_HF_SCOPE_CONFIG_SCHEMA: dict[str, Any] = {
             "type": "integer",
             "min": 50,
             "max": 300000,
+            "phase": "signal",
         },
         {
             "key": "max_market_data_age_ms_4h",
@@ -544,15 +562,17 @@ CRYPTO_HF_SCOPE_CONFIG_SCHEMA: dict[str, Any] = {
             "type": "integer",
             "min": 50,
             "max": 300000,
+            "phase": "signal",
         },
-        {"key": "enforce_market_data_freshness", "label": "Enforce Market Data Freshness", "type": "boolean"},
-        {"key": "require_market_data_age_for_sources", "label": "Require Data Age For Sources", "type": "list"},
+        {"key": "enforce_market_data_freshness", "label": "Enforce Market Data Freshness", "type": "boolean", "phase": "signal"},
+        {"key": "require_market_data_age_for_sources", "label": "Require Data Age For Sources", "type": "list", "phase": "signal"},
         {
             "key": "max_live_context_age_seconds",
             "label": "Max Live Context Age (sec)",
             "type": "number",
             "min": 0.1,
             "max": 60,
+            "phase": "signal",
         },
         {
             "key": "max_oracle_age_seconds",
@@ -560,6 +580,7 @@ CRYPTO_HF_SCOPE_CONFIG_SCHEMA: dict[str, Any] = {
             "type": "number",
             "min": 1,
             "max": 3600,
+            "phase": "signal",
         },
         {
             "key": "max_oracle_age_ms",
@@ -567,8 +588,9 @@ CRYPTO_HF_SCOPE_CONFIG_SCHEMA: dict[str, Any] = {
             "type": "number",
             "min": 100,
             "max": 3_600_000,
+            "phase": "signal",
         },
-        {"key": "require_oracle_for_directional", "label": "Require Oracle For Directional", "type": "boolean"},
+        {"key": "require_oracle_for_directional", "label": "Require Oracle For Directional", "type": "boolean", "phase": "signal"},
         {
             "key": "oracle_direction_gate_modes",
             "label": "Oracle Direction Gate Modes",

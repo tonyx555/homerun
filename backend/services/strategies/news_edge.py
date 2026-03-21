@@ -72,11 +72,11 @@ NEWS_EDGE_CONFIG_SCHEMA: dict[str, Any] = {
         {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
         {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
         {"key": "orchestrator_min_edge", "label": "Min Intent Edge (%)", "type": "number", "min": 0, "max": 100},
-        {"key": "require_verifier", "label": "Require Verifier", "type": "boolean"},
-        {"key": "require_second_source", "label": "Require Second Source", "type": "boolean"},
-        {"key": "min_supporting_articles", "label": "Min Supporting Articles", "type": "integer", "min": 1, "max": 10},
-        {"key": "min_supporting_sources", "label": "Min Supporting Sources", "type": "integer", "min": 1, "max": 10},
-        {"key": "max_signal_age_minutes", "label": "Max Signal Age (Minutes)", "type": "integer", "min": 1, "max": 1440},
+        {"key": "require_verifier", "label": "Require Verifier", "type": "boolean", "phase": "signal"},
+        {"key": "require_second_source", "label": "Require Second Source", "type": "boolean", "phase": "signal"},
+        {"key": "min_supporting_articles", "label": "Min Supporting Articles", "type": "integer", "min": 1, "max": 10, "phase": "signal"},
+        {"key": "min_supporting_sources", "label": "Min Supporting Sources", "type": "integer", "min": 1, "max": 10, "phase": "signal"},
+        {"key": "max_signal_age_minutes", "label": "Max Signal Age (Minutes)", "type": "integer", "min": 1, "max": 1440, "phase": "signal"},
     ]
 }
 

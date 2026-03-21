@@ -149,9 +149,9 @@ class TailEndCarryStrategy(BaseStrategy):
         "max_risk_score": 0.78,
     }
 
-    # Composable evaluate pipeline: score = edge*0.55 + conf*28 + entry*6 - risk*9 + time_bonus
+    # Composable evaluate pipeline: score = edge*2.5 + conf*28 + entry*6 - risk*9 + time_bonus
     scoring_weights = ScoringWeights(
-        edge_weight=0.55,
+        edge_weight=2.5,
         confidence_weight=28.0,
         risk_penalty=9.0,
     )
@@ -162,6 +162,9 @@ class TailEndCarryStrategy(BaseStrategy):
         "min_probability": 0.85,
         "max_probability": 0.999,
         "min_upside_percent": 5.0,
+        # Sports-specific entry overrides
+        "sports_min_probability": 0.90,
+        "sports_max_days_to_resolution": 0.25,
         "min_days_to_resolution": 0.01,
         "max_days_to_resolution": 1.0,
         "min_liquidity": 3500.0,
@@ -190,13 +193,15 @@ class TailEndCarryStrategy(BaseStrategy):
         "trailing_stop_enabled": True,
         "trailing_stop_pct": 12.0,
         "sports_inversion_stop_enabled": False,
-        "sports_trailing_stop_pct": 20.0,
+        "sports_trailing_stop_pct": 30.0,
         "sports_sizing_multiplier": 0.45,
         "skip_live_games": True,
         "live_game_buffer_minutes": 15.0,
         "session_timeout_seconds": 180,
         "resolution_hold_enabled": True,
         "resolution_hold_minutes": 360.0,
+        "sports_resolution_hold_minutes": 150.0,
+        "resolution_hold_max_loss_pct": 25.0,
         "max_hold_minutes": 1440.0,
         "price_policy": "taker_limit",
         "time_in_force": "IOC",
@@ -470,7 +475,9 @@ class TailEndCarryStrategy(BaseStrategy):
 
         min_probability = clamp(safe_float(cfg.get("min_probability"), 0.85), 0.5, 0.995)
         max_probability = clamp(safe_float(cfg.get("max_probability"), 0.999), min_probability + 0.005, 0.999)
-        min_upside_percent = clamp(safe_float(cfg.get("min_upside_percent"), 10.0), 5.0, 100.0)
+        min_upside_percent = clamp(safe_float(cfg.get("min_upside_percent"), 5.0), 5.0, 100.0)
+        sports_min_probability = clamp(safe_float(cfg.get("sports_min_probability"), 0.90), 0.5, 0.995)
+        sports_max_days = max(0.005, safe_float(cfg.get("sports_max_days_to_resolution"), 0.25))
         min_days = max(0.0, safe_float(cfg.get("min_days_to_resolution"), 0.01))
         max_days = max(min_days + 0.005, safe_float(cfg.get("max_days_to_resolution"), 1.0))
         min_liquidity = max(100.0, safe_float(cfg.get("min_liquidity"), 3500.0))
@@ -527,15 +534,23 @@ class TailEndCarryStrategy(BaseStrategy):
 
             # Fix #1: classify market category
             category = self._classify_market_from_model(market, event_for_market)
+            is_sports = category in (CATEGORY_SPORTS, CATEGORY_ESPORTS)
+
+            # Sports-specific: tighter resolution window (default 0.25 days / 6 hours)
+            if is_sports and days_to_res > sports_max_days:
+                continue
 
             # Fix #3: skip live games for sports/esports
-            if skip_live_games and category in (CATEGORY_SPORTS, CATEGORY_ESPORTS):
+            if skip_live_games and is_sports:
                 if self._is_live_game(market, now, live_game_buffer_minutes):
                     continue
 
+            # Sports use a higher min_probability (0.90 default vs 0.85 general)
+            effective_min_prob = sports_min_probability if is_sports else min_probability
+
             for outcome in ("YES", "NO"):
                 price, bid, ask, token_id = self._extract_side_book(market, prices, outcome)
-                if not (min_probability <= price <= max_probability):
+                if not (effective_min_prob <= price <= max_probability):
                     continue
                 if price <= 0.0:
                     continue
@@ -657,7 +672,7 @@ class TailEndCarryStrategy(BaseStrategy):
         """Tail carry: source, strategy type, entry band, resolution window, keyword exclusion, live game checks."""
         min_entry = clamp(to_float(params.get("min_entry_price", 0.85), 0.85), 0.01, 0.995)
         max_entry = clamp(to_float(params.get("max_entry_price", 0.999), 0.999), min_entry, 0.999)
-        min_upside_percent = clamp(to_float(params.get("min_upside_percent", 10.0), 10.0), 10.0, 100.0)
+        min_upside_percent = clamp(to_float(params.get("min_upside_percent", 5.0), 5.0), 5.0, 100.0)
         min_days = max(0.0, to_float(params.get("min_days_to_resolution", 0.01), 0.01))
         max_days = max(min_days + 0.005, to_float(params.get("max_days_to_resolution", 1.0), 1.0))
 
@@ -703,20 +718,33 @@ class TailEndCarryStrategy(BaseStrategy):
 
         # Fix #1: classify market for category-aware logic
         category = self._classify_market_from_payload(payload)
+        is_sports = category in (CATEGORY_SPORTS, CATEGORY_ESPORTS)
+
+        # Sports-specific entry overrides: tighter probability and resolution window
+        sports_min_probability = clamp(
+            to_float(params.get("sports_min_probability", 0.90), 0.90), 0.50, 0.995
+        )
+        sports_max_days = max(
+            min_days + 0.005,
+            to_float(params.get("sports_max_days_to_resolution", 0.25), 0.25),
+        )
+        effective_min_entry = sports_min_probability if is_sports else min_entry
+        effective_max_days = sports_max_days if is_sports else max_days
+        effective_days_ok = dtr is not None and min_days <= dtr <= effective_max_days
 
         # Fix #3: live game gate
         skip_live_games = _is_bool_true(params.get("skip_live_games", True))
         live_game_buffer = max(0.0, to_float(params.get("live_game_buffer_minutes", 15.0), 15.0))
         now = utcnow().astimezone(timezone.utc)
         is_live = False
-        if skip_live_games and category in (CATEGORY_SPORTS, CATEGORY_ESPORTS):
+        if skip_live_games and is_sports:
             is_live = self._is_live_game_from_payload(payload, now, live_game_buffer)
         live_game_ok = not is_live
 
         # Stash for compute_score / evaluate
         payload["_entry_price"] = entry_price
         payload["_dtr"] = dtr
-        payload["_max_days"] = max_days
+        payload["_max_days"] = effective_max_days
         payload["_strategy_type"] = strategy_type
         payload["_max_settlement_upside_pct"] = max_settlement_upside_pct
         payload["_market_category"] = category
@@ -740,16 +768,16 @@ class TailEndCarryStrategy(BaseStrategy):
             DecisionCheck(
                 "entry",
                 "Entry probability band",
-                min_entry <= entry_price <= max_entry,
+                effective_min_entry <= entry_price <= max_entry,
                 score=entry_price,
-                detail=f"[{min_entry:.3f}, {max_entry:.3f}]",
+                detail=f"[{effective_min_entry:.3f}, {max_entry:.3f}]{' (sports override)' if is_sports else ''}",
             ),
             DecisionCheck(
                 "resolution_window",
                 "Resolution window",
-                days_ok,
+                effective_days_ok,
                 score=dtr,
-                detail=f"[{min_days:.2f}, {max_days:.2f}] days",
+                detail=f"[{min_days:.2f}, {effective_max_days:.2f}] days{' (sports override)' if is_sports else ''}",
             ),
             DecisionCheck(
                 "upside",
@@ -776,12 +804,12 @@ class TailEndCarryStrategy(BaseStrategy):
     def compute_score(
         self, edge: float, confidence: float, risk_score: float, market_count: int, payload: dict
     ) -> float:
-        """Tail carry: edge*0.55 + conf*28 + entry*6 - risk*9 + time_bonus."""
+        """Tail carry: edge*2.5 + conf*28 + entry*6 - risk*9 + time_bonus."""
         entry_price = float(payload.get("_entry_price", 0) or 0)
         dtr = payload.get("_dtr")
         max_days = float(payload.get("_max_days", 1.0) or 1.0)
 
-        score = (edge * 0.55) + (confidence * 28.0) + (entry_price * 6.0) - (risk_score * 9.0)
+        score = (edge * 2.5) + (confidence * 28.0) + (entry_price * 6.0) - (risk_score * 9.0)
         if dtr is not None:
             score += max(0.0, (max_days - dtr) * 0.4)
         return score
@@ -945,11 +973,35 @@ class TailEndCarryStrategy(BaseStrategy):
         # -- Fix #7: Resolution proximity hold --
         # If resolution is imminent, hold regardless of price (the thesis is
         # "converge to 1.00 at resolution" — let it play out).
+        # Sports get a tighter hold window (150min default vs 360min).
         resolution_hold_enabled = _is_bool_true(config.get("resolution_hold_enabled", True))
-        resolution_hold_minutes = max(0.0, safe_float(config.get("resolution_hold_minutes"), 120.0))
+        if is_sports:
+            resolution_hold_minutes = max(0.0, safe_float(config.get("sports_resolution_hold_minutes"), 150.0))
+        else:
+            resolution_hold_minutes = max(0.0, safe_float(config.get("resolution_hold_minutes"), 360.0))
+
+        # Max unrealized loss override: if down >25%, exit even during resolution hold.
+        # The tail-carry thesis breaks if the position has inverted this far.
+        resolution_hold_max_loss_pct = clamp(
+            safe_float(config.get("resolution_hold_max_loss_pct"), 25.0), 5.0, 80.0
+        )
+
         if resolution_hold_enabled and seconds_left is not None:
             minutes_left = seconds_left / 60.0
             if minutes_left <= resolution_hold_minutes and current_price > 0.0:
+                # Check max loss override before holding
+                if entry_price > 0.0:
+                    unrealized_loss_pct = ((entry_price - current_price) / entry_price) * 100.0
+                    if unrealized_loss_pct >= resolution_hold_max_loss_pct:
+                        return ExitDecision(
+                            "close",
+                            (
+                                f"Resolution hold max-loss override ({unrealized_loss_pct:.1f}% loss >= "
+                                f"{resolution_hold_max_loss_pct:.0f}% threshold; entry={entry_price:.4f}, "
+                                f"current={current_price:.4f}, category={category})"
+                            ),
+                            close_price=current_price,
+                        )
                 # Still hold — skip all stops, let it resolve
                 return ExitDecision(
                     "hold",

@@ -4994,6 +4994,7 @@ export async function listAvailableTools(): Promise<{ tools: { name: string; des
 
 export interface ChatStreamEvent {
   event: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'tool_error' | 'done' | 'error'
+    | 'experiment_start' | 'iteration_start' | 'proposal' | 'decision'
   data: Record<string, unknown>
 }
 
@@ -5416,4 +5417,143 @@ export async function getCortexSettings(): Promise<CortexSettings> {
 export async function updateCortexSettings(settings: Partial<CortexSettings>): Promise<{ status: string; updated: string[] }> {
   const { data } = await api.put('/cortex/settings', settings)
   return data
+}
+
+// ---------------------------------------------------------------------------
+// Autoresearch
+// ---------------------------------------------------------------------------
+
+export interface AutoresearchSettings {
+  model: string | null
+  max_iterations: number
+  interval_seconds: number
+  temperature: number
+  mandate: string | null
+  auto_apply: boolean
+  walk_forward_windows: number
+  train_ratio: number
+  mode: 'params' | 'code'
+}
+
+export interface AutoresearchExperimentStatus {
+  experiment_id: string | null
+  trader_id: string
+  name: string | null
+  status: 'running' | 'paused' | 'completed' | 'failed' | 'idle'
+  iteration_count: number
+  best_score: number
+  baseline_score: number
+  best_params?: Record<string, unknown>
+  kept_count: number
+  reverted_count: number
+  started_at: string | null
+  finished_at?: string | null
+  settings?: Record<string, unknown>
+  mode?: 'params' | 'code'
+  strategy_id?: string | null
+  best_version?: number | null
+}
+
+export interface AutoresearchIteration {
+  id: string
+  iteration_number: number
+  baseline_score: number
+  new_score: number
+  score_delta: number
+  decision: 'kept' | 'reverted'
+  reasoning: string
+  changed_params: Record<string, unknown> | null
+  backtest_result: Record<string, unknown> | null
+  source_diff?: string | null
+  validation_result?: Record<string, unknown> | null
+  duration_seconds: number
+  tokens_used: number
+  created_at: string
+}
+
+export async function getAutoresearchStatus(traderId: string): Promise<AutoresearchExperimentStatus> {
+  const { data } = await api.get(`/autoresearch/status/${traderId}`)
+  return data
+}
+
+export async function getAutoresearchHistory(traderId: string, limit = 50): Promise<{ iterations: AutoresearchIteration[] }> {
+  const { data } = await api.get(`/autoresearch/history/${traderId}`, { params: { limit } })
+  return data
+}
+
+export async function listAutoresearchExperiments(traderId: string): Promise<{ experiments: AutoresearchExperimentStatus[] }> {
+  const { data } = await api.get(`/autoresearch/experiments/${traderId}`)
+  return data
+}
+
+export async function getAutoresearchSettings(): Promise<AutoresearchSettings> {
+  const { data } = await api.get('/autoresearch/settings')
+  return data
+}
+
+export async function updateAutoresearchSettings(settings: Partial<AutoresearchSettings>): Promise<AutoresearchSettings> {
+  const { data } = await api.put('/autoresearch/settings', settings)
+  return data
+}
+
+export async function stopAutoresearchExperiment(traderId: string): Promise<{ stopped: boolean; experiment_id: string | null }> {
+  const { data } = await api.post(`/autoresearch/stop/${traderId}`)
+  return data
+}
+
+export async function createAbExperimentFromAutoresearch(experimentId: string): Promise<{ ab_experiment_id: string; control_version: number; candidate_version: number; strategy_slug: string }> {
+  const { data } = await api.post(`/autoresearch/create-ab-experiment/${experimentId}`)
+  return data
+}
+
+export function streamAutoresearchExperiment(
+  traderId: string,
+  onEvent: (event: ChatStreamEvent) => void,
+  onDone: () => void,
+  onError: (error: string) => void,
+  signal?: AbortSignal,
+  body?: { mode?: string; strategy_id?: string },
+): void {
+  fetch(`/api/autoresearch/stream/${traderId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+    signal,
+  }).then(response => {
+    if (!response.ok) {
+      response.text().then(text => onError(text || `HTTP ${response.status}`))
+      return
+    }
+    const reader = response.body?.getReader()
+    const decoder = new TextDecoder()
+    if (!reader) { onError('No response body'); return }
+
+    let buffer = ''
+    const read = (): void => {
+      reader.read().then(({ done, value }) => {
+        if (done) { onDone(); return }
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const parsed = JSON.parse(line.slice(6))
+              onEvent({ event: parsed.type, data: parsed.data || {} })
+              if (parsed.type === 'done' || parsed.type === 'error') {
+                onDone()
+                return
+              }
+            } catch { /* skip malformed */ }
+          }
+        }
+        read()
+      }).catch(err => {
+        if (err.name !== 'AbortError') onError(String(err))
+      })
+    }
+    read()
+  }).catch(err => {
+    if (err.name !== 'AbortError') onError(String(err))
+  })
 }
