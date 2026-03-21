@@ -1,57 +1,27 @@
-"""Cortex — autonomous fleet commander agent worker.
+"""Cortex — autonomous strategy and risk management agent worker.
 
-Runs on a configurable interval, instantiates a ReAct agent with fleet
-management tools, and persists its reasoning, actions, and learnings.
+Runs on a configurable interval, instantiates a ReAct agent with all
+available tools, and persists output to the cortex chat session.
 Optionally notifies via Telegram.
 """
 
 from __future__ import annotations
 
 import asyncio
-import uuid
 
 from datetime import datetime
 
-from models.database import AppSettings, AsyncSessionLocal, CortexMemory, CortexRunLog
+from models.database import AppSettings, AsyncSessionLocal, CortexMemory
 from services.ai.agent import Agent, AgentEventType
-from services.ai.tools import resolve_tools
+from services.ai.tools import get_all_tools
 from utils.logger import get_logger
 from utils.utcnow import utcnow
 
 logger = get_logger("cortex")
 
-# Tools the Cortex agent has access to
-CORTEX_TOOL_NAMES = [
-    # Cortex-specific
-    "cortex_recall",
-    "cortex_remember",
-    "cortex_expire_memory",
-    "cortex_get_fleet_status",
-    "cortex_pause_trader",
-    "cortex_enable_strategy",
-    "cortex_update_risk_clamps",
-    # Existing observation tools
-    "get_portfolio_performance",
-    "get_open_positions",
-    "get_trade_history",
-    "list_strategies",
-    "get_strategy_details",
-    "get_strategy_performance",
-    "get_recent_decisions",
-    "update_strategy_config",
-    "get_live_prices",
-    "get_market_regime",
-    "get_active_markets_summary",
-    "get_system_status",
-    "search_news",
-    "get_news_edges",
-    "analyze_market_sentiment",
-    "get_confluence_signals",
-    "get_whale_clusters",
-]
 
 DEFAULT_MANDATE = """\
-You are Cortex, an autonomous fleet commander for a prediction market trading system.
+You are Cortex, an autonomous agent for a prediction market trading system.
 
 Your job is to observe, reason, and act to optimize fleet performance while managing risk.
 
@@ -67,8 +37,9 @@ Is poor performance due to market conditions (temporary) or a fundamental issue?
    - Disable strategies unsuited to the current market regime
    - Adjust strategy parameters (min_edge, confidence thresholds) based on observed data
    - Tighten or loosen risk clamps as exposure warrants
-5. **Learn** — Save observations and lessons to memory for future reference. \
-Update or expire stale memories.
+5. **Manage memory** — Review your existing memories. Delete stale, redundant, or \
+no-longer-relevant ones. Only save NEW memories when you discover something genuinely \
+new that will be useful across future cycles.
 
 ## Principles
 - **Prefer observation over action.** Most cycles should result in 0 actions.
@@ -78,8 +49,37 @@ Update or expire stale memories.
 - **Never increase risk limits without very strong justification.**
 - **Always explain your reasoning.**
 
+## Memory Guidelines
+Memories are your long-term knowledge base across cycles. They are NOT a place to dump \
+raw analysis output.
+
+**Good memories** (save these):
+- Durable lessons: "Strategy X loses money on single-stock markets due to 8:1 loss asymmetry"
+- Rules you've derived: "Never increase position size when collateral ratio < 35%"
+- Regime patterns: "Weather strategies underperform in spring transition months"
+- Known bugs/issues: "Weather trader generates duplicate orders — needs dedup guard"
+
+**Bad memories** (do NOT save these):
+- Verbose analysis results or P&L breakdowns (these belong in your response, not memory)
+- Observations that duplicate existing memories with slightly updated numbers
+- Temporary state that will change by next cycle (e.g., current cash balance)
+
+**Memory hygiene every cycle:**
+- Recall existing memories before saving new ones
+- If a new observation updates an existing memory, UPDATE the existing one (expire old, save new)
+- Delete memories about resolved issues or outdated conditions
+- Consolidate multiple related memories into one when possible
+- Keep total memory count lean — 5-15 high-quality memories, not 50 verbose ones
+
 ## Output Format
-End your response with a brief summary paragraph. If you saved any learnings, mention them.
+Structure your response as:
+
+**Summary** — 2-3 sentence overview of what you observed and concluded.
+
+**Actions Taken** — If you took any actions (paused traders, adjusted configs, etc.), \
+list them with the reason. If no actions, say "No actions taken."
+
+**Memory Updates** — If you saved, updated, or deleted any memories, briefly note what changed.
 """
 
 
@@ -175,24 +175,29 @@ async def _send_telegram(token: str, chat_id: str, text: str) -> None:
         logger.warning("Cortex Telegram notification failed", exc_info=exc)
 
 
+async def _get_or_create_cortex_session() -> str:
+    """Get or create the single Cortex chat session. Returns session_id."""
+    from services.ai.chat_memory import chat_memory_service
+
+    existing = await chat_memory_service.find_latest_for_context("cortex", "cortex")
+    if existing:
+        return existing["session_id"]
+    created = await chat_memory_service.create_session(
+        context_type="cortex",
+        context_id="cortex",
+        title="Cortex Activity",
+    )
+    return created["session_id"]
+
+
 async def run_cortex_cycle(*, trigger: str = "scheduled", settings_override: dict | None = None) -> dict:
-    """Execute one Cortex agent cycle. Returns run summary dict."""
+    """Execute one Cortex agent cycle. Persists output to chat session."""
+    from services.ai.chat_memory import chat_memory_service
+
     cfg = settings_override or await _load_cortex_settings()
 
-    run_id = str(uuid.uuid4())
     started_at = utcnow()
-
-    # Create run log entry
-    async with AsyncSessionLocal() as session:
-        run_log = CortexRunLog(
-            id=run_id,
-            started_at=started_at,
-            status="running",
-            trigger=trigger,
-            model_used=cfg.get("model"),
-        )
-        session.add(run_log)
-        await session.commit()
+    session_id = await _get_or_create_cortex_session()
 
     # Load memories
     memories = await _load_memories(cfg.get("memory_limit", 20))
@@ -205,9 +210,9 @@ async def run_cortex_cycle(*, trigger: str = "scheduled", settings_override: dic
     )
 
     # Resolve tools
-    tools = resolve_tools(CORTEX_TOOL_NAMES)
+    tools = list(get_all_tools().values())
 
-    # Create agent (reuses existing Agent class)
+    # Create agent
     agent = Agent(
         system_prompt=system_prompt,
         tools=tools,
@@ -217,29 +222,25 @@ async def run_cortex_cycle(*, trigger: str = "scheduled", settings_override: dic
         temperature=cfg.get("temperature", 0.1),
     )
 
-    # Run agent
-    thinking_parts: list[str] = []
-    actions: list[dict] = []
+    # Run agent — track only the final answer and write actions
+    write_tool_names = {
+        "cortex_pause_trader", "cortex_enable_strategy",
+        "cortex_update_risk_clamps", "update_strategy_config",
+    }
+    write_actions: list[dict] = []
     answer = ""
     total_tokens = 0
     error_msg = None
 
     try:
         async for event in agent.run("Perform your fleet observation and management cycle."):
-            if event.type == AgentEventType.THINKING:
-                thinking_parts.append(event.data.get("content", ""))
-            elif event.type == AgentEventType.TOOL_START:
-                actions.append({
-                    "tool": event.data.get("tool", ""),
-                    "input": event.data.get("input", {}),
-                    "output": None,
-                })
-            elif event.type == AgentEventType.TOOL_END:
-                if actions:
-                    actions[-1]["output"] = event.data.get("output", {})
-            elif event.type == AgentEventType.TOOL_ERROR:
-                if actions:
-                    actions[-1]["output"] = {"error": event.data.get("error", "")}
+            if event.type == AgentEventType.TOOL_START:
+                tool_name = event.data.get("tool", "")
+                if tool_name in write_tool_names:
+                    write_actions.append({
+                        "tool": tool_name,
+                        "input": event.data.get("input", {}),
+                    })
             elif event.type == AgentEventType.ANSWER_START:
                 answer = event.data.get("content", "")
             elif event.type == AgentEventType.DONE:
@@ -252,38 +253,17 @@ async def run_cortex_cycle(*, trigger: str = "scheduled", settings_override: dic
         error_msg = str(exc)
         logger.error("Cortex cycle error", exc_info=exc)
 
-    # Identify write actions taken (for Telegram)
-    write_actions = [a for a in actions if a["tool"] in (
-        "cortex_pause_trader", "cortex_enable_strategy",
-        "cortex_update_risk_clamps", "update_strategy_config",
-    )]
+    # Persist only the final answer text
+    answer_text = answer or error_msg or ""
 
-    # Identify learnings saved
-    learnings = [a for a in actions if a["tool"] == "cortex_remember"]
+    if answer_text.strip():
+        await chat_memory_service.append_message(
+            session_id=session_id,
+            role="assistant",
+            content=answer_text,
+            model_used=cfg.get("model"),
+        )
 
-    # Update run log
-    finished_at = utcnow()
-    status = "error" if error_msg else "completed"
-
-    async with AsyncSessionLocal() as session:
-        from sqlalchemy import select
-
-        row = (await session.execute(select(CortexRunLog).where(CortexRunLog.id == run_id))).scalar_one_or_none()
-        if row:
-            row.finished_at = finished_at
-            row.status = status
-            row.thinking_log = "\n".join(thinking_parts)
-            row.actions_taken = actions
-            row.learnings_saved = [
-                {"content": a.get("input", {}).get("content", ""), "category": a.get("input", {}).get("category", "")}
-                for a in learnings
-            ]
-            row.summary = answer or error_msg
-            row.tokens_used = total_tokens
-            # Cost estimation will come from LLM usage log
-            await session.commit()
-
-    # Telegram notification
     if cfg.get("notify_telegram") and write_actions:
         token = cfg.get("telegram_bot_token")
         chat_id = cfg.get("telegram_chat_id")
@@ -291,27 +271,23 @@ async def run_cortex_cycle(*, trigger: str = "scheduled", settings_override: dic
             from utils.secrets import decrypt_secret
 
             decrypted_token = decrypt_secret(token) or token
-            lines = ["<b>🧠 Cortex Fleet Commander</b>\n"]
+            lines = ["<b>Cortex</b>\n"]
             for a in write_actions:
-                tool_name = a["tool"].replace("cortex_", "").replace("_", " ").title()
+                tool_name = a.get("tool", "").replace("cortex_", "").replace("_", " ").title()
                 reason = a.get("input", {}).get("reason", "")
-                lines.append(f"• <b>{tool_name}</b>: {reason}")
+                lines.append(f"- <b>{tool_name}</b>: {reason}")
             if answer:
-                # Truncate for Telegram
                 summary = answer[:500] + ("..." if len(answer) > 500 else "")
                 lines.append(f"\n<i>{summary}</i>")
             await _send_telegram(decrypted_token, chat_id, "\n".join(lines))
 
+    finished_at = utcnow()
     result = {
-        "run_id": run_id,
-        "status": status,
-        "actions_count": len(write_actions),
-        "learnings_count": len(learnings),
+        "status": "error" if error_msg else "completed",
         "tokens_used": total_tokens,
         "duration_seconds": (finished_at - started_at).total_seconds(),
-        "summary": answer[:200] if answer else error_msg,
     }
-    logger.info("Cortex cycle complete", **{k: v for k, v in result.items() if k != "summary"})
+    logger.info("Cortex cycle complete", **result)
     return result
 
 

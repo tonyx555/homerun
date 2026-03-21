@@ -56,10 +56,11 @@ DEFAULT_HTTP_RPC_URL = settings.POLYGON_RPC_URL
 # Fallback RPC endpoints (tried in order after the configured primary).
 FALLBACK_HTTP_RPC_URLS = (
     "https://polygon-bor-rpc.publicnode.com",
-    "https://polygon.llamarpc.com",
+    "https://polygon-rpc.com",
+    "https://rpc.ankr.com/polygon",
 )
 
-DEFAULT_HTTP_TIMEOUT = httpx.Timeout(connect=7.5, read=20.0, write=10.0, pool=12.0)
+DEFAULT_HTTP_TIMEOUT = httpx.Timeout(connect=5.0, read=12.0, write=10.0, pool=8.0)
 RPC_ATTEMPTS_PER_ENDPOINT = 2
 
 

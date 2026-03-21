@@ -1063,6 +1063,10 @@ class AppSettings(Base):
     search_kalshi_enabled = Column(Boolean, default=False)
     search_max_results = Column(Integer, default=50)
 
+    # Web Search Provider API Keys
+    serpapi_key = Column(String, nullable=True)
+    brave_search_key = Column(String, nullable=True)
+
     # Opportunity Search Filters (hard rejection thresholds)
     min_liquidity_hard = Column(Float, default=1000.0)
     min_position_size = Column(Float, default=50.0)

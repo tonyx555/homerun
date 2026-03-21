@@ -2188,10 +2188,15 @@ async def ai_chat_stream(
 
     context_type = str(request.context_type or "general").strip().lower() or "general"
 
+    from datetime import datetime, timezone as _tz
+    _now_utc = datetime.now(_tz.utc)
+
     system_prompt = (
         "You are the AI copilot for Homerun, a Polymarket prediction market "
         "arbitrage trading platform. You help traders understand their fleet, "
         "analyze performance, and make better decisions.\n\n"
+        f"Current date: {_now_utc.strftime('%Y-%m-%d')} (UTC). "
+        f"Current year: {_now_utc.year}. Always use the current year when searching for markets.\n\n"
         "RULES:\n"
         "- No preamble ('Sure!', 'Great question!'), no capability lists, no sign-offs.\n"
         "- NEVER use emojis.\n"
@@ -2229,6 +2234,22 @@ async def ai_chat_stream(
         "what the tool widgets already show (e.g. a custom comparison table, a chart "
         "combining multiple tool outputs, a curated recommendation list). When tool "
         "results speak for themselves, just add brief commentary in plain text.\n\n"
+        "CRITICAL: NEVER output markdown tables (| Header | ... | syntax). ALL tabular data "
+        "MUST use OpenUI ```openui blocks with Table/Col components. Markdown tables render "
+        "as ugly raw text in the UI. Always use:\n"
+        "```openui\nroot = Stack([tbl])\ntbl = Table(cols, rows)\ncols = [Col(\"Name\", \"string\"), Col(\"Value\", \"number\")]\n"
+        "rows = [[\"Example\", 42]]\n```\n\n"
+        "When presenting individual market opportunities or recommendations, use MarketCard "
+        "components in OpenUI Lang blocks. MarketCard renders a rich interactive card with "
+        "prices, metadata, and a link to Polymarket. Example:\n"
+        "```openui\nroot = Stack([card1, card2])\n"
+        "card1 = MarketCard(\"Will Bitcoin hit $150k by Dec 2026?\", \"will-bitcoin-hit-150k\", "
+        "11, 89, \"$277K\", \"$30K\", \"Dec 31, 2026\", \"BTC at $108K needs 40% rally\")\n"
+        "card2 = MarketCard(\"Will ETH hit $10k?\", \"will-eth-hit-10k\", "
+        "5, 95, \"$150K\", \"$20K\", \"Jun 30, 2026\")\n```\n"
+        "Use MarketCard for ALL market recommendations. You can mix MarketCard with other "
+        "components (Table for comparison summaries, TextContent for analysis) in the same "
+        "Stack.\n\n"
         + _get_openui_prompt()
         + "\n\n"
     )

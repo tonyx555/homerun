@@ -332,65 +332,62 @@ def _format_event(e: dict, include_markets: bool = True) -> dict:
 
 
 async def _search_markets(args: dict) -> dict:
-    """Keyword search via /public-search — the real full-text search endpoint."""
+    """Keyword search via /events with _q (Strapi full-text) and slug_contains."""
     try:
         query = args["query"]
         limit = args.get("limit", 10)
         client = _http()
+        slug_query = query.lower().replace(" ", "-")
 
-        # /public-search returns events, markets, profiles
-        resp = await client.get(
-            f"{GAMMA_API_URL}/public-search",
-            params={"query": query.strip()},
+        base_params: dict[str, Any] = {
+            "closed": "false",
+            "active": "true",
+            "limit": limit,
+        }
+
+        # Run both search strategies concurrently
+        resp_q, resp_slug = await asyncio.gather(
+            client.get(f"{GAMMA_API_URL}/events", params={**base_params, "_q": query.strip()}),
+            client.get(f"{GAMMA_API_URL}/events", params={**base_params, "slug_contains": slug_query}),
         )
-        if resp.status_code != 200:
-            return {"error": f"Search API returned {resp.status_code}"}
 
-        data = resp.json()
+        seen_ids: set[str] = set()
+        events: list[dict] = []
 
-        # Extract events (each contains grouped markets)
-        events_raw = data if isinstance(data, list) else data.get("events", [])
-        events = []
-        for e in events_raw[:limit]:
-            if isinstance(e, dict):
+        for resp in (resp_q, resp_slug):
+            if resp.status_code != 200:
+                continue
+            for e in resp.json():
+                if not isinstance(e, dict):
+                    continue
+                eid = e.get("id", "")
+                if eid in seen_ids:
+                    continue
+                seen_ids.add(eid)
                 events.append(_format_event(e))
+                if len(events) >= limit:
+                    break
 
-        # If no events found, try markets directly
-        if not events:
-            markets_raw = data.get("markets", []) if isinstance(data, dict) else []
-            markets = [_format_market(m) for m in markets_raw[:limit]]
-            return {"events": [], "markets": markets, "count": len(markets), "query": query}
-
-        return {"events": events, "markets": [], "count": len(events), "query": query}
+        return {"events": events[:limit], "count": len(events), "query": query}
     except Exception as exc:
         logger.error("search_markets failed: %s", exc)
         return {"error": str(exc)}
 
 
 async def _discover_events(args: dict) -> dict:
-    """Browse/filter events via /events with rich query params."""
+    """Browse/filter events via /events. Client-side filters for volume/liquidity/dates."""
     try:
         limit = args.get("limit", 15)
-        order = args.get("order", "volume_24hr")
 
+        # Only pass params the Gamma API actually supports
         params: dict[str, Any] = {
             "active": "true",
             "closed": "false",
-            "limit": limit,
-            "order": order,
-            "ascending": "false",
+            "limit": 100,  # fetch more, filter client-side
         }
 
         if args.get("tag_slug"):
             params["tag_slug"] = args["tag_slug"]
-        if args.get("end_date_min"):
-            params["end_date_min"] = args["end_date_min"]
-        if args.get("end_date_max"):
-            params["end_date_max"] = args["end_date_max"]
-        if args.get("volume_min") is not None:
-            params["volume_min"] = str(args["volume_min"])
-        if args.get("liquidity_min") is not None:
-            params["liquidity_min"] = str(args["liquidity_min"])
 
         client = _http()
         resp = await client.get(f"{GAMMA_API_URL}/events", params=params)
@@ -398,12 +395,48 @@ async def _discover_events(args: dict) -> dict:
             return {"error": f"Events API returned {resp.status_code}"}
 
         events_raw = resp.json()
-        events = [_format_event(e) for e in events_raw[:limit]]
+
+        # Client-side filtering for params the API doesn't support
+        volume_min = args.get("volume_min")
+        liquidity_min = args.get("liquidity_min")
+        end_date_min = args.get("end_date_min")
+        end_date_max = args.get("end_date_max")
+
+        filtered = []
+        for e in events_raw:
+            if not isinstance(e, dict):
+                continue
+            if volume_min is not None:
+                vol = float(e.get("volume", 0) or 0)
+                if vol < volume_min:
+                    continue
+            if liquidity_min is not None:
+                liq = float(e.get("liquidity", 0) or 0)
+                if liq < liquidity_min:
+                    continue
+            if end_date_min and e.get("endDate"):
+                if e["endDate"] < end_date_min:
+                    continue
+            if end_date_max and e.get("endDate"):
+                if e["endDate"] > end_date_max:
+                    continue
+            filtered.append(e)
+
+        # Sort by volume (24hr) descending by default
+        order = args.get("order", "volume_24hr")
+        sort_key = {
+            "volume_24hr": "volume24hr",
+            "volume": "volume",
+            "liquidity": "liquidity",
+            "end_date": "endDate",
+        }.get(order, "volume24hr")
+        filtered.sort(key=lambda e: float(e.get(sort_key, 0) or 0), reverse=(order != "end_date"))
+
+        events = [_format_event(e) for e in filtered[:limit]]
 
         return {
             "events": events,
             "count": len(events),
-            "filters": {k: v for k, v in params.items() if k not in ("active", "closed", "ascending")},
         }
     except Exception as exc:
         logger.error("discover_events failed: %s", exc)

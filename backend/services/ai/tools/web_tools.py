@@ -106,17 +106,18 @@ async def _web_search(args: dict) -> dict:
 async def _search_serpapi(query: str, max_results: int) -> dict:
     from models.database import AsyncSessionLocal, AppSettings
     from sqlalchemy import select
+    from utils.secrets import decrypt_secret
 
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(AppSettings).where(AppSettings.key == "serpapi_key")
-        )
-        row = result.scalar_one_or_none()
+        result = await session.execute(select(AppSettings).where(AppSettings.id == "default"))
+        settings = result.scalar_one_or_none()
 
-    if not row or not row.value:
+    if not settings or not settings.serpapi_key:
         return {"error": "SERPAPI_KEY not configured"}
 
-    api_key = row.value
+    api_key = decrypt_secret(settings.serpapi_key) or ""
+    if not api_key:
+        return {"error": "SERPAPI_KEY not configured"}
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
         resp = await client.get(
             "https://serpapi.com/search",
@@ -140,17 +141,18 @@ async def _search_serpapi(query: str, max_results: int) -> dict:
 async def _search_brave(query: str, max_results: int) -> dict:
     from models.database import AsyncSessionLocal, AppSettings
     from sqlalchemy import select
+    from utils.secrets import decrypt_secret
 
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(AppSettings).where(AppSettings.key == "brave_search_key")
-        )
-        row = result.scalar_one_or_none()
+        result = await session.execute(select(AppSettings).where(AppSettings.id == "default"))
+        settings = result.scalar_one_or_none()
 
-    if not row or not row.value:
+    if not settings or not settings.brave_search_key:
         return {"error": "BRAVE_SEARCH_KEY not configured"}
 
-    api_key = row.value
+    api_key = decrypt_secret(settings.brave_search_key) or ""
+    if not api_key:
+        return {"error": "BRAVE_SEARCH_KEY not configured"}
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
         resp = await client.get(
             "https://api.search.brave.com/res/v1/web/search",

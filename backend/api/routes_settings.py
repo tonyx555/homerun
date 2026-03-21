@@ -622,6 +622,10 @@ class SearchFilterSettings(BaseModel):
     search_kalshi_enabled: bool = Field(default=False, description="Include Kalshi in search results")
     search_max_results: int = Field(default=50, ge=5, le=200, description="Maximum search results to return")
 
+    # Web search provider API keys
+    serpapi_key: str | None = Field(default=None, description="SerpAPI key for web search")
+    brave_search_key: str | None = Field(default=None, description="Brave Search API key for web search")
+
     # Hard rejection filters
     min_liquidity_hard: float = Field(default=1000.0, ge=0, description="Hard reject below this liquidity ($)")
     min_position_size: float = Field(default=50.0, ge=0, description="Reject if max position < this ($)")

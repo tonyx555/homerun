@@ -281,7 +281,10 @@ export default function SettingsPanel({
     search_polymarket_enabled: true,
     search_kalshi_enabled: false,
     search_max_results: 50,
+    serpapi_key: '',
+    brave_search_key: '',
   })
+  const [showSearchSecrets, setShowSearchSecrets] = useState<Record<string, boolean>>({})
 
   const transferFileInputRef = useRef<HTMLInputElement | null>(null)
   const [transferCategories, setTransferCategories] = useState<Record<SettingsTransferCategory, boolean>>(() => {
@@ -390,6 +393,8 @@ export default function SettingsPanel({
         search_polymarket_enabled: settings.search_filters?.search_polymarket_enabled ?? true,
         search_kalshi_enabled: settings.search_filters?.search_kalshi_enabled ?? false,
         search_max_results: settings.search_filters?.search_max_results ?? 50,
+        serpapi_key: '',
+        brave_search_key: '',
       })
 
     }
@@ -616,13 +621,17 @@ export default function SettingsPanel({
     const updates: any = {}
 
     switch (section) {
-      case 'search':
-        updates.search_filters = {
+      case 'search': {
+        const sf: Record<string, unknown> = {
           search_polymarket_enabled: searchForm.search_polymarket_enabled,
           search_kalshi_enabled: searchForm.search_kalshi_enabled,
           search_max_results: searchForm.search_max_results,
         }
+        if (searchForm.serpapi_key) sf.serpapi_key = searchForm.serpapi_key
+        if (searchForm.brave_search_key) sf.brave_search_key = searchForm.brave_search_key
+        updates.search_filters = sf
         break
+      }
       case 'notifications':
         updates.notifications = {
           enabled: notificationsForm.enabled,
@@ -935,6 +944,63 @@ export default function SettingsPanel({
                           max={200}
                           className="h-8 text-xs mt-1 w-32"
                         />
+                      </div>
+
+                      <Separator className="opacity-30" />
+
+                      <div className="space-y-3">
+                        <div>
+                          <p className="font-medium text-sm">Web Search Providers</p>
+                          <p className="text-xs text-muted-foreground">
+                            Used by AI agents for web search. Falls back in order: SerpAPI → Brave → DuckDuckGo (no key needed).
+                          </p>
+                        </div>
+
+                        <div>
+                          <Label className="text-xs text-muted-foreground">SerpAPI Key</Label>
+                          <div className="relative mt-1">
+                            <Input
+                              type={showSearchSecrets['serpapi'] ? 'text' : 'password'}
+                              value={searchForm.serpapi_key}
+                              onChange={(e) => setSearchForm(p => ({ ...p, serpapi_key: e.target.value }))}
+                              placeholder={settings?.search_filters?.serpapi_key || 'Not configured'}
+                              className="pr-10 font-mono text-sm"
+                            />
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="absolute right-0 top-0 h-full px-3"
+                              onClick={() => setShowSearchSecrets(p => ({ ...p, serpapi: !p.serpapi }))}
+                            >
+                              {showSearchSecrets['serpapi'] ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                            </Button>
+                          </div>
+                          <p className="text-[11px] text-muted-foreground/70 mt-1">serpapi.com — Google search results</p>
+                        </div>
+
+                        <div>
+                          <Label className="text-xs text-muted-foreground">Brave Search API Key</Label>
+                          <div className="relative mt-1">
+                            <Input
+                              type={showSearchSecrets['brave'] ? 'text' : 'password'}
+                              value={searchForm.brave_search_key}
+                              onChange={(e) => setSearchForm(p => ({ ...p, brave_search_key: e.target.value }))}
+                              placeholder={settings?.search_filters?.brave_search_key || 'Not configured'}
+                              className="pr-10 font-mono text-sm"
+                            />
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="absolute right-0 top-0 h-full px-3"
+                              onClick={() => setShowSearchSecrets(p => ({ ...p, brave: !p.brave }))}
+                            >
+                              {showSearchSecrets['brave'] ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                            </Button>
+                          </div>
+                          <p className="text-[11px] text-muted-foreground/70 mt-1">api.search.brave.com — Brave web search</p>
+                        </div>
                       </div>
 
                       <Separator className="opacity-30" />
@@ -1758,17 +1824,25 @@ export default function SettingsPanel({
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                               <div className="rounded-lg border border-border/50 bg-card/40 px-3 py-2">
                                 <p className="text-[11px] uppercase tracking-widest text-muted-foreground">DB Size</p>
-                                <p className="text-sm font-semibold">
-                                  {formatDbBytes(maintenanceStatsQuery.data?.db_size_bytes)}
-                                </p>
+                                {maintenanceStatsQuery.isLoading ? (
+                                  <div className="h-5 w-20 rounded bg-muted-foreground/20 animate-pulse mt-0.5" />
+                                ) : (
+                                  <p className="text-sm font-semibold">
+                                    {formatDbBytes(maintenanceStatsQuery.data?.db_size_bytes)}
+                                  </p>
+                                )}
                               </div>
                               <div className="rounded-lg border border-border/50 bg-card/40 px-3 py-2">
                                 <p className="text-[11px] uppercase tracking-widest text-muted-foreground">Total Rows</p>
-                                <p className="text-sm font-semibold">
-                                  {maintenanceStatsQuery.data?.total_rows != null
-                                    ? maintenanceStatsQuery.data.total_rows.toLocaleString()
-                                    : 'Unavailable'}
-                                </p>
+                                {maintenanceStatsQuery.isLoading ? (
+                                  <div className="h-5 w-24 rounded bg-muted-foreground/20 animate-pulse mt-0.5" />
+                                ) : (
+                                  <p className="text-sm font-semibold">
+                                    {maintenanceStatsQuery.data?.total_rows != null
+                                      ? maintenanceStatsQuery.data.total_rows.toLocaleString()
+                                      : 'Unavailable'}
+                                  </p>
+                                )}
                               </div>
                             </div>
 

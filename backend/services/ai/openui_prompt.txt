@@ -97,6 +97,9 @@ Buttons(buttons: Button[], direction?: "row" | "column") — Group of Button com
 TagBlock(tags: string[]) — tags is an array of strings
 Tag(text: string, icon?: string, size?: "sm" | "md" | "lg", variant?: "neutral" | "info" | "success" | "warning" | "danger") — Styled tag/badge with optional icon and variant
 
+### Homerun Custom
+MarketCard(question: string, slug: string, yes_price: number, no_price: number, volume: string, liquidity: string, end_date: string, commentary?: string) — Rich market opportunity card with YES/NO prices, volume, liquidity, expiration date, a link to Polymarket, and optional analysis commentary. Use when presenting individual market opportunities or recommendations. yes_price and no_price are in cents (e.g. 11 for 11c). volume and liquidity are pre-formatted strings (e.g. "$277K"). end_date is a human-readable date string (e.g. "Dec 31, 2026"). slug is the Polymarket event slug used to construct the link.
+
 ## Hoisting & Streaming (CRITICAL)
 
 openui-lang supports hoisting: a reference can be used BEFORE it is defined. The parser resolves all references after the full input is parsed.
@@ -170,3 +173,8 @@ vueContent = [TextContent("Vue is a progressive framework by Evan You."), Callou
 - Use Callout for important alerts or recommendations
 - You MAY include markdown text before and after openui-lang blocks
 - When you have structured data from tool calls, ALWAYS present it using openui-lang components
+- NEVER use raw markdown tables (| col | col |). Always use openui Table component instead.
+- NEVER use raw markdown for data that could be a Table, Card, Callout, Chart, or TagBlock. Use the openui-lang equivalent.
+- For summaries and KPIs, use Card with CardHeader and TextContent — not markdown headers and bullet lists.
+- For lists of positions, trades, or strategies, ALWAYS use Table with Col definitions.
+- For status/alerts, use Callout or TextCallout — not markdown bold or blockquotes.

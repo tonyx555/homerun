@@ -8619,7 +8619,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
               </Button>
             </TooltipTrigger>
             <TooltipContent side="bottom" className="text-xs">
-              Autonomous fleet commander agent
+              Autonomous strategy & risk agent
             </TooltipContent>
           </Tooltip>
           <Button
@@ -12436,10 +12436,10 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
               <SheetHeader className="space-y-1 text-left">
                 <SheetTitle className="text-base flex items-center gap-2">
                   <Brain className="w-4 h-4 text-orange-400" />
-                  Cortex Fleet Commander
+                  Cortex
                 </SheetTitle>
                 <SheetDescription>
-                  Autonomous agent that observes fleet performance, adjusts strategies, and manages risk.
+                  Autonomous agent that observes performance, adjusts strategies, and manages risk.
                 </SheetDescription>
               </SheetHeader>
             </div>

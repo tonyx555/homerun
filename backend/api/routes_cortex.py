@@ -1,8 +1,9 @@
-"""API routes for the Cortex autonomous fleet commander agent.
+"""API routes for the Cortex autonomous agent.
 
 Provides endpoints for:
-- Status and run history
-- Manual run triggering (with SSE streaming)
+- Status
+- Streaming cycle trigger (persists to chat session)
+- Chat history
 - Memory CRUD (browse, edit, delete)
 - Settings read/write
 """
@@ -20,7 +21,6 @@ from models.database import (
     AppSettings,
     AsyncSessionLocal,
     CortexMemory,
-    CortexRunLog,
 )
 from utils.logger import get_logger
 from utils.utcnow import utcnow
@@ -62,15 +62,29 @@ class CreateMemoryRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Status & Runs
+# Status & Streaming
 # ---------------------------------------------------------------------------
+
+
+async def _get_or_create_cortex_session() -> str:
+    """Get or create the single Cortex chat session. Returns session_id."""
+    from services.ai.chat_memory import chat_memory_service
+
+    existing = await chat_memory_service.find_latest_for_context("cortex", "cortex")
+    if existing:
+        return existing["session_id"]
+    created = await chat_memory_service.create_session(
+        context_type="cortex",
+        context_id="cortex",
+        title="Cortex Activity",
+    )
+    return created["session_id"]
 
 
 @router.get("/status")
 async def get_cortex_status() -> dict:
-    """Current Cortex state: enabled, last run, memory count, etc."""
+    """Current Cortex state: enabled, write_actions, memory count, session_id."""
     async with AsyncSessionLocal() as session:
-        # Settings
         settings_row = (
             await session.execute(select(AppSettings).where(AppSettings.id == "default"))
         ).scalar_one_or_none()
@@ -79,128 +93,64 @@ async def get_cortex_status() -> dict:
         interval = getattr(settings_row, "cortex_interval_seconds", 300) if settings_row else 300
         write_enabled = bool(getattr(settings_row, "cortex_write_actions_enabled", False)) if settings_row else False
 
-        # Last run
-        last_run = (
-            await session.execute(
-                select(CortexRunLog).order_by(CortexRunLog.started_at.desc()).limit(1)
-            )
-        ).scalar_one_or_none()
-
-        # Memory count
         memory_count = (
             await session.execute(
                 select(func.count(CortexMemory.id)).where(CortexMemory.expired == False)  # noqa: E712
             )
         ).scalar() or 0
 
-        # Total runs
-        total_runs = (await session.execute(select(func.count(CortexRunLog.id)))).scalar() or 0
+    session_id = await _get_or_create_cortex_session()
 
-        return {
-            "enabled": enabled,
-            "write_actions_enabled": write_enabled,
-            "interval_seconds": interval,
-            "memory_count": memory_count,
-            "total_runs": total_runs,
-            "last_run": {
-                "id": last_run.id,
-                "started_at": last_run.started_at.isoformat() if last_run.started_at else None,
-                "finished_at": last_run.finished_at.isoformat() if last_run.finished_at else None,
-                "status": last_run.status,
-                "actions_count": len(last_run.actions_taken or []),
-                "learnings_count": len(last_run.learnings_saved or []),
-                "tokens_used": last_run.tokens_used,
-                "summary": last_run.summary,
-                "trigger": last_run.trigger,
-            }
-            if last_run
-            else None,
-        }
+    return {
+        "enabled": enabled,
+        "write_actions_enabled": write_enabled,
+        "interval_seconds": interval,
+        "memory_count": memory_count,
+        "session_id": session_id,
+    }
 
 
-@router.get("/runs")
-async def list_runs(
-    limit: int = Query(default=20, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
-    status: Optional[str] = Query(default=None),
+@router.get("/history")
+async def get_cortex_history(
+    limit: int = Query(default=200, ge=1, le=1000),
 ) -> dict:
-    """Paginated run history."""
-    async with AsyncSessionLocal() as session:
-        stmt = select(CortexRunLog).order_by(CortexRunLog.started_at.desc())
-        count_stmt = select(func.count(CortexRunLog.id))
+    """Get the cortex chat session messages."""
+    from services.ai.chat_memory import chat_memory_service
 
-        if status:
-            stmt = stmt.where(CortexRunLog.status == status)
-            count_stmt = count_stmt.where(CortexRunLog.status == status)
-
-        total = (await session.execute(count_stmt)).scalar() or 0
-        rows = (await session.execute(stmt.offset(offset).limit(limit))).scalars().all()
-
-        return {
-            "runs": [
-                {
-                    "id": r.id,
-                    "started_at": r.started_at.isoformat() if r.started_at else None,
-                    "finished_at": r.finished_at.isoformat() if r.finished_at else None,
-                    "status": r.status,
-                    "actions_count": len(r.actions_taken or []),
-                    "learnings_count": len(r.learnings_saved or []),
-                    "tokens_used": r.tokens_used,
-                    "cost_usd": r.cost_usd,
-                    "model_used": r.model_used,
-                    "trigger": r.trigger,
-                    "summary": r.summary,
-                }
-                for r in rows
-            ],
-            "total": total,
-            "limit": limit,
-            "offset": offset,
-        }
+    session_id = await _get_or_create_cortex_session()
+    detail = await chat_memory_service.get_session(session_id, message_limit=limit)
+    if not detail:
+        return {"session_id": session_id, "messages": []}
+    return {
+        "session_id": detail["session_id"],
+        "messages": detail.get("messages", []),
+    }
 
 
-@router.get("/runs/{run_id}")
-async def get_run(run_id: str) -> dict:
-    """Full detail for a single run including thinking log and actions."""
-    async with AsyncSessionLocal() as session:
-        row = (
-            await session.execute(select(CortexRunLog).where(CortexRunLog.id == run_id))
-        ).scalar_one_or_none()
-        if not row:
-            raise HTTPException(status_code=404, detail="Run not found")
+@router.delete("/history")
+async def clear_cortex_history() -> dict:
+    """Archive the current cortex session and create a fresh one."""
+    from services.ai.chat_memory import chat_memory_service
 
-        return {
-            "id": row.id,
-            "started_at": row.started_at.isoformat() if row.started_at else None,
-            "finished_at": row.finished_at.isoformat() if row.finished_at else None,
-            "status": row.status,
-            "thinking_log": row.thinking_log,
-            "actions_taken": row.actions_taken or [],
-            "learnings_saved": row.learnings_saved or [],
-            "summary": row.summary,
-            "tokens_used": row.tokens_used,
-            "cost_usd": row.cost_usd,
-            "model_used": row.model_used,
-            "trigger": row.trigger,
-        }
+    existing = await chat_memory_service.find_latest_for_context("cortex", "cortex")
+    if existing:
+        await chat_memory_service.archive_session(existing["session_id"])
+
+    new_session = await chat_memory_service.create_session(
+        context_type="cortex",
+        context_id="cortex",
+        title="Cortex Activity",
+    )
+    return {"session_id": new_session["session_id"]}
 
 
-@router.post("/runs/trigger")
-async def trigger_run() -> dict:
-    """Manually trigger an immediate Cortex cycle."""
-    from workers.cortex_worker import run_cortex_cycle
-
-    result = await run_cortex_cycle(trigger="manual")
-    return result
-
-
-@router.post("/runs/trigger/stream")
-async def trigger_run_stream():
-    """Manually trigger a Cortex cycle with SSE streaming of agent events."""
+@router.post("/stream")
+async def trigger_cortex_stream():
+    """Trigger a Cortex cycle with SSE streaming. Persists to chat session."""
     from services.ai.agent import Agent, AgentEventType
-    from services.ai.tools import resolve_tools
+    from services.ai.chat_memory import chat_memory_service
+    from services.ai.tools import get_all_tools
     from workers.cortex_worker import (
-        CORTEX_TOOL_NAMES,
         _build_system_prompt,
         _load_cortex_settings,
         _load_memories,
@@ -213,7 +163,7 @@ async def trigger_run_stream():
 
     memories = await _load_memories(cfg.get("memory_limit", 20))
     system_prompt = _build_system_prompt(cfg.get("mandate"), memories, cfg.get("write_actions_enabled", False))
-    tools = resolve_tools(CORTEX_TOOL_NAMES)
+    tools = list(get_all_tools().values())
 
     agent = Agent(
         system_prompt=system_prompt,
@@ -224,46 +174,40 @@ async def trigger_run_stream():
         temperature=cfg.get("temperature", 0.1),
     )
 
-    run_id = str(uuid.uuid4())
+    session_id = await _get_or_create_cortex_session()
 
-    # Create run log
-    async with AsyncSessionLocal() as session:
-        session.add(CortexRunLog(
-            id=run_id,
-            started_at=utcnow(),
-            status="running",
-            trigger="manual",
-            model_used=cfg.get("model"),
-        ))
-        await session.commit()
+    write_tool_names = {
+        "cortex_pause_trader", "cortex_enable_strategy",
+        "cortex_update_risk_clamps", "update_strategy_config",
+    }
 
     async def event_stream():
-        actions = []
-        thinking_parts = []
-        answer = ""
+        answer_parts: list[str] = []
+        write_actions: list[dict] = []
         total_tokens = 0
         error_msg = None
 
         try:
             async for event in agent.run("Perform your fleet observation and management cycle."):
+                # Stream status events to frontend (thinking/tool activity, then final answer)
                 payload = json.dumps({"type": event.type.value, "data": event.data}, default=str)
-                yield f"data: {payload}\n\n"
+                yield f"event: {event.type.value}\ndata: {payload}\n\n"
 
-                if event.type == AgentEventType.THINKING:
-                    thinking_parts.append(event.data.get("content", ""))
-                elif event.type == AgentEventType.TOOL_START:
-                    actions.append({"tool": event.data.get("tool", ""), "input": event.data.get("input", {}), "output": None})
-                elif event.type == AgentEventType.TOOL_END:
-                    if actions:
-                        actions[-1]["output"] = event.data.get("output", {})
-                elif event.type == AgentEventType.TOOL_ERROR:
-                    if actions:
-                        actions[-1]["output"] = {"error": event.data.get("error", "")}
+                if event.type == AgentEventType.TOOL_START:
+                    tool_name = event.data.get("tool", "")
+                    if tool_name in write_tool_names:
+                        write_actions.append({
+                            "tool": tool_name,
+                            "input": event.data.get("input", {}),
+                        })
                 elif event.type == AgentEventType.ANSWER_START:
-                    answer = event.data.get("content", "")
+                    answer_parts.append(event.data.get("content", ""))
                 elif event.type == AgentEventType.DONE:
                     result_data = event.data.get("result", {})
-                    answer = result_data.get("answer", answer)
+                    final_answer = result_data.get("answer", "")
+                    if final_answer:
+                        answer_parts.clear()
+                        answer_parts.append(final_answer)
                     total_tokens = result_data.get("total_tokens", 0)
                 elif event.type == AgentEventType.ERROR:
                     error_msg = event.data.get("error", "Unknown error")
@@ -273,43 +217,31 @@ async def trigger_run_stream():
         except Exception as exc:
             error_msg = str(exc)
             error_payload = json.dumps({"type": "error", "data": {"error": error_msg}})
-            yield f"data: {error_payload}\n\n"
+            yield f"event: error\ndata: {error_payload}\n\n"
 
-        # Persist run log
-        learnings = [a for a in actions if a["tool"] == "cortex_remember"]
-        status = "error" if error_msg else "completed"
+        # Persist only the final answer text (no raw tool segments)
+        answer_text = "".join(answer_parts) or error_msg or ""
 
-        async with AsyncSessionLocal() as session:
-            row = (await session.execute(select(CortexRunLog).where(CortexRunLog.id == run_id))).scalar_one_or_none()
-            if row:
-                row.finished_at = utcnow()
-                row.status = status
-                row.thinking_log = "\n".join(thinking_parts)
-                row.actions_taken = actions
-                row.learnings_saved = [
-                    {"content": a.get("input", {}).get("content", ""), "category": a.get("input", {}).get("category", "")}
-                    for a in learnings
-                ]
-                row.summary = answer or error_msg
-                row.tokens_used = total_tokens
-                await session.commit()
+        if answer_text.strip():
+            await chat_memory_service.append_message(
+                session_id=session_id,
+                role="assistant",
+                content=answer_text,
+                model_used=cfg.get("model"),
+            )
 
-        # Telegram
-        write_actions = [a for a in actions if a["tool"] in (
-            "cortex_pause_trader", "cortex_enable_strategy",
-            "cortex_update_risk_clamps", "update_strategy_config",
-        )]
+        # Telegram notification for write actions
         if cfg.get("notify_telegram") and write_actions:
             token = cfg.get("telegram_bot_token")
             chat_id = cfg.get("telegram_chat_id")
             if token and chat_id:
                 from utils.secrets import decrypt_secret
                 decrypted_token = decrypt_secret(token) or token
-                lines = ["<b>🧠 Cortex Fleet Commander</b>\n"]
+                lines = ["<b>Cortex</b>\n"]
                 for a in write_actions:
                     tool_name = a["tool"].replace("cortex_", "").replace("_", " ").title()
                     reason = a.get("input", {}).get("reason", "")
-                    lines.append(f"• <b>{tool_name}</b>: {reason}")
+                    lines.append(f"- <b>{tool_name}</b>: {reason}")
                 await _send_telegram(decrypted_token, chat_id, "\n".join(lines))
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

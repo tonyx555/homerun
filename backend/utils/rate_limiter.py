@@ -65,7 +65,7 @@ class RateLimiter:
         "clob_prices_history": RateLimitConfig(requests_per_window=1000, window_seconds=10),
         "data_general": RateLimitConfig(requests_per_window=1000, window_seconds=10),
         "data_trades": RateLimitConfig(requests_per_window=200, window_seconds=10),
-        "data_positions": RateLimitConfig(requests_per_window=150, window_seconds=10),
+        "data_positions": RateLimitConfig(requests_per_window=60, window_seconds=10),
     }
 
     def __init__(self):

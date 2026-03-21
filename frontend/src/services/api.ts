@@ -2867,12 +2867,12 @@ export const getDatabaseMaintenanceStats = async (): Promise<DatabaseMaintenance
 }
 
 export const runVacuumAnalyze = async (full: boolean = false): Promise<Record<string, unknown>> => {
-  const { data } = await api.post('/maintenance/vacuum', null, { params: { full } })
+  const { data } = await api.post('/maintenance/vacuum', null, { params: { full }, timeout: 300_000 })
   return unwrapApiData(data)
 }
 
 export const runReindexTables = async (): Promise<Record<string, unknown>> => {
-  const { data } = await api.post('/maintenance/reindex')
+  const { data } = await api.post('/maintenance/reindex', null, { timeout: 300_000 })
   return unwrapApiData(data)
 }
 
@@ -3041,6 +3041,9 @@ export interface SearchFilterSettings {
   search_polymarket_enabled: boolean
   search_kalshi_enabled: boolean
   search_max_results: number
+  // Web search provider API keys (masked)
+  serpapi_key: string | null
+  brave_search_key: string | null
   // Hard rejection filters
   min_liquidity_hard: number
   min_position_size: number
@@ -5266,26 +5269,6 @@ export const setActiveDiscoveryProfile = async (profileId: string): Promise<{ ac
 
 // ==================== CORTEX AGENT ====================
 
-export interface CortexRunSummary {
-  id: string
-  started_at: string | null
-  finished_at: string | null
-  status: string
-  actions_count: number
-  learnings_count: number
-  tokens_used: number | null
-  cost_usd: number | null
-  model_used: string | null
-  trigger: string
-  summary: string | null
-}
-
-export interface CortexRunDetail extends CortexRunSummary {
-  thinking_log: string | null
-  actions_taken: Array<{ tool: string; input: Record<string, unknown>; output: Record<string, unknown> | null }>
-  learnings_saved: Array<{ content: string; category: string }>
-}
-
 export interface CortexMemoryEntry {
   id: string
   category: string
@@ -5315,8 +5298,16 @@ export interface CortexStatus {
   write_actions_enabled: boolean
   interval_seconds: number
   memory_count: number
-  total_runs: number
-  last_run: CortexRunSummary | null
+  session_id: string
+}
+
+export interface CortexHistoryMessage {
+  id: string
+  session_id: string
+  role: string
+  content: string
+  model_used: string | null
+  created_at: string | null
 }
 
 export async function getCortexStatus(): Promise<CortexStatus> {
@@ -5324,36 +5315,31 @@ export async function getCortexStatus(): Promise<CortexStatus> {
   return data
 }
 
-export async function listCortexRuns(params?: {
-  limit?: number
-  offset?: number
-  status?: string
-}): Promise<{ runs: CortexRunSummary[]; total: number }> {
-  const { data } = await api.get('/cortex/runs', { params })
+export async function getCortexHistory(limit?: number): Promise<{ session_id: string; messages: CortexHistoryMessage[] }> {
+  const { data } = await api.get('/cortex/history', { params: { limit } })
   return data
 }
 
-export async function getCortexRun(runId: string): Promise<CortexRunDetail> {
-  const { data } = await api.get(`/cortex/runs/${runId}`)
+export async function clearCortexHistory(): Promise<{ session_id: string }> {
+  const { data } = await api.delete('/cortex/history')
   return data
 }
 
-export async function triggerCortexRun(): Promise<Record<string, unknown>> {
-  const { data } = await api.post('/cortex/runs/trigger')
-  return data
-}
-
-export function streamCortexRun(
+export function streamCortexCycle(
   onEvent: (event: ChatStreamEvent) => void,
   onDone: () => void,
   onError: (error: string) => void,
   signal?: AbortSignal,
 ): void {
-  fetch('/api/cortex/runs/trigger/stream', {
+  fetch('/api/cortex/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     signal,
   }).then(response => {
+    if (!response.ok) {
+      response.text().then(text => onError(text || `HTTP ${response.status}`))
+      return
+    }
     const reader = response.body?.getReader()
     const decoder = new TextDecoder()
     if (!reader) { onError('No response body'); return }
@@ -5369,7 +5355,7 @@ export function streamCortexRun(
           if (line.startsWith('data: ')) {
             try {
               const parsed = JSON.parse(line.slice(6))
-              onEvent(parsed)
+              onEvent({ event: parsed.type, data: parsed.data || {} })
               if (parsed.type === 'done' || parsed.type === 'error') {
                 onDone()
                 return

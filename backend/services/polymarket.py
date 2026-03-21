@@ -2284,6 +2284,9 @@ class PolymarketClient:
             offset += len(page)
             if len(page) < page_size:
                 break
+            # Stagger pagination to avoid saturating the data-positions rate bucket
+            # when multiple wallets are being analyzed concurrently.
+            await asyncio.sleep(0.35)
 
         return all_positions[:max_positions]
 

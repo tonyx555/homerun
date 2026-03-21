@@ -584,10 +584,13 @@ def discovery_payload(settings: AppSettings) -> dict[str, Any]:
 
 
 def search_filters_payload(settings: AppSettings) -> dict[str, Any]:
-    return {
+    payload = {
         field_name: _with_default(getattr(settings, field_name), default)
         for field_name, default in SEARCH_FILTER_DEFAULTS.items()
     }
+    payload["serpapi_key"] = mask_stored_secret(settings.serpapi_key)
+    payload["brave_search_key"] = mask_stored_secret(settings.brave_search_key)
+    return payload
 
 
 def network_payload(settings: AppSettings) -> dict[str, Any]:
@@ -862,6 +865,10 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
         for field_name in SEARCH_FILTER_DEFAULTS:
             if field_name in provided_fields:
                 setattr(settings, field_name, getattr(sf, field_name))
+        if "serpapi_key" in provided_fields and sf.serpapi_key:
+            set_encrypted_secret(settings, "serpapi_key", sf.serpapi_key)
+        if "brave_search_key" in provided_fields and sf.brave_search_key:
+            set_encrypted_secret(settings, "brave_search_key", sf.brave_search_key)
 
     if trading_proxy:
         proxy = trading_proxy

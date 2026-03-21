@@ -1316,7 +1316,7 @@ class WalletDiscoveryEngine:
                 self.client.get_wallet_positions(address),
                 self.client.get_user_profile(address),
                 self.client.get_wallet_pnl(address, time_period="ALL"),
-                self.client.get_closed_positions_paginated(address, max_positions=1500),
+                self.client.get_closed_positions_paginated(address, max_positions=500),
             )
         except Exception as e:
             logger.error("Failed to fetch data for wallet %s: %s", address, e)

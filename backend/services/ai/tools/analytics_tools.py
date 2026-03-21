@@ -33,11 +33,18 @@ live_trading_runtime_state: id, wallet_address, total_trades, winning_trades, lo
 
 trade_signals: id, source, market_id, market_question, direction, strategy_key, strategy_version, edge_percent, confidence, signal_strength, reason, payload_json (JSON), status, created_at, expires_at
 
-opportunities: id, market_id, condition_id, slug, question, source, strategy_key, yes_price, no_price, edge_percent, confidence, volume, liquidity, status, created_at, updated_at, resolved_at
+opportunity_state: stable_id (PK), opportunity_json (JSON — full opportunity data), first_seen_at, last_seen_at, last_updated_at, is_active (boolean), last_run_id
+  -- The primary opportunity table. opportunity_json contains: strategy, title, total_cost, expected_roi, risk_score, positions, markets, etc.
+
+opportunity_history: id, strategy_type, event_id, title, total_cost, expected_roi, risk_score, positions_data (JSON), detected_at, expired_at, resolution_date, was_profitable, actual_roi
+
+opportunity_events: id, stable_id, run_id, event_type (detected|updated|expired|reactivated), opportunity_json (JSON), created_at
 
 research_sessions: id, session_type, query, opportunity_id, market_id, status, result, error, iterations, tools_called, total_input_tokens, total_output_tokens, total_cost_usd, model_used, started_at, completed_at, duration_seconds
 
-Important: There is NO "trades" table. Use trader_orders for trade data. Use strategy_key (not strategy_id) to filter by strategy.
+discovered_wallets: address (PK), username, discovered_at, last_analyzed_at, discovery_source (scan|manual|referral), total_trades, wins, losses, win_rate, total_pnl, realized_pnl
+
+Important: There is NO "trades" or "opportunities" table. Use trader_orders for trade data. Use opportunity_state for current opportunities. Use strategy_key (not strategy_id) to filter by strategy.
 """.strip()
 
 
@@ -262,8 +269,8 @@ async def _detect_anomalies(args: dict) -> dict:
         from services.anomaly_detector import AnomalyDetector
 
         detector = AnomalyDetector()
-        opportunities = await detector.detect_opportunities()
-        return {"anomalies": opportunities if isinstance(opportunities, list) else [], "count": len(opportunities) if isinstance(opportunities, list) else 0}
+        anomalies = await detector.get_anomalies()
+        return {"anomalies": anomalies if isinstance(anomalies, list) else [], "count": len(anomalies) if isinstance(anomalies, list) else 0}
     except Exception as exc:
         logger.error("detect_anomalies failed: %s", exc)
         return {"error": str(exc)}
@@ -276,7 +283,7 @@ async def _get_cross_platform_arb(args: dict) -> dict:
 
         async with AsyncSessionLocal() as session:
             result = await session.execute(
-                text("SELECT COUNT(*) FROM discovered_wallets WHERE source = 'kalshi' LIMIT 1")
+                text("SELECT COUNT(*) FROM discovered_wallets WHERE discovery_source = 'kalshi' LIMIT 1")
             )
             count = result.scalar() or 0
 

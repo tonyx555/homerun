@@ -3,6 +3,7 @@ import { useAtom } from 'jotai'
 import { aiTabSubtabAtom } from '../../store/atoms'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '../ui/tabs'
 import { RefreshCw } from 'lucide-react'
+import { cn } from '../../lib/utils'
 import AIChatView from './AIChatView'
 import AIAgentsView from './AIAgentsView'
 import AIToolsView from './AIToolsView'
@@ -44,7 +45,7 @@ export default function AITab() {
             <TabsTrigger value="activity" className="data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-300">Activity</TabsTrigger>
           </TabsList>
         </div>
-        <TabsContent value="chat" className="flex-1 overflow-hidden mt-0"><AIChatView /></TabsContent>
+        <TabsContent value="chat" forceMount className={cn('flex-1 overflow-hidden mt-0', activeSubtab !== 'chat' && 'hidden')}><AIChatView /></TabsContent>
         <TabsContent value="agents" className="flex-1 overflow-auto mt-0 p-4"><AIAgentsView /></TabsContent>
         <TabsContent value="tools" className="flex-1 overflow-auto mt-0 p-4"><AIToolsView /></TabsContent>
         <TabsContent value="providers" className="flex-1 overflow-auto mt-0 p-4">

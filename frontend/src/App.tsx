@@ -1134,22 +1134,28 @@ function App() {
   const headerStats = useMemo(() => {
     if (!isLiveAccountSelected) {
       const balance = selectedAccount?.current_capital ?? 0
+      const initialCapital = selectedAccount?.initial_capital ?? balance
       const pnl = selectedAccount?.total_pnl ?? 0
       const roi = selectedAccount?.roi_percent ?? 0
       const positions = selectedAccount?.open_positions ?? 0
-      return { balance, pnl, roi, positions }
+      return { portfolioValue: initialCapital + pnl, balance, pnl, roi, positions }
     }
 
     if (selectedLivePlatform === 'kalshi') {
       const liveBalance = headerKalshiBalance?.balance ?? headerKalshiStatus?.balance?.balance ?? 0
       const livePositions = headerKalshiPositions.length
       const livePnl = headerKalshiPositions.reduce((sum, position) => sum + Number(position.unrealized_pnl || 0), 0)
+      const livePositionMarketValue = headerKalshiPositions.reduce(
+        (sum, position) => sum + Number(position.size || 0) * Number(position.current_price || 0),
+        0,
+      )
       const liveCostBasis = headerKalshiPositions.reduce(
         (sum, position) => sum + Number(position.size || 0) * Number(position.average_cost || 0),
         0,
       )
       const liveRoi = liveCostBasis > 0 ? (livePnl / liveCostBasis) * 100 : 0
       return {
+        portfolioValue: liveBalance + livePositionMarketValue,
         balance: liveBalance,
         pnl: livePnl,
         roi: liveRoi,
@@ -1160,6 +1166,10 @@ function App() {
     const liveBalance = headerTradingBalance?.balance ?? 0
     const livePositions = headerTradingPositions.length
     const liveUnrealizedPnl = headerTradingPositions.reduce((sum, position) => sum + Number(position.unrealized_pnl || 0), 0)
+    const livePositionMarketValue = headerTradingPositions.reduce(
+      (sum, position) => sum + Number(position.size || 0) * Number(position.current_price || 0),
+      0,
+    )
     const liveCostBasis = headerTradingPositions.reduce(
       (sum, position) => sum + Number(position.size || 0) * Number(position.average_cost || 0),
       0,
@@ -1171,6 +1181,7 @@ function App() {
       ? liveRoiCandidate
       : (liveCostBasis > 0 ? (liveUnrealizedPnl / liveCostBasis) * 100 : 0)
     return {
+      portfolioValue: liveBalance + livePositionMarketValue,
       balance: liveBalance,
       pnl: livePnl,
       roi: liveRoi,
@@ -1770,25 +1781,31 @@ function App() {
           <AccountModeSelector />
 
           {/* Inline Account Stats */}
-          <div className="hidden md:flex items-center gap-3 text-xs ml-3">
-            <div className="stat-pill flex items-center gap-1.5 px-2.5 py-1 rounded-md">
+          <div className="hidden md:flex items-center gap-1 text-xs ml-3">
+            <div className="stat-pill flex items-center gap-1 px-2 py-1 rounded-md">
+              <Briefcase className="w-3 h-3 text-emerald-400" />
+              <span className="text-muted-foreground">Value</span>
+              <FlashNumber value={headerStats.portfolioValue} prefix="$" decimals={2} className="font-data font-semibold text-foreground data-glow-green" />
+            </div>
+            <div className="text-border/60 mx-0.5">|</div>
+            <div className="stat-pill flex items-center gap-1 px-2 py-1 rounded-md">
               <Wallet className="w-3 h-3 text-blue-400" />
-              <span className="text-muted-foreground">Balance</span>
+              <span className="text-muted-foreground">Bal</span>
               <FlashNumber value={headerStats.balance} prefix="$" decimals={2} className="font-data font-semibold text-foreground data-glow-blue" />
             </div>
-            <div className="stat-pill flex items-center gap-1.5 px-2.5 py-1 rounded-md">
+            <div className="stat-pill flex items-center gap-1 px-2 py-1 rounded-md">
               <TrendingUp className="w-3 h-3 text-green-400" />
               <span className="text-muted-foreground">PnL</span>
               <FlashNumber value={headerStats.pnl} prefix="$" decimals={2} className={cn("font-data font-semibold", headerStats.pnl >= 0 ? "text-green-400" : "text-red-400")} />
             </div>
-            <div className="stat-pill flex items-center gap-1.5 px-2.5 py-1 rounded-md">
+            <div className="stat-pill flex items-center gap-1 px-2 py-1 rounded-md">
               <DollarSign className="w-3 h-3 text-yellow-400" />
               <span className="text-muted-foreground">ROI</span>
               <FlashNumber value={headerStats.roi} suffix="%" decimals={1} className={cn("font-data font-semibold", headerStats.roi >= 0 ? "text-green-400" : "text-red-400")} />
             </div>
-            <div className="stat-pill flex items-center gap-1.5 px-2.5 py-1 rounded-md">
+            <div className="stat-pill flex items-center gap-1 px-2 py-1 rounded-md">
               <Activity className="w-3 h-3 text-purple-400" />
-              <span className="text-muted-foreground">Positions</span>
+              <span className="text-muted-foreground">Pos</span>
               <AnimatedNumber value={headerStats.positions} decimals={0} className="font-data font-semibold text-foreground" />
             </div>
           </div>

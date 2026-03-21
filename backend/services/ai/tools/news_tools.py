@@ -133,16 +133,22 @@ async def _search_news(args: dict) -> dict:
 
 async def _get_news_edges(args: dict) -> dict:
     try:
-        from services.news.edge_detector import EdgeDetector
+        from services.news.edge_detector import edge_detector
 
-        detector = EdgeDetector.instance()
-        if detector is None:
-            return {"error": "EdgeDetector not initialized"}
-
-        edges = await detector.get_cached_edges()
-        if isinstance(edges, list):
-            return {"edges": edges, "count": len(edges)}
-        return {"edges": edges}
+        edges = edge_detector.get_cached_edges()
+        serialized = []
+        for e in edges:
+            serialized.append({
+                "article_title": e.article_title,
+                "market_id": e.market_id,
+                "model_probability": e.model_probability,
+                "market_price": e.market_price,
+                "edge_percent": e.edge_percent,
+                "direction": e.direction,
+                "confidence": e.confidence,
+                "reasoning": e.reasoning,
+            })
+        return {"edges": serialized, "count": len(serialized)}
     except Exception as exc:
         logger.error("get_news_edges failed: %s", exc)
         return {"error": str(exc)}

@@ -11,17 +11,14 @@ import {
   MessagePrimitive,
 } from '@assistant-ui/react'
 import { MarkdownTextPrimitive } from '@assistant-ui/react-markdown'
-import ReactMarkdown from 'react-markdown'
 import { useMessage, useMessagePartText } from '@assistant-ui/react'
-import { Renderer } from '@openuidev/react-lang'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion } from 'framer-motion'
 import {
-  ThinkingIndicator,
-  ToolStartWidget,
-  ToolResultWidget,
-  ToolErrorWidget,
-} from './ChatToolWidgets'
-import { homerunLibrary } from './openui-library'
+  encodeSeg,
+  SegmentedContent,
+  RichTextContent,
+  markdownComponents,
+} from './ChatRendering'
 import {
   MessageSquare,
   Plus,
@@ -268,305 +265,26 @@ function UserMessage() {
   )
 }
 
-// Segment delimiter used to encode structured content in the text stream.
-// Format: ‹‹SEG:type:json››
-const SEG_RE = /\u00AB\u00ABSEG:(thinking|tool_start|tool_end|tool_error):([^\u00BB]*)\u00BB\u00BB/g
-
-type ChatSegment =
-  | { type: 'thinking'; text: string }
-  | { type: 'tool_start'; tool: string; input: Record<string, unknown> }
-  | { type: 'tool_end'; tool: string; output: Record<string, unknown> }
-  | { type: 'tool_error'; tool: string; error: string }
-  | { type: 'text'; text: string }
-
-function parseSegments(raw: string): ChatSegment[] {
-  const segments: ChatSegment[] = []
-  let lastIndex = 0
-  let match: RegExpExecArray | null
-
-  const re = new RegExp(SEG_RE.source, 'g')
-  while ((match = re.exec(raw)) !== null) {
-    if (match.index > lastIndex) {
-      const text = raw.slice(lastIndex, match.index).trim()
-      if (text) segments.push({ type: 'text', text })
-    }
-    const segType = match[1] as 'thinking' | 'tool_start' | 'tool_end' | 'tool_error'
-    try {
-      const data = JSON.parse(match[2])
-      if (segType === 'thinking') {
-        segments.push({ type: 'thinking', text: data.content || '' })
-      } else if (segType === 'tool_start') {
-        segments.push({ type: 'tool_start', tool: data.tool || '', input: data.input || {} })
-      } else if (segType === 'tool_end') {
-        segments.push({ type: 'tool_end', tool: data.tool || '', output: data.output || {} })
-      } else if (segType === 'tool_error') {
-        segments.push({ type: 'tool_error', tool: data.tool || '', error: data.error || '' })
-      }
-    } catch {
-      // Skip malformed segments
-    }
-    lastIndex = match.index + match[0].length
-  }
-  if (lastIndex < raw.length) {
-    const text = raw.slice(lastIndex).trim()
-    if (text) segments.push({ type: 'text', text })
-  }
-  return segments
-}
-
-// Detect OpenUI Lang markup — fenced code blocks with ```openui ... ```
-// Also detect raw assignment syntax: root = Component(...)
-const OPENUI_FENCED_RE = /```openui\n([\s\S]*?)```/g
-const OPENUI_RAW_RE = /^root\s*=\s*[A-Z]\w*\(/m
-
-const PROSE_CLASSES = "text-sm text-foreground/90 leading-relaxed prose dark:prose-invert prose-sm max-w-none prose-p:my-2 prose-headings:my-3 prose-li:my-0.5 prose-pre:bg-background/80 prose-pre:border prose-pre:border-border/40 prose-code:text-purple-700 dark:prose-code:text-purple-300 prose-code:text-xs"
-
-/** Splits text into alternating plain-text and OpenUI blocks.
- *  Detects both ```openui fenced blocks and raw assignment blocks (root = Component(...)).
- *  When `streaming` is true, also captures incomplete/in-progress blocks so the
- *  Renderer can progressively display them instead of showing raw code.
- */
-function splitOpenUI(text: string, streaming = false): { type: 'text' | 'openui'; content: string }[] {
-  const parts: { type: 'text' | 'openui'; content: string }[] = []
-  let lastIdx = 0
-  let m: RegExpExecArray | null
-
-  // First try fenced code blocks: ```openui\n...\n```
-  const fencedRe = new RegExp(OPENUI_FENCED_RE.source, 'g')
-  while ((m = fencedRe.exec(text)) !== null) {
-    if (m.index > lastIdx) {
-      const plain = text.slice(lastIdx, m.index).trim()
-      if (plain) parts.push({ type: 'text', content: plain })
-    }
-    parts.push({ type: 'openui', content: m[1].trim() })
-    lastIdx = m.index + m[0].length
-  }
-
-  if (parts.length > 0) {
-    // Found complete fenced blocks — check for trailing incomplete block while streaming
-    if (lastIdx < text.length) {
-      const tail = text.slice(lastIdx).trim()
-      if (tail) {
-        if (streaming && /```openui\n/i.test(tail)) {
-          // Incomplete fenced block still streaming — extract content after the fence
-          const innerMatch = tail.match(/```openui\n([\s\S]*)$/i)
-          if (innerMatch) {
-            parts.push({ type: 'openui', content: innerMatch[1].trim() })
-          } else {
-            parts.push({ type: 'text', content: tail })
-          }
-        } else {
-          parts.push({ type: 'text', content: tail })
-        }
-      }
-    }
-    return parts
-  }
-
-  // While streaming, detect an incomplete fenced block that hasn't closed yet
-  if (streaming) {
-    const incompleteFence = text.match(/^([\s\S]*?)```openui\n([\s\S]*)$/i)
-    if (incompleteFence) {
-      const before = incompleteFence[1].trim()
-      const openUIContent = incompleteFence[2].trim()
-      if (before) parts.push({ type: 'text', content: before })
-      if (openUIContent) parts.push({ type: 'openui', content: openUIContent })
-      return parts.length > 0 ? parts : [{ type: 'text', content: text }]
-    }
-  }
-
-  // Fallback: detect raw assignment blocks (root = Component(...) multiline blocks)
-  const rawBlockRe = new RegExp(
-    `((?:^\\w+\\s*=\\s*[A-Z]\\w*\\([\\s\\S]*?\\)\\s*\\n?)+)`,
-    'gm'
-  )
-  while ((m = rawBlockRe.exec(text)) !== null) {
-    // Only accept if block contains root = ...
-    if (!/^root\s*=/m.test(m[1])) continue
-    if (m.index > lastIdx) {
-      const plain = text.slice(lastIdx, m.index).trim()
-      if (plain) parts.push({ type: 'text', content: plain })
-    }
-    parts.push({ type: 'openui', content: m[1].trim() })
-    lastIdx = m.index + m[0].length
-  }
-
-  // While streaming, detect partial raw openui blocks (root = ... without complete closure)
-  if (streaming && parts.length === 0 && OPENUI_RAW_RE.test(text)) {
-    const rootIdx = text.search(/^root\s*=\s*[A-Z]\w*\(/m)
-    if (rootIdx >= 0) {
-      const before = text.slice(0, rootIdx).trim()
-      const openUIContent = text.slice(rootIdx).trim()
-      if (before) parts.push({ type: 'text', content: before })
-      parts.push({ type: 'openui', content: openUIContent })
-      return parts
-    }
-  }
-
-  if (lastIdx < text.length) {
-    const plain = text.slice(lastIdx).trim()
-    if (plain) parts.push({ type: 'text', content: plain })
-  }
-
-  return parts.length > 0 ? parts : [{ type: 'text', content: text }]
-}
-
-/**
- * Renders a text block as markdown + OpenUI mixed content.
- * @param standalone — if true, uses ReactMarkdown (for extracted segment text).
- *                     if false, uses MarkdownTextPrimitive (reads from message context).
- * @param isStreaming — if true, passes streaming state to OpenUI Renderer for progressive rendering.
- */
-function RichTextContent({ text, standalone, isStreaming = false }: { text: string; standalone?: boolean; isStreaming?: boolean }) {
-  const hasOpenUI = OPENUI_FENCED_RE.test(text) || OPENUI_RAW_RE.test(text)
-  // Reset regex lastIndex after test (they have 'g' or 'm' flags)
-  OPENUI_FENCED_RE.lastIndex = 0
-
-  // During streaming, also detect incomplete fenced blocks (```openui without closing ```)
-  const hasPartialOpenUI = isStreaming && !hasOpenUI && /```openui\n/i.test(text)
-
-  if (!hasOpenUI && !hasPartialOpenUI) {
-    return (
-      <div className={PROSE_CLASSES}>
-        {standalone ? <ReactMarkdown>{text}</ReactMarkdown> : <MarkdownTextPrimitive />}
-      </div>
-    )
-  }
-
-  // Split and render OpenUI blocks with the Renderer, plain text as markdown.
-  // Once split, each text part MUST use ReactMarkdown (not MarkdownTextPrimitive)
-  // because MarkdownTextPrimitive renders the full raw message from context,
-  // not just the individual part.
-  const parts = splitOpenUI(text, isStreaming)
-  return (
-    <div className="space-y-2">
-      {parts.map((part, i) =>
-        part.type === 'openui' ? (
-          <motion.div
-            key={`oui-${i}`}
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.2 }}
-          >
-            <Renderer library={homerunLibrary} response={part.content} isStreaming={isStreaming} />
-          </motion.div>
-        ) : (
-          <div key={`md-${i}`} className={PROSE_CLASSES}>
-            <ReactMarkdown>{part.content}</ReactMarkdown>
-          </div>
-        )
-      )}
-    </div>
-  )
-}
 
 function AssistantTextContent() {
   const part = useMessagePartText()
   const raw = part.text
   const isStreaming = useMessage((state) => state.status?.type === 'running')
 
-  // If no structured segments, render as rich text using MarkdownTextPrimitive (context-aware)
-  if (!raw.includes('\u00AB\u00ABSEG:')) {
-    return (
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ duration: 0.15 }}
-      >
-        <RichTextContent text={raw} standalone={false} isStreaming={isStreaming} />
-      </motion.div>
-    )
+  // Segmented content — delegate to shared renderer
+  if (raw.includes('\u00AB\u00ABSEG:')) {
+    return <SegmentedContent raw={raw} isStreaming={isStreaming} />
   }
 
-  const segments = parseSegments(raw)
-
-  // Pair tool_start segments with their corresponding tool_end/tool_error.
-  // Each tool_start is followed later by either a tool_end or tool_error for
-  // the same tool.  When paired, we show the completed result; when unpaired
-  // (still running), we show the spinner.
-  type PairedTool = {
-    tool: string
-    input: Record<string, unknown>
-    result?: { type: 'end'; output: Record<string, unknown> } | { type: 'error'; error: string }
-  }
-  const paired: (PairedTool | ChatSegment)[] = []
-  const pendingStarts: PairedTool[] = []
-
-  for (const seg of segments) {
-    if (seg.type === 'thinking') continue // transient — skip
-    if (seg.type === 'tool_start') {
-      const p: PairedTool = { tool: seg.tool, input: seg.input }
-      pendingStarts.push(p)
-      paired.push(p)
-    } else if (seg.type === 'tool_end') {
-      // Find the most recent unpaired start for this tool
-      const match = [...pendingStarts].reverse().find(p => p.tool === seg.tool && !p.result)
-      if (match) {
-        match.result = { type: 'end', output: seg.output }
-      } else {
-        // Orphaned tool_end — render as result anyway
-        paired.push(seg)
-      }
-    } else if (seg.type === 'tool_error') {
-      const match = [...pendingStarts].reverse().find(p => p.tool === seg.tool && !p.result)
-      if (match) {
-        match.result = { type: 'error', error: seg.error }
-      } else {
-        paired.push(seg)
-      }
-    } else {
-      paired.push(seg)
-    }
-  }
-
-  // Show thinking dots only when there are NO visible segments yet (nothing painted)
-  const hasVisibleContent = paired.length > 0
-  const showThinking = !hasVisibleContent && segments.some(s => s.type === 'thinking')
-
+  // Plain text — use MarkdownTextPrimitive (reads from assistant-ui message context)
   return (
-    <div className="space-y-0.5">
-      {/* Animated thinking dots — only shown before ANY content arrives */}
-      <AnimatePresence>
-        {showThinking && <ThinkingIndicator key="thinking-dots" />}
-      </AnimatePresence>
-      <AnimatePresence mode="popLayout">
-        {paired.map((seg, i) => {
-          // Paired tool call
-          if ('input' in seg && 'tool' in seg && !('type' in seg)) {
-            const p = seg as PairedTool
-            if (p.result?.type === 'end') {
-              return <ToolResultWidget key={`tool-${i}`} tool={p.tool} output={p.result.output} />
-            }
-            if (p.result?.type === 'error') {
-              return <ToolErrorWidget key={`tool-${i}`} tool={p.tool} error={p.result.error} />
-            }
-            // Still running — show spinner
-            return <ToolStartWidget key={`tool-${i}`} tool={p.tool} input={p.input} />
-          }
-          const s = seg as ChatSegment
-          switch (s.type) {
-            case 'tool_end':
-              return <ToolResultWidget key={`te-${i}`} tool={s.tool} output={s.output} />
-            case 'tool_error':
-              return <ToolErrorWidget key={`err-${i}`} tool={s.tool} error={s.error} />
-            case 'text':
-              return (
-                <motion.div
-                  key={`txt-${i}`}
-                  initial={{ opacity: 0, y: 6 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.3, ease: 'easeOut' }}
-                  className="mt-2"
-                >
-                  <RichTextContent text={s.text} standalone={true} isStreaming={isStreaming} />
-                </motion.div>
-              )
-            default:
-              return null
-          }
-        })}
-      </AnimatePresence>
-    </div>
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.15 }}
+    >
+      <RichTextContent text={raw} standalone={false} isStreaming={isStreaming} contextMarkdown={<MarkdownTextPrimitive components={markdownComponents} />} />
+    </motion.div>
   )
 }
 
@@ -667,12 +385,6 @@ function WelcomeScreen() {
       </div>
     </div>
   )
-}
-
-// Encode a structured segment into the text stream.
-// Uses «« »» delimiters that won't appear in normal text.
-function encodeSeg(type: string, data: Record<string, unknown>): string {
-  return `\u00AB\u00ABSEG:${type}:${JSON.stringify(data)}\u00BB\u00BB`
 }
 
 function ChatRuntime({

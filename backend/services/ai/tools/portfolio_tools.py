@@ -110,11 +110,18 @@ async def _get_open_positions(args: dict) -> dict:
 
         positions = []
         for r in rows:
+            # Truncate long hex IDs for display (full IDs not useful in chat)
+            mid = r.market_id or ""
+            if len(mid) > 20:
+                mid = mid[:8] + "..." + mid[-6:]
+            tid = r.token_id or ""
+            if len(tid) > 20:
+                tid = tid[:8] + "..." + tid[-6:]
             positions.append({
                 "id": r.id,
-                "market_question": r.market_question or r.market_id,
-                "market_id": r.market_id,
-                "token_id": r.token_id,
+                "market_question": r.market_question or mid,
+                "market_id": mid,
+                "token_id": tid,
                 "outcome": r.outcome,
                 "size": float(r.size) if r.size else 0,
                 "average_cost": float(r.average_cost) if r.average_cost else 0,
@@ -146,10 +153,13 @@ async def _get_trade_history(args: dict) -> dict:
 
         trades = []
         for r in rows:
+            mid = r.market_id or ""
+            if len(mid) > 20:
+                mid = mid[:8] + "..." + mid[-6:]
             trades.append({
                 "id": r.id,
-                "market_question": r.market_question or r.market_id,
-                "market_id": r.market_id,
+                "market_question": r.market_question or mid,
+                "market_id": mid,
                 "direction": r.direction,
                 "mode": r.mode,
                 "status": r.status,
