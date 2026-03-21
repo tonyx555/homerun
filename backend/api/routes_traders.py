@@ -782,6 +782,10 @@ async def get_trader_market_history(
                     if isinstance(backfill_attempt_map, dict):
                         for market_id in backfill_market_ids:
                             backfill_attempt_map.pop(str(market_id), None)
+                    backfill_done_set = getattr(market_scanner, "_market_history_backfill_done", None)
+                    if isinstance(backfill_done_set, set):
+                        for market_id in backfill_market_ids:
+                            backfill_done_set.discard(str(market_id))
                     await market_scanner.attach_price_history_to_opportunities(
                         backfill_targets,
                         now=datetime.now(timezone.utc),
