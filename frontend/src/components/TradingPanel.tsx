@@ -2574,25 +2574,6 @@ function upsertTraderRows(rows: Trader[] | undefined, trader: Trader): Trader[] 
   return next
 }
 
-function _normalizeTuneList(value: unknown): string[] {
-  if (Array.isArray(value)) {
-    return value
-      .map((item) => String(item || '').trim())
-      .filter((item) => item.length > 0)
-  }
-  if (typeof value !== 'string') return []
-
-  const compact = value.trim()
-  if (!compact) return []
-
-  const parts = compact
-    .split(/\r?\n+/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .map((line) => line.replace(/^\d+[\).]\s*/, '').replace(/^[-*]\s*/, '').trim())
-    .filter((line) => line.length > 0)
-  return parts.length > 0 ? parts : [compact]
-}
 
 function normalizeSourceKey(value: string): string {
   const key = String(value || '').trim().toLowerCase()
@@ -4425,7 +4406,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const [tuneIterateModel, setTuneIterateModel] = useState('')
   const [tuneIterateMaxIterations, setTuneIterateMaxIterations] = useState('12')
   const [_tuneIterateError, setTuneIterateError] = useState<string | null>(null)
-  const [tuneIterateResponse, setTuneIterateResponse] = useState<TraderTuneAgentResponse | null>(null)
+  const [_tuneIterateResponse, setTuneIterateResponse] = useState<TraderTuneAgentResponse | null>(null)
   const [tuneAutoEnabled, setTuneAutoEnabled] = useState(false)
   const [tuneAutoIntervalMinutes, _setTuneAutoIntervalMinutes] = useState('15')
   const [tuneAutoLastRunAt, setTuneAutoLastRunAt] = useState<number | null>(null)
@@ -5217,11 +5198,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     enabled: Boolean(selectedDecisionId),
     refetchInterval: 7000,
   })
-
-  const _tuneIterateParsed = useMemo(
-    () => (isRecord(tuneIterateResponse?.parsed) ? tuneIterateResponse?.parsed : null),
-    [tuneIterateResponse]
-  )
 
   const refreshAll = () => {
     queryClient.invalidateQueries({ queryKey: ['trader-orchestrator-overview'] })
