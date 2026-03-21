@@ -184,7 +184,6 @@ async def trigger_cortex_stream():
     async def event_stream():
         answer_parts: list[str] = []
         write_actions: list[dict] = []
-        total_tokens = 0
         error_msg = None
 
         try:
@@ -208,7 +207,6 @@ async def trigger_cortex_stream():
                     if final_answer:
                         answer_parts.clear()
                         answer_parts.append(final_answer)
-                    total_tokens = result_data.get("total_tokens", 0)
                 elif event.type == AgentEventType.ERROR:
                     error_msg = event.data.get("error", "Unknown error")
 
