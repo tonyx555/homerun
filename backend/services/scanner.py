@@ -621,7 +621,12 @@ class ArbitrageScanner:
                 platform = str(market.get("platform", "polymarket") or "polymarket").lower()
                 if platform != "polymarket":
                     continue
-                token_ids = self._coerce_polymarket_token_ids(market.get("clob_token_ids"))
+                token_ids = self._coerce_polymarket_token_ids(
+                    market.get("clob_token_ids")
+                    or market.get("clobTokenIds")
+                    or market.get("token_ids")
+                    or market.get("tokenIds")
+                )
                 if token_ids is None:
                     continue
                 for market_id in self._market_id_candidates_from_payload(market):

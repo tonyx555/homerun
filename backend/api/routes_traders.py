@@ -812,6 +812,80 @@ async def get_trader_market_history(
         resolved_key = alias_to_history_key.get(market_id, market_id)
         histories[market_id] = normalized_history.get(resolved_key, [])
 
+    # Direct Polymarket API fallback for any markets still missing history.
+    empty_market_ids = [mid for mid in requested_ids if len(histories.get(mid, [])) < 2]
+    if empty_market_ids:
+        try:
+            from services.polymarket import polymarket_client as _pm_client
+        except Exception:
+            _pm_client = None  # type: ignore[assignment]
+        if _pm_client is not None:
+            start_s = (now_ms - scanner_window_seconds * 1000) // 1000
+            now_s = now_ms // 1000
+            for market_id in empty_market_ids:
+                try:
+                    catalog_market = catalog_by_alias.get(market_id)
+                    token_pair: list[str] = []
+                    if isinstance(catalog_market, dict):
+                        for key in ("clob_token_ids", "clobTokenIds", "token_ids", "tokenIds"):
+                            raw_tokens = catalog_market.get(key)
+                            if isinstance(raw_tokens, (list, tuple)):
+                                token_pair = [str(t).strip() for t in raw_tokens if str(t).strip() and len(str(t).strip()) > 20]
+                            if len(token_pair) >= 2:
+                                break
+                    if len(token_pair) < 2:
+                        # Try resolving the market to get token IDs.
+                        if market_id.startswith("0x"):
+                            resolved = await _pm_client.get_market_by_condition_id(market_id)
+                        else:
+                            resolved = await _pm_client.get_market_by_token_id(market_id)
+                        if isinstance(resolved, dict):
+                            for key in ("clob_token_ids", "clobTokenIds", "token_ids", "tokenIds"):
+                                raw_tokens = resolved.get(key)
+                                if isinstance(raw_tokens, (list, tuple)):
+                                    token_pair = [str(t).strip() for t in raw_tokens if str(t).strip() and len(str(t).strip()) > 20]
+                                if len(token_pair) >= 2:
+                                    break
+                    if len(token_pair) < 2:
+                        continue
+                    token_results = await asyncio.gather(
+                        _pm_client.get_prices_history(token_pair[0], start_ts=start_s, end_ts=now_s),
+                        _pm_client.get_prices_history(token_pair[1], start_ts=start_s, end_ts=now_s),
+                        return_exceptions=True,
+                    )
+                    points: list[dict[str, float]] = []
+                    buckets: dict[int, list[float | None]] = {}
+                    for idx, result in enumerate(token_results):
+                        if isinstance(result, Exception):
+                            continue
+                        for pt in result:
+                            if not isinstance(pt, dict):
+                                continue
+                            try:
+                                t = int(float(pt.get("t", 0)))
+                                p = float(pt.get("p", 0))
+                            except (TypeError, ValueError):
+                                continue
+                            if t <= 0 or not (0 <= p <= 1.01):
+                                continue
+                            if t not in buckets:
+                                buckets[t] = [None, None]
+                            buckets[t][idx] = p
+                    for t in sorted(buckets):
+                        vals = buckets[t]
+                        yes = vals[0]
+                        no = vals[1]
+                        if yes is None and no is not None:
+                            yes = round(1.0 - no, 6)
+                        if no is None and yes is not None:
+                            no = round(1.0 - yes, 6)
+                        if yes is not None and no is not None:
+                            points.append({"t": float(t), "yes": round(yes, 6), "no": round(no, 6), "idx_0": round(yes, 6), "idx_1": round(no, 6)})
+                    if len(points) >= 2:
+                        histories[market_id] = points[-normalize_max_points:]
+                except Exception:
+                    continue
+
     return {
         "histories": histories,
         "updated_at": row.updated_at.isoformat() if row is not None and row.updated_at is not None else None,
