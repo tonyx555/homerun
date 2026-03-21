@@ -701,7 +701,7 @@ $stamp | ConvertTo-Json | Set-Content -Path ".setup-stamp.json" -Encoding UTF8
 # ── Completion ───────────────────────────────────────────────────────
 
 Write-Host ""
-Write-Host "    ─────────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
+Write-Host "    ---------------------------------------------------------------------" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "    Setup complete!" -ForegroundColor Green
 Write-Host ""
@@ -710,12 +710,12 @@ Write-Host "      .\scripts\infra\run.ps1" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "    Or start services individually:" -ForegroundColor DarkGray
 Write-Host '      Backend:  cd backend; .\venv\Scripts\Activate.ps1; uvicorn main:app --reload' -ForegroundColor DarkGray
-Write-Host "      Frontend: cd frontend; npm run dev" -ForegroundColor DarkGray
+Write-Host '      Frontend: cd frontend; npm run dev' -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "    Endpoints:" -ForegroundColor White
 Write-Host "      Frontend  http://localhost:3000" -ForegroundColor Cyan
 Write-Host "      Backend   http://localhost:8000" -ForegroundColor Cyan
 Write-Host "      API Docs  http://localhost:8000/docs" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "    ─────────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
+Write-Host "    ---------------------------------------------------------------------" -ForegroundColor DarkGray
 Write-Host ""

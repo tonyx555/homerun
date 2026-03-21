@@ -85,8 +85,6 @@ class SettlementLagStrategy(BaseStrategy):
         "near_zero_threshold": 0.02,
         "near_one_threshold": 0.95,
         "min_sum_deviation": 0.03,
-        "base_size_usd": 18.0,
-        "max_size_usd": 150.0,
     }
 
     # Thresholds are strategy-local and configurable through strategy config.

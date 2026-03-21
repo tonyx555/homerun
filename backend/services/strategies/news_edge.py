@@ -41,6 +41,7 @@ from services.strategies.base import (
     SizingConfig,
     ExitDecision,
     StrategyDecision,
+    _trader_size_limits,
 )
 from services.data_events import DataEvent
 from services.quality_filter import QualityFilterOverrides
@@ -818,20 +819,7 @@ class NewsEdgeStrategy(BaseStrategy):
             params.get("max_risk_score", d.get("max_risk_score", 0.68)),
             d.get("max_risk_score", 0.68),
         )
-        base_size = max(
-            1.0,
-            to_float(
-                params.get("base_size_usd", d.get("base_size_usd", 20.0)),
-                d.get("base_size_usd", 20.0),
-            ),
-        )
-        max_size = max(
-            base_size,
-            to_float(
-                params.get("max_size_usd", d.get("max_size_usd", 180.0)),
-                d.get("max_size_usd", 180.0),
-            ),
-        )
+        base_size, max_size = _trader_size_limits(context)
 
         edge = max(0.0, to_float(getattr(signal, "edge_percent", 0.0), 0.0))
         confidence = to_confidence(getattr(signal, "confidence", 0.0), 0.0)

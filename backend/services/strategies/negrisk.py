@@ -68,8 +68,6 @@ class NegRiskStrategy(BaseStrategy):
         "warn_total_yes": 0.97,
         "election_min_total_yes": 0.97,
         "max_resolution_spread_days": 7,
-        "base_size_usd": 20.0,
-        "max_size_usd": 180.0,
     }
 
     def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:

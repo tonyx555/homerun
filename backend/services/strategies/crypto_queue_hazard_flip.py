@@ -15,7 +15,7 @@ from typing import Any
 from models import Market, Opportunity
 from services.data_events import DataEvent, EventType
 from services.quality_filter import QualityFilterOverrides
-from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision
+from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision, _trader_size_limits
 from services.trader_orchestrator.strategies.sizing import compute_position_size
 from utils.converters import clamp, safe_float, to_confidence, to_float
 from utils.signal_helpers import selected_probability, signal_payload
@@ -71,8 +71,6 @@ class CryptoQueueHazardFlipStrategy(BaseStrategy):
         "min_recent_move_zscore": 1.40,
         "max_spread_widening_bps": 30.0,
         "max_cancel_rate_30s": 0.78,
-        "base_size_usd": 20.0,
-        "max_size_usd": 120.0,
         "sizing_policy": "adaptive",
         "take_profit_pct": 7.5,
         "stop_loss_pct": 4.2,
@@ -221,7 +219,6 @@ class CryptoQueueHazardFlipStrategy(BaseStrategy):
         if typed_market is None:
             return None
 
-        strategy_cfg = dict(getattr(self, "config", None) or {})
         direction = str(signal["direction"])
         outcome = str(signal["outcome"])
         entry_price = float(signal["entry_price"])
@@ -278,7 +275,7 @@ class CryptoQueueHazardFlipStrategy(BaseStrategy):
             custom_roi_percent=signal["edge"],
             custom_risk_score=risk_score,
             confidence=signal["confidence"],
-            min_position_size=max(1.0, to_float(strategy_cfg.get("base_size_usd", 20.0), 20.0)),
+            min_position_size=1.0,
         )
         if opp is None:
             return None
@@ -353,8 +350,7 @@ class CryptoQueueHazardFlipStrategy(BaseStrategy):
         max_spread_widening_bps = max(0.0, to_float(params.get("max_spread_widening_bps", 30.0), 30.0))
         max_cancel_rate_30s = max(0.0, min(1.0, to_float(params.get("max_cancel_rate_30s", 0.78), 0.78)))
 
-        base_size = max(1.0, to_float(params.get("base_size_usd", 20.0), 20.0))
-        max_size = max(base_size, to_float(params.get("max_size_usd", 120.0), 120.0))
+        base_size, max_size = _trader_size_limits(context)
         sizing_policy = str(params.get("sizing_policy", "adaptive") or "adaptive")
 
         source = str(getattr(signal, "source", "") or "").strip().lower()

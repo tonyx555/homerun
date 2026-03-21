@@ -956,11 +956,13 @@ class AppSettings(Base):
     # LLM/AI Service Settings
     openai_api_key = Column(String, nullable=True)
     anthropic_api_key = Column(String, nullable=True)
-    llm_provider = Column(String, default="none")  # none, openai, anthropic, google, xai, deepseek, ollama, lmstudio
+    llm_provider = Column(String, default="none")  # none, openai, anthropic, google, xai, deepseek, openrouter, ollama, lmstudio
     llm_model = Column(String, nullable=True)
     google_api_key = Column(String, nullable=True)
     xai_api_key = Column(String, nullable=True)
     deepseek_api_key = Column(String, nullable=True)
+    openrouter_api_key = Column(String, nullable=True)
+    openrouter_base_url = Column(String, nullable=True)
     ollama_api_key = Column(String, nullable=True)
     ollama_base_url = Column(String, nullable=True)
     lmstudio_api_key = Column(String, nullable=True)
@@ -1532,7 +1534,7 @@ class LLMModelCache(Base):
     __tablename__ = "llm_model_cache"
 
     id = Column(String, primary_key=True)
-    provider = Column(String, nullable=False)  # openai, anthropic, google, xai, deepseek, ollama, lmstudio
+    provider = Column(String, nullable=False)  # openai, anthropic, google, xai, deepseek, openrouter, ollama, lmstudio
     model_id = Column(String, nullable=False)  # The model identifier used in API calls
     display_name = Column(String, nullable=True)  # Human-readable name
     created_at = Column(DateTime, default=_utcnow)
@@ -1836,7 +1838,7 @@ class LLMUsageLog(Base):
     __tablename__ = "llm_usage_log"
 
     id = Column(String, primary_key=True)
-    provider = Column(String, nullable=False)  # openai, anthropic, google, xai, deepseek, ollama, lmstudio
+    provider = Column(String, nullable=False)  # openai, anthropic, google, xai, deepseek, openrouter, ollama, lmstudio
     model = Column(String, nullable=False)
 
     # Usage

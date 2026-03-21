@@ -1,10 +1,44 @@
-"""Analytics tools — signals, decisions, trader performance, anomalies."""
+"""Analytics tools — signals, decisions, trader performance, anomalies, DB queries."""
 
 from __future__ import annotations
 
+import datetime
+import decimal
 import logging
+from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Schema reference injected into query_database description so the LLM knows
+# the real table/column names instead of guessing.
+# ---------------------------------------------------------------------------
+
+_DB_SCHEMA_HINT = """
+Key tables and columns (PostgreSQL):
+
+strategies: id, slug (unique), source_key, name, description, source_code, class_name, is_system, enabled, status, error_message, config (JSON), config_schema (JSON), aliases, version, sort_order, created_at, updated_at
+
+traders: id, name, description, source_configs_json (JSON), risk_limits_json (JSON), metadata_json (JSON), mode, is_enabled, is_paused, interval_seconds, requested_run_at, last_run_at, next_run_at, created_at, updated_at
+
+trader_orders: id, trader_id, signal_id, decision_id, source, strategy_key, strategy_version, market_id, market_question, direction, event_id, trace_id, mode, status, notional_usd, entry_price, effective_price, edge_percent, confidence, actual_profit, reason, payload_json (JSON), error_message, created_at, executed_at, updated_at
+  -- status values: pending, submitted, filled, resolved_win, resolved_loss, closed_win, closed_loss, cancelled, failed, expired
+
+trader_decisions: id, trader_id (FK->traders), signal_id (FK->trade_signals), source, strategy_key, strategy_version, decision, reason, score, event_id, trace_id, checks_summary_json (JSON), risk_snapshot_json (JSON), payload_json (JSON), created_at
+  -- decision values: selected, skipped, blocked, failed
+
+execution_sessions: id, trader_id (FK->traders), signal_id, decision_id, source, strategy_key, strategy_version, mode, status, policy, plan_id, market_ids_json (JSON), legs_total, legs_completed, legs_failed, legs_open, requested_notional_usd, executed_notional_usd, max_unhedged_notional_usd, unhedged_notional_usd, trace_id, started_at, completed_at, expires_at, error_message, payload_json (JSON), created_at, updated_at
+
+live_trading_runtime_state: id, wallet_address, total_trades, winning_trades, losing_trades, total_volume, total_pnl, daily_volume, daily_pnl, open_positions, last_trade_at, daily_volume_reset_at, market_positions_json (JSON), pending_reconciliation_json (JSON), created_at, updated_at
+
+trade_signals: id, source, market_id, market_question, direction, strategy_key, strategy_version, edge_percent, confidence, signal_strength, reason, payload_json (JSON), status, created_at, expires_at
+
+opportunities: id, market_id, condition_id, slug, question, source, strategy_key, yes_price, no_price, edge_percent, confidence, volume, liquidity, status, created_at, updated_at, resolved_at
+
+research_sessions: id, session_type, query, opportunity_id, market_id, status, result, error, iterations, tools_called, total_input_tokens, total_output_tokens, total_cost_usd, model_used, started_at, completed_at, duration_seconds
+
+Important: There is NO "trades" table. Use trader_orders for trade data. Use strategy_key (not strategy_id) to filter by strategy.
+""".strip()
 
 
 def build_tools() -> list:
@@ -19,15 +53,15 @@ def build_tools() -> list:
             ),
             parameters={"type": "object", "properties": {}, "required": []},
             handler=_get_active_signals,
-            max_calls=3,
+            max_calls=10,
             category="analytics",
         ),
         AgentTool(
             name="get_recent_decisions",
             description=(
                 "Get recent orchestrator trading decisions — what the system decided "
-                "to trade, why, and the outcome. Includes the strategy that generated "
-                "each decision and the reasoning."
+                "to trade, why, and the outcome. Queries the trader_decisions table. "
+                "Includes the strategy that generated each decision and the reasoning."
             ),
             parameters={
                 "type": "object",
@@ -41,11 +75,15 @@ def build_tools() -> list:
                         "type": "string",
                         "description": "Filter by trader/orchestrator ID (optional)",
                     },
+                    "strategy_key": {
+                        "type": "string",
+                        "description": "Filter by strategy slug/key (optional)",
+                    },
                 },
                 "required": [],
             },
             handler=_get_recent_decisions,
-            max_calls=3,
+            max_calls=10,
             category="analytics",
         ),
         AgentTool(
@@ -56,7 +94,7 @@ def build_tools() -> list:
             ),
             parameters={"type": "object", "properties": {}, "required": []},
             handler=_get_trader_overview,
-            max_calls=2,
+            max_calls=5,
             category="analytics",
         ),
         AgentTool(
@@ -68,7 +106,7 @@ def build_tools() -> list:
             ),
             parameters={"type": "object", "properties": {}, "required": []},
             handler=_detect_anomalies,
-            max_calls=2,
+            max_calls=3,
             category="analytics",
         ),
         AgentTool(
@@ -80,15 +118,15 @@ def build_tools() -> list:
             ),
             parameters={"type": "object", "properties": {}, "required": []},
             handler=_get_cross_platform_arb,
-            max_calls=2,
+            max_calls=3,
             category="analytics",
         ),
         AgentTool(
             name="query_database",
             description=(
-                "Run a read-only SQL query against the application database. "
+                "Run a read-only SQL query against the application database (PostgreSQL). "
                 "Useful for custom analytics, aggregations, or data exploration. "
-                "Only SELECT queries are allowed."
+                "Only SELECT queries are allowed.\n\n" + _DB_SCHEMA_HINT
             ),
             parameters={
                 "type": "object",
@@ -106,10 +144,28 @@ def build_tools() -> list:
                 "required": ["sql"],
             },
             handler=_query_database,
-            max_calls=5,
+            max_calls=15,
             category="analytics",
         ),
     ]
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _json_safe(obj: Any) -> Any:
+    """Recursively convert non-JSON-native types for safe serialization."""
+    if isinstance(obj, (datetime.datetime, datetime.date)):
+        return obj.isoformat()
+    if isinstance(obj, decimal.Decimal):
+        return float(obj)
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
 
 
 # ---------------------------------------------------------------------------
@@ -137,18 +193,21 @@ async def _get_active_signals(args: dict) -> dict:
 
 async def _get_recent_decisions(args: dict) -> dict:
     try:
-        from models.database import AsyncSessionLocal, LiveTradingRuntimeState
+        from models.database import AsyncSessionLocal, TraderDecision
         from sqlalchemy import select
 
         limit = args.get("limit", 20)
         trader_id = args.get("trader_id")
+        strategy_key = args.get("strategy_key")
 
         async with AsyncSessionLocal() as session:
-            q = select(LiveTradingRuntimeState).order_by(
-                LiveTradingRuntimeState.updated_at.desc()
+            q = select(TraderDecision).order_by(
+                TraderDecision.created_at.desc()
             ).limit(limit)
             if trader_id:
-                q = q.where(LiveTradingRuntimeState.trader_id == trader_id)
+                q = q.where(TraderDecision.trader_id == trader_id)
+            if strategy_key:
+                q = q.where(TraderDecision.strategy_key == strategy_key)
 
             result = await session.execute(q)
             rows = result.scalars().all()
@@ -157,9 +216,13 @@ async def _get_recent_decisions(args: dict) -> dict:
         for r in rows:
             decisions.append({
                 "id": r.id,
-                "trader_id": getattr(r, "trader_id", None),
-                "state": getattr(r, "state", None),
-                "last_run": getattr(r, "updated_at", None).isoformat() if getattr(r, "updated_at", None) else None,
+                "trader_id": r.trader_id,
+                "strategy_key": r.strategy_key,
+                "decision": r.decision,
+                "reason": r.reason,
+                "score": r.score,
+                "source": r.source,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
             })
 
         return {"decisions": decisions, "count": len(decisions)}
@@ -208,12 +271,10 @@ async def _detect_anomalies(args: dict) -> dict:
 
 async def _get_cross_platform_arb(args: dict) -> dict:
     try:
-        # Try via the discovery routes helper
         from models.database import AsyncSessionLocal
         from sqlalchemy import text
 
         async with AsyncSessionLocal() as session:
-            # Check if cross-platform data exists
             result = await session.execute(
                 text("SELECT COUNT(*) FROM discovered_wallets WHERE source = 'kalshi' LIMIT 1")
             )
@@ -229,7 +290,7 @@ async def _get_cross_platform_arb(args: dict) -> dict:
 
 
 async def _query_database(args: dict) -> dict:
-    """Execute a read-only SQL query."""
+    """Execute a read-only SQL query with datetime-safe serialization."""
     try:
         from models.database import AsyncSessionLocal
         from sqlalchemy import text
@@ -259,7 +320,7 @@ async def _query_database(args: dict) -> dict:
 
         rows = []
         for row in rows_raw[:limit]:
-            rows.append(dict(zip(columns, row)))
+            rows.append(_json_safe(dict(zip(columns, row))))
 
         return {"columns": columns, "rows": rows, "count": len(rows)}
     except Exception as exc:

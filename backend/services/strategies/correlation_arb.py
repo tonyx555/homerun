@@ -200,8 +200,6 @@ class CorrelationArbStrategy(BaseStrategy):
         "min_correlation": 0.6,
         "min_divergence": 0.05,
         "z_score_threshold": 2.0,
-        "base_size_usd": 15.0,
-        "max_size_usd": 120.0,
         "take_profit_pct": 12.0,
     }
 
@@ -209,8 +207,6 @@ class CorrelationArbStrategy(BaseStrategy):
         "min_edge_percent": 3.0,
         "min_confidence": 0.42,
         "max_risk_score": 0.75,
-        "base_size_usd": 18.0,
-        "max_size_usd": 150.0,
     }
 
     # Composable evaluate pipeline: score = edge*0.60 + conf*30 - risk*9

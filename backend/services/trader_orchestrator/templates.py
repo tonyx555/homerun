@@ -38,8 +38,6 @@ TRADER_TEMPLATES: list[dict[str, Any]] = [
                     "auto_mode_priority": ["directional", "convergence", "maker_quote"],
                     "min_edge_percent": 1.8,
                     "min_confidence": 0.42,
-                    "base_size_usd": 20.0,
-                    "max_size_usd": 150.0,
                     "max_open_order_seconds": 8.0,
                     "timeout_taker_rescue_enabled": False,
                     "timeout_taker_rescue_price_bps": 12.0,
@@ -98,8 +96,6 @@ TRADER_TEMPLATES: list[dict[str, Any]] = [
                     "enabled_sub_strategies": ["directional_edge"],
                     "min_edge_percent": 2.8,
                     "min_confidence": 0.48,
-                    "base_size_usd": 18.0,
-                    "max_size_usd": 120.0,
                     "max_open_order_seconds": 6.0,
                     "timeout_taker_rescue_enabled": True,
                     "timeout_taker_rescue_price_bps": 25.0,
@@ -134,8 +130,6 @@ TRADER_TEMPLATES: list[dict[str, Any]] = [
                     "enabled_sub_strategies": ["maker_quote"],
                     "min_edge_percent": 1.8,
                     "min_confidence": 0.38,
-                    "base_size_usd": 16.0,
-                    "max_size_usd": 100.0,
                     "max_open_order_seconds": 7.0,
                     "timeout_taker_rescue_enabled": True,
                     "timeout_taker_rescue_price_bps": 20.0,
@@ -181,8 +175,6 @@ TRADER_TEMPLATES: list[dict[str, Any]] = [
                     "yes_notional_weight": 1.0,
                     "no_notional_weight": 1.0,
                     "maker_price_offset_bps": 0.0,
-                    "base_size_usd": 24.0,
-                    "max_size_usd": 220.0,
                 },
             }
         ],
@@ -205,7 +197,6 @@ TRADER_TEMPLATES: list[dict[str, Any]] = [
                 "strategy_params": {
                     "min_edge_percent": 8.0,
                     "min_confidence": 0.55,
-                    "base_size_usd": 20.0,
                 },
             }
         ],
@@ -228,7 +219,6 @@ TRADER_TEMPLATES: list[dict[str, Any]] = [
                     "min_confidence": 0.45,
                     "max_risk_score": 0.78,
                     "min_liquidity": 25.0,
-                    "base_size_usd": 18.0,
                 },
             },
             {
@@ -240,7 +230,6 @@ TRADER_TEMPLATES: list[dict[str, Any]] = [
                     "min_model_agreement": 0.62,
                     "min_source_count": 2,
                     "max_source_spread_c": 4.0,
-                    "base_size_usd": 14.0,
                 },
             },
         ],
@@ -266,7 +255,6 @@ TRADER_TEMPLATES: list[dict[str, Any]] = [
                     "min_abs_move_5m": 1.5,
                     "sizing_policy": "kelly",
                     "kelly_fractional_scale": 0.5,
-                    "base_size_usd": 16.0,
                 },
             }
         ],
@@ -294,8 +282,6 @@ TRADER_TEMPLATES: list[dict[str, Any]] = [
                     "max_position_size": 500.0,
                     "proportional_sizing": True,
                     "proportional_multiplier": 1.0,
-                    "base_size_usd": 20.0,
-                    "max_size_usd": 1000.0,
                     "traders_scope": {
                         "modes": ["tracked", "pool"],
                         "individual_wallets": [],

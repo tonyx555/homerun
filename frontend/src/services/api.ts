@@ -1623,7 +1623,7 @@ export interface ExecutionLatencyBucket {
   wake_to_context_ready_ms: ExecutionLatencyPercentiles
   context_ready_to_decision_ms: ExecutionLatencyPercentiles
   decision_to_submit_start_ms: ExecutionLatencyPercentiles
-  submit_start_to_provider_ack_ms: ExecutionLatencyPercentiles
+  submit_round_trip_ms: ExecutionLatencyPercentiles
   emit_to_submit_start_ms: ExecutionLatencyPercentiles
 }
 
@@ -2909,6 +2909,8 @@ export interface LLMSettings {
   ollama_base_url: string | null
   lmstudio_api_key: string | null
   lmstudio_base_url: string | null
+  openrouter_api_key: string | null
+  openrouter_base_url: string | null
   model: string | null
   max_monthly_spend: number | null
   model_assignments: Record<string, string>

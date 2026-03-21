@@ -164,8 +164,6 @@ _COMMON_SCANNER_SCHEMA = {
         {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
         {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
         {"key": "max_risk_score", "label": "Max Risk Score", "type": "number", "min": 0, "max": 1},
-        {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
-        {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
     ]
 }
 
@@ -466,8 +464,6 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                 {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
                 {"key": "max_risk_score", "label": "Max Risk Score", "type": "number", "min": 0, "max": 1},
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
         },
     ),
@@ -515,8 +511,6 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                     "min": 0.05,
                     "max": 1,
                 },
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
         },
     ),
@@ -564,8 +558,6 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                     "type": "enum",
                     "options": ["fixed", "linear", "adaptive", "kelly"],
                 },
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
                 {"key": "take_profit_pct", "label": "Take Profit (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "trailing_stop_pct", "label": "Trailing Stop (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "smart_take_profit_enabled", "label": "Smart Take Profit Enabled", "type": "boolean"},
@@ -676,8 +668,6 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         config_schema={
             "param_fields": [
                 *news_edge_config_schema().get("param_fields", []),
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
         },
     ),
@@ -714,8 +704,6 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                     "max": 1,
                 },
                 {"key": "direction_guardrail_regimes", "label": "Direction Guardrail Regimes", "type": "list"},
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
         },
     ),
@@ -744,8 +732,6 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                     "min": 0.05,
                     "max": 1,
                 },
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
         },
     ),
@@ -831,8 +817,6 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                     "min": 0.05,
                     "max": 1,
                 },
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
                 {"key": "take_profit_pct", "label": "Take Profit (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "stop_loss_pct", "label": "Stop Loss (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "max_hold_minutes", "label": "Max Hold (minutes)", "type": "number", "min": 0},
@@ -868,8 +852,6 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                 {"key": "max_depth_fraction", "label": "Max Depth Fraction", "type": "number", "min": 0.001, "max": 1},
                 {"key": "probe_fraction", "label": "Probe Fraction", "type": "number", "min": 0.01, "max": 0.99},
                 {"key": "confirm_fraction", "label": "Confirm Fraction", "type": "number", "min": 0.01, "max": 0.99},
-                {"key": "base_size_usd", "label": "Target Size (USD)", "type": "number", "min": 1, "max": 10000},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
                 {"key": "max_average_entry_price", "label": "Max Average Entry Price", "type": "number", "min": 0.05, "max": 0.95},
                 {"key": "max_confirmation_no_ask", "label": "Max Confirmation NO Ask", "type": "number", "min": 0.05, "max": 0.99},
                 {"key": "min_flow_imbalance", "label": "Min Flow Imbalance", "type": "number", "min": 0, "max": 1},
@@ -902,8 +884,6 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                 },
                 {"key": "max_spread_widening_bps", "label": "Max Spread Widening (bps)", "type": "number", "min": 0},
                 {"key": "max_cancel_rate_30s", "label": "Max Cancel Rate 30s", "type": "number", "min": 0, "max": 1},
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
         },
     ),
@@ -932,8 +912,6 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                     "min": 0.05,
                     "max": 1,
                 },
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
         },
     ),
@@ -957,8 +935,6 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                     "type": "enum",
                     "options": ["fixed", "linear", "adaptive", "kelly"],
                 },
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
         },
     ),
@@ -994,8 +970,6 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                     "min": 0,
                     "max": 1,
                 },
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
         },
     ),
@@ -1077,8 +1051,6 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                     "min": 0.05,
                     "max": 1,
                 },
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
                 {"key": "max_hold_seconds", "label": "Safety Max Hold (sec)", "type": "number", "min": 5, "max": 120},
                 {"key": "max_markets_per_event", "label": "Max Markets Per Event", "type": "integer", "min": 1, "max": 20},
                 {
@@ -1135,8 +1107,6 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                 {"key": "session_timeout_seconds", "label": "Session Timeout (sec)", "type": "integer", "min": 1, "max": 1800},
                 {"key": "max_reprice_attempts", "label": "Max Reprice Attempts", "type": "integer", "min": 0, "max": 10},
                 {"key": "pair_lock", "label": "Pair Lock", "type": "boolean"},
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
         },
     ),
@@ -1194,8 +1164,6 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                     "max": 10,
                 },
                 {"key": "risk_base_score", "label": "Base Risk Score", "type": "number", "min": 0, "max": 1},
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
             ]
         },
     ),
@@ -1259,8 +1227,6 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                     "max": 1,
                 },
                 {"key": "risk_base_score", "label": "Base Risk Score", "type": "number", "min": 0, "max": 1},
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
                 *StrategySDK.trader_filter_config_schema().get("param_fields", []),
             ]
         },
@@ -1296,8 +1262,6 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                 {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
                 {"key": "max_risk_score", "label": "Max Risk Score", "type": "number", "min": 0, "max": 1},
-                {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 1000000},
-                {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 1000000},
                 {"key": "take_profit_pct", "label": "Take Profit (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "stop_loss_pct", "label": "Stop Loss (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "max_hold_minutes", "label": "Max Hold (min)", "type": "number", "min": 1, "max": 10080},

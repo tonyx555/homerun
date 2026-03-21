@@ -46,9 +46,12 @@ def build_tools() -> list:
         AgentTool(
             name="cortex_remember",
             description=(
-                "Save a new memory or update an existing one. Use this to persist "
-                "observations, lessons learned, rules you've derived, or preferences. "
-                "These memories will be available in future runs."
+                "Save a persistent memory for future agent runs. Use ONLY for durable "
+                "cross-session insights: lessons learned from mistakes, rules derived "
+                "from patterns, or user preferences. Do NOT save analysis results, "
+                "chat responses, or per-request data — those belong in the conversation, "
+                "not memory. Memory is for things that change how the agent behaves in "
+                "future conversations."
             ),
             parameters={
                 "type": "object",

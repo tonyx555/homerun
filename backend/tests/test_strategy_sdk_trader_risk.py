@@ -85,8 +85,6 @@ def test_validate_traders_copy_trade_config_normalizes_and_clamps_fields():
             "max_position_size": "2500",
             "proportional_sizing": "1",
             "proportional_multiplier": "1.75",
-            "base_size_usd": "15",
-            "max_size_usd": "10",
             "max_copy_drawdown_pct": "35",
             "max_copy_daily_loss_usd": "210.5",
             "max_copy_source_exposure_usd": "5000",
@@ -114,8 +112,6 @@ def test_validate_traders_copy_trade_config_normalizes_and_clamps_fields():
     assert cfg["max_position_size"] == 2500.0
     assert cfg["proportional_sizing"] is True
     assert cfg["proportional_multiplier"] == 1.75
-    assert cfg["base_size_usd"] == 15.0
-    assert cfg["max_size_usd"] == 15.0
     assert cfg["max_copy_drawdown_pct"] == 35.0
     assert cfg["max_copy_daily_loss_usd"] == 210.5
     assert cfg["max_copy_source_exposure_usd"] == 5000.0

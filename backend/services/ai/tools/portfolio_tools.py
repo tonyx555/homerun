@@ -20,7 +20,7 @@ def build_tools() -> list:
             ),
             parameters={"type": "object", "properties": {}, "required": []},
             handler=_get_open_positions,
-            max_calls=3,
+            max_calls=10,
             category="portfolio",
         ),
         AgentTool(
@@ -41,7 +41,7 @@ def build_tools() -> list:
                 "required": [],
             },
             handler=_get_trade_history,
-            max_calls=3,
+            max_calls=10,
             category="portfolio",
         ),
         AgentTool(
@@ -52,7 +52,7 @@ def build_tools() -> list:
             ),
             parameters={"type": "object", "properties": {}, "required": []},
             handler=_get_account_balance,
-            max_calls=3,
+            max_calls=10,
             category="portfolio",
         ),
         AgentTool(
@@ -73,7 +73,7 @@ def build_tools() -> list:
                 "required": [],
             },
             handler=_get_portfolio_performance,
-            max_calls=2,
+            max_calls=5,
             category="portfolio",
         ),
         AgentTool(
@@ -84,7 +84,7 @@ def build_tools() -> list:
             ),
             parameters={"type": "object", "properties": {}, "required": []},
             handler=_get_open_orders,
-            max_calls=3,
+            max_calls=10,
             category="portfolio",
         ),
     ]

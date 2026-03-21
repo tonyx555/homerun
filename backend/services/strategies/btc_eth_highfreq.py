@@ -37,7 +37,7 @@ import math
 
 from models import Market, Event, Opportunity
 from config import settings as _cfg
-from .base import BaseStrategy, DecisionCheck, StrategyDecision, ExitDecision
+from .base import BaseStrategy, DecisionCheck, StrategyDecision, ExitDecision, _trader_size_limits
 from services.data_events import DataEvent
 from services.strategy_sdk import StrategySDK
 from utils.converters import clamp, coerce_bool as _coerce_bool, safe_float, to_bool, to_confidence, to_float
@@ -179,8 +179,6 @@ CRYPTO_HF_SCOPE_DEFAULTS: dict[str, Any] = {
     "min_edge_percent": 3.0,
     "min_confidence": 0.42,
     "max_risk_score": 0.80,
-    "base_size_usd": 20.0,
-    "max_size_usd": 150.0,
     "include_assets": ["BTC", "ETH", "SOL", "XRP"],
     "exclude_assets": [],
     "include_timeframes": ["5m", "15m", "1h", "4h"],
@@ -448,8 +446,6 @@ CRYPTO_HF_SCOPE_CONFIG_SCHEMA: dict[str, Any] = {
         {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
         {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
         {"key": "max_risk_score", "label": "Max Risk Score", "type": "number", "min": 0, "max": 1},
-        {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 1000000},
-        {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 1000000},
         {"key": "live_window_required", "label": "Live Window Required", "type": "boolean"},
         {
             "key": "min_liquidity_usd",
@@ -3865,8 +3861,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         # --- Core thresholds ---
         min_edge = to_float(params.get("min_edge_percent", 3.0), 3.0)
         min_conf = to_confidence(params.get("min_confidence", 0.45), 0.45)
-        base_size = to_float(params.get("base_size_usd", 25.0), 25.0)
-        max_size = max(1.0, to_float(params.get("max_size_usd", base_size * 3.0), base_size * 3.0))
+        base_size, max_size = _trader_size_limits(context)
 
         # --- Direction guardrail parameters ---
         guardrail_enabled = to_bool(params.get("direction_guardrail_enabled"), True)

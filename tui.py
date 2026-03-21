@@ -351,8 +351,17 @@ def _nudge_windows_terminal_window() -> bool:
         hwnd = user32.GetForegroundWindow()
         if not hwnd:
             hwnd = kernel32.GetConsoleWindow()
-        if not hwnd or user32.IsZoomed(hwnd):
+        if not hwnd:
             return False
+        if user32.IsZoomed(hwnd):
+            # Window is maximized — un-maximize and re-maximize to force
+            # the terminal driver to re-read the actual viewport size.
+            SW_RESTORE = 9
+            SW_MAXIMIZE = 3
+            user32.ShowWindow(hwnd, SW_RESTORE)
+            time.sleep(0.03)
+            user32.ShowWindow(hwnd, SW_MAXIMIZE)
+            return True
 
         rect = RECT()
         if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
@@ -418,11 +427,9 @@ def _ensure_startup_terminal_size() -> None:
         return
     if sys.platform == "win32":
         _resize_windows_terminal_window_to_quarter_screen()
-        # Brief pause so the new window geometry propagates before we
-        # query terminal size and set the console buffer to match.
-        time.sleep(0.15)
-        cols, lines = _target_terminal_size()
-        _resize_windows_console(cols, lines)
+        # Maximize handles the window geometry; do NOT follow up with
+        # ``mode con:`` because it fights the maximized state and
+        # creates a buffer/window size mismatch (blocky scrolling).
         return
     cols, lines = _target_terminal_size()
     _resize_posix_terminal(cols, lines)

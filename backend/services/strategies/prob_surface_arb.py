@@ -113,8 +113,6 @@ class ProbSurfaceArbStrategy(BaseStrategy):
         "min_family_size": 3,
         "min_deviation_cents": 0.03,
         "min_liquidity": 500.0,
-        "base_size_usd": 15.0,
-        "max_size_usd": 150.0,
         "max_opportunities": 20,
         "take_profit_pct": 12.0,
     }
@@ -123,8 +121,6 @@ class ProbSurfaceArbStrategy(BaseStrategy):
         "min_edge_percent": 2.0,
         "min_confidence": 0.50,
         "max_risk_score": 0.75,
-        "base_size_usd": 15.0,
-        "max_size_usd": 150.0,
     }
 
     def __init__(self) -> None:

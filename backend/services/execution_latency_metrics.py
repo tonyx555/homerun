@@ -3,8 +3,12 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import time
 from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 _STAGE_KEYS = (
@@ -15,7 +19,7 @@ _STAGE_KEYS = (
     "wake_to_context_ready_ms",
     "context_ready_to_decision_ms",
     "decision_to_submit_start_ms",
-    "submit_start_to_provider_ack_ms",
+    "submit_round_trip_ms",
     "emit_to_submit_start_ms",
 )
 _MAX_SAMPLES = 5000
@@ -120,6 +124,70 @@ class ExecutionLatencyMetrics:
             "by_strategy": _trim(by_strategy),
             "by_trader": _trim(by_trader),
         }
+
+
+async def snapshot_from_events(
+    session: AsyncSession,
+    *,
+    rolling_window_seconds: int = _ROLLING_WINDOW_SECONDS,
+    max_rows: int = _MAX_SAMPLES,
+) -> dict[str, Any]:
+    """Build a latency snapshot from persisted trader_events when the in-memory buffer is empty."""
+    from models.database import TraderEvent
+
+    cutoff = datetime.now(timezone.utc) - __import__("datetime").timedelta(seconds=rolling_window_seconds)
+    stmt = (
+        select(TraderEvent)
+        .where(TraderEvent.event_type == "execution_latency")
+        .where(TraderEvent.created_at >= cutoff)
+        .order_by(TraderEvent.created_at.desc())
+        .limit(max_rows)
+    )
+    result = await session.execute(stmt)
+    rows = result.scalars().all()
+
+    samples: list[_LatencySample] = []
+    for row in rows:
+        payload = row.payload_json if isinstance(row.payload_json, dict) else {}
+        latency = payload.get("latency") if isinstance(payload.get("latency"), dict) else payload
+        trader_id = str(row.trader_id or "").strip()
+        source = str(row.source or "").strip().lower()
+        strategy_key = str(payload.get("strategy_key") or "").strip().lower()
+        samples.append(
+            _LatencySample(
+                trader_id=trader_id,
+                source=source,
+                strategy_key=strategy_key,
+                recorded_at_epoch=row.created_at.replace(tzinfo=timezone.utc).timestamp() if row.created_at else 0.0,
+                payload=latency,
+            )
+        )
+
+    by_source: dict[str, list[_LatencySample]] = {}
+    by_strategy: dict[str, list[_LatencySample]] = {}
+    by_trader: dict[str, list[_LatencySample]] = {}
+    for sample in samples:
+        if sample.source:
+            by_source.setdefault(sample.source, []).append(sample)
+        if sample.strategy_key:
+            by_strategy.setdefault(sample.strategy_key, []).append(sample)
+        if sample.trader_id:
+            by_trader.setdefault(sample.trader_id, []).append(sample)
+
+    def _trim(groups: dict[str, list[_LatencySample]]) -> dict[str, Any]:
+        ranked = sorted(groups.items(), key=lambda item: len(item[1]), reverse=True)[:_PER_GROUP_LIMIT]
+        return {key: _stage_summary(rows) for key, rows in ranked}
+
+    return {
+        "internal_sla_definition": "ws_release_at->submit_started_at",
+        "internal_sla_target_ms": 200,
+        "rolling_window_seconds": rolling_window_seconds,
+        "sample_count": len(samples),
+        "overall": _stage_summary(samples),
+        "by_source": _trim(by_source),
+        "by_strategy": _trim(by_strategy),
+        "by_trader": _trim(by_trader),
+    }
 
 
 execution_latency_metrics = ExecutionLatencyMetrics()

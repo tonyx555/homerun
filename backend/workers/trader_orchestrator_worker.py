@@ -34,7 +34,6 @@ from models.database import (
 from services.trader_orchestrator.live_market_context import (
     RuntimeTradeSignalView,
     build_cached_live_signal_contexts,
-    build_live_signal_contexts,
 )
 from services.trader_orchestrator.session_engine import ExecutionSessionEngine
 from services.trader_orchestrator.position_lifecycle import (
@@ -546,7 +545,7 @@ async def get_daily_realized_pnl(session, *, trader_id=None, mode=None):
 
 
 async def get_unrealized_pnl(session, *, trader_id=None, mode=None):
-    return await hot_state.get_unrealized_pnl(trader_id, mode or "live")
+    return await hot_state.get_unrealized_pnl(trader_id, mode or "live", ws_only=True)
 
 
 async def get_consecutive_loss_count(session, *, trader_id, mode=None, limit=100, since=None):
@@ -1282,7 +1281,7 @@ def _build_execution_latency_sample(
     context_ready_at: datetime,
     decision_ready_at: datetime,
     submit_started_at: datetime | None = None,
-    submit_ack_at: datetime | None = None,
+    submit_completed_at: datetime | None = None,
 ) -> dict[str, Any]:
     payload = getattr(signal, "payload_json", None)
     payload = payload if isinstance(payload, dict) else {}
@@ -1302,7 +1301,7 @@ def _build_execution_latency_sample(
         "wake_to_context_ready_ms": _delta_ms(wake_started_at, context_ready_at),
         "context_ready_to_decision_ms": _delta_ms(context_ready_at, decision_ready_at),
         "decision_to_submit_start_ms": _delta_ms(decision_ready_at, submit_started_at),
-        "submit_start_to_provider_ack_ms": _delta_ms(submit_started_at, submit_ack_at),
+        "submit_round_trip_ms": _delta_ms(submit_started_at, submit_completed_at),
         "emit_to_submit_start_ms": _delta_ms(emitted_at, submit_started_at),
     }
     return sample
@@ -4348,30 +4347,6 @@ async def _run_trader_once(
                 ),
             )
         )
-        history_window_seconds = int(
-            max(
-                300,
-                min(
-                    21600,
-                    safe_int(
-                        live_market_context_settings.get("history_window_seconds"),
-                        int(DEFAULT_LIVE_MARKET_CONTEXT["history_window_seconds"]),
-                    ),
-                ),
-            )
-        )
-        history_fidelity_seconds = int(
-            max(
-                30,
-                min(
-                    1800,
-                    safe_int(
-                        live_market_context_settings.get("history_fidelity_seconds"),
-                        int(DEFAULT_LIVE_MARKET_CONTEXT["history_fidelity_seconds"]),
-                    ),
-                ),
-            )
-        )
         max_history_points = int(
             max(
                 20,
@@ -4381,28 +4356,6 @@ async def _run_trader_once(
                         live_market_context_settings.get("max_history_points"),
                         int(DEFAULT_LIVE_MARKET_CONTEXT["max_history_points"]),
                     ),
-                ),
-            )
-        )
-        live_market_context_timeout_seconds = float(
-            max(
-                1.0,
-                min(
-                    12.0,
-                    safe_float(
-                        live_market_context_settings.get("timeout_seconds"),
-                        float(DEFAULT_LIVE_MARKET_CONTEXT["timeout_seconds"]),
-                    )
-                    or float(DEFAULT_LIVE_MARKET_CONTEXT["timeout_seconds"]),
-                ),
-            )
-        )
-        live_market_context_request_timeout_seconds = float(
-            max(
-                0.5,
-                min(
-                    4.0,
-                    live_market_context_timeout_seconds / 2.0,
                 ),
             )
         )
@@ -4443,11 +4396,15 @@ async def _run_trader_once(
                 )
         allow_averaging = bool(effective_risk_limits.get("allow_averaging", False))
 
+        # Realized PnL: instant hot-state lookups.
         global_daily_pnl = await get_daily_realized_pnl(session, trader_id=None, mode=run_mode)
         trader_daily_pnl = await get_daily_realized_pnl(session, trader_id=trader_id, mode=run_mode)
+        # Unrealized PnL: may read WS price cache — run both in parallel.
         try:
-            global_unrealized_pnl = await get_unrealized_pnl(session, trader_id=None, mode=run_mode)
-            trader_unrealized_pnl = await get_unrealized_pnl(session, trader_id=trader_id, mode=run_mode)
+            global_unrealized_pnl, trader_unrealized_pnl = await asyncio.gather(
+                get_unrealized_pnl(session, trader_id=None, mode=run_mode),
+                get_unrealized_pnl(session, trader_id=trader_id, mode=run_mode),
+            )
         except Exception as exc:
             logger.warning(
                 "Failed to load unrealized PnL for trader cycle; using zero fallback",
@@ -4767,59 +4724,25 @@ async def _run_trader_once(
                             max_history_points=max_history_points,
                             strict_ws_only=True,
                         )
-                    elif stream_trigger_mode:
+                    elif context_candidates:
+                        # WS-cache only — never block the hot path on HTTP
+                        # fallback calls to Polymarket.  Signals already carry
+                        # prices from their source workers; the WS cache just
+                        # provides a fresher snapshot when available.
                         live_contexts = await build_cached_live_signal_contexts(
                             context_candidates,
                             max_history_points=max_history_points,
                             strict_ws_only=False,
                         )
-                        if len(live_contexts) < len(context_candidates):
-                            async with release_conn(session):
-                                live_contexts = await asyncio.wait_for(
-                                    build_live_signal_contexts(
-                                        context_candidates,
-                                        history_window_seconds=history_window_seconds,
-                                        history_fidelity_seconds=history_fidelity_seconds,
-                                        max_history_points=max_history_points,
-                                        market_fetch_timeout_seconds=live_market_context_request_timeout_seconds,
-                                        prices_batch_timeout_seconds=live_market_context_request_timeout_seconds,
-                                        history_fetch_timeout_seconds=live_market_context_request_timeout_seconds,
-                                        strict_ws_only=False,
-                                    ),
-                                    timeout=live_market_context_timeout_seconds,
-                                )
-                    elif context_candidates:
-                        async with release_conn(session):
-                            live_contexts = await asyncio.wait_for(
-                                build_live_signal_contexts(
-                                    context_candidates,
-                                    history_window_seconds=history_window_seconds,
-                                    history_fidelity_seconds=history_fidelity_seconds,
-                                    max_history_points=max_history_points,
-                                    market_fetch_timeout_seconds=live_market_context_request_timeout_seconds,
-                                    prices_batch_timeout_seconds=live_market_context_request_timeout_seconds,
-                                    history_fetch_timeout_seconds=live_market_context_request_timeout_seconds,
-                                    strict_ws_only=False,
-                                ),
-                                timeout=live_market_context_timeout_seconds,
-                            )
                     if fallback_candidates:
                         try:
-                            async with release_conn(session):
-                                fallback_contexts = await asyncio.wait_for(
-                                    build_live_signal_contexts(
-                                        fallback_candidates,
-                                        history_window_seconds=history_window_seconds,
-                                        history_fidelity_seconds=history_fidelity_seconds,
-                                        max_history_points=max_history_points,
-                                        market_fetch_timeout_seconds=live_market_context_request_timeout_seconds,
-                                        prices_batch_timeout_seconds=live_market_context_request_timeout_seconds,
-                                        history_fetch_timeout_seconds=live_market_context_request_timeout_seconds,
-                                        strict_ws_only=False,
-                                    ),
-                                    timeout=live_market_context_timeout_seconds,
+                            live_contexts.update(
+                                await build_cached_live_signal_contexts(
+                                    fallback_candidates,
+                                    max_history_points=max_history_points,
+                                    strict_ws_only=False,
                                 )
-                            live_contexts.update(fallback_contexts)
+                            )
                         except asyncio.CancelledError:
                             raise
                         except Exception as fb_exc:
@@ -5995,7 +5918,7 @@ async def _run_trader_once(
                             context_ready_at=context_ready_at,
                             decision_ready_at=decision_ready_at,
                             submit_started_at=submit_started_at,
-                            submit_ack_at=submit_completed_at,
+                            submit_completed_at=submit_completed_at,
                         )
                         await execution_latency_metrics.record(
                             trader_id=trader_id,
@@ -6012,7 +5935,7 @@ async def _run_trader_once(
                                 "wake_to_context_ready_ms": latency_sample.get("wake_to_context_ready_ms"),
                                 "context_ready_to_decision_ms": latency_sample.get("context_ready_to_decision_ms"),
                                 "decision_to_submit_start_ms": latency_sample.get("decision_to_submit_start_ms"),
-                                "submit_start_to_provider_ack_ms": latency_sample.get("submit_start_to_provider_ack_ms"),
+                                "submit_round_trip_ms": latency_sample.get("submit_round_trip_ms"),
                                 "emit_to_submit_start_ms": latency_sample.get("emit_to_submit_start_ms"),
                             }
                         )
@@ -6026,7 +5949,7 @@ async def _run_trader_once(
                                 "Hot-path execution latency "
                                 f"armed_to_release_ms={submit_latency_payload.get('armed_to_ws_release_ms', 'unknown')} "
                                 f"release_to_submit_ms={submit_latency_payload.get('ws_release_to_submit_start_ms', 'unknown')} "
-                                f"provider_ack_ms={submit_latency_payload.get('submit_start_to_provider_ack_ms', 'unknown')}"
+                                f"submit_round_trip_ms={submit_latency_payload.get('submit_round_trip_ms', 'unknown')}"
                             ),
                             payload={
                                 "decision_id": decision_row.id,

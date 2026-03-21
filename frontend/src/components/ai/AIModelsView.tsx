@@ -1,18 +1,20 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { RefreshCw, Save, Cpu, CheckCircle } from 'lucide-react'
+import { RefreshCw, Save, Cpu, CheckCircle, Check, ChevronsUpDown } from 'lucide-react'
 import { cn } from '../../lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card'
 import { Button } from '../ui/button'
 import { Badge } from '../ui/badge'
 import { Switch } from '../ui/switch'
+import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover'
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '../ui/select'
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from '../ui/command'
 import {
   getSettings,
   updateSettings,
@@ -37,6 +39,64 @@ const PURPOSES: PurposeConfig[] = [
   { key: 'agent_execution', label: 'Agent Execution', description: 'Used when running AI agents' },
   { key: 'strategy_intelligence', label: 'Strategy Intelligence', description: 'Used for custom strategy LLM calls' },
 ]
+
+function ModelCombobox({
+  models,
+  value,
+  onChange,
+}: {
+  models: LLMModelOption[]
+  value: string
+  onChange: (v: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const selected = value === '__default__' ? null : models.find(m => m.id === value)
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          variant="outline"
+          role="combobox"
+          aria-expanded={open}
+          className="w-full justify-between bg-muted/60 border-border text-xs h-8 font-normal"
+        >
+          <span className="truncate text-left">
+            {selected ? selected.name : value === '__default__' ? 'Default' : value || 'Default'}
+          </span>
+          <ChevronsUpDown className="ml-2 h-3 w-3 shrink-0 opacity-50" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-[300px] p-0" align="start">
+        <Command>
+          <CommandInput placeholder="Search models..." className="h-8 text-xs" />
+          <CommandList>
+            <CommandEmpty>No models found.</CommandEmpty>
+            <CommandGroup className="max-h-[250px] overflow-auto">
+              <CommandItem
+                value="Default primary model"
+                onSelect={() => { onChange('__default__'); setOpen(false) }}
+              >
+                <Check className={cn('mr-2 h-3 w-3', value === '__default__' ? 'opacity-100' : 'opacity-0')} />
+                <span className="text-muted-foreground">Default</span>
+              </CommandItem>
+              {models.map(m => (
+                <CommandItem
+                  key={m.id}
+                  value={m.name}
+                  onSelect={() => { onChange(m.id); setOpen(false) }}
+                >
+                  <Check className={cn('mr-2 h-3 w-3', value === m.id ? 'opacity-100' : 'opacity-0')} />
+                  <span className="truncate text-xs">{m.name}</span>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
+  )
+}
 
 export default function AIModelsView() {
   const queryClient = useQueryClient()
@@ -85,17 +145,20 @@ export default function AIModelsView() {
   }, [settings])
 
   // Flatten all models from all providers into one list
-  const allModels: LLMModelOption[] = []
-  if (modelsData?.models) {
-    for (const providerModels of Object.values(modelsData.models)) {
-      for (const m of providerModels) {
-        if (!allModels.some(x => x.id === m.id)) {
-          allModels.push(m)
+  const allModels = useMemo(() => {
+    const models: LLMModelOption[] = []
+    if (modelsData?.models) {
+      for (const providerModels of Object.values(modelsData.models)) {
+        for (const m of providerModels) {
+          if (!models.some(x => x.id === m.id)) {
+            models.push(m)
+          }
         }
       }
     }
-  }
-  allModels.sort((a, b) => a.name.localeCompare(b.name))
+    models.sort((a, b) => a.name.localeCompare(b.name))
+    return models
+  }, [modelsData])
 
   const handleModelChange = (purposeKey: string, modelId: string) => {
     setModelAssignments(prev => {
@@ -179,25 +242,12 @@ export default function AIModelsView() {
                       <p className="text-[11px] text-muted-foreground">{purpose.description}</p>
                     </div>
 
-                    {/* Model dropdown */}
-                    <Select
+                    {/* Model dropdown with search */}
+                    <ModelCombobox
+                      models={allModels}
                       value={currentModel || '__default__'}
-                      onValueChange={(val) => handleModelChange(purpose.key, val)}
-                    >
-                      <SelectTrigger className="h-8 text-xs bg-muted/60 border-border">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="__default__">
-                          <span className="text-muted-foreground">Default</span>
-                        </SelectItem>
-                        {allModels.map(m => (
-                          <SelectItem key={m.id} value={m.id}>
-                            {m.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                      onChange={(val) => handleModelChange(purpose.key, val)}
+                    />
 
                     {/* Toggle */}
                     <div className="flex justify-center">

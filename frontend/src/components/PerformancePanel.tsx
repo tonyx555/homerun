@@ -1563,7 +1563,8 @@ function PerformancePnlChart({
   const gradientId = mode === 'live' ? 'liveModeGradient' : 'sandboxModeGradient'
   const label = mode === 'live' ? 'Live cumulative' : 'Sandbox cumulative'
 
-  const tooltipFormatter = (value: number | string | undefined) => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tooltipFormatter = (value: any) => {
     const numericValue = Number(value)
     return [formatCurrency(Number.isFinite(numericValue) ? numericValue : 0), label] as [string, string]
   }

@@ -193,7 +193,6 @@ def test_copy_trade_signal_applies_leader_weight_and_allocation_cap_to_size():
             "leader_allocation_cap_pct": 60.0,
             "proportional_multiplier": 2.0,
             "max_position_size": 1000.0,
-            "max_size_usd": 1000.0,
         }
     )
     context["copy_allocation_context"] = {
@@ -232,7 +231,6 @@ def test_copy_trade_live_sell_allows_partial_inventory_when_enabled():
             "min_inventory_fraction": 0.2,
             "proportional_multiplier": 1.0,
             "max_position_size": 1000.0,
-            "max_size_usd": 1000.0,
         }
     )
     context["copy_inventory_context"] = {

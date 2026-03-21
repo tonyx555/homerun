@@ -122,8 +122,6 @@ class HoldingRewardYieldStrategy(BaseStrategy):
         "min_liquidity": 5000.0,
         "min_days_to_resolution": 30.0,
         "max_opportunities": 20,
-        "base_size_usd": 50.0,
-        "max_size_usd": 500.0,
         "min_edge_percent": 1.0,
         "min_confidence": 0.30,
         "max_risk_score": 0.75,

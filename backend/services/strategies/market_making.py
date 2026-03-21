@@ -71,8 +71,6 @@ class MarketMakingStrategy(BaseStrategy):
         "min_volume_24h": 1000.0,
         "gamma": 0.1,
         "max_inventory_usd": 500.0,
-        "base_size_usd": 50.0,
-        "max_size_usd": 500.0,
         "take_profit_pct": 8.0,
         "inventory_skew_gamma": 0.1,
         "vol_spread_multiplier": 2.0,
@@ -86,8 +84,6 @@ class MarketMakingStrategy(BaseStrategy):
         "min_edge_percent": 2.5,
         "min_confidence": 0.40,
         "max_risk_score": 0.78,
-        "base_size_usd": 14.0,
-        "max_size_usd": 100.0,
     }
 
     # Composable evaluate pipeline: score = edge*0.50 + conf*28 + liq_score*6 - risk*8

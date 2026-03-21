@@ -81,13 +81,17 @@ class LLMSettings(BaseModel):
 
     provider: str = Field(
         default="none",
-        description="LLM provider: none, openai, anthropic, google, xai, deepseek, ollama, lmstudio",
+        description="LLM provider: none, openai, anthropic, google, xai, deepseek, openrouter, ollama, lmstudio",
     )
     openai_api_key: Optional[str] = Field(default=None, description="OpenAI API key")
     anthropic_api_key: Optional[str] = Field(default=None, description="Anthropic API key")
     google_api_key: Optional[str] = Field(default=None, description="Google (Gemini) API key")
     xai_api_key: Optional[str] = Field(default=None, description="xAI (Grok) API key")
     deepseek_api_key: Optional[str] = Field(default=None, description="DeepSeek API key")
+    openrouter_api_key: Optional[str] = Field(default=None, description="OpenRouter API key")
+    openrouter_base_url: Optional[str] = Field(
+        default=None, description="OpenRouter base URL (default: https://openrouter.ai/api/v1)"
+    )
     ollama_api_key: Optional[str] = Field(default=None, description="Ollama API key (optional)")
     ollama_base_url: Optional[str] = Field(
         default=None, description="Ollama base URL (default: http://localhost:11434)"
@@ -765,7 +769,7 @@ SETTINGS_TRANSFER_CATEGORY_ORDER: tuple[str, ...] = (
 )
 
 _ALLOWED_DATA_SOURCE_KINDS = {"python", "rss", "rest_api", "twitter"}
-_ALLOWED_LLM_PROVIDERS = {"none", "openai", "anthropic", "google", "xai", "deepseek", "ollama", "lmstudio"}
+_ALLOWED_LLM_PROVIDERS = {"none", "openai", "anthropic", "google", "xai", "deepseek", "openrouter", "ollama", "lmstudio"}
 
 
 class SettingsExportRequest(BaseModel):
@@ -1274,6 +1278,8 @@ async def _export_transfer_bundle(categories: list[str]) -> tuple[dict[str, Any]
                 "google_api_key": decrypt_secret(settings_row.google_api_key),
                 "xai_api_key": decrypt_secret(settings_row.xai_api_key),
                 "deepseek_api_key": decrypt_secret(settings_row.deepseek_api_key),
+                "openrouter_api_key": decrypt_secret(settings_row.openrouter_api_key),
+                "openrouter_base_url": _coerce_string(settings_row.openrouter_base_url),
                 "ollama_api_key": decrypt_secret(settings_row.ollama_api_key),
                 "ollama_base_url": _coerce_string(settings_row.ollama_base_url),
                 "lmstudio_api_key": decrypt_secret(settings_row.lmstudio_api_key),
@@ -1360,6 +1366,7 @@ def _apply_llm_configuration_import(settings_row: AppSettings, payload: dict[str
     settings_row.llm_model = _coerce_string(payload.get("model"))
     settings_row.ai_default_model = _coerce_string(payload.get("model"))
     settings_row.ai_max_monthly_spend = monthly_spend
+    settings_row.openrouter_base_url = _coerce_string(payload.get("openrouter_base_url"))
     settings_row.ollama_base_url = _coerce_string(payload.get("ollama_base_url"))
     settings_row.lmstudio_base_url = _coerce_string(payload.get("lmstudio_base_url"))
 
@@ -1368,6 +1375,7 @@ def _apply_llm_configuration_import(settings_row: AppSettings, payload: dict[str
     set_encrypted_secret(settings_row, "google_api_key", _coerce_string(payload.get("google_api_key")))
     set_encrypted_secret(settings_row, "xai_api_key", _coerce_string(payload.get("xai_api_key")))
     set_encrypted_secret(settings_row, "deepseek_api_key", _coerce_string(payload.get("deepseek_api_key")))
+    set_encrypted_secret(settings_row, "openrouter_api_key", _coerce_string(payload.get("openrouter_api_key")))
     set_encrypted_secret(settings_row, "ollama_api_key", _coerce_string(payload.get("ollama_api_key")))
     set_encrypted_secret(settings_row, "lmstudio_api_key", _coerce_string(payload.get("lmstudio_api_key")))
 
@@ -2949,7 +2957,7 @@ async def test_llm_connection(provider: Optional[str] = None):
         manager_provider = provider_name or None
         if provider_name in {"", "none"}:
             manager_provider = None
-        elif provider_name not in {"openai", "anthropic", "google", "xai", "deepseek", "ollama", "lmstudio"}:
+        elif provider_name not in {"openai", "anthropic", "google", "xai", "deepseek", "openrouter", "ollama", "lmstudio"}:
             return {
                 "status": "error",
                 "message": f"Unsupported LLM provider '{provider_name}'.",

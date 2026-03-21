@@ -22,6 +22,7 @@ from services.strategies.base import (
     ExitDecision,
     ScoringWeights,
     SizingConfig,
+    _trader_size_limits,
 )
 import logging
 
@@ -53,8 +54,6 @@ class FlashCrashReversionStrategy(BaseStrategy):
         "min_edge_percent": 3.0,
         "min_confidence": 0.40,
         "max_risk_score": 0.80,
-        "base_size_usd": 16.0,
-        "max_size_usd": 130.0,
     }
 
     # Composable evaluate pipeline: score = edge*0.65 + conf*30 + liq_score*8 - risk*10
@@ -565,8 +564,7 @@ class FlashCrashReversionStrategy(BaseStrategy):
         min_edge = to_float(params.get("min_edge_percent", 3.0), 3.0)
         min_conf = to_confidence(params.get("min_confidence", 0.40), 0.40)
         max_risk = to_confidence(params.get("max_risk_score", 0.80), 0.80)
-        base_size = max(1.0, to_float(params.get("base_size_usd", 16.0), 16.0))
-        max_size = max(base_size, to_float(params.get("max_size_usd", 130.0), 130.0))
+        base_size, max_size = _trader_size_limits(context)
         sizing_policy = str(params.get("sizing_policy", "kelly") or "kelly")
         kelly_fractional_scale = to_float(params.get("kelly_fractional_scale", 0.5), 0.5)
 

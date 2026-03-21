@@ -155,8 +155,6 @@ class TemporalDecayStrategy(BaseStrategy):
         "shock_max_retrace": 0.12,
         "shock_min_favored_price": 0.55,
         "shock_target_certainty": 0.96,
-        "base_size_usd": 16.0,
-        "max_size_usd": 140.0,
         "take_profit_pct": 10.0,
         "stop_loss_pct": 25.0,
         "trailing_stop_pct": 15.0,

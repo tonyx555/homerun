@@ -33,8 +33,6 @@ LATE_FAVORITE_ALPHA_DEFAULTS: dict[str, Any] = {
     "min_edge_percent": 1.0,
     "min_confidence": 0.42,
     "max_risk_score": 0.78,
-    "base_size_usd": 20.0,
-    "max_size_usd": 140.0,
     "min_favorite_prob": 0.58,
     "max_favorite_prob": 0.88,
     "min_hours_to_resolution": 0.25,
@@ -86,8 +84,6 @@ LATE_FAVORITE_ALPHA_CONFIG_SCHEMA: dict[str, Any] = {
         {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
         {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
         {"key": "max_risk_score", "label": "Max Risk Score", "type": "number", "min": 0, "max": 1},
-        {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 1000000},
-        {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 1000000},
         {"key": "take_profit_pct", "label": "Take Profit (%)", "type": "number", "min": 0, "max": 100},
         {"key": "stop_loss_pct", "label": "Stop Loss (%)", "type": "number", "min": 0, "max": 100},
         {"key": "max_hold_minutes", "label": "Max Hold (Minutes)", "type": "number", "min": 1, "max": 10080},
@@ -129,11 +125,6 @@ def validate_late_favorite_alpha_config(config: Any) -> dict[str, Any]:
     cfg["min_edge_percent"] = _coerce_float(cfg.get("min_edge_percent"), 1.0, 0.0, 100.0)
     cfg["min_confidence"] = _coerce_float(cfg.get("min_confidence"), 0.42, 0.0, 1.0)
     cfg["max_risk_score"] = _coerce_float(cfg.get("max_risk_score"), 0.78, 0.0, 1.0)
-    cfg["base_size_usd"] = _coerce_float(cfg.get("base_size_usd"), 20.0, 1.0, 1_000_000.0)
-    cfg["max_size_usd"] = _coerce_float(cfg.get("max_size_usd"), cfg["base_size_usd"], 1.0, 1_000_000.0)
-    if cfg["max_size_usd"] < cfg["base_size_usd"]:
-        cfg["max_size_usd"] = cfg["base_size_usd"]
-
     cfg["min_favorite_prob"] = _coerce_float(cfg.get("min_favorite_prob"), 0.58, 0.5, 0.99)
     cfg["max_favorite_prob"] = _coerce_float(cfg.get("max_favorite_prob"), 0.88, cfg["min_favorite_prob"] + 0.01, 0.995)
     if cfg["max_favorite_prob"] <= cfg["min_favorite_prob"]:
@@ -202,8 +193,6 @@ class LateFavoriteAlphaStrategy(BaseStrategy):
         "min_edge_percent": 1.0,
         "min_confidence": 0.42,
         "max_risk_score": 0.78,
-        "base_size_usd": 20.0,
-        "max_size_usd": 140.0,
     }
 
     def __init__(self) -> None:

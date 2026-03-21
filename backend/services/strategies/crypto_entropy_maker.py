@@ -15,7 +15,7 @@ from typing import Any
 from models import Market, Opportunity
 from services.data_events import DataEvent, EventType
 from services.quality_filter import QualityFilterOverrides
-from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision
+from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision, _trader_size_limits
 from services.trader_orchestrator.strategies.sizing import compute_position_size
 from utils.converters import clamp, safe_float, to_confidence, to_float
 from utils.signal_helpers import selected_probability, signal_payload
@@ -79,8 +79,6 @@ class CryptoEntropyMakerStrategy(BaseStrategy):
         "min_liquidity_usd": 1000.0,
         "max_entry_price": 0.92,
         "max_markets_per_event": 24,
-        "base_size_usd": 16.0,
-        "max_size_usd": 130.0,
         "min_order_size_usd": 2.0,
         "sizing_policy": "adaptive",
         "take_profit_pct": 6.5,
@@ -380,8 +378,7 @@ class CryptoEntropyMakerStrategy(BaseStrategy):
         max_cancel_rate_30s = max(0.0, min(1.0, to_float(params.get("max_cancel_rate_30s", 0.75), 0.75)))
         min_liquidity_usd = max(0.0, to_float(params.get("min_liquidity_usd", 1000.0), 1000.0))
 
-        base_size = max(1.0, to_float(params.get("base_size_usd", 16.0), 16.0))
-        max_size = max(base_size, to_float(params.get("max_size_usd", 130.0), 130.0))
+        base_size, max_size = _trader_size_limits(context)
         sizing_policy = str(params.get("sizing_policy", "adaptive") or "adaptive")
 
         source = str(getattr(signal, "source", "") or "").strip().lower()

@@ -78,14 +78,11 @@ def test_traders_copy_trade_defaults_and_validation_delegate_to_strategy_module(
         {
             "min_confidence": "0.7",
             "max_signal_age_seconds": "99",
-            "base_size_usd": "100",
-            "max_size_usd": "10",
             "retention_window": "2h",
         }
     )
     assert validated["min_confidence"] == 0.7
     assert validated["max_signal_age_seconds"] == 5
-    assert validated["max_size_usd"] >= validated["base_size_usd"]
     assert validated["retention_max_age_minutes"] == 120
 
 
@@ -113,8 +110,6 @@ def test_validate_late_favorite_alpha_config_clamps_ranges_and_retention():
             "max_favorite_prob": "0.70",
             "min_hours_to_resolution": "4",
             "max_hours_to_resolution": "2",
-            "base_size_usd": "200",
-            "max_size_usd": "100",
             "retention_window": "90m",
             "max_opportunities": "120",
         }
@@ -122,7 +117,6 @@ def test_validate_late_favorite_alpha_config_clamps_ranges_and_retention():
     assert cfg["min_favorite_prob"] == 0.74
     assert cfg["max_favorite_prob"] > cfg["min_favorite_prob"]
     assert cfg["max_hours_to_resolution"] > cfg["min_hours_to_resolution"]
-    assert cfg["max_size_usd"] >= cfg["base_size_usd"]
     assert cfg["retention_max_age_minutes"] == 90
     assert cfg["max_opportunities"] == 120
 
@@ -139,8 +133,6 @@ def test_crypto_highfreq_scope_schema_contains_include_exclude_fields():
     keys = {field.get("key") for field in schema.get("param_fields", []) if isinstance(field, dict)}
     assert "min_edge_percent" in keys
     assert "min_confidence" in keys
-    assert "base_size_usd" in keys
-    assert "max_size_usd" in keys
     assert "include_assets" in keys
     assert "exclude_assets" in keys
     assert "include_timeframes" in keys

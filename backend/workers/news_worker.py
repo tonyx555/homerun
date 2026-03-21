@@ -14,8 +14,10 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 
+from sqlalchemy import select
+
 from config import settings
-from models.database import AsyncSessionLocal, recover_pool
+from models.database import AsyncSessionLocal, Trader, recover_pool
 from services.news import shared_state
 from services.data_events import DataEvent
 from services.event_dispatcher import event_dispatcher
@@ -82,6 +84,24 @@ def _interval_from_control_and_settings(control: dict, wf_settings: dict) -> int
             ),
         )
     )
+
+
+async def _has_active_news_traders(session) -> bool:
+    """Return True if at least one enabled, non-paused trader uses a 'news' source."""
+    rows = (
+        await session.execute(
+            select(Trader.source_configs_json)
+            .where(Trader.is_enabled.is_(True))
+            .where(Trader.is_paused.is_(False))
+        )
+    ).scalars().all()
+    for source_configs_json in rows:
+        if not isinstance(source_configs_json, list):
+            continue
+        for sc in source_configs_json:
+            if isinstance(sc, dict) and str(sc.get("source_key", "")).strip().lower() == "news":
+                return True
+    return False
 
 
 def _next_scan_for_state(
@@ -209,6 +229,30 @@ async def _run_loop() -> None:
         enabled = bool(control.get("is_enabled", True)) and bool(wf_settings.get("enabled", True))
         auto_run = bool(wf_settings.get("auto_run", True))
         now = datetime.now(timezone.utc)
+
+        # Gate: skip the entire cycle if no trader is consuming news signals.
+        has_consumers = False
+        try:
+            async with AsyncSessionLocal() as session:
+                has_consumers = await _has_active_news_traders(session)
+        except Exception:
+            has_consumers = True  # fail-open so a DB hiccup doesn't permanently block
+
+        if not has_consumers:
+            try:
+                async with AsyncSessionLocal() as session:
+                    await write_worker_snapshot(
+                        session,
+                        "news",
+                        running=True,
+                        enabled=enabled and not paused,
+                        current_activity="Idle - no active news traders.",
+                        interval_seconds=interval,
+                    )
+            except Exception:
+                pass
+            await asyncio.sleep(min(30, interval))
+            continue
 
         try:
             async with AsyncSessionLocal() as session:

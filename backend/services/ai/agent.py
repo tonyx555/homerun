@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import AsyncGenerator, Callable, Optional
 
+import jsonschema
+
 from services.ai import get_llm_manager
 from services.ai.llm_provider import LLMMessage, ToolDefinition
 from services.ai.scratchpad import ScratchpadService
@@ -452,6 +454,27 @@ class Agent:
                 )
             )
             return
+
+        # Validate tool arguments against the parameter schema
+        if tool.parameters:
+            try:
+                jsonschema.validate(instance=tc.arguments, schema=tool.parameters)
+            except jsonschema.ValidationError as ve:
+                error_msg = f"Invalid arguments for tool '{tc.name}': {ve.message}"
+                logger.warning(error_msg)
+                yield AgentEvent(
+                    type=AgentEventType.TOOL_ERROR,
+                    data={"tool": tc.name, "error": error_msg},
+                )
+                self._messages.append(
+                    LLMMessage(
+                        role="tool",
+                        content=error_msg,
+                        tool_call_id=tc.id,
+                        name=tc.name,
+                    )
+                )
+                return
 
         # Execute the tool
         yield AgentEvent(

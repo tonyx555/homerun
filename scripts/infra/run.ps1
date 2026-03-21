@@ -1602,7 +1602,7 @@ Write-Host "    $([char]27)[38;2;53;212;122m██   ██ ██    ██ █
 Write-Host "    $([char]27)[38;2;88;241;193m██   ██  ██████  ██      ██ ███████ ██   ██  ██████  ██   ████$([char]27)[0m"
 Write-Host ""
 Write-Host "                    Autonomous Trading Platform" -ForegroundColor DarkGray
-Write-Host "    ─────────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
+Write-Host "    ---------------------------------------------------------------------" -ForegroundColor DarkGray
 Write-Host ""
 
 Invoke-AutoUpdateRepository

@@ -96,6 +96,98 @@
   }
 }
 
+/* -----------------------------------------------------------------------
+ * OpenUI theme sync
+ * The @openuidev/react-ui defaults.css uses @media(prefers-color-scheme)
+ * which follows the OS, not the app's .theme-light/.theme-dark class.
+ * Override OpenUI CSS custom properties so they track the app toggle.
+ * ----------------------------------------------------------------------- */
+
+/* Force light OpenUI vars when app is in light mode */
+.theme-light {
+  --openui-background: oklch(0.97 0 89.876 / 1);
+  --openui-foreground: oklch(0.994 0 89.876 / 1);
+  --openui-popover-background: oklch(0.994 0 89.876 / 1);
+  --openui-sunk-light: oklch(0.097 0 0 / 0.02);
+  --openui-sunk: oklch(0.097 0 0 / 0.04);
+  --openui-sunk-deep: oklch(0.097 0 0 / 0.08);
+  --openui-elevated-light: oklch(0.097 0 0 / 0.04);
+  --openui-elevated: oklch(0.097 0 0 / 0.08);
+  --openui-elevated-strong: oklch(0.097 0 0 / 0.16);
+  --openui-elevated-intense: oklch(0.097 0 0 / 0.32);
+  --openui-text-neutral-primary: oklch(0.097 0 0 / 1);
+  --openui-text-neutral-secondary: oklch(0.097 0 0 / 0.5);
+  --openui-text-neutral-tertiary: oklch(0.097 0 0 / 0.2);
+  --openui-text-neutral-link: oklch(0.097 0 0 / 1);
+  --openui-text-brand: oklch(0.097 0 0 / 1);
+  --openui-border-default: oklch(0.097 0 0 / 0.06);
+  --openui-border-interactive: oklch(0.097 0 0 / 0.12);
+  --openui-border-interactive-emphasis: oklch(0.097 0 0 / 0.3);
+  --openui-border-interactive-selected: oklch(0.097 0 0 / 1);
+  --openui-interactive-accent-default: oklch(0.097 0 0 / 1);
+  --openui-interactive-accent-hover: oklch(0.097 0 0 / 0.8);
+  --openui-interactive-accent-disabled: oklch(0.097 0 0 / 0.4);
+  --openui-shadow-s: 0 1px 3px -2px oklch(0 0 0 / 0.02), 0 2px 5px -2px oklch(0 0 0 / 0.04);
+  --openui-shadow-m: 0 4px 6px -2px oklch(0 0 0 / 0.025), 0 2px 2px -2px oklch(0 0 0 / 0.05);
+}
+
+/* Force dark OpenUI vars when app is in dark mode */
+.theme-dark {
+  --openui-background: oklch(0.145 0 0 / 1);
+  --openui-foreground: oklch(0.205 0 0 / 1);
+  --openui-popover-background: oklch(0.205 0 0 / 1);
+  --openui-sunk-light: oklch(0.994 0 89.876 / 0.02);
+  --openui-sunk: oklch(0.994 0 89.876 / 0.04);
+  --openui-sunk-deep: oklch(0.994 0 89.876 / 0.08);
+  --openui-elevated-light: oklch(0.994 0 89.876 / 0.04);
+  --openui-elevated: oklch(0.994 0 89.876 / 0.08);
+  --openui-elevated-strong: oklch(0.994 0 89.876 / 0.16);
+  --openui-elevated-intense: oklch(0.994 0 89.876 / 0.32);
+  --openui-text-neutral-primary: oklch(0.985 0 89.876 / 1);
+  --openui-text-neutral-secondary: oklch(0.985 0 89.876 / 0.5);
+  --openui-text-neutral-tertiary: oklch(0.985 0 89.876 / 0.2);
+  --openui-text-neutral-link: oklch(0.985 0 89.876 / 1);
+  --openui-text-brand: oklch(0.994 0 89.876 / 1);
+  --openui-border-default: oklch(0.994 0 89.876 / 0.12);
+  --openui-border-interactive: oklch(0.994 0 89.876 / 0.2);
+  --openui-border-interactive-emphasis: oklch(0.994 0 89.876 / 0.4);
+  --openui-border-interactive-selected: oklch(0.985 0 89.876 / 1);
+  --openui-interactive-accent-default: oklch(0.994 0 89.876 / 1);
+  --openui-interactive-accent-hover: oklch(0.994 0 89.876 / 0.8);
+  --openui-interactive-accent-disabled: oklch(0.994 0 89.876 / 0.4);
+  --openui-shadow-s: 0 1px 3px -2px oklch(0 0 0 / 0.06), 0 2px 5px -2px oklch(0 0 0 / 0.10);
+  --openui-shadow-m: 0 4px 6px -2px oklch(0 0 0 / 0.08), 0 2px 2px -2px oklch(0 0 0 / 0.12);
+}
+
+/* -----------------------------------------------------------------------
+ * OpenUI chart fixes
+ * The default .openui-chart-container has aspect-ratio: 1/1 which is
+ * intended for pie/radial charts but breaks 2D charts (Bar, Area, Line)
+ * inside flex layouts. Override for 2D chart wrappers.
+ * ----------------------------------------------------------------------- */
+.openui-bar-chart-container,
+.openui-area-chart-container,
+.openui-line-chart-container,
+.openui-bar-chart-condensed-container,
+.openui-area-chart-condensed-container,
+.openui-line-chart-condensed-container,
+.openui-horizontal-bar-chart-container,
+.openui-scatter-chart-container,
+.openui-radar-chart-container-wrapper {
+  width: 100%;
+}
+
+.openui-bar-chart-container .openui-chart-container,
+.openui-area-chart-container .openui-chart-container,
+.openui-line-chart-container .openui-chart-container,
+.openui-bar-chart-condensed-container .openui-chart-container,
+.openui-area-chart-condensed-container .openui-chart-container,
+.openui-line-chart-condensed-container .openui-chart-container,
+.openui-horizontal-bar-chart-container .openui-chart-container,
+.openui-scatter-chart-container .openui-chart-container {
+  aspect-ratio: auto;
+}
+
 @layer base {
   * {
     @apply border-border;

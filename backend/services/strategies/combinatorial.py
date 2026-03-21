@@ -817,8 +817,6 @@ class CombinatorialStrategy(BaseStrategy):
         "min_markets": 2,
         "medium_confidence_threshold": 0.75,
         "high_confidence_threshold": 0.90,
-        "base_size_usd": 20.0,
-        "max_size_usd": 180.0,
     }
 
     # Maximum entries in the dependency cache before LRU eviction

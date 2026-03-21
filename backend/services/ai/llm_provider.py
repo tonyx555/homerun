@@ -2,7 +2,7 @@
 Multi-provider LLM abstraction layer.
 
 Supports: OpenAI, Anthropic, Google (Gemini), xAI (Grok), DeepSeek,
-Ollama, LM Studio, and other OpenAI-compatible APIs.
+OpenRouter, Ollama, LM Studio, and other OpenAI-compatible APIs.
 
 Provider is detected by model name prefix:
 - gpt-*, o1-*, o3-*, o4-*, chatgpt-* -> OpenAI
@@ -10,6 +10,7 @@ Provider is detected by model name prefix:
 - gemini-* -> Google
 - grok-* -> xAI
 - deepseek-* -> DeepSeek
+- openrouter/* -> OpenRouter
 - ollama/* -> Ollama
 - lmstudio/* -> LM Studio
 - Any other -> selected provider, then first configured provider
@@ -148,6 +149,7 @@ class LLMProvider(str, Enum):
     GOOGLE = "google"
     XAI = "xai"
     DEEPSEEK = "deepseek"
+    OPENROUTER = "openrouter"
     OLLAMA = "ollama"
     LMSTUDIO = "lmstudio"
 
@@ -175,6 +177,8 @@ def _strip_v1_suffix(base_url: str) -> str:
 def _normalize_model_name_for_provider(model: str, provider: LLMProvider) -> str:
     """Strip optional provider prefixes from model names."""
     model_name = (model or "").strip()
+    if provider == LLMProvider.OPENROUTER and model_name.startswith("openrouter/"):
+        return model_name[len("openrouter/") :]
     if provider == LLMProvider.OLLAMA and model_name.startswith("ollama/"):
         return model_name[len("ollama/") :]
     if provider == LLMProvider.LMSTUDIO and model_name.startswith("lmstudio/"):
@@ -1801,6 +1805,82 @@ class DeepSeekProvider(BaseLLMProvider):
         return await self._delegate.structured_output(messages, schema, model, temperature)
 
 
+# ==================== OPENROUTER PROVIDER ====================
+
+
+class OpenRouterProvider(BaseLLMProvider):
+    """OpenRouter provider using OpenAI-compatible API.
+
+    OpenRouter exposes an OpenAI-compatible endpoint at https://openrouter.ai/api/v1.
+    This provider delegates to OpenAIProvider with a custom base URL.
+    """
+
+    provider = LLMProvider.OPENROUTER
+
+    def __init__(self, api_key: str, base_url: str = "https://openrouter.ai/api/v1"):
+        """Initialize the OpenRouter provider.
+
+        Args:
+            api_key: OpenRouter API key.
+            base_url: API base URL (override if self-hosting).
+        """
+        self.api_key = api_key
+        self.base_url = _ensure_openai_compatible_base_url(base_url, "https://openrouter.ai/api/v1")
+        self._delegate = OpenAIProvider(
+            api_key=api_key,
+            base_url=self.base_url,
+            model_prefixes=None,  # OpenRouter hosts models from many providers
+        )
+
+    async def list_models(self) -> list[dict[str, str]]:
+        """Fetch available models from the OpenRouter API."""
+        return await self._delegate.list_models()
+
+    async def chat(
+        self,
+        messages: list[LLMMessage],
+        model: str,
+        tools: Optional[list[ToolDefinition]] = None,
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+    ) -> LLMResponse:
+        """Send a chat completion request via the OpenRouter API.
+
+        Args:
+            messages: Conversation messages.
+            model: Model identifier (e.g. "openai/gpt-4o").
+            tools: Optional tool definitions.
+            temperature: Sampling temperature.
+            max_tokens: Maximum response tokens.
+
+        Returns:
+            LLMResponse with content and usage.
+        """
+        response = await self._delegate.chat(messages, model, tools, temperature, max_tokens)
+        response.provider = self.provider.value
+        return response
+
+    async def structured_output(
+        self,
+        messages: list[LLMMessage],
+        schema: dict,
+        model: str,
+        temperature: float = 0.0,
+    ) -> dict:
+        """Get structured JSON output from the OpenRouter API.
+
+        Args:
+            messages: Conversation messages.
+            schema: JSON Schema for the response.
+            model: Model identifier.
+            temperature: Sampling temperature.
+
+        Returns:
+            Parsed JSON dict conforming to the schema.
+        """
+        return await self._delegate.structured_output(messages, schema, model, temperature)
+
+
 # ==================== OLLAMA PROVIDER ====================
 
 
@@ -2139,6 +2219,15 @@ class LLMManager:
                     self._providers[LLMProvider.DEEPSEEK] = DeepSeekProvider(api_key=deepseek_key)
                     logger.info("Initialized DeepSeek LLM provider")
 
+                openrouter_key = decrypt_secret(app_settings.openrouter_api_key)
+                openrouter_base_url = app_settings.openrouter_base_url
+                if openrouter_key:
+                    self._providers[LLMProvider.OPENROUTER] = OpenRouterProvider(
+                        api_key=openrouter_key,
+                        base_url=openrouter_base_url or "https://openrouter.ai/api/v1",
+                    )
+                    logger.info("Initialized OpenRouter LLM provider")
+
                 enable_ollama = selected_provider == LLMProvider.OLLAMA or bool((ollama_base_url or "").strip())
                 if enable_ollama:
                     self._providers[LLMProvider.OLLAMA] = OllamaProvider(
@@ -2174,6 +2263,7 @@ class LLMManager:
                     LLMProvider.GOOGLE: "gemini-2.0-flash",
                     LLMProvider.XAI: "grok-3-mini",
                     LLMProvider.DEEPSEEK: "deepseek-chat",
+                    LLMProvider.OPENROUTER: "openrouter/auto",
                     LLMProvider.OLLAMA: "llama3.2:latest",
                     LLMProvider.LMSTUDIO: "local-model",
                 }
@@ -2289,6 +2379,8 @@ class LLMManager:
             return LLMProvider.XAI
         if model_lower.startswith("deepseek-"):
             return LLMProvider.DEEPSEEK
+        if model_lower.startswith("openrouter/"):
+            return LLMProvider.OPENROUTER
         if model_lower.startswith("ollama/"):
             return LLMProvider.OLLAMA
         if model_lower.startswith("lmstudio/"):

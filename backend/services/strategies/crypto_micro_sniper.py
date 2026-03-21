@@ -15,7 +15,7 @@ from typing import Any
 from models import Market, Opportunity
 from services.data_events import DataEvent, EventType
 from services.quality_filter import QualityFilterOverrides
-from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision
+from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision, _trader_size_limits
 from services.trader_orchestrator.strategies.sizing import compute_position_size
 from utils.converters import clamp, safe_float, to_confidence, to_float
 from utils.signal_helpers import selected_probability, signal_payload
@@ -109,8 +109,6 @@ class CryptoMicroSniperStrategy(BaseStrategy):
         "min_slippage_pct": 0.08,
         "max_markets_per_event": 24,
         "min_order_size_usd": 2.0,
-        "base_size_usd": 24.0,
-        "max_size_usd": 180.0,
         "sizing_policy": "kelly",
         "kelly_fractional_scale": 0.35,
         "take_profit_pct": 7.0,
@@ -726,8 +724,7 @@ class CryptoMicroSniperStrategy(BaseStrategy):
                 },
             )
 
-        base_size = max(1.0, to_float(cfg.get("base_size_usd", 24.0), 24.0))
-        max_size = max(base_size, to_float(cfg.get("max_size_usd", 180.0), 180.0))
+        base_size, max_size = _trader_size_limits(context)
         min_order_size_usd = max(0.01, to_float(cfg.get("min_order_size_usd", 2.0), 2.0))
         sizing_policy = str(cfg.get("sizing_policy", "kelly") or "kelly")
         kelly_fractional_scale = to_float(cfg.get("kelly_fractional_scale", 0.35), 0.35)

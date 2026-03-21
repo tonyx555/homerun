@@ -116,7 +116,7 @@ type ExecutionLatencyStageKey =
   | 'wake_to_context_ready_ms'
   | 'context_ready_to_decision_ms'
   | 'decision_to_submit_start_ms'
-  | 'submit_start_to_provider_ack_ms'
+  | 'submit_round_trip_ms'
   | 'emit_to_submit_start_ms'
 
 const TRADE_STATUS_FILTER_OPTIONS: Array<{ value: TradeStatusFilter; label: string }> = [
@@ -352,7 +352,7 @@ const LATENCY_STAGE_OPTIONS: Array<{ key: ExecutionLatencyStageKey; label: strin
   { key: 'context_ready_to_decision_ms', label: 'Context Ready -> Decision' },
   { key: 'ws_release_to_decision_ms', label: 'WS Release -> Decision' },
   { key: 'decision_to_submit_start_ms', label: 'Decision -> Submit Start' },
-  { key: 'submit_start_to_provider_ack_ms', label: 'Submit Start -> Provider Ack' },
+  { key: 'submit_round_trip_ms', label: 'Submit Round Trip' },
   { key: 'ws_release_to_submit_start_ms', label: 'WS Release -> Submit Start' },
   { key: 'emit_to_submit_start_ms', label: 'Emit -> Submit Start' },
 ]
@@ -2373,10 +2373,10 @@ function latencyStagePercentiles(
   stageKey: ExecutionLatencyStageKey
 ): { p95: number | null; p99: number | null } {
   const stage = isRecord(bucket) && isRecord(bucket[stageKey]) ? bucket[stageKey] : null
-  return {
-    p95: stage ? toNumber(stage.p95) : null,
-    p99: stage ? toNumber(stage.p99) : null,
-  }
+  if (!stage) return { p95: null, p99: null }
+  const p95 = typeof stage.p95 === 'number' && Number.isFinite(stage.p95) ? stage.p95 : null
+  const p99 = typeof stage.p99 === 'number' && Number.isFinite(stage.p99) ? stage.p99 : null
+  return { p95, p99 }
 }
 
 function formatLatencyPercentilePair(bucket: unknown, stageKey: ExecutionLatencyStageKey): string {
@@ -8841,33 +8841,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
           {showingAllBotsDashboard ? (
             <div className="flex-1 min-h-0 overflow-hidden rounded-lg border border-cyan-500/25 bg-card">
               <div className="h-full min-h-0 flex flex-col">
-                <div className="shrink-0 px-2 py-1.5">
-                  <div className="grid gap-1.5 sm:grid-cols-2 xl:grid-cols-4">
-                    <div className="rounded-md border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-1.5">
-                      <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Running Bots</p>
-                      <p className="text-sm font-mono">{runningTraderCount}/{activeTraderCount}</p>
-                      <p className="text-[10px] text-muted-foreground">Inactive {inactiveTraderCount}</p>
-                    </div>
-                    <div className="rounded-md border border-cyan-500/25 bg-cyan-500/10 px-2.5 py-1.5">
-                      <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Selected Signals</p>
-                      <p className="text-sm font-mono">{selectedDecisionCountAllBots}</p>
-                      <p className="text-[10px] text-muted-foreground">Latest {recentSelectedDecisions.length}</p>
-                    </div>
-                    <div className="rounded-md border border-border/60 bg-background/70 px-2.5 py-1.5">
-                      <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Resolved P&amp;L</p>
-                      <p className={cn('text-sm font-mono', globalSummary.resolvedPnl >= 0 ? 'text-emerald-500' : 'text-red-500')}>
-                        {formatCurrency(globalSummary.resolvedPnl)}
-                      </p>
-                      <p className="text-[10px] text-muted-foreground">WR {formatPercent(globalSummary.winRate)}</p>
-                    </div>
-                    <div className="rounded-md border border-border/60 bg-background/70 px-2.5 py-1.5">
-                      <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Exposure</p>
-                      <p className="text-sm font-mono">{formatCurrency(toNumber(metrics?.gross_exposure_usd), true)}</p>
-                      <p className="text-[10px] text-muted-foreground">{globalSummary.open} open orders</p>
-                    </div>
-                  </div>
-                </div>
-
                 <Tabs
                   value={allBotsTab}
                   onValueChange={(value) => setAllBotsTab(value as AllBotsTab)}
@@ -8884,7 +8857,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                   <TabsContent value="overview" className="mt-2 flex-1 min-h-0 overflow-hidden">
                     <div className="h-full min-h-0 grid gap-2 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
                       <div className="min-h-0 flex flex-col gap-2">
-                        <div className="grid gap-2 sm:grid-cols-2">
+                        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
                           <div className="rounded-md border border-emerald-500/25 bg-emerald-500/10 p-2.5">
                             <div className="flex items-center justify-between gap-2">
                               <div className="flex items-center gap-1.5">
@@ -9025,6 +8998,24 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                 />
                               )}
                             </div>
+                          </div>
+
+                          <div className="rounded-md border border-emerald-500/25 bg-emerald-500/10 p-2.5">
+                            <div className="flex items-center gap-1.5">
+                              <Play className="w-3.5 h-3.5 text-emerald-500" />
+                              <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Running Bots</span>
+                            </div>
+                            <p className="mt-1 text-sm font-mono">{runningTraderCount}/{activeTraderCount}</p>
+                            <p className="text-[10px] text-muted-foreground">Inactive {inactiveTraderCount}</p>
+                          </div>
+
+                          <div className="rounded-md border border-blue-500/25 bg-blue-500/10 p-2.5">
+                            <div className="flex items-center gap-1.5">
+                              <PieChart className="w-3.5 h-3.5 text-blue-500" />
+                              <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Exposure</span>
+                            </div>
+                            <p className="mt-1 text-sm font-mono">{formatCurrency(toNumber(metrics?.gross_exposure_usd), true)}</p>
+                            <p className="text-[10px] text-muted-foreground">{globalSummary.open} open orders</p>
                           </div>
                         </div>
 

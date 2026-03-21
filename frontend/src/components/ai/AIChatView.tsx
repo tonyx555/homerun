@@ -12,7 +12,7 @@ import {
 } from '@assistant-ui/react'
 import { MarkdownTextPrimitive } from '@assistant-ui/react-markdown'
 import ReactMarkdown from 'react-markdown'
-import { useMessagePartText } from '@assistant-ui/react'
+import { useMessage, useMessagePartText } from '@assistant-ui/react'
 import { Renderer } from '@openuidev/react-lang'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
@@ -319,12 +319,14 @@ function parseSegments(raw: string): ChatSegment[] {
 const OPENUI_FENCED_RE = /```openui\n([\s\S]*?)```/g
 const OPENUI_RAW_RE = /^root\s*=\s*[A-Z]\w*\(/m
 
-const PROSE_CLASSES = "text-sm text-foreground/90 leading-relaxed prose prose-invert prose-sm max-w-none prose-p:my-2 prose-headings:my-3 prose-li:my-0.5 prose-pre:bg-background/80 prose-pre:border prose-pre:border-border/40 prose-code:text-purple-700 dark:prose-code:text-purple-300 prose-code:text-xs"
+const PROSE_CLASSES = "text-sm text-foreground/90 leading-relaxed prose dark:prose-invert prose-sm max-w-none prose-p:my-2 prose-headings:my-3 prose-li:my-0.5 prose-pre:bg-background/80 prose-pre:border prose-pre:border-border/40 prose-code:text-purple-700 dark:prose-code:text-purple-300 prose-code:text-xs"
 
 /** Splits text into alternating plain-text and OpenUI blocks.
  *  Detects both ```openui fenced blocks and raw assignment blocks (root = Component(...)).
+ *  When `streaming` is true, also captures incomplete/in-progress blocks so the
+ *  Renderer can progressively display them instead of showing raw code.
  */
-function splitOpenUI(text: string): { type: 'text' | 'openui'; content: string }[] {
+function splitOpenUI(text: string, streaming = false): { type: 'text' | 'openui'; content: string }[] {
   const parts: { type: 'text' | 'openui'; content: string }[] = []
   let lastIdx = 0
   let m: RegExpExecArray | null
@@ -341,12 +343,36 @@ function splitOpenUI(text: string): { type: 'text' | 'openui'; content: string }
   }
 
   if (parts.length > 0) {
-    // Found fenced blocks — add remaining text
+    // Found complete fenced blocks — check for trailing incomplete block while streaming
     if (lastIdx < text.length) {
-      const plain = text.slice(lastIdx).trim()
-      if (plain) parts.push({ type: 'text', content: plain })
+      const tail = text.slice(lastIdx).trim()
+      if (tail) {
+        if (streaming && /```openui\n/i.test(tail)) {
+          // Incomplete fenced block still streaming — extract content after the fence
+          const innerMatch = tail.match(/```openui\n([\s\S]*)$/i)
+          if (innerMatch) {
+            parts.push({ type: 'openui', content: innerMatch[1].trim() })
+          } else {
+            parts.push({ type: 'text', content: tail })
+          }
+        } else {
+          parts.push({ type: 'text', content: tail })
+        }
+      }
     }
     return parts
+  }
+
+  // While streaming, detect an incomplete fenced block that hasn't closed yet
+  if (streaming) {
+    const incompleteFence = text.match(/^([\s\S]*?)```openui\n([\s\S]*)$/i)
+    if (incompleteFence) {
+      const before = incompleteFence[1].trim()
+      const openUIContent = incompleteFence[2].trim()
+      if (before) parts.push({ type: 'text', content: before })
+      if (openUIContent) parts.push({ type: 'openui', content: openUIContent })
+      return parts.length > 0 ? parts : [{ type: 'text', content: text }]
+    }
   }
 
   // Fallback: detect raw assignment blocks (root = Component(...) multiline blocks)
@@ -365,6 +391,18 @@ function splitOpenUI(text: string): { type: 'text' | 'openui'; content: string }
     lastIdx = m.index + m[0].length
   }
 
+  // While streaming, detect partial raw openui blocks (root = ... without complete closure)
+  if (streaming && parts.length === 0 && OPENUI_RAW_RE.test(text)) {
+    const rootIdx = text.search(/^root\s*=\s*[A-Z]\w*\(/m)
+    if (rootIdx >= 0) {
+      const before = text.slice(0, rootIdx).trim()
+      const openUIContent = text.slice(rootIdx).trim()
+      if (before) parts.push({ type: 'text', content: before })
+      parts.push({ type: 'openui', content: openUIContent })
+      return parts
+    }
+  }
+
   if (lastIdx < text.length) {
     const plain = text.slice(lastIdx).trim()
     if (plain) parts.push({ type: 'text', content: plain })
@@ -377,13 +415,17 @@ function splitOpenUI(text: string): { type: 'text' | 'openui'; content: string }
  * Renders a text block as markdown + OpenUI mixed content.
  * @param standalone — if true, uses ReactMarkdown (for extracted segment text).
  *                     if false, uses MarkdownTextPrimitive (reads from message context).
+ * @param isStreaming — if true, passes streaming state to OpenUI Renderer for progressive rendering.
  */
-function RichTextContent({ text, standalone }: { text: string; standalone?: boolean }) {
+function RichTextContent({ text, standalone, isStreaming = false }: { text: string; standalone?: boolean; isStreaming?: boolean }) {
   const hasOpenUI = OPENUI_FENCED_RE.test(text) || OPENUI_RAW_RE.test(text)
   // Reset regex lastIndex after test (they have 'g' or 'm' flags)
   OPENUI_FENCED_RE.lastIndex = 0
 
-  if (!hasOpenUI) {
+  // During streaming, also detect incomplete fenced blocks (```openui without closing ```)
+  const hasPartialOpenUI = isStreaming && !hasOpenUI && /```openui\n/i.test(text)
+
+  if (!hasOpenUI && !hasPartialOpenUI) {
     return (
       <div className={PROSE_CLASSES}>
         {standalone ? <ReactMarkdown>{text}</ReactMarkdown> : <MarkdownTextPrimitive />}
@@ -395,7 +437,7 @@ function RichTextContent({ text, standalone }: { text: string; standalone?: bool
   // Once split, each text part MUST use ReactMarkdown (not MarkdownTextPrimitive)
   // because MarkdownTextPrimitive renders the full raw message from context,
   // not just the individual part.
-  const parts = splitOpenUI(text)
+  const parts = splitOpenUI(text, isStreaming)
   return (
     <div className="space-y-2">
       {parts.map((part, i) =>
@@ -406,7 +448,7 @@ function RichTextContent({ text, standalone }: { text: string; standalone?: bool
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.2 }}
           >
-            <Renderer library={homerunLibrary} response={part.content} isStreaming={false} />
+            <Renderer library={homerunLibrary} response={part.content} isStreaming={isStreaming} />
           </motion.div>
         ) : (
           <div key={`md-${i}`} className={PROSE_CLASSES}>
@@ -421,6 +463,7 @@ function RichTextContent({ text, standalone }: { text: string; standalone?: bool
 function AssistantTextContent() {
   const part = useMessagePartText()
   const raw = part.text
+  const isStreaming = useMessage((state) => state.status.type === 'running')
 
   // If no structured segments, render as rich text using MarkdownTextPrimitive (context-aware)
   if (!raw.includes('\u00AB\u00ABSEG:')) {
@@ -430,7 +473,7 @@ function AssistantTextContent() {
         animate={{ opacity: 1 }}
         transition={{ duration: 0.15 }}
       >
-        <RichTextContent text={raw} standalone={false} />
+        <RichTextContent text={raw} standalone={false} isStreaming={isStreaming} />
       </motion.div>
     )
   }
@@ -515,7 +558,7 @@ function AssistantTextContent() {
                   transition={{ duration: 0.3, ease: 'easeOut' }}
                   className="mt-2"
                 >
-                  <RichTextContent text={s.text} standalone={true} />
+                  <RichTextContent text={s.text} standalone={true} isStreaming={isStreaming} />
                 </motion.div>
               )
             default:

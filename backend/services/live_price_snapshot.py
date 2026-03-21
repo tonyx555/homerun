@@ -259,11 +259,15 @@ async def get_live_mid_prices(
     token_ids: Iterable[object],
     *,
     ttl_seconds: float = DEFAULT_PRICE_TTL_SECONDS,
+    ws_only: bool = False,
 ) -> dict[str, float]:
     """Return live-ish CLOB midpoint prices keyed by normalized token id.
 
     Uses a short-lived in-memory cache to avoid hammering CLOB endpoints when
     the UI refreshes frequently across multiple views.
+
+    When *ws_only* is True the HTTP fallback to Polymarket is skipped entirely,
+    making this function non-blocking and safe for the trader hot path.
     """
     normalized_tokens: list[str] = []
     seen: set[str] = set()
@@ -316,7 +320,7 @@ async def get_live_mid_prices(
         pass
 
     provider_missing = [token_id for token_id in missing_tokens if token_id not in fetched_prices]
-    if provider_missing:
+    if provider_missing and not ws_only:
         try:
             payload = await polymarket_client.get_prices_batch(provider_missing)
         except Exception:

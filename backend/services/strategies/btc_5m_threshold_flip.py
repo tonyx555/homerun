@@ -7,7 +7,7 @@ from typing import Any
 from models import Market, Opportunity
 from services.data_events import DataEvent, EventType
 from services.strategy_sdk import StrategySDK
-from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision
+from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision, _trader_size_limits
 from utils.converters import clamp, safe_float, to_float
 from utils.logger import get_logger
 from utils.signal_helpers import signal_payload
@@ -192,8 +192,6 @@ class BTC5mThresholdFlipStrategy(BaseStrategy):
         "max_depth_fraction": 0.05,
         "probe_fraction": 0.25,
         "confirm_fraction": 0.75,
-        "base_size_usd": 40.0,
-        "max_size_usd": 125.0,
         "max_average_entry_price": 0.42,
         "max_confirmation_no_ask": 0.58,
         "min_flow_imbalance": 0.0,
@@ -972,8 +970,7 @@ class BTC5mThresholdFlipStrategy(BaseStrategy):
 
         trader_context = context.get("trader")
         risk_limits = trader_context.get("risk_limits") if isinstance(trader_context, dict) and isinstance(trader_context.get("risk_limits"), dict) else {}
-        base_target = max(1.0, to_float(cfg.get("base_size_usd", 40.0), 40.0))
-        max_size = max(base_target, to_float(cfg.get("max_size_usd", 125.0), 125.0))
+        base_target, max_size = _trader_size_limits(context)
         stage_fraction = clamp(to_float(strategy_context.get("stage_fraction"), 0.25 if stage == "probe" else 0.75), 0.01, 1.0)
         requested_size = max(1.0, min(max_size, base_target * stage_fraction))
         risk_cap = _as_float(risk_limits.get("max_trade_notional_usd"))

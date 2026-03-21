@@ -664,8 +664,12 @@ def get_signal_sequence_cursor(trader_id: str, mode: str) -> int | None:
     return snap.cursor_runtime_sequence
 
 
-async def get_unrealized_pnl(trader_id: Optional[str], mode: str) -> float:
-    """Compute mark-to-market unrealized PnL from cached active legs + live prices."""
+async def get_unrealized_pnl(trader_id: Optional[str], mode: str, *, ws_only: bool = False) -> float:
+    """Compute mark-to-market unrealized PnL from cached active legs + live prices.
+
+    When *ws_only* is True the HTTP fallback is skipped, keeping this call
+    non-blocking for the trader hot path.
+    """
     from services.live_price_snapshot import get_live_mid_prices
 
     mode_key = _normalize_mode_key(mode)
@@ -687,7 +691,7 @@ async def get_unrealized_pnl(trader_id: Optional[str], mode: str) -> float:
         return 0.0
 
     try:
-        prices = await get_live_mid_prices(token_ids)
+        prices = await get_live_mid_prices(token_ids, ws_only=ws_only)
     except Exception:
         prices = {}
 

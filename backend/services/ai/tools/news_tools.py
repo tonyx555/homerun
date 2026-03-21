@@ -33,7 +33,7 @@ def build_tools() -> list:
                 "required": ["query"],
             },
             handler=_search_news,
-            max_calls=5,
+            max_calls=10,
             category="news",
         ),
         AgentTool(
@@ -45,7 +45,7 @@ def build_tools() -> list:
             ),
             parameters={"type": "object", "properties": {}, "required": []},
             handler=_get_news_edges,
-            max_calls=3,
+            max_calls=10,
             category="news",
         ),
         AgentTool(
@@ -71,7 +71,7 @@ def build_tools() -> list:
                 "required": ["query"],
             },
             handler=_analyze_market_sentiment,
-            max_calls=3,
+            max_calls=10,
             category="news",
         ),
         AgentTool(
@@ -91,7 +91,7 @@ def build_tools() -> list:
                 "required": ["market_id", "question"],
             },
             handler=_analyze_resolution,
-            max_calls=3,
+            max_calls=10,
             category="news",
         ),
     ]

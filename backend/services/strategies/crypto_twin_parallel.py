@@ -16,7 +16,7 @@ from typing import Any
 from models import Market, Opportunity
 from services.data_events import DataEvent, EventType
 from services.quality_filter import QualityFilterOverrides
-from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision
+from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision, _trader_size_limits
 from services.trader_orchestrator.strategies.sizing import compute_position_size
 from utils.converters import clamp, safe_float, to_confidence, to_float
 from utils.signal_helpers import signal_payload
@@ -101,8 +101,6 @@ class CryptoTwinParallelStrategy(BaseStrategy):
         "max_combined_entry_price": 0.985,
         "max_leg_entry_price": 0.88,
         "min_liquidity_usd": 700.0,
-        "base_size_usd": 24.0,
-        "max_size_usd": 220.0,
         "sizing_policy": "adaptive",
         "yes_notional_weight": 1.0,
         "no_notional_weight": 1.0,
@@ -348,7 +346,7 @@ class CryptoTwinParallelStrategy(BaseStrategy):
             custom_risk_score=risk_score,
             confidence=confidence,
             min_liquidity_hard=max(100.0, to_float(cfg.get("min_liquidity_usd", 700.0), 700.0)),
-            min_position_size=max(1.0, to_float(cfg.get("base_size_usd", 24.0), 24.0) * 0.1),
+            min_position_size=1.0,
         )
         if opp is None:
             return None
@@ -430,8 +428,7 @@ class CryptoTwinParallelStrategy(BaseStrategy):
         max_leg_entry_price = min(1.0, max(0.01, to_float(params.get("max_leg_entry_price", 0.88), 0.88)))
         min_liquidity_usd = max(0.0, to_float(params.get("min_liquidity_usd", 700.0), 700.0))
 
-        base_size = max(2.0, to_float(params.get("base_size_usd", 24.0), 24.0))
-        max_size = max(base_size, to_float(params.get("max_size_usd", 220.0), 220.0))
+        base_size, max_size = _trader_size_limits(context)
         sizing_policy = str(params.get("sizing_policy", "adaptive") or "adaptive")
         yes_weight = max(0.0001, to_float(params.get("yes_notional_weight", 1.0), 1.0))
         no_weight = max(0.0001, to_float(params.get("no_notional_weight", 1.0), 1.0))

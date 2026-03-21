@@ -14,7 +14,7 @@ from typing import Any
 from models import Market, Opportunity
 from services.data_events import DataEvent, EventType
 from services.quality_filter import QualityFilterOverrides
-from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision
+from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision, _trader_size_limits
 from services.trader_orchestrator.strategies.sizing import compute_position_size
 from utils.converters import clamp, safe_float, to_confidence, to_float
 from utils.signal_helpers import selected_probability, signal_payload
@@ -87,8 +87,6 @@ class CryptoCancelClusterReentryStrategy(BaseStrategy):
         "min_cancel_drop": 0.18,
         "max_spread_widening_bps": 18.0,
         "min_orderflow_alignment": 0.04,
-        "base_size_usd": 18.0,
-        "max_size_usd": 140.0,
         "sizing_policy": "adaptive",
         "take_profit_pct": 7.0,
         "stop_loss_pct": 4.0,
@@ -424,8 +422,7 @@ class CryptoCancelClusterReentryStrategy(BaseStrategy):
         max_spread_widening_bps = max(0.0, to_float(params.get("max_spread_widening_bps", 18.0), 18.0))
         min_orderflow_alignment = max(0.0, min(1.0, to_float(params.get("min_orderflow_alignment", 0.04), 0.04)))
 
-        base_size = max(1.0, to_float(params.get("base_size_usd", 18.0), 18.0))
-        max_size = max(base_size, to_float(params.get("max_size_usd", 140.0), 140.0))
+        base_size, max_size = _trader_size_limits(context)
         sizing_policy = str(params.get("sizing_policy", "adaptive") or "adaptive")
 
         source = str(getattr(signal, "source", "") or "").strip().lower()

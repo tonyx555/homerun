@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from config import settings
-from services.execution_latency_metrics import execution_latency_metrics
+from services.execution_latency_metrics import execution_latency_metrics, snapshot_from_events as _latency_snapshot_from_events
 from sqlalchemy import and_, case, desc, func, or_, select, text as sa_text, update as sa_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -7168,6 +7168,9 @@ async def get_orchestrator_overview(session: AsyncSession) -> dict[str, Any]:
         metrics.setdefault("open_orders", int(worker.get("open_orders", 0) or 0))
         metrics.setdefault("gross_exposure_usd", float(worker.get("gross_exposure_usd", 0.0) or 0.0))
         metrics.setdefault("daily_pnl", float(worker.get("daily_pnl", 0.0) or 0.0))
+    existing_latency = metrics.get("execution_latency")
+    if not isinstance(existing_latency, dict) or not int(existing_latency.get("sample_count") or 0):
+        metrics["execution_latency"] = await _latency_snapshot_from_events(session, rolling_window_seconds=86400)
     return {
         "control": control,
         "worker": worker,

@@ -14,7 +14,7 @@ from typing import Any
 from models import Market, Opportunity
 from services.data_events import DataEvent
 from services.quality_filter import QualityFilterOverrides
-from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision
+from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision, _trader_size_limits
 from services.trader_orchestrator.strategies.sizing import compute_position_size
 from utils.converters import clamp, safe_float, to_confidence, to_float
 from utils.signal_helpers import selected_probability, signal_payload
@@ -55,8 +55,6 @@ class CryptoOracleLagCaptureStrategy(BaseStrategy):
         "min_oracle_diff_pct": 0.12,
         "max_oracle_age_seconds": 10.0,
         "max_entry_price": 0.92,
-        "base_size_usd": 18.0,
-        "max_size_usd": 160.0,
         "sizing_policy": "kelly",
         "kelly_fractional_scale": 0.45,
         "take_profit_pct": 9.0,
@@ -351,8 +349,7 @@ class CryptoOracleLagCaptureStrategy(BaseStrategy):
         min_oracle_diff_pct = max(0.01, to_float(params.get("min_oracle_diff_pct", 0.12), 0.12))
         max_oracle_age_seconds = max(0.1, to_float(params.get("max_oracle_age_seconds", 10.0), 10.0))
         max_entry_price = min(0.999, max(0.01, to_float(params.get("max_entry_price", 0.92), 0.92)))
-        base_size = max(1.0, to_float(params.get("base_size_usd", 18.0), 18.0))
-        max_size = max(base_size, to_float(params.get("max_size_usd", 160.0), 160.0))
+        base_size, max_size = _trader_size_limits(context)
         sizing_policy = str(params.get("sizing_policy", "kelly") or "kelly")
         kelly_fractional_scale = to_float(params.get("kelly_fractional_scale", 0.45), 0.45)
 

@@ -19,7 +19,7 @@ def build_tools() -> list:
             ),
             parameters={"type": "object", "properties": {}, "required": []},
             handler=_list_strategies,
-            max_calls=3,
+            max_calls=10,
             category="strategies",
         ),
         AgentTool(
@@ -39,7 +39,7 @@ def build_tools() -> list:
                 "required": ["strategy_id"],
             },
             handler=_get_strategy_details,
-            max_calls=5,
+            max_calls=10,
             category="strategies",
         ),
         AgentTool(
@@ -59,7 +59,7 @@ def build_tools() -> list:
                 "required": ["strategy_id"],
             },
             handler=_get_strategy_performance,
-            max_calls=5,
+            max_calls=10,
             category="strategies",
         ),
         AgentTool(
@@ -84,7 +84,7 @@ def build_tools() -> list:
                 "required": ["strategy_id", "config_updates"],
             },
             handler=_update_strategy_config,
-            max_calls=5,
+            max_calls=10,
             category="strategies",
         ),
         AgentTool(
@@ -109,7 +109,7 @@ def build_tools() -> list:
                 "required": ["source_code"],
             },
             handler=_validate_strategy_code,
-            max_calls=5,
+            max_calls=10,
             category="strategies",
         ),
         AgentTool(
@@ -134,7 +134,7 @@ def build_tools() -> list:
                 "required": ["strategy_id"],
             },
             handler=_run_strategy_backtest,
-            max_calls=2,
+            max_calls=5,
             category="strategies",
         ),
         AgentTool(
@@ -167,7 +167,7 @@ def build_tools() -> list:
                 "required": ["name", "slug", "source_code"],
             },
             handler=_create_strategy,
-            max_calls=3,
+            max_calls=10,
             category="strategies",
         ),
     ]

@@ -1,4 +1,10 @@
-"""Market data tools — search, prices, order books, regime detection."""
+"""Market data tools — search, discovery, prices, order books, regime detection.
+
+Uses three Polymarket APIs:
+- Gamma API (gamma-api.polymarket.com) — market/event metadata, no auth
+- CLOB API  (clob.polymarket.com)     — orderbook, prices, spreads, no auth for reads
+- Public search (/public-search)       — keyword search across all content
+"""
 
 from __future__ import annotations
 
@@ -27,37 +33,95 @@ def build_tools() -> list:
     from services.ai.agent import AgentTool
 
     return [
+        # -- Discovery & Search --
         AgentTool(
             name="search_markets",
             description=(
-                "Search Polymarket for active prediction markets matching a query. "
-                "Returns market question, current prices, volume, liquidity, and IDs. "
-                "Use this to discover markets before deeper analysis."
+                "Keyword search across all Polymarket content (markets, events, descriptions). "
+                "Uses the /public-search endpoint for real full-text search. "
+                "Use specific topic keywords like 'Bitcoin', 'NBA finals', 'Fed rate', 'Trump'. "
+                "Returns matching events (which group related markets together) with prices, "
+                "volume, liquidity, and end dates."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Search query (e.g. 'Trump', 'Bitcoin price', 'Fed rate')",
+                        "description": "Search keywords (e.g. 'Bitcoin price', 'NBA playoffs', 'Fed rate cut')",
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Max results to return (default 10)",
+                        "description": "Max results (default 10)",
                         "default": 10,
-                    },
-                    "active_only": {
-                        "type": "boolean",
-                        "description": "Only return active (non-closed) markets",
-                        "default": True,
                     },
                 },
                 "required": ["query"],
             },
             handler=_search_markets,
+            max_calls=10,
+            category="market_data",
+        ),
+        AgentTool(
+            name="discover_events",
+            description=(
+                "Browse and filter Polymarket events with rich criteria. Use this for "
+                "discovery queries like 'trending markets', 'expiring soon', 'high volume', "
+                "or category-specific browsing. Events group related markets together. "
+                "Supports filtering by end date range, volume, liquidity, tags, and sorting."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "tag_slug": {
+                        "type": "string",
+                        "description": "Filter by category tag slug (e.g. 'politics', 'crypto', 'sports', 'science', 'finance', 'pop-culture')",
+                    },
+                    "end_date_min": {
+                        "type": "string",
+                        "description": "Earliest end date (ISO 8601, e.g. '2026-03-21T00:00:00Z'). Use for 'expiring after' filters.",
+                    },
+                    "end_date_max": {
+                        "type": "string",
+                        "description": "Latest end date (ISO 8601). Use for 'expiring before' / 'expiring soon' filters.",
+                    },
+                    "volume_min": {
+                        "type": "number",
+                        "description": "Minimum total volume in USD (e.g. 10000 for $10K+)",
+                    },
+                    "liquidity_min": {
+                        "type": "number",
+                        "description": "Minimum liquidity in USD",
+                    },
+                    "order": {
+                        "type": "string",
+                        "description": "Sort: volume_24hr (default/trending), volume, liquidity, end_date, start_date, competitive",
+                        "default": "volume_24hr",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results (default 15)",
+                        "default": 15,
+                    },
+                },
+                "required": [],
+            },
+            handler=_discover_events,
+            max_calls=10,
+            category="market_data",
+        ),
+        AgentTool(
+            name="get_market_tags",
+            description=(
+                "List all available category tags on Polymarket with their IDs and slugs. "
+                "Use this to discover valid tag slugs for filtering with discover_events."
+            ),
+            parameters={"type": "object", "properties": {}, "required": []},
+            handler=_get_tags,
             max_calls=5,
             category="market_data",
         ),
+        # -- Market Details --
         AgentTool(
             name="get_market_details",
             description=(
@@ -75,9 +139,31 @@ def build_tools() -> list:
                 "required": ["market_id"],
             },
             handler=_get_market_details,
-            max_calls=5,
+            max_calls=10,
             category="market_data",
         ),
+        AgentTool(
+            name="get_event_details",
+            description=(
+                "Fetch a Polymarket event and ALL its child markets. Events group related "
+                "markets (e.g. 'NBA Finals 2026' event contains markets for each game). "
+                "Use event slug or ID."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "event_id": {
+                        "type": "string",
+                        "description": "Event ID or slug",
+                    },
+                },
+                "required": ["event_id"],
+            },
+            handler=_get_event_details,
+            max_calls=10,
+            category="market_data",
+        ),
+        # -- Price & Orderbook --
         AgentTool(
             name="get_live_prices",
             description=(
@@ -113,7 +199,7 @@ def build_tools() -> list:
                 "required": ["token_id"],
             },
             handler=_get_price_history,
-            max_calls=5,
+            max_calls=10,
             category="market_data",
         ),
         AgentTool(
@@ -121,7 +207,8 @@ def build_tools() -> list:
             description=(
                 "Check the order book depth and liquidity for a market token. "
                 "Returns bid/ask spreads, depth, and available liquidity at different "
-                "price levels."
+                "price levels. Note: use /price and /midpoint for reliable live prices "
+                "as /book can sometimes return stale data."
             ),
             parameters={
                 "type": "object",
@@ -134,33 +221,32 @@ def build_tools() -> list:
                 "required": ["token_id"],
             },
             handler=_check_orderbook,
-            max_calls=5,
+            max_calls=10,
             category="market_data",
         ),
         AgentTool(
-            name="find_related_markets",
+            name="get_market_prices",
             description=(
-                "Find other Polymarket markets related to the same event or topic. "
-                "Useful for cross-market analysis, correlation detection, and finding "
-                "arbitrage opportunities."
+                "Get reliable live prices for one or more market tokens from the CLOB API. "
+                "Returns best bid, best ask, midpoint, and spread for each token. "
+                "More reliable than orderbook for current prices."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "event_id": {
-                        "type": "string",
-                        "description": "Event ID to find sibling markets",
-                    },
-                    "search_query": {
-                        "type": "string",
-                        "description": "Text search for related markets",
+                    "token_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of CLOB token IDs to price",
                     },
                 },
+                "required": ["token_ids"],
             },
-            handler=_find_related_markets,
-            max_calls=3,
+            handler=_get_market_prices,
+            max_calls=10,
             category="market_data",
         ),
+        # -- Analysis --
         AgentTool(
             name="get_market_regime",
             description=(
@@ -179,78 +265,174 @@ def build_tools() -> list:
                 "required": ["market_id"],
             },
             handler=_get_market_regime,
-            max_calls=5,
+            max_calls=10,
             category="market_data",
         ),
         AgentTool(
             name="get_active_markets_summary",
             description=(
-                "Get a summary of all currently active markets the system is monitoring. "
-                "Returns count, top markets by volume, recent price movers, and overall "
-                "market health metrics."
+                "Get a summary of all currently active markets the system is monitoring "
+                "(from the internal runtime, not Polymarket API). Returns count, top markets "
+                "by volume. Only useful if the system's market scanner is running."
             ),
             parameters={"type": "object", "properties": {}, "required": []},
             handler=_get_active_markets_summary,
-            max_calls=2,
+            max_calls=5,
             category="market_data",
         ),
     ]
 
 
 # ---------------------------------------------------------------------------
-# Implementations
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _format_market(m: dict) -> dict:
+    """Extract a consistent market summary dict from a Gamma API market object."""
+    return {
+        "condition_id": m.get("conditionId") or m.get("condition_id", ""),
+        "question": m.get("question", ""),
+        "slug": m.get("slug", ""),
+        "outcomes": m.get("outcomes", []),
+        "outcome_prices": m.get("outcomePrices", []),
+        "volume": m.get("volume", 0),
+        "volume_24hr": m.get("volume24hr", 0),
+        "liquidity": m.get("liquidity", 0),
+        "end_date": m.get("endDate", ""),
+        "active": m.get("active", False),
+        "clob_token_ids": m.get("clobTokenIds", []),
+    }
+
+
+def _format_event(e: dict, include_markets: bool = True) -> dict:
+    """Extract a consistent event summary dict from a Gamma API event object."""
+    result: dict[str, Any] = {
+        "event_id": e.get("id", ""),
+        "title": e.get("title", ""),
+        "slug": e.get("slug", ""),
+        "category": e.get("category", ""),
+        "volume": e.get("volume", 0),
+        "volume_24hr": e.get("volume24hr", 0),
+        "liquidity": e.get("liquidity", 0),
+        "end_date": e.get("endDate", ""),
+        "start_date": e.get("startDate", ""),
+        "active": e.get("active", False),
+        "market_count": len(e.get("markets", [])),
+    }
+    if include_markets:
+        result["markets"] = [_format_market(m) for m in e.get("markets", [])[:10]]
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Implementations — Search & Discovery
 # ---------------------------------------------------------------------------
 
 
 async def _search_markets(args: dict) -> dict:
+    """Keyword search via /public-search — the real full-text search endpoint."""
     try:
         query = args["query"]
         limit = args.get("limit", 10)
-        active_only = args.get("active_only", True)
-
-        # Fetch more results for client-side filtering when a query is specified.
-        fetch_limit = max(limit * 5, 100) if query else limit
-        params: dict[str, Any] = {"limit": fetch_limit}
-        if active_only:
-            params["active"] = "true"
-            params["closed"] = "false"
-
         client = _http()
-        resp = await client.get(f"{GAMMA_API_URL}/markets", params=params)
+
+        # /public-search returns events, markets, profiles
+        resp = await client.get(
+            f"{GAMMA_API_URL}/public-search",
+            params={"query": query.strip()},
+        )
         if resp.status_code != 200:
-            return {"error": f"Gamma API returned {resp.status_code}"}
+            return {"error": f"Search API returned {resp.status_code}"}
 
-        all_markets = resp.json()
-        # Client-side filter by query (each word must match)
-        if query:
-            query_words = query.lower().split()
-            matched = []
-            for m in all_markets:
-                text = (m.get("question", "") + " " + m.get("description", "")).lower()
-                if all(w in text for w in query_words):
-                    matched.append(m)
-                if len(matched) >= limit:
-                    break
-        else:
-            matched = all_markets[:limit]
+        data = resp.json()
 
-        results = []
-        for m in matched:
-            results.append({
-                "condition_id": m.get("conditionId", ""),
-                "question": m.get("question", ""),
-                "outcome_prices": m.get("outcomePrices", []),
-                "volume": m.get("volume", 0),
-                "liquidity": m.get("liquidity", 0),
-                "end_date": m.get("endDate", ""),
-                "slug": m.get("slug", ""),
-                "active": m.get("active", False),
-            })
+        # Extract events (each contains grouped markets)
+        events_raw = data if isinstance(data, list) else data.get("events", [])
+        events = []
+        for e in events_raw[:limit]:
+            if isinstance(e, dict):
+                events.append(_format_event(e))
 
-        return {"markets": results, "count": len(results), "query": query}
+        # If no events found, try markets directly
+        if not events:
+            markets_raw = data.get("markets", []) if isinstance(data, dict) else []
+            markets = [_format_market(m) for m in markets_raw[:limit]]
+            return {"events": [], "markets": markets, "count": len(markets), "query": query}
+
+        return {"events": events, "markets": [], "count": len(events), "query": query}
     except Exception as exc:
         logger.error("search_markets failed: %s", exc)
         return {"error": str(exc)}
+
+
+async def _discover_events(args: dict) -> dict:
+    """Browse/filter events via /events with rich query params."""
+    try:
+        limit = args.get("limit", 15)
+        order = args.get("order", "volume_24hr")
+
+        params: dict[str, Any] = {
+            "active": "true",
+            "closed": "false",
+            "limit": limit,
+            "order": order,
+            "ascending": "false",
+        }
+
+        if args.get("tag_slug"):
+            params["tag_slug"] = args["tag_slug"]
+        if args.get("end_date_min"):
+            params["end_date_min"] = args["end_date_min"]
+        if args.get("end_date_max"):
+            params["end_date_max"] = args["end_date_max"]
+        if args.get("volume_min") is not None:
+            params["volume_min"] = str(args["volume_min"])
+        if args.get("liquidity_min") is not None:
+            params["liquidity_min"] = str(args["liquidity_min"])
+
+        client = _http()
+        resp = await client.get(f"{GAMMA_API_URL}/events", params=params)
+        if resp.status_code != 200:
+            return {"error": f"Events API returned {resp.status_code}"}
+
+        events_raw = resp.json()
+        events = [_format_event(e) for e in events_raw[:limit]]
+
+        return {
+            "events": events,
+            "count": len(events),
+            "filters": {k: v for k, v in params.items() if k not in ("active", "closed", "ascending")},
+        }
+    except Exception as exc:
+        logger.error("discover_events failed: %s", exc)
+        return {"error": str(exc)}
+
+
+async def _get_tags(args: dict) -> dict:
+    """List all available category tags."""
+    try:
+        client = _http()
+        resp = await client.get(f"{GAMMA_API_URL}/tags")
+        if resp.status_code != 200:
+            return {"error": f"Tags API returned {resp.status_code}"}
+
+        tags = resp.json()
+        return {
+            "tags": [
+                {"id": t.get("id"), "label": t.get("label", ""), "slug": t.get("slug", "")}
+                for t in tags[:50]
+            ],
+            "count": len(tags),
+        }
+    except Exception as exc:
+        logger.error("get_tags failed: %s", exc)
+        return {"error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# Implementations — Market/Event Details
+# ---------------------------------------------------------------------------
 
 
 async def _get_market_details(args: dict) -> dict:
@@ -286,6 +468,7 @@ async def _get_market_details(args: dict) -> dict:
             "outcomes": data.get("outcomes", []),
             "outcome_prices": data.get("outcomePrices", []),
             "volume": data.get("volume", 0),
+            "volume_24hr": data.get("volume24hr", 0),
             "liquidity": data.get("liquidity", 0),
             "active": data.get("active", False),
             "closed": data.get("closed", False),
@@ -296,6 +479,42 @@ async def _get_market_details(args: dict) -> dict:
     except Exception as exc:
         logger.error("get_market_details failed: %s", exc)
         return {"error": str(exc)}
+
+
+async def _get_event_details(args: dict) -> dict:
+    """Fetch an event and all its child markets."""
+    try:
+        event_id = args["event_id"]
+        client = _http()
+
+        # Try direct ID fetch
+        resp = await client.get(f"{GAMMA_API_URL}/events/{event_id}")
+        if resp.status_code == 200:
+            data = resp.json()
+        else:
+            # Fallback: try by slug
+            resp2 = await client.get(
+                f"{GAMMA_API_URL}/events",
+                params={"slug": event_id, "limit": 1},
+            )
+            if resp2.status_code == 200:
+                results = resp2.json()
+                if results:
+                    data = results[0] if isinstance(results, list) else results
+                else:
+                    return {"error": f"Event not found: {event_id}"}
+            else:
+                return {"error": f"Event not found: {event_id}"}
+
+        return _format_event(data, include_markets=True)
+    except Exception as exc:
+        logger.error("get_event_details failed: %s", exc)
+        return {"error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# Implementations — Prices & Orderbook
+# ---------------------------------------------------------------------------
 
 
 async def _get_live_prices(args: dict) -> dict:
@@ -388,60 +607,45 @@ async def _check_orderbook(args: dict) -> dict:
         return {"error": str(exc)}
 
 
-async def _find_related_markets(args: dict) -> dict:
+async def _get_market_prices(args: dict) -> dict:
+    """Get reliable live prices from CLOB /price and /midpoint endpoints."""
     try:
-        event_id = args.get("event_id")
-        search_query = args.get("search_query")
-        results: list[dict] = []
+        token_ids = args["token_ids"]
         client = _http()
+        results = []
 
-        if event_id:
-            resp = await client.get(
-                f"{GAMMA_API_URL}/markets",
-                params={"event_id": event_id, "limit": 20},
-            )
-            if resp.status_code == 200:
-                for m in resp.json():
-                    results.append({
-                        "condition_id": m.get("conditionId", ""),
-                        "question": m.get("question", ""),
-                        "outcome_prices": m.get("outcomePrices", []),
-                        "volume": m.get("volume", 0),
-                        "liquidity": m.get("liquidity", 0),
-                        "slug": m.get("slug", ""),
-                    })
+        for tid in token_ids[:10]:  # Cap at 10 to avoid abuse
+            try:
+                # Fetch midpoint + bid/ask prices in parallel
+                mid_resp, bid_resp, ask_resp = await asyncio.gather(
+                    client.get(f"{CLOB_API_URL}/midpoint", params={"token_id": tid}),
+                    client.get(f"{CLOB_API_URL}/price", params={"token_id": tid, "side": "BUY"}),
+                    client.get(f"{CLOB_API_URL}/price", params={"token_id": tid, "side": "SELL"}),
+                )
+                mid = float(mid_resp.json().get("mid", 0)) if mid_resp.status_code == 200 else None
+                bid = float(bid_resp.json().get("price", 0)) if bid_resp.status_code == 200 else None
+                ask = float(ask_resp.json().get("price", 0)) if ask_resp.status_code == 200 else None
+                spread = round(ask - bid, 4) if bid is not None and ask is not None else None
 
-        if search_query:
-            resp = await client.get(
-                f"{GAMMA_API_URL}/markets",
-                params={"active": "true", "closed": "false", "limit": 20},
-            )
-            if resp.status_code == 200:
-                q = search_query.lower()
-                for m in resp.json():
-                    if q in m.get("question", "").lower():
-                        results.append({
-                            "condition_id": m.get("conditionId", ""),
-                            "question": m.get("question", ""),
-                            "outcome_prices": m.get("outcomePrices", []),
-                            "volume": m.get("volume", 0),
-                            "liquidity": m.get("liquidity", 0),
-                            "slug": m.get("slug", ""),
-                        })
+                results.append({
+                    "token_id": tid,
+                    "midpoint": mid,
+                    "best_bid": bid,
+                    "best_ask": ask,
+                    "spread": spread,
+                })
+            except Exception:
+                results.append({"token_id": tid, "error": "Failed to fetch price"})
 
-        # Deduplicate
-        seen = set()
-        unique = []
-        for r in results:
-            cid = r["condition_id"]
-            if cid and cid not in seen:
-                seen.add(cid)
-                unique.append(r)
-
-        return {"related_markets": unique, "count": len(unique)}
+        return {"prices": results, "count": len(results)}
     except Exception as exc:
-        logger.error("find_related_markets failed: %s", exc)
+        logger.error("get_market_prices failed: %s", exc)
         return {"error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# Implementations — Analysis
+# ---------------------------------------------------------------------------
 
 
 async def _get_market_regime(args: dict) -> dict:
@@ -487,3 +691,7 @@ async def _get_active_markets_summary(args: dict) -> dict:
     except Exception as exc:
         logger.error("get_active_markets_summary failed: %s", exc)
         return {"error": str(exc)}
+
+
+# Needed for asyncio.gather in _get_market_prices
+import asyncio

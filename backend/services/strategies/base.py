@@ -146,6 +146,35 @@ class EvaluateContext:
             raise KeyError(key)
 
 
+def _trader_size_limits(context: "EvaluateContext | dict") -> tuple[float, float]:
+    """Extract (base_size, max_size) from trader risk limits.
+
+    Uses max_trade_notional_usd from the trader's risk panel as the ceiling,
+    and derives base_size as 40% of that.  Falls back to sensible defaults
+    when the trader object or risk limits are unavailable.
+    """
+    trader = context.get("trader") if hasattr(context, "get") else getattr(context, "trader", None)
+    risk_limits: dict = {}
+    if trader is not None:
+        # Trader may be a serialized dict (key "risk_limits") or an ORM
+        # object (attribute "risk_limits_json").  Try dict access first.
+        if isinstance(trader, dict):
+            risk_limits = trader.get("risk_limits") or {}
+        else:
+            risk_limits = getattr(trader, "risk_limits_json", None) or {}
+        if not isinstance(risk_limits, dict):
+            risk_limits = {}
+    max_trade = 0.0
+    try:
+        max_trade = float(risk_limits.get("max_trade_notional_usd", 0))
+    except (TypeError, ValueError):
+        pass
+    if max_trade <= 0:
+        max_trade = 50.0  # conservative fallback
+    base_size = max(1.0, max_trade * 0.40)
+    return base_size, max_trade
+
+
 class StrategyContext(TypedDict, total=False):
     """Typed structure for strategy context stored alongside every TradeSignal.
 
@@ -672,8 +701,7 @@ class BaseStrategy(ABC):
 
         min_edge = float(params.get("min_edge_percent", 0))
         min_conf = float(params.get("min_confidence", 0))
-        base_size = float(params.get("base_size_usd", 25.0))
-        max_size = float(params.get("max_size_usd", 500.0))
+        base_size, max_size = _trader_size_limits(context)
 
         checks = [
             DecisionCheck("edge", "Edge threshold", edge >= min_edge, score=edge, detail=f"min={min_edge:.1f}"),
@@ -777,12 +805,7 @@ class BaseStrategy(ABC):
         max_risk = to_confidence(
             params.get("max_risk_score", d.get("max_risk_score", 0.68)), d.get("max_risk_score", 0.68)
         )
-        base_size = max(
-            1.0, to_float(params.get("base_size_usd", d.get("base_size_usd", 20.0)), d.get("base_size_usd", 20.0))
-        )
-        max_size = max(
-            base_size, to_float(params.get("max_size_usd", d.get("max_size_usd", 180.0)), d.get("max_size_usd", 180.0))
-        )
+        base_size, max_size = _trader_size_limits(context)
 
         edge = max(0.0, to_float(getattr(signal, "edge_percent", 0.0), 0.0))
         confidence = to_confidence(getattr(signal, "confidence", 0.0), 0.0)

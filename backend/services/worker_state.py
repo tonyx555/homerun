@@ -112,6 +112,7 @@ def _summarize_execution_latency(payload: dict[str, Any]) -> dict[str, Any]:
     for key in ("by_source", "by_strategy", "by_trader"):
         value = payload.get(key)
         if isinstance(value, dict):
+            summary[key] = value
             summary[f"{key}_count"] = len(value)
     return summary
 

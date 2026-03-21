@@ -69,8 +69,6 @@ class VPINToxicityStrategy(BaseStrategy):
         "vpin_threshold": 0.70,
         "vpin_lookback_buckets": 20,
         "min_liquidity": 1000.0,
-        "base_size_usd": 18.0,
-        "max_size_usd": 160.0,
         "take_profit_pct": 12.0,
     }
 

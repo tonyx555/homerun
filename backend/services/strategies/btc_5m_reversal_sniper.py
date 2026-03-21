@@ -31,7 +31,7 @@ from typing import Any
 from models import Market, Opportunity
 from services.data_events import DataEvent, EventType
 from services.quality_filter import QualityFilterOverrides
-from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision
+from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision, _trader_size_limits
 from utils.converters import clamp, safe_float, to_confidence, to_float
 from utils.signal_helpers import signal_payload
 
@@ -125,8 +125,6 @@ class BTC5mReversalSniperStrategy(BaseStrategy):
         "max_entry_price": 0.92,              # Don't buy at 0.95 for a slim edge
 
         # ── Position Sizing ──
-        "base_size_usd": 30.0,
-        "max_size_usd": 200.0,
         "min_order_size_usd": 2.0,
         "sizing_policy": "kelly",
         "kelly_fractional_scale": 0.30,
@@ -696,8 +694,7 @@ class BTC5mReversalSniperStrategy(BaseStrategy):
 
         # ── Position Sizing ──
         sizing_policy = str(cfg.get("sizing_policy", "kelly")).lower()
-        base_size = max(1.0, to_float(cfg.get("base_size_usd", 30.0), 30.0))
-        max_size = max(base_size, to_float(cfg.get("max_size_usd", 200.0), 200.0))
+        base_size, max_size = _trader_size_limits(context)
 
         if sizing_policy == "kelly" and selected_price and confidence > 0.0:
             kelly_f = max(0.0, (confidence * (1.0 / selected_price) - 1.0) / ((1.0 / selected_price) - 1.0))

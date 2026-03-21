@@ -3245,7 +3245,6 @@ async def test_run_trader_once_uses_cached_live_context_builder_for_trigger_cycl
     monkeypatch.setattr(trader_orchestrator_worker, "AsyncSessionLocal", lambda: _DummySessionContext())
     monkeypatch.setattr(trader_orchestrator_worker, "_query_sources_for_configs", lambda *_: ["crypto"])
     monkeypatch.setattr(trader_orchestrator_worker, "build_cached_live_signal_contexts", cached_context_mock)
-    monkeypatch.setattr(trader_orchestrator_worker, "build_live_signal_contexts", full_context_mock)
     monkeypatch.setattr(
         trader_orchestrator_worker,
         "resolve_strategy_version",
@@ -3346,7 +3345,6 @@ async def test_run_trader_once_uses_cached_live_context_builder_for_trigger_cycl
     assert orders_written == 1
     assert processed_signals == 1
     cached_context_mock.assert_awaited_once()
-    full_context_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -3422,7 +3420,6 @@ async def test_run_trader_once_trigger_cycle_fetches_full_live_context_when_stri
     monkeypatch.setattr(trader_orchestrator_worker, "AsyncSessionLocal", lambda: _DummySessionContext())
     monkeypatch.setattr(trader_orchestrator_worker, "_query_sources_for_configs", lambda *_: ["crypto"])
     monkeypatch.setattr(trader_orchestrator_worker, "build_cached_live_signal_contexts", cached_context_mock)
-    monkeypatch.setattr(trader_orchestrator_worker, "build_live_signal_contexts", full_context_mock)
     monkeypatch.setattr(
         trader_orchestrator_worker,
         "resolve_strategy_version",
@@ -3541,7 +3538,6 @@ async def test_run_trader_once_defers_signals_when_strict_ws_context_unavailable
 
     monkeypatch.setattr(trader_orchestrator_worker, "AsyncSessionLocal", lambda: _DummySessionContext())
     monkeypatch.setattr(trader_orchestrator_worker, "_query_sources_for_configs", lambda *_: ["crypto"])
-    monkeypatch.setattr(trader_orchestrator_worker, "build_live_signal_contexts", AsyncMock(return_value={}))
     monkeypatch.setattr(trader_orchestrator_worker, "build_cached_live_signal_contexts", AsyncMock(return_value={}))
     monkeypatch.setattr(
         trader_orchestrator_worker,
@@ -3668,19 +3664,6 @@ async def test_run_trader_once_defers_signals_when_strict_ws_release_is_stale(mo
 
     monkeypatch.setattr(trader_orchestrator_worker, "AsyncSessionLocal", lambda: _DummySessionContext())
     monkeypatch.setattr(trader_orchestrator_worker, "_query_sources_for_configs", lambda *_: ["crypto"])
-    monkeypatch.setattr(
-        trader_orchestrator_worker,
-        "build_live_signal_contexts",
-        AsyncMock(
-            return_value={
-                signal.id: {
-                    "market_data_source": "ws_strict",
-                    "live_selected_price": 0.41,
-                    "market_data_age_ms": 5,
-                }
-            }
-        ),
-    )
     monkeypatch.setattr(
         trader_orchestrator_worker,
         "build_cached_live_signal_contexts",

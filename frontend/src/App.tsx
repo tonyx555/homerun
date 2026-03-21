@@ -723,6 +723,13 @@ function App() {
     return () => window.removeEventListener('navigate-strategies-subtab', handler as EventListener)
   }, [])
 
+  // When switching to AI tab, dispatch resize so chart ResizeObservers recalculate
+  useEffect(() => {
+    if (activeTab === 'ai') {
+      requestAnimationFrame(() => window.dispatchEvent(new Event('resize')))
+    }
+  }, [activeTab])
+
   // WebSocket for real-time updates
   const { isConnected, lastMessage, sendMessage } = useWebSocket('/ws')
   useRealtimeInvalidation(lastMessage, queryClient, setScannerActivity, {
@@ -2974,13 +2981,15 @@ function App() {
             )}
 
             {/* ==================== AI ==================== */}
-            {activeTab === 'ai' && (
-              <div className="flex-1 overflow-hidden flex flex-col section-enter">
-                <div className="flex-1 overflow-hidden min-h-0">
-                  <AITab />
-                </div>
+            {/* AI tab stays mounted (hidden) so streaming responses survive tab switches.
+                Use visibility:hidden + h-0 instead of display:none so ResizeObservers
+                in charts can still measure. When tab activates, dispatch resize so any
+                charts that mounted while hidden recalculate their dimensions. */}
+            <div className={activeTab === 'ai' ? 'flex-1 overflow-hidden flex flex-col section-enter' : 'invisible h-0 overflow-hidden'}>
+              <div className="flex-1 overflow-hidden min-h-0">
+                <AITab />
               </div>
-            )}
+            </div>
 
             {/* ==================== Settings ==================== */}
             {activeTab === 'settings' && (

@@ -93,8 +93,6 @@ class MyCustomStrategy(BaseStrategy):
         # Execution params
         "min_edge_percent": 3.0,
         "min_confidence": 0.4,
-        "base_size_usd": 25.0,
-        "max_size_usd": 200.0,
         # Exit params
         "take_profit_pct": 15.0,
         "stop_loss_pct": 8.0,
@@ -130,7 +128,6 @@ class MyCustomStrategy(BaseStrategy):
 
         return StrategyDecision(
             "selected", "Signal approved",
-            size_usd=float(params.get("base_size_usd", 25.0)),
             checks=[DecisionCheck("edge", "Edge check", True, score=edge)]
         )
 

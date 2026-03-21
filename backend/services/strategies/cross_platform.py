@@ -823,16 +823,12 @@ class CrossPlatformStrategy(BaseStrategy):
         "min_confidence": 0.50,
         "max_risk_score": 0.70,
         "min_spread_after_fees": 0.03,
-        "base_size_usd": 20.0,
-        "max_size_usd": 200.0,
     }
 
     pipeline_defaults = {
         "min_edge_percent": 4.0,
         "min_confidence": 0.45,
         "max_risk_score": 0.75,
-        "base_size_usd": 18.0,
-        "max_size_usd": 150.0,
     }
 
     # Composable evaluate pipeline: score = edge*0.55 + conf*30 - risk*8 + 3.0 if guaranteed

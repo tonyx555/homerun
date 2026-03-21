@@ -16,7 +16,7 @@ from typing import Any
 from models import Market, Opportunity
 from services.data_events import DataEvent, EventType
 from services.quality_filter import QualityFilterOverrides
-from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision
+from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision, _trader_size_limits
 from services.trader_orchestrator.strategies.sizing import compute_position_size
 from utils.converters import clamp, safe_float, to_confidence, to_float
 from utils.signal_helpers import live_move, selected_probability, signal_payload
@@ -61,8 +61,6 @@ class CryptoSpikeReversionStrategy(BaseStrategy):
         "min_abs_move_5m": 1.8,
         "max_abs_move_2h": 14.0,
         "require_reversion_shape": True,
-        "base_size_usd": 20.0,
-        "max_size_usd": 120.0,
         "min_order_size_usd": 2.0,
         "sizing_policy": "kelly",
         "kelly_fractional_scale": 0.45,
@@ -396,8 +394,7 @@ class CryptoSpikeReversionStrategy(BaseStrategy):
         max_abs_move_2h = max(min_abs_move_5m, to_float(params.get("max_abs_move_2h", 14.0), 14.0))
         require_reversion_shape = bool(params.get("require_reversion_shape", True))
 
-        base_size = max(1.0, to_float(params.get("base_size_usd", 20.0), 20.0))
-        max_size = max(base_size, to_float(params.get("max_size_usd", 120.0), 120.0))
+        base_size, max_size = _trader_size_limits(context)
         sizing_policy = str(params.get("sizing_policy", "kelly") or "kelly")
         kelly_fractional_scale = to_float(params.get("kelly_fractional_scale", 0.45), 0.45)
 

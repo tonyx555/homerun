@@ -117,8 +117,6 @@ class StatArbStrategy(BaseStrategy):
         "min_edge_percent": 5.0,
         "min_confidence": 0.45,
         "max_risk_score": 0.75,
-        "base_size_usd": 15.0,
-        "max_size_usd": 120.0,
         "take_profit_pct": 12.0,
     }
 
@@ -126,8 +124,6 @@ class StatArbStrategy(BaseStrategy):
         "min_edge_percent": 3.5,
         "min_confidence": 0.45,
         "max_risk_score": 0.75,
-        "base_size_usd": 18.0,
-        "max_size_usd": 150.0,
     }
 
     # Composable evaluate pipeline: score = edge*0.58 + conf*32 - risk*8

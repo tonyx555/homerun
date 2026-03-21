@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from models import Event, Market, Opportunity
-from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision
+from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision, _trader_size_limits
 from services.strategy_sdk import StrategySDK
 from utils.converters import coerce_bool as _coerce_bool, safe_float, to_confidence
 
@@ -26,8 +26,6 @@ TRADERS_COPY_TRADE_DEFAULTS: dict[str, Any] = {
     "max_position_size": 1000.0,
     "proportional_sizing": True,
     "proportional_multiplier": 1.0,
-    "base_size_usd": 25.0,
-    "max_size_usd": 1500.0,
     "max_copy_drawdown_pct": 100.0,
     "max_copy_daily_loss_usd": 1_000_000.0,
     "max_copy_source_exposure_usd": 1_000_000.0,
@@ -66,8 +64,6 @@ TRADERS_COPY_TRADE_CONFIG_SCHEMA: dict[str, Any] = {
         {"key": "max_position_size", "label": "Max Position Size (USD)", "type": "number", "min": 1, "max": 1000000},
         {"key": "proportional_sizing", "label": "Proportional Sizing", "type": "boolean"},
         {"key": "proportional_multiplier", "label": "Proportional Multiplier", "type": "number", "min": 0.01, "max": 100},
-        {"key": "base_size_usd", "label": "Base Size (USD)", "type": "number", "min": 1, "max": 10000},
-        {"key": "max_size_usd", "label": "Max Size (USD)", "type": "number", "min": 1, "max": 50000},
         {"key": "max_copy_drawdown_pct", "label": "Max Copy Drawdown (%)", "type": "number", "min": 0, "max": 100},
         {"key": "max_copy_daily_loss_usd", "label": "Max Copy Daily Loss (USD)", "type": "number", "min": 0},
         {"key": "max_copy_source_exposure_usd", "label": "Max Copy Source Exposure (USD)", "type": "number", "min": 0},
@@ -147,8 +143,6 @@ def validate_traders_copy_trade_config(config: Any) -> dict[str, Any]:
         "max_position_size",
         "proportional_sizing",
         "proportional_multiplier",
-        "base_size_usd",
-        "max_size_usd",
         "max_copy_drawdown_pct",
         "max_copy_daily_loss_usd",
         "max_copy_source_exposure_usd",
@@ -185,8 +179,6 @@ def validate_traders_copy_trade_config(config: Any) -> dict[str, Any]:
     cfg["max_position_size"] = _coerce_float(cfg.get("max_position_size"), 1000.0, 1.0, 1_000_000.0)
     cfg["proportional_sizing"] = _coerce_bool(cfg.get("proportional_sizing"), True)
     cfg["proportional_multiplier"] = _coerce_float(cfg.get("proportional_multiplier"), 1.0, 0.01, 100.0)
-    cfg["base_size_usd"] = _coerce_float(cfg.get("base_size_usd"), 25.0, 1.0, 10_000.0)
-    cfg["max_size_usd"] = _coerce_float(cfg.get("max_size_usd"), max(1.0, float(cfg["base_size_usd"])), 1.0, 50_000.0)
     cfg["max_copy_drawdown_pct"] = _coerce_float(cfg.get("max_copy_drawdown_pct"), 100.0, 0.0, 100.0)
     cfg["max_copy_daily_loss_usd"] = _coerce_float(cfg.get("max_copy_daily_loss_usd"), 1_000_000.0, 0.0, 100_000_000.0)
     cfg["max_copy_source_exposure_usd"] = _coerce_float(
@@ -205,8 +197,6 @@ def validate_traders_copy_trade_config(config: Any) -> dict[str, Any]:
     cfg["require_inventory_for_sells"] = _coerce_bool(cfg.get("require_inventory_for_sells"), True)
     cfg["allow_partial_inventory_sells"] = _coerce_bool(cfg.get("allow_partial_inventory_sells"), True)
     cfg["min_inventory_fraction"] = _coerce_float(cfg.get("min_inventory_fraction"), 0.25, 0.0, 1.0)
-    if cfg["max_size_usd"] < cfg["base_size_usd"]:
-        cfg["max_size_usd"] = cfg["base_size_usd"]
     cfg["traders_scope"] = StrategySDK.validate_trader_scope_config(cfg.get("traders_scope"))
     return StrategySDK.normalize_strategy_retention_config(cfg)
 
@@ -786,8 +776,7 @@ class TradersCopyTradeStrategy(BaseStrategy):
             )
 
         max_position_size = safe_float(params.get("max_position_size"), 1000.0)
-        base_size = safe_float(params.get("base_size_usd"), 25.0)
-        max_size = safe_float(params.get("max_size_usd"), max(base_size, max_position_size))
+        base_size, max_size = _trader_size_limits(context)
         proportional = bool(params.get("proportional_sizing", True))
         proportional_multiplier = safe_float(params.get("proportional_multiplier"), 1.0)
 

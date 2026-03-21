@@ -462,7 +462,7 @@ async def get_unified_docs():
                         "purpose": "Gate execution: decide whether to trade a signal right now",
                         "default_behavior": (
                             "Passthrough — checks min_edge_percent and min_confidence "
-                            "from config, sizes position using base_size_usd, returns 'selected'"
+                            "from config, sizes position using trader risk limits, returns 'selected'"
                         ),
                     },
                     {
@@ -963,13 +963,6 @@ async def get_unified_docs():
                         "max": 1,
                     },
                     {
-                        "key": "base_size_usd",
-                        "label": "Base Size (USD)",
-                        "type": "number",
-                        "min": 1,
-                        "max": 10000,
-                    },
-                    {
                         "key": "cooldown_minutes",
                         "label": "Cooldown (min)",
                         "type": "integer",
@@ -1444,8 +1437,6 @@ async def get_unified_docs():
                     '        "momentum_threshold": 0.05,\n'
                     '        "min_edge_percent": 2.0,\n'
                     '        "min_confidence": 0.5,\n'
-                    '        "base_size_usd": 30.0,\n'
-                    '        "max_size_usd": 200.0,\n'
                     '        "take_profit_pct": 20.0,\n'
                     '        "stop_loss_pct": 10.0,\n'
                     '        "reversal_threshold": 0.03,\n'
@@ -1486,10 +1477,10 @@ async def get_unified_docs():
                     "        confidence = float(getattr(signal, 'confidence', 0) or 0)\n"
                     "        if confidence > 1.0:\n"
                     "            confidence /= 100.0\n\n"
+                    "        from services.strategies.base import _trader_size_limits\n"
                     "        min_edge = float(params.get('min_edge_percent', 2.0))\n"
                     "        min_conf = float(params.get('min_confidence', 0.5))\n"
-                    "        base_size = float(params.get('base_size_usd', 30.0))\n"
-                    "        max_size = float(params.get('max_size_usd', 200.0))\n\n"
+                    "        base_size, max_size = _trader_size_limits(context)\n\n"
                     "        checks = [\n"
                     "            DecisionCheck('edge', 'Edge threshold', edge >= min_edge, score=edge, detail=f'min={min_edge}'),\n"
                     "            DecisionCheck('confidence', 'Confidence', confidence >= min_conf, score=confidence, detail=f'min={min_conf}'),\n"
