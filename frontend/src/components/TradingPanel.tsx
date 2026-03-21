@@ -5222,32 +5222,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     () => (isRecord(tuneIterateResponse?.parsed) ? tuneIterateResponse?.parsed : null),
     [tuneIterateResponse]
   )
-  const _tuneIterateActions = useMemo(() => {
-    if (!tuneIterateParsed) return [] as string[]
-    return normalizeTuneList(tuneIterateParsed.actions_taken)
-  }, [tuneIterateParsed])
-  const _tuneIterateNextSteps = useMemo(() => {
-    if (!tuneIterateParsed) return [] as string[]
-    return normalizeTuneList(tuneIterateParsed.suggested_next_steps)
-  }, [tuneIterateParsed])
-  const _tuneIterateIssues = useMemo(() => {
-    if (!tuneIterateParsed) return [] as string[]
-    const issueCandidates = [
-      tuneIterateParsed.issues_identified,
-      tuneIterateParsed.issues,
-      tuneIterateParsed.problem_analysis,
-      tuneIterateParsed.risk_findings,
-    ]
-    for (const candidate of issueCandidates) {
-      const issues = normalizeTuneList(candidate)
-      if (issues.length > 0) return issues
-    }
-    return [] as string[]
-  }, [tuneIterateParsed])
-  const _tuneIterateAppliedUpdates = useMemo(
-    () => (Array.isArray(tuneIterateResponse?.applied_param_updates) ? tuneIterateResponse.applied_param_updates : []),
-    [tuneIterateResponse]
-  )
 
   const refreshAll = () => {
     queryClient.invalidateQueries({ queryKey: ['trader-orchestrator-overview'] })
