@@ -473,6 +473,23 @@ class IntentRuntime:
             await asyncio.sleep(_PREWARM_WAIT_POLL_SECONDS)
 
     def _snapshot_ready_for_runtime(self, snapshot: dict[str, Any]) -> bool:
+        deferred_reason = str(snapshot.get("deferred_reason") or "")
+        if deferred_reason == "awaiting_post_arm_ws_tick":
+            payload = snapshot.get("payload_json") or {}
+            armed_at_raw = payload.get("execution_armed_at")
+            armed_at_epoch: float | None = None
+            if armed_at_raw:
+                try:
+                    armed_at_epoch = datetime.fromisoformat(
+                        str(armed_at_raw).replace("Z", "+00:00")
+                    ).timestamp()
+                except Exception:
+                    pass
+            return self._tokens_have_fresh_ws_quotes(
+                list(snapshot.get("required_token_ids") or []),
+                source=str(snapshot.get("source") or ""),
+                min_observed_at_epoch=armed_at_epoch,
+            )
         return self._tokens_have_fresh_ws_quotes(
             list(snapshot.get("required_token_ids") or []),
             source=str(snapshot.get("source") or ""),
@@ -879,7 +896,26 @@ class IntentRuntime:
                     incoming_snapshot["status"] = "pending"
                     incoming_snapshot["effective_price"] = None
                     self._clear_deferred_state_locked(existing["id"])
+                    _ea = str(
+                        (incoming_snapshot.get("payload_json") or {})
+                        .get("strategy_runtime", {})
+                        .get("execution_activation", "")
+                        or ""
+                    )
                     if (
+                        _ea == "ws_post_arm_tick"
+                        and incoming_snapshot["required_token_ids"]
+                    ):
+                        incoming_snapshot["payload_json"]["execution_armed_at"] = _to_iso(now)
+                        self._set_deferred_state_locked(
+                            existing["id"],
+                            required_token_ids=incoming_snapshot["required_token_ids"],
+                            reason="awaiting_post_arm_ws_tick",
+                        )
+                        incoming_snapshot["deferred_until_ws"] = True
+                        incoming_snapshot["deferred_reason"] = "awaiting_post_arm_ws_tick"
+                        incoming_snapshot["runtime_sequence"] = None
+                    elif (
                         normalized_source in _PREWARM_SOURCES
                         and incoming_snapshot["required_token_ids"]
                         and not self._tokens_have_fresh_ws_quotes(
@@ -909,7 +945,25 @@ class IntentRuntime:
                 else:
                     signal_id = uuid.uuid4().hex
                     incoming_snapshot["id"] = signal_id
+                    _ea = str(
+                        (incoming_snapshot.get("payload_json") or {})
+                        .get("strategy_runtime", {})
+                        .get("execution_activation", "")
+                        or ""
+                    )
                     if (
+                        _ea == "ws_post_arm_tick"
+                        and incoming_snapshot["required_token_ids"]
+                    ):
+                        incoming_snapshot["payload_json"]["execution_armed_at"] = _to_iso(now)
+                        self._set_deferred_state_locked(
+                            signal_id,
+                            required_token_ids=incoming_snapshot["required_token_ids"],
+                            reason="awaiting_post_arm_ws_tick",
+                        )
+                        incoming_snapshot["deferred_until_ws"] = True
+                        incoming_snapshot["deferred_reason"] = "awaiting_post_arm_ws_tick"
+                    elif (
                         normalized_source in _PREWARM_SOURCES
                         and incoming_snapshot["required_token_ids"]
                         and not self._tokens_have_fresh_ws_quotes(

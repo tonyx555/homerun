@@ -1148,6 +1148,7 @@ class LiveExecutionService:
 
         if collateral_balance >= required_total_usdc and available < required_total_usdc:
             await self.refresh_collateral_balance_allowance()
+            self._invalidate_balance_cache()
             refreshed_balance = await self.get_balance()
             refreshed_available_raw = safe_float(refreshed_balance.get("available")) if isinstance(refreshed_balance, dict) else None
             refreshed_balance_raw = safe_float(refreshed_balance.get("balance")) if isinstance(refreshed_balance, dict) else None

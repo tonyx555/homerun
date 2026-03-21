@@ -135,9 +135,8 @@ def format_fleet_status(result: dict) -> str | None:
     daily_pnl = snap.get("daily_pnl", 0)
     pnl_str = f"${daily_pnl:+.2f}"
 
-    children = ["statusBadge", "exposure", "pnl", "positions", "traderTable"]
     lines = [
-        f'root = Stack([header, traderCard])',
+        'root = Stack([header, traderCard])',
         f'header = Card("Fleet Status", "{status_text}", "{"amber" if paused else "emerald"}", [statusBadge, exposure, pnl, positions])',
         f'statusBadge = Badge("{status_text}", "{status_variant}")',
         f'exposure = KeyValue("Gross Exposure", "${snap.get("gross_exposure_usd", 0):.2f}", true)',
@@ -179,7 +178,7 @@ def format_portfolio_overview(result: dict) -> str | None:
 
         lines = [
             'root = Stack([summary, posCard])',
-            f'summary = Card("Portfolio Summary", "", "purple", [pnl, cost, count])',
+            'summary = Card("Portfolio Summary", "", "purple", [pnl, cost, count])',
             f'pnl = KeyValue("Total P&L", "${total_pnl:.2f}", true)',
             f'cost = KeyValue("Total Cost", "${total_cost:.2f}", true)',
             f'count = KeyValue("Positions", "{len(positions)}", false)',
