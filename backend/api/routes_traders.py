@@ -894,12 +894,20 @@ async def get_trader_market_history(
                         if yes is not None and no is not None:
                             points.append({"t": float(t), "yes": round(yes, 6), "no": round(no, 6), "idx_0": round(yes, 6), "idx_1": round(no, 6)})
                     if len(points) >= 2:
-                        existing = histories.get(market_id, [])
-                        if existing:
-                            merged = _merge_normalized_binary_history(points, existing, normalize_max_points)
-                            histories[market_id] = merged[-normalize_max_points:]
-                        else:
-                            histories[market_id] = points[-normalize_max_points:]
+                        # Downsample to fit within limit while covering full span
+                        downsampled = normalize_binary_price_history(
+                            points,
+                            now_ms=now_ms,
+                            window_seconds=modal_backfill_seconds,
+                            max_points=min(limit, 2000),
+                        )
+                        if len(downsampled) >= 2:
+                            existing = histories.get(market_id, [])
+                            if existing:
+                                merged = _merge_normalized_binary_history(downsampled, existing, min(limit, 2000))
+                                histories[market_id] = merged
+                            else:
+                                histories[market_id] = downsampled
                 except Exception:
                     continue
 
