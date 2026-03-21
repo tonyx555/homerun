@@ -2574,7 +2574,7 @@ function upsertTraderRows(rows: Trader[] | undefined, trader: Trader): Trader[] 
   return next
 }
 
-function normalizeTuneList(value: unknown): string[] {
+function _normalizeTuneList(value: unknown): string[] {
   if (Array.isArray(value)) {
     return value
       .map((item) => String(item || '').trim())
@@ -5218,7 +5218,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     refetchInterval: 7000,
   })
 
-  const tuneIterateParsed = useMemo(
+  const _tuneIterateParsed = useMemo(
     () => (isRecord(tuneIterateResponse?.parsed) ? tuneIterateResponse?.parsed : null),
     [tuneIterateResponse]
   )
