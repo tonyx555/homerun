@@ -8,6 +8,7 @@ Uses three Polymarket APIs:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -693,5 +694,3 @@ async def _get_active_markets_summary(args: dict) -> dict:
         return {"error": str(exc)}
 
 
-# Needed for asyncio.gather in _get_market_prices
-import asyncio

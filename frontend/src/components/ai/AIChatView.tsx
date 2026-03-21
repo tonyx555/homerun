@@ -463,7 +463,7 @@ function RichTextContent({ text, standalone, isStreaming = false }: { text: stri
 function AssistantTextContent() {
   const part = useMessagePartText()
   const raw = part.text
-  const isStreaming = useMessage((state) => state.status.type === 'running')
+  const isStreaming = useMessage((state) => state.status?.type === 'running')
 
   // If no structured segments, render as rich text using MarkdownTextPrimitive (context-aware)
   if (!raw.includes('\u00AB\u00ABSEG:')) {

@@ -3212,7 +3212,7 @@ async def test_run_trader_once_uses_cached_live_context_builder_for_trigger_cycl
             }
         }
     )
-    full_context_mock = AsyncMock(side_effect=AssertionError("trigger cycles should not use full live builder"))
+    _full_context_mock = AsyncMock(side_effect=AssertionError("trigger cycles should not use full live builder"))
 
     async def _create_decision(session, **kwargs):
         return SimpleNamespace(id="decision-trigger")
@@ -3387,7 +3387,7 @@ async def test_run_trader_once_trigger_cycle_fetches_full_live_context_when_stri
         }
     }
     cached_context_mock = AsyncMock(return_value=strict_live_context)
-    full_context_mock = AsyncMock(return_value=strict_live_context)
+    _full_context_mock = AsyncMock(return_value=strict_live_context)
 
     async def _create_decision(session, **kwargs):
         return SimpleNamespace(id="decision-trigger-strict")
