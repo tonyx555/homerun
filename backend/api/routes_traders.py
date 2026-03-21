@@ -601,9 +601,14 @@ async def get_trader_market_history(
         return {"histories": {}, "updated_at": None}
 
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    scanner_window_seconds = max(60, int(getattr(settings, "SCANNER_SPARKLINE_WINDOW_HOURS", 24)) * 3600)
+    # Use a wider window for the position modal than the scanner sparklines.
+    # The modal has 7d/3d/24h presets, so we need at least 7 days of data.
+    scanner_window_seconds = max(7 * 24 * 3600, int(getattr(settings, "SCANNER_SPARKLINE_WINDOW_HOURS", 24)) * 3600)
     scanner_max_points = max(2, int(getattr(settings, "SCANNER_SPARKLINE_MAX_POINTS", 960)))
-    normalize_max_points = max(limit, scanner_max_points)
+    # For the position modal, allow many more points than the sparkline setting.
+    # The frontend requests limit=960 but the sparkline setting may be lower (e.g. 180).
+    # Use at least 960 points to fill the 7d/3d/24h chart windows properly.
+    normalize_max_points = max(limit, scanner_max_points, 960)
 
     row = (await session.execute(select(ScannerSnapshot).where(ScannerSnapshot.id == "latest"))).scalar_one_or_none()
     history_map = row.market_history_json if row is not None and isinstance(row.market_history_json, dict) else {}
@@ -812,26 +817,22 @@ async def get_trader_market_history(
         resolved_key = alias_to_history_key.get(market_id, market_id)
         histories[market_id] = normalized_history.get(resolved_key, [])
 
-    # Direct Polymarket API fallback for markets with thin history.
-    # The scanner may have a handful of recent live ticks but no real backfill.
-    # Trigger fallback when fewer than 10 points or span < 30 minutes.
-    def _history_is_thin(pts: list[dict[str, float]]) -> bool:
-        if len(pts) < 10:
-            return True
-        try:
-            span_ms = float(pts[-1].get("t", 0)) - float(pts[0].get("t", 0))
-            return span_ms < 30 * 60 * 1000  # < 30 min span
-        except Exception:
-            return True
-
-    empty_market_ids = [mid for mid in requested_ids if _history_is_thin(histories.get(mid, []))]
+    # Always run the direct Polymarket API fetch for the position modal.
+    # The scanner backfill uses a short window (sparkline hours) and may
+    # only produce a small amount of data. The modal needs days of history
+    # to fill the 7d/3d/24h time-window presets, so we always fetch and merge.
+    empty_market_ids = list(requested_ids)
     if empty_market_ids:
         try:
             from services.polymarket import polymarket_client as _pm_client
         except Exception:
             _pm_client = None  # type: ignore[assignment]
         if _pm_client is not None:
-            start_s = (now_ms - scanner_window_seconds * 1000) // 1000
+            # Use a much wider window for the position modal — 7 days
+            # to fill the 7d/3d/24h time window presets, not the scanner's
+            # short sparkline window.
+            modal_backfill_seconds = max(scanner_window_seconds, 7 * 24 * 3600)
+            start_s = (now_ms - modal_backfill_seconds * 1000) // 1000
             now_s = now_ms // 1000
             for market_id in empty_market_ids:
                 try:
