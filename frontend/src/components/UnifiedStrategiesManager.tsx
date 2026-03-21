@@ -380,7 +380,7 @@ function healthStatusClass(status: string): string {
 export default function UnifiedStrategiesManager({
   initialSourceFilter,
   onSourceFilterApplied,
-  onOpenCopilot,
+  onOpenCopilot: _onOpenCopilot,
 }: {
   initialSourceFilter?: string | null
   onSourceFilterApplied?: () => void

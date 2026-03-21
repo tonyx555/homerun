@@ -4424,10 +4424,10 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   )
   const [tuneIterateModel, setTuneIterateModel] = useState('')
   const [tuneIterateMaxIterations, setTuneIterateMaxIterations] = useState('12')
-  const [tuneIterateError, setTuneIterateError] = useState<string | null>(null)
+  const [_tuneIterateError, setTuneIterateError] = useState<string | null>(null)
   const [tuneIterateResponse, setTuneIterateResponse] = useState<TraderTuneAgentResponse | null>(null)
   const [tuneAutoEnabled, setTuneAutoEnabled] = useState(false)
-  const [tuneAutoIntervalMinutes, setTuneAutoIntervalMinutes] = useState('15')
+  const [tuneAutoIntervalMinutes, _setTuneAutoIntervalMinutes] = useState('15')
   const [tuneAutoLastRunAt, setTuneAutoLastRunAt] = useState<number | null>(null)
   const [tuneRevertSnapshot, setTuneRevertSnapshot] = useState<TuneRevertSnapshot | null>(null)
   const [tuneRevertError, setTuneRevertError] = useState<string | null>(null)
@@ -5222,15 +5222,15 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     () => (isRecord(tuneIterateResponse?.parsed) ? tuneIterateResponse?.parsed : null),
     [tuneIterateResponse]
   )
-  const tuneIterateActions = useMemo(() => {
+  const _tuneIterateActions = useMemo(() => {
     if (!tuneIterateParsed) return [] as string[]
     return normalizeTuneList(tuneIterateParsed.actions_taken)
   }, [tuneIterateParsed])
-  const tuneIterateNextSteps = useMemo(() => {
+  const _tuneIterateNextSteps = useMemo(() => {
     if (!tuneIterateParsed) return [] as string[]
     return normalizeTuneList(tuneIterateParsed.suggested_next_steps)
   }, [tuneIterateParsed])
-  const tuneIterateIssues = useMemo(() => {
+  const _tuneIterateIssues = useMemo(() => {
     if (!tuneIterateParsed) return [] as string[]
     const issueCandidates = [
       tuneIterateParsed.issues_identified,
@@ -5244,7 +5244,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     }
     return [] as string[]
   }, [tuneIterateParsed])
-  const tuneIterateAppliedUpdates = useMemo(
+  const _tuneIterateAppliedUpdates = useMemo(
     () => (Array.isArray(tuneIterateResponse?.applied_param_updates) ? tuneIterateResponse.applied_param_updates : []),
     [tuneIterateResponse]
   )

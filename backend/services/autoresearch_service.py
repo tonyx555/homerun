@@ -18,8 +18,6 @@ import difflib
 import json
 import time
 import uuid
-from dataclasses import asdict
-from datetime import datetime
 from typing import Any, AsyncGenerator, Optional
 
 from sqlalchemy import desc, select, update
@@ -34,7 +32,7 @@ from models.database import (
     Strategy,
     Trader,
 )
-from services.ai.agent import Agent, AgentEvent, AgentEventType, AgentTool, run_agent_to_completion
+from services.ai.agent import AgentTool, run_agent_to_completion
 from services.param_optimizer import (
     DEFAULT_PARAM_SPECS,
     BacktestResult,
@@ -635,7 +633,6 @@ class AutoresearchService:
         train_ratio = float(settings.get("train_ratio", 0.7))
         auto_apply = bool(settings.get("auto_apply", True))
         model = settings.get("model")
-        temperature = float(settings.get("temperature", 0.2))
         mandate = settings.get("mandate")
 
         # Validate trader exists
@@ -999,8 +996,7 @@ class AutoresearchService:
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Run strategy code evolution loop, yielding SSE events."""
         from services.strategy_backtester import run_strategy_backtest
-        from services.strategy_backtester import BacktestResult as StrategyBacktestResult
-        from services.strategy_loader import validate_strategy_source, STRATEGY_TEMPLATE, ALLOWED_IMPORT_PREFIXES
+        from services.strategy_loader import validate_strategy_source, ALLOWED_IMPORT_PREFIXES
         from services.strategy_versioning import create_strategy_version_snapshot
         from services.strategy_runtime import bump_strategy_runtime_revisions
 
@@ -1017,7 +1013,6 @@ class AutoresearchService:
         max_iterations = int(settings.get("max_iterations", 50))
         auto_apply = bool(settings.get("auto_apply", True))
         model = settings.get("model")
-        temperature = float(settings.get("temperature", 0.2))
         mandate = settings.get("mandate")
 
         # Load strategy

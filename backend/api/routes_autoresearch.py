@@ -168,7 +168,6 @@ async def update_autoresearch_settings(request: AutoresearchSettingsRequest) -> 
 @router.post("/create-ab-experiment/{experiment_id}")
 async def create_ab_from_autoresearch(experiment_id: str) -> dict:
     """Create a strategy A/B experiment from a completed code evolution autoresearch experiment."""
-    from sqlalchemy import select
     from models.database import AsyncSessionLocal, AutoresearchExperiment, Strategy
     from services.strategy_experiments import create_strategy_experiment
 

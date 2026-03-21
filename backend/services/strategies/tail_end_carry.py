@@ -712,7 +712,6 @@ class TailEndCarryStrategy(BaseStrategy):
                 entry_price = to_float((positions[0] or {}).get("price"), 0.0)
 
         dtr = days_to_resolution(payload)
-        days_ok = dtr is not None and min_days <= dtr <= max_days
         max_settlement_upside_pct = ((1.0 - entry_price) / entry_price * 100.0) if entry_price > 0.0 else 0.0
         upside_ok = max_settlement_upside_pct >= min_upside_percent
 
