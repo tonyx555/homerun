@@ -4,6 +4,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Provider as JotaiProvider } from 'jotai'
 import App from './App'
 import './index.css'
+import '@openuidev/react-ui/defaults.css'
+import '@openuidev/react-ui/components.css'
 
 const queryClient = new QueryClient({
   defaultOptions: {

@@ -158,6 +158,14 @@ class TemporalDecayStrategy(BaseStrategy):
         "base_size_usd": 16.0,
         "max_size_usd": 140.0,
         "take_profit_pct": 10.0,
+        "stop_loss_pct": 25.0,
+        "trailing_stop_pct": 15.0,
+        "exclude_market_keywords": [
+            "bitcoin", "btc", "ethereum", "eth", "solana", "sol",
+            "xrp", "crypto", "up or down", "doge", "dogecoin",
+            "bnb", "cardano", "ada", "polygon", "matic", "avax",
+            "avalanche", "chainlink", "link", "litecoin", "ltc",
+        ],
     }
 
     # Composable evaluate pipeline: score = edge*0.60 + conf*30 - risk*8
@@ -179,10 +187,104 @@ class TemporalDecayStrategy(BaseStrategy):
     def __init__(self):
         super().__init__()
 
+    # ------------------------------------------------------------------
+    # Keyword exclusion helpers (same pattern as tail_end_carry)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_excluded_keywords(value: Any) -> list[str]:
+        if isinstance(value, str):
+            candidates = [token.strip() for token in value.split(",")]
+        elif isinstance(value, list):
+            candidates = list(value)
+        else:
+            return []
+        out: list[str] = []
+        seen: set[str] = set()
+        for raw in candidates:
+            token = str(raw or "").strip().lower()
+            if not token or token in seen:
+                continue
+            seen.add(token)
+            out.append(token)
+        return out
+
+    @staticmethod
+    def _keyword_in_text(keyword: str, text: str) -> bool:
+        if not keyword or not text:
+            return False
+        if len(keyword) <= 4 and keyword.replace("-", "").replace("_", "").isalnum():
+            return re.search(rf"\b{re.escape(keyword)}\b", text) is not None
+        return keyword in text
+
+    @classmethod
+    def _first_blocked_keyword(cls, text: str, excluded_keywords: list[str]) -> Optional[str]:
+        for keyword in excluded_keywords:
+            if cls._keyword_in_text(keyword, text):
+                return keyword
+        return None
+
+    @classmethod
+    def _market_text(cls, market: Market) -> str:
+        chunks: list[str] = []
+        for value in (market.id, market.question, getattr(market, "slug", None),
+                      getattr(market, "group_item_title", None), getattr(market, "event_slug", None)):
+            text = str(value or "").strip().lower()
+            if text:
+                chunks.append(text)
+        for tag in list(getattr(market, "tags", []) or []):
+            text = str(tag or "").strip().lower()
+            if text:
+                chunks.append(text)
+        return " | ".join(chunks)
+
+    @classmethod
+    def _signal_market_text(cls, signal: Any, payload: dict) -> str:
+        chunks: list[str] = []
+        for value in (
+            getattr(signal, "market_question", None),
+            payload.get("market_question"),
+            payload.get("title"),
+            payload.get("description"),
+            payload.get("market_id"),
+        ):
+            text = str(value or "").strip().lower()
+            if text:
+                chunks.append(text)
+        markets = payload.get("markets")
+        if isinstance(markets, list):
+            for raw_market in markets[:2]:
+                if not isinstance(raw_market, dict):
+                    continue
+                for value in (raw_market.get("id"), raw_market.get("question"), raw_market.get("slug")):
+                    text = str(value or "").strip().lower()
+                    if text:
+                        chunks.append(text)
+        return " | ".join(chunks)
+
+    # ------------------------------------------------------------------
+    # Evaluate gate
+    # ------------------------------------------------------------------
+
     def custom_checks(self, signal, context, params, payload):
         source = str(getattr(signal, "source", "") or "").strip().lower()
+        excluded_keywords = self._normalize_excluded_keywords(
+            params.get("exclude_market_keywords", self.config.get("exclude_market_keywords", ""))
+        )
+        keyword_ok = True
+        blocked_keyword: Optional[str] = None
+        if excluded_keywords:
+            signal_text = self._signal_market_text(signal, payload)
+            blocked_keyword = self._first_blocked_keyword(signal_text, excluded_keywords)
+            keyword_ok = blocked_keyword is None
         return [
             DecisionCheck("source", "Signal source", source == "scanner", detail=f"got={source}"),
+            DecisionCheck(
+                "keyword_exclusion",
+                "Market keyword exclusion",
+                keyword_ok,
+                detail=f"blocked by '{blocked_keyword}'" if blocked_keyword else "no excluded keywords matched",
+            ),
         ]
 
     def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:
@@ -190,11 +292,20 @@ class TemporalDecayStrategy(BaseStrategy):
         scan_time = time.time()
         opportunities: list[Opportunity] = []
 
+        cfg = dict(self.default_config)
+        cfg.update(getattr(self, "config", {}) or {})
+        excluded_keywords = self._normalize_excluded_keywords(cfg.get("exclude_market_keywords"))
+
         for market in markets:
             if market.closed or not market.active:
                 continue
             if len(market.outcome_prices) < 2:
                 continue
+
+            if excluded_keywords:
+                market_text = self._market_text(market)
+                if self._first_blocked_keyword(market_text, excluded_keywords) is not None:
+                    continue
 
             market_keys = [
                 str(getattr(market, "id", "") or "").upper(),
@@ -834,17 +945,22 @@ class TemporalDecayStrategy(BaseStrategy):
         return max(1.0, min(max_size, size))
 
     def should_exit(self, position: Any, market_state: dict) -> ExitDecision:
-        """Temporal decay: lock gains with a default TP when no exit config is supplied."""
+        """Temporal decay: inject TP/SL/trailing defaults then delegate to base exit logic."""
         if market_state.get("is_resolved"):
             return self.default_exit_check(position, market_state)
         config = getattr(position, "config", None) or {}
         config = dict(config)
-        configured_tp = self.config.get("take_profit_pct", 10.0)
-        try:
-            default_tp = float(configured_tp)
-        except (TypeError, ValueError):
-            default_tp = 10.0
-        config.setdefault("take_profit_pct", default_tp)
+        for key, fallback in (
+            ("take_profit_pct", 10.0),
+            ("stop_loss_pct", 25.0),
+            ("trailing_stop_pct", 15.0),
+        ):
+            configured = self.config.get(key, fallback)
+            try:
+                default_val = float(configured)
+            except (TypeError, ValueError):
+                default_val = fallback
+            config.setdefault(key, default_val)
         position.config = config
         return self.default_exit_check(position, market_state)
 

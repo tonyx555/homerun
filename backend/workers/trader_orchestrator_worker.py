@@ -6644,7 +6644,22 @@ async def _run_trader_once_with_timeout(
     trigger_signal_snapshots_by_source: dict[str, dict[str, dict[str, Any]]] | None,
     timeout_seconds: float,
 ) -> tuple[int, int, int]:
-    timeout = max(1.0, float(timeout_seconds))
+    # Per-trader cycle timeout override: check risk_limits then source strategy_params.
+    per_trader_timeout = safe_float(
+        (dict(trader.get("risk_limits") or {})).get("trader_cycle_timeout_seconds"),
+        0.0,
+    )
+    if per_trader_timeout <= 0:
+        source_configs = trader.get("source_configs")
+        if isinstance(source_configs, dict):
+            for _sc in source_configs.values():
+                _sp = (dict(_sc) if isinstance(_sc, dict) else {}).get("strategy_params")
+                if isinstance(_sp, dict):
+                    per_trader_timeout = safe_float(_sp.get("trader_cycle_timeout_seconds"), 0.0)
+                    if per_trader_timeout > 0:
+                        break
+    effective_timeout = per_trader_timeout if per_trader_timeout > 0 else timeout_seconds
+    timeout = max(1.0, min(180.0, float(effective_timeout)))
     trader_id = str(trader.get("id") or "")
     existing = _inflight_trader_cycle_tasks.get(trader_id) if trader_id else None
     if existing is not None and not existing.done():

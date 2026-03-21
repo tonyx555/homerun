@@ -185,6 +185,7 @@ class WorkerHost:
                 continue
             try:
                 await task
+                await asyncio.sleep(0)  # yield so parallel restart handlers update state first
                 if self._shutting_down:
                     return
                 if self._worker_tasks.get(module_name) is not task:
@@ -197,6 +198,7 @@ class WorkerHost:
                 await asyncio.sleep(1.0)
                 await self._restart_worker_task(module_name, reason="unexpected_exit")
             except asyncio.CancelledError:
+                await asyncio.sleep(0)
                 if self._shutting_down:
                     return
                 if self._worker_tasks.get(module_name) is not task:
@@ -278,6 +280,7 @@ class WorkerHost:
                 continue
             try:
                 await task
+                await asyncio.sleep(0)
                 if self._shutting_down:
                     return
                 if self._runtime_tasks.get(runtime_name) is not task:
@@ -286,6 +289,7 @@ class WorkerHost:
                 await asyncio.sleep(1.0)
                 await self._restart_runtime_task(runtime_name, reason="unexpected_exit")
             except asyncio.CancelledError:
+                await asyncio.sleep(0)
                 if self._shutting_down:
                     return
                 if self._runtime_tasks.get(runtime_name) is not task:

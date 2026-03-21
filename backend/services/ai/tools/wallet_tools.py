@@ -165,14 +165,24 @@ async def _get_wallet_leaderboard(args: dict) -> dict:
         time_period = args.get("time_period", "30d")
         limit = args.get("limit", 20)
 
-        page = await engine.get_leaderboard_page(
-            category=category,
-            time_period=time_period,
-            sort="rank",
-            page=1,
+        # Map category to sort_by column
+        sort_map = {
+            "overall": "rank_score",
+            "profit": "total_pnl",
+            "win_rate": "win_rate",
+            "volume": "total_volume",
+            "sharpe": "sharpe_ratio",
+        }
+        sort_by = sort_map.get(category, "rank_score")
+
+        result = await engine.get_leaderboard(
+            limit=limit,
+            sort_by=sort_by,
+            sort_dir="desc",
+            window_key=time_period if time_period != "all" else None,
         )
-        if isinstance(page, dict):
-            wallets = page.get("wallets", page.get("results", []))[:limit]
+        if isinstance(result, dict):
+            wallets = result.get("wallets", result.get("results", []))[:limit]
             return {"wallets": wallets, "count": len(wallets), "category": category, "time_period": time_period}
         return {"wallets": [], "count": 0}
     except Exception as exc:

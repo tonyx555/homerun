@@ -58,7 +58,8 @@ DEFAULT_SUMMARY_INTERVAL_MINUTES = 60
 COMMAND_POLL_TIMEOUT_SECONDS = 25
 COMMAND_LOOP_IDLE_SECONDS = 3
 TELEGRAM_SETTINGS_LOAD_TIMEOUT_SECONDS = 10
-TELEGRAM_COMMAND_TIMEOUT_SECONDS = 12
+TELEGRAM_TYPING_INTERVAL_SECONDS = 4
+TELEGRAM_COMMAND_SAFETY_TIMEOUT_SECONDS = 300
 CLOSE_ALERT_MARKER_LIMIT = 4000
 CLOSE_ALERT_BATCH_LIMIT = 10
 TELEGRAM_UPDATE_DRAIN_LIMIT = 50
@@ -1322,24 +1323,28 @@ class TelegramNotifier:
             elif sender_id:
                 operator = f"telegram:{sender_id}"
 
+        typing_task = asyncio.create_task(self._send_typing_loop(chat_id))
         try:
             response = await asyncio.wait_for(
                 self._handle_telegram_command(text=text, operator=operator, chat_id=chat_id),
-                timeout=TELEGRAM_COMMAND_TIMEOUT_SECONDS,
+                timeout=TELEGRAM_COMMAND_SAFETY_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
             logger.warning(
-                "Telegram command timed out",
+                "Telegram command hit safety timeout",
                 operator=operator,
                 chat_id=chat_id,
             )
-            response = (
-                "⚠️ Backend is busy and the command timed out.\n"
-                "Try again in a minute."
-            )
+            response = "❌ Command took too long and was cancelled."
         except Exception as exc:
             logger.error("Telegram command processing failed", exc_info=exc)
             response = "❌ Telegram command failed.\nPlease retry or check backend logs."
+        finally:
+            typing_task.cancel()
+            try:
+                await typing_task
+            except asyncio.CancelledError:
+                pass
         if response:
             await self._enqueue(response)
 
@@ -1440,6 +1445,25 @@ class TelegramNotifier:
             return await self._telegram_ai_chat(message=stripped, chat_id=chat_id)
 
         return f"Unknown command.\nUse {_inline_code('/help')} for available Telegram commands."
+
+    async def _send_typing_loop(self, chat_id: str) -> None:
+        while True:
+            await self._send_chat_action(chat_id, "typing")
+            await asyncio.sleep(TELEGRAM_TYPING_INTERVAL_SECONDS)
+
+    async def _send_chat_action(self, chat_id: str, action: str) -> None:
+        if not self._bot_token:
+            return
+        target = chat_id or self._chat_id
+        if not target:
+            return
+        if not self._http_client:
+            self._http_client = httpx.AsyncClient(timeout=15.0)
+        url = f"{TELEGRAM_API_BASE}/bot{self._bot_token}/sendChatAction"
+        try:
+            await self._http_client.post(url, json={"chat_id": target, "action": action})
+        except Exception:
+            pass
 
     @staticmethod
     def _parse_telegram_start_args(args: list[str]) -> Optional[str]:

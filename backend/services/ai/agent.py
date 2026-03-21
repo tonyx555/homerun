@@ -313,58 +313,14 @@ class Agent:
                     # Loop back for next iteration
                     continue
 
-                # --- No tool calls: check if this is narration or final answer ---
-                if not response.content or not response.content.strip():
-                    # Empty response with no tool calls — nudge the LLM to answer
-                    logger.info(
-                        "Agent got empty response (iter %d), nudging for answer",
-                        iteration,
-                    )
-                    self._messages.append(
-                        LLMMessage(
-                            role="user",
-                            content="Please provide your answer based on the data gathered so far.",
-                        )
-                    )
-                    continue
+                # --- No tool calls: this is the final answer ---
+                # Standard ReAct pattern: if the LLM returned no tool
+                # calls, it has decided it is done.  The LLM's own
+                # structured output (tool_calls present vs absent)
+                # determines continuation — no heuristics.
+                content = (response.content or "").strip()
 
-                if response.content:
-                    content = response.content.strip()
-                    # Heuristic: short text that reads like thinking/narration
-                    # rather than a complete answer — continue the loop so the
-                    # LLM can issue more tool calls in the next turn.
-                    lower = content.lower()
-                    _narration_signals = (
-                        content.endswith(":")
-                        or "let me " in lower
-                        or "i'll " in lower
-                        or "i will " in lower
-                        or lower.startswith("trying")
-                        or lower.startswith("looking")
-                        or lower.startswith("checking")
-                        or lower.startswith("searching")
-                    )
-                    is_narration = (
-                        iteration < self.max_iterations - 1
-                        and len(content) < 300
-                        and _narration_signals
-                    )
-                    if is_narration:
-                        logger.info(
-                            "Agent narration detected (iter %d), continuing: %s",
-                            iteration,
-                            content[:80],
-                        )
-                        # Emit as thinking so the user sees narration
-                        yield AgentEvent(
-                            type=AgentEventType.THINKING,
-                            data={"content": content},
-                        )
-                        self._messages.append(
-                            LLMMessage(role="assistant", content=content)
-                        )
-                        continue
-
+                if content:
                     yield AgentEvent(
                         type=AgentEventType.ANSWER_START,
                         data={"content": content},
@@ -384,6 +340,19 @@ class Agent:
                         data={"result": result, "session_id": session_id},
                     )
                     return
+
+                # Empty response with no tool calls — safety: end the loop
+                logger.warning(
+                    "Agent got empty response with no tool calls (iter %d), ending",
+                    iteration,
+                )
+                result = {"answer": ""}
+                await self._scratchpad.complete_session(session_id=session_id, result=result)
+                yield AgentEvent(
+                    type=AgentEventType.DONE,
+                    data={"result": result, "session_id": session_id},
+                )
+                return
 
             # --- Max iterations exhausted ---
             logger.warning(

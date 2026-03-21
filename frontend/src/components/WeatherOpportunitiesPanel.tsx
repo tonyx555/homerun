@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   CloudRain,
@@ -32,6 +32,8 @@ import {
 } from '../services/api'
 import { useWebSocket } from '../hooks/useWebSocket'
 import WeatherWorkflowSettingsFlyout from './WeatherWorkflowSettingsFlyout'
+
+const EMPTY_OPPORTUNITIES: Opportunity[] = []
 
 type DirectionFilter = 'all' | 'buy_yes' | 'buy_no'
 type TargetDateFilter = 'all' | string
@@ -194,7 +196,7 @@ export default function WeatherOpportunitiesPanel({
     },
   })
 
-  const opportunities = oppData?.opportunities ?? []
+  const opportunities = oppData?.opportunities ?? EMPTY_OPPORTUNITIES
   const totalOpportunities = oppData?.total ?? opportunities.length
   const analyzeAllLimit = Math.max(
     ITEMS_PER_PAGE,
@@ -295,7 +297,11 @@ export default function WeatherOpportunitiesPanel({
     }
   }, [currentPage, totalPages, oppData])
 
+  const prevAnalyzeRef = useRef<{ visibleIds: string[]; allIds: string[] }>({ visibleIds: [], allIds: [] })
   useEffect(() => {
+    const prev = prevAnalyzeRef.current
+    if (prev.visibleIds === visibleAnalyzeIds && prev.allIds === allAnalyzeIds) return
+    prevAnalyzeRef.current = { visibleIds: visibleAnalyzeIds, allIds: allAnalyzeIds }
     onAnalyzeTargetsChange?.({ visibleIds: visibleAnalyzeIds, allIds: allAnalyzeIds })
   }, [onAnalyzeTargetsChange, visibleAnalyzeIds, allAnalyzeIds])
 

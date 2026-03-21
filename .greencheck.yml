@@ -1,0 +1,32 @@
+watch:
+  workflows: [CI]
+  branches: [main]
+  ignore-authors: [dependabot, renovate]
+
+fix:
+  agent: claude
+  types: [lint, type-error, test-failure, build-error]
+  max-passes: 5
+  max-cost: "$3.00"
+  timeout: 20m
+
+safety:
+  never-touch-files:
+    - "*.lock"
+    - "package-lock.json"
+    - ".env*"
+    - ".github/**"
+    - "data/**"
+    - "alembic/versions/**"
+  max-files-per-fix: 10
+  revert-on-regression: true
+
+report:
+  pr-comment: true
+  job-summary: true
+
+merge:
+  enabled: false
+  max-commits: 3
+  require-label: true
+  protected-patterns: [main, master, release/*]

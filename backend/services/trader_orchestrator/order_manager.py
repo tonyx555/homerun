@@ -541,6 +541,9 @@ async def submit_execution_leg(
             notional_usd=effective_shadow_notional,
         )
 
+    price_policy = str(leg.get("price_policy") or "").strip().lower()
+    enforce_fallback = price_policy != "taker_limit"
+
     execution = await execute_live_order(
         token_id=token_id,
         side=order_side,
@@ -550,7 +553,7 @@ async def submit_execution_leg(
         opportunity_id=str(getattr(signal, "id", "") or ""),
         time_in_force=time_in_force,
         post_only=post_only,
-        enforce_fallback_bound=True,
+        enforce_fallback_bound=enforce_fallback,
         skip_buy_pre_submit_gate=skip_buy_pre_submit_gate,
     )
 
@@ -574,7 +577,7 @@ async def submit_execution_leg(
                     opportunity_id=str(getattr(signal, "id", "") or ""),
                     time_in_force=time_in_force,
                     post_only=post_only,
-                    enforce_fallback_bound=True,
+                    enforce_fallback_bound=enforce_fallback,
                     skip_buy_pre_submit_gate=skip_buy_pre_submit_gate,
                 )
                 if retry_execution.status != "failed":

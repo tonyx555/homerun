@@ -480,8 +480,8 @@ class WorkflowOrchestrator:
                     loop.run_in_executor(_EMBED_EXECUTOR, market_watcher_index.rebuild, indexed_markets),
                     timeout=30,
                 )
-            except (asyncio.TimeoutError, Exception) as exc:
-                logger.warning("Market watcher index init/rebuild failed (continuing without ML): %s", exc)
+            except Exception as exc:
+                logger.warning("Market watcher index init/rebuild failed (continuing without ML): %s", exc, exc_info=exc)
 
             # 4) Budget guardrails (global LLM accounting + cycle/hour caps).
             llm_manager = None

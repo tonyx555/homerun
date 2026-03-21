@@ -15,11 +15,11 @@ Set-Location (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $MyInvo
 
 function Show-Banner {
     Write-Host ""
-    Write-Host "    ██   ██  ██████  ███    ███ ███████ ██████  ██    ██ ███    ██" -ForegroundColor DarkCyan
-    Write-Host "    ██   ██ ██    ██ ████  ████ ██      ██   ██ ██    ██ ████   ██" -ForegroundColor DarkCyan
-    Write-Host "    ███████ ██    ██ ██ ████ ██ █████   ██████  ██    ██ ██ ██  ██" -ForegroundColor Cyan
-    Write-Host "    ██   ██ ██    ██ ██  ██  ██ ██      ██   ██ ██    ██ ██  ██ ██" -ForegroundColor Cyan
-    Write-Host "    ██   ██  ██████  ██      ██ ███████ ██   ██  ██████  ██   ████" -ForegroundColor White
+    Write-Host "    $([char]27)[38;2;30;107;69m██   ██  ██████  ███    ███ ███████ ██████  ██    ██ ███    ██$([char]27)[0m"
+    Write-Host "    $([char]27)[38;2;35;138;85m██   ██ ██    ██ ████  ████ ██      ██   ██ ██    ██ ████   ██$([char]27)[0m"
+    Write-Host "    $([char]27)[38;2;42;172;104m███████ ██    ██ ██ ████ ██ █████   ██████  ██    ██ ██ ██  ██$([char]27)[0m"
+    Write-Host "    $([char]27)[38;2;53;212;122m██   ██ ██    ██ ██  ██  ██ ██      ██   ██ ██    ██ ██  ██ ██$([char]27)[0m"
+    Write-Host "    $([char]27)[38;2;88;241;193m██   ██  ██████  ██      ██ ███████ ██   ██  ██████  ██   ████$([char]27)[0m"
     Write-Host ""
     Write-Host "                    Autonomous Trading Platform" -ForegroundColor DarkGray
     Write-Host ""
@@ -709,7 +709,7 @@ Write-Host "    Start the application:" -ForegroundColor White
 Write-Host "      .\scripts\infra\run.ps1" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "    Or start services individually:" -ForegroundColor DarkGray
-Write-Host "      Backend:  cd backend; .\venv\Scripts\Activate.ps1; uvicorn main:app --reload" -ForegroundColor DarkGray
+Write-Host '      Backend:  cd backend; .\venv\Scripts\Activate.ps1; uvicorn main:app --reload' -ForegroundColor DarkGray
 Write-Host "      Frontend: cd frontend; npm run dev" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "    Endpoints:" -ForegroundColor White

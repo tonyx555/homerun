@@ -857,6 +857,24 @@ async def get_opportunity_ai_summary(
 
 # === AI Chat / Copilot ===
 
+# Cache the OpenUI prompt loaded from the generated file
+_openui_prompt_cache: str | None = None
+
+
+def _get_openui_prompt() -> str:
+    """Load the OpenUI Lang prompt generated from the frontend library."""
+    global _openui_prompt_cache
+    if _openui_prompt_cache is not None:
+        return _openui_prompt_cache
+    import pathlib
+    prompt_path = pathlib.Path(__file__).parent.parent / "services" / "ai" / "openui_prompt.txt"
+    try:
+        _openui_prompt_cache = prompt_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        logger.warning("OpenUI prompt file not found at %s", prompt_path)
+        _openui_prompt_cache = ""
+    return _openui_prompt_cache
+
 
 async def _build_context_pack(
     session: AsyncSession,
@@ -2176,38 +2194,25 @@ async def ai_chat_stream(
         "RULES — follow these strictly:\n"
         "- Be SHORT and direct. No preamble, no capability lists, no sign-offs.\n"
         "- NEVER use emojis.\n"
-        "- Briefly narrate what you are doing (\"Looking for markets ending soon...\") but keep it short.\n"
         "- Use tools to get real data — do not guess or make up numbers.\n"
         "- When a tool fails, try an alternative tool immediately. Only mention the "
         "failure if no alternative exists.\n"
         "- When a tool call limit is reached, work with whatever data you already have.\n"
-        "- Incorporate tool results into a coherent answer. The UI already renders "
-        "tool results as rich widgets — do NOT repeat raw data the user can see.\n"
         "- Add insight, analysis, or recommendations beyond what the raw data shows.\n"
         "- For greetings, reply in one short sentence. Do not list capabilities.\n"
-        "- IMPORTANT: When you have all the data you need, produce your final answer "
-        "immediately. Do NOT say 'let me look up more' unless you are actually calling "
-        "a tool in the same turn.\n\n"
+        "- CRITICAL AGENT BEHAVIOR: You MUST either call a tool OR produce your "
+        "complete final answer. NEVER return narration like 'Let me look into that' "
+        "or 'Let me provide a summary' without also calling a tool in the same turn. "
+        "If you have gathered enough data, immediately produce your full detailed answer "
+        "with analysis. If you need more data, call the appropriate tool.\n\n"
         "## Tool hints\n"
         "- For trader performance: use cortex_get_fleet_status or get_portfolio_performance\n"
         "- For market search: use search_markets (not get_active_markets_summary)\n"
         "- For market details: pass the slug from search results to get_market_details\n"
         "- For wallet/trader analysis: use get_wallet_profile with the wallet address\n\n"
-        "## Rich Output Format\n"
-        "You can embed rich UI components using OpenUI Lang markup:\n"
-        "- <MarketCard question=\"...\" yesPrice={0.65} noPrice={0.35} volume=\"$1.2M\" liquidity=\"$50K\" />\n"
-        "- <Card title=\"...\" subtitle=\"...\" accent=\"purple|cyan|emerald|amber|red\">...children...</Card>\n"
-        "- <ScoreGauge label=\"...\" value={0.75} format=\"percent\" />\n"
-        "- <SentimentBar label=\"...\" score={0.4} confidence={0.8} />\n"
-        "- <DataTable headers={[\"Market\",\"Price\",\"Volume\"]} rows={[[\"...\",\"65c\",\"$1M\"],[...]]} />\n"
-        "- <KeyValue label=\"...\" value=\"...\" mono={true} />\n"
-        "- <Badge text=\"Active\" variant=\"success|warning|danger|info|neutral\" />\n"
-        "- <Recommendation verdict=\"execute|review|skip\" reasoning=\"...\" />\n"
-        "- <BulletList items={[\"item 1\",\"item 2\"]} />\n"
-        "- <Stack gap=\"gap-3\">...children...</Stack>\n"
-        "- <TextBlock text=\"...\" variant=\"body|heading|caption|code\" />\n"
-        "Use these for analysis and recommendations. Wrap multiple in <Stack>. "
-        "Mix with markdown freely.\n\n"
+        "## Rich Output Format (OpenUI Lang)\n"
+        + _get_openui_prompt()
+        + "\n\n"
     )
 
     compact_context = {

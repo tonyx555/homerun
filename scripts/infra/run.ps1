@@ -1595,11 +1595,11 @@ function Test-NeedsSetup {
 
 # Show banner before any pre-flight output
 Write-Host ""
-Write-Host "    ██   ██  ██████  ███    ███ ███████ ██████  ██    ██ ███    ██" -ForegroundColor DarkCyan
-Write-Host "    ██   ██ ██    ██ ████  ████ ██      ██   ██ ██    ██ ████   ██" -ForegroundColor DarkCyan
-Write-Host "    ███████ ██    ██ ██ ████ ██ █████   ██████  ██    ██ ██ ██  ██" -ForegroundColor Cyan
-Write-Host "    ██   ██ ██    ██ ██  ██  ██ ██      ██   ██ ██    ██ ██  ██ ██" -ForegroundColor Cyan
-Write-Host "    ██   ██  ██████  ██      ██ ███████ ██   ██  ██████  ██   ████" -ForegroundColor White
+Write-Host "    $([char]27)[38;2;30;107;69m██   ██  ██████  ███    ███ ███████ ██████  ██    ██ ███    ██$([char]27)[0m"
+Write-Host "    $([char]27)[38;2;35;138;85m██   ██ ██    ██ ████  ████ ██      ██   ██ ██    ██ ████   ██$([char]27)[0m"
+Write-Host "    $([char]27)[38;2;42;172;104m███████ ██    ██ ██ ████ ██ █████   ██████  ██    ██ ██ ██  ██$([char]27)[0m"
+Write-Host "    $([char]27)[38;2;53;212;122m██   ██ ██    ██ ██  ██  ██ ██      ██   ██ ██    ██ ██  ██ ██$([char]27)[0m"
+Write-Host "    $([char]27)[38;2;88;241;193m██   ██  ██████  ██      ██ ███████ ██   ██  ██████  ██   ████$([char]27)[0m"
 Write-Host ""
 Write-Host "                    Autonomous Trading Platform" -ForegroundColor DarkGray
 Write-Host "    ─────────────────────────────────────────────────────────────────" -ForegroundColor DarkGray

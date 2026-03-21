@@ -170,20 +170,22 @@ async def _get_recent_decisions(args: dict) -> dict:
 
 async def _get_trader_overview(args: dict) -> dict:
     try:
-        from models.database import AsyncSessionLocal, LiveTradingRuntimeState
+        from models.database import AsyncSessionLocal, Trader
         from sqlalchemy import select
 
         async with AsyncSessionLocal() as session:
-            result = await session.execute(select(LiveTradingRuntimeState))
+            result = await session.execute(select(Trader))
             rows = result.scalars().all()
 
         traders = []
         for r in rows:
             traders.append({
                 "id": r.id,
-                "trader_id": getattr(r, "trader_id", None),
-                "state": getattr(r, "state", None),
-                "updated_at": getattr(r, "updated_at", None).isoformat() if getattr(r, "updated_at", None) else None,
+                "name": r.name,
+                "enabled": r.is_enabled,
+                "paused": r.is_paused,
+                "mode": r.mode,
+                "created_at": r.created_at.isoformat() if getattr(r, "created_at", None) else None,
             })
 
         return {"traders": traders, "count": len(traders)}

@@ -56,6 +56,7 @@ _ORDER_SUBMIT_TIMEOUT_SECONDS = 10.0
 _CLOB_READ_CIRCUIT_BREAKER_THRESHOLD = 3  # consecutive failures before opening
 _CLOB_READ_CIRCUIT_BREAKER_COOLDOWN = 30.0  # seconds to wait before retrying
 _CLOB_READ_FAILURE_LOG_INTERVAL = 30.0  # seconds between repeated failure logs
+_BALANCE_CACHE_TTL_SECONDS = 5.0  # short-lived cache to deduplicate calls within one order pipeline
 
 
 def _to_decimal(value) -> Decimal:
@@ -374,6 +375,10 @@ class LiveExecutionService:
         self._clob_read_consecutive_failures: int = 0
         self._clob_read_circuit_open_until: Optional[float] = None
         self._clob_read_last_failure_logged: float = 0.0
+        # Short-lived balance cache to avoid repeated CLOB calls within the same
+        # order submission pipeline (signature refresh + buy gate both call get_balance).
+        self._balance_cache: Optional[dict] = None
+        self._balance_cache_at: float = 0.0
 
     def _get_stats_lock(self) -> asyncio.Lock:
         if self._stats_lock is None:
@@ -1063,6 +1068,7 @@ class LiveExecutionService:
                 signature_type=signature_type,
             )
             await self._run_client_io(self._client.update_balance_allowance, params)
+            self._invalidate_balance_cache()
             return True
         except Exception as exc:
             logger.warning(
@@ -2439,14 +2445,16 @@ class LiveExecutionService:
                 f"Order size ${float(size_usd):.2f} below minimum ${float(min_order_floor):.2f}",
             )
 
-        if size_usd > max_trade_size:
+        if size_usd > max_trade_size and side == OrderSide.BUY:
             return (
                 False,
                 f"Order size ${float(size_usd):.2f} exceeds maximum ${settings.MAX_TRADE_SIZE_USD:.2f}",
             )
 
+        # Daily volume limit applies only to BUY orders (new exposure).
+        # SELL orders (exits/closes) must always be allowed so positions can be unwound.
         projected_daily_volume = self._daily_volume + size_usd
-        if projected_daily_volume > max_daily_volume:
+        if projected_daily_volume > max_daily_volume and side == OrderSide.BUY:
             return (
                 False,
                 f"Would exceed daily volume limit (${float(projected_daily_volume):.2f} > ${settings.MAX_DAILY_TRADE_VOLUME:.2f})",
@@ -2781,6 +2789,7 @@ class LiveExecutionService:
                         self._stats.total_trades += 1
                         self._stats.last_trade_at = utcnow()
                     await self._persist_runtime_state()
+                    self._invalidate_balance_cache()
                     logger.info(f"Order placed successfully: {order.clob_order_id}")
                     break
 
@@ -3474,8 +3483,21 @@ class LiveExecutionService:
         """Get current positions"""
         return list(self._positions.values())
 
+    def _invalidate_balance_cache(self) -> None:
+        self._balance_cache = None
+        self._balance_cache_at = 0.0
+
     async def get_balance(self) -> dict:
-        """Get wallet balance"""
+        """Get wallet balance.  Results are cached for a few seconds to avoid
+        redundant CLOB API round-trips within the same order pipeline."""
+        import time as _time
+
+        if (
+            self._balance_cache is not None
+            and (_time.monotonic() - self._balance_cache_at) < _BALANCE_CACHE_TTL_SECONDS
+        ):
+            return self._balance_cache
+
         if not self.is_ready():
             await self.ensure_initialized()
         if not self.is_ready():
@@ -3607,7 +3629,7 @@ class LiveExecutionService:
             self._balance_signature_type = selected_signature_type
             self._apply_signature_type_to_client(selected_signature_type)
 
-            return {
+            result = {
                 "address": address,
                 "balance": best_snapshot["balance"],
                 "available": best_snapshot["available"],
@@ -3615,7 +3637,11 @@ class LiveExecutionService:
                 "currency": "USDC",
                 "timestamp": utcnow().isoformat(),
                 "positions_value": sum(p.size * p.current_price for p in self._positions.values()),
+                "signature_type": selected_signature_type,
             }
+            self._balance_cache = result
+            self._balance_cache_at = __import__("time").monotonic()
+            return result
         except Exception as e:
             return {"error": str(e)}
 

@@ -135,12 +135,26 @@ async def execute_live_order(
                     from services.ws_feeds import get_feed_manager
                     fm = get_feed_manager()
                     if fm.cache.is_fresh(normalized_token_id):
-                        cached = fm.cache.get_mid_price(normalized_token_id)
+                        is_taker = not enforce_fallback_bound and not post_only
+                        if is_taker:
+                            bid_ask = fm.cache.get_best_bid_ask(normalized_token_id)
+                            if bid_ask is not None:
+                                best_bid, best_ask = bid_ask
+                                if normalized_side == OrderSide.BUY and best_ask > 0:
+                                    cached = best_ask
+                                elif normalized_side == OrderSide.SELL and best_bid > 0:
+                                    cached = best_bid
+                                else:
+                                    cached = None
+                            else:
+                                cached = None
+                        else:
+                            cached = fm.cache.get_mid_price(normalized_token_id)
                         if cached is not None and cached > 0:
                             cached_notional = float(cached) * requested_size
                             if cached_notional + 1e-9 >= min_order_size:
                                 live_quote = cached
-                                price_resolution = "ws_cache"
+                                price_resolution = "ws_cache_ask" if (is_taker and normalized_side == OrderSide.BUY) else "ws_cache_bid" if (is_taker and normalized_side == OrderSide.SELL) else "ws_cache"
                 except Exception:
                     pass
 

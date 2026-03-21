@@ -94,6 +94,7 @@ async def test_handle_telegram_command_autotrader_requires_valid_action():
 async def test_process_telegram_update_returns_timeout_message_when_command_hangs(monkeypatch):
     notifier = TelegramNotifier()
     queued_messages: list[str] = []
+    typing_actions: list[str] = []
 
     async def _hang(*, text: str, operator: str, chat_id: str) -> str:
         del text
@@ -105,9 +106,13 @@ async def test_process_telegram_update_returns_timeout_message_when_command_hang
     async def _enqueue(message: str) -> None:
         queued_messages.append(message)
 
+    async def _fake_chat_action(chat_id: str, action: str) -> None:
+        typing_actions.append(action)
+
     monkeypatch.setattr(notifier, "_handle_telegram_command", _hang)
     monkeypatch.setattr(notifier, "_enqueue", _enqueue)
-    monkeypatch.setattr(notifier_module, "TELEGRAM_COMMAND_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(notifier, "_send_chat_action", _fake_chat_action)
+    monkeypatch.setattr(notifier_module, "TELEGRAM_COMMAND_SAFETY_TIMEOUT_SECONDS", 0.01)
 
     await notifier._process_telegram_update(
         {
@@ -119,7 +124,8 @@ async def test_process_telegram_update_returns_timeout_message_when_command_hang
         }
     )
 
-    assert queued_messages == ["⚠️ Backend is busy and the command timed out.\nTry again in a minute."]
+    assert queued_messages == ["❌ Command took too long and was cancelled."]
+    assert "typing" in typing_actions
 
 
 @pytest.mark.asyncio

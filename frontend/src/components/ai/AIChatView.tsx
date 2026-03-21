@@ -314,35 +314,63 @@ function parseSegments(raw: string): ChatSegment[] {
   return segments
 }
 
-// Detect OpenUI Lang markup — looks for component tags like <Stack>, <Card>, <MarketCard> etc.
-const OPENUI_COMPONENTS = ['Stack', 'Card', 'ScoreGauge', 'Badge', 'KeyValue', 'DataTable', 'SentimentBar', 'MarketCard', 'Recommendation', 'BulletList', 'TextBlock'] as const
-const OPENUI_TAG_RE = new RegExp(`<(${OPENUI_COMPONENTS.join('|')})[\\s/>]`)
-const OPENUI_BLOCK_RE = new RegExp(
-  `(<(?:${OPENUI_COMPONENTS.join('|')})[\\s>][\\s\\S]*?<\\/(?:${OPENUI_COMPONENTS.join('|')})>|<(?:${OPENUI_COMPONENTS.join('|')})\\s[^>]*\\/>)`,
-  'g',
-)
+// Detect OpenUI Lang markup — fenced code blocks with ```openui ... ```
+// Also detect raw assignment syntax: root = Component(...)
+const OPENUI_FENCED_RE = /```openui\n([\s\S]*?)```/g
+const OPENUI_RAW_RE = /^root\s*=\s*[A-Z]\w*\(/m
 
 const PROSE_CLASSES = "text-sm text-foreground/90 leading-relaxed prose prose-invert prose-sm max-w-none prose-p:my-2 prose-headings:my-3 prose-li:my-0.5 prose-pre:bg-background/80 prose-pre:border prose-pre:border-border/40 prose-code:text-purple-700 dark:prose-code:text-purple-300 prose-code:text-xs"
 
-/** Splits text into alternating plain-text and OpenUI blocks */
+/** Splits text into alternating plain-text and OpenUI blocks.
+ *  Detects both ```openui fenced blocks and raw assignment blocks (root = Component(...)).
+ */
 function splitOpenUI(text: string): { type: 'text' | 'openui'; content: string }[] {
   const parts: { type: 'text' | 'openui'; content: string }[] = []
   let lastIdx = 0
   let m: RegExpExecArray | null
-  const re = new RegExp(OPENUI_BLOCK_RE.source, 'g')
-  while ((m = re.exec(text)) !== null) {
+
+  // First try fenced code blocks: ```openui\n...\n```
+  const fencedRe = new RegExp(OPENUI_FENCED_RE.source, 'g')
+  while ((m = fencedRe.exec(text)) !== null) {
     if (m.index > lastIdx) {
       const plain = text.slice(lastIdx, m.index).trim()
       if (plain) parts.push({ type: 'text', content: plain })
     }
-    parts.push({ type: 'openui', content: m[1] })
+    parts.push({ type: 'openui', content: m[1].trim() })
     lastIdx = m.index + m[0].length
   }
+
+  if (parts.length > 0) {
+    // Found fenced blocks — add remaining text
+    if (lastIdx < text.length) {
+      const plain = text.slice(lastIdx).trim()
+      if (plain) parts.push({ type: 'text', content: plain })
+    }
+    return parts
+  }
+
+  // Fallback: detect raw assignment blocks (root = Component(...) multiline blocks)
+  const rawBlockRe = new RegExp(
+    `((?:^\\w+\\s*=\\s*[A-Z]\\w*\\([\\s\\S]*?\\)\\s*\\n?)+)`,
+    'gm'
+  )
+  while ((m = rawBlockRe.exec(text)) !== null) {
+    // Only accept if block contains root = ...
+    if (!/^root\s*=/m.test(m[1])) continue
+    if (m.index > lastIdx) {
+      const plain = text.slice(lastIdx, m.index).trim()
+      if (plain) parts.push({ type: 'text', content: plain })
+    }
+    parts.push({ type: 'openui', content: m[1].trim() })
+    lastIdx = m.index + m[0].length
+  }
+
   if (lastIdx < text.length) {
     const plain = text.slice(lastIdx).trim()
     if (plain) parts.push({ type: 'text', content: plain })
   }
-  return parts
+
+  return parts.length > 0 ? parts : [{ type: 'text', content: text }]
 }
 
 /**
@@ -351,7 +379,9 @@ function splitOpenUI(text: string): { type: 'text' | 'openui'; content: string }
  *                     if false, uses MarkdownTextPrimitive (reads from message context).
  */
 function RichTextContent({ text, standalone }: { text: string; standalone?: boolean }) {
-  const hasOpenUI = OPENUI_TAG_RE.test(text)
+  const hasOpenUI = OPENUI_FENCED_RE.test(text) || OPENUI_RAW_RE.test(text)
+  // Reset regex lastIndex after test (they have 'g' or 'm' flags)
+  OPENUI_FENCED_RE.lastIndex = 0
 
   if (!hasOpenUI) {
     return (
@@ -406,26 +436,76 @@ function AssistantTextContent() {
   }
 
   const segments = parseSegments(raw)
-  // Check if the first segment is a transient thinking marker
-  const showThinking = segments.length > 0 && segments[0].type === 'thinking'
-  // Filter out thinking segments — they are transient UI indicators, not content
-  const visibleSegments = segments.filter(s => s.type !== 'thinking')
+
+  // Pair tool_start segments with their corresponding tool_end/tool_error.
+  // Each tool_start is followed later by either a tool_end or tool_error for
+  // the same tool.  When paired, we show the completed result; when unpaired
+  // (still running), we show the spinner.
+  type PairedTool = {
+    tool: string
+    input: Record<string, unknown>
+    result?: { type: 'end'; output: Record<string, unknown> } | { type: 'error'; error: string }
+  }
+  const paired: (PairedTool | ChatSegment)[] = []
+  const pendingStarts: PairedTool[] = []
+
+  for (const seg of segments) {
+    if (seg.type === 'thinking') continue // transient — skip
+    if (seg.type === 'tool_start') {
+      const p: PairedTool = { tool: seg.tool, input: seg.input }
+      pendingStarts.push(p)
+      paired.push(p)
+    } else if (seg.type === 'tool_end') {
+      // Find the most recent unpaired start for this tool
+      const match = [...pendingStarts].reverse().find(p => p.tool === seg.tool && !p.result)
+      if (match) {
+        match.result = { type: 'end', output: seg.output }
+      } else {
+        // Orphaned tool_end — render as result anyway
+        paired.push(seg)
+      }
+    } else if (seg.type === 'tool_error') {
+      const match = [...pendingStarts].reverse().find(p => p.tool === seg.tool && !p.result)
+      if (match) {
+        match.result = { type: 'error', error: seg.error }
+      } else {
+        paired.push(seg)
+      }
+    } else {
+      paired.push(seg)
+    }
+  }
+
+  // Show thinking dots only when there are NO visible segments yet (nothing painted)
+  const hasVisibleContent = paired.length > 0
+  const showThinking = !hasVisibleContent && segments.some(s => s.type === 'thinking')
 
   return (
     <div className="space-y-0.5">
-      {/* Animated thinking dots — shown before content arrives */}
+      {/* Animated thinking dots — only shown before ANY content arrives */}
       <AnimatePresence>
         {showThinking && <ThinkingIndicator key="thinking-dots" />}
       </AnimatePresence>
       <AnimatePresence mode="popLayout">
-        {visibleSegments.map((seg, i) => {
-          switch (seg.type) {
-            case 'tool_start':
-              return <ToolStartWidget key={`ts-${i}`} tool={seg.tool} input={seg.input} />
+        {paired.map((seg, i) => {
+          // Paired tool call
+          if ('input' in seg && 'tool' in seg && !('type' in seg)) {
+            const p = seg as PairedTool
+            if (p.result?.type === 'end') {
+              return <ToolResultWidget key={`tool-${i}`} tool={p.tool} output={p.result.output} />
+            }
+            if (p.result?.type === 'error') {
+              return <ToolErrorWidget key={`tool-${i}`} tool={p.tool} error={p.result.error} />
+            }
+            // Still running — show spinner
+            return <ToolStartWidget key={`tool-${i}`} tool={p.tool} input={p.input} />
+          }
+          const s = seg as ChatSegment
+          switch (s.type) {
             case 'tool_end':
-              return <ToolResultWidget key={`te-${i}`} tool={seg.tool} output={seg.output} />
+              return <ToolResultWidget key={`te-${i}`} tool={s.tool} output={s.output} />
             case 'tool_error':
-              return <ToolErrorWidget key={`err-${i}`} tool={seg.tool} error={seg.error} />
+              return <ToolErrorWidget key={`err-${i}`} tool={s.tool} error={s.error} />
             case 'text':
               return (
                 <motion.div
@@ -435,7 +515,7 @@ function AssistantTextContent() {
                   transition={{ duration: 0.3, ease: 'easeOut' }}
                   className="mt-2"
                 >
-                  <RichTextContent text={seg.text} standalone={true} />
+                  <RichTextContent text={s.text} standalone={true} />
                 </motion.div>
               )
             default:
@@ -637,8 +717,8 @@ function ChatRuntime({
                 tool: event.data.tool,
                 output: event.data.output || {},
               }))
-              // Show thinking again after tool completes (agent may call more tools)
-              state.isThinking = true
+              // Don't show thinking dots after tool completes — content is already visible
+              state.isThinking = false
               state.changed = true
               break
             case 'tool_error':

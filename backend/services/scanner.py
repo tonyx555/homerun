@@ -699,6 +699,37 @@ class ArbitrageScanner:
                 out.append(token)
         return out
 
+    def _collect_targeted_ws_tokens(self, markets: list) -> list[str]:
+        """Collect WS tokens for crypto binary markets + active opportunity markets only."""
+        seen: set[str] = set()
+        out: list[str] = []
+
+        def _add_token(token: str) -> None:
+            t = token.strip()
+            if t and len(t) > 20 and t not in seen:
+                seen.add(t)
+                out.append(t)
+
+        # 1) Crypto binary markets from MarketRuntime (HF trader always needs these)
+        try:
+            from services.market_runtime import get_market_runtime
+            for row in get_market_runtime().get_crypto_markets():
+                for tid in row.get("clob_token_ids") or []:
+                    _add_token(str(tid or ""))
+        except Exception:
+            pass
+
+        # 2) Markets with active strategy-generated opportunities
+        for opp in self._opportunities:
+            for mkt in opp.markets or []:
+                platform = str(mkt.get("platform", "polymarket") or "polymarket").lower()
+                if platform != "polymarket":
+                    continue
+                for tid in mkt.get("clob_token_ids") or []:
+                    _add_token(str(tid or ""))
+
+        return out
+
     @staticmethod
     def _collect_live_token_ids(markets: list) -> list[str]:
         """Collect unique token IDs from markets in stable order (Polymarket + Kalshi)."""
@@ -2441,14 +2472,14 @@ class ArbitrageScanner:
                 None, _update_caches_after_catalog, self, events, markets, prices, now
             )
 
-            # Phase 5 — Subscribe WS feeds to active tokens
+            # Phase 5 — Subscribe WS feeds to crypto + opportunity tokens only
             if settings.WS_FEED_ENABLED:
                 try:
                     feed_mgr = get_feed_manager()
                     if feed_mgr._started:
-                        poly_tokens = [t for t in self._collect_polymarket_tokens(markets)[:500] if len(t) > 20]
+                        poly_tokens = self._collect_targeted_ws_tokens(markets)
                         if poly_tokens:
-                            await feed_mgr.polymarket_feed.subscribe(token_ids=poly_tokens[:200])
+                            await feed_mgr.polymarket_feed.subscribe(token_ids=poly_tokens)
                 except Exception as e:
                     logger.warning(f"  WS subscription failed (non-critical): {e}", exc_info=e)
 
@@ -2737,9 +2768,9 @@ class ArbitrageScanner:
             try:
                 feed_mgr = get_feed_manager()
                 if feed_mgr._started:
-                    poly_tokens = [t for t in self._collect_polymarket_tokens(merged_markets)[:500] if len(t) > 20]
+                    poly_tokens = self._collect_targeted_ws_tokens(merged_markets)
                     if poly_tokens:
-                        await feed_mgr.polymarket_feed.subscribe(token_ids=poly_tokens[:200])
+                        await feed_mgr.polymarket_feed.subscribe(token_ids=poly_tokens)
             except Exception as e:
                 logger.warning(f"  WS subscription sync failed (non-critical): {e}", exc_info=e)
 

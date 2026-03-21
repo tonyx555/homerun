@@ -649,9 +649,16 @@ class PolymarketWSFeed:
         if not token_ids:
             return
         async with self._sub_lock:
+            new_ids = [tid for tid in token_ids if tid not in self._subscribed_assets]
             self._subscribed_assets.update(token_ids)
-            if self._ws and self._state == ConnectionState.CONNECTED:
-                await self._send_subscribe(token_ids)
+            should_send = bool(new_ids) and self._ws and self._state == ConnectionState.CONNECTED
+        if should_send:
+            _SUBSCRIBE_CHUNK = 100
+            for i in range(0, len(new_ids), _SUBSCRIBE_CHUNK):
+                chunk = new_ids[i : i + _SUBSCRIBE_CHUNK]
+                await self._send_subscribe(chunk)
+                if i + _SUBSCRIBE_CHUNK < len(new_ids):
+                    await asyncio.sleep(0.05)
 
     async def unsubscribe(self, token_ids: List[str]) -> None:
         """Remove subscriptions.  Cached data for removed tokens is cleared."""

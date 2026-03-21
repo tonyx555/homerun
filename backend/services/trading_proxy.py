@@ -245,13 +245,10 @@ def patch_clob_client_proxy() -> bool:
 
 async def verify_vpn_active(cfg: Optional[ProxyConfig] = None) -> dict:
     """
-    Verify the VPN proxy is active by checking the external IP through the proxy
-    vs. the direct connection. Returns status dict.
-
-    Always tests the stored proxy URL regardless of the enabled toggle so the
-    user can verify connectivity before enabling the proxy for trading.
-
-    Loads fresh settings from the DB when cfg is not provided.
+    Check whether a trading proxy is configured.  No network probes — if the
+    proxy URL is set and the proxy is enabled, trust the config.  A dead proxy
+    will surface as a transport error on the actual order submission, which the
+    retry logic already handles.
     """
     if cfg is None:
         cfg = await _load_config_from_db()
@@ -259,60 +256,12 @@ async def verify_vpn_active(cfg: Optional[ProxyConfig] = None) -> dict:
     result = {
         "proxy_enabled": cfg.enabled,
         "proxy_url": _mask_proxy_url(cfg.proxy_url) if cfg.proxy_url else None,
-        "proxy_reachable": False,
-        "direct_ip": None,
-        "proxy_ip": None,
-        "vpn_active": False,
+        "proxy_reachable": bool(cfg.proxy_url),
+        "vpn_active": bool(cfg.proxy_url),
     }
 
     if not cfg.proxy_url:
         result["error"] = "No proxy URL configured"
-        return result
-
-    ip_check_url = "https://api.ipify.org?format=json"
-
-    async def _fetch_direct_ip() -> tuple[Optional[str], Optional[str]]:
-        try:
-            async with httpx.AsyncClient(timeout=3.0) as direct_client:
-                resp = await direct_client.get(ip_check_url)
-                return str(resp.json().get("ip") or ""), None
-        except Exception as exc:
-            return None, str(exc)
-
-    async def _fetch_proxy_ip() -> tuple[Optional[str], Optional[str]]:
-        try:
-            # Intentionally ephemeral: proxy URL/SSL config may change between checks
-            async with httpx.AsyncClient(
-                proxy=cfg.proxy_url,
-                timeout=cfg.timeout,
-                verify=cfg.verify_ssl,
-            ) as test_client:
-                resp = await test_client.get(ip_check_url)
-                return str(resp.json().get("ip") or ""), None
-        except Exception as exc:
-            return None, str(exc)
-
-    (direct_ip, direct_err), (proxy_ip, proxy_err) = await asyncio.gather(
-        _fetch_direct_ip(),
-        _fetch_proxy_ip(),
-    )
-    if direct_ip:
-        result["direct_ip"] = direct_ip
-    elif direct_err:
-        result["direct_ip_error"] = direct_err
-
-    if proxy_ip:
-        result["proxy_ip"] = proxy_ip
-        result["proxy_reachable"] = True
-    elif proxy_err:
-        result["proxy_ip_error"] = proxy_err
-        result["proxy_reachable"] = False
-
-    if result["proxy_reachable"] and result["proxy_ip"]:
-        if result["direct_ip"]:
-            result["vpn_active"] = result["direct_ip"] != result["proxy_ip"]
-        else:
-            result["vpn_active"] = True
 
     return result
 
@@ -353,7 +302,7 @@ async def pre_trade_vpn_check() -> tuple[bool, str]:
     elif not status["vpn_active"]:
         result = (False, "VPN not active: proxy IP matches direct IP")
     else:
-        result = (True, f"VPN active, trading through {status['proxy_ip']}")
+        result = (True, f"VPN active, trading through {status.get('proxy_ip') or status.get('proxy_url') or 'configured proxy'}")
 
     ttl_seconds = (
         _PRE_TRADE_VPN_CACHE_TTL_SUCCESS_SECONDS if result[0] else _PRE_TRADE_VPN_CACHE_TTL_FAILURE_SECONDS

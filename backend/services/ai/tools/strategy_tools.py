@@ -266,25 +266,89 @@ async def _get_strategy_details(args: dict) -> dict:
 
 async def _get_strategy_performance(args: dict) -> dict:
     try:
-        from models.database import AsyncSessionLocal, LiveTradingOrder
-        from sqlalchemy import select, func
+        from models.database import AsyncSessionLocal, TraderOrder
+        from sqlalchemy import func, select
+        from services.trader_orchestrator_state import (
+            REALIZED_ORDER_STATUSES,
+            REALIZED_WIN_ORDER_STATUSES,
+            REALIZED_LOSS_ORDER_STATUSES,
+        )
 
         sid = args["strategy_id"]
 
+        # Normalize status values for case-insensitive matching
+        realized_statuses = tuple(REALIZED_ORDER_STATUSES)
+        win_statuses = tuple(REALIZED_WIN_ORDER_STATUSES)
+        loss_statuses = tuple(REALIZED_LOSS_ORDER_STATUSES)
+
+        status_col = func.lower(func.trim(func.coalesce(TraderOrder.status, "")))
+
         async with AsyncSessionLocal() as session:
-            # Count trades from this strategy
-            result = await session.execute(
-                select(func.count(LiveTradingOrder.id)).where(
-                    LiveTradingOrder.strategy_slug == sid
+            # Count only RESOLVED trades (wins + losses) — excludes cancelled,
+            # failed, submitted, open, etc. that never actually entered/settled.
+            resolved_result = await session.execute(
+                select(func.count(TraderOrder.id)).where(
+                    TraderOrder.strategy_key == sid,
+                    status_col.in_(realized_statuses),
                 )
             )
-            trade_count = result.scalar() or 0
+            resolved_count = resolved_result.scalar() or 0
 
-            # Get recent decisions
+            # Win count — only resolved wins
+            win_result = await session.execute(
+                select(func.count(TraderOrder.id)).where(
+                    TraderOrder.strategy_key == sid,
+                    status_col.in_(win_statuses),
+                )
+            )
+            wins = win_result.scalar() or 0
+
+            # Loss count
+            loss_result = await session.execute(
+                select(func.count(TraderOrder.id)).where(
+                    TraderOrder.strategy_key == sid,
+                    status_col.in_(loss_statuses),
+                )
+            )
+            losses = loss_result.scalar() or 0
+
+            # Total orders (all statuses) for context
+            total_result = await session.execute(
+                select(func.count(TraderOrder.id)).where(
+                    TraderOrder.strategy_key == sid,
+                )
+            )
+            total_orders = total_result.scalar() or 0
+
+            # Realized P&L — only from resolved orders
+            total_pnl_result = await session.execute(
+                select(func.sum(TraderOrder.actual_profit)).where(
+                    TraderOrder.strategy_key == sid,
+                    status_col.in_(realized_statuses),
+                    TraderOrder.actual_profit.isnot(None),
+                )
+            )
+            total_pnl = round(float(total_pnl_result.scalar() or 0), 4)
+
+            # Status breakdown for transparency
+            status_breakdown_result = await session.execute(
+                select(
+                    TraderOrder.status,
+                    func.count(TraderOrder.id),
+                )
+                .where(TraderOrder.strategy_key == sid)
+                .group_by(TraderOrder.status)
+            )
+            status_breakdown = {
+                str(row[0] or "unknown"): row[1]
+                for row in status_breakdown_result.all()
+            }
+
+            # Get recent orders
             result2 = await session.execute(
-                select(LiveTradingOrder)
-                .where(LiveTradingOrder.strategy_slug == sid)
-                .order_by(LiveTradingOrder.created_at.desc())
+                select(TraderOrder)
+                .where(TraderOrder.strategy_key == sid)
+                .order_by(TraderOrder.created_at.desc())
                 .limit(10)
             )
             recent = result2.scalars().all()
@@ -293,17 +357,25 @@ async def _get_strategy_performance(args: dict) -> dict:
         for r in recent:
             recent_trades.append({
                 "id": r.id,
-                "condition_id": r.condition_id,
-                "side": r.side,
-                "price": float(r.price) if getattr(r, "price", None) else None,
-                "size": float(r.size) if getattr(r, "size", None) else None,
-                "status": getattr(r, "status", None),
+                "market_question": r.market_question or r.market_id,
+                "direction": r.direction,
+                "mode": r.mode,
+                "status": r.status,
+                "notional_usd": float(r.notional_usd) if r.notional_usd else None,
+                "entry_price": float(r.entry_price) if r.entry_price else None,
+                "actual_profit": float(r.actual_profit) if r.actual_profit else None,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
             })
 
         return {
             "strategy_id": sid,
-            "total_trades": trade_count,
+            "resolved_trades": resolved_count,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": round(wins / resolved_count, 4) if resolved_count > 0 else 0.0,
+            "total_pnl_usd": total_pnl,
+            "total_orders_all_statuses": total_orders,
+            "status_breakdown": status_breakdown,
             "recent_trades": recent_trades,
         }
     except Exception as exc:

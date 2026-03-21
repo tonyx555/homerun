@@ -36,7 +36,6 @@ _PREWARM_WAIT_POLL_SECONDS = 0.01
 _PAYLOAD_VOLATILE_KEYS = {
     "bridge_run_at",
     "bridge_source",
-    "execution_armed_at",
     "ingested_at",
     "market_data_age_ms",
     "signal_emitted_at",
@@ -136,45 +135,7 @@ def _signal_runtime_metadata(payload: Any, strategy_context: Any) -> dict[str, A
     }
 
 
-def _requires_post_arm_ws_tick(payload: Any, strategy_context: Any, *, source: Any) -> bool:
-    metadata = _signal_runtime_metadata(payload, strategy_context)
-    if str(metadata.get("execution_activation") or "").strip().lower() == "ws_post_arm_tick":
-        return True
-    normalized_source = str(source or "").strip().lower()
-    return normalized_source != "crypto"
 
-
-def _set_execution_armed_at(
-    payload: Any,
-    strategy_context: Any,
-    *,
-    armed_at_iso: str,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    payload_json = dict(payload) if isinstance(payload, dict) else {}
-    strategy_context_json = dict(strategy_context) if isinstance(strategy_context, dict) else {}
-    payload_json["execution_armed_at"] = armed_at_iso
-    strategy_context_json["execution_armed_at"] = armed_at_iso
-    return payload_json, strategy_context_json
-
-
-def _required_observed_after_epoch(payload: Any, strategy_context: Any, *, source: Any) -> float | None:
-    if not _requires_post_arm_ws_tick(payload, strategy_context, source=source):
-        return None
-    armed_at = _normalize_datetime(
-        (
-            (payload or {}).get("execution_armed_at")
-            if isinstance(payload, dict)
-            else None
-        )
-        or (
-            (strategy_context or {}).get("execution_armed_at")
-            if isinstance(strategy_context, dict)
-            else None
-        )
-    )
-    if armed_at is None:
-        return None
-    return float(armed_at.timestamp())
 
 
 def _normalize_payload_for_compare(value: Any) -> Any:
@@ -515,11 +476,6 @@ class IntentRuntime:
         return self._tokens_have_fresh_ws_quotes(
             list(snapshot.get("required_token_ids") or []),
             source=str(snapshot.get("source") or ""),
-            min_observed_at_epoch=_required_observed_after_epoch(
-                snapshot.get("payload_json"),
-                snapshot.get("strategy_context_json"),
-                source=snapshot.get("source"),
-            ),
         )
 
     async def _ensure_hot_subscriptions(self, token_ids: list[str]) -> None:
@@ -564,18 +520,13 @@ class IntentRuntime:
                 copy.deepcopy(payload_json or {}),
                 direction=str(direction or "").strip().lower(),
             )
-            requires_post_arm_release = _requires_post_arm_ws_tick(
-                payload_json,
-                strategy_context_json,
-                source=normalized_source,
-            )
             for token_id in required:
                 normalized_token = str(token_id or "").strip().lower()
                 if not normalized_token or normalized_token in seen:
                     continue
                 seen.add(normalized_token)
                 token_ids.append(normalized_token)
-                if requires_post_arm_release or normalized_token in wait_seen:
+                if normalized_token in wait_seen:
                     continue
                 wait_seen.add(normalized_token)
                 wait_token_ids.append(normalized_token)
@@ -784,27 +735,8 @@ class IntentRuntime:
                 if not snapshot["id"]:
                     continue
                 if snapshot["runtime_sequence"] is None and str(snapshot.get("status") or "").strip().lower() in _SIGNAL_ACTIVE_STATUSES:
-                    if (
-                        snapshot["required_token_ids"]
-                        and _required_observed_after_epoch(
-                            snapshot.get("payload_json"),
-                            snapshot.get("strategy_context_json"),
-                            source=snapshot.get("source"),
-                        ) is not None
-                    ):
-                        if self._snapshot_ready_for_runtime(snapshot):
-                            snapshot["runtime_sequence"] = self._allocate_runtime_sequence_locked()
-                            bootstrap_snapshots[snapshot["id"]] = copy.deepcopy(snapshot)
-                        else:
-                            self._signals_by_id[snapshot["id"]] = snapshot
-                            self._set_deferred_state_locked(
-                                snapshot["id"],
-                                required_token_ids=list(snapshot.get("required_token_ids") or []),
-                                reason="awaiting_post_arm_ws_tick",
-                            )
-                    else:
-                        snapshot["runtime_sequence"] = self._allocate_runtime_sequence_locked()
-                        bootstrap_snapshots[snapshot["id"]] = copy.deepcopy(snapshot)
+                    snapshot["runtime_sequence"] = self._allocate_runtime_sequence_locked()
+                    bootstrap_snapshots[snapshot["id"]] = copy.deepcopy(snapshot)
                 sequence = _normalize_runtime_sequence(snapshot.get("runtime_sequence"))
                 if sequence is not None:
                     self._next_runtime_sequence = max(self._next_runtime_sequence, sequence + 1)
@@ -890,12 +822,6 @@ class IntentRuntime:
                 strategy_context["ingested_at"] = _to_iso(now)
                 strategy_context["bridge_source"] = str(source)
                 strategy_context["bridge_run_at"] = _to_iso(now)
-                requires_post_arm_release = _requires_post_arm_ws_tick(
-                    payload,
-                    strategy_context,
-                    source=normalized_source,
-                )
-
                 opp_quality_passed: bool | None = None
                 if quality_filter_pipeline is not None:
                     report = quality_filter_pipeline.evaluate(opportunity)
@@ -953,24 +879,7 @@ class IntentRuntime:
                     incoming_snapshot["status"] = "pending"
                     incoming_snapshot["effective_price"] = None
                     self._clear_deferred_state_locked(existing["id"])
-                    if requires_post_arm_release and incoming_snapshot["required_token_ids"]:
-                        (
-                            incoming_snapshot["payload_json"],
-                            incoming_snapshot["strategy_context_json"],
-                        ) = _set_execution_armed_at(
-                            incoming_snapshot.get("payload_json"),
-                            incoming_snapshot.get("strategy_context_json"),
-                            armed_at_iso=_to_iso(now) or "",
-                        )
-                        self._set_deferred_state_locked(
-                            existing["id"],
-                            required_token_ids=incoming_snapshot["required_token_ids"],
-                            reason="awaiting_post_arm_ws_tick",
-                        )
-                        incoming_snapshot["deferred_until_ws"] = True
-                        incoming_snapshot["deferred_reason"] = "awaiting_post_arm_ws_tick"
-                        incoming_snapshot["runtime_sequence"] = None
-                    elif (
+                    if (
                         normalized_source in _PREWARM_SOURCES
                         and incoming_snapshot["required_token_ids"]
                         and not self._tokens_have_fresh_ws_quotes(
@@ -1000,24 +909,7 @@ class IntentRuntime:
                 else:
                     signal_id = uuid.uuid4().hex
                     incoming_snapshot["id"] = signal_id
-                    if requires_post_arm_release and incoming_snapshot["required_token_ids"]:
-                        (
-                            incoming_snapshot["payload_json"],
-                            incoming_snapshot["strategy_context_json"],
-                        ) = _set_execution_armed_at(
-                            incoming_snapshot.get("payload_json"),
-                            incoming_snapshot.get("strategy_context_json"),
-                            armed_at_iso=_to_iso(now) or "",
-                        )
-                        self._signals_by_id[signal_id] = incoming_snapshot
-                        self._set_deferred_state_locked(
-                            signal_id,
-                            required_token_ids=incoming_snapshot["required_token_ids"],
-                            reason="awaiting_post_arm_ws_tick",
-                        )
-                        incoming_snapshot["deferred_until_ws"] = True
-                        incoming_snapshot["deferred_reason"] = "awaiting_post_arm_ws_tick"
-                    elif (
+                    if (
                         normalized_source in _PREWARM_SOURCES
                         and incoming_snapshot["required_token_ids"]
                         and not self._tokens_have_fresh_ws_quotes(
