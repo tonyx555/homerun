@@ -81,13 +81,13 @@ const LIVE_MARK_FRESH_MS = 15_000
 const MODAL_MARKET_HISTORY_LIMIT = 960
 const MODAL_MARKET_HISTORY_REFRESH_MS = 10_000
 const LIVELINE_WINDOW_PRESETS: WindowOption[] = [
-  { label: 'All', secs: 60 * 60 * 24 * 365 * 10 },
+  { label: '24h', secs: 60 * 60 * 24 },
   { label: '7d', secs: 60 * 60 * 24 * 7 },
   { label: '3d', secs: 60 * 60 * 24 * 3 },
-  { label: '24h', secs: 60 * 60 * 24 },
   { label: '6h', secs: 60 * 60 * 6 },
   { label: '1h', secs: 60 * 60 },
   { label: '15m', secs: 60 * 15 },
+  { label: 'All', secs: 60 * 60 * 24 * 365 * 10 },
 ]
 
 const VENUE_META: Record<PositionVenue, {
@@ -1801,6 +1801,7 @@ export default function PositionsPanel() {
                       badge
                       pulse
                       fill
+                      window={60 * 60 * 24}
                       windows={LIVELINE_WINDOW_PRESETS}
                       windowStyle="rounded"
                       lerpSpeed={0.1}
