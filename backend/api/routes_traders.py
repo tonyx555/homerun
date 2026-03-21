@@ -812,8 +812,19 @@ async def get_trader_market_history(
         resolved_key = alias_to_history_key.get(market_id, market_id)
         histories[market_id] = normalized_history.get(resolved_key, [])
 
-    # Direct Polymarket API fallback for any markets still missing history.
-    empty_market_ids = [mid for mid in requested_ids if len(histories.get(mid, [])) < 2]
+    # Direct Polymarket API fallback for markets with thin history.
+    # The scanner may have a handful of recent live ticks but no real backfill.
+    # Trigger fallback when fewer than 10 points or span < 30 minutes.
+    def _history_is_thin(pts: list[dict[str, float]]) -> bool:
+        if len(pts) < 10:
+            return True
+        try:
+            span_ms = float(pts[-1].get("t", 0)) - float(pts[0].get("t", 0))
+            return span_ms < 30 * 60 * 1000  # < 30 min span
+        except Exception:
+            return True
+
+    empty_market_ids = [mid for mid in requested_ids if _history_is_thin(histories.get(mid, []))]
     if empty_market_ids:
         try:
             from services.polymarket import polymarket_client as _pm_client
@@ -882,7 +893,12 @@ async def get_trader_market_history(
                         if yes is not None and no is not None:
                             points.append({"t": float(t), "yes": round(yes, 6), "no": round(no, 6), "idx_0": round(yes, 6), "idx_1": round(no, 6)})
                     if len(points) >= 2:
-                        histories[market_id] = points[-normalize_max_points:]
+                        existing = histories.get(market_id, [])
+                        if existing:
+                            merged = _merge_normalized_binary_history(points, existing, normalize_max_points)
+                            histories[market_id] = merged[-normalize_max_points:]
+                        else:
+                            histories[market_id] = points[-normalize_max_points:]
                 except Exception:
                     continue
 
