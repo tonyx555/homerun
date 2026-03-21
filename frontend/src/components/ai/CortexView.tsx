@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Brain,
@@ -11,7 +11,6 @@ import {
   Trash2,
   Plus,
   Pencil,
-  Bot,
 } from 'lucide-react'
 import { cn } from '../../lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card'
@@ -19,9 +18,7 @@ import { Button } from '../ui/button'
 import { Badge } from '../ui/badge'
 import { Input } from '../ui/input'
 import { Switch } from '../ui/switch'
-import {
-  BotMessageBubble,
-} from './ChatRendering'
+import { MessageContent } from './ChatRendering'
 import {
   getCortexStatus,
   getCortexHistory,
@@ -254,12 +251,9 @@ function ActivityPanel({
 
   const messages = historyData?.messages ?? []
 
-  // Auto-scroll when streaming or new messages arrive
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-    }
-  }, [messages.length, streamContent])
+  const assistantMessages = messages.filter(m => m.role === 'assistant')
+  // Newest first
+  const reversed = [...assistantMessages].reverse()
 
   if (isLoading) {
     return (
@@ -269,7 +263,7 @@ function ActivityPanel({
     )
   }
 
-  if (messages.length === 0 && !isStreaming) {
+  if (assistantMessages.length === 0 && !isStreaming) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
         <Brain className="w-10 h-10 mb-3 opacity-20" />
@@ -279,10 +273,10 @@ function ActivityPanel({
   }
 
   return (
-    <div ref={scrollRef} className="h-full overflow-y-auto">
+    <div ref={scrollRef} className="h-full overflow-y-auto p-3 space-y-3">
       {/* Clear history */}
-      {messages.length > 0 && !isStreaming && (
-        <div className="flex justify-end px-4 py-2 border-b border-border/10">
+      {assistantMessages.length > 0 && !isStreaming && (
+        <div className="flex justify-end">
           <Button
             size="sm"
             variant="ghost"
@@ -295,47 +289,50 @@ function ActivityPanel({
         </div>
       )}
 
-      {/* Historical messages */}
-      {messages.filter(m => m.role === 'assistant').map((msg) => (
-        <div key={msg.id} className="border-b border-border/10">
-          <CortexMessage message={msg} />
+      {/* Live streaming card */}
+      {isStreaming && (
+        <div className="rounded-lg border border-purple-500/30 bg-muted/20 overflow-hidden">
+          <div className="flex items-center gap-2 px-3 py-2 border-b border-border/20 bg-purple-500/5">
+            <Brain className="w-3.5 h-3.5 text-purple-400 animate-pulse" />
+            <span className="text-xs font-medium text-purple-400">Running now</span>
+          </div>
+          <div className="p-3">
+            {streamPhase === 'answering' && streamContent ? (
+              <MessageContent content={streamContent} isStreaming={true} />
+            ) : (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <span>{streamContent || 'Starting cycle...'}</span>
+              </div>
+            )}
+          </div>
         </div>
-      ))}
+      )}
 
-      {/* Live streaming content */}
-      {isStreaming && streamPhase === 'working' && (
-        <div className="flex gap-3 py-4 px-4 bg-muted/20 border-b border-border/20">
-          <div className="w-7 h-7 rounded-full bg-purple-500/20 border border-purple-500/30 flex items-center justify-center shrink-0 mt-0.5">
-            <Bot className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />
-          </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-[10px] uppercase tracking-wider text-purple-600 dark:text-purple-400/70 mb-1">Cortex</p>
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <Brain className="w-4 h-4 animate-pulse text-purple-400" />
-              <span>{streamContent || 'Starting cycle...'}</span>
-            </div>
-          </div>
-        </div>
-      )}
-      {isStreaming && streamPhase === 'answering' && streamContent && (
-        <BotMessageBubble label="Cortex" content={streamContent} isStreaming={true} />
-      )}
+      {/* Historical messages — newest first, bordered cards */}
+      {reversed.map((msg) => (
+        <CortexRunCard key={msg.id} message={msg} />
+      ))}
     </div>
   )
 }
 
-function CortexMessage({ message }: { message: CortexHistoryMessage }) {
-  const timestamp = message.created_at ? new Date(message.created_at).toLocaleString() : ''
+function CortexRunCard({ message }: { message: CortexHistoryMessage }) {
+  const timestamp = message.created_at ? new Date(message.created_at) : null
+  const dateStr = timestamp ? timestamp.toLocaleDateString() : ''
+  const timeStr = timestamp ? timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
 
   return (
-    <div>
-      <BotMessageBubble label="Cortex" content={message.content} />
-      {timestamp && (
-        <div className="px-4 py-1 text-[10px] text-muted-foreground/50">
-          {timestamp}
-          {message.model_used && <span className="ml-2">{message.model_used}</span>}
-        </div>
-      )}
+    <div className="rounded-lg border border-border/40 bg-muted/10 overflow-hidden">
+      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border/20 bg-muted/30">
+        <Clock className="w-3 h-3 text-muted-foreground/60" />
+        <span className="text-[11px] text-muted-foreground">{dateStr} {timeStr}</span>
+        {message.model_used && (
+          <Badge variant="outline" className="text-[9px] ml-auto">{message.model_used}</Badge>
+        )}
+      </div>
+      <div className="p-3">
+        <MessageContent content={message.content} />
+      </div>
     </div>
   )
 }
@@ -365,16 +362,21 @@ function MemoryPanel() {
     refetchInterval: 30000,
   })
 
+  const invalidateMemory = () => {
+    queryClient.invalidateQueries({ queryKey: ['cortex-memory'] })
+    queryClient.invalidateQueries({ queryKey: ['cortex-status'] })
+  }
+
   const deleteMutation = useMutation({
     mutationFn: deleteCortexMemory,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['cortex-memory'] }),
+    onSuccess: invalidateMemory,
   })
 
   const updateMutation = useMutation({
     mutationFn: ({ id, updates }: { id: string; updates: Parameters<typeof updateCortexMemory>[1] }) =>
       updateCortexMemory(id, updates),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['cortex-memory'] })
+      invalidateMemory()
       setEditingId(null)
     },
   })
@@ -382,7 +384,7 @@ function MemoryPanel() {
   const createMutation = useMutation({
     mutationFn: createCortexMemory,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['cortex-memory'] })
+      invalidateMemory()
       setNewContent('')
       setShowAdd(false)
     },
