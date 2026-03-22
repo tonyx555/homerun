@@ -2687,8 +2687,8 @@ async def reconcile_live_positions(
             and not isinstance(latest_wallet_sell_trade, dict)
         ):
             _has_been_evaluated = bool(
-                isinstance(position_state.get("last_exit_evaluated_at"), str)
-                and position_state["last_exit_evaluated_at"] > "2000"
+                isinstance(pending_position_state.get("last_exit_evaluated_at"), str)
+                and pending_position_state["last_exit_evaluated_at"] > "2000"
             )
             _position_age_minutes = (
                 (now - row.created_at).total_seconds() / 60.0
@@ -2699,8 +2699,8 @@ async def reconcile_live_positions(
                 close_price = (
                     wallet_mark_price
                     if wallet_mark_price is not None and wallet_mark_price > 0.0
-                    else current_price
-                    if current_price is not None and current_price > 0.0
+                    else pending_current_price
+                    if pending_current_price is not None and pending_current_price > 0.0
                     else entry_fill_price
                 )
                 if close_price is not None and close_price > 0.0:
