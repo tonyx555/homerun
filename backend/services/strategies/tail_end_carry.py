@@ -965,10 +965,15 @@ class TailEndCarryStrategy(BaseStrategy):
         config = dict(config)
 
         entry_price = safe_float(getattr(position, "entry_price", 0.0), 0.0)
-        current_price = safe_float(market_state.get("current_price"), 0.0)
+        current_price = safe_float(market_state.get("current_price"), None)
         highest_price = safe_float(getattr(position, "highest_price", None), None)
         age_minutes = safe_float(getattr(position, "age_minutes", None), None)
         seconds_left = safe_float(market_state.get("seconds_left"), None)
+
+        # No price available — hold without blocking default exits so the
+        # lifecycle layer can still act on resolution or staleness signals.
+        if current_price is None or current_price <= 0.0:
+            return ExitDecision("hold", "No current price available for exit evaluation")
 
         strategy_context = getattr(position, "strategy_context", None)
 
@@ -977,7 +982,7 @@ class TailEndCarryStrategy(BaseStrategy):
 
         is_sports = category in (CATEGORY_SPORTS, CATEGORY_ESPORTS)
 
-        # -- Fix #7: Resolution proximity hold --
+        # -- Resolution proximity hold --
         # If resolution is imminent, hold regardless of price (the thesis is
         # "converge to 1.00 at resolution" — let it play out).
         # Sports get a tighter hold window (150min default vs 360min).
@@ -995,7 +1000,7 @@ class TailEndCarryStrategy(BaseStrategy):
 
         if resolution_hold_enabled and seconds_left is not None:
             minutes_left = seconds_left / 60.0
-            if minutes_left <= resolution_hold_minutes and current_price > 0.0:
+            if minutes_left <= resolution_hold_minutes:
                 # Check max loss override before holding
                 if entry_price > 0.0:
                     unrealized_loss_pct = ((entry_price - current_price) / entry_price) * 100.0
