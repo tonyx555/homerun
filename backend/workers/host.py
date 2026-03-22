@@ -127,6 +127,7 @@ class WorkerHost:
         self._copy_trade_service_started = False
         self._position_monitor_started = False
         self._fill_monitor_started = False
+        self._restart_grace: dict[str, float] = {}  # module_name -> monotonic time of last restart
 
     def _enabled(self, key: str) -> bool:
         return bool(self._plane_config.get(key, False))
@@ -170,6 +171,11 @@ class WorkerHost:
             await self._cancel_worker_task(module_name, current)
         replacement = await self._spawn_worker_task(module_name)
         self._worker_tasks[module_name] = replacement
+        # Record restart time so the freshness monitor gives the worker a
+        # grace period to complete its first cycle and write a fresh
+        # heartbeat, preventing an infinite restart loop.
+        import time as _time
+        self._restart_grace[module_name] = _time.monotonic()
         logger.warning(
             "Worker task restarted",
             plane=self._plane_name,
@@ -323,9 +329,28 @@ class WorkerHost:
             }
             now = utcnow()
 
+            import time as _time
+            mono_now = _time.monotonic()
+
             for module_name, task in list(self._worker_tasks.items()):
                 if task.done():
                     continue
+                # Skip freshness check if this worker was recently restarted
+                # and hasn't had enough time to complete its first cycle and
+                # write a fresh heartbeat.  Without this, a worker with a
+                # long interval (e.g. events at 300s) gets restarted every
+                # 30s in an infinite loop because the old stale timestamp is
+                # still in the DB.
+                grace_until = self._restart_grace.get(module_name)
+                if grace_until is not None:
+                    grace_elapsed = mono_now - grace_until
+                    worker_interval = max(1, int((snapshot_by_name.get(_worker_name_from_module(module_name)) or {}).get("interval_seconds") or 60))
+                    # Give 2× the worker interval plus 60s buffer
+                    grace_period = worker_interval * 2 + 60
+                    if grace_elapsed < grace_period:
+                        continue
+                    else:
+                        self._restart_grace.pop(module_name, None)
                 worker_name = _worker_name_from_module(module_name)
                 snapshot = snapshot_by_name.get(worker_name)
                 if not snapshot:
