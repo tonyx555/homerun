@@ -3295,7 +3295,17 @@ class ArbitrageScanner:
                         self._last_full_snapshot_strategy_market_count = 0
                         self._last_full_snapshot_chunk_market_count = 0
                         self._last_full_snapshot_strategy_opportunity_count = 0
-                        return self._opportunities
+                        self._full_snapshot_cycle_total_markets = 0
+                        self._full_snapshot_cycle_processed_markets = 0
+                        self._full_snapshot_cursor_index = 0
+                        self._last_full_snapshot_strategy_scan = now
+                    logger.info(
+                        "Heavy lane: zero qualifying markets — cycle state reset",
+                        active_markets=len(active_markets),
+                        full_slugs=list(full_slugs),
+                    )
+                    await self._set_activity("Heavy lane: no qualifying markets")
+                    return self._opportunities
 
                 universe_markets = full_snapshot_markets
                 universe_count = len(universe_markets)
