@@ -3627,6 +3627,7 @@ async def _run_trader_once(
     process_signals: bool = True,
     trigger_signal_ids_by_source: dict[str, list[str]] | None = None,
     trigger_signal_snapshots_by_source: dict[str, dict[str, dict[str, Any]]] | None = None,
+    cycle_timeout_seconds: float = 0.0,
 ) -> tuple[int, int, int]:
     decisions_written = 0
     orders_written = 0
@@ -3636,6 +3637,17 @@ async def _run_trader_once(
     crypto_scope_prefiltered_dimensions: dict[str, int] = {}
 
     async with AsyncSessionLocal() as session:
+        # Set a session-level statement_timeout slightly under the cycle
+        # timeout so Postgres kills stuck queries *before* the asyncio
+        # cycle timeout fires.  This lets the error propagate cleanly
+        # through asyncpg (which is cancellable) instead of leaving an
+        # abandoned task holding a leaked DB connection.
+        if cycle_timeout_seconds > 0:
+            _stmt_timeout_ms = int(max(3000, (cycle_timeout_seconds - 2) * 1000))
+            try:
+                await session.execute(text(f"SET statement_timeout = '{_stmt_timeout_ms}'"))
+            except Exception:
+                pass
         trader_id = str(trader["id"])
         source_configs = _normalize_source_configs(trader)
         effective_process_signals = bool(process_signals)
@@ -6416,6 +6428,15 @@ async def _run_trader_once(
             if defer_signal_processing or stream_trigger_mode:
                 break
 
+        # Restore the default statement_timeout before the connection goes
+        # back to the pool so other callers are not affected.
+        if cycle_timeout_seconds > 0:
+            try:
+                _default_stmt_ms = max(1000, int(settings.DATABASE_STATEMENT_TIMEOUT_MS))
+                await session.execute(text(f"SET statement_timeout = '{_default_stmt_ms}'"))
+            except Exception:
+                pass
+
     return decisions_written, orders_written, processed_signals
 
 
@@ -6617,6 +6638,7 @@ async def _run_trader_once_with_timeout(
             process_signals=process_signals,
             trigger_signal_ids_by_source=trigger_signal_ids_by_source,
             trigger_signal_snapshots_by_source=trigger_signal_snapshots_by_source,
+            cycle_timeout_seconds=timeout,
         ),
         name=f"trader-cycle-{trader_id or 'unknown'}",
     )

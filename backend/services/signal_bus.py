@@ -18,7 +18,7 @@ from utils.utcnow import utcnow
 from typing import Any, Optional
 
 from config import settings
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import case, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import (
@@ -944,6 +944,13 @@ async def expire_stale_signals(session: AsyncSession, *, commit: bool = True) ->
     max_price_age_seconds = float(getattr(settings, "SCANNER_MARKET_PRICE_MAX_AGE_SECONDS", 0) or 0)
     if max_price_age_seconds <= 0:
         max_price_age_seconds = max(30.0, float(getattr(settings, "WS_PRICE_STALE_SECONDS", 30.0) or 30.0) * 2.0)
+
+    # Use a short lock_timeout so we fail fast on rows locked by other
+    # transactions (e.g. in-flight trader cycles) instead of blocking for
+    # the full statement_timeout.  Locked rows are simply skipped — they
+    # will be caught on the next expiry pass.
+    await session.execute(text("SET LOCAL lock_timeout = '3000'"))
+
     result = await session.execute(
         select(TradeSignal).where(
             TradeSignal.status.in_(tuple(SIGNAL_ACTIVE_STATUSES)),
