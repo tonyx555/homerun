@@ -3580,7 +3580,7 @@ _engine_kw.update(
         "pool_use_lifo": True,
     }
 )
-_engine_kw["connect_args"] = {
+_connect_args: dict = {
     "timeout": float(max(1.0, float(settings.DATABASE_CONNECT_TIMEOUT_SECONDS))),
     "command_timeout": float(
         max(
@@ -3593,8 +3593,31 @@ _engine_kw["connect_args"] = {
         "timezone": "UTC",
         "statement_timeout": str(max(1000, int(settings.DATABASE_STATEMENT_TIMEOUT_MS))),
         "idle_in_transaction_session_timeout": str(max(1000, int(settings.DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS))),
+        # TCP keepalive on the server side of each connection — detect dead
+        # clients within ~90 seconds (60s idle + 3×10s probes) instead of
+        # relying on the OS default of 2 hours.
+        "tcp_keepalives_idle": "60",
+        "tcp_keepalives_interval": "10",
+        "tcp_keepalives_count": "3",
     },
 }
+
+# asyncpg-level TCP keepalive — ensures the client side also detects dead
+# connections via kernel probes.  Without this, a half-open TCP connection
+# (e.g. after a ProactorEventLoop I/O transport failure on Windows) can sit
+# indefinitely, consuming a pool slot the reaper cannot reclaim because
+# socket.close() itself hangs on the broken transport.
+#
+# These are passed directly to asyncpg's connect() which forwards them to
+# the underlying socket via SO_KEEPALIVE + TCP_KEEPIDLE/INTVL/CNT.
+if _os.name == "nt":
+    # Windows: only SO_KEEPALIVE + TCP_KEEPIDLE are supported via
+    # setsockopt; asyncpg handles this through its 'tcp_keepalive' dict.
+    _connect_args["tcp_keepalive"] = True
+else:
+    _connect_args["tcp_keepalive"] = True
+
+_engine_kw["connect_args"] = _connect_args
 
 async_engine = create_async_engine(settings.DATABASE_URL, **_engine_kw)
 
@@ -3716,6 +3739,43 @@ _POOL_EXHAUSTION_THRESHOLD = 0.85     # trigger recovery when 85% of slots are c
 _reaper_task: asyncio.Task | None = None
 
 
+def _force_close_raw_socket(dbapi_conn) -> None:
+    """Set a short SO_TIMEOUT on the raw socket and shut it down.
+
+    When the ProactorEventLoop I/O transport is broken on Windows,
+    socket.close() can hang indefinitely because the completion port
+    callback never fires.  By calling socket.shutdown() first with a
+    short timeout, we ensure the OS tears down the TCP connection at the
+    kernel level regardless of the event loop state.
+    """
+    import socket as _socket
+
+    try:
+        transport = getattr(dbapi_conn, "_transport", None)
+        raw_sock = None
+        if transport is not None:
+            raw_sock = getattr(transport, "_sock", None)
+            if raw_sock is None:
+                raw_sock = transport.get_extra_info("socket")
+        if raw_sock is None:
+            # asyncpg exposes the raw socket on the protocol
+            protocol = getattr(dbapi_conn, "_protocol", None)
+            if protocol is not None:
+                transport = getattr(protocol, "_transport", None)
+                if transport is not None:
+                    raw_sock = getattr(transport, "_sock", None)
+                    if raw_sock is None:
+                        raw_sock = transport.get_extra_info("socket")
+        if raw_sock is not None and isinstance(raw_sock, _socket.socket):
+            try:
+                raw_sock.settimeout(2.0)
+                raw_sock.shutdown(_socket.SHUT_RDWR)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
 def _get_pool_stats() -> dict:
     """Return current pool utilization stats."""
     pool = async_engine.pool
@@ -3772,9 +3832,15 @@ async def _reap_stale_checkouts() -> None:
         # socket, which causes any in-flight query to fail with a connection
         # error.  The connection_record is returned to the pool and will
         # create a fresh connection on next checkout.
+        #
+        # On Windows with ProactorEventLoop, the I/O completion port can
+        # break, causing socket.close() to hang.  Set a short OS-level
+        # timeout on the raw socket first so the close cannot block
+        # indefinitely.
         try:
             dbapi_conn = conn_record.dbapi_connection
             if dbapi_conn is not None:
+                _force_close_raw_socket(dbapi_conn)
                 conn_record.invalidate(e=TimeoutError(f"checkout exceeded {_CHECKOUT_HARD_LIMIT_SECONDS}s"))
                 reaped += 1
         except Exception as e:

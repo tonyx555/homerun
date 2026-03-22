@@ -70,6 +70,8 @@ async def _run_loop() -> None:
     heartbeat_stop_event = asyncio.Event()
 
     async def _heartbeat_loop() -> None:
+        import random as _rnd
+        await asyncio.sleep(_rnd.uniform(0, heartbeat_interval))
         while not heartbeat_stop_event.is_set():
             try:
                 async with AsyncSessionLocal() as session:

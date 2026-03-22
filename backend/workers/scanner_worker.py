@@ -305,6 +305,8 @@ async def _run_scan_loop() -> None:
     heartbeat_stop_event = asyncio.Event()
 
     async def _heartbeat_loop() -> None:
+        import random as _rnd
+        await asyncio.sleep(_rnd.uniform(0, heartbeat_interval_seconds))
         _mem_warn_threshold_mb = 1500
         while not heartbeat_stop_event.is_set():
             try:

@@ -512,6 +512,22 @@ class WorkerHost:
         def _global_exception_handler(loop_ref, context):
             exc = context.get("exception")
             message = context.get("message", "Unhandled asyncio exception")
+            # ProactorEventLoop transport errors (e.g.
+            # _ProactorReadPipeTransport._loop_reading) are noisy and
+            # non-actionable — they indicate the IOCP layer dropped an I/O
+            # callback.  Log at WARNING instead of ERROR to reduce noise.
+            is_transport_noise = (
+                "Proactor" in message
+                or "_loop_reading" in message
+                or "_loop_writing" in message
+            )
+            if is_transport_noise:
+                logger.warning(
+                    "Asyncio transport callback error (suppressed)",
+                    plane=self._plane_name,
+                    context_message=message,
+                )
+                return
             if exc is not None:
                 logger.error(
                     "Unhandled asyncio exception",
@@ -682,6 +698,15 @@ async def _run(plane_name: str) -> None:
 
 
 def main() -> None:
+    # On Windows, Python defaults to ProactorEventLoop which uses I/O
+    # Completion Ports.  ProactorEventLoop is required for subprocess pipe
+    # operations, but the worker process never spawns subprocesses — only
+    # the API process does (validation_service.py).  SelectorEventLoop is
+    # more stable for pure socket I/O on Windows and avoids the
+    # _ProactorReadPipeTransport._loop_reading failures that cascade into
+    # DB pool exhaustion when the IOCP layer breaks under load.
+    if os.name == "nt":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     args = _parse_args()
     asyncio.run(_run(str(args.plane)))
 

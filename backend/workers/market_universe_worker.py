@@ -181,6 +181,10 @@ async def _run_loop() -> None:
     next_full_reconcile_at: datetime | None = None
 
     async def _heartbeat_loop() -> None:
+        import random as _rnd
+        # Stagger heartbeat start to avoid thundering herd on the DB pool
+        # when all workers fire their heartbeats on the same 5-second tick.
+        await asyncio.sleep(_rnd.uniform(0, heartbeat_interval))
         while not heartbeat_stop_event.is_set():
             try:
                 await write_worker_snapshot_loop_state(worker_name, state)
