@@ -192,6 +192,35 @@ def _merge_trigger_signal_snapshots_by_source(
     return merged or None
 
 
+def _trader_has_runtime_queue_source(trader: dict[str, Any]) -> bool:
+    """Return True if any of the trader's sources publish to the runtime
+    signal queue (intent_runtime sources like tracked_traders, copy_trade).
+    Scanner-sourced traders do NOT — the scanner publishes to the event bus
+    only, so their signals must be consumed by the scheduled loop."""
+    source_configs = trader.get("source_configs") or trader.get("source_configs_json")
+    if isinstance(source_configs, str):
+        import json as _json
+        try:
+            source_configs = _json.loads(source_configs)
+        except Exception:
+            source_configs = None
+    if isinstance(source_configs, dict):
+        sources = source_configs
+    elif isinstance(source_configs, list):
+        sources = {
+            str(sc.get("source_key") or sc.get("source") or ""): sc
+            for sc in source_configs
+            if isinstance(sc, dict)
+        }
+    else:
+        return False
+    _SCANNER_ONLY_SOURCES = {"scanner"}
+    return any(
+        str(key or "").strip().lower() not in _SCANNER_ONLY_SOURCES
+        for key in sources
+    )
+
+
 def _runtime_hot_path_owns_signal_execution(
     *,
     lane_key: str,
@@ -202,6 +231,7 @@ def _runtime_hot_path_owns_signal_execution(
         lane_key == _LANE_GENERAL
         and not process_runtime_triggers
         and not _is_crypto_source_trader(trader)
+        and _trader_has_runtime_queue_source(trader)
     )
 
 
