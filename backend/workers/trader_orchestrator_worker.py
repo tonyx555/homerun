@@ -596,6 +596,7 @@ _TRADER_CYCLE_HEARTBEAT_EVENT_INTERVAL_SECONDS = 1
 _trader_cycle_heartbeat_last_emitted: dict[str, datetime] = {}
 _LANE_GENERAL = "general"
 _LANE_CRYPTO = "crypto"
+_RUNTIME_TRIGGER_DEFAULT_CYCLE_TIMEOUT_SECONDS = 10.0
 _TERMINAL_STALE_ORDER_CHECK_INTERVAL_SECONDS = 30
 _TERMINAL_STALE_ORDER_MIN_AGE_MINUTES = 3
 _TERMINAL_STALE_ORDER_ALERT_COOLDOWN_SECONDS = 300
@@ -6784,27 +6785,18 @@ async def _build_runtime_trigger_specs(
         ]
     if mode == "live" and not await live_execution_service.ensure_initialized():
         return control, [], 3.0
-    default_trader_cycle_timeout = float(max(12, ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS * 3))
     control_settings = dict((control or {}).get("settings") or {})
     global_runtime_settings = dict(control_settings.get("global_runtime") or {})
-    configured_trader_cycle_timeout = safe_float(
-        global_runtime_settings.get("trader_cycle_timeout_seconds"),
+    # Runtime triggers use a dedicated (shorter) timeout — these cycles are
+    # lightweight (no maintenance, no signal scanning) and must be fast.
+    # Falls back to _RUNTIME_TRIGGER_DEFAULT_CYCLE_TIMEOUT_SECONDS (10s).
+    configured_rt_timeout = safe_float(
+        global_runtime_settings.get("runtime_trigger_cycle_timeout_seconds"),
         0.0,
     )
-    effective_trader_cycle_timeout = (
-        configured_trader_cycle_timeout
-        if configured_trader_cycle_timeout > 0
-        else default_trader_cycle_timeout
-    )
-    trader_cycle_timeout_seconds = float(
-        max(
-            3.0,
-            min(
-                180.0,
-                effective_trader_cycle_timeout,
-            ),
-        )
-    )
+    if configured_rt_timeout <= 0:
+        configured_rt_timeout = _RUNTIME_TRIGGER_DEFAULT_CYCLE_TIMEOUT_SECONDS
+    trader_cycle_timeout_seconds = float(max(3.0, min(60.0, configured_rt_timeout)))
     specs: list[dict[str, Any]] = []
     for trader in traders:
         if not bool(trader.get("is_enabled", True)) or bool(trader.get("is_paused", False)):
@@ -6998,13 +6990,17 @@ async def run_worker_loop(*, lane: str = _LANE_GENERAL, write_snapshot: bool = T
                         int(control.get("run_interval_seconds") or ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS),
                     )
                     sleep_seconds = cycle_interval
-                    default_trader_cycle_timeout = float(max(12, cycle_interval * 3))
+                    default_trader_cycle_timeout = float(max(30, cycle_interval * 3))
                     control_settings = dict(control.get("settings") or {})
                     global_runtime_settings = dict(control_settings.get("global_runtime") or {})
                     configured_trader_cycle_timeout = safe_float(
                         global_runtime_settings.get("trader_cycle_timeout_seconds"),
                         0.0,
                     )
+                    # Scheduled cycles do maintenance + full signal scans —
+                    # they need substantially more headroom than runtime
+                    # triggers.  Floor at 30s to avoid the cycle timing out
+                    # before individual DB queries can complete.
                     effective_trader_cycle_timeout = (
                         configured_trader_cycle_timeout
                         if configured_trader_cycle_timeout > 0
@@ -7012,7 +7008,7 @@ async def run_worker_loop(*, lane: str = _LANE_GENERAL, write_snapshot: bool = T
                     )
                     trader_cycle_timeout_seconds = float(
                         max(
-                            3.0,
+                            30.0,
                             min(
                                 180.0,
                                 effective_trader_cycle_timeout,

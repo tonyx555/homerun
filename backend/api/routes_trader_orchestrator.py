@@ -137,7 +137,8 @@ class GlobalRuntimeSettingsRequest(BaseModel):
     live_risk_clamps: LiveRiskClampsSettingsRequest = Field(default_factory=LiveRiskClampsSettingsRequest)
     live_market_context: LiveMarketContextSettingsRequest = Field(default_factory=LiveMarketContextSettingsRequest)
     live_provider_health: LiveProviderHealthSettingsRequest = Field(default_factory=LiveProviderHealthSettingsRequest)
-    trader_cycle_timeout_seconds: float | None = Field(default=None, ge=3.0, le=120.0)
+    trader_cycle_timeout_seconds: float | None = Field(default=None, ge=30.0, le=180.0)
+    runtime_trigger_cycle_timeout_seconds: float | None = Field(default=None, ge=3.0, le=60.0)
 
 
 class UpdateSettingsRequest(BaseModel):
