@@ -314,6 +314,7 @@ class IntentRuntime:
         self._ws_callback_registered = False
         self._projection_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._projection_task: asyncio.Task[None] | None = None
+        self._deferred_timeout_task: asyncio.Task[None] | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
 
     def _track_task(self, task: asyncio.Task[Any], *, name: str) -> asyncio.Task[Any]:
@@ -348,6 +349,10 @@ class IntentRuntime:
             self._run_projection_loop(),
             name="intent-runtime-projection",
         )
+        self._deferred_timeout_task = self._start_task(
+            self._run_deferred_timeout_loop(),
+            name="intent-runtime-deferred-timeout",
+        )
         self._register_ws_callback()
         await self.hydrate_from_db()
 
@@ -355,19 +360,23 @@ class IntentRuntime:
         background_tasks = [
             task
             for task in self._background_tasks
-            if task is not self._projection_task and not task.done()
+            if task is not self._projection_task
+            and task is not self._deferred_timeout_task
+            and not task.done()
         ]
         for task in background_tasks:
             task.cancel()
-        if self._projection_task is not None and not self._projection_task.done():
-            self._projection_task.cancel()
-            try:
-                await self._projection_task
-            except asyncio.CancelledError:
-                pass
+        for managed_task in (self._projection_task, self._deferred_timeout_task):
+            if managed_task is not None and not managed_task.done():
+                managed_task.cancel()
+                try:
+                    await managed_task
+                except asyncio.CancelledError:
+                    pass
         if background_tasks:
             await asyncio.gather(*background_tasks, return_exceptions=True)
         self._projection_task = None
+        self._deferred_timeout_task = None
         self._loop = None
         self._started = False
 
@@ -630,6 +639,78 @@ class IntentRuntime:
                 signal_ids=sorted(snapshots.keys()),
                 trigger="intent_runtime_ws_tick",
                 reason="strict_ws_context_ready",
+                emitted_at=emitted_at_iso,
+                signal_snapshots=snapshots,
+            )
+        if projection_snapshots:
+            await self._enqueue_projection(
+                {
+                    "kind": "upsert",
+                    "source": "__deferred__",
+                    "snapshots": projection_snapshots,
+                    "sweep_missing": False,
+                    "keep_dedupe_keys": [],
+                }
+            )
+            await self._publish_signal_stats()
+
+    async def _run_deferred_timeout_loop(self) -> None:
+        while True:
+            await asyncio.sleep(5.0)
+            try:
+                await self._release_stale_deferred_signals()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug("Deferred timeout sweep error", exc_info=exc)
+
+    async def _release_stale_deferred_signals(self) -> None:
+        max_age = max(5.0, float(getattr(settings, "INTENT_RUNTIME_DEFERRED_MAX_AGE_SECONDS", 15.0) or 15.0))
+        now = utcnow()
+        published_by_source: dict[str, dict[str, dict[str, Any]]] = {}
+        projection_snapshots: dict[str, dict[str, Any]] = {}
+        async with self._lock:
+            all_deferred_signal_ids: set[str] = set()
+            for token_signal_ids in self._deferred_signal_ids_by_token.values():
+                all_deferred_signal_ids.update(token_signal_ids)
+            for signal_id in sorted(all_deferred_signal_ids):
+                snapshot = self._signals_by_id.get(signal_id)
+                if snapshot is None:
+                    self._clear_deferred_state_locked(signal_id)
+                    continue
+                updated_at = _normalize_datetime(snapshot.get("updated_at"))
+                if updated_at is None:
+                    updated_at = _normalize_datetime(snapshot.get("created_at"))
+                if updated_at is None:
+                    continue
+                age_seconds = (now - updated_at).total_seconds()
+                if age_seconds < max_age:
+                    continue
+                self._clear_deferred_state_locked(signal_id)
+                snapshot["status"] = "pending"
+                snapshot["runtime_sequence"] = self._allocate_runtime_sequence_locked()
+                snapshot["deferred_until_ws"] = False
+                snapshot["deferred_reason"] = None
+                snapshot["updated_at"] = _to_iso(now)
+                published_by_source.setdefault(str(snapshot.get("source") or ""), {})[signal_id] = copy.deepcopy(snapshot)
+                projection_snapshots[signal_id] = copy.deepcopy(snapshot)
+        if not published_by_source:
+            return
+        released_count = sum(len(v) for v in published_by_source.values())
+        logger.info("Released %d deferred signals past max age %.1fs", released_count, max_age)
+        for source_key, snapshots in published_by_source.items():
+            emitted_at_iso = _to_iso(now)
+            for snapshot in snapshots.values():
+                _restamp_signal_emitted_at(snapshot, emitted_at_iso)
+            for signal_id, projection_snapshot in projection_snapshots.items():
+                if signal_id in snapshots:
+                    _restamp_signal_emitted_at(projection_snapshot, emitted_at_iso)
+            await publish_signal_batch(
+                event_type="upsert_reactivated",
+                source=source_key,
+                signal_ids=sorted(snapshots.keys()),
+                trigger="intent_runtime_deferred_timeout",
+                reason="deferred_max_age_exceeded",
                 emitted_at=emitted_at_iso,
                 signal_snapshots=snapshots,
             )

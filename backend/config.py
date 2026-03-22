@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     WS_HEARTBEAT_MAX_MISSES: int = 3  # Consecutive pong misses before closing connection
     WS_STRICT_CONTEXT_WARMUP_SECONDS: float = 0.75  # Strict context WS subscribe warmup before evaluation
     SCANNER_STRICT_WS_MAX_AGE_MS: int = 30000  # WS-only max age for scanner-source strict execution
+    INTENT_RUNTIME_DEFERRED_MAX_AGE_SECONDS: float = 15.0  # Force-release deferred signals after this many seconds without a WS tick
 
     # Scanner Settings
     SCAN_WATCHDOG_SECONDS: int = 600  # Max seconds before a scan cycle is killed
