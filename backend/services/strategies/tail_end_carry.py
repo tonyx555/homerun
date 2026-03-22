@@ -603,8 +603,16 @@ class TailEndCarryStrategy(BaseStrategy):
                     }
                 ]
 
+                market_label = (
+                    getattr(market, "group_item_title", None)
+                    or getattr(market, "question", None)
+                    or ""
+                )
+                if len(market_label) > 80:
+                    market_label = market_label[:77] + "…"
+
                 opp = self.create_opportunity(
-                    title=f"Tail Carry: {outcome} {price:.1%} into resolution",
+                    title=f"Tail Carry: {outcome} {price:.1%} — {market_label}" if market_label else f"Tail Carry: {outcome} {price:.1%} into resolution",
                     description=(
                         f"{outcome} at {price:.3f} with {days_to_res:.1f} days to resolution; "
                         f"target repricing to {target_price:.3f}. [{category}]"

@@ -6902,6 +6902,8 @@ async def run_worker_loop(*, lane: str = _LANE_GENERAL, write_snapshot: bool = T
         float(getattr(settings, "ORCHESTRATOR_MAINTENANCE_INTERVAL_SECONDS", 5.0) or 5.0),
     )
     last_maintenance_at: datetime | None = None
+    _stale_signal_expiry_consecutive_failures = 0
+    _stale_signal_expiry_backoff_until: datetime | None = None
 
     try:
         while True:
@@ -7300,20 +7302,41 @@ async def run_worker_loop(*, lane: str = _LANE_GENERAL, write_snapshot: bool = T
                         logger.warning("Failed strategy runtime refresh pass: %s", exc)
 
                 if run_maintenance:
+                    _skip_expiry = (
+                        _stale_signal_expiry_backoff_until is not None
+                        and utcnow() < _stale_signal_expiry_backoff_until
+                    )
                     async with AsyncSessionLocal() as maint_session:
-                        try:
-                            await expire_stale_signals(maint_session)
-                        except OperationalError as exc:
-                            if _is_retryable_db_error(exc):
+                        if _skip_expiry:
+                            pass  # backoff active — skip expiry this cycle
+                        else:
+                            try:
+                                await expire_stale_signals(maint_session)
+                                _stale_signal_expiry_consecutive_failures = 0
+                                _stale_signal_expiry_backoff_until = None
+                            except OperationalError as exc:
+                                if _is_retryable_db_error(exc):
+                                    if hasattr(maint_session, "rollback"):
+                                        await maint_session.rollback()
+                                    _stale_signal_expiry_consecutive_failures += 1
+                                    _backoff_secs = min(300.0, 5.0 * (2 ** min(_stale_signal_expiry_consecutive_failures - 1, 6)))
+                                    _stale_signal_expiry_backoff_until = utcnow() + timedelta(seconds=_backoff_secs)
+                                    logger.warning(
+                                        "Skipped stale-signal expiry due to transient DB error (backoff %.0fs, failures=%d)",
+                                        _backoff_secs, _stale_signal_expiry_consecutive_failures,
+                                    )
+                                else:
+                                    raise
+                            except Exception as exc:
                                 if hasattr(maint_session, "rollback"):
                                     await maint_session.rollback()
-                                logger.warning("Skipped stale-signal expiry due to transient DB error")
-                            else:
-                                raise
-                        except Exception as exc:
-                            if hasattr(maint_session, "rollback"):
-                                await maint_session.rollback()
-                            logger.warning("Failed stale-signal expiry pass: %s", exc)
+                                _stale_signal_expiry_consecutive_failures += 1
+                                _backoff_secs = min(300.0, 5.0 * (2 ** min(_stale_signal_expiry_consecutive_failures - 1, 6)))
+                                _stale_signal_expiry_backoff_until = utcnow() + timedelta(seconds=_backoff_secs)
+                                logger.warning(
+                                    "Failed stale-signal expiry pass (backoff %.0fs, failures=%d): %s",
+                                    _backoff_secs, _stale_signal_expiry_consecutive_failures, exc,
+                                )
 
                         try:
                             orphan_cleanup = await _reconcile_orphan_open_orders(maint_session)
