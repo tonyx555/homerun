@@ -214,7 +214,7 @@ def test_crypto_highfreq_scope_defaults_include_stop_loss_policy():
     assert defaults["stop_loss_policy"] == "always"
     assert defaults["stop_loss_activation_seconds"] == 90
     assert defaults["min_liquidity_usd"] == 250.0
-    assert defaults["min_liquidity_usd_opening"] == 4000.0
+    assert defaults["min_liquidity_usd_opening"] == 500.0
     assert defaults["max_spread_pct"] == 0.08
     assert defaults["max_signal_age_seconds"] == 35.0
     assert defaults["max_open_order_seconds"] == 45.0
@@ -271,7 +271,7 @@ def test_crypto_highfreq_scope_defaults_include_stop_loss_policy():
     assert defaults["hard_stop_loss_pct_4h"] == 25.0
     assert defaults["immediate_stop_loss_requires_time_pressure"] is False
     assert defaults["stop_loss_activation_seconds_5m"] == 0
-    assert defaults["min_edge_percent"] == 3.0
+    assert defaults["min_edge_percent"] == 0.25
     assert defaults["min_confidence"] == 0.42
     assert defaults["directional_max_entry_price_ceiling"] == 0.80
     assert defaults["maker_max_entry_price_ceiling"] == 0.80

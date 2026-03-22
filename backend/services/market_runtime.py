@@ -699,17 +699,14 @@ class MarketRuntime:
                 self._dispatch_last_opportunities = len(opportunities)
                 self._dispatch_last_signals_published = int(signals_published or 0)
                 self._dispatch_last_error = None
-                # Capture cross-process filter diagnostics from any
-                # crypto strategy that exposes get_crypto_filter_diagnostics().
+                # Capture filter diagnostics from strategy instances.
                 try:
-                    import sys
                     from services.strategy_loader import strategy_loader as _sl
                     for _slug in list(_sl._loaded.keys()):
-                        _loaded = _sl.get_strategy(_slug)
-                        if _loaded is None:
+                        _inst = _sl.get_instance(_slug)
+                        if _inst is None:
                             continue
-                        _mod = sys.modules.get(getattr(_loaded, "module_name", ""))
-                        _diag_fn = getattr(_mod, "get_crypto_filter_diagnostics", None) if _mod else None
+                        _diag_fn = getattr(_inst, "get_filter_diagnostics", None)
                         if callable(_diag_fn):
                             diag = _diag_fn()
                             if diag:

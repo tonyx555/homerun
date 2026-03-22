@@ -2862,7 +2862,8 @@ function clamp(value: number, min: number, max: number): number {
 function buildPositionBookRows(
   orders: TraderOrder[],
   traderNameById: Record<string, string>,
-  decisionSignalPayloadByDecisionId: Map<string, Record<string, unknown>>
+  decisionSignalPayloadByDecisionId: Map<string, Record<string, unknown>>,
+  liveMarksByOrderId?: Map<string, any>
 ): PositionBookRow[] {
   const buckets = new Map<string, {
     traderId: string
@@ -2926,7 +2927,10 @@ function buildPositionBookRows(
       ?? order.notional_usd
     )
     let unrealizedPnl: number | null = null
-    if (order.unrealized_pnl !== null && order.unrealized_pnl !== undefined) {
+    const lm = liveMarksByOrderId?.get(String(order.id || ''))
+    if (lm && typeof lm.unrealized_pnl === 'number' && lm.mark_price > 0) {
+      unrealizedPnl = lm.unrealized_pnl
+    } else if (order.unrealized_pnl !== null && order.unrealized_pnl !== undefined) {
       unrealizedPnl = toNumber(order.unrealized_pnl)
     } else if (markPrice > 0 && filledSize > 0 && filledNotional > 0) {
       unrealizedPnl = (markPrice * filledSize) - filledNotional
@@ -6696,8 +6700,8 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   }, [allOrders, traderNameById])
 
   const globalPositionBook = useMemo(
-    () => buildPositionBookRows(allOrders, traderNameById, decisionSignalPayloadByDecisionId),
-    [allOrders, traderNameById, decisionSignalPayloadByDecisionId]
+    () => buildPositionBookRows(allOrders, traderNameById, decisionSignalPayloadByDecisionId, liveMarksByOrderId),
+    [allOrders, traderNameById, decisionSignalPayloadByDecisionId, liveMarksByOrderId]
   )
 
   const selectedPositionBook = useMemo(
@@ -7353,6 +7357,10 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       if ((order.unrealized_pnl === null || order.unrealized_pnl === undefined) && markPx > 0 && filledSize > 0 && filledNotional > 0) {
         unrealized = (markPx * filledSize) - filledNotional
       }
+      // Prefer live mark U-P&L from real-time WS feed over stale API value
+      if (liveMark && typeof liveMark.unrealized_pnl === 'number' && liveMark.mark_price > 0) {
+        unrealized = liveMark.unrealized_pnl
+      }
       const fillProgressPercent = computeOrderFillProgressPercent(
         orderPayload as Record<string, unknown>,
         {
@@ -7450,7 +7458,12 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       totalNotional += Math.abs(toNumber(order.notional_usd))
       if (OPEN_ORDER_STATUSES.has(status)) {
         open += 1
-        unrealizedPnl += toNumber(order.unrealized_pnl)
+        const lm = liveMarksByOrderId.get(String(order.id || ''))
+        if (lm && typeof lm.unrealized_pnl === 'number' && lm.mark_price > 0) {
+          unrealizedPnl += lm.unrealized_pnl
+        } else {
+          unrealizedPnl += toNumber(order.unrealized_pnl)
+        }
       }
       if (RESOLVED_ORDER_STATUSES.has(status)) {
         resolved += 1
@@ -7474,7 +7487,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       unrealizedPnl,
       winRate: resolved > 0 ? (wins / resolved) * 100 : 0,
     }
-  }, [filteredTradeHistoryFull])
+  }, [filteredTradeHistoryFull, liveMarksByOrderId])
 
   const filteredAllTradeHistory = useMemo(() => {
     const q = allBotsTradeSearch.trim().toLowerCase()
@@ -9285,6 +9298,10 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                   let unrealized = toNumber(order.unrealized_pnl)
                                   if ((order.unrealized_pnl === null || order.unrealized_pnl === undefined) && markPx > 0 && filledSize > 0 && filledNotional > 0) {
                                     unrealized = (markPx * filledSize) - filledNotional
+                                  }
+                                  // Prefer live mark U-P&L from real-time WS feed over stale API value
+                                  if (liveMark2 && typeof liveMark2.unrealized_pnl === 'number' && liveMark2.mark_price > 0) {
+                                    unrealized = liveMark2.unrealized_pnl
                                   }
                                   const fillProgressPercent = computeOrderFillProgressPercent(
                                     orderPayload as Record<string, unknown>,

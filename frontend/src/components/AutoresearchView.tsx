@@ -12,6 +12,9 @@ import {
   Code2,
   SlidersHorizontal,
   FlaskRound,
+  ChevronDown,
+  ChevronRight,
+  ArrowRight,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { Badge } from './ui/badge'
@@ -111,8 +114,9 @@ export default function AutoresearchView({
   // Autoresearch inner mode: "params" or "code"
   const [arMode, setArMode] = useState<'params' | 'code'>('params')
 
-  // Streaming state
+  // Streaming state — streamingMode tracks which mode started the experiment
   const [isStreaming, setIsStreaming] = useState(false)
+  const [streamingMode, setStreamingMode] = useState<'params' | 'code' | null>(null)
   const [streamIterations, setStreamIterations] = useState<StreamIteration[]>([])
   const [streamPhase, setStreamPhase] = useState<string>('')
   const [streamError, setStreamError] = useState<string>('')
@@ -125,6 +129,9 @@ export default function AutoresearchView({
   const [expandedIteration, setExpandedIteration] = useState<number | null>(null)
   const [abCreating, setAbCreating] = useState(false)
   const [doneData, setDoneData] = useState<Record<string, unknown> | null>(null)
+
+  // Params mode — expanded row for reasoning detail
+  const [expandedParamIteration, setExpandedParamIteration] = useState<number | null>(null)
 
   // Strategy list to resolve strategy_key → strategy ID
   const { data: strategies } = useQuery({
@@ -173,9 +180,13 @@ export default function AutoresearchView({
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['autoresearch-settings'] }),
   })
 
-  // Display iterations
+  // Whether the current mode owns the running experiment
+  const isModeStreaming = isStreaming && streamingMode === arMode
+
+  // Display iterations — filter by current arMode so params/code views
+  // show only their own iterations instead of rendering the same table.
   const dbIterations = historyData?.iterations ?? []
-  const displayIterations = isStreaming
+  const allIterations = isModeStreaming
     ? streamIterations
     : dbIterations.map(i => ({
         iteration: i.iteration_number,
@@ -186,22 +197,28 @@ export default function AutoresearchView({
         changed_params: i.changed_params,
         duration_seconds: i.duration_seconds,
         source_diff: i.source_diff,
+        source_diff_lines: i.source_diff ? i.source_diff.split('\n').length : 0,
         validation_passed: i.validation_result?.valid as boolean | undefined,
       } as StreamIteration))
+  const displayIterations = allIterations.filter(iter => {
+    if (arMode === 'code') return iter.source_diff != null || iter.validation_passed != null
+    return iter.source_diff == null  // params iterations don't have source_diff
+  })
 
-  // Derived
-  const experimentStatus = isStreaming ? 'running' : (status?.status ?? 'idle')
-  const bestScore = isStreaming
+  // Derived — use isModeStreaming so stats reflect the current tab's experiment
+  const experimentStatus = isModeStreaming ? 'running' : (status?.status ?? 'idle')
+  const bestScore = isModeStreaming
     ? (streamIterations.length > 0 ? Math.max(...streamIterations.filter(i => i.decision === 'kept').map(i => i.new_score), status?.baseline_score ?? 0) : status?.baseline_score ?? 0)
     : (status?.best_score ?? 0)
   const baselineScore = status?.baseline_score ?? 0
-  const iterationCount = isStreaming ? streamIterations.length : (status?.iteration_count ?? 0)
-  const keptCount = isStreaming ? streamIterations.filter(i => i.decision === 'kept').length : (status?.kept_count ?? 0)
-  const revertedCount = isStreaming ? streamIterations.filter(i => i.decision === 'reverted').length : (status?.reverted_count ?? 0)
+  const iterationCount = isModeStreaming ? streamIterations.length : (status?.iteration_count ?? 0)
+  const keptCount = isModeStreaming ? streamIterations.filter(i => i.decision === 'kept').length : (status?.kept_count ?? 0)
+  const revertedCount = isModeStreaming ? streamIterations.filter(i => i.decision === 'reverted').length : (status?.reverted_count ?? 0)
 
   // Start experiment
   const handleStart = useCallback(() => {
     setIsStreaming(true)
+    setStreamingMode(arMode)
     setStreamIterations([])
     setStreamPhase('starting')
     setStreamError('')
@@ -251,12 +268,14 @@ export default function AutoresearchView({
       },
       () => {
         setIsStreaming(false)
+        setStreamingMode(null)
         abortRef.current = null
         queryClient.invalidateQueries({ queryKey: ['autoresearch-status', trader.id] })
         queryClient.invalidateQueries({ queryKey: ['autoresearch-history', trader.id] })
       },
       (error) => {
         setIsStreaming(false)
+        setStreamingMode(null)
         abortRef.current = null
         setStreamError(error)
       },
@@ -268,6 +287,7 @@ export default function AutoresearchView({
   const handleStop = useCallback(async () => {
     abortRef.current?.abort()
     setIsStreaming(false)
+    setStreamingMode(null)
     try { await stopAutoresearchExperiment(trader.id) } catch { /* ignore */ }
     queryClient.invalidateQueries({ queryKey: ['autoresearch-status', trader.id] })
     queryClient.invalidateQueries({ queryKey: ['autoresearch-history', trader.id] })
@@ -474,15 +494,18 @@ export default function AutoresearchView({
                   className="rounded p-1 text-muted-foreground hover:bg-muted/60 hover:text-foreground transition-colors">
                   <Settings2 className="w-3.5 h-3.5" />
                 </button>
-                {isStreaming ? (
+                {isModeStreaming ? (
                   <Button size="sm" variant="destructive" className="h-6 px-2 text-[10px]" onClick={handleStop}>
                     <Square className="w-3 h-3 mr-1" /> Stop
                   </Button>
                 ) : (
                   <Button size="sm" className="h-6 px-2 text-[10px]" onClick={handleStart}
-                    disabled={arMode === 'code' && !selectedStrategyKey}>
+                    disabled={(arMode === 'code' && !selectedStrategyKey) || (isStreaming && streamingMode !== arMode)}>
                     <Play className="w-3 h-3 mr-1" /> Start
                   </Button>
+                )}
+                {isStreaming && streamingMode !== arMode && (
+                  <span className="text-[9px] text-amber-400">{streamingMode} running</span>
                 )}
               </div>
             </div>
@@ -543,7 +566,7 @@ export default function AutoresearchView({
             )}
 
             {streamError && <p className="shrink-0 px-3 py-1 text-[10px] text-red-500">{streamError}</p>}
-            {isStreaming && <p className="shrink-0 px-3 py-0.5 text-[9px] text-muted-foreground">{streamPhase}</p>}
+            {isModeStreaming && <p className="shrink-0 px-3 py-0.5 text-[9px] text-muted-foreground">{streamPhase}</p>}
 
             {/* Iteration log */}
             <div className="flex-1 min-h-0 overflow-auto px-2 py-1">
@@ -552,7 +575,7 @@ export default function AutoresearchView({
                   <div className="text-center space-y-1">
                     <FlaskConical className="w-8 h-8 mx-auto opacity-20" />
                     <p className="text-[10px]">
-                      {isStreaming ? 'Waiting for first iteration...' : (
+                      {isModeStreaming ? 'Waiting for first iteration...' : (
                         arMode === 'code'
                           ? 'Select a strategy and click Start to begin code evolution.'
                           : 'Click Start to begin parameter optimization.'
@@ -562,96 +585,167 @@ export default function AutoresearchView({
                 </div>
               ) : (
                 <div className="space-y-1">
-                  <table className="w-full text-[10px]">
-                    <thead className="sticky top-0 bg-background/90 backdrop-blur-sm">
-                      <tr className="text-left text-muted-foreground">
-                        <th className="px-1.5 py-1 font-medium w-8">#</th>
-                        <th className="px-1.5 py-1 font-medium w-16">Score</th>
-                        <th className="px-1.5 py-1 font-medium w-14">&Delta;</th>
-                        <th className="px-1.5 py-1 font-medium w-10"></th>
-                        {arMode === 'code' && <th className="px-1.5 py-1 font-medium w-10">Valid</th>}
-                        <th className="px-1.5 py-1 font-medium">{arMode === 'code' ? 'Changes' : 'Params Changed'}</th>
-                        <th className="px-1.5 py-1 font-medium w-12">Time</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {displayIterations.map((iter, idx) => (
-                        <tr key={idx}
-                          className={cn('border-t border-border/30 hover:bg-muted/30', iter.decision === 'kept' && 'bg-emerald-500/5')}
-                          title={iter.reasoning}>
-                          <td className="px-1.5 py-1 font-mono text-muted-foreground">{iter.iteration}</td>
-                          <td className="px-1.5 py-1 font-mono">{iter.new_score.toFixed(2)}</td>
-                          <td className={cn('px-1.5 py-1 font-mono',
-                            iter.score_delta > 0 ? 'text-emerald-500' : iter.score_delta < 0 ? 'text-red-400' : 'text-muted-foreground')}>
-                            {iter.score_delta > 0 ? '+' : ''}{iter.score_delta.toFixed(3)}
-                          </td>
-                          <td className="px-1.5 py-1">
-                            {iter.decision === 'kept' ? <Check className="w-3.5 h-3.5 text-emerald-500" />
-                              : iter.decision === 'reverted' ? <X className="w-3.5 h-3.5 text-red-400" />
-                              : <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />}
-                          </td>
-                          {arMode === 'code' && (
-                            <td className="px-1.5 py-1">
-                              {iter.validation_passed === true ? <Check className="w-3 h-3 text-emerald-500" />
-                                : iter.validation_passed === false ? <X className="w-3 h-3 text-red-400" />
-                                : <span className="text-muted-foreground">-</span>}
-                            </td>
-                          )}
-                          <td className="px-1.5 py-1 text-muted-foreground truncate max-w-[200px]">
-                            {arMode === 'code' ? (
-                              iter.source_diff_lines ? (
-                                <button onClick={() => setExpandedIteration(expandedIteration === iter.iteration ? null : iter.iteration)}
-                                  className="text-[10px] text-purple-400 hover:underline">
-                                  {iter.source_diff_lines} lines
-                                </button>
-                              ) : <span className="italic">none</span>
-                            ) : (
-                              iter.changed_params ? Object.keys(iter.changed_params).join(', ') : <span className="italic">none</span>
+                  {arMode === 'params' ? (
+                    /* ===== Params mode: card-based iteration list with visible reasoning ===== */
+                    <div className="space-y-1">
+                      {displayIterations.map((iter, idx) => {
+                        const isExpanded = expandedParamIteration === iter.iteration
+                        const paramEntries = iter.changed_params ? Object.entries(iter.changed_params) : []
+                        return (
+                          <div key={idx}
+                            className={cn(
+                              'rounded border transition-colors',
+                              iter.decision === 'kept'
+                                ? 'border-emerald-500/30 bg-emerald-500/5'
+                                : 'border-border/30 bg-background/50'
                             )}
-                          </td>
-                          <td className="px-1.5 py-1 font-mono text-muted-foreground">{iter.duration_seconds.toFixed(0)}s</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                          >
+                            {/* Iteration header row */}
+                            <button
+                              onClick={() => setExpandedParamIteration(isExpanded ? null : iter.iteration)}
+                              className="flex w-full items-center gap-2 px-2 py-1.5 text-left hover:bg-muted/20 transition-colors"
+                            >
+                              {isExpanded
+                                ? <ChevronDown className="w-3 h-3 shrink-0 text-muted-foreground" />
+                                : <ChevronRight className="w-3 h-3 shrink-0 text-muted-foreground" />}
+                              <span className="text-[10px] font-mono text-muted-foreground w-5">#{iter.iteration}</span>
+                              {iter.decision === 'kept'
+                                ? <Check className="w-3.5 h-3.5 shrink-0 text-emerald-500" />
+                                : iter.decision === 'reverted'
+                                ? <X className="w-3.5 h-3.5 shrink-0 text-red-400" />
+                                : <Loader2 className="w-3.5 h-3.5 shrink-0 animate-spin text-muted-foreground" />}
+                              <span className="text-[10px] font-mono">{iter.new_score.toFixed(2)}</span>
+                              <span className={cn('text-[10px] font-mono',
+                                iter.score_delta > 0 ? 'text-emerald-500' : iter.score_delta < 0 ? 'text-red-400' : 'text-muted-foreground')}>
+                                {iter.score_delta > 0 ? '+' : ''}{iter.score_delta.toFixed(3)}
+                              </span>
+                              <span className="flex-1 text-[10px] text-muted-foreground truncate">
+                                {paramEntries.length > 0 ? paramEntries.map(([k]) => k).join(', ') : <span className="italic">no changes</span>}
+                              </span>
+                              <span className="text-[9px] font-mono text-muted-foreground shrink-0">{iter.duration_seconds.toFixed(0)}s</span>
+                            </button>
 
-                  {/* Expanded diff viewer */}
-                  {arMode === 'code' && expandedIteration !== null &&
-                    Boolean(displayIterations.find(i => i.iteration === expandedIteration)?.source_diff) && (
-                    <div className="rounded border border-purple-500/30 bg-background/90 p-2">
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-[9px] text-muted-foreground">Diff for iteration {expandedIteration}</span>
-                        <button onClick={() => setExpandedIteration(null)} className="text-[9px] text-muted-foreground hover:text-foreground">close</button>
-                      </div>
-                      <pre className="text-[9px] font-mono overflow-auto max-h-[150px] leading-tight">
-                        {(displayIterations.find(i => i.iteration === expandedIteration)?.source_diff ?? '').split('\n').map((line: string, i: number) => (
-                          <div key={i} className={cn(
-                            line.startsWith('+') && !line.startsWith('+++') ? 'text-emerald-400' :
-                            line.startsWith('-') && !line.startsWith('---') ? 'text-red-400' :
-                            'text-muted-foreground'
-                          )}>{line}</div>
-                        ))}
-                      </pre>
-                    </div>
-                  )}
+                            {/* Expanded detail */}
+                            {isExpanded && (
+                              <div className="border-t border-border/30 px-3 py-2 space-y-2">
+                                {/* Reasoning */}
+                                {iter.reasoning && (
+                                  <div>
+                                    <p className="text-[9px] font-medium text-muted-foreground mb-0.5">LLM Reasoning</p>
+                                    <p className="text-[10px] leading-relaxed text-foreground/90 whitespace-pre-wrap">{iter.reasoning}</p>
+                                  </div>
+                                )}
 
-                  {/* A/B experiment button */}
-                  {arMode === 'code' && !isStreaming && Boolean(doneData?.can_create_ab_experiment) && (
-                    <div className="flex items-center gap-2 rounded border border-purple-500/30 bg-purple-500/5 px-2 py-1.5">
-                      <FlaskRound className="w-3.5 h-3.5 text-purple-400" />
-                      <span className="text-[10px] text-muted-foreground flex-1">
-                        Best version v{String(doneData!.best_version)} improved by +{String(doneData!.improvement)}
-                      </span>
-                      <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]" disabled={abCreating}
-                        onClick={async () => {
-                          setAbCreating(true)
-                          try { await createAbExperimentFromAutoresearch(String(doneData!.experiment_id)); setDoneData(null) } catch { /* */ }
-                          setAbCreating(false)
-                        }}>
-                        {abCreating && <Loader2 className="w-3 h-3 mr-1 animate-spin" />}
-                        Create A/B Experiment
-                      </Button>
+                                {/* Parameter changes */}
+                                {paramEntries.length > 0 && (
+                                  <div>
+                                    <p className="text-[9px] font-medium text-muted-foreground mb-0.5">Parameter Changes</p>
+                                    <div className="grid gap-1">
+                                      {paramEntries.map(([key, val]) => (
+                                        <div key={key} className="flex items-center gap-2 rounded bg-muted/30 px-2 py-1">
+                                          <span className="text-[10px] font-mono text-cyan-400">{key}</span>
+                                          <ArrowRight className="w-3 h-3 text-muted-foreground shrink-0" />
+                                          <span className="text-[10px] font-mono text-foreground">{JSON.stringify(val)}</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
                     </div>
+                  ) : (
+                    /* ===== Code mode: table with diff viewer ===== */
+                    <>
+                      <table className="w-full text-[10px]">
+                        <thead className="sticky top-0 bg-background/90 backdrop-blur-sm">
+                          <tr className="text-left text-muted-foreground">
+                            <th className="px-1.5 py-1 font-medium w-8">#</th>
+                            <th className="px-1.5 py-1 font-medium w-16">Score</th>
+                            <th className="px-1.5 py-1 font-medium w-14">&Delta;</th>
+                            <th className="px-1.5 py-1 font-medium w-10"></th>
+                            <th className="px-1.5 py-1 font-medium w-10">Valid</th>
+                            <th className="px-1.5 py-1 font-medium">Changes</th>
+                            <th className="px-1.5 py-1 font-medium w-12">Time</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {displayIterations.map((iter, idx) => (
+                            <tr key={idx}
+                              className={cn('border-t border-border/30 hover:bg-muted/30', iter.decision === 'kept' && 'bg-emerald-500/5')}
+                              title={iter.reasoning}>
+                              <td className="px-1.5 py-1 font-mono text-muted-foreground">{iter.iteration}</td>
+                              <td className="px-1.5 py-1 font-mono">{iter.new_score.toFixed(2)}</td>
+                              <td className={cn('px-1.5 py-1 font-mono',
+                                iter.score_delta > 0 ? 'text-emerald-500' : iter.score_delta < 0 ? 'text-red-400' : 'text-muted-foreground')}>
+                                {iter.score_delta > 0 ? '+' : ''}{iter.score_delta.toFixed(3)}
+                              </td>
+                              <td className="px-1.5 py-1">
+                                {iter.decision === 'kept' ? <Check className="w-3.5 h-3.5 text-emerald-500" />
+                                  : iter.decision === 'reverted' ? <X className="w-3.5 h-3.5 text-red-400" />
+                                  : <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />}
+                              </td>
+                              <td className="px-1.5 py-1">
+                                {iter.validation_passed === true ? <Check className="w-3 h-3 text-emerald-500" />
+                                  : iter.validation_passed === false ? <X className="w-3 h-3 text-red-400" />
+                                  : <span className="text-muted-foreground">-</span>}
+                              </td>
+                              <td className="px-1.5 py-1 text-muted-foreground truncate max-w-[200px]">
+                                {iter.source_diff_lines ? (
+                                  <button onClick={() => setExpandedIteration(expandedIteration === iter.iteration ? null : iter.iteration)}
+                                    className="text-[10px] text-purple-400 hover:underline">
+                                    {iter.source_diff_lines} lines
+                                  </button>
+                                ) : <span className="italic">none</span>}
+                              </td>
+                              <td className="px-1.5 py-1 font-mono text-muted-foreground">{iter.duration_seconds.toFixed(0)}s</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+
+                      {/* Expanded diff viewer */}
+                      {expandedIteration !== null &&
+                        Boolean(displayIterations.find(i => i.iteration === expandedIteration)?.source_diff) && (
+                        <div className="rounded border border-purple-500/30 bg-background/90 p-2">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-[9px] text-muted-foreground">Diff for iteration {expandedIteration}</span>
+                            <button onClick={() => setExpandedIteration(null)} className="text-[9px] text-muted-foreground hover:text-foreground">close</button>
+                          </div>
+                          <pre className="text-[9px] font-mono overflow-auto max-h-[150px] leading-tight">
+                            {(displayIterations.find(i => i.iteration === expandedIteration)?.source_diff ?? '').split('\n').map((line: string, i: number) => (
+                              <div key={i} className={cn(
+                                line.startsWith('+') && !line.startsWith('+++') ? 'text-emerald-400' :
+                                line.startsWith('-') && !line.startsWith('---') ? 'text-red-400' :
+                                'text-muted-foreground'
+                              )}>{line}</div>
+                            ))}
+                          </pre>
+                        </div>
+                      )}
+
+                      {/* A/B experiment button */}
+                      {!isModeStreaming && Boolean(doneData?.can_create_ab_experiment) && (
+                        <div className="flex items-center gap-2 rounded border border-purple-500/30 bg-purple-500/5 px-2 py-1.5">
+                          <FlaskRound className="w-3.5 h-3.5 text-purple-400" />
+                          <span className="text-[10px] text-muted-foreground flex-1">
+                            Best version v{String(doneData!.best_version)} improved by +{String(doneData!.improvement)}
+                          </span>
+                          <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]" disabled={abCreating}
+                            onClick={async () => {
+                              setAbCreating(true)
+                              try { await createAbExperimentFromAutoresearch(String(doneData!.experiment_id)); setDoneData(null) } catch { /* */ }
+                              setAbCreating(false)
+                            }}>
+                            {abCreating && <Loader2 className="w-3 h-3 mr-1 animate-spin" />}
+                            Create A/B Experiment
+                          </Button>
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
               )}

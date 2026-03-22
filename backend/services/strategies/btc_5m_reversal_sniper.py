@@ -533,16 +533,53 @@ class BTC5mReversalSniperStrategy(BaseStrategy):
         cfg.update(getattr(self, "config", {}) or {})
 
         candidates: list[tuple[float, Opportunity]] = []
+        rejection_counts: dict[str, int] = {}
+        btc_5m_count = 0
+        max_seconds_left = 0.0
+
         for row in rows:
             if not isinstance(row, dict):
                 continue
+
+            # Track BTC 5m markets for diagnostics
+            asset = str(row.get("asset") or "").strip().upper()
+            timeframe = str(row.get("timeframe") or "").strip().lower()
+            target_asset = str(cfg.get("asset", "BTC") or "BTC").strip().upper()
+            if asset == target_asset and timeframe in {"5m", "5min", "5-minute", "5minutes"}:
+                btc_5m_count += 1
+                secs = self._seconds_left(row)
+                max_seconds_left = max(max_seconds_left, secs)
+
             signal = self._score_market(row, cfg)
             if signal is None:
+                # Classify the rejection for diagnostics
+                reason = self._rejection_reason(row, cfg)
+                rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
                 continue
             opp = self._build_opportunity(row, signal)
             if opp is None:
                 continue
             candidates.append((float(signal["score"]), opp))
+
+        # Update diagnostics
+        nearest = round(max_seconds_left, 1) if btc_5m_count > 0 else None
+        top_reasons = sorted(rejection_counts.items(), key=lambda kv: kv[1], reverse=True)[:3]
+        parts = [f"Scanned {len(rows)} markets ({btc_5m_count} BTC 5m), {len(candidates)} signals"]
+        if top_reasons:
+            parts.append("rejected: " + ", ".join(f"{v} {k}" for k, v in top_reasons))
+        if nearest is not None:
+            parts.append(f"nearest {nearest}s left")
+        self._filter_diagnostics = {
+            "markets_scanned": len(rows),
+            "btc_5m_markets": btc_5m_count,
+            "signals_emitted": len(candidates),
+            "rejections": rejection_counts,
+            "message": " \u2014 ".join(parts),
+            "summary": {
+                "nearest_seconds_left": nearest,
+                **{f"rejected_{k}": v for k, v in rejection_counts.items()},
+            },
+        }
 
         if not candidates:
             return []
@@ -563,6 +600,46 @@ class BTC5mReversalSniperStrategy(BaseStrategy):
                 break
 
         return out
+
+    def _rejection_reason(self, row: dict[str, Any], cfg: dict[str, Any]) -> str:
+        """Classify why a market was rejected (for diagnostics only)."""
+        asset = str(row.get("asset") or "").strip().upper()
+        target_asset = str(cfg.get("asset", "BTC") or "BTC").strip().upper()
+        if asset != target_asset:
+            return "wrong_asset"
+
+        timeframe = str(row.get("timeframe") or "").strip().lower()
+        if timeframe not in {"5m", "5min", "5-minute", "5minutes"}:
+            return "wrong_timeframe"
+
+        up_price = safe_float(row.get("up_price"), None)
+        down_price = safe_float(row.get("down_price"), None)
+        oracle_price = safe_float(row.get("oracle_price"), None)
+        price_to_beat = safe_float(row.get("price_to_beat"), None)
+        if up_price is None or down_price is None or oracle_price is None or price_to_beat is None:
+            return "missing_price_data"
+        if not (0.0 < up_price < 1.0 and 0.0 < down_price < 1.0 and price_to_beat > 0.0):
+            return "invalid_prices"
+
+        oracle_age_seconds = safe_float(row.get("oracle_age_seconds"), None)
+        max_oracle_age = max(0.1, to_float(cfg.get("max_oracle_age_seconds", 5.0), 5.0))
+        if oracle_age_seconds is None or oracle_age_seconds > max_oracle_age:
+            return "oracle_stale"
+
+        seconds_left = self._seconds_left(row)
+        window_start = max(1.0, to_float(cfg.get("entry_window_start_seconds", 15.0), 15.0))
+        window_end = max(0.5, to_float(cfg.get("entry_window_end_seconds", 2.0), 2.0))
+        if seconds_left > window_start:
+            return "not_in_window"
+        if seconds_left < window_end:
+            return "past_window"
+
+        diff_pct = ((oracle_price - price_to_beat) / price_to_beat) * 100.0
+        min_oracle_divergence = max(0.01, to_float(cfg.get("min_oracle_divergence_pct", 0.10), 0.10))
+        if abs(diff_pct) < min_oracle_divergence:
+            return "low_divergence"
+
+        return "other"
 
     def detect(self, events: list, markets: list, prices: dict[str, dict]) -> list[Opportunity]:
         """Standard scanner interface — not used, detection is via on_event."""

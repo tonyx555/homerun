@@ -1242,6 +1242,25 @@ async def _resolve_execution_wallet_address() -> str:
         wallet = ""
     if not wallet:
         wallet = str(live_execution_service._get_wallet_address() or "").strip()
+    # DB fallback: look up wallet from live_trading_positions if service not initialized
+    if not wallet:
+        try:
+            from models.database import AsyncSessionLocal, LiveTradingPosition
+            from sqlalchemy import select
+
+            async with AsyncSessionLocal() as _session:
+                row = (
+                    await _session.execute(
+                        select(LiveTradingPosition.wallet_address)
+                        .where(LiveTradingPosition.wallet_address.isnot(None))
+                        .limit(1)
+                    )
+                ).scalar()
+                if row:
+                    wallet = str(row).strip()
+                    logger.info("wallet address resolved from DB fallback: %s", wallet[:12] + "...")
+        except Exception:
+            pass
     return wallet
 
 

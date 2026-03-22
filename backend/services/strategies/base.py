@@ -497,6 +497,23 @@ class BaseStrategy(ABC):
         self.config = dict(self.default_config)
         # Strategy state — persisted across detect() cycles
         self._state: dict = {}
+        # Filter diagnostics — strategies populate this in their detection
+        # methods.  The orchestrator reads it via get_filter_diagnostics()
+        # to display heartbeat messages in the terminal.
+        self._filter_diagnostics: dict = {}
+
+    def get_filter_diagnostics(self) -> dict[str, Any] | None:
+        """Return the most recent detection-cycle diagnostics, if any.
+
+        Strategies that want informative heartbeat messages in the terminal
+        should populate ``self._filter_diagnostics`` during detection with at
+        least a ``message`` key (str) for the heartbeat line.  Optional keys
+        like ``markets_scanned``, ``signals_emitted``, and ``summary`` are
+        forwarded to the payload as-is.
+
+        Returns ``None`` when no diagnostics have been recorded yet.
+        """
+        return dict(self._filter_diagnostics) if self._filter_diagnostics else None
 
     def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:
         """Detect arbitrage opportunities (sync).

@@ -55,15 +55,54 @@ class GlobalPauseState:
             from services.weather import shared_state as weather_shared_state
             from services.worker_state import read_worker_control
 
-            async with AsyncSessionLocal() as session:
-                scanner_control = await shared_state.read_scanner_control(session)
-                news_control = await news_shared_state.read_news_control(session)
-                weather_control = await weather_shared_state.read_weather_control(session)
-                discovery_control = await discovery_shared_state.read_discovery_control(session)
-                orchestrator_control = await read_orchestrator_control(session)
-                crypto_control = await read_worker_control(session, "crypto")
-                tracked_control = await read_worker_control(session, "tracked_traders")
-                events_control = await read_worker_control(session, "events")
+            # Each control read is independent — run them all in parallel to
+            # avoid holding a single DB session across 8 sequential queries.
+            async def _read_scanner() -> dict:
+                async with AsyncSessionLocal() as session:
+                    return await shared_state.read_scanner_control(session)
+
+            async def _read_news() -> dict:
+                async with AsyncSessionLocal() as session:
+                    return await news_shared_state.read_news_control(session)
+
+            async def _read_weather() -> dict:
+                async with AsyncSessionLocal() as session:
+                    return await weather_shared_state.read_weather_control(session)
+
+            async def _read_discovery() -> dict:
+                async with AsyncSessionLocal() as session:
+                    return await discovery_shared_state.read_discovery_control(session)
+
+            async def _read_orchestrator() -> dict:
+                async with AsyncSessionLocal() as session:
+                    return await read_orchestrator_control(session)
+
+            async def _read_worker(name: str) -> dict:
+                async with AsyncSessionLocal() as session:
+                    return await read_worker_control(session, name)
+
+            (
+                scanner_control,
+                news_control,
+                weather_control,
+                discovery_control,
+                orchestrator_control,
+                crypto_control,
+                tracked_control,
+                events_control,
+            ) = await asyncio.wait_for(
+                asyncio.gather(
+                    _read_scanner(),
+                    _read_news(),
+                    _read_weather(),
+                    _read_discovery(),
+                    _read_orchestrator(),
+                    _read_worker("crypto"),
+                    _read_worker("tracked_traders"),
+                    _read_worker("events"),
+                ),
+                timeout=10.0,
+            )
 
             self._paused = all(
                 bool(control.get("is_paused", False))

@@ -47,17 +47,6 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# ---------------------------------------------------------------------------
-# Crypto filter diagnostics buffer (populated by _detect_from_crypto_markets)
-# ---------------------------------------------------------------------------
-
-_latest_crypto_filter_diagnostics: dict[str, Any] = {}
-
-
-def get_crypto_filter_diagnostics() -> dict[str, Any]:
-    """Return the most recent crypto market filtering diagnostics."""
-    return dict(_latest_crypto_filter_diagnostics)
-
 
 # ---------------------------------------------------------------------------
 # Evaluate-method constants (ported from BaseCryptoTimeframeStrategy)
@@ -176,7 +165,7 @@ def _crypto_hf_param_value(config: dict[str, Any], base_key: str, timeframe: Any
 
 
 CRYPTO_HF_SCOPE_DEFAULTS: dict[str, Any] = {
-    "min_edge_percent": 3.0,
+    "min_edge_percent": 0.25,
     "min_confidence": 0.42,
     "max_risk_score": 0.80,
     "include_assets": ["BTC", "ETH", "SOL", "XRP"],
@@ -187,27 +176,27 @@ CRYPTO_HF_SCOPE_DEFAULTS: dict[str, Any] = {
     "auto_mode_priority": ["directional", "convergence", "maker_quote"],
     "live_window_required": True,
     "min_liquidity_usd": 250.0,
-    "min_liquidity_usd_opening": 4000.0,
+    "min_liquidity_usd_opening": 500.0,
     "max_spread_pct": 0.08,
     "max_signal_age_seconds": 35.0,
     "max_open_order_seconds": 45.0,
-    "max_signal_age_seconds_5m": 2.5,
-    "max_signal_age_seconds_15m": 4.5,
-    "max_signal_age_seconds_1h": 7.5,
-    "max_signal_age_seconds_4h": 10.0,
-    "max_market_data_age_ms": 2500,
-    "max_market_data_age_ms_5m": 3000,
-    "max_market_data_age_ms_15m": 3200,
-    "max_market_data_age_ms_1h": 3500,
-    "max_market_data_age_ms_4h": 4500,
+    "max_signal_age_seconds_5m": 8.0,
+    "max_signal_age_seconds_15m": 12.0,
+    "max_signal_age_seconds_1h": 20.0,
+    "max_signal_age_seconds_4h": 30.0,
+    "max_market_data_age_ms": 8000,
+    "max_market_data_age_ms_5m": 8000,
+    "max_market_data_age_ms_15m": 10000,
+    "max_market_data_age_ms_1h": 12000,
+    "max_market_data_age_ms_4h": 15000,
     "enforce_market_data_freshness": True,
     "require_market_data_age_for_sources": ["crypto"],
     "enable_live_market_context": True,
     "require_live_market_revalidation": True,
     "require_live_revalidation_for_sources": ["crypto"],
-    "max_live_context_age_seconds": 5.0,
-    "max_oracle_age_seconds": 20.0,
-    "max_oracle_age_ms": 20_000.0,
+    "max_live_context_age_seconds": 10.0,
+    "max_oracle_age_seconds": 30.0,
+    "max_oracle_age_ms": 30_000.0,
     "require_oracle_for_directional": True,
     "oracle_direction_gate_modes": ["directional", "convergence"],
     "oracle_source_policy": "degrade",
@@ -224,7 +213,7 @@ CRYPTO_HF_SCOPE_DEFAULTS: dict[str, Any] = {
     "orderflow_alignment_enabled": True,
     "orderflow_alignment_modes": ["maker_quote", "convergence"],
     "min_orderflow_alignment": 0.05,
-    "allow_missing_orderflow_alignment": False,
+    "allow_missing_orderflow_alignment": True,
     "cancel_cluster_guard_enabled": True,
     "cancel_cluster_guard_modes": ["maker_quote"],
     "max_cancel_rate_30s": 0.72,
@@ -392,11 +381,11 @@ CRYPTO_HF_SCOPE_DEFAULTS: dict[str, Any] = {
     # --- Latency arb gate: require decisive oracle move before entry ---
     # Only generate signals when oracle (Binance) has moved significantly from
     # price_to_beat AND the Polymarket market hasn't repriced yet (price lag).
-    "min_oracle_move_pct": 2.5,
-    "min_oracle_move_pct_5m": 2.5,
-    "min_oracle_move_pct_15m": 2.0,
-    "min_oracle_move_pct_1h": 1.5,
-    "min_oracle_move_pct_4h": 1.0,
+    "min_oracle_move_pct": 0.30,
+    "min_oracle_move_pct_5m": 0.30,
+    "min_oracle_move_pct_15m": 0.25,
+    "min_oracle_move_pct_1h": 0.20,
+    "min_oracle_move_pct_4h": 0.15,
     "max_market_repricing_for_entry": 0.30,
     # --- Consecutive loss circuit breaker ---
     "consecutive_loss_pause_enabled": True,
@@ -6753,7 +6742,6 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         with fee-aware gating. No rebalance, no pure_arb -- direction is
         determined SOLELY by the oracle signal when oracle is available.
         """
-        global _latest_crypto_filter_diagnostics
         opportunities: list[Opportunity] = []
         rejections: list[dict[str, Any]] = []
 
@@ -6947,14 +6935,20 @@ class BtcEthHighFreqStrategy(BaseStrategy):
 
         oracle_rejections = [r for r in rejections if r["gate"] == "oracle_move"]
         max_oracle_move = max((r["oracle_move_pct"] for r in oracle_rejections), default=0.0)
-        _latest_crypto_filter_diagnostics = {
+        repriced_count = sum(1 for r in rejections if r["gate"] == "repriced")
+        self._filter_diagnostics = {
             "scanned_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
             "markets_scanned": len(markets),
             "signals_emitted": len(opportunities),
             "rejections": rejections,
+            "message": (
+                f"Scanned {len(markets)} markets, {len(opportunities)} signals"
+                f" \u2014 {len(oracle_rejections)} below oracle threshold (max {round(max_oracle_move, 4)}%),"
+                f" {repriced_count} already repriced"
+            ),
             "summary": {
                 "oracle_move": len(oracle_rejections),
-                "repriced": sum(1 for r in rejections if r["gate"] == "repriced"),
+                "repriced": repriced_count,
                 "max_oracle_move_pct": round(max_oracle_move, 4),
             },
         }

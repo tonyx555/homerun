@@ -680,14 +680,14 @@ async def _run_loop() -> None:
                 try:
                     await _run_with_retryable_db_retries(
                         "full_intelligence",
-                        lambda: _graceful_timeout(wallet_intelligence.run_full_analysis(include_confluence=False), timeout=300, label="full_intelligence"),
+                        lambda: _graceful_timeout(wallet_intelligence.run_full_analysis(include_confluence=False), timeout=120, label="full_intelligence"),
                     )
                 except _TimedTaskStillRunningError:
                     activity_labels.append("full_intelligence_still_running")
                     logger.warning("Tracked-traders full_intelligence skipped because prior run is still finishing")
                 except asyncio.TimeoutError:
                     activity_labels.append("full_intelligence_timeout")
-                    logger.warning("Tracked-traders full_intelligence timed out after 300s")
+                    logger.warning("Tracked-traders full_intelligence timed out after 120s")
                 except Exception as exc:
                     if _is_retryable_db_error(exc):
                         activity_labels.append("full_intelligence_db_contention")

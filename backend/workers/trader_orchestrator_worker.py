@@ -1335,51 +1335,42 @@ def _strategy_instance_for_source_config(source_config: dict[str, Any] | None) -
     return strategy_loader.get_instance(strategy_key)
 
 
-def _get_trader_crypto_strategy_key(trader: dict[str, Any]) -> str | None:
-    """Return the strategy_key configured for the trader's crypto source, if any."""
-    source_configs = _normalize_source_configs(trader)
-    crypto_config = source_configs.get("crypto")
-    if not crypto_config:
-        return None
-    return str(crypto_config.get("strategy_key") or "").strip().lower() or None
+def _format_filter_diagnostics_message(cfd: dict[str, Any]) -> str:
+    """Format a heartbeat message from crypto filter diagnostics.
 
-
-def _get_crypto_filter_diagnostics(trader: dict[str, Any] | None = None) -> dict[str, Any] | None:
-    """Get crypto filter diagnostics from the trader's configured strategy.
-
-    Checks the trader's actual strategy first.  Falls back to scanning all
-    loaded strategies for one that exposes ``get_crypto_filter_diagnostics``.
-    Returns None when no strategy publishes diagnostics — the caller should
-    fall through to generic dispatch stats.
+    Strategies provide their own ``message`` key.  Falls back to a generic
+    summary using ``markets_scanned`` / ``signals_emitted`` if absent.
     """
-    import sys
+    msg = cfd.get("message")
+    if isinstance(msg, str) and msg.strip():
+        return msg.strip()
+    scanned = cfd.get("markets_scanned", 0)
+    emitted = cfd.get("signals_emitted", 0)
+    return f"Scanned {scanned} markets, {emitted} signals"
 
-    # Prefer the trader's own strategy
-    preferred_slug: str | None = None
-    if trader is not None:
-        preferred_slug = _get_trader_crypto_strategy_key(trader)
 
-    slugs_to_check: list[str] = []
-    if preferred_slug:
-        slugs_to_check.append(preferred_slug)
-    # Fallback: scan all loaded strategies
-    for slug in list(strategy_loader._loaded.keys()):
-        if slug not in slugs_to_check:
-            slugs_to_check.append(slug)
+def _get_strategy_filter_diagnostics(trader: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Get filter diagnostics from the trader's configured strategy.
 
-    for slug in slugs_to_check:
-        loaded = strategy_loader.get_strategy(slug)
-        if loaded is None:
+    Looks up the strategy instance for the trader and calls
+    ``get_filter_diagnostics()`` on it.  Returns None when the strategy
+    has no diagnostics — the caller falls through to generic stats.
+    """
+    if trader is None:
+        return None
+    source_configs = _normalize_source_configs(trader)
+    for source_config in source_configs.values():
+        strategy_key = str(source_config.get("strategy_key") or "").strip().lower()
+        if not strategy_key:
             continue
-        module_name = getattr(loaded, "module_name", "")
-        if not module_name:
+        instance = strategy_loader.get_instance(strategy_key)
+        if instance is None:
             continue
-        mod = sys.modules.get(module_name)
-        if mod is None:
-            continue
-        fn = getattr(mod, "get_crypto_filter_diagnostics", None)
+        fn = getattr(instance, "get_filter_diagnostics", None)
         if callable(fn):
-            return fn()
+            result = fn()
+            if result:
+                return result
     return None
 
 
@@ -3777,31 +3768,13 @@ async def _run_trader_once(
                                             }
                                     except Exception:
                                         pass
-                                    try:
-                                        _cfd = _get_crypto_filter_diagnostics(trader=trader)
-                                        if _cfd:
-                                            _idle_payload["crypto_filter_diagnostics"] = _cfd
-                                            _summary = _cfd.get("summary", {})
-                                            _scanned = _cfd.get("markets_scanned", 0)
-                                            _emitted = _cfd.get("signals_emitted", 0)
-                                            _oracle = _summary.get("oracle_move", 0)
-                                            _repriced = _summary.get("repriced", 0)
-                                            _max_move = _summary.get("max_oracle_move_pct", 0.0)
-                                            _idle_message = (
-                                                f"Scanned {_scanned} markets, {_emitted} signals"
-                                                f" \u2014 {_oracle} below oracle threshold (max {_max_move}%),"
-                                                f" {_repriced} already repriced"
-                                            )
-                                        else:
-                                            _disp = _idle_payload.get("dispatch") or {}
-                                            _idle_message = (
-                                                f"Dispatched {_disp.get('total', '?')}x, "
-                                                f"handlers={_disp.get('handlers', '?')}, "
-                                                f"opps={_disp.get('opportunities', '?')}, "
-                                                f"signals={_disp.get('signals_published', '?')}"
-                                            )
-                                    except Exception:
-                                        pass
+                                try:
+                                    _cfd = _get_strategy_filter_diagnostics(trader=trader)
+                                    if _cfd:
+                                        _idle_payload["filter_diagnostics"] = _cfd
+                                        _idle_message = _format_filter_diagnostics_message(_cfd)
+                                except Exception:
+                                    pass
                                 await _emit_cycle_heartbeat_if_due(
                                     session,
                                     trader_id=trader_id,
@@ -6403,24 +6376,13 @@ async def _run_trader_once(
                             "orders_written": orders_written,
                         }
                         _no_signal_message = "Idle cycle: no pending signals."
-                        if _is_crypto_source_trader(trader):
-                            try:
-                                _cfd = _get_crypto_filter_diagnostics(trader=trader)
-                                if _cfd:
-                                    _no_signal_payload["crypto_filter_diagnostics"] = _cfd
-                                    _summary = _cfd.get("summary", {})
-                                    _scanned = _cfd.get("markets_scanned", 0)
-                                    _emitted = _cfd.get("signals_emitted", 0)
-                                    _oracle = _summary.get("oracle_move", 0)
-                                    _repriced = _summary.get("repriced", 0)
-                                    _max_move = _summary.get("max_oracle_move_pct", 0.0)
-                                    _no_signal_message = (
-                                        f"Scanned {_scanned} markets, {_emitted} signals"
-                                        f" \u2014 {_oracle} below oracle threshold (max {_max_move}%),"
-                                        f" {_repriced} already repriced"
-                                    )
-                            except Exception:
-                                pass
+                        try:
+                            _cfd = _get_strategy_filter_diagnostics(trader=trader)
+                            if _cfd:
+                                _no_signal_payload["filter_diagnostics"] = _cfd
+                                _no_signal_message = _format_filter_diagnostics_message(_cfd)
+                        except Exception:
+                            pass
                         await _emit_cycle_heartbeat_if_due(
                             session,
                             trader_id=trader_id,

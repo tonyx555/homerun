@@ -238,6 +238,7 @@ async def _run_loop() -> None:
                 degrade_trigger_metrics: set[str] = set()
                 alert_payload: dict[str, Any] | None = None
 
+                # Phase 1: upsert incidents (separate session to limit hold time)
                 async with AsyncSessionLocal() as session:
                     for metric_name, check in checks.items():
                         breached = bool(check.get("breached", False))
@@ -261,6 +262,8 @@ async def _run_loop() -> None:
                         if action.get("action") in {"opened", "resolved"}:
                             incident_actions.append(action)
 
+                # Phase 2: degrade control + open incident listing (separate session)
+                async with AsyncSessionLocal() as session:
                     scanner_control = await read_scanner_control(session)
                     forced_degraded = bool(scanner_control.get("heavy_lane_forced_degraded", False))
                     forced_reason = str(scanner_control.get("heavy_lane_degraded_reason") or "")

@@ -50,7 +50,7 @@ _IDLE_SLEEP_SECONDS = 1
 _POSITION_MARK_SYNC_INTERVAL_SECONDS = 10.0
 _last_position_mark_sync_at = 0.0
 _MAX_CONSECUTIVE_DB_FAILURES = 3
-_CONTROL_REFRESH_SECONDS = 1.0
+_CONTROL_REFRESH_SECONDS = 5.0
 _ACTIVE_POSITION_TICK_SECONDS = 10.0
 _EVENT_QUEUE_MAXSIZE = 4096
 _previous_active_order_ids: set[str] = set()
@@ -59,7 +59,8 @@ _WALLET_MONITOR_REFRESH_SECONDS = 15.0
 _TRADER_RECONCILE_ATTEMPTS = 3
 _TRADER_RECONCILE_RETRY_BASE_DELAY_SECONDS = 0.05
 _TRADER_RECONCILE_RETRY_MAX_DELAY_SECONDS = 0.3
-_TRADER_RECONCILE_TIMEOUT_SECONDS = 120.0
+_TRADER_RECONCILE_TIMEOUT_SECONDS = 30.0
+_RECONCILIATION_CYCLE_TIMEOUT_SECONDS = 120.0
 _MAX_TRIGGER_DRAIN_PER_CYCLE = 128
 _RECONCILE_TRIGGER_EVENTS = frozenset(
     {
@@ -174,19 +175,29 @@ async def _reconcile_live_state_for_trader(
         "notional_updates": 0,
         "price_updates": 0,
     }
-    if provider_pass:
+
+    # Provider reconcile + open order count are independent — run in parallel.
+    async def _provider_pass() -> dict[str, Any]:
         async with AsyncSessionLocal() as session:
-            provider_result = await reconcile_live_provider_orders(
+            return await reconcile_live_provider_orders(
                 session,
                 trader_id=trader_id,
                 commit=True,
                 broadcast=True,
             )
 
+    async def _open_order_count() -> int:
+        async with AsyncSessionLocal() as session:
+            return await get_open_order_count_for_trader(session, trader_id, mode="live")
+
+    if provider_pass:
+        provider_result, active_open_orders = await asyncio.gather(
+            _provider_pass(), _open_order_count()
+        )
+    else:
+        active_open_orders = await _open_order_count()
+
     active_seen = int(provider_result.get("active_seen", 0) or 0)
-    active_open_orders = 0
-    async with AsyncSessionLocal() as session:
-        active_open_orders = await get_open_order_count_for_trader(session, trader_id, mode="live")
     lifecycle_result: dict[str, Any] = {"would_close": 0, "closed": 0}
     trader_params = _default_strategy_params(trader)
     if (not provider_pass) or active_seen > 0 or active_open_orders > 0:
@@ -457,19 +468,27 @@ async def _run_reconciliation_cycle(
     heartbeat_activity: str = "",
 ) -> dict[str, Any]:
     summary = _empty_cycle_summary()
-    async with AsyncSessionLocal() as session:
-        try:
-            await recover_missing_live_trader_orders(
-                session,
-                trader_ids=None,
-                commit=True,
-                broadcast=True,
+    try:
+        async with AsyncSessionLocal() as session:
+            await asyncio.wait_for(
+                recover_missing_live_trader_orders(
+                    session,
+                    trader_ids=None,
+                    commit=True,
+                    broadcast=True,
+                ),
+                timeout=_TRADER_RECONCILE_TIMEOUT_SECONDS,
             )
-        except Exception as exc:
-            logger.warning(
-                "Live order authority recovery failed during reconciliation cycle",
-                exc_info=exc,
-            )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Live order authority recovery timed out after %.0fs",
+            _TRADER_RECONCILE_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Live order authority recovery failed during reconciliation cycle",
+            exc_info=exc,
+        )
     async with AsyncSessionLocal() as session:
         traders = await list_traders(session)
 
@@ -643,11 +662,19 @@ async def run_worker_loop() -> None:
 
     startup_summary = _empty_cycle_summary()
     try:
-        startup_summary = await _run_reconciliation_cycle(
-            reason="startup",
-            emit_event=True,
-            provider_pass=True,
-            heartbeat_activity="Startup reconciling",
+        startup_summary = await asyncio.wait_for(
+            _run_reconciliation_cycle(
+                reason="startup",
+                emit_event=True,
+                provider_pass=True,
+                heartbeat_activity="Startup reconciling",
+            ),
+            timeout=_RECONCILIATION_CYCLE_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Startup reconciliation cycle timed out after %.0fs",
+            _RECONCILIATION_CYCLE_TIMEOUT_SECONDS,
         )
     except Exception as exc:
         logger.warning("Startup full reconciliation failed", exc_info=exc)
@@ -788,12 +815,23 @@ async def run_worker_loop() -> None:
                             cycle_reason = "scheduled"
                             provider_pass = True
 
-                cycle_summary = await _run_reconciliation_cycle(
-                    reason=cycle_reason,
-                    emit_event=emit_event,
-                    provider_pass=provider_pass,
-                    heartbeat_activity="Reconciling",
-                )
+                try:
+                    cycle_summary = await asyncio.wait_for(
+                        _run_reconciliation_cycle(
+                            reason=cycle_reason,
+                            emit_event=emit_event,
+                            provider_pass=provider_pass,
+                            heartbeat_activity="Reconciling",
+                        ),
+                        timeout=_RECONCILIATION_CYCLE_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Reconciliation cycle timed out after %.0fs reason=%s",
+                        _RECONCILIATION_CYCLE_TIMEOUT_SECONDS,
+                        cycle_reason,
+                    )
+                    cycle_summary = _empty_cycle_summary()
                 consecutive_db_failures = 0
 
                 # Sync position marks and exit registry for event-driven updates
