@@ -2460,7 +2460,7 @@ class ArbitrageScanner:
                 except asyncio.TimeoutError:
                     prices = {}
                     logger.warning(f"  Price load timed out after {optional_stage_timeout:.1f}s; continuing with cached market prices")
-                logger.warning(f"  Loaded prices for {len(prices)}/{len(all_token_ids)} tokens from WS cache")
+                logger.info(f"  Loaded prices for {len(prices)}/{len(all_token_ids)} tokens from WS cache")
                 logger.debug(f"  [timing] Price load: {_time.monotonic() - _phase_t:.1f}s")
             # Phase 4 — Update in-memory caches (offloaded to thread)
             def _update_caches_after_catalog(scanner, evts, mkts, prc, ts):

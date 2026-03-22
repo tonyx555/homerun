@@ -561,8 +561,8 @@ class WalletWebSocketMonitor:
 
                 async with websockets.connect(
                     self._ws_url,
-                    ping_interval=30,
-                    ping_timeout=60,
+                    ping_interval=None,
+                    ping_timeout=None,
                     open_timeout=10,
                     close_timeout=10,
                 ) as ws:
@@ -607,29 +607,38 @@ class WalletWebSocketMonitor:
                     if self._mempool_mode:
                         await self._subscribe_mempool(ws)
 
+                    # Custom heartbeat loop (more reliable than built-in ping)
+                    heartbeat_task = asyncio.create_task(
+                        self._heartbeat_loop(ws), name="wallet-ws-heartbeat",
+                    )
+
                     # Process incoming messages
-                    async for message in ws:
-                        if not self._running:
-                            break
+                    try:
+                        async for message in ws:
+                            if not self._running:
+                                break
 
-                        try:
-                            data = json.loads(message)
-                            params = data.get("params", {})
-                            result = params.get("result", {})
+                            try:
+                                data = json.loads(message)
+                                params = data.get("params", {})
+                                result = params.get("result", {})
 
-                            block_number_hex = result.get("number")
-                            if block_number_hex:
-                                block_number = int(block_number_hex, 16)
-                                block_timestamp_hex = result.get("timestamp", "0x0")
-                                await self._handle_block(
-                                    block_number,
-                                    block_timestamp_hex=block_timestamp_hex,
-                                )
+                                block_number_hex = result.get("number")
+                                if block_number_hex:
+                                    block_number = int(block_number_hex, 16)
+                                    block_timestamp_hex = result.get("timestamp", "0x0")
+                                    await self._handle_block(
+                                        block_number,
+                                        block_timestamp_hex=block_timestamp_hex,
+                                    )
 
-                        except json.JSONDecodeError:
-                            self._stats["errors"] += 1
-                        except Exception:
-                            self._stats["errors"] += 1
+                            except json.JSONDecodeError:
+                                self._stats["errors"] += 1
+                            except Exception:
+                                self._stats["errors"] += 1
+                    finally:
+                        if not heartbeat_task.done():
+                            heartbeat_task.cancel()
 
             except asyncio.CancelledError:
                 logger.info("WS loop cancelled")
@@ -657,6 +666,34 @@ class WalletWebSocketMonitor:
 
         self._ws_connection = None
         await self._close_rpc_client()
+
+    async def _heartbeat_loop(self, ws) -> None:
+        """Proactive ping/pong keepalive — tolerates up to 3 consecutive misses."""
+        _INTERVAL = 30.0
+        _PONG_TIMEOUT = 10.0
+        _MAX_MISSES = 3
+        consecutive_misses = 0
+        try:
+            while True:
+                await asyncio.sleep(_INTERVAL)
+                try:
+                    pong = await ws.ping()
+                    await asyncio.wait_for(pong, timeout=_PONG_TIMEOUT)
+                    consecutive_misses = 0
+                except asyncio.TimeoutError:
+                    consecutive_misses += 1
+                    logger.warning(
+                        "Wallet WS heartbeat pong timeout",
+                        misses=consecutive_misses,
+                        threshold=_MAX_MISSES,
+                    )
+                    if consecutive_misses >= _MAX_MISSES:
+                        await ws.close()
+                        return
+                except Exception:
+                    return
+        except asyncio.CancelledError:
+            return
 
     async def _close_rpc_client(self) -> None:
         async with self._rpc_client_lock:
