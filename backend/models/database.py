@@ -3602,21 +3602,6 @@ _connect_args: dict = {
     },
 }
 
-# asyncpg-level TCP keepalive — ensures the client side also detects dead
-# connections via kernel probes.  Without this, a half-open TCP connection
-# (e.g. after a ProactorEventLoop I/O transport failure on Windows) can sit
-# indefinitely, consuming a pool slot the reaper cannot reclaim because
-# socket.close() itself hangs on the broken transport.
-#
-# These are passed directly to asyncpg's connect() which forwards them to
-# the underlying socket via SO_KEEPALIVE + TCP_KEEPIDLE/INTVL/CNT.
-if _os.name == "nt":
-    # Windows: only SO_KEEPALIVE + TCP_KEEPIDLE are supported via
-    # setsockopt; asyncpg handles this through its 'tcp_keepalive' dict.
-    _connect_args["tcp_keepalive"] = True
-else:
-    _connect_args["tcp_keepalive"] = True
-
 _engine_kw["connect_args"] = _connect_args
 
 async_engine = create_async_engine(settings.DATABASE_URL, **_engine_kw)
@@ -3628,6 +3613,42 @@ _db_logger.info(
     _pool_size,
     _max_overflow,
 )
+
+
+# Enable TCP keepalive on the raw socket for every new connection.
+# asyncpg does not expose a connect-time keepalive parameter, so we
+# set it via a SQLAlchemy pool "connect" event which fires after the
+# DBAPI connection is established.  This ensures the client side
+# detects dead connections within ~90s (60s idle + 3×10s probes)
+# instead of relying on the OS default of 2 hours.
+@_sa_event.listens_for(async_engine.sync_engine, "connect")
+def _set_tcp_keepalive(dbapi_connection, connection_record):
+    import socket as _socket
+    try:
+        transport = getattr(dbapi_connection, "_transport", None)
+        raw_sock = None
+        if transport is not None:
+            raw_sock = transport.get_extra_info("socket")
+            if raw_sock is None:
+                raw_sock = getattr(transport, "_sock", None)
+        if raw_sock is None:
+            protocol = getattr(dbapi_connection, "_protocol", None)
+            if protocol is not None:
+                t = getattr(protocol, "_transport", None)
+                if t is not None:
+                    raw_sock = t.get_extra_info("socket")
+                    if raw_sock is None:
+                        raw_sock = getattr(t, "_sock", None)
+        if raw_sock is not None and isinstance(raw_sock, _socket.socket):
+            raw_sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE, 1)
+            if hasattr(_socket, "TCP_KEEPIDLE"):
+                raw_sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_KEEPIDLE, 60)
+            if hasattr(_socket, "TCP_KEEPINTVL"):
+                raw_sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_KEEPINTVL, 10)
+            if hasattr(_socket, "TCP_KEEPCNT"):
+                raw_sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_KEEPCNT, 3)
+    except Exception:
+        pass
 
 
 def _pool_task_context() -> tuple[str, str]:
