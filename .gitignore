@@ -43,9 +43,7 @@ Thumbs.db
 *.db
 *.db-shm
 *.db-wal
-data/*.stale*
-data/postgres/
-data/runtime/
+data/
 backend/.runtime/
 
 # Local exports
