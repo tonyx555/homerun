@@ -331,6 +331,63 @@ def _resize_windows_terminal_window_to_quarter_screen() -> bool:
         return False
 
 
+def _sync_windows_console_buffer() -> bool:
+    """Set the console screen buffer height equal to the visible viewport height.
+
+    On Windows the console has a separate *buffer* size (total scrollable area)
+    and *window* size (visible portion).  Maximizing, restoring, and resizing
+    can desync them — when the buffer is taller than the viewport Textual
+    renders to buffer coordinates and the display goes blocky/scrolly.
+
+    Calling this forces buffer height == viewport height, eliminating the
+    mismatch.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes.wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        STD_OUTPUT = -11
+        handle = kernel32.GetStdHandle(STD_OUTPUT)
+
+        class COORD(ctypes.Structure):
+            _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
+
+        class SMALL_RECT(ctypes.Structure):
+            _fields_ = [
+                ("Left", ctypes.c_short),
+                ("Top", ctypes.c_short),
+                ("Right", ctypes.c_short),
+                ("Bottom", ctypes.c_short),
+            ]
+
+        class CONSOLE_SCREEN_BUFFER_INFO(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", COORD),
+                ("dwCursorPosition", COORD),
+                ("wAttributes", ctypes.c_ushort),
+                ("srWindow", SMALL_RECT),
+                ("dwMaximumWindowSize", COORD),
+            ]
+
+        info = CONSOLE_SCREEN_BUFFER_INFO()
+        if not kernel32.GetConsoleScreenBufferInfo(handle, ctypes.byref(info)):
+            return False
+
+        viewport_cols = info.srWindow.Right - info.srWindow.Left + 1
+        viewport_rows = info.srWindow.Bottom - info.srWindow.Top + 1
+
+        if info.dwSize.Y == viewport_rows and info.dwSize.X == viewport_cols:
+            return True  # already in sync
+
+        new_size = COORD(X=viewport_cols, Y=viewport_rows)
+        kernel32.SetConsoleScreenBufferSize(handle, new_size)
+        return True
+    except Exception:
+        return False
+
+
 def _nudge_windows_terminal_window() -> bool:
     if sys.platform != "win32":
         return False
@@ -361,6 +418,8 @@ def _nudge_windows_terminal_window() -> bool:
             user32.ShowWindow(hwnd, SW_RESTORE)
             time.sleep(0.03)
             user32.ShowWindow(hwnd, SW_MAXIMIZE)
+            time.sleep(0.03)
+            _sync_windows_console_buffer()
             return True
 
         rect = RECT()
@@ -377,7 +436,9 @@ def _nudge_windows_terminal_window() -> bool:
         if not user32.MoveWindow(hwnd, left, top, width + 1, height, True):
             return False
         time.sleep(0.03)
-        return bool(user32.MoveWindow(hwnd, left, top, width, height, True))
+        user32.MoveWindow(hwnd, left, top, width, height, True)
+        _sync_windows_console_buffer()
+        return True
     except Exception:
         return False
 
@@ -430,6 +491,8 @@ def _ensure_startup_terminal_size() -> None:
         # Maximize handles the window geometry; do NOT follow up with
         # ``mode con:`` because it fights the maximized state and
         # creates a buffer/window size mismatch (blocky scrolling).
+        # Instead, sync the buffer height to the viewport height directly.
+        _sync_windows_console_buffer()
         return
     cols, lines = _target_terminal_size()
     _resize_posix_terminal(cols, lines)
@@ -1497,6 +1560,7 @@ class HomerunApp(App):
     def _nudge_windows_viewport(self) -> None:
         """Nudge the Windows terminal window to force Textual to re-read the real size."""
         _nudge_windows_terminal_window()
+        _sync_windows_console_buffer()
         self._finalize_initial_layout()
 
     def _apply_responsive_layout(self, viewport_width: int | None = None) -> None:
@@ -1574,6 +1638,8 @@ class HomerunApp(App):
             self._render_worker_panel(worker_name)
 
     def on_resize(self, event: Resize) -> None:
+        if sys.platform == "win32":
+            _sync_windows_console_buffer()
         viewport_width = getattr(event, "width", None)
         viewport_height = getattr(getattr(event, "size", None), "height", None)
         if not isinstance(viewport_width, int) or viewport_width <= 0:
