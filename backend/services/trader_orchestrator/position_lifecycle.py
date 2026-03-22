@@ -981,6 +981,52 @@ def _extract_live_token_id(payload: dict[str, Any]) -> str:
     return ""
 
 
+def _extract_condition_outcome_key(payload: dict[str, Any], direction: str) -> str:
+    """Build a conditionId:outcomeIndex fallback key for wallet position lookup.
+
+    Polymarket can change a market's token_ids (token versioning) while the
+    stored order still references the original.  The conditionId + outcomeIndex
+    pair is stable across versions, so it serves as a reliable fallback when
+    exact token_id lookup fails.
+    """
+    # Try live_market.condition_id first (set during live execution)
+    cid = ""
+    live_market = payload.get("live_market")
+    if isinstance(live_market, dict):
+        cid = str(live_market.get("condition_id") or live_market.get("conditionId") or "").strip()
+    # Fall back to provider reconciliation snapshot
+    if not cid:
+        pr = payload.get("provider_reconciliation")
+        if isinstance(pr, dict):
+            snapshot = pr.get("snapshot")
+            if isinstance(snapshot, dict):
+                raw = snapshot.get("raw")
+                if isinstance(raw, dict):
+                    cid = str(raw.get("market") or raw.get("condition_id") or raw.get("conditionId") or "").strip()
+    if not cid:
+        return ""
+    # Determine outcome index from direction
+    dir_lower = str(direction or "").strip().lower()
+    if dir_lower in ("buy_no", "no", "sell_yes"):
+        outcome_idx = 1
+    elif dir_lower in ("buy_yes", "yes", "sell_no"):
+        outcome_idx = 0
+    else:
+        # Try to get from leg metadata
+        leg = payload.get("leg")
+        if isinstance(leg, dict):
+            outcome = str(leg.get("outcome") or "").strip().lower()
+            if outcome in ("no", "down"):
+                outcome_idx = 1
+            elif outcome in ("yes", "up"):
+                outcome_idx = 0
+            else:
+                return ""
+        else:
+            return ""
+    return f"{cid}:{outcome_idx}"
+
+
 def _extract_wallet_settlement_price(wallet_position: Optional[dict[str, Any]]) -> Optional[float]:
     if not isinstance(wallet_position, dict):
         return None
@@ -1282,6 +1328,13 @@ async def _load_execution_wallet_positions_by_token() -> dict[str, dict[str, Any
         if not token_id:
             continue
         by_token[token_id] = position
+        # Also index by conditionId:outcomeIndex so lookups survive token
+        # versioning — Polymarket can change a market's token_ids while the
+        # order payload still references the old one.
+        cid = str(position.get("conditionId") or position.get("condition_id") or "").strip()
+        outcome_idx = position.get("outcomeIndex")
+        if cid and outcome_idx is not None:
+            by_token[f"{cid}:{outcome_idx}"] = position
     return by_token
 
 
@@ -2414,6 +2467,12 @@ async def reconcile_live_positions(
         _exit_instance = None
         token_id = _extract_live_token_id(payload)
         wallet_position = wallet_positions_by_token.get(token_id) if token_id else None
+        # Fallback: if exact token_id lookup fails (token versioning), try
+        # conditionId:outcomeIndex which is stable across token versions.
+        if not isinstance(wallet_position, dict) and token_id:
+            cond_key = _extract_condition_outcome_key(payload, str(row.direction or ""))
+            if cond_key:
+                wallet_position = wallet_positions_by_token.get(cond_key)
         wallet_position_observed = isinstance(wallet_position, dict)
         wallet_position_size = _extract_wallet_position_size(wallet_position)
         wallet_mark_price = _extract_wallet_mark_price(wallet_position)
