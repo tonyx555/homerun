@@ -221,9 +221,9 @@ def test_crypto_highfreq_scope_defaults_include_stop_loss_policy():
     assert defaults["enable_live_market_context"] is True
     assert defaults["require_live_market_revalidation"] is True
     assert defaults["require_live_revalidation_for_sources"] == ["crypto"]
-    assert defaults["max_live_context_age_seconds"] == 5.0
-    assert defaults["max_oracle_age_seconds"] == 20.0
-    assert defaults["max_oracle_age_ms"] == 20000.0
+    assert defaults["max_live_context_age_seconds"] == 10.0
+    assert defaults["max_oracle_age_seconds"] == 30.0
+    assert defaults["max_oracle_age_ms"] == 30000.0
     assert defaults["require_oracle_for_directional"] is True
     assert defaults["oracle_source_policy"] == "degrade"
     assert defaults["min_seconds_left_for_entry_5m"] == 35.0
