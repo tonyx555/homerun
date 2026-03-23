@@ -188,7 +188,7 @@ async def _reconcile_live_state_for_trader(
 
     async def _open_order_count() -> int:
         async with AsyncSessionLocal() as session:
-            return await get_open_order_count_for_trader(session, trader_id, mode="live")
+            return await get_open_order_count_for_trader(session, trader_id, mode="live", statuses=OPEN_ORDER_STATUSES)
 
     if provider_pass:
         provider_result, active_open_orders = await asyncio.gather(

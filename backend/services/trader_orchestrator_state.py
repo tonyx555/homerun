@@ -81,7 +81,7 @@ ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS = 30
 _UNSET = object()  # Sentinel: distinguish "not provided" from explicit None
 ORCHESTRATOR_SNAPSHOT_ID = "latest"
 OPEN_ORDER_STATUSES = {"submitted", "executed", "open"}
-UNFILLED_ORDER_STATUSES = {"submitted", "executed", "open"}
+UNFILLED_ORDER_STATUSES = {"submitted", "open"}
 SHADOW_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
 LIVE_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
 CLEANUP_ELIGIBLE_ORDER_STATUSES = {"submitted", "executed", "open"}
@@ -6017,7 +6017,9 @@ async def get_open_order_count_for_trader(
     session: AsyncSession,
     trader_id: str,
     mode: Optional[str] = None,
+    statuses: Optional[set[str]] = None,
 ) -> int:
+    effective_statuses = statuses if statuses is not None else UNFILLED_ORDER_STATUSES
     status_key_expr = func.lower(func.trim(func.coalesce(TraderOrder.status, "")))
     query = (
         select(
@@ -6025,7 +6027,7 @@ async def get_open_order_count_for_trader(
             func.count(TraderOrder.id).label("count"),
         )
         .where(TraderOrder.trader_id == trader_id)
-        .where(status_key_expr.in_(tuple(UNFILLED_ORDER_STATUSES)))
+        .where(status_key_expr.in_(tuple(effective_statuses)))
         .group_by(TraderOrder.mode)
     )
     if mode is not None:
