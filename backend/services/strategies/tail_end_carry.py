@@ -209,7 +209,7 @@ class TailEndCarryStrategy(BaseStrategy):
         "immediate_break_even_stop_buffer_pct": 0.5,
         "max_market_data_age_ms": 15000,
         "require_strict_ws_pricing": True,
-        "strict_ws_price_sources": ["ws_strict"],
+        "strict_ws_price_sources": ["ws_strict", "redis_strict", "http_batch", "market_snapshot"],
     }
 
     def __init__(self) -> None:
