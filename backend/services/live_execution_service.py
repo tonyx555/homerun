@@ -2755,13 +2755,12 @@ class LiveExecutionService:
                     if immediate_snapshot is not None:
                         self._apply_snapshot_to_order(order, immediate_snapshot)
                     # IOC/FAK orders fill immediately but the placement response
-                    # often lacks average_fill_price.  Fetch the full order from
-                    # the venue so the fill price is persisted before the order
-                    # disappears from the active-orders list.
+                    # often lacks both size_matched AND average_fill_price.
+                    # Always fetch the full order from the venue for these order
+                    # types so fill data is captured before the order disappears
+                    # from the active-orders list.
                     if (
-                        order.filled_size > 0
-                        and order.average_fill_price <= 0
-                        and order.clob_order_id
+                        order.clob_order_id
                         and normalized_order_type in {OrderType.IOC, OrderType.FAK, OrderType.FOK}
                         and hasattr(self._client, "get_order")
                     ):
