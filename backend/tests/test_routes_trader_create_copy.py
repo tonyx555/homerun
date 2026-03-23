@@ -148,14 +148,16 @@ async def test_get_all_trader_orders_history_is_read_only_by_default(monkeypatch
         session=session_obj,
         status=None,
         limit=2000,
+        offset=0,
     )
 
-    assert result == {"orders": []}
+    assert result == {"orders": [], "limit": 2000, "offset": 0}
     list_orders_mock.assert_awaited_once_with(
         session_obj,
         trader_id=None,
         status=None,
         limit=2000,
+        offset=0,
     )
 
 
