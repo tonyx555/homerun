@@ -5715,8 +5715,14 @@ async def sync_trader_position_inventory(
                 "last_mark_price": None,
                 "last_mark_source": "",
                 "last_marked_at": "",
+                "strategy_exit_config": None,
             }
             grouped[identity] = bucket
+
+        if bucket.get("strategy_exit_config") is None:
+            order_exit_config = payload.get("strategy_exit_config")
+            if isinstance(order_exit_config, dict) and order_exit_config:
+                bucket["strategy_exit_config"] = order_exit_config
 
         bucket["open_order_count"] = int(bucket["open_order_count"]) + 1
         bucket["total_notional_usd"] = float(bucket["total_notional_usd"]) + max(0.0, notional)
@@ -5763,7 +5769,7 @@ async def sync_trader_position_inventory(
         weighted_den = float(bucket.get("weighted_entry_denominator") or 0.0)
         if weighted_den > 0:
             avg_entry_price = float(bucket.get("weighted_entry_numerator") or 0.0) / weighted_den
-        position_payload = {
+        position_payload: dict[str, Any] = {
             "sync_source": "order_inventory",
             "open_order_ids": list(
                 dict.fromkeys([str(order_id) for order_id in list(bucket.get("open_order_ids") or [])])
@@ -5772,6 +5778,9 @@ async def sync_trader_position_inventory(
             "last_mark_source": str(bucket.get("last_mark_source") or ""),
             "last_marked_at": str(bucket.get("last_marked_at") or ""),
         }
+        exit_config = bucket.get("strategy_exit_config")
+        if isinstance(exit_config, dict) and exit_config:
+            position_payload["strategy_exit_config"] = exit_config
 
         if row is None:
             row = TraderPosition(
