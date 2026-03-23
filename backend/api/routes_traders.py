@@ -1791,6 +1791,108 @@ async def sell_trader_order_now(
     }
 
 
+@router.post("/{trader_id}/orders/{order_id}/reconcile")
+async def reconcile_trader_order(
+    trader_id: str,
+    order_id: str,
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Reconcile an order's recorded notional/price with actual Polymarket position."""
+    from services.polymarket import polymarket_client
+    from services.trader_orchestrator_state import _extract_order_token_id
+
+    trader = await get_trader(session, trader_id)
+    if trader is None:
+        raise HTTPException(status_code=404, detail="Trader not found")
+
+    order = (
+        await session.execute(
+            select(TraderOrder).where(
+                TraderOrder.id == order_id,
+                TraderOrder.trader_id == trader_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    mode_key = str(order.mode or "").strip().lower()
+    if mode_key != "live":
+        raise HTTPException(status_code=422, detail="Reconcile only applies to live orders")
+
+    status_key = str(order.status or "").strip().lower()
+    if status_key not in {"submitted", "executed", "open"}:
+        raise HTTPException(status_code=409, detail="Order is not active")
+
+    token_id = _extract_order_token_id(order)
+    if not token_id:
+        raise HTTPException(status_code=422, detail="Cannot determine token_id from order payload")
+
+    wallet = str(live_execution_service.get_execution_wallet_address() or "").strip()
+    if not wallet:
+        raise HTTPException(status_code=503, detail="Live execution wallet not available")
+
+    positions = await polymarket_client.get_wallet_positions_with_prices(wallet)
+    matched_pos = None
+    for pos in positions:
+        pos_asset = str(pos.get("asset") or pos.get("asset_id") or pos.get("token_id") or "").strip()
+        if pos_asset == token_id:
+            matched_pos = pos
+            break
+
+    old_notional = float(order.notional_usd or 0)
+    old_effective_price = float(order.effective_price or 0)
+
+    if matched_pos is not None:
+        new_size = float(matched_pos.get("size", 0) or 0)
+        new_avg_price = float(matched_pos.get("avgPrice", 0) or 0)
+        new_initial_value = float(matched_pos.get("initialValue", 0) or 0)
+        new_current_value = float(matched_pos.get("currentValue", 0) or 0)
+        new_notional = new_initial_value if new_initial_value > 0 else (new_size * new_avg_price)
+        new_effective_price = new_avg_price
+    else:
+        new_size = 0.0
+        new_avg_price = 0.0
+        new_notional = 0.0
+        new_effective_price = 0.0
+        new_initial_value = 0.0
+        new_current_value = 0.0
+
+    order.notional_usd = new_notional
+    order.effective_price = new_effective_price
+    payload = dict(order.payload_json or {})
+    payload["manual_reconciliation"] = {
+        "reconciled_at": datetime.now(timezone.utc).isoformat(),
+        "before": {"notional_usd": old_notional, "effective_price": old_effective_price},
+        "after": {"notional_usd": new_notional, "effective_price": new_effective_price},
+        "polymarket": {
+            "size": new_size,
+            "avg_price": new_avg_price,
+            "initial_value": new_initial_value,
+            "current_value": new_current_value,
+        },
+    }
+    order.payload_json = payload
+    await session.commit()
+    await sync_trader_position_inventory(session, trader_id=trader_id, mode="live")
+
+    result = {
+        "before": {"notional_usd": round(old_notional, 4), "effective_price": round(old_effective_price, 4)},
+        "after": {"notional_usd": round(new_notional, 4), "effective_price": round(new_effective_price, 4)},
+        "polymarket": {"size": round(new_size, 4), "avg_price": round(new_avg_price, 4), "current_value": round(new_current_value, 4)},
+    }
+    await create_trader_event(
+        session,
+        trader_id=trader_id,
+        event_type="trader_order_manual_reconcile",
+        severity="warn",
+        source="operator",
+        message=f"Manual reconcile: ${old_notional:.2f} -> ${new_notional:.2f}",
+        payload={"order_id": order_id, **result},
+    )
+    return {"status": "reconciled", "trader_id": trader_id, "order_id": order_id, **result}
+
+
 @router.post("/{trader_id}/manual-buy")
 async def manual_buy(
     trader_id: str,

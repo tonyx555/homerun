@@ -58,6 +58,7 @@ import {
   stopTraderOrchestratorLive,
   runTraderTuneIteration,
   sellTraderOrderNow,
+  reconcileTraderOrder,
   type ExecutionLatencySummary,
   type Trader,
   type TraderConfigSchema,
@@ -3216,6 +3217,8 @@ function BotTradePositionModal({
   themeMode,
   onSell,
   sellPendingOrderId,
+  onReconcile,
+  reconcilePendingOrderId,
   sellError,
   sellSuccess,
   onClose,
@@ -3228,6 +3231,8 @@ function BotTradePositionModal({
   themeMode: 'dark' | 'light'
   onSell: (order: TraderOrder) => void
   sellPendingOrderId: string | null
+  onReconcile: (order: TraderOrder) => void
+  reconcilePendingOrderId: string | null
   sellError: string | null
   sellSuccess: string | null
   onClose: () => void
@@ -3657,17 +3662,30 @@ function BotTradePositionModal({
           </div>
           <div className="flex items-center gap-1">
             {canSellAnchorOrder && anchorOrder ? (
-              <Button
-                type="button"
-                size="sm"
-                variant="destructive"
-                className="h-7 px-2 text-[11px]"
-                onClick={() => onSell(anchorOrder)}
-                disabled={sellPendingOrderId === String(anchorOrder.id || '')}
-              >
-                {sellPendingOrderId === String(anchorOrder.id || '') ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
-                Sell Now
-              </Button>
+              <>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="h-7 px-2 text-[11px]"
+                  onClick={() => onReconcile(anchorOrder)}
+                  disabled={reconcilePendingOrderId === String(anchorOrder.id || '')}
+                >
+                  {reconcilePendingOrderId === String(anchorOrder.id || '') ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
+                  Reconcile
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="destructive"
+                  className="h-7 px-2 text-[11px]"
+                  onClick={() => onSell(anchorOrder)}
+                  disabled={sellPendingOrderId === String(anchorOrder.id || '')}
+                >
+                  {sellPendingOrderId === String(anchorOrder.id || '') ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
+                  Sell Now
+                </Button>
+              </>
             ) : null}
             {scope.links.polymarket && (
               <a
@@ -4731,6 +4749,33 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     },
     onError: (error: unknown) => {
       setMarketModalSellError(errorMessage(error, 'Failed to sell trade immediately'))
+    },
+  })
+  const reconcileOrderMutation = useMutation({
+    mutationFn: async (params: { traderId: string; orderId: string }) => {
+      return reconcileTraderOrder(params.traderId, params.orderId, {
+        requested_by: 'trading_panel_modal',
+      })
+    },
+    onMutate: () => {
+      setMarketModalSellError(null)
+      setMarketModalSellSuccess(null)
+    },
+    onSuccess: async (result) => {
+      const before = result.before?.notional_usd ?? 0
+      const after = result.after?.notional_usd ?? 0
+      setMarketModalSellSuccess(
+        `Reconciled: $${before.toFixed(2)} -> $${after.toFixed(2)} (${result.polymarket?.size?.toFixed(2) ?? '?'} shares @ $${result.polymarket?.avg_price?.toFixed(3) ?? '?'})`
+      )
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['trader-orders-all'] }),
+        queryClient.invalidateQueries({ queryKey: ['trader-orders-summary'] }),
+        queryClient.invalidateQueries({ queryKey: ['trader-orchestrator-overview'] }),
+      ])
+      void marketHistoryQuery.refetch()
+    },
+    onError: (error: unknown) => {
+      setMarketModalSellError(errorMessage(error, 'Failed to reconcile order'))
     },
   })
   const modalSharedHistory = useMemo(
@@ -6547,6 +6592,22 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       return
     }
     sellTradeNowMutation.mutate({
+      traderId: marketModalState.scope.traderId,
+      orderId,
+    })
+  }
+
+  const handleReconcileModalOrder = (order: TraderOrder) => {
+    if (!marketModalState?.scope.traderId) {
+      setMarketModalSellError('This trade is not attached to a specific bot and cannot be reconciled from this view.')
+      return
+    }
+    const orderId = String(order.id || '').trim()
+    if (!orderId) {
+      setMarketModalSellError('Trade is missing an order id and cannot be reconciled.')
+      return
+    }
+    reconcileOrderMutation.mutate({
       traderId: marketModalState.scope.traderId,
       orderId,
     })
@@ -10977,6 +11038,8 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
 	                  themeMode={themeMode}
 	                  onSell={handleSellModalOrder}
 	                  sellPendingOrderId={sellTradeNowMutation.isPending ? String(sellTradeNowMutation.variables?.orderId || '') : null}
+	                  onReconcile={handleReconcileModalOrder}
+	                  reconcilePendingOrderId={reconcileOrderMutation.isPending ? String(reconcileOrderMutation.variables?.orderId || '') : null}
 	                  sellError={marketModalSellError}
 	                  sellSuccess={marketModalSellSuccess}
 	                  onClose={closeMarketModal}

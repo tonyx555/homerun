@@ -2355,6 +2355,24 @@ export const sellTraderOrderNow = async (
   return unwrapApiData(data)
 }
 
+export interface ReconcileOrderResponse {
+  status: string
+  trader_id: string
+  order_id: string
+  before: { notional_usd: number; effective_price: number }
+  after: { notional_usd: number; effective_price: number }
+  polymarket: { size: number; avg_price: number; current_value: number }
+}
+
+export const reconcileTraderOrder = async (
+  traderId: string,
+  orderId: string,
+  payload?: { requested_by?: string }
+): Promise<ReconcileOrderResponse> => {
+  const { data } = await api.post(`/traders/${traderId}/orders/${orderId}/reconcile`, payload || {})
+  return unwrapApiData(data)
+}
+
 export const activateTrader = async (traderId: string, payload?: { requested_by?: string; reason?: string }): Promise<Trader> => {
   const { data } = await api.post(`/traders/${traderId}/activate`, payload || {})
   return normalizeTraderFields(data)
