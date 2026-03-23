@@ -2731,6 +2731,94 @@ async def reconcile_live_positions(
                         closed += 1
                     continue
 
+        # ── Wallet-absent close: position vanished from on-chain wallet ──
+        # If wallet data loaded successfully but this token is completely
+        # absent (size=0 / redeemed), and there is no sell trade (i.e. auto-
+        # redemption or external close), close the order.  Use the best
+        # available price: market mark, wallet mark, or entry price.
+        if (
+            token_id
+            and entry_fill_size > 0.0
+            and wallet_positions_loaded
+            and not wallet_position_observed
+            and pending_winning_idx is None
+            and wallet_settlement_price is None
+            and not isinstance(latest_wallet_sell_trade, dict)
+        ):
+            _wab_price = (
+                pending_current_price
+                if pending_current_price is not None and pending_current_price > 0.0
+                else (
+                    wallet_mark_price
+                    if wallet_mark_price is not None and wallet_mark_price > 0.0
+                    else entry_fill_price
+                )
+            )
+            if _wab_price is not None and _wab_price > 0.0:
+                close_qty = entry_fill_size
+                close_notional = close_qty * _wab_price
+                close_trigger = "wallet_absent_close"
+                pnl = close_notional - entry_fill_notional
+                next_status = _status_for_close(pnl=pnl, close_trigger=close_trigger)
+                details.append(
+                    {
+                        "order_id": row.id,
+                        "market_id": row.market_id,
+                        "close_trigger": close_trigger,
+                        "close_price": _wab_price,
+                        "realized_pnl": pnl,
+                        "next_status": next_status,
+                    }
+                )
+                would_close += 1
+                total_realized_pnl += pnl
+                by_status[next_status] = int(by_status.get(next_status, 0)) + 1
+                if not dry_run:
+                    pending_exit_local = payload.get("pending_live_exit")
+                    if isinstance(pending_exit_local, dict):
+                        pending_exit_local["status"] = "superseded_wallet_absent"
+                        pending_exit_local["resolved_at"] = _iso_utc(now)
+                        payload["pending_live_exit"] = pending_exit_local
+                    row.status = next_status
+                    row.actual_profit = pnl
+                    row.updated_at = now
+                    payload["position_close"] = {
+                        "close_price": _wab_price,
+                        "price_source": "wallet_absent_best_available",
+                        "close_trigger": close_trigger,
+                        "realized_pnl": pnl,
+                        "filled_size": close_qty,
+                        "closed_at": _iso_utc(now),
+                        "reason": reason,
+                    }
+                    reverse_signal_id, reverse_source = await _emit_armed_reverse_signal(
+                        session,
+                        row=row,
+                        payload=payload,
+                        signal_payload=pending_signal_payload,
+                        market_info=pending_market_info,
+                        close_trigger=close_trigger,
+                        realized_pnl=pnl,
+                        now=now,
+                    )
+                    if reverse_signal_id and reverse_source:
+                        reverse_signal_ids_by_source.setdefault(reverse_source, []).append(reverse_signal_id)
+                    row.payload_json = payload
+                    hot_state.record_order_resolved(
+                        trader_id=trader_id,
+                        mode=str(row.mode or ""),
+                        order_id=str(row.id or ""),
+                        market_id=str(row.market_id or ""),
+                        direction=str(row.direction or ""),
+                        source=str(row.source or ""),
+                        status=next_status,
+                        actual_profit=pnl,
+                        payload=payload,
+                        copy_source_wallet=_extract_copy_source_wallet_from_payload(payload),
+                    )
+                    closed += 1
+                continue
+
         pending_exit = payload.get("pending_live_exit")
         pending_exit_status = (
             str(pending_exit.get("status") or "").strip().lower() if isinstance(pending_exit, dict) else ""
