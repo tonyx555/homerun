@@ -2736,6 +2736,13 @@ async def reconcile_live_positions(
         # absent (size=0 / redeemed), and there is no sell trade (i.e. auto-
         # redemption or external close), close the order.  Use the best
         # available price: market mark, wallet mark, or entry price.
+        # Skip when there is already an active exit submitted to the provider
+        # (identified by a CLOB order ID) — the pending-exit reconciliation
+        # path handles that case and knows the real fill price.
+        _pending_exit_tmp = payload.get("pending_live_exit")
+        _has_active_provider_exit = isinstance(_pending_exit_tmp, dict) and bool(
+            _pending_exit_provider_clob_id(_pending_exit_tmp)
+        )
         if (
             token_id
             and entry_fill_size > 0.0
@@ -2744,6 +2751,7 @@ async def reconcile_live_positions(
             and pending_winning_idx is None
             and wallet_settlement_price is None
             and not isinstance(latest_wallet_sell_trade, dict)
+            and not _has_active_provider_exit
         ):
             _wab_price = (
                 pending_current_price
