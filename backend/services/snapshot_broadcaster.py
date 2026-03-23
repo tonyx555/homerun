@@ -60,6 +60,12 @@ _CRYPTO_BROADCAST_MIN_INTERVAL_S = max(
     float(getattr(_cfg, "CRYPTO_WS_BROADCAST_MIN_INTERVAL_SECONDS", 0.20) or 0.20),
 )
 
+# Trader decision/event/order events are high-frequency during active
+# orchestration and have no dedup signature.  Rate-limit them so bursts of
+# blocked decisions don't overflow the WS send buffer and kill the connection.
+_TRADER_COALESCE_TYPES = frozenset({"trader_decision", "trader_event", "trader_order"})
+_TRADER_COALESCE_INTERVAL_S = 0.25  # At most ~4 broadcasts/sec per event type
+
 
 class SnapshotBroadcaster:
     """Event-driven broadcaster with DB-poll fallback."""
@@ -84,6 +90,8 @@ class SnapshotBroadcaster:
         self._last_world_status_sig: Optional[tuple] = None
         self._last_world_update_sig: Optional[tuple] = None
         self._last_orchestrator_status_sig: Optional[tuple] = None
+        # Per-type monotonic timestamp for trader event coalescing.
+        self._trader_coalesce_last_mono: dict[str, float] = {}
         # Async queue fed by event bus subscription.
         self._event_queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
 
@@ -357,6 +365,17 @@ class SnapshotBroadcaster:
             if (now_mono - self._last_crypto_broadcast_mono) < _CRYPTO_BROADCAST_MIN_INTERVAL_S:
                 return  # rate-limited
             self._last_crypto_broadcast_mono = now_mono
+            await manager.broadcast({"type": event_type, "data": data})
+            return
+
+        # Trader decision/event/order: time-based coalescing so bursts of
+        # blocked decisions don't overflow the WS send buffer.
+        if event_type in _TRADER_COALESCE_TYPES:
+            now_mono = time.monotonic()
+            last_mono = self._trader_coalesce_last_mono.get(event_type, 0.0)
+            if (now_mono - last_mono) < _TRADER_COALESCE_INTERVAL_S:
+                return  # coalesced — the most recent broadcast is fresh enough
+            self._trader_coalesce_last_mono[event_type] = now_mono
             await manager.broadcast({"type": event_type, "data": data})
             return
 

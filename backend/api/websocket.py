@@ -211,7 +211,7 @@ class ConnectionManager:
                     continue
                 if require_visible and not bool(state.get("visible", True)):
                     continue
-                await connection.send_text(message_json)
+                await asyncio.wait_for(connection.send_text(message_json), timeout=5.0)
             except Exception:
                 disconnected.append(connection)
 
@@ -222,7 +222,10 @@ class ConnectionManager:
     async def send_personal(self, websocket: WebSocket, message: dict):
         """Send message to specific client"""
         try:
-            await websocket.send_text(json.dumps(message, default=str))
+            await asyncio.wait_for(
+                websocket.send_text(json.dumps(message, default=str)),
+                timeout=5.0,
+            )
         except Exception:
             self.disconnect(websocket)
 
