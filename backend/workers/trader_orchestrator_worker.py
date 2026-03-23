@@ -4782,7 +4782,7 @@ async def _run_trader_once(
                 fallback_candidates: list[Any] = []
                 for sig in signals:
                     sig_source = normalize_source_key(getattr(sig, "source", ""))
-                    if strict_ws_pricing_enforced and sig_source == "crypto":
+                    if strict_ws_pricing_enforced and sig_source in ("crypto", "scanner"):
                         context_candidates.append(sig)
                         continue
                     if strict_ws_pricing_enforced:
@@ -4901,7 +4901,7 @@ async def _run_trader_once(
                     strict_age_budget_ms = strict_market_data_age_ms
                     if signal_source == "scanner":
                         strict_age_budget_ms = scanner_strict_market_data_age_ms
-                    if strict_ws_pricing_enforced and signal_source == "crypto":
+                    if strict_ws_pricing_enforced and signal_source in ("crypto", "scanner"):
                         strategy_params = _enforce_strict_ws_strategy_params(
                             strategy_params,
                             strict_age_budget_ms=strict_age_budget_ms,
@@ -4938,7 +4938,7 @@ async def _run_trader_once(
                         str(prefetched_source_runtime.get("requested_strategy_version_error") or "").strip() or None
                     )
                     live_context = live_contexts.get(signal_id, {})
-                    if strict_ws_pricing_enforced and signal_source == "crypto":
+                    if strict_ws_pricing_enforced and signal_source in ("crypto", "scanner"):
                         live_source = str(
                             live_context.get("market_data_source")
                             or live_context.get("live_selected_price_source")

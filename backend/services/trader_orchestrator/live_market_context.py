@@ -569,6 +569,8 @@ def _build_context_from_cached_market_state(
     selected_token: str | None,
     selected_history: list[dict[str, float]],
     max_history_seconds: int | None = None,
+    yes_source: str | None = None,
+    no_source: str | None = None,
 ) -> dict[str, Any]:
     signal_market_id = _normalize_identifier(getattr(signal, "market_id", ""))
     signal_entry = safe_float(getattr(signal, "entry_price", None))
@@ -577,8 +579,10 @@ def _build_context_from_cached_market_state(
     selected_source: str | None = None
     selected_age_ms: float | None = None
     selected_observed_at: str | None = None
-    yes_source = "ws_strict" if yes_live is not None else None
-    no_source = "ws_strict" if no_live is not None else None
+    if yes_source is None:
+        yes_source = "ws_strict" if yes_live is not None else None
+    if no_source is None:
+        no_source = "ws_strict" if no_live is not None else None
 
     if direction == "buy_yes":
         selected_outcome = "yes"
@@ -686,9 +690,13 @@ def _build_cached_signal_contexts(
     try:
         feed_manager = get_feed_manager()
     except Exception:
-        return {}, signal_rows
-    if feed_manager is None or not getattr(feed_manager, "_started", False):
-        return {}, signal_rows
+        feed_manager = None
+    ws_available = feed_manager is not None and getattr(feed_manager, "_started", False)
+    if not ws_available:
+        # Check whether any scanner signals can use their own embedded prices
+        has_scanner = any(row.get("source") == "scanner" for row in signal_rows)
+        if not has_scanner:
+            return {}, signal_rows
 
     resolved: dict[str, dict[str, Any]] = {}
     unresolved: list[dict[str, Any]] = []
@@ -723,7 +731,7 @@ def _build_cached_signal_contexts(
             continue
 
         def _cached_price(token_id: str | None) -> tuple[float | None, float | None, str | None]:
-            if not token_id:
+            if not token_id or not ws_available:
                 return None, None, None
             try:
                 mid = safe_float(feed_manager.cache.get_mid_price(token_id))
@@ -743,6 +751,46 @@ def _build_cached_signal_contexts(
 
         yes_live, yes_age_ms, yes_observed_at = _cached_price(yes_token)
         no_live, no_age_ms, no_observed_at = _cached_price(no_token)
+        yes_src: str | None = "ws_strict" if yes_live is not None else None
+        no_src: str | None = "ws_strict" if no_live is not None else None
+
+        # For scanner signals, fall back to the scanner's own price observation
+        # when the WS cache is stale or empty.  Use the scanner price unless the
+        # WS price is newer (i.e. has a smaller age_ms).
+        is_scanner = row.get("source") == "scanner"
+        if is_scanner:
+            hint_observed_s = None
+            for _ts_key in (
+                "source_observed_at",
+                "price_updated_at",
+                "updated_at",
+                "fetched_at",
+                "live_market_fetched_at",
+            ):
+                hint_observed_s = _epoch_seconds_from_market_timestamp(market_info.get(_ts_key))
+                if hint_observed_s is not None:
+                    break
+            hint_age_ms = (
+                max(0.0, (now_epoch - hint_observed_s) * 1000.0) if hint_observed_s is not None else None
+            )
+
+            hint_yes = safe_float(market_info.get("yes_price") or market_info.get("up_price"))
+            if hint_yes is not None and hint_age_ms is not None:
+                # Use scanner price if WS is missing, or scanner is fresher
+                if yes_live is None or (yes_age_ms is not None and hint_age_ms < yes_age_ms):
+                    yes_live = float(hint_yes)
+                    yes_age_ms = hint_age_ms
+                    yes_observed_at = _iso_from_epoch_seconds(hint_observed_s)
+                    yes_src = "market_snapshot"
+
+            hint_no = safe_float(market_info.get("no_price") or market_info.get("down_price"))
+            if hint_no is not None and hint_age_ms is not None:
+                if no_live is None or (no_age_ms is not None and hint_age_ms < no_age_ms):
+                    no_live = float(hint_no)
+                    no_age_ms = hint_age_ms
+                    no_observed_at = _iso_from_epoch_seconds(hint_observed_s)
+                    no_src = "market_snapshot"
+
         selected_live = yes_live if selected_token == yes_token else no_live
         if selected_live is None:
             unresolved.append(row)
@@ -750,10 +798,14 @@ def _build_cached_signal_contexts(
 
         selected_history = history_cache.get(selected_token)
         if selected_history is None:
-            selected_history = _cached_history_points_for_token(
-                feed_manager,
-                selected_token,
-                max_history_points=max_history_points,
+            selected_history = (
+                _cached_history_points_for_token(
+                    feed_manager,
+                    selected_token,
+                    max_history_points=max_history_points,
+                )
+                if ws_available
+                else []
             )
             history_cache[selected_token] = selected_history
 
@@ -773,6 +825,8 @@ def _build_cached_signal_contexts(
             selected_token=selected_token,
             selected_history=selected_history,
             max_history_seconds=max_history_seconds,
+            yes_source=yes_src,
+            no_source=no_src,
         )
 
     # Auto-subscribe unresolved signal tokens so they'll be cached for next cycle
