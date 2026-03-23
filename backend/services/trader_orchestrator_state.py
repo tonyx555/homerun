@@ -3636,12 +3636,15 @@ async def list_trader_orders(
     trader_id: Optional[str] = None,
     status: Optional[str] = None,
     limit: int = 200,
+    offset: int = 0,
 ) -> list[TraderOrder]:
     query = select(TraderOrder).order_by(desc(TraderOrder.created_at))
     if trader_id:
         query = query.where(TraderOrder.trader_id == trader_id)
     if status:
         query = query.where(TraderOrder.status == status)
+    if offset > 0:
+        query = query.offset(offset)
     query = query.limit(max(1, min(limit, 5000)))
     return list((await session.execute(query)).scalars().all())
 
@@ -7413,18 +7416,125 @@ async def list_serialized_trader_decisions(
     return serialized_rows
 
 
+async def get_trader_orders_summary(
+    session: AsyncSession,
+    *,
+    mode: Optional[str] = None,
+) -> dict[str, Any]:
+    open_statuses = ('submitted', 'executed', 'open')
+    resolved_statuses = ('resolved', 'resolved_win', 'resolved_loss', 'closed_win', 'closed_loss', 'win', 'loss')
+    failed_statuses = ('failed', 'rejected', 'error', 'cancelled')
+
+    status_col = func.lower(TraderOrder.status)
+    is_open = status_col.in_(open_statuses)
+    is_resolved = status_col.in_(resolved_statuses)
+    is_failed = status_col.in_(failed_statuses)
+    profit_col = func.coalesce(TraderOrder.actual_profit, 0.0)
+
+    query = select(
+        func.count().label("total_count"),
+        func.count().filter(is_open).label("open"),
+        func.count().filter(is_resolved).label("resolved"),
+        func.count().filter(is_failed).label("failed"),
+        func.sum(profit_col).filter(is_resolved).label("resolved_pnl"),
+        func.sum(profit_col).filter(is_resolved & (profit_col > 0)).label("wins_pnl"),
+        func.count().filter(is_resolved & (profit_col > 0)).label("wins"),
+        func.count().filter(is_resolved & (profit_col < 0)).label("losses"),
+        func.sum(func.abs(func.coalesce(TraderOrder.notional_usd, 0.0))).label("total_notional"),
+        func.avg(TraderOrder.edge_percent).filter(TraderOrder.edge_percent.isnot(None) & (TraderOrder.edge_percent != 0)).label("avg_edge"),
+        func.avg(TraderOrder.confidence).filter(TraderOrder.confidence.isnot(None) & (TraderOrder.confidence != 0)).label("avg_confidence"),
+    )
+    if mode:
+        query = query.where(func.lower(TraderOrder.mode) == mode.strip().lower())
+
+    row = (await session.execute(query)).one()
+    resolved_count = int(row.resolved or 0)
+    wins_count = int(row.wins or 0)
+
+    by_trader_query = select(
+        TraderOrder.trader_id,
+        func.count().label("orders"),
+        func.count().filter(is_open).label("open"),
+        func.count().filter(is_resolved).label("resolved"),
+        func.sum(profit_col).filter(is_resolved).label("pnl"),
+        func.sum(func.abs(func.coalesce(TraderOrder.notional_usd, 0.0))).label("notional"),
+        func.count().filter(is_resolved & (profit_col > 0)).label("wins"),
+        func.count().filter(is_resolved & (profit_col < 0)).label("losses"),
+        func.max(func.coalesce(TraderOrder.updated_at, TraderOrder.created_at)).label("latest_activity"),
+    ).group_by(TraderOrder.trader_id)
+    if mode:
+        by_trader_query = by_trader_query.where(func.lower(TraderOrder.mode) == mode.strip().lower())
+    trader_rows = (await session.execute(by_trader_query)).all()
+
+    by_source_query = select(
+        TraderOrder.source,
+        func.count().label("orders"),
+        func.count().filter(is_resolved).label("resolved"),
+        func.sum(profit_col).filter(is_resolved).label("pnl"),
+        func.sum(func.abs(func.coalesce(TraderOrder.notional_usd, 0.0))).label("notional"),
+        func.count().filter(is_resolved & (profit_col > 0)).label("wins"),
+        func.count().filter(is_resolved & (profit_col < 0)).label("losses"),
+    ).group_by(TraderOrder.source)
+    if mode:
+        by_source_query = by_source_query.where(func.lower(TraderOrder.mode) == mode.strip().lower())
+    by_source_query = by_source_query.order_by(func.count().desc()).limit(8)
+    source_rows = (await session.execute(by_source_query)).all()
+
+    return {
+        "total_count": int(row.total_count or 0),
+        "open": int(row.open or 0),
+        "resolved": resolved_count,
+        "failed": int(row.failed or 0),
+        "resolved_pnl": float(row.resolved_pnl or 0),
+        "wins": wins_count,
+        "losses": int(row.losses or 0),
+        "total_notional": float(row.total_notional or 0),
+        "win_rate": (wins_count / resolved_count * 100) if resolved_count > 0 else 0,
+        "avg_edge": float(row.avg_edge or 0),
+        "avg_confidence": float(row.avg_confidence or 0),
+        "by_trader": [
+            {
+                "trader_id": str(tr.trader_id or ""),
+                "orders": int(tr.orders or 0),
+                "open": int(tr.open or 0),
+                "resolved": int(tr.resolved or 0),
+                "pnl": float(tr.pnl or 0),
+                "notional": float(tr.notional or 0),
+                "wins": int(tr.wins or 0),
+                "losses": int(tr.losses or 0),
+                "latest_activity_ts": tr.latest_activity.isoformat() + "Z" if tr.latest_activity else None,
+            }
+            for tr in sorted(trader_rows, key=lambda r: float(r.pnl or 0), reverse=True)
+        ],
+        "by_source": [
+            {
+                "source": str(sr.source or ""),
+                "orders": int(sr.orders or 0),
+                "resolved": int(sr.resolved or 0),
+                "pnl": float(sr.pnl or 0),
+                "notional": float(sr.notional or 0),
+                "wins": int(sr.wins or 0),
+                "losses": int(sr.losses or 0),
+            }
+            for sr in source_rows
+        ],
+    }
+
+
 async def list_serialized_trader_orders(
     session: AsyncSession,
     *,
     trader_id: Optional[str] = None,
     status: Optional[str] = None,
     limit: int = 200,
+    offset: int = 0,
 ) -> list[dict[str, Any]]:
     rows = await list_trader_orders(
         session,
         trader_id=trader_id,
         status=status,
         limit=limit,
+        offset=offset,
     )
     signal_ids = sorted({str(row.signal_id).strip() for row in rows if str(row.signal_id or "").strip()})
     signals_by_id: dict[str, TradeSignal] = {}
@@ -7477,6 +7587,23 @@ async def list_serialized_trader_events(
         event_types=event_types,
     )
     return ([_serialize_event(row) for row in rows], next_cursor)
+
+
+async def list_serialized_trader_events_bulk(
+    session: AsyncSession,
+    *,
+    trader_ids: Optional[list[str]] = None,
+    limit: int = 200,
+    event_types: Optional[list[str]] = None,
+) -> list[dict[str, Any]]:
+    query = select(TraderEvent).order_by(desc(TraderEvent.created_at), desc(TraderEvent.id))
+    if trader_ids:
+        query = query.where(TraderEvent.trader_id.in_(trader_ids))
+    if event_types:
+        query = query.where(TraderEvent.event_type.in_(event_types))
+    query = query.limit(max(1, min(limit, 2000)))
+    rows = list((await session.execute(query)).scalars().all())
+    return [_serialize_event(row) for row in rows]
 
 
 async def list_serialized_execution_sessions(

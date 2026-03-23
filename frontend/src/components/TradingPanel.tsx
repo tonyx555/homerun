@@ -34,14 +34,15 @@ import {
   deleteTrader,
   getAllTraderDecisions,
   getAllTraderOrders,
+  getAllTraderEventsBulk,
   getSettings,
   getTraderMarketHistory,
   getCryptoMarkets,
   type CryptoMarket,
   getTraderDecisionDetail,
-  getTraderEvents,
   getTraderConfigSchema,
   getTraderOrchestratorOverview,
+  getTraderOrdersSummary,
   getTraderSources,
   getSimulationAccounts,
   getWallets,
@@ -341,6 +342,8 @@ const TERMINAL_SELECTED_MAX_ROWS = 220
 const TERMINAL_ALL_BOTS_MAX_ROWS = 120
 const TERMINAL_COMPACT_ROW_HEIGHT = 34
 const TERMINAL_COMPACT_OVERSCAN = 16
+const ORDERS_PAGE_SIZE = 200
+const ORDERS_PAGE_SIZE_OPTIONS = [100, 200, 500] as const
 
 const CRYPTO_STRATEGY_OPTIONS = [
   { key: 'btc_eth_highfreq', label: 'Crypto High Frequency' },
@@ -4373,7 +4376,11 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const [allBotsPositionDirectionFilter, setAllBotsPositionDirectionFilter] = useState<PositionDirectionFilter>('all')
   const [allBotsPositionSortField, setAllBotsPositionSortField] = useState<PositionSortField>('exposure')
   const [allBotsPositionSortDirection, setAllBotsPositionSortDirection] = useState<PositionSortDirection>('desc')
+  const [ordersPage, setOrdersPage] = useState(0)
+  const [ordersPageSize, setOrdersPageSize] = useState(ORDERS_PAGE_SIZE)
   const terminalViewportRef = useRef<HTMLDivElement | null>(null)
+  const tradesTableParentRef = useRef<HTMLDivElement | null>(null)
+  const positionsTableParentRef = useRef<HTMLDivElement | null>(null)
 
   const [traderFlyoutOpen, setTraderFlyoutOpen] = useState(false)
   const [traderFlyoutMode, setTraderFlyoutMode] = useState<'create' | 'edit'>('create')
@@ -4631,12 +4638,19 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const traderIdsKey = useMemo(() => traderIds.join('|'), [traderIds])
 
   const allOrdersQuery = useQuery({
-    queryKey: ['trader-orders-all'],
-    queryFn: () => getAllTraderOrders(5000),
+    queryKey: ['trader-orders-all', ordersPage, ordersPageSize],
+    queryFn: () => getAllTraderOrders(ordersPageSize, ordersPage * ordersPageSize),
     enabled: traderIds.length > 0,
-    refetchInterval: isConnected ? 2000 : 10000,
-    staleTime: 0,
-    refetchOnMount: 'always',
+    refetchInterval: isConnected ? 8000 : 20000,
+    staleTime: 2000,
+  })
+
+  const ordersSummaryQuery = useQuery({
+    queryKey: ['trader-orders-summary', selectedAccountMode],
+    queryFn: () => getTraderOrdersSummary(selectedAccountMode),
+    enabled: traderIds.length > 0,
+    refetchInterval: isConnected ? 10000 : 30000,
+    staleTime: 3000,
   })
 
   const allDecisionsQuery = useQuery({
@@ -4655,14 +4669,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     queryKey: ['trader-events-all', traderIdsKey],
     enabled: traderIds.length > 0,
     refetchInterval: isConnected ? 30000 : 30000,
-    queryFn: async () => {
-      const grouped = await Promise.all(
-        traderIds.map((traderId) => getTraderEvents(traderId, { limit: 80 }))
-      )
-      return grouped
-        .flatMap((group) => group.events)
-        .sort((a, b) => toTs(b.created_at) - toTs(a.created_at))
-    },
+    queryFn: () => getAllTraderEventsBulk(traderIds, { limit: 500 }),
   })
 
   const allOrders = useMemo(
@@ -4717,6 +4724,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       )
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['trader-orders-all'] }),
+        queryClient.invalidateQueries({ queryKey: ['trader-orders-summary'] }),
         queryClient.invalidateQueries({ queryKey: ['trader-orchestrator-overview'] }),
       ])
       void marketHistoryQuery.refetch()
@@ -5207,6 +5215,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     queryClient.invalidateQueries({ queryKey: ['trader-orchestrator-overview'] })
     queryClient.invalidateQueries({ queryKey: ['traders-list'] })
     queryClient.invalidateQueries({ queryKey: ['trader-orders-all'] })
+    queryClient.invalidateQueries({ queryKey: ['trader-orders-summary'] })
     queryClient.invalidateQueries({ queryKey: ['trader-orders'] })
     queryClient.invalidateQueries({ queryKey: ['trader-decisions-all'] })
     queryClient.invalidateQueries({ queryKey: ['trader-events-all'] })
@@ -6544,160 +6553,56 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   }
 
   const globalSummary = useMemo(() => {
-    let resolved = 0
-    let wins = 0
-    let losses = 0
-    let failed = 0
-    let open = 0
-    let totalNotional = 0
-    let resolvedPnl = 0
-    let edgeSum = 0
-    let edgeCount = 0
-    let confidenceSum = 0
-    let confidenceCount = 0
-
-    const byTrader = new Map<string, {
-      traderId: string
-      traderName: string
-      orders: number
-      open: number
-      resolved: number
-      pnl: number
-      notional: number
-      wins: number
-      losses: number
-      latest_activity_ts: number
-    }>()
-
-    const bySource = new Map<string, {
-      source: string
-      orders: number
-      resolved: number
-      pnl: number
-      notional: number
-      wins: number
-      losses: number
-    }>()
-
+    const summary = ordersSummaryQuery.data
+    if (summary) {
+      return {
+        open: summary.open,
+        resolved: summary.resolved,
+        wins: summary.wins,
+        losses: summary.losses,
+        failed: summary.failed,
+        totalNotional: summary.total_notional,
+        resolvedPnl: summary.resolved_pnl,
+        winRate: summary.win_rate,
+        avgEdge: summary.avg_edge,
+        avgConfidence: summary.avg_confidence,
+        traderRows: summary.by_trader.map((tr) => ({
+          traderId: tr.trader_id,
+          traderName: traderNameById[tr.trader_id] || shortId(tr.trader_id),
+          orders: tr.orders,
+          open: tr.open,
+          resolved: tr.resolved,
+          pnl: tr.pnl,
+          notional: tr.notional,
+          wins: tr.wins,
+          losses: tr.losses,
+          latest_activity_ts: tr.latest_activity_ts ? toTs(tr.latest_activity_ts) : 0,
+        })),
+        sourceRows: summary.by_source,
+      }
+    }
+    // Fallback: compute from current page of orders (during initial load before summary arrives)
+    let resolved = 0, wins = 0, losses = 0, failed = 0, open = 0, resolvedPnl = 0
     for (const order of allOrders) {
       const status = normalizeStatus(order.status)
-      const notional = Math.abs(toNumber(order.notional_usd))
       const pnl = toNumber(order.actual_profit)
-      const edge = toNumber(order.edge_percent)
-      const confidence = toNumber(order.confidence)
-      const traderId = String(order.trader_id || 'unknown')
-      const traderName = traderNameById[traderId] || shortId(traderId)
-      const source = String(order.source || 'unknown')
-      const orderTs = Math.max(
-        toTs(order.updated_at),
-        toTs(order.executed_at),
-        toTs(order.created_at)
-      )
-
-      totalNotional += notional
-      if (edge !== 0) {
-        edgeSum += edge
-        edgeCount += 1
-      }
-      if (confidence !== 0) {
-        confidenceSum += confidence
-        confidenceCount += 1
-      }
-
-      if (!byTrader.has(traderId)) {
-        byTrader.set(traderId, {
-          traderId,
-          traderName,
-          orders: 0,
-          open: 0,
-          resolved: 0,
-          pnl: 0,
-          notional: 0,
-          wins: 0,
-          losses: 0,
-          latest_activity_ts: 0,
-        })
-      }
-
-      if (!bySource.has(source)) {
-        bySource.set(source, {
-          source,
-          orders: 0,
-          resolved: 0,
-          pnl: 0,
-          notional: 0,
-          wins: 0,
-          losses: 0,
-        })
-      }
-
-      const traderRow = byTrader.get(traderId)
-      const sourceRow = bySource.get(source)
-      if (!traderRow || !sourceRow) continue
-
-      traderRow.orders += 1
-      traderRow.notional += notional
-      traderRow.latest_activity_ts = Math.max(traderRow.latest_activity_ts, orderTs)
-      sourceRow.orders += 1
-      sourceRow.notional += notional
-
-      if (OPEN_ORDER_STATUSES.has(status)) {
-        open += 1
-        traderRow.open += 1
-      }
-
+      if (OPEN_ORDER_STATUSES.has(status)) open += 1
       if (RESOLVED_ORDER_STATUSES.has(status)) {
         resolved += 1
         resolvedPnl += pnl
-        traderRow.resolved += 1
-        sourceRow.resolved += 1
-        traderRow.pnl += pnl
-        sourceRow.pnl += pnl
-
-        if (pnl > 0) {
-          wins += 1
-          traderRow.wins += 1
-          sourceRow.wins += 1
-        }
-        if (pnl < 0) {
-          losses += 1
-          traderRow.losses += 1
-          sourceRow.losses += 1
-        }
+        if (pnl > 0) wins += 1
+        if (pnl < 0) losses += 1
       }
-
-      if (FAILED_ORDER_STATUSES.has(status)) {
-        failed += 1
-      }
+      if (FAILED_ORDER_STATUSES.has(status)) failed += 1
     }
-
-    const winRate = resolved > 0 ? (wins / resolved) * 100 : 0
-    const traderRows = Array.from(byTrader.values())
-      .sort((a, b) => {
-        if (a.pnl !== b.pnl) return b.pnl - a.pnl
-        if (a.open !== b.open) return b.open - a.open
-        return a.traderName.localeCompare(b.traderName)
-      })
-
-    const sourceRows = Array.from(bySource.values())
-      .sort((a, b) => b.orders - a.orders)
-      .slice(0, 8)
-
     return {
-      open,
-      resolved,
-      wins,
-      losses,
-      failed,
-      totalNotional,
-      resolvedPnl,
-      winRate,
-      avgEdge: edgeCount > 0 ? edgeSum / edgeCount : 0,
-      avgConfidence: confidenceCount > 0 ? confidenceSum / confidenceCount : 0,
-      traderRows,
-      sourceRows,
+      open, resolved, wins, losses, failed,
+      totalNotional: 0, resolvedPnl, winRate: resolved > 0 ? (wins / resolved) * 100 : 0,
+      avgEdge: 0, avgConfidence: 0,
+      traderRows: [] as Array<{ traderId: string; traderName: string; orders: number; open: number; resolved: number; pnl: number; notional: number; wins: number; losses: number; latest_activity_ts: number }>,
+      sourceRows: [] as Array<{ source: string; orders: number; resolved: number; pnl: number; notional: number; wins: number; losses: number }>,
     }
-  }, [allOrders, traderNameById])
+  }, [ordersSummaryQuery.data, allOrders, traderNameById])
 
   const globalPositionBook = useMemo(
     () => buildPositionBookRows(allOrders, traderNameById, decisionSignalPayloadByDecisionId, liveMarksByOrderId),
@@ -7507,8 +7412,10 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         const haystack = `${order.market_question || ''} ${order.market_id || ''} ${order.source || ''} ${order.direction || ''} ${order.direction_label || ''} ${order.direction_side || ''} ${traderNameById[String(order.trader_id || '')] || ''} ${orderExecutionTypeSummary(order)}`.toLowerCase()
         return haystack.includes(q)
       })
-      .slice(0, 300)
   }, [allBotsTradeSearch, allBotsTradeStatusFilter, allOrders, traderNameById])
+
+  const ordersTotalCount = ordersSummaryQuery.data?.total_count ?? allOrders.length
+  const ordersTotalPages = Math.max(1, Math.ceil(ordersTotalCount / ordersPageSize))
 
   const filteredAllPositionBook = useMemo(() => {
     const query = allBotsPositionSearch.trim().toLowerCase()
@@ -9208,7 +9115,10 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                             {statusOption.label}
                           </Button>
                         ))}
-                        <span className="ml-auto text-[10px] font-mono text-muted-foreground">{filteredAllTradeHistory.length} rows</span>
+                        <span className="ml-auto text-[10px] font-mono text-muted-foreground">
+                          {filteredAllTradeHistory.length} rows
+                          {ordersTotalCount > ordersPageSize && ` (page ${ordersPage + 1}/${ordersTotalPages})`}
+                        </span>
                       </div>
                       <div className="flex-1 min-h-0 flex flex-col rounded-md border border-border/60 bg-card/80">
                         {filteredAllTradeHistory.length === 0 ? (
@@ -9236,7 +9146,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                 </thead>
                               </table>
                             </div>
-                            <div className="flex-1 min-h-0 overflow-auto">
+                            <div className="flex-1 min-h-0 overflow-auto" ref={tradesTableParentRef}>
                               <Table className="w-full table-fixed">
                                 <TableBody>
                                 {filteredAllTradeHistory.map((order) => {
@@ -9489,6 +9399,70 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                               </TableBody>
                             </Table>
                             </div>
+                            {ordersTotalPages > 1 && (
+                              <div className="shrink-0 flex items-center justify-between border-t border-border/60 px-3 py-1.5">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="text-[10px] text-muted-foreground">Page size:</span>
+                                  <Select
+                                    value={String(ordersPageSize)}
+                                    onValueChange={(value) => { setOrdersPageSize(Number(value)); setOrdersPage(0) }}
+                                  >
+                                    <SelectTrigger className="h-5 w-16 text-[10px]">
+                                      <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      {ORDERS_PAGE_SIZE_OPTIONS.map((size) => (
+                                        <SelectItem key={size} value={String(size)}>{size}</SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                </div>
+                                <div className="flex items-center gap-1">
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    disabled={ordersPage === 0}
+                                    onClick={() => setOrdersPage(0)}
+                                    className="h-5 px-1.5 text-[10px]"
+                                  >
+                                    First
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    disabled={ordersPage === 0}
+                                    onClick={() => setOrdersPage((p) => Math.max(0, p - 1))}
+                                    className="h-5 px-1.5 text-[10px]"
+                                  >
+                                    Prev
+                                  </Button>
+                                  <span className="text-[10px] font-mono text-muted-foreground px-1">
+                                    {ordersPage + 1} / {ordersTotalPages}
+                                  </span>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    disabled={ordersPage >= ordersTotalPages - 1}
+                                    onClick={() => setOrdersPage((p) => Math.min(ordersTotalPages - 1, p + 1))}
+                                    className="h-5 px-1.5 text-[10px]"
+                                  >
+                                    Next
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    disabled={ordersPage >= ordersTotalPages - 1}
+                                    onClick={() => setOrdersPage(ordersTotalPages - 1)}
+                                    className="h-5 px-1.5 text-[10px]"
+                                  >
+                                    Last
+                                  </Button>
+                                </div>
+                                <span className="text-[10px] font-mono text-muted-foreground">
+                                  {ordersTotalCount} total
+                                </span>
+                              </div>
+                            )}
                           </>
                         )}
                       </div>
@@ -9607,7 +9581,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                 </thead>
                               </table>
                             </div>
-                            <div className="flex-1 min-h-0 overflow-auto">
+                            <div className="flex-1 min-h-0 overflow-auto" ref={positionsTableParentRef}>
                               <Table className="min-w-[1240px]">
                                 <TableBody>
                                 {filteredAllPositionBook.map((row) => {

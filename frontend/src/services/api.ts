@@ -2508,11 +2508,71 @@ export const adoptTraderLiveWalletPosition = async (
   return unwrapApiData(data)
 }
 
-export const getAllTraderOrders = async (limit = 2000): Promise<TraderOrder[]> => {
+export const getAllTraderOrders = async (limit = 500, offset = 0): Promise<TraderOrder[]> => {
   const { data } = await api.get('/traders/orders/all', {
-    params: { limit: Math.max(1, Math.trunc(Number(limit) || 2000)) },
+    params: {
+      limit: Math.max(1, Math.trunc(Number(limit) || 500)),
+      offset: Math.max(0, Math.trunc(Number(offset) || 0)),
+    },
   })
   return data.orders || []
+}
+
+export interface TraderOrdersSummary {
+  total_count: number
+  open: number
+  resolved: number
+  failed: number
+  resolved_pnl: number
+  wins: number
+  losses: number
+  total_notional: number
+  win_rate: number
+  avg_edge: number
+  avg_confidence: number
+  by_trader: Array<{
+    trader_id: string
+    orders: number
+    open: number
+    resolved: number
+    pnl: number
+    notional: number
+    wins: number
+    losses: number
+    latest_activity_ts: string | null
+  }>
+  by_source: Array<{
+    source: string
+    orders: number
+    resolved: number
+    pnl: number
+    notional: number
+    wins: number
+    losses: number
+  }>
+}
+
+export const getTraderOrdersSummary = async (mode?: string): Promise<TraderOrdersSummary> => {
+  const { data } = await api.get('/traders/orders/summary', {
+    params: mode ? { mode } : undefined,
+  })
+  return data
+}
+
+export const getAllTraderEventsBulk = async (
+  traderIds: string[],
+  params?: { limit?: number; types?: string[] }
+): Promise<TraderEvent[]> => {
+  const normalizedIds = Array.from(new Set(traderIds.map((id) => String(id).trim()).filter(Boolean)))
+  if (normalizedIds.length === 0) return []
+  const { data } = await api.get('/traders/events/all', {
+    params: {
+      trader_ids: normalizedIds.join(','),
+      limit: params?.limit ?? 500,
+      types: params?.types?.join(',') || undefined,
+    },
+  })
+  return data.events || []
 }
 
 export const getTraderMarketHistory = async (

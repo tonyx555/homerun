@@ -539,7 +539,8 @@ async def create_trader_route(
 @router.get("/orders/all")
 async def get_all_trader_orders_all(
     status: Optional[str] = Query(default=None),
-    limit: int = Query(default=1000, ge=1, le=5000),
+    limit: int = Query(default=500, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_db_session),
 ):
     orders = await list_serialized_trader_orders(
@@ -547,10 +548,53 @@ async def get_all_trader_orders_all(
         trader_id=None,
         status=status,
         limit=limit,
+        offset=offset,
     )
     return {
-        "orders": orders
+        "orders": orders,
+        "limit": limit,
+        "offset": offset,
     }
+
+
+@router.get("/orders/summary")
+async def get_trader_orders_summary(
+    mode: Optional[str] = Query(default=None),
+    session: AsyncSession = Depends(get_db_session),
+):
+    from services.trader_orchestrator_state import get_trader_orders_summary
+    return await get_trader_orders_summary(session, mode=mode)
+
+
+@router.get("/events/all")
+async def get_all_trader_events_bulk(
+    trader_ids: Optional[str] = Query(default=None),
+    limit: int = Query(default=500, ge=1, le=2000),
+    types: Optional[str] = Query(default=None),
+    session: AsyncSession = Depends(get_db_session),
+):
+    from services.trader_orchestrator_state import list_serialized_trader_events_bulk
+    normalized_trader_ids: list[str] | None = None
+    if trader_ids:
+        seen: set[str] = set()
+        ids: list[str] = []
+        for raw in str(trader_ids).split(","):
+            value = str(raw or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            ids.append(value)
+        normalized_trader_ids = ids or None
+    event_types: list[str] | None = None
+    if types:
+        event_types = [t.strip() for t in str(types).split(",") if t.strip()]
+    events = await list_serialized_trader_events_bulk(
+        session,
+        trader_ids=normalized_trader_ids,
+        limit=limit,
+        event_types=event_types or None,
+    )
+    return {"events": events}
 
 
 @router.get("/decisions/all")
@@ -1893,7 +1937,8 @@ async def run_once(trader_id: str, session: AsyncSession = Depends(get_db_sessio
 @router.get("/orders")
 async def get_all_trader_orders(
     status: Optional[str] = Query(default=None),
-    limit: int = Query(default=2000, ge=1, le=5000),
+    limit: int = Query(default=500, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_db_session),
 ):
     orders = await list_serialized_trader_orders(
@@ -1901,9 +1946,12 @@ async def get_all_trader_orders(
         trader_id=None,
         status=status,
         limit=limit,
+        offset=offset,
     )
     return {
-        "orders": orders
+        "orders": orders,
+        "limit": limit,
+        "offset": offset,
     }
 
 
