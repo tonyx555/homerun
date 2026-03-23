@@ -456,6 +456,19 @@ class PriceCache:
             return None
         return time.monotonic() - entry.updated_at
 
+    def touch_all(self) -> None:
+        """Refresh ``updated_at`` on every cached entry without changing prices.
+
+        Called when the WS connection is confirmed alive (heartbeat pong
+        received).  For quiet markets the order book doesn't change so no WS
+        messages arrive, but the cached price is still valid — it just hasn't
+        moved.  Touching resets the staleness timer so the execution gate
+        doesn't reject unchanged but still-accurate prices.
+        """
+        now_mono = time.monotonic()
+        for entry in self._entries.values():
+            entry.updated_at = now_mono
+
     def all_token_ids(self) -> List[str]:
         """Return a snapshot of all cached token IDs."""
         return list(self._entries.keys())
@@ -852,6 +865,9 @@ class PolymarketWSFeed:
                     await asyncio.wait_for(pong, timeout=self._heartbeat_pong_timeout)
                     self.stats.last_latency_ms = (time.monotonic() - start) * 1000
                     consecutive_misses = 0
+                    # Connection confirmed alive — touch cached prices so quiet
+                    # markets don't go stale while the feed is healthy.
+                    self._cache.touch_all()
                 except asyncio.TimeoutError:
                     consecutive_misses += 1
                     logger.warning(

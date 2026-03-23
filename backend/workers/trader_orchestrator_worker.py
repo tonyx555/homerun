@@ -2646,13 +2646,18 @@ async def _ensure_orchestrator_cycle_lock_owner() -> bool:
     return await _ensure_orchestrator_cycle_lock_owner_for_lane(_LANE_GENERAL)
 
 
+_orchestrator_lock_consecutive_failures: int = 0
+_LOCK_STALE_EVICTION_THRESHOLD: int = 10  # evict after this many consecutive failures (~20s at 2s sleep)
+
+
 async def _ensure_orchestrator_cycle_lock_owner_for_lane(lane: str) -> bool:
     """Own the cross-process orchestrator lock for a specific worker lane."""
-    global _orchestrator_lock_connection
+    global _orchestrator_lock_connection, _orchestrator_lock_consecutive_failures
 
     if _orchestrator_lock_connection is not None:
         return True
 
+    lock_key = _cycle_lock_key_for_lane(lane)
     connection: asyncpg.Connection | None = None
     try:
         connection = await asyncpg.connect(
@@ -2663,11 +2668,16 @@ async def _ensure_orchestrator_cycle_lock_owner_for_lane(lane: str) -> bool:
         )
         acquired = await connection.fetchval(
             "SELECT pg_try_advisory_lock($1)",
-            _cycle_lock_key_for_lane(lane),
+            lock_key,
         )
         if not acquired:
+            _orchestrator_lock_consecutive_failures += 1
+            if _orchestrator_lock_consecutive_failures >= _LOCK_STALE_EVICTION_THRESHOLD:
+                await _evict_stale_advisory_lock_holder(connection, lock_key)
+                _orchestrator_lock_consecutive_failures = 0
             return False
 
+        _orchestrator_lock_consecutive_failures = 0
         _orchestrator_lock_connection = connection
         connection = None
         logger.info("Acquired orchestrator cross-process cycle lock")
@@ -2676,6 +2686,54 @@ async def _ensure_orchestrator_cycle_lock_owner_for_lane(lane: str) -> bool:
     finally:
         if connection is not None:
             await _close_orchestrator_lock_connection(connection)
+
+
+async def _evict_stale_advisory_lock_holder(conn: asyncpg.Connection, lock_key: int) -> None:
+    """Terminate stale PG sessions holding the orchestrator advisory lock.
+
+    Advisory locks are session-scoped — if the worker process that acquired the
+    lock crashes without cleanly closing its PG connection, the lock persists
+    until the connection times out (which may be never with keep-alive).  This
+    helper finds the PID holding the lock, checks whether it is idle (no active
+    query), and terminates it so the current worker can acquire the lock.
+    """
+    try:
+        high = (lock_key >> 32) & 0xFFFFFFFF
+        low = lock_key & 0xFFFFFFFF
+        # Convert to signed int32 to match pg_locks classid/objid
+        import ctypes
+        classid = ctypes.c_int32(high).value
+        objid = ctypes.c_int32(low).value
+
+        rows = await conn.fetch(
+            """
+            SELECT l.pid
+            FROM pg_locks l
+            JOIN pg_stat_activity a ON a.pid = l.pid
+            WHERE l.locktype = 'advisory'
+              AND l.classid = $1
+              AND l.objid = $2
+              AND l.granted = true
+              AND a.pid != pg_backend_pid()
+              AND a.state = 'idle'
+            """,
+            classid,
+            objid,
+        )
+        for row in rows:
+            stale_pid = row["pid"]
+            terminated = await conn.fetchval(
+                "SELECT pg_terminate_backend($1)",
+                stale_pid,
+            )
+            logger.warning(
+                "Evicted stale advisory lock holder",
+                stale_pid=stale_pid,
+                terminated=terminated,
+                lock_key=lock_key,
+            )
+    except Exception as exc:
+        logger.debug("Stale advisory lock eviction failed: %s", exc)
 
 
 async def _release_orchestrator_cycle_lock_owner() -> None:
@@ -7005,6 +7063,18 @@ async def run_worker_loop(*, lane: str = _LANE_GENERAL, write_snapshot: bool = T
                     logger.debug(
                         "Orchestrator cycle lock held by another worker instance; waiting to retry",
                     )
+                    if write_snapshot:
+                        try:
+                            async with AsyncSessionLocal() as _lock_session:
+                                await _write_orchestrator_snapshot_best_effort(
+                                    _lock_session,
+                                    running=False,
+                                    enabled=True,
+                                    current_activity="Waiting for orchestrator cycle lock",
+                                    interval_seconds=cycle_interval,
+                                )
+                        except Exception:
+                            pass
                     await _worker_sleep(2)
                     continue
 
