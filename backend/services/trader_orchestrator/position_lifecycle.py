@@ -2766,7 +2766,16 @@ async def reconcile_live_positions(
                 close_qty = entry_fill_size
                 close_notional = close_qty * _wab_price
                 close_trigger = "wallet_absent_close"
-                pnl = close_notional - entry_fill_notional
+                # Use the canonical DB notional as the cost basis when it is
+                # smaller than the payload fill metrics.  This avoids phantom
+                # losses from FAK/IOC orders whose requested size was recorded
+                # instead of the actual fill (which may have been zero).  If the
+                # order was manually reconciled the DB value is already correct.
+                _db_notional = safe_float(row.notional_usd) or 0.0
+                _effective_entry_notional = entry_fill_notional
+                if 0.0 < _db_notional < entry_fill_notional:
+                    _effective_entry_notional = _db_notional
+                pnl = close_notional - _effective_entry_notional
                 next_status = _status_for_close(pnl=pnl, close_trigger=close_trigger)
                 details.append(
                     {
