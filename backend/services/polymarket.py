@@ -508,6 +508,25 @@ class PolymarketClient:
             keys_to_drop = list(self._username_cache.keys())[:excess]
             for k in keys_to_drop:
                 del self._username_cache[k]
+        # Prune expired cooldown entries to prevent unbounded growth.
+        # Each unique condition_id/token_id ever queried gets a cooldown
+        # entry that is never removed, leaking memory over long runs.
+        _cooldown_max = 5_000
+        if len(self._market_lookup_cooldown_until) > _cooldown_max:
+            import time as _time_mod
+            _now_mono = _time_mod.monotonic()
+            expired_keys = [
+                k for k, v in self._market_lookup_cooldown_until.items()
+                if v < _now_mono
+            ]
+            for k in expired_keys:
+                del self._market_lookup_cooldown_until[k]
+            # If still over limit after removing expired, drop oldest half
+            if len(self._market_lookup_cooldown_until) > _cooldown_max:
+                excess = len(self._market_lookup_cooldown_until) - _cooldown_max // 2
+                keys_to_drop = list(self._market_lookup_cooldown_until.keys())[:excess]
+                for k in keys_to_drop:
+                    del self._market_lookup_cooldown_until[k]
 
     async def get_market_by_condition_id(self, condition_id: str, **kwargs) -> Optional[dict]:
         """Look up a market by condition_id, using cache when available."""

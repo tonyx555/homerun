@@ -945,16 +945,15 @@ async def expire_stale_signals(session: AsyncSession, *, commit: bool = True) ->
     if max_price_age_seconds <= 0:
         max_price_age_seconds = max(30.0, float(getattr(settings, "WS_PRICE_STALE_SECONDS", 30.0) or 30.0) * 2.0)
 
-    # Use a short lock_timeout so we fail fast on rows locked by other
-    # transactions (e.g. in-flight trader cycles) instead of blocking for
-    # the full statement_timeout.  Locked rows are simply skipped — they
-    # will be caught on the next expiry pass.
-    await session.execute(text("SET LOCAL lock_timeout = '3000'"))
-
+    # Use FOR UPDATE SKIP LOCKED so we only process rows that are not
+    # currently locked by in-flight trader cycles.  This eliminates the
+    # 20+ consecutive LockNotAvailableError failures that occur when
+    # trader cycles hold row locks during signal processing.  Skipped
+    # rows are simply caught on the next expiry pass.
     result = await session.execute(
-        select(TradeSignal).where(
-            TradeSignal.status.in_(tuple(SIGNAL_ACTIVE_STATUSES)),
-        )
+        select(TradeSignal)
+        .where(TradeSignal.status.in_(tuple(SIGNAL_ACTIVE_STATUSES)))
+        .with_for_update(skip_locked=True)
     )
     rows = list(result.scalars().all())
     expired_signal_ids: list[str] = []
@@ -1025,6 +1024,7 @@ async def expire_source_signals_except(
             query = query.where(func.lower(func.coalesce(TradeSignal.strategy_type, "")).in_(normalized_strategy_types))
     if keep:
         query = query.where(~TradeSignal.dedupe_key.in_(list(keep)))
+    query = query.with_for_update(skip_locked=True)
 
     rows = list((await session.execute(query)).scalars().all())
     expired_signal_ids: list[str] = []
