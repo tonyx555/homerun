@@ -18,7 +18,7 @@ from utils.utcnow import utcnow
 from typing import Any, Optional
 
 from config import settings
-from sqlalchemy import case, func, or_, select, text
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import (
