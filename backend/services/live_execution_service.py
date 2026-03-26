@@ -2867,6 +2867,22 @@ class LiveExecutionService:
                 logger.error(f"Order failed: {order.error_message}")
                 break
 
+        except (asyncio.CancelledError, KeyboardInterrupt) as e:
+            # CancelledError is BaseException in Python 3.9+ and bypasses
+            # ``except Exception``.  Release the reservation before re-raising
+            # so the daily volume counter doesn't leak phantom volume on every
+            # trader cycle timeout / task cancellation.
+            if reserved:
+                try:
+                    await self._release_reservation(
+                        size_usd=size_usd,
+                        side=side,
+                        token_id=token_key,
+                    )
+                except Exception:
+                    pass
+                reserved = False
+            raise
         except Exception as e:
             order.status = OrderStatus.FAILED
             order.error_message = str(e)
