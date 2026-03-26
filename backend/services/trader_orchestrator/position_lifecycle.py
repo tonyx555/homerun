@@ -2784,6 +2784,16 @@ async def reconcile_live_positions(
         _has_active_provider_exit = isinstance(_pending_exit_tmp, dict) and bool(
             _pending_exit_provider_clob_id(_pending_exit_tmp)
         )
+        # Guard: do not wallet-absent-close orders placed in the last 120
+        # seconds.  Polymarket's data API can lag behind the CLOB — a just-
+        # placed buy may not appear in get_wallet_positions() yet, causing a
+        # false wallet_absent_close that records a phantom loss and triggers
+        # an immediate re-buy of the same market.
+        _wab_order_age_anchor = row.executed_at or row.updated_at or row.created_at
+        _wab_min_age_ok = (
+            _wab_order_age_anchor is None
+            or (now - _wab_order_age_anchor).total_seconds() >= 120.0
+        )
         if (
             token_id
             and entry_fill_size > 0.0
@@ -2793,6 +2803,7 @@ async def reconcile_live_positions(
             and wallet_settlement_price is None
             and not isinstance(latest_wallet_sell_trade, dict)
             and not _has_active_provider_exit
+            and _wab_min_age_ok
         ):
             _wab_price = (
                 pending_current_price
