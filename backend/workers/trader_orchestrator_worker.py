@@ -4946,8 +4946,16 @@ async def _run_trader_once(
                         ).strip().lower()
                         live_price = safe_float(live_context.get("live_selected_price"), None)
                         live_age_ms = safe_float(live_context.get("market_data_age_ms"), None)
+                        # For scanner signals, accept redis_strict as a valid
+                        # source.  Tail-end markets are illiquid and may not
+                        # receive WS ticks for minutes at a time.  The scanner
+                        # already validated pricing when it generated the signal;
+                        # redis_strict is still WS-derived data cached in Redis.
+                        _effective_source_set = strict_ws_price_source_set
+                        if signal_source == "scanner":
+                            _effective_source_set = strict_ws_price_source_set | {"redis_strict"}
                         strict_context_ok = (
-                            live_source in strict_ws_price_source_set
+                            live_source in _effective_source_set
                             and live_price is not None
                             and live_price > 0.0
                             and live_age_ms is not None

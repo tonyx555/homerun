@@ -1437,7 +1437,7 @@ async def build_live_signal_contexts(
 
         timing = _extract_market_timing(market_info)
         selected_source = str(selected_meta.get("source") or "").strip().lower()
-        strict_sources = {"ws_strict"}
+        strict_sources = {"ws_strict", "redis_strict"}
         if strict_ws_only and selected_source not in strict_sources:
             selected_live = None
             selected_meta = {}
