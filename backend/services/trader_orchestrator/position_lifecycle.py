@@ -28,6 +28,14 @@ PAPER_ACTIVE_STATUSES = {"submitted", "executed", "open"}
 LIVE_ACTIVE_STATUSES = {"submitted", "executed", "open"}
 _FAILED_EXIT_MAX_RETRIES = 5
 _FAILED_EXIT_MIN_RETRY_INTERVAL_SECONDS = 15
+
+# ── Short-lived cache for wallet data to avoid redundant Polymarket API
+# calls when multiple traders share the same execution wallet.  The cache
+# is invalidated after _WALLET_CACHE_TTL_SECONDS so fresh data is always
+# fetched at the start of a new reconciliation cycle.
+_WALLET_CACHE_TTL_SECONDS = 8.0
+_wallet_positions_cache: tuple[float, dict[str, dict[str, Any]]] = (0.0, {})
+_wallet_sell_trades_cache: tuple[float, dict[str, dict[str, Any]]] = (0.0, {})
 _WALLET_SIZE_EPSILON = 1e-9
 _MARK_TOUCH_INTERVAL_SECONDS = 0.5
 _MAX_LIVE_EXIT_FALLBACK_MARK_AGE_SECONDS = 120.0
@@ -1311,6 +1319,11 @@ async def _resolve_execution_wallet_address() -> str:
 
 
 async def _load_execution_wallet_positions_by_token() -> dict[str, dict[str, Any]]:
+    global _wallet_positions_cache
+    cached_at, cached_data = _wallet_positions_cache
+    if cached_data and (_time_mod.monotonic() - cached_at) < _WALLET_CACHE_TTL_SECONDS:
+        return cached_data
+
     wallet = await _resolve_execution_wallet_address()
     if not wallet:
         return {}
@@ -1335,10 +1348,16 @@ async def _load_execution_wallet_positions_by_token() -> dict[str, dict[str, Any
         outcome_idx = position.get("outcomeIndex")
         if cid and outcome_idx is not None:
             by_token[f"{cid}:{outcome_idx}"] = position
+    _wallet_positions_cache = (_time_mod.monotonic(), by_token)
     return by_token
 
 
 async def _load_execution_wallet_recent_sell_trades_by_token() -> dict[str, dict[str, Any]]:
+    global _wallet_sell_trades_cache
+    cached_at, cached_data = _wallet_sell_trades_cache
+    if cached_data and (_time_mod.monotonic() - cached_at) < _WALLET_CACHE_TTL_SECONDS:
+        return cached_data
+
     wallet = await _resolve_execution_wallet_address()
     if not wallet:
         return {}
@@ -1450,6 +1469,7 @@ async def _load_execution_wallet_recent_sell_trades_by_token() -> dict[str, dict
             existing_ts is None or (isinstance(existing_ts, datetime) and timestamp > existing_ts)
         ):
             latest_by_token[token_id] = record
+    _wallet_sell_trades_cache = (_time_mod.monotonic(), latest_by_token)
     return latest_by_token
 
 
