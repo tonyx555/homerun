@@ -2807,16 +2807,26 @@ async def reconcile_live_positions(
                 close_qty = entry_fill_size
                 close_notional = close_qty * _wab_price
                 close_trigger = "wallet_absent_close"
-                # Use the canonical DB notional as the cost basis when it is
-                # smaller than the payload fill metrics.  This avoids phantom
-                # losses from FAK/IOC orders whose requested size was recorded
-                # instead of the actual fill (which may have been zero).  If the
-                # order was manually reconciled the DB value is already correct.
-                _db_notional = safe_float(row.notional_usd) or 0.0
-                _effective_entry_notional = entry_fill_notional
-                if 0.0 < _db_notional < entry_fill_notional:
-                    _effective_entry_notional = _db_notional
-                pnl = close_notional - _effective_entry_notional
+                # If the order was never actually submitted to the CLOB
+                # (submit_method is absent and no clob_order_id), it's a
+                # phantom record that never had real money at risk.  Close
+                # it with zero P&L instead of fabricating a loss.
+                _submit_method = str(payload.get("submit_method") or "").strip()
+                _clob_order_id = str(payload.get("clob_order_id") or payload.get("provider_clob_order_id") or "").strip()
+                _never_submitted = not _submit_method and not _clob_order_id
+                if _never_submitted:
+                    pnl = 0.0
+                else:
+                    # Use the canonical DB notional as the cost basis when it is
+                    # smaller than the payload fill metrics.  This avoids phantom
+                    # losses from FAK/IOC orders whose requested size was recorded
+                    # instead of the actual fill (which may have been zero).  If the
+                    # order was manually reconciled the DB value is already correct.
+                    _db_notional = safe_float(row.notional_usd) or 0.0
+                    _effective_entry_notional = entry_fill_notional
+                    if 0.0 < _db_notional < entry_fill_notional:
+                        _effective_entry_notional = _db_notional
+                    pnl = close_notional - _effective_entry_notional
                 next_status = _status_for_close(pnl=pnl, close_trigger=close_trigger)
                 details.append(
                     {
