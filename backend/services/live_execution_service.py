@@ -2507,7 +2507,11 @@ class LiveExecutionService:
             if not is_valid:
                 return False, error
 
-            self._daily_volume += size_usd
+            # Only track BUY volume toward the daily limit — SELL orders
+            # (position exits) must always be allowed and should not inflate
+            # the counter that gates new entries.
+            if side == OrderSide.BUY:
+                self._daily_volume += size_usd
             self._total_volume += size_usd
             delta = size_usd if side == OrderSide.BUY else -size_usd
             self._apply_market_exposure_delta(token_id, delta)
@@ -2528,7 +2532,8 @@ class LiveExecutionService:
     ) -> None:
         stats_lock = self._get_stats_lock()
         async with stats_lock:
-            self._daily_volume = max(ZERO, self._daily_volume - size_usd)
+            if side == OrderSide.BUY:
+                self._daily_volume = max(ZERO, self._daily_volume - size_usd)
             self._total_volume = max(ZERO, self._total_volume - size_usd)
             delta = -size_usd if side == OrderSide.BUY else size_usd
             self._apply_market_exposure_delta(token_id, delta)
