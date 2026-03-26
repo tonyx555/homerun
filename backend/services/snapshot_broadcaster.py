@@ -93,7 +93,7 @@ class SnapshotBroadcaster:
         # Per-type monotonic timestamp for trader event coalescing.
         self._trader_coalesce_last_mono: dict[str, float] = {}
         # Async queue fed by event bus subscription.
-        self._event_queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
+        self._event_queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue(maxsize=10000)
 
     # ------------------------------------------------------------------
     # Signature helpers

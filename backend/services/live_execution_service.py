@@ -594,6 +594,17 @@ class LiveExecutionService:
             "orders": serialized_orders,
         }
         self._pending_reconciliations.append(payload)
+        # Safety cap: drop oldest entries to prevent unbounded memory growth
+        # if reconciliations accumulate faster than they're resolved.
+        _MAX_PENDING_RECONCILIATIONS = 500
+        if len(self._pending_reconciliations) > _MAX_PENDING_RECONCILIATIONS:
+            dropped = self._pending_reconciliations[: len(self._pending_reconciliations) - _MAX_PENDING_RECONCILIATIONS]
+            self._pending_reconciliations = self._pending_reconciliations[-_MAX_PENDING_RECONCILIATIONS:]
+            logger.warning(
+                "Dropped %d oldest pending reconciliations (cap=%d)",
+                len(dropped),
+                _MAX_PENDING_RECONCILIATIONS,
+            )
         await self._persist_runtime_state_now()
         self._start_background_task(
             self._run_pending_reconciliation(payload["id"]),

@@ -312,7 +312,7 @@ class IntentRuntime:
         self._next_runtime_sequence = 1
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ws_callback_registered = False
-        self._projection_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._projection_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=5000)
         self._projection_task: asyncio.Task[None] | None = None
         self._deferred_timeout_task: asyncio.Task[None] | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()

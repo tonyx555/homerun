@@ -1478,9 +1478,30 @@ async def _load_execution_wallet_recent_sell_trades_by_token() -> dict[str, dict
 _market_info_cache: dict[str, tuple[float, Optional[dict[str, Any]]]] = {}
 _MARKET_INFO_CACHE_TTL_SECONDS = 60.0
 _MARKET_INFO_NEAR_RESOLUTION_SECONDS = 300.0  # 5 minutes
+_MARKET_INFO_CACHE_MAX_SIZE = 2000
+_market_info_cache_last_eviction: float = 0.0
+
+
+def _evict_stale_market_info_cache(now_mono: float) -> None:
+    """Remove expired entries and enforce max size to prevent unbounded growth."""
+    global _market_info_cache_last_eviction
+    if (now_mono - _market_info_cache_last_eviction) < 30.0:
+        return
+    _market_info_cache_last_eviction = now_mono
+    expired_keys = [
+        k for k, (fetched_at, _) in _market_info_cache.items()
+        if (now_mono - fetched_at) > _MARKET_INFO_CACHE_TTL_SECONDS * 5
+    ]
+    for k in expired_keys:
+        _market_info_cache.pop(k, None)
+    if len(_market_info_cache) > _MARKET_INFO_CACHE_MAX_SIZE:
+        sorted_entries = sorted(_market_info_cache.items(), key=lambda x: x[1][0])
+        for k, _ in sorted_entries[: len(_market_info_cache) - _MARKET_INFO_CACHE_MAX_SIZE]:
+            _market_info_cache.pop(k, None)
 
 
 def _market_info_needs_refresh(lookup_id: str, now_mono: float) -> bool:
+    _evict_stale_market_info_cache(now_mono)
     entry = _market_info_cache.get(lookup_id)
     if entry is None:
         return True
