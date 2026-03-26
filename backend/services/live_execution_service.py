@@ -2867,7 +2867,7 @@ class LiveExecutionService:
                 logger.error(f"Order failed: {order.error_message}")
                 break
 
-        except (asyncio.CancelledError, KeyboardInterrupt) as e:
+        except (asyncio.CancelledError, KeyboardInterrupt):
             # CancelledError is BaseException in Python 3.9+ and bypasses
             # ``except Exception``.  Release the reservation before re-raising
             # so the daily volume counter doesn't leak phantom volume on every
