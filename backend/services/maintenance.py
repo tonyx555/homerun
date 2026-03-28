@@ -41,7 +41,7 @@ class MaintenanceService:
     DEFAULT_WALLET_TRADE_AGE = 60  # Delete wallet trades older than 60 days
     DEFAULT_ANOMALY_AGE = 30  # Delete resolved anomalies older than 30 days
     DEFAULT_LLM_USAGE_RETENTION_DAYS = 30  # Delete raw LLM usage logs older than 30 days
-    DEFAULT_TRADE_SIGNAL_EMISSION_AGE = 21  # Delete trade signal emission rows older than 21 days
+    DEFAULT_TRADE_SIGNAL_EMISSION_AGE = 3  # Delete trade signal emission rows older than 3 days
     DEFAULT_TRADE_SIGNAL_UPDATE_AGE = 3  # Delete upsert_update emissions older than 3 days
     DEFAULT_WALLET_ACTIVITY_ROLLUP_AGE = 60  # Delete wallet activity rollups older than 60 days
 

@@ -354,7 +354,7 @@ def maintenance_payload(settings: AppSettings) -> dict[str, Any]:
         "auto_cleanup_enabled": settings.auto_cleanup_enabled,
         "cleanup_interval_hours": settings.cleanup_interval_hours,
         "cleanup_resolved_trade_days": settings.cleanup_resolved_trade_days,
-        "cleanup_trade_signal_emission_days": _with_default(settings.cleanup_trade_signal_emission_days, 21),
+        "cleanup_trade_signal_emission_days": _with_default(settings.cleanup_trade_signal_emission_days, 3),
         "cleanup_trade_signal_update_days": _with_default(settings.cleanup_trade_signal_update_days, 3),
         "cleanup_wallet_activity_rollup_days": _with_default(settings.cleanup_wallet_activity_rollup_days, 60),
         "cleanup_wallet_activity_dedupe_enabled": _with_default(settings.cleanup_wallet_activity_dedupe_enabled, True),

@@ -2031,11 +2031,11 @@ export default function SettingsPanel({
 
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                           <div>
-                            <Label className="text-xs text-muted-foreground">Trade Signal Retention (days)</Label>
+                            <Label className="text-xs text-muted-foreground">Signal Emission Retention (days)</Label>
                             <Input
                               type="number"
                               value={maintenanceForm.cleanup_trade_signal_emission_days}
-                              onChange={(e) => setMaintenanceForm(p => ({ ...p, cleanup_trade_signal_emission_days: parseInt(e.target.value) || 21 }))}
+                              onChange={(e) => setMaintenanceForm(p => ({ ...p, cleanup_trade_signal_emission_days: parseInt(e.target.value) || 3 }))}
                               min={1}
                               max={3650}
                               className="mt-1 text-sm"
