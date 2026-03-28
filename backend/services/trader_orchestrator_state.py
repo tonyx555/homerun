@@ -1657,11 +1657,17 @@ async def recover_missing_live_trader_orders(
 ) -> dict[str, Any]:
     trader_id_filter = {str(value or "").strip() for value in (trader_ids or []) if str(value or "").strip()}
     await _acquire_live_order_authority_recovery_lock(session)
+    # Only recover orders from the last 24 hours.  Older orders are stale
+    # CLOB records that Polymarket still considers "open" but were filled or
+    # cancelled long ago.  Loading all 16K+ rows was causing 30s+ timeouts
+    # and 100MB+ memory spikes every cycle.
+    _recovery_cutoff = _now() - timedelta(hours=24)
     live_rows = list(
         (
             await session.execute(
                 select(LiveTradingOrder)
                 .where(func.lower(func.coalesce(LiveTradingOrder.status, "")).in_(("open", "filled", "pending", "partially_filled")))
+                .where(LiveTradingOrder.created_at >= _recovery_cutoff)
                 .order_by(desc(LiveTradingOrder.created_at))
             )
         )

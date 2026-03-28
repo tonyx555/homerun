@@ -462,6 +462,7 @@ async def _sync_position_marks_and_exit_registry() -> None:
 
 _recovery_next_attempt_at: float = 0.0
 _RECOVERY_BACKOFF_SECONDS = 120.0  # back off 2 minutes on failure
+_live_order_cleanup_next_at: float = 0.0
 
 
 async def _run_reconciliation_cycle(
@@ -500,6 +501,30 @@ async def _run_reconciliation_cycle(
                 _RECOVERY_BACKOFF_SECONDS,
                 exc_info=exc,
             )
+    # Periodic cleanup of stale live_trading_orders (once per hour).
+    # These accumulate from CLOB order syncs and the recovery function
+    # loads ALL of them — keeping the table small prevents memory spikes.
+    global _live_order_cleanup_next_at
+    now_mono2 = time.monotonic()
+    if now_mono2 >= _live_order_cleanup_next_at:
+        _live_order_cleanup_next_at = now_mono2 + 3600.0  # 1 hour
+        try:
+            async with AsyncSessionLocal() as cleanup_session:
+                from sqlalchemy import text as sa_text
+                result = await cleanup_session.execute(
+                    sa_text("""
+                        DELETE FROM live_trading_orders
+                        WHERE created_at < now() - interval '7 days'
+                        AND lower(coalesce(status, '')) NOT IN ('open', 'pending', 'partially_filled')
+                    """)
+                )
+                deleted = result.rowcount
+                await cleanup_session.commit()
+                if deleted > 0:
+                    logger.info("Cleaned up %d stale live_trading_orders (>7 days old)", deleted)
+        except Exception as exc:
+            logger.warning("Failed to clean up stale live_trading_orders", exc_info=exc)
+
     async with AsyncSessionLocal() as session:
         traders = await list_traders(session)
 
@@ -573,7 +598,10 @@ async def _run_reconciliation_cycle(
             break
         return None
 
-    # Run traders sequentially (concurrency=1) so we can update heartbeat between each
+    # Run traders sequentially (concurrency=1) so we can update heartbeat between each.
+    # Sleep between traders to release DB pool pressure — the reconciliation holds
+    # a connection for 7-15s of Polymarket API I/O per trader, which starves the
+    # trader orchestrator of connections for signal processing.
     results: list[dict[str, Any] | None | BaseException] = []
     for idx, trader in enumerate(traders):
         try:
@@ -581,6 +609,8 @@ async def _run_reconciliation_cycle(
         except Exception as exc:
             result = exc
         results.append(result)
+        if idx < len(traders) - 1:
+            await asyncio.sleep(1.5)
         # Update heartbeat between traders to prevent stale detection
         if heartbeat_activity and idx < len(traders) - 1:
             try:
