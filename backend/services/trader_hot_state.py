@@ -240,7 +240,7 @@ def _audit_buffer_append(entry: _AuditEntry) -> None:
             )
 
 
-_RESEED_INTERVAL_SECONDS = 120.0
+_RESEED_INTERVAL_SECONDS = 600.0
 _last_seed_at: float = 0.0
 
 
