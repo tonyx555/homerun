@@ -305,7 +305,7 @@ async def _seed_from_db(session: AsyncSession) -> None:
         key = (trader_id, mode)
         snap = _shadow_snapshots.get(key)
         if snap is None:
-            snap = _TraderSnapshot(trader_id=trader_id, mode=mode)
+            snap = _TraderSnapshot()
             _shadow_snapshots[key] = snap
         return snap
 
