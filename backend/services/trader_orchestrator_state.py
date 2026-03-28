@@ -1705,11 +1705,21 @@ async def recover_missing_live_trader_orders(
         else:
             rows_without_authority.append(row)
         row_status = str(row.status or "").strip().lower()
-        if row_status in OPEN_ORDER_STATUSES:
-            row_trader_id = str(row.trader_id or "").strip()
-            row_market_id = str(row.market_id or "").strip()
-            if row_trader_id and row_market_id:
+        row_trader_id = str(row.trader_id or "").strip()
+        row_market_id = str(row.market_id or "").strip()
+        if row_trader_id and row_market_id:
+            if row_status in OPEN_ORDER_STATUSES:
                 existing_active_markets.add((row_trader_id, row_market_id))
+            # Also block recovery for recently closed/resolved orders to prevent
+            # phantom duplicates when a sell exit creates a new LiveTradingOrder
+            # that the recovery sees as unmatched.
+            elif row_status in RESOLVED_ORDER_STATUSES or row_status.startswith("closed"):
+                row_updated = row.updated_at
+                if row_updated is not None:
+                    if row_updated.tzinfo is None:
+                        row_updated = row_updated.replace(tzinfo=timezone.utc)
+                    if (now - row_updated).total_seconds() < 600:  # 10 minutes
+                        existing_active_markets.add((row_trader_id, row_market_id))
 
     collapsed_duplicates = 0
     for group in rows_by_authority_key.values():
