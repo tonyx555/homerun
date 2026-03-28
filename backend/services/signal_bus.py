@@ -598,24 +598,6 @@ async def _record_signal_emission(
     event_type: str,
     reason: str | None = None,
 ) -> None:
-    snapshot = {
-        "signal_id": row.id,
-        "source": row.source,
-        "source_item_id": row.source_item_id,
-        "signal_type": row.signal_type,
-        "strategy_type": row.strategy_type,
-        "market_id": row.market_id,
-        "direction": row.direction,
-        "entry_price": row.entry_price,
-        "effective_price": row.effective_price,
-        "edge_percent": row.edge_percent,
-        "confidence": row.confidence,
-        "liquidity": row.liquidity,
-        "status": row.status,
-        "dedupe_key": row.dedupe_key,
-        "expires_at": row.expires_at.isoformat() if row.expires_at else None,
-        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
-    }
     session.add(
         TradeSignalEmission(
             id=uuid.uuid4().hex,
