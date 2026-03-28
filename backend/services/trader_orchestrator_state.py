@@ -81,6 +81,7 @@ ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS = 30
 _UNSET = object()  # Sentinel: distinguish "not provided" from explicit None
 ORCHESTRATOR_SNAPSHOT_ID = "latest"
 OPEN_ORDER_STATUSES = {"submitted", "executed", "open"}
+RESOLVED_ORDER_STATUSES = {"resolved", "resolved_win", "resolved_loss"}
 UNFILLED_ORDER_STATUSES = {"submitted", "open"}
 SHADOW_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
 LIVE_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
