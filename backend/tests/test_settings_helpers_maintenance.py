@@ -36,7 +36,7 @@ def test_maintenance_payload_defaults_llm_usage_retention_days():
     payload = maintenance_payload(settings)
 
     assert payload["llm_usage_retention_days"] == 30
-    assert payload["cleanup_trade_signal_emission_days"] == 21
+    assert payload["cleanup_trade_signal_emission_days"] == 3
     assert payload["cleanup_trade_signal_update_days"] == 3
     assert payload["cleanup_wallet_activity_rollup_days"] == 60
     assert payload["cleanup_wallet_activity_dedupe_enabled"] is True
