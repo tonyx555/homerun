@@ -33,7 +33,7 @@ _FAILED_EXIT_MIN_RETRY_INTERVAL_SECONDS = 15
 # calls when multiple traders share the same execution wallet.  The cache
 # is invalidated after _WALLET_CACHE_TTL_SECONDS so fresh data is always
 # fetched at the start of a new reconciliation cycle.
-_WALLET_CACHE_TTL_SECONDS = 8.0
+_WALLET_CACHE_TTL_SECONDS = 30.0
 _wallet_positions_cache: tuple[float, dict[str, dict[str, Any]]] = (0.0, {})
 _wallet_sell_trades_cache: tuple[float, dict[str, dict[str, Any]]] = (0.0, {})
 _WALLET_SIZE_EPSILON = 1e-9

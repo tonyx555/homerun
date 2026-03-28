@@ -635,8 +635,8 @@ async def _record_signal_emission(
             dedupe_key=str(row.dedupe_key or ""),
             event_type=str(event_type),
             reason=reason,
-            payload_json=_safe_json(row.payload_json),
-            snapshot_json=snapshot,
+            payload_json=None,
+            snapshot_json=None,
             created_at=_utc_now(),
         )
     )
