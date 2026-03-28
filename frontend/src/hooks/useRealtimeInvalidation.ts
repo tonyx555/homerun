@@ -127,10 +127,10 @@ export function useRealtimeInvalidation(
         return nextRows
       }
 
-      queryClient.setQueryData(['trader-orders-all'], upsertRows)
+      queryClient.setQueriesData({ queryKey: ['trader-orders-all'] }, upsertRows)
       const traderId = String(incomingOrder.trader_id || '').trim()
       if (traderId) {
-        queryClient.setQueryData(['trader-orders', traderId], upsertRows)
+        queryClient.setQueriesData({ queryKey: ['trader-orders', traderId] }, upsertRows)
       }
     }
 
