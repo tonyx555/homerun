@@ -3638,6 +3638,22 @@ async def list_trader_orders(
     limit: int = 200,
     offset: int = 0,
 ) -> list[TraderOrder]:
+    _open_statuses = ("submitted", "executed", "open")
+
+    # When fetching without a specific status filter, ALWAYS include all
+    # open orders regardless of pagination.  Open positions must never be
+    # silently dropped by a row limit — this is a financial application.
+    open_orders: list[TraderOrder] = []
+    if not status:
+        open_query = (
+            select(TraderOrder)
+            .where(func.lower(func.coalesce(TraderOrder.status, "")).in_(_open_statuses))
+        )
+        if trader_id:
+            open_query = open_query.where(TraderOrder.trader_id == trader_id)
+        open_orders = list((await session.execute(open_query)).scalars().all())
+
+    # Fetch the paginated historical window.
     query = select(TraderOrder).order_by(desc(TraderOrder.created_at))
     if trader_id:
         query = query.where(TraderOrder.trader_id == trader_id)
@@ -3646,7 +3662,17 @@ async def list_trader_orders(
     if offset > 0:
         query = query.offset(offset)
     query = query.limit(max(1, min(limit, 5000)))
-    return list((await session.execute(query)).scalars().all())
+    paginated = list((await session.execute(query)).scalars().all())
+
+    # Merge: open orders first, then paginated (deduplicated).
+    if not open_orders:
+        return paginated
+    seen_ids = {str(o.id) for o in open_orders}
+    merged = list(open_orders)
+    for order in paginated:
+        if str(order.id) not in seen_ids:
+            merged.append(order)
+    return merged
 
 
 async def get_trader_decision_detail(session: AsyncSession, decision_id: str) -> Optional[dict[str, Any]]:
