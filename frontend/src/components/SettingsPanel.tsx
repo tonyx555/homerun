@@ -2035,7 +2035,10 @@ export default function SettingsPanel({
                             <Input
                               type="number"
                               value={maintenanceForm.cleanup_trade_signal_emission_days}
-                              onChange={(e) => setMaintenanceForm(p => ({ ...p, cleanup_trade_signal_emission_days: parseInt(e.target.value) || 3 }))}
+                              onChange={(e) => {
+                                const value = Number.parseInt(e.target.value, 10)
+                                setMaintenanceForm(p => ({ ...p, cleanup_trade_signal_emission_days: Number.isNaN(value) ? p.cleanup_trade_signal_emission_days : value }))
+                              }}
                               min={1}
                               max={3650}
                               className="mt-1 text-sm"
