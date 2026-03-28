@@ -289,10 +289,25 @@ async def reseed_if_stale() -> bool:
 
 
 async def _seed_from_db(session: AsyncSession) -> None:
-    _snapshots.clear()
-    _global_gross.clear()
-    _global_daily_pnl.clear()
-    _global_daily_pnl_date.clear()
+    # IMPORTANT: We must NOT clear _snapshots before the DB queries
+    # complete.  The old approach called .clear() first, creating a
+    # window where concurrent readers (e.g. the stacking guard) saw an
+    # empty snapshot and allowed duplicate orders.  Instead we build into
+    # shadow dicts, then swap into the module globals atomically at the
+    # very end via dict.update after clear.
+    _shadow_snapshots: dict[tuple[str, str], _TraderSnapshot] = {}
+    _shadow_global_gross: dict[str, float] = {}
+    _shadow_global_daily_pnl: dict[str, float] = {}
+    _shadow_global_daily_pnl_date: dict[str, str] = {}
+
+    # Override _ensure_snapshot to build into shadow dict
+    def _shadow_ensure(trader_id: str, mode: str) -> _TraderSnapshot:
+        key = (trader_id, mode)
+        snap = _shadow_snapshots.get(key)
+        if snap is None:
+            snap = _TraderSnapshot(trader_id=trader_id, mode=mode)
+            _shadow_snapshots[key] = snap
+        return snap
 
     # Prune expired re-entry cooldown entries
     now = time.monotonic()
@@ -337,7 +352,7 @@ async def _seed_from_db(session: AsyncSession) -> None:
     async for order in order_rows:
         trader_id = str(order.trader_id or "")
         mode = _normalize_mode_key(order.mode)
-        snap = _ensure_snapshot(trader_id, mode)
+        snap = _shadow_ensure(trader_id, mode)
         payload = dict(order.payload_json or {})
         status_key = _normalize_status_key(order.status)
         row_notional = safe_float(order.notional_usd, 0.0) or 0.0
@@ -364,7 +379,7 @@ async def _seed_from_db(session: AsyncSession) -> None:
 
             if active_notional > 0:
                 snap.gross_notional += active_notional
-                _global_gross[mode] = _global_gross.get(mode, 0.0) + active_notional
+                _shadow_global_gross[mode] = _shadow_global_gross.get(mode, 0.0) + active_notional
                 if market_id:
                     snap.market_notional[market_id] = snap.market_notional.get(market_id, 0.0) + active_notional
                 source_key = str(order.source or "").strip().lower()
@@ -409,8 +424,8 @@ async def _seed_from_db(session: AsyncSession) -> None:
                     profit = safe_float(order.actual_profit, 0.0) or 0.0
                     snap.daily_realized_pnl += profit
                     snap.daily_pnl_date = today_str
-                    _global_daily_pnl[mode] = _global_daily_pnl.get(mode, 0.0) + profit
-                    _global_daily_pnl_date[mode] = today_str
+                    _shadow_global_daily_pnl[mode] = _shadow_global_daily_pnl.get(mode, 0.0) + profit
+                    _shadow_global_daily_pnl_date[mode] = today_str
 
     # ── Positions (open only, for position cap scope) ──────────────
     pos_rows = (
@@ -427,7 +442,7 @@ async def _seed_from_db(session: AsyncSession) -> None:
     for row in pos_rows:
         trader_id = str(row.trader_id or "")
         mode = _normalize_mode_key(row.mode)
-        snap = _ensure_snapshot(trader_id, mode)
+        snap = _shadow_ensure(trader_id, mode)
         key = _position_cap_scope_key(
             position_cap_scope="market_direction",
             mode=mode,
@@ -442,7 +457,7 @@ async def _seed_from_db(session: AsyncSession) -> None:
             snap.open_market_ids.add(market_id)
     # Snapshot index by trader
     snapshots_by_trader: dict[str, list[_TraderSnapshot]] = {}
-    for (tid, _), snap in _snapshots.items():
+    for (tid, _), snap in _shadow_snapshots.items():
         snapshots_by_trader.setdefault(tid, []).append(snap)
     trader_ids = set(snapshots_by_trader.keys())
 
@@ -533,6 +548,18 @@ async def _seed_from_db(session: AsyncSession) -> None:
             snap.cursor_created_at = cursor.last_signal_created_at
             snap.cursor_signal_id = cursor_signal_id
             snap.cursor_runtime_sequence = int(cursor.last_runtime_sequence) if cursor.last_runtime_sequence is not None else None
+
+    # ── Atomic swap: replace module globals in one shot ──────────
+    # Readers may briefly see a mix of old and new data during the
+    # update() calls below, but they will NEVER see empty state.
+    _snapshots.clear()
+    _snapshots.update(_shadow_snapshots)
+    _global_gross.clear()
+    _global_gross.update(_shadow_global_gross)
+    _global_daily_pnl.clear()
+    _global_daily_pnl.update(_shadow_global_daily_pnl)
+    _global_daily_pnl_date.clear()
+    _global_daily_pnl_date.update(_shadow_global_daily_pnl_date)
 
 
 def _ensure_snapshot(trader_id: str, mode: str) -> _TraderSnapshot:
