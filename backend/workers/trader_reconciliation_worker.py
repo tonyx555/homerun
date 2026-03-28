@@ -460,6 +460,10 @@ async def _sync_position_marks_and_exit_registry() -> None:
         logger.warning("Position mark sync failed", exc_info=exc)
 
 
+_recovery_next_attempt_at: float = 0.0
+_RECOVERY_BACKOFF_SECONDS = 120.0  # back off 2 minutes on failure
+
+
 async def _run_reconciliation_cycle(
     *,
     reason: str,
@@ -467,28 +471,35 @@ async def _run_reconciliation_cycle(
     provider_pass: bool,
     heartbeat_activity: str = "",
 ) -> dict[str, Any]:
+    global _recovery_next_attempt_at
     summary = _empty_cycle_summary()
-    try:
-        async with AsyncSessionLocal() as session:
-            await asyncio.wait_for(
-                recover_missing_live_trader_orders(
-                    session,
-                    trader_ids=None,
-                    commit=True,
-                    broadcast=True,
-                ),
-                timeout=_TRADER_RECONCILE_TIMEOUT_SECONDS,
+    now_mono = time.monotonic()
+    if now_mono >= _recovery_next_attempt_at:
+        try:
+            async with AsyncSessionLocal() as session:
+                await asyncio.wait_for(
+                    recover_missing_live_trader_orders(
+                        session,
+                        trader_ids=None,
+                        commit=True,
+                        broadcast=True,
+                    ),
+                    timeout=_TRADER_RECONCILE_TIMEOUT_SECONDS,
+                )
+        except asyncio.TimeoutError:
+            _recovery_next_attempt_at = time.monotonic() + _RECOVERY_BACKOFF_SECONDS
+            logger.warning(
+                "Live order authority recovery timed out after %.0fs; backing off %.0fs",
+                _TRADER_RECONCILE_TIMEOUT_SECONDS,
+                _RECOVERY_BACKOFF_SECONDS,
             )
-    except asyncio.TimeoutError:
-        logger.warning(
-            "Live order authority recovery timed out after %.0fs",
-            _TRADER_RECONCILE_TIMEOUT_SECONDS,
-        )
-    except Exception as exc:
-        logger.warning(
-            "Live order authority recovery failed during reconciliation cycle",
-            exc_info=exc,
-        )
+        except Exception as exc:
+            _recovery_next_attempt_at = time.monotonic() + _RECOVERY_BACKOFF_SECONDS
+            logger.warning(
+                "Live order authority recovery failed; backing off %.0fs",
+                _RECOVERY_BACKOFF_SECONDS,
+                exc_info=exc,
+            )
     async with AsyncSessionLocal() as session:
         traders = await list_traders(session)
 
