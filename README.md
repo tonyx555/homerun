@@ -343,7 +343,7 @@ homerun/
 │       ├── services/           # API client layer
 │       └── hooks/store/lib     # Jotai state, WebSocket, keyboard shortcuts
 ├── scripts/                    # Setup, run, and OS-specific launchers
-└── tui.py                      # Terminal UI (Textual)
+└── gui.py                      # Desktop GUI (tkinter)
 ```
 
 <br />

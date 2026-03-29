@@ -28,8 +28,6 @@ numpy>=1.24.0
 sentence-transformers>=2.2.0  # Embedding model (optional — TF-IDF fallback if missing)
 faiss-cpu>=1.7.0              # Fast vector search (optional — numpy fallback if missing)
 
-# TUI (Terminal User Interface)
-textual>=0.85.0,<1.0          # Modern TUI framework (0.x API; 1.0+ has breaking changes)
-rich>=13.7.0                  # Rich text rendering
+# GUI uses tkinter (ships with Python, no pip install needed)
 pytest-asyncio>=0.23.0,<1.0
 pytest-timeout>=2.3.0,<3.0

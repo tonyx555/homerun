@@ -14,14 +14,14 @@ DIM='\033[2m'
 NC='\033[0m' # No Color
 
 RUN_SERVICE_SMOKE_TEST=0
-TUI_ARGS=()
+GUI_ARGS=()
 for arg in "$@"; do
     case "$arg" in
         --services-smoke-test)
             RUN_SERVICE_SMOKE_TEST=1
             ;;
         *)
-            TUI_ARGS+=("$arg")
+            GUI_ARGS+=("$arg")
             ;;
     esac
 done
@@ -330,7 +330,7 @@ cleanup_stale_homerun_processes() {
     local project_root
     project_root="$(pwd)"
     local pids
-    pids="$(ps -eo pid=,command= 2>/dev/null | grep -E 'workers\.host|workers\.runner|workers\.\w+_worker|uvicorn.*main:app|tui\.py' | grep -v grep | awk '{print $1}')" || true
+    pids="$(ps -eo pid=,command= 2>/dev/null | grep -E 'workers\.host|workers\.runner|workers\.\w+_worker|uvicorn.*main:app|gui\.py' | grep -v grep | awk '{print $1}')" || true
     if [ -z "$pids" ]; then
         return 0
     fi
@@ -537,21 +537,16 @@ printf '%s\n' "$DATABASE_URL" > backend/.runtime/database_url
 
 backend/venv/bin/python scripts/infra/ensure_postgres_ready.py --database-url "$DATABASE_URL"
 
-# Ensure TUI dependencies are installed
 source backend/venv/bin/activate
-python -c "import textual" 2>/dev/null || {
-    echo -e "${CYAN}Installing TUI dependencies...${NC}"
-    PIP_USER=0 python -m pip install -q --no-user textual rich
-}
 
 if [ "$RUN_SERVICE_SMOKE_TEST" -eq 1 ]; then
     python scripts/infra/launcher_smoke.py
     exit $?
 fi
 
-# Launch the TUI
-if [ "${#TUI_ARGS[@]}" -gt 0 ]; then
-    python tui.py "${TUI_ARGS[@]}"
+# Launch the GUI (tkinter – no extra dependencies)
+if [ "${#GUI_ARGS[@]}" -gt 0 ]; then
+    python gui.py "${GUI_ARGS[@]}"
 else
-    python tui.py
+    python gui.py
 fi

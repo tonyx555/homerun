@@ -81,7 +81,7 @@ homerun/
 │   │   └── Homerun.*
 │   ├── ml/                    # Offline ML pipelines
 │   └── monitoring/            # Live operational monitoring
-├── tui.py                      # Terminal UI (Textual + Rich)
+├── gui.py                      # Desktop GUI (tkinter)
 └── docs/                       # Documentation and strategy research
 ```
 

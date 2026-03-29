@@ -8,7 +8,7 @@ set "PS_EXE=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
 if not exist "%PS_EXE%" set "PS_EXE=powershell"
 
 cls
-set "HOMERUN_TUI_LAUNCHER=bat"
+set "HOMERUN_GUI_LAUNCHER=bat"
 "%PS_EXE%" -NoProfile -ExecutionPolicy Bypass -File "%RUN_SCRIPT%" %*
 set "EXIT_CODE=%ERRORLEVEL%"
 

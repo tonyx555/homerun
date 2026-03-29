@@ -4,6 +4,6 @@ Type=Application
 Name=Homerun
 Comment=Launch Homerun
 Exec=sh -lc 'cd "$(dirname "%k")/../infra" && ./run.sh'
-Terminal=true
+Terminal=false
 StartupNotify=true
 Categories=Development;Finance;

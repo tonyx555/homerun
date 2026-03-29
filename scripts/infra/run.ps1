@@ -7,12 +7,12 @@ $ErrorActionPreference = "Stop"
 Set-Location (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)))
 
 $runServiceSmokeTest = $false
-$tuiArgs = @()
+$guiArgs = @()
 foreach ($arg in $args) {
     if ($arg -eq "--services-smoke-test") {
         $runServiceSmokeTest = $true
     } else {
-        $tuiArgs += $arg
+        $guiArgs += $arg
     }
 }
 
@@ -55,8 +55,6 @@ function Ensure-ConsoleViewport {
         # Silently ignore — Windows Terminal manages its own viewport
     }
 }
-
-Ensure-ConsoleViewport
 
 function Test-TcpPort {
     param(
@@ -138,26 +136,7 @@ function Wait-ForService {
     return $false
 }
 
-$inWindowsTerminal = [bool]$env:WT_SESSION
-$allowWindowsTerminal = @("1", "true", "yes", "on") -contains (($env:HOMERUN_TUI_ALLOW_WT | Out-String).Trim().ToLowerInvariant())
-$alreadyRelaunched = @("1", "true", "yes", "on") -contains (($env:HOMERUN_CONHOST_RELAUNCHED | Out-String).Trim().ToLowerInvariant())
-
-if ($inWindowsTerminal -and -not $allowWindowsTerminal -and -not $alreadyRelaunched) {
-    [Environment]::SetEnvironmentVariable("HOMERUN_CONHOST_RELAUNCHED", "1", "Process")
-    $relaunchArgs = @(
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        $MyInvocation.MyCommand.Path
-    ) + $args
-    Start-Process -FilePath "powershell.exe" -WorkingDirectory (Get-Location).Path -ArgumentList $relaunchArgs | Out-Null
-    exit 0
-}
-
-if ($inWindowsTerminal -and -not $allowWindowsTerminal) {
-    [Environment]::SetEnvironmentVariable("HOMERUN_TUI_SAFE_CONSOLE", "1", "Process")
-}
+# No console host workarounds needed – GUI uses tkinter, not the terminal.
 
 function Get-ListeningProcessId {
     param(
@@ -1397,13 +1376,13 @@ function Cleanup-StaleHomerunProcesses {
         $cmdLine = $proc.CommandLine
         if (-not $cmdLine) { continue }
 
-        # Only kill homerun-related processes (workers, uvicorn backend, tui)
+        # Only kill homerun-related processes (workers, uvicorn backend, gui)
         $isHomerun = $false
         if ($cmdLine -match "workers\.host") { $isHomerun = $true }
         elseif ($cmdLine -match "workers\.runner") { $isHomerun = $true }
         elseif ($cmdLine -match "workers\.\w+_worker") { $isHomerun = $true }
         elseif (($cmdLine -match "uvicorn") -and ($cmdLine -match "main:app")) { $isHomerun = $true }
-        elseif ($cmdLine -match "tui\.py") { $isHomerun = $true }
+        elseif ($cmdLine -match "gui\.py") { $isHomerun = $true }
 
         if (-not $isHomerun) { continue }
 
@@ -1652,29 +1631,13 @@ try {
     # Activate venv
     & backend\venv\Scripts\Activate.ps1
 
-    # Ensure TUI dependencies are installed (pinned to Textual 8.x line)
-    python -c "import textual; v=tuple(int(x) for x in textual.__version__.split('.')[:2]); exit(0 if v >= (8,0) and v < (9,0) else 1)" *> $null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Installing TUI dependencies..." -ForegroundColor Cyan
-        python -m pip install -q "textual>=8.0.0,<9.0" "rich>=14.0.0,<15.0.0"
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed to install TUI dependencies"
-        }
-    }
-
     if ($runServiceSmokeTest) {
         python .\scripts\infra\launcher_smoke.py
         exit $LASTEXITCODE
     }
 
-    # Launch the TUI
-    Ensure-ConsoleViewport
-    try {
-        Clear-Host
-    } catch {
-    }
-    Start-Sleep -Milliseconds 250
-    python tui.py @tuiArgs
+    # Launch the GUI (tkinter – no extra dependencies)
+    python gui.py @guiArgs
 } finally {
     # Kill any remaining Homerun Python processes (workers, backend, etc.)
     Cleanup-StaleHomerunProcesses
