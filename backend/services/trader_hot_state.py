@@ -549,9 +549,23 @@ async def _seed_from_db(session: AsyncSession) -> None:
             snap.cursor_signal_id = cursor_signal_id
             snap.cursor_runtime_sequence = int(cursor.last_runtime_sequence) if cursor.last_runtime_sequence is not None else None
 
-    # ── Atomic swap: replace module globals in one shot ──────────
-    # Readers may briefly see a mix of old and new data during the
-    # update() calls below, but they will NEVER see empty state.
+    # ── Merge & swap: preserve open_market_ids from live updates ─
+    # During the DB query, record_order_created() may have added
+    # market_ids to the OLD snapshots that the DB query didn't see
+    # (e.g., order committed by another session after our SELECT).
+    # Merge these into the shadow snapshots so they're not lost —
+    # this is the critical fix for stacking guard races during reseed.
+    for key, old_snap in _snapshots.items():
+        shadow_snap = _shadow_snapshots.get(key)
+        if shadow_snap is not None:
+            # Merge any market_ids the old snapshot had that the shadow doesn't
+            shadow_snap.open_market_ids |= old_snap.open_market_ids
+            shadow_snap.open_order_ids |= old_snap.open_order_ids
+            shadow_snap.open_order_count = len(shadow_snap.open_order_ids)
+        elif old_snap.open_market_ids:
+            # Old snapshot has open markets but shadow doesn't have this trader at all —
+            # preserve it so the stacking guard still sees it
+            _shadow_snapshots[key] = old_snap
     _snapshots.clear()
     _snapshots.update(_shadow_snapshots)
     _global_gross.clear()
