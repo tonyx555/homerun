@@ -5968,6 +5968,34 @@ async def _run_trader_once(
                     if final_decision == "selected":
                         if _pre_gate_market_id:
                             intra_cycle_seen_market_ids.add(_pre_gate_market_id)
+
+                        # ── DB-level stacking verification before execution ──
+                        # Final authoritative check against the database before
+                        # spending real money.  The hot-state pre-gate is fast but
+                        # can miss entries during reseed or after wallet_absent_close.
+                        if _pre_gate_market_id and not allow_averaging and run_mode == "live":
+                            _db_stacking_exists = (
+                                await session.execute(
+                                    select(func.count()).select_from(TraderOrder).where(
+                                        TraderOrder.trader_id == trader_id,
+                                        TraderOrder.market_id == _pre_gate_market_id,
+                                        TraderOrder.mode == "live",
+                                        func.lower(func.coalesce(TraderOrder.status, "")).in_(
+                                            ("submitted", "executed", "open")
+                                        ),
+                                    )
+                                )
+                            ).scalar_one()
+                            if _db_stacking_exists > 0:
+                                final_decision = "blocked"
+                                final_reason = "Stacking guard: market already open (DB verification)"
+                                logger.warning(
+                                    "DB stacking guard blocked order that passed hot-state check "
+                                    "trader=%s market=%s existing_orders=%d",
+                                    trader_id, _pre_gate_market_id, _db_stacking_exists,
+                                )
+
+                    if final_decision == "selected":
                         await _commit_with_retry(session)
                         submit_started_at = utcnow()
                         async with release_conn(session):
