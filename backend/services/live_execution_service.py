@@ -1127,29 +1127,6 @@ class LiveExecutionService:
         if required_usdc <= ZERO:
             return False, "BUY pre-submit gate failed: required notional must be greater than zero."
 
-        # ── Wallet position duplicate guard ──────────────────────────
-        # Check if we already hold shares for this token on-chain.
-        # This prevents the system from accumulating untracked positions
-        # when DB tracking is lost (wallet_absent_close, recovery churn,
-        # or timeout-induced orphans).  Uses the cached wallet data to
-        # avoid an extra API call.
-        try:
-            from services.trader_orchestrator.position_lifecycle import (
-                _load_execution_wallet_positions_by_token,
-            )
-            wallet_positions = await _load_execution_wallet_positions_by_token()
-            existing_pos = wallet_positions.get(token_key)
-            if isinstance(existing_pos, dict):
-                existing_size = float(existing_pos.get("size", 0) or 0)
-                if existing_size > 0.5:  # more than 0.5 shares already held
-                    return False, (
-                        f"BUY pre-submit gate blocked: wallet already holds {existing_size:.1f} shares "
-                        f"for token {token_key[:20]}. Existing on-chain position must be "
-                        f"reconciled or sold before placing a new buy."
-                    )
-        except Exception as exc:
-            logger.debug("Wallet position duplicate check skipped: %s", exc)
-
         balance = await self.get_balance()
         if not isinstance(balance, dict):
             logger.warning(
