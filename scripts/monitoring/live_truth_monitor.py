@@ -9,7 +9,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -21,7 +21,7 @@ BACKEND_ROOT = ROOT / "backend"
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from config import settings
+from config import settings  # noqa: E402
 from models.database import (  # noqa: E402
     AsyncSessionLocal,
     ExecutionSessionOrder,
@@ -564,7 +564,7 @@ async def run_monitor(config: MonitorConfig) -> int:
     trader_id = str(trader.id)
     strategy_keys = _extract_trader_strategy_keys(trader)
     started_at = utcnow()
-    ends_at = started_at + timedelta(seconds=max(1, config.duration_seconds))
+
     started_mono = time.monotonic()
     ends_mono = started_mono + float(max(1, config.duration_seconds))
     next_cycle_mono = started_mono
@@ -906,7 +906,6 @@ async def run_monitor(config: MonitorConfig) -> int:
                         else None
                     )
 
-                    local_reason = _extract_order_reason(order, payload)
                     market_question = _extract_market_question(order)
 
                     # Local active with no provider evidence.
