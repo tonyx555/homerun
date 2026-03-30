@@ -1408,7 +1408,6 @@ class BaseStrategy(ABC):
             # vs event end_date of "March 31, 2026").
             group_title = str(getattr(markets[0], "group_item_title", "") or "").strip()
             if group_title:
-                from utils.signal_helpers import parse_iso
                 from dateutil import parser as _dateutil_parser
                 try:
                     parsed_group_date = _dateutil_parser.parse(group_title, fuzzy=True)
