@@ -38,6 +38,19 @@ def _get_shared_http_client() -> httpx.AsyncClient:
     if _shared_http_client is None or _shared_http_client.is_closed:
         _shared_http_client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
     return _shared_http_client
+
+
+def reset_shared_http_client() -> None:
+    """Force-recreate the shared HTTP client after a network outage."""
+    global _shared_http_client
+    old = _shared_http_client
+    _shared_http_client = None
+    if old is not None:
+        try:
+            import asyncio
+            asyncio.get_event_loop().create_task(old.aclose())
+        except Exception:
+            pass
 _RETENTION_BOUNDS: dict[str, tuple[int, int]] = {
     "max_records": (1, 250_000),
     "max_age_days": (1, 3650),

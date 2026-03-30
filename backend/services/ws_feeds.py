@@ -76,7 +76,7 @@ DEFAULT_RECONNECT_BASE_DELAY = 1.0  # initial backoff delay in seconds
 DEFAULT_RECONNECT_MAX_DELAY = 60.0  # maximum backoff ceiling
 DEFAULT_RECONNECT_MULTIPLIER = 2.0  # exponential multiplier per attempt
 MAX_RECONNECT_ATTEMPTS = 30  # after this many consecutive failures, extend delay
-MAX_RECONNECT_EXTENDED_DELAY = 300.0  # 5 minutes between attempts after exhaustion
+MAX_RECONNECT_EXTENDED_DELAY = 60.0  # 1 minute max between attempts (was 5min — too slow for network recovery)
 
 
 # ---------------------------------------------------------------------------

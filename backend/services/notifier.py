@@ -1261,6 +1261,13 @@ class TelegramNotifier:
             logger.warning("Telegram getUpdates network error (%s); resetting HTTP client", type(exc).__name__)
             await self._replace_http_client()
             return []
+        except RuntimeError as exc:
+            if "client has been closed" in str(exc).lower():
+                logger.warning("Telegram HTTP client closed; recreating")
+                await self._replace_http_client()
+                return []
+            logger.error("Failed to poll Telegram updates", exc_info=exc)
+            return []
         except Exception as exc:
             logger.error("Failed to poll Telegram updates", exc_info=exc)
             return []
