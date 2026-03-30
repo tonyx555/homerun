@@ -2742,6 +2742,20 @@ class LiveExecutionService:
                         _is_transient_transport_error(exc)
                         and transport_retries_used < max_transport_retries
                     ):
+                        # For FAK/IOC BUY orders, do NOT retry on transport errors.
+                        # The order may have been accepted by the CLOB before the
+                        # timeout — retrying would create a duplicate on-chain order
+                        # (since FAK has no stable nonce for idempotency).  The
+                        # reconciliation worker will discover any fills.
+                        if side == OrderSide.BUY and provider_market_order:
+                            logger.warning(
+                                "FAK/IOC BUY transport error — skipping retry to avoid duplicate on-chain order",
+                                attempt=attempt + 1,
+                                token_id=token_key,
+                                error_type=type(exc).__name__,
+                                error=str(exc)[:200],
+                            )
+                            raise
                         transport_retries_used += 1
                         delay = 0.5 * (2 ** (transport_retries_used - 1))
                         logger.warning(
