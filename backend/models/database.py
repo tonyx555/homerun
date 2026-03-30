@@ -1953,7 +1953,7 @@ class AutoresearchExperiment(Base):
     __tablename__ = "autoresearch_experiments"
 
     id = Column(String, primary_key=True, default=lambda: str(__import__("uuid").uuid4()))
-    trader_id = Column(String, ForeignKey("traders.id"), nullable=False)
+    trader_id = Column(String, ForeignKey("traders.id", ondelete="CASCADE"), nullable=False)
     name = Column(String, nullable=False)
     status = Column(String, nullable=False, default="running")  # running, paused, completed, failed
     mode = Column(String, default="params")  # "params" | "code"
