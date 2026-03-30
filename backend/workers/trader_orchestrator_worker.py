@@ -6236,6 +6236,20 @@ async def _run_trader_once(
                                     commit=False,
                                 )
 
+                            # Mark the signal as consumed/failed after execution
+                            # failure so the scanner doesn't keep re-emitting it
+                            # and the trader doesn't retry the same market 600+ times.
+                            if final_decision == "failed" and signal_id:
+                                try:
+                                    await set_trade_signal_status(
+                                        session,
+                                        signal_id=signal_id,
+                                        status="failed",
+                                        commit=False,
+                                    )
+                                except Exception:
+                                    pass
+
                             if normalized_order_status in {
                                 "executed",
                                 "completed",

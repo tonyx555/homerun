@@ -1401,6 +1401,24 @@ class BaseStrategy(ABC):
         resolution_date = None
         if markets and markets[0].end_date:
             resolution_date = markets[0].end_date
+            # For grouped/multi-outcome markets, the event-level end_date may
+            # be the earliest sub-market date — not the specific sub-market
+            # being traded.  If group_item_title contains a parseable date
+            # that is later than end_date, prefer it (e.g. "December 31, 2026"
+            # vs event end_date of "March 31, 2026").
+            group_title = str(getattr(markets[0], "group_item_title", "") or "").strip()
+            if group_title:
+                from utils.signal_helpers import parse_iso
+                from dateutil import parser as _dateutil_parser
+                try:
+                    parsed_group_date = _dateutil_parser.parse(group_title, fuzzy=True)
+                    if parsed_group_date.tzinfo is None:
+                        from datetime import timezone as _tz
+                        parsed_group_date = parsed_group_date.replace(tzinfo=_tz.utc)
+                    if parsed_group_date > resolution_date:
+                        resolution_date = parsed_group_date
+                except (ValueError, OverflowError):
+                    pass
 
         if custom_risk_score is not None:
             risk_score = float(max(0.0, min(1.0, custom_risk_score)))
