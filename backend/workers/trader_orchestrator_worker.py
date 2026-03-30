@@ -678,6 +678,16 @@ _traders_scope_context_cache: dict[str, tuple[datetime, dict[str, Any]]] = {}
 _lane_snapshot_metrics: dict[str, dict[str, Any]] = {}
 _lane_snapshot_seeded = False
 
+# ── Per-market execution no-fill cooldown ─────────────────────────
+# After a FAK/IOC no-fill, cool down this specific market for a trader
+# so we don't hammer the same illiquid book 600+ times.  The market may
+# have liquidity later — this just spaces out retries.
+_NOFILL_COOLDOWN_SECONDS = 300.0  # 5 minutes between retries
+_NOFILL_MAX_CONSECUTIVE = 3       # after 3 consecutive no-fills, extend cooldown
+_NOFILL_EXTENDED_COOLDOWN_SECONDS = 900.0  # 15 minutes after 3 fails
+_nofill_cooldowns: dict[tuple[str, str], float] = {}  # (trader_id, market_id) -> monotonic expiry
+_nofill_counts: dict[tuple[str, str], int] = {}        # consecutive no-fill count
+
 
 def _empty_lane_snapshot_metrics() -> dict[str, Any]:
     return {
@@ -5723,7 +5733,37 @@ async def _run_trader_once(
                         )
                         and str(getattr(decision_obj, "decision", "") or "").strip() == "selected"
                     )
-                    if _pre_gate_blocked:
+                    # No-fill cooldown: skip markets that recently failed with FAK no-fill
+                    import time as _time_mod
+                    _nofill_key = (trader_id, _pre_gate_market_id)
+                    _nofill_expiry = _nofill_cooldowns.get(_nofill_key, 0.0)
+                    _nofill_blocked = (
+                        _pre_gate_market_id
+                        and _nofill_expiry > _time_mod.monotonic()
+                        and str(getattr(decision_obj, "decision", "") or "").strip() == "selected"
+                    )
+                    if _nofill_blocked:
+                        _pre_gate_blocked = True
+
+                    if _pre_gate_blocked and _nofill_blocked:
+                        gate_result = {
+                            "final_decision": "blocked",
+                            "final_reason": f"No-fill cooldown: market in {int(_nofill_expiry - _time_mod.monotonic())}s cooldown after FAK no-fill",
+                            "score": getattr(decision_obj, "score", None),
+                            "size_usd": getattr(decision_obj, "size_usd", None),
+                            "checks_payload": checks_payload,
+                            "risk_snapshot": None,
+                            "strategy_decision": str(getattr(decision_obj, "decision", "blocked") or "blocked"),
+                            "strategy_reason": str(getattr(decision_obj, "reason", "") or ""),
+                            "platform_gates": [
+                                {
+                                    "gate": "nofill_cooldown",
+                                    "passed": False,
+                                    "reason": "Market in no-fill cooldown",
+                                }
+                            ],
+                        }
+                    elif _pre_gate_blocked:
                         gate_result = {
                             "final_decision": "blocked",
                             "final_reason": "Stacking guard: market already open (pre-gate)",
@@ -6236,19 +6276,24 @@ async def _run_trader_once(
                                     commit=False,
                                 )
 
-                            # Mark the signal as consumed/failed after execution
-                            # failure so the scanner doesn't keep re-emitting it
-                            # and the trader doesn't retry the same market 600+ times.
-                            if final_decision == "failed" and signal_id:
-                                try:
-                                    await set_trade_signal_status(
-                                        session,
-                                        signal_id=signal_id,
-                                        status="failed",
-                                        commit=False,
-                                    )
-                                except Exception:
-                                    pass
+                            # Record per-market no-fill cooldown after execution
+                            # failure so we don't hammer the same illiquid book.
+                            # The signal stays pending — the market may have
+                            # liquidity after the cooldown expires.
+                            if final_decision == "failed" and _pre_gate_market_id:
+                                _nf_key = (trader_id, _pre_gate_market_id)
+                                _nf_count = _nofill_counts.get(_nf_key, 0) + 1
+                                _nofill_counts[_nf_key] = _nf_count
+                                _cd = (
+                                    _NOFILL_EXTENDED_COOLDOWN_SECONDS
+                                    if _nf_count >= _NOFILL_MAX_CONSECUTIVE
+                                    else _NOFILL_COOLDOWN_SECONDS
+                                )
+                                _nofill_cooldowns[_nf_key] = _time_mod.monotonic() + _cd
+                                logger.info(
+                                    "No-fill cooldown set for trader=%s market=%s count=%d cooldown=%ds",
+                                    trader_id, _pre_gate_market_id, _nf_count, int(_cd),
+                                )
 
                             if normalized_order_status in {
                                 "executed",
@@ -6259,6 +6304,11 @@ async def _run_trader_once(
                                 "open",
                                 "submitted",
                             }:
+                                # Clear no-fill cooldown on successful fill
+                                _nf_success_key = (trader_id, _pre_gate_market_id)
+                                _nofill_cooldowns.pop(_nf_success_key, None)
+                                _nofill_counts.pop(_nf_success_key, None)
+
                                 for _co in getattr(submit_result, "created_orders", None) or []:
                                     hot_state.record_order_created(
                                         trader_id=trader_id,
