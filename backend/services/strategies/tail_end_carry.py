@@ -528,6 +528,23 @@ class TailEndCarryStrategy(BaseStrategy):
             if end_date is None:
                 continue
 
+            # For grouped/multi-outcome markets, the event-level end_date
+            # may be the earliest sub-market (e.g. "March 31") while the
+            # specific sub-market resolves much later (e.g. "December 31,
+            # 2026").  Extract the actual date from group_item_title if it
+            # parses to a LATER date, and use that for the resolution check.
+            group_title = str(getattr(market, "group_item_title", "") or "").strip()
+            if group_title:
+                try:
+                    from dateutil import parser as _dateutil_parser
+                    parsed_group_date = _dateutil_parser.parse(group_title, fuzzy=True)
+                    if parsed_group_date.tzinfo is None:
+                        parsed_group_date = parsed_group_date.replace(tzinfo=end_date.tzinfo or timezone.utc)
+                    if parsed_group_date > end_date:
+                        end_date = parsed_group_date
+                except (ValueError, OverflowError, TypeError):
+                    pass
+
             days_to_res = (end_date - now).total_seconds() / 86400.0
             if days_to_res < min_days or days_to_res > max_days:
                 continue
