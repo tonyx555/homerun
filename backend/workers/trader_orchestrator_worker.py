@@ -6297,6 +6297,16 @@ async def _run_trader_once(
                                 },
                                 commit=False,
                             )
+                            # Mark the signal as failed so it won't be retried
+                            # endlessly.  Without this, FAK no-fill errors loop
+                            # on the same signal every cycle, blocking all other
+                            # signals from being evaluated.
+                            await set_trade_signal_status(
+                                session,
+                                signal_id=signal_id,
+                                status="failed",
+                                commit=False,
+                            )
                     else:
                         signal_status = "failed" if final_decision == "failed" else "skipped"
                         await set_trade_signal_status(
