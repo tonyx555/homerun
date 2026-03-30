@@ -535,15 +535,35 @@ class TailEndCarryStrategy(BaseStrategy):
             # parses to a LATER date, and use that for the resolution check.
             group_title = str(getattr(market, "group_item_title", "") or "").strip()
             if group_title:
-                try:
-                    from dateutil import parser as _dateutil_parser
-                    parsed_group_date = _dateutil_parser.parse(group_title, fuzzy=True)
-                    if parsed_group_date.tzinfo is None:
-                        parsed_group_date = parsed_group_date.replace(tzinfo=end_date.tzinfo or timezone.utc)
-                    if parsed_group_date > end_date:
-                        end_date = parsed_group_date
-                except (ValueError, OverflowError, TypeError):
-                    pass
+                # Parse common date formats from group_item_title using
+                # stdlib only (dateutil is blocked by strategy sandbox).
+                # Handles: "March 31, 2026", "December 31, 2026", "2026-12-31"
+                import re as _re
+                _MONTHS = {
+                    "january": 1, "february": 2, "march": 3, "april": 4,
+                    "may": 5, "june": 6, "july": 7, "august": 8,
+                    "september": 9, "october": 10, "november": 11, "december": 12,
+                }
+                _parsed_group_date = None
+                # Try "Month Day, Year" pattern
+                _m = _re.search(r'(\w+)\s+(\d{1,2}),?\s+(\d{4})', group_title)
+                if _m:
+                    _mon = _MONTHS.get(_m.group(1).lower())
+                    if _mon:
+                        try:
+                            _parsed_group_date = datetime(int(_m.group(3)), _mon, int(_m.group(2)), tzinfo=timezone.utc)
+                        except ValueError:
+                            pass
+                # Try ISO "YYYY-MM-DD" pattern
+                if _parsed_group_date is None:
+                    _m2 = _re.search(r'(\d{4})-(\d{2})-(\d{2})', group_title)
+                    if _m2:
+                        try:
+                            _parsed_group_date = datetime(int(_m2.group(1)), int(_m2.group(2)), int(_m2.group(3)), tzinfo=timezone.utc)
+                        except ValueError:
+                            pass
+                if _parsed_group_date is not None and _parsed_group_date > end_date:
+                    end_date = _parsed_group_date
 
             days_to_res = (end_date - now).total_seconds() / 86400.0
             if days_to_res < min_days or days_to_res > max_days:
