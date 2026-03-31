@@ -11,6 +11,7 @@ from sqlalchemy import (
     Index,
     UniqueConstraint,
     event as _sa_event,
+    text,
 )
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
@@ -2209,6 +2210,7 @@ class TraderGroupMember(Base):
         UniqueConstraint("group_id", "wallet_address", name="uq_group_wallet"),
         Index("idx_trader_group_member_group", "group_id"),
         Index("idx_trader_group_member_wallet", "wallet_address"),
+        Index("idx_trader_group_member_wallet_lower", text("lower(wallet_address)")),
     )
 
 

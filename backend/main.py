@@ -1028,11 +1028,11 @@ async def readiness_check():
     }
 
 
-_tui_health_cache: Optional[dict] = None
-_tui_health_refresh_task: Optional[asyncio.Task] = None
-_tui_health_cache_updated_at: datetime | None = None
-_TUI_HEALTH_CACHE_TTL_SECONDS = 5.0
-_TUI_HEALTH_WORKER_NAMES = (
+_gui_health_cache: Optional[dict] = None
+_gui_health_refresh_task: Optional[asyncio.Task] = None
+_gui_health_cache_updated_at: datetime | None = None
+_GUI_HEALTH_CACHE_TTL_SECONDS = 5.0
+_GUI_HEALTH_WORKER_NAMES = (
     "scanner",
     "scanner_slo",
     "discovery",
@@ -1047,14 +1047,14 @@ _TUI_HEALTH_WORKER_NAMES = (
 )
 
 
-async def _tui_health_db_queries() -> dict:
-    """DB-dependent portion of the TUI health check."""
+async def _gui_health_db_queries() -> dict:
+    """DB-dependent portion of the GUI health check."""
     async with AsyncSessionLocal() as session:
         scanner_status = await shared_state.get_scanner_status_from_db(session)
         worker_status_rows = await list_worker_snapshots(
             session,
             include_stats=False,
-            worker_names=_TUI_HEALTH_WORKER_NAMES,
+            worker_names=_GUI_HEALTH_WORKER_NAMES,
         )
         orchestrator_snapshot = await read_orchestrator_snapshot(session)
     return {
@@ -1065,7 +1065,7 @@ async def _tui_health_db_queries() -> dict:
     }
 
 
-def _build_tui_health_response(db: dict) -> dict:
+def _build_gui_health_response(db: dict) -> dict:
     scanner_status = db.get("scanner_status", {})
     worker_status_rows = db.get("worker_status_rows", [])
     orchestrator_snapshot = db.get("orchestrator_snapshot", {})
@@ -1134,49 +1134,49 @@ def _build_tui_health_response(db: dict) -> dict:
     }
 
 
-@app.get("/health/tui")
-async def tui_health_check():
-    """Lightweight health snapshot for high-frequency TUI polling.
+@app.get("/health/gui")
+async def gui_health_check():
+    """Lightweight health snapshot for high-frequency GUI polling.
 
     The DB queries are wrapped in a short timeout so that pool contention
-    doesn't block the response and cause the TUI to flap OFFLINE/ONLINE.
+    doesn't block the response and cause the GUI to flap OFFLINE/ONLINE.
     When the pool is busy the last successful result is served instead.
     """
-    global _tui_health_cache, _tui_health_cache_updated_at, _tui_health_refresh_task
-    if _tui_health_refresh_task is not None and _tui_health_refresh_task.done():
+    global _gui_health_cache, _gui_health_cache_updated_at, _gui_health_refresh_task
+    if _gui_health_refresh_task is not None and _gui_health_refresh_task.done():
         try:
-            _tui_health_cache = _tui_health_refresh_task.result()
-            _tui_health_cache_updated_at = utcnow()
+            _gui_health_cache = _gui_health_refresh_task.result()
+            _gui_health_cache_updated_at = utcnow()
         except Exception:
             pass
         finally:
-            _tui_health_refresh_task = None
+            _gui_health_refresh_task = None
     cache_age_seconds = None
-    if _tui_health_cache_updated_at is not None:
-        cache_age_seconds = max(0.0, (utcnow() - _tui_health_cache_updated_at).total_seconds())
+    if _gui_health_cache_updated_at is not None:
+        cache_age_seconds = max(0.0, (utcnow() - _gui_health_cache_updated_at).total_seconds())
     cache_is_fresh = bool(
-        _tui_health_cache is not None
+        _gui_health_cache is not None
         and cache_age_seconds is not None
-        and cache_age_seconds <= _TUI_HEALTH_CACHE_TTL_SECONDS
+        and cache_age_seconds <= _GUI_HEALTH_CACHE_TTL_SECONDS
     )
     if cache_is_fresh:
-        return _build_tui_health_response(_tui_health_cache or {"database": False})
-    if _tui_health_refresh_task is None:
-        _tui_health_refresh_task = asyncio.create_task(_tui_health_db_queries(), name="tui-health-db-queries")
-        if _tui_health_cache is not None:
-            return _build_tui_health_response(_tui_health_cache)
+        return _build_gui_health_response(_gui_health_cache or {"database": False})
+    if _gui_health_refresh_task is None:
+        _gui_health_refresh_task = asyncio.create_task(_gui_health_db_queries(), name="gui-health-db-queries")
+        if _gui_health_cache is not None:
+            return _build_gui_health_response(_gui_health_cache)
     try:
-        db = await asyncio.wait_for(asyncio.shield(_tui_health_refresh_task), timeout=2.0)
-        _tui_health_cache = db
-        _tui_health_cache_updated_at = utcnow()
+        db = await asyncio.wait_for(asyncio.shield(_gui_health_refresh_task), timeout=2.0)
+        _gui_health_cache = db
+        _gui_health_cache_updated_at = utcnow()
     except asyncio.TimeoutError:
-        db = _tui_health_cache or {"database": False}
+        db = _gui_health_cache or {"database": False}
     except Exception:
-        _tui_health_refresh_task = None
-        db = _tui_health_cache or {"database": False}
+        _gui_health_refresh_task = None
+        db = _gui_health_cache or {"database": False}
     else:
-        _tui_health_refresh_task = None
-    return _build_tui_health_response(db)
+        _gui_health_refresh_task = None
+    return _build_gui_health_response(db)
 
 
 def _get_news_status() -> dict:

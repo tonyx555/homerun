@@ -4,7 +4,7 @@ import asyncio
 from abc import ABC
 from dataclasses import dataclass, field
 from typing import Any, Optional, TypedDict
-from datetime import datetime
+from datetime import datetime, timezone
 
 from models import (
     Opportunity,
@@ -1408,16 +1408,34 @@ class BaseStrategy(ABC):
             # vs event end_date of "March 31, 2026").
             group_title = str(getattr(markets[0], "group_item_title", "") or "").strip()
             if group_title:
-                from dateutil import parser as _dateutil_parser
-                try:
-                    parsed_group_date = _dateutil_parser.parse(group_title, fuzzy=True)
-                    if parsed_group_date.tzinfo is None:
-                        from datetime import timezone as _tz
-                        parsed_group_date = parsed_group_date.replace(tzinfo=_tz.utc)
-                    if parsed_group_date > resolution_date:
-                        resolution_date = parsed_group_date
-                except (ValueError, OverflowError):
-                    pass
+                import re as _re
+                _MONTHS = {
+                    "january": 1, "february": 2, "march": 3, "april": 4,
+                    "may": 5, "june": 6, "july": 7, "august": 8,
+                    "september": 9, "october": 10, "november": 11, "december": 12,
+                }
+                _parsed_group_date = None
+                # Try "Month Day, Year" pattern
+                _m = _re.search(r'(\w+)\s+(\d{1,2}),?\s+(\d{4})', group_title)
+                if _m:
+                    _mon = _MONTHS.get(_m.group(1).lower())
+                    if _mon:
+                        try:
+                            _parsed_group_date = datetime(int(_m.group(3)), _mon, int(_m.group(2)),
+                                                          tzinfo=timezone.utc)
+                        except ValueError:
+                            pass
+                # Try ISO "YYYY-MM-DD" pattern
+                if _parsed_group_date is None:
+                    _m2 = _re.search(r'(\d{4})-(\d{2})-(\d{2})', group_title)
+                    if _m2:
+                        try:
+                            _parsed_group_date = datetime(int(_m2.group(1)), int(_m2.group(2)),
+                                                          int(_m2.group(3)), tzinfo=timezone.utc)
+                        except ValueError:
+                            pass
+                if _parsed_group_date is not None and _parsed_group_date > resolution_date:
+                    resolution_date = _parsed_group_date
 
         if custom_risk_score is not None:
             risk_score = float(max(0.0, min(1.0, custom_risk_score)))

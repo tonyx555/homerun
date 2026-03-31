@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Homerun GUI – Desktop launcher for the Homerun trading platform.
 
-Replaces the Textual TUI with a native tkinter window.  Zero extra
-dependencies – tkinter ships with every standard Python install.
+Native tkinter desktop launcher.  Zero extra dependencies – tkinter ships
+with every standard Python install.
 """
 from __future__ import annotations
 
@@ -194,7 +194,7 @@ _WORKER_PLANE_BY_NAME: dict[str, str] = {
     "events": "all", "trader_reconciliation": "all", "redeemer": "all",
 }
 
-HEALTH_URL = f"http://127.0.0.1:{BACKEND_PORT}/health/tui"
+HEALTH_URL = f"http://127.0.0.1:{BACKEND_PORT}/health/gui"
 PROJECT_ROOT = Path(__file__).parent.resolve()
 BACKEND_DIR = PROJECT_ROOT / "backend"
 
@@ -421,6 +421,20 @@ def format_log_line(line: str, tag: str) -> tuple[str, str]:
             if func:
                 parts.append(f"{func}()")
             parts.append(msg)
+            # Include extra_data key=value pairs (e.g. strategy, event_type)
+            extra = data.get("data")
+            if isinstance(extra, dict):
+                for k, v in extra.items():
+                    if v is not None:
+                        parts.append(f"{k}={v}")
+            # Append exception traceback (last line only) so errors are visible
+            exc_text = data.get("exception", "")
+            if exc_text:
+                # Take the last non-empty line of the traceback (the actual error)
+                exc_lines = [l for l in exc_text.strip().splitlines() if l.strip()]
+                if exc_lines:
+                    parts.append(f"|| {exc_lines[-1].strip()}")
+                    level = "ERROR"
             return (" ".join(parts), level)
         except (json.JSONDecodeError, KeyError):
             pass
@@ -980,9 +994,15 @@ class HomerunApp:
     def _normalize_worker_log_line(self, text: str) -> str:
         line = OSC_ESCAPE_RE.sub("", text.replace("\r", "")).strip()
         line = CONTROL_CHAR_RE.sub("", ANSI_ESCAPE_RE.sub("", line))
+        # Parse JSON log lines to extract readable message + exception info
+        if line.startswith("{"):
+            formatted, _ = format_log_line(line, "")
+            # strip the empty "[] " prefix from format_log_line
+            formatted = formatted.lstrip("[] ")
+            return formatted[:200] if formatted else ""
         if line.startswith("[") and "] " in line:
             line = line.split("] ", 1)[1]
-        return " ".join(line.strip().split())[:80]
+        return " ".join(line.strip().split())[:200]
 
     # ------------------------------------------------------------------
     # Worker panel rendering
@@ -1001,7 +1021,7 @@ class HomerunApp:
             "status-warn": YELLOW, "status-idle": FG_DIM,
         }.get(status_class, FG_DIM)
 
-        display = f"● {status}\n{meta}\n{log_lines[0][:60]}\n{log_lines[1][:60]}"
+        display = f"● {status}\n{meta}\n{log_lines[0][:120]}\n{log_lines[1][:120]}"
         panel = self._worker_panels.get(worker_name)
         if panel:
             try:
@@ -1602,7 +1622,7 @@ class HomerunApp:
         try:
             self._apply_health(data)
         except Exception as exc:
-            self._enqueue_log(f"TUI health apply failed: {exc}", source="SYSTEM", level="ERROR")
+            self._enqueue_log(f"GUI health apply failed: {exc}", source="SYSTEM", level="ERROR")
 
     def _apply_health(self, data: dict) -> None:
         self.backend_healthy = True

@@ -308,7 +308,10 @@ class EventDispatcher:
             raise
         except Exception as exc:
             logger.warning(
-                "Strategy event handler failed",
+                "Strategy event handler failed: %s (%s): %s",
+                slug,
+                event.event_type,
+                exc,
                 strategy=slug,
                 event_type=event.event_type,
                 exc_info=exc,
