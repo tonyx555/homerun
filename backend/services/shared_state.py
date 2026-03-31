@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Any, Optional
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import or_, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -259,6 +259,11 @@ async def read_market_catalog(
         columns.append(MarketCatalog.markets_json)
 
     stmt = select(*columns).where(MarketCatalog.id == CATALOG_ID)
+    # The market catalog JSON can be tens of megabytes; extend
+    # the statement timeout so the query isn't killed by the
+    # default 30s limit.
+    if include_markets or include_events:
+        await session.execute(text("SET LOCAL statement_timeout = '120s'"))
     row = (await session.execute(stmt)).one_or_none()
     if row is None:
         return [], [], {"updated_at": None, "error": None}
