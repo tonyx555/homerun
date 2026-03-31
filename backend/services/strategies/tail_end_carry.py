@@ -536,7 +536,7 @@ class TailEndCarryStrategy(BaseStrategy):
             group_title = str(getattr(market, "group_item_title", "") or "").strip()
             if group_title:
                 # Parse common date formats from group_item_title using
-                # stdlib only (dateutil is blocked by strategy sandbox).
+                # stdlib only (third-party date parsers are blocked by sandbox).
                 # Handles: "March 31, 2026", "December 31, 2026", "2026-12-31"
                 import re as _re
                 _MONTHS = {
