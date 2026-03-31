@@ -5,8 +5,6 @@ import { useAtomValue } from 'jotai'
 import { useQuery } from '@tanstack/react-query'
 import {
   CheckCircle2,
-  ChevronDown,
-  ChevronUp,
   Clock,
   ExternalLink,
   MessageCircle,
@@ -34,6 +32,7 @@ import { themeAtom } from '../store/atoms'
 import type { TrackedTraderOpportunity } from '../services/discoveryApi'
 import type { Opportunity, CryptoMarket } from '../services/api'
 import { getCryptoMarkets } from '../services/api'
+import BuyButton from './BuyButton'
 
 // ─── Unified Type ──────────────────────────────────────────
 
@@ -629,7 +628,7 @@ function TraderSignalCard({
   isModalView?: boolean
   onCloseModal?: () => void
 }) {
-  const [expanded, setExpanded] = useState(isModalView)
+  const expanded = isModalView
   const [modalOpen, setModalOpen] = useState(false)
   const themeMode = useAtomValue(themeAtom)
   const isBuy = signal.direction === 'BUY'
@@ -724,13 +723,50 @@ function TraderSignalCard({
       className={cn(
         'relative rounded-lg border bg-card/80 overflow-hidden transition-all cursor-pointer',
         !isModalView && 'hover:shadow-md',
-        isModalView && 'w-[min(1100px,calc(100vw-2rem))] max-h-[90vh] overflow-y-auto rounded-2xl border-border/70 bg-background shadow-[0_40px_120px_rgba(0,0,0,0.55)] [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden',
+        isModalView && 'w-[min(1100px,calc(100vw-2rem))] max-h-[90vh] overflow-hidden rounded-2xl border-border/70 bg-background shadow-[0_40px_120px_rgba(0,0,0,0.55)]',
         TIER_BORDER_COLORS[signal.tier],
       )}
-      onClick={() => setExpanded(!expanded)}
+      onClick={!isModalView ? () => setModalOpen(true) : undefined}
     >
       {/* Accent bar */}
       <div className={cn('absolute left-0 top-0 bottom-0 w-1', accentBar)} />
+
+      {/* ── Modal Header Bar ── */}
+      {isModalView && (
+        <div className="border-b border-border/60 px-4 py-3 flex-shrink-0">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <h3 className="text-sm font-semibold truncate max-w-[620px]" title={marketLabel}>
+                  {marketLabel}
+                </h3>
+                <Badge variant="outline" className={cn('h-5 px-1.5 text-[10px] font-medium border', SOURCE_COLORS[signal.source])}>
+                  {signal.source === 'insider' ? 'INSIDER' : 'CONFLUENCE'}
+                </Badge>
+                <Badge variant="outline" className={cn('h-5 px-1.5 text-[10px] font-bold', TIER_COLORS[signal.tier])}>
+                  {signal.tier}
+                </Badge>
+              </div>
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                {signal.direction || '—'} · {signal.wallet_count} wallets · Confidence {signal.confidence}
+              </p>
+            </div>
+            <div className="flex items-center gap-1 flex-shrink-0">
+              <BuyButton traderSignal={signal} variant="compact" />
+              <button
+                onClick={(e) => { e.stopPropagation(); onCloseModal?.() }}
+                className="inline-flex items-center gap-1 h-7 px-2 text-[11px] rounded-md border border-border/60 bg-background text-foreground hover:bg-muted/60 transition-colors font-medium"
+              >
+                <Minimize2 className="w-3 h-3" />
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Card Body (scrollable in modal) ── */}
+      <div className={cn(isModalView && 'max-h-[calc(90vh-72px)] overflow-y-auto')}>
 
       <div className={cn('bg-gradient-to-r p-4 pl-4', bgGradient)}>
         {/* Row 1: Header badges */}
@@ -1068,38 +1104,7 @@ function TraderSignalCard({
               Copilot
             </button>
           )}
-          {!isModalView ? (
-            <button
-              onClick={(e) => {
-                e.stopPropagation()
-                setModalOpen(true)
-              }}
-              className="inline-flex items-center gap-1 text-xs text-violet-300 hover:text-violet-200"
-              title="Expand this card"
-            >
-              <Maximize2 className="w-3 h-3" />
-              Expand
-            </button>
-          ) : (
-            <button
-              onClick={(e) => {
-                e.stopPropagation()
-                onCloseModal?.()
-              }}
-              className="inline-flex items-center gap-1 text-xs text-violet-300 hover:text-violet-200"
-              title="Return to grid"
-            >
-              <Minimize2 className="w-3 h-3" />
-              Pop In
-            </button>
-          )}
-          <div className="ml-auto">
-            {expanded ? (
-              <ChevronUp className="w-4 h-4 text-muted-foreground/60" />
-            ) : (
-              <ChevronDown className="w-4 h-4 text-muted-foreground/60" />
-            )}
-          </div>
+          <BuyButton traderSignal={signal} variant="inline" />
         </div>
 
         {/* Expanded details */}
@@ -1207,8 +1212,11 @@ function TraderSignalCard({
                 {signal.wallet_count} wallets
               </span>
             </div>
+
           </div>
         )}
+      </div>
+
       </div>
     </div>
       {!isModalView && typeof document !== 'undefined' && createPortal(

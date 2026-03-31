@@ -3,8 +3,6 @@ import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  ChevronDown,
-  ChevronUp,
   AlertTriangle,
   TrendingUp,
   ExternalLink,
@@ -15,7 +13,6 @@ import {
   Clock,
   CalendarDays,
   Layers,
-  Maximize2,
   Minimize2,
   Newspaper,
 } from 'lucide-react'
@@ -33,6 +30,7 @@ import { Liveline } from 'liveline'
 import type { LivelineSeries } from 'liveline'
 import { useAtomValue } from 'jotai'
 import { themeAtom } from '../store/atoms'
+import { Button } from './ui/button'
 import { Card } from './ui/card'
 import { Badge } from './ui/badge'
 import { Separator } from './ui/separator'
@@ -388,7 +386,6 @@ function OpportunityCard({
   isModalView = false,
   onCloseModal,
 }: Props) {
-  const [expanded, setExpanded] = useState(isModalView)
   const [aiExpanded, setAiExpanded] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const themeMode = useAtomValue(themeAtom)
@@ -752,7 +749,6 @@ function OpportunityCard({
 
   useEffect(() => {
     if (!isModalView) return
-    setExpanded(true)
     setAiExpanded(true)
   }, [isModalView])
 
@@ -778,14 +774,61 @@ function OpportunityCard({
 
   return (
     <>
-    <Card className={cn(
-      "overflow-hidden relative group transition-all duration-200",
-      !isModalView && "hover:shadow-lg hover:shadow-black/20 hover:border-border/80",
-      isModalView && "w-[min(1100px,calc(100vw-2rem))] max-h-[90vh] overflow-y-auto rounded-2xl border-border/70 bg-background shadow-[0_40px_120px_rgba(0,0,0,0.55)] [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden",
-      bgGradient && `bg-gradient-to-r ${bgGradient}`
-    )}>
+    <Card
+      className={cn(
+        "overflow-hidden relative group transition-all duration-200",
+        !isModalView && "hover:shadow-lg hover:shadow-black/20 hover:border-border/80 cursor-pointer",
+        isModalView && "w-[min(1100px,calc(100vw-2rem))] max-h-[90vh] overflow-hidden rounded-2xl border-border/70 bg-background shadow-[0_40px_120px_rgba(0,0,0,0.55)]",
+        bgGradient && `bg-gradient-to-r ${bgGradient}`
+      )}
+      onClick={!isModalView ? () => setModalOpen(true) : undefined}
+    >
       {/* Left accent bar */}
       <div className={cn("absolute left-0 top-0 bottom-0 w-1 rounded-l-lg transition-all", accentColor)} />
+
+      {/* ── Modal Header Bar ── */}
+      {isModalView && (
+        <div className="border-b border-border/60 px-4 py-3 flex-shrink-0">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <h3 className="text-sm font-semibold truncate max-w-[620px]" title={opportunity.title}>
+                  {opportunity.title}
+                </h3>
+                <Badge variant="outline" className={cn("h-5 px-1.5 text-[10px]", STRATEGY_COLORS[opportunity.strategy])}>
+                  {STRATEGY_NAMES[opportunity.strategy] || opportunity.strategy}
+                </Badge>
+                {opportunity.category && (
+                  <Badge variant="outline" className="h-5 px-1.5 text-[10px] border-border/80 bg-muted/60 text-muted-foreground">
+                    {opportunity.category}
+                  </Badge>
+                )}
+              </div>
+              <p className="mt-1 text-[11px] text-muted-foreground truncate max-w-[620px]">
+                {opportunity.description || opportunity.title}
+              </p>
+            </div>
+            <div className="flex items-center gap-1 flex-shrink-0">
+              {!isSearch && (
+                <BuyButton opportunity={opportunity} variant="compact" />
+              )}
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-7 px-2 text-[11px]"
+                onClick={(e) => { e.stopPropagation(); onCloseModal?.() }}
+              >
+                <Minimize2 className="w-3 h-3 mr-1" />
+                Close
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Card Body (scrollable in modal) ── */}
+      <div className={cn(isModalView && "max-h-[calc(90vh-72px)] overflow-y-auto")}>
 
       <div className="pl-4 pr-3 py-2.5 space-y-2">
         {/* ── Row 1: Badges + ROI / Prices ── */}
@@ -892,19 +935,19 @@ function OpportunityCard({
                 theme={themeMode}
                 window={livelineWindow}
                 paused={livelineSeries.length <= 1}
-                grid={expanded || isModalView}
+                grid={isModalView}
                 badge={false}
                 fill={livelineSeries.length <= 1}
                 pulse={false}
-                momentum={expanded || isModalView}
-                scrub={expanded || isModalView}
+                momentum={isModalView}
+                scrub={isModalView}
                 seriesToggleCompact
                 lerpSpeed={0.15}
-                padding={expanded || isModalView
+                padding={isModalView
                   ? { top: 6, right: 6, bottom: 6, left: 6 }
                   : { top: 4, right: 4, bottom: 4, left: 4 }}
                 formatValue={(v) => v.toFixed(2)}
-                style={{ height: expanded || isModalView ? 132 : 64 }}
+                style={{ height: isModalView ? 132 : 64 }}
               />
               <div className={cn(
                 "mt-0 flex flex-wrap gap-x-1.5 gap-y-0.5 px-0.5 text-[9px] font-data"
@@ -1144,43 +1187,6 @@ function OpportunityCard({
               News
             </button>
           )}
-          <div className="ml-auto flex items-center gap-2">
-            {!isModalView ? (
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  setModalOpen(true)
-                }}
-                className="inline-flex items-center gap-1 h-6 px-2 text-[10px] rounded border bg-violet-500/10 text-violet-300 border-violet-500/20 hover:bg-violet-500/20 transition-colors font-medium"
-                title="Expand this card"
-              >
-                <Maximize2 className="w-2.5 h-2.5" />
-                Expand
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  onCloseModal?.()
-                }}
-                className="inline-flex items-center gap-1 h-6 px-2 text-[10px] rounded border bg-violet-500/10 text-violet-300 border-violet-500/20 hover:bg-violet-500/20 transition-colors font-medium"
-                title="Return to list"
-              >
-                <Minimize2 className="w-2.5 h-2.5" />
-                Pop In
-              </button>
-            )}
-            <button
-              type="button"
-              className="flex items-center gap-1 text-[10px] text-muted-foreground cursor-pointer hover:text-foreground transition-colors"
-              onClick={() => setExpanded(!expanded)}
-            >
-              {expanded ? 'Less' : 'More'}
-              {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-            </button>
-          </div>
         </div>
 
         {judgeMutation.error && (
@@ -1192,8 +1198,8 @@ function OpportunityCard({
         )}
       </div>
 
-      {/* ── Expanded Details ── */}
-      {expanded && (
+      {/* ── Expanded Details (modal only) ── */}
+      {isModalView && (
         <>
           <Separator />
           <div className="p-3 pl-4 space-y-3">
@@ -1469,13 +1475,11 @@ function OpportunityCard({
               </div>
             )}
 
-            {/* Buy Button */}
-            {!isSearch && (
-              <BuyButton opportunity={opportunity} />
-            )}
           </div>
         </>
       )}
+
+      </div>
     </Card>
       {!isModalView && typeof document !== 'undefined' && createPortal(
         <AnimatePresence>
