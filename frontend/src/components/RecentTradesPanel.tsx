@@ -643,16 +643,27 @@ export default function RecentTradesPanel({
     filteredOutSignals,
   ])
 
+  // Stabilize analyze targets by comparing serialized IDs to avoid
+  // infinite re-render loops (setState → parent re-render → new array
+  // refs → effect fires again).
+  const analyzeVisibleKey = useMemo(
+    () => (showOpportunities ? paginatedSignals.map((s) => s.id).join(',') : ''),
+    [showOpportunities, paginatedSignals]
+  )
+  const analyzeAllKey = useMemo(
+    () => (showOpportunities ? unifiedSignals.map((s) => s.id).join(',') : ''),
+    [showOpportunities, unifiedSignals]
+  )
   useEffect(() => {
     if (!showOpportunities) {
       onAnalyzeTargetsChange?.({ visibleIds: [], allIds: [] })
       return
     }
     onAnalyzeTargetsChange?.({
-      visibleIds: Array.from(new Set(paginatedSignals.map((signal) => signal.id))),
-      allIds: Array.from(new Set(unifiedSignals.map((signal) => signal.id))),
+      visibleIds: analyzeVisibleKey ? analyzeVisibleKey.split(',') : [],
+      allIds: analyzeAllKey ? analyzeAllKey.split(',') : [],
     })
-  }, [showOpportunities, onAnalyzeTargetsChange, paginatedSignals, unifiedSignals])
+  }, [showOpportunities, onAnalyzeTargetsChange, analyzeVisibleKey, analyzeAllKey])
 
   const trackedWalletActivity = useMemo(() => {
     const map = new Map<
