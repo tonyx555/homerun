@@ -603,6 +603,14 @@ class ExecutionSessionEngine:
                         1,
                     )
                     if reprice_price is not None:
+                        # Cancel the failed order before repricing to prevent double-fills
+                        prev_clob_id = str(getattr(result, "clob_order_id", "") or "").strip()
+                        if prev_clob_id:
+                            try:
+                                from services.live_execution_service import live_execution_service
+                                await live_execution_service.cancel_order(prev_clob_id)
+                            except Exception:
+                                pass
                         leg_payload["limit_price"] = reprice_price
                         async with release_conn(self.db):
                             retry_result = (

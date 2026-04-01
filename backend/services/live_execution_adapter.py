@@ -264,6 +264,13 @@ async def execute_live_order(
                 else resolved_price + _POST_ONLY_REPRICE_TICK
             )
             if abs(retry_price - resolved_price) >= 1e-9:
+                # Cancel the first order before retrying to prevent double-fills
+                first_clob_id = str(getattr(order, "clob_order_id", "") or "").strip()
+                if first_clob_id:
+                    try:
+                        await live_execution_service.cancel_order(first_clob_id)
+                    except Exception:
+                        logger.warning("Post-only retry: cancel of first order failed", clob_order_id=first_clob_id)
                 retry_order = await live_execution_service.place_order(
                     token_id=normalized_token_id,
                     side=normalized_side,
