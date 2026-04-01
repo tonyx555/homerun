@@ -9192,7 +9192,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                   <tr className="border-b">
                                     <th className="w-[32%] h-8 px-4 text-left align-middle font-medium text-muted-foreground text-[10px]">Market</th>
                                     <th className="w-[6%] h-8 px-4 text-left align-middle font-medium text-muted-foreground text-[10px]">Dir</th>
-                                    <th className="w-[8%] h-8 px-4 text-right align-middle font-medium text-muted-foreground text-[10px]">Notional</th>
+                                    <th className="w-[8%] h-8 px-4 text-right align-middle font-medium text-muted-foreground text-[10px]">Value</th>
                                     <th className="w-[6%] h-8 px-4 text-right align-middle font-medium text-muted-foreground text-[10px]">Fill</th>
                                     <th className="w-[6%] h-8 px-4 text-right align-middle font-medium text-muted-foreground text-[10px]">Fill Progress</th>
                                     <th className="w-[6%] h-8 px-4 text-right align-middle font-medium text-muted-foreground text-[10px]">Mark</th>
@@ -9405,7 +9405,17 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                             {directionPresentation.label}
                                           </Badge>
                                         </TableCell>
-                                        <TableCell className="text-right font-mono py-0.5 text-[10px]">{formatCurrency(toNumber(order.notional_usd), true)}</TableCell>
+                                        <TableCell
+                                          className="text-right font-mono py-0.5 text-[10px]"
+                                          title={`Entry: ${formatCurrency(filledNotional > 0 ? filledNotional : toNumber(order.notional_usd), true)} | Shares: ${filledSize > 0 ? filledSize.toFixed(1) : '\u2014'}`}
+                                        >
+                                          {(() => {
+                                            const cv = markPx > 0 && filledSize > 0
+                                              ? markPx * filledSize
+                                              : filledNotional > 0 ? filledNotional : toNumber(order.notional_usd)
+                                            return cv > 0 ? formatCurrency(cv, true) : '\u2014'
+                                          })()}
+                                        </TableCell>
                                         <TableCell className="text-right font-mono py-0.5 text-[10px]">{fillPx > 0 ? fillPx.toFixed(3) : '\u2014'}</TableCell>
                                         <TableCell className="text-right font-mono py-0.5 text-[10px]">{fillProgressPercent !== null ? formatPercent(fillProgressPercent, 0) : '\u2014'}</TableCell>
                                         <TableCell className="text-right font-mono py-0.5 text-[10px]">{markPx > 0 ? <FlashNumber value={markPx} decimals={3} className="font-mono" /> : '\u2014'}</TableCell>
@@ -10043,7 +10053,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                               <TableRow>
                                 <TableHead className="w-[32%] text-[10px]">Market</TableHead>
                                 <TableHead className="w-[6%] text-[10px]">Dir</TableHead>
-                                <TableHead className="w-[8%] text-[10px] text-right">Notional</TableHead>
+                                <TableHead className="w-[8%] text-[10px] text-right">Value</TableHead>
                                 <TableHead className="w-[6%] text-[10px] text-right">Fill</TableHead>
                                 <TableHead className="w-[6%] text-[10px] text-right">Fill Progress</TableHead>
                                 <TableHead className="w-[6%] text-[10px] text-right">Mark</TableHead>
@@ -10065,6 +10075,8 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                   lifecycleLabel,
                                   fillPx,
                                   markPx,
+                                  filledSize,
+                                  filledNotional,
                                   unrealized,
                                   fillProgressPercent,
                                   dynamicEdgePercent,
@@ -10085,6 +10097,9 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                   outcomeDetail,
                                   venuePresentation,
                                 } = row
+                                const currentValue = markPx > 0 && filledSize > 0
+                                  ? markPx * filledSize
+                                  : filledNotional > 0 ? filledNotional : toNumber(order.notional_usd)
                                 const pendingExitLabel = pendingExitStatus && pendingExitStatus !== 'unknown'
                                   ? (pendingExitStatus === 'failed' && OPEN_ORDER_STATUSES.has(status)
                                     ? 'Exit:RETRY'
@@ -10169,7 +10184,12 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                           {directionLabel}
                                         </Badge>
                                       </TableCell>
-                                      <TableCell className="text-right font-mono py-0.5 text-[10px]">{formatCurrency(toNumber(order.notional_usd), true)}</TableCell>
+                                      <TableCell
+                                        className="text-right font-mono py-0.5 text-[10px]"
+                                        title={`Entry: ${formatCurrency(filledNotional > 0 ? filledNotional : toNumber(order.notional_usd), true)} | Shares: ${filledSize > 0 ? filledSize.toFixed(1) : '\u2014'}`}
+                                      >
+                                        {currentValue > 0 ? formatCurrency(currentValue, true) : '\u2014'}
+                                      </TableCell>
                                       <TableCell className="text-right font-mono py-0.5 text-[10px]">{fillPx > 0 ? fillPx.toFixed(3) : '\u2014'}</TableCell>
                                       <TableCell className="text-right font-mono py-0.5 text-[10px]">{fillProgressPercent !== null ? formatPercent(fillProgressPercent, 0) : '\u2014'}</TableCell>
                                       <TableCell className="text-right font-mono py-0.5 text-[10px]">
