@@ -111,7 +111,7 @@ function formatUsd(value: number): string {
 
 export default function BuyButton({ opportunity, traderSignal, className, variant = 'full' }: BuyButtonProps) {
   const [open, setOpen] = useState(false)
-  const [result, setResult] = useState<{ success: boolean; message: string } | null>(null)
+  const [result, setResult] = useState<{ success: boolean; message: string; traderId?: string } | null>(null)
   const [sizeUsd, setSizeUsd] = useState<number | null>(null)
   const [customSize, setCustomSize] = useState('')
   const [selectedTraderId, setSelectedTraderId] = useState<string | null>(null)
@@ -158,12 +158,11 @@ export default function BuyButton({ opportunity, traderSignal, className, varian
       })
     },
     onSuccess: (data) => {
-      setResult({ success: data.status !== 'partial_failure', message: data.message })
-      setOpen(false)
-      resetModal()
+      const success = data.status !== 'partial_failure'
+      setResult({ success, message: data.message, traderId: selectedTraderId || undefined })
+      setConfirmStep(false)
       queryClient.invalidateQueries({ queryKey: ['trader-orders'] })
       queryClient.invalidateQueries({ queryKey: ['trading-positions'] })
-      setTimeout(() => setResult(null), 4000)
     },
     onError: (error: any) => {
       setResult({
@@ -171,7 +170,6 @@ export default function BuyButton({ opportunity, traderSignal, className, varian
         message: error?.response?.data?.detail || error?.message || 'Buy failed',
       })
       setConfirmStep(false)
-      setTimeout(() => setResult(null), 4000)
     },
   })
 
@@ -204,25 +202,6 @@ export default function BuyButton({ opportunity, traderSignal, className, varian
 
   return (
     <div className={cn('relative', className)}>
-      <AnimatePresence>
-        {result && (
-          <motion.div
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -4 }}
-            className={cn(
-              'absolute bottom-full mb-1 left-0 right-0 rounded-md px-2 py-1 text-[10px] z-50 flex items-center gap-1',
-              result.success
-                ? 'bg-green-500/20 text-green-400 border border-green-500/30'
-                : 'bg-red-500/20 text-red-400 border border-red-500/30'
-            )}
-          >
-            {result.success ? <Check className="w-3 h-3 flex-shrink-0" /> : <AlertTriangle className="w-3 h-3 flex-shrink-0" />}
-            <span className="truncate">{result.message}</span>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
       {variant === 'inline' ? (
         <button
           onClick={handleOpen}
@@ -531,8 +510,65 @@ export default function BuyButton({ opportunity, traderSignal, className, varian
               </div>
 
               {/* Footer */}
-              <div className="px-5 py-4 border-t border-border/60 bg-muted/20 flex-shrink-0">
-                {confirmStep && selectedTrader?.mode === 'live' ? (
+              <div className="px-5 py-4 border-t border-border/60 bg-muted/20 flex-shrink-0 space-y-3">
+                {/* Result Banner (shows after execution) */}
+                {result && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 4 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className={cn(
+                      'flex items-start gap-2 px-3 py-2.5 rounded-lg border',
+                      result.success
+                        ? 'bg-green-500/10 border-green-500/20'
+                        : 'bg-red-500/10 border-red-500/20'
+                    )}
+                  >
+                    {result.success
+                      ? <Check className="w-4 h-4 text-green-400 flex-shrink-0 mt-0.5" />
+                      : <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />}
+                    <div className="flex-1 min-w-0">
+                      <p className={cn('text-xs font-medium', result.success ? 'text-green-400' : 'text-red-400')}>
+                        {result.success ? 'Order Placed' : 'Order Failed'}
+                      </p>
+                      <p className={cn('text-[11px] mt-0.5', result.success ? 'text-green-400/70' : 'text-red-400/70')}>
+                        {result.message}
+                      </p>
+                    </div>
+                  </motion.div>
+                )}
+
+                {result ? (
+                  <div className="flex gap-2">
+                    {result.traderId && (
+                      <Button
+                        onClick={() => {
+                          setOpen(false)
+                          setResult(null)
+                          resetModal()
+                          window.location.hash = `#/traders/${result.traderId}`
+                        }}
+                        size="sm"
+                        variant="outline"
+                        className="flex-1 h-9 text-xs"
+                      >
+                        <Bot className="w-3.5 h-3.5 mr-1.5" />
+                        Go to Trader
+                      </Button>
+                    )}
+                    <Button
+                      onClick={() => { setOpen(false); setResult(null); resetModal() }}
+                      size="sm"
+                      className={cn(
+                        'flex-1 h-9 text-xs',
+                        result.success
+                          ? 'bg-green-500/20 hover:bg-green-500/30 text-green-400 border border-green-500/30'
+                          : 'bg-muted/40 hover:bg-muted/60 text-foreground border border-border/50'
+                      )}
+                    >
+                      {result.success ? 'Done' : 'Close'}
+                    </Button>
+                  </div>
+                ) : confirmStep && selectedTrader?.mode === 'live' ? (
                   <div className="space-y-3">
                     <div className="flex items-start gap-2 px-3 py-2.5 rounded-lg bg-red-500/10 border border-red-500/20">
                       <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
