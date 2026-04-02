@@ -30,23 +30,25 @@ import { Switch } from './ui/switch'
 import { Separator } from './ui/separator'
 import { Badge } from './ui/badge'
 import {
-  getSettings,
-  updateSettings,
-  testTelegramConnection,
-  testTradingProxy,
   flushDatabaseData,
   getDatabaseMaintenanceStats,
   runVacuumAnalyze,
   runReindexTables,
-  exportSettingsBundle,
-  importSettingsBundle,
   runWorkerOnce,
   type DatabaseFlushTarget,
+} from '../services/apiTraders'
+import {
+  getSettings,
+  updateSettings,
+  testTelegramConnection,
+  testTradingProxy,
+  exportSettingsBundle,
+  importSettingsBundle,
   type DiscoverySettings,
   type UILockSettings,
   type SettingsTransferCategory,
   type SettingsExportBundle,
-} from '../services/api'
+} from '../services/apiSettings'
 
 type SettingsSection =
   | 'search'

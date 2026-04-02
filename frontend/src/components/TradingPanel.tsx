@@ -27,6 +27,12 @@ import {
   Zap,
 } from 'lucide-react'
 import {
+  getCryptoMarkets,
+  getSimulationAccounts,
+  getWallets,
+} from '../services/apiCore'
+import type { CryptoMarket } from '../services/apiCore'
+import {
   activateTrader,
   armTraderOrchestratorLiveStart,
   createTrader,
@@ -35,17 +41,12 @@ import {
   getAllTraderDecisions,
   getAllTraderOrders,
   getAllTraderEventsBulk,
-  getSettings,
   getTraderMarketHistory,
-  getCryptoMarkets,
-  type CryptoMarket,
   getTraderDecisionDetail,
   getTraderConfigSchema,
   getTraderOrchestratorOverview,
   getTraderOrdersSummary,
   getTraderSources,
-  getSimulationAccounts,
-  getWallets,
   getTraders,
   runTraderOnce,
   runTraderOrchestratorLivePreflight,
@@ -56,7 +57,6 @@ import {
   stopTrader,
   stopTraderOrchestrator,
   stopTraderOrchestratorLive,
-  runTraderTuneIteration,
   sellTraderOrderNow,
   reconcileTraderOrder,
   type ExecutionLatencySummary,
@@ -70,12 +70,13 @@ import {
   type TraderStopLifecycleMode,
   type TraderSourceConfig,
   type TraderSource,
-  type TraderTuneAgentResponse,
-  updateSettings,
   updateTrader,
   type TraderOrchestratorConfig,
   updateTraderOrchestratorSettings,
-} from '../services/api'
+} from '../services/apiTraders'
+import { getSettings, updateSettings } from '../services/apiSettings'
+import { runTraderTuneIteration } from '../services/apiIntelligence'
+import type { TraderTuneAgentResponse } from '../services/apiIntelligence'
 import { discoveryApi } from '../services/discoveryApi'
 import { cn } from '../lib/utils'
 import { getTraderOrderPlatformLinks } from '../lib/marketUrls'

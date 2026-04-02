@@ -50,30 +50,36 @@ import {
   triggerScan,
   clearOpportunities,
   getStrategies,
+  getSimulationAccounts,
+  getCryptoMarkets,
+} from './services/apiCore'
+import type { Opportunity } from './services/apiCore'
+import {
   getWorkersStatus,
   getTradingVpnStatus,
   getTradingStatus,
   getTradingPositions,
   getTradingBalance,
   analyzeWalletPnL,
+  getSignalStats,
+  pauseAllWorkers,
+  resumeAllWorkers,
+} from './services/apiTraders'
+import type { WorkerStatus } from './services/apiTraders'
+import {
+  getUILockStatus,
+  lockUILock,
+  sendUILockActivity,
+  unlockUILock,
+} from './services/apiSettings'
+import {
   getKalshiStatus,
   getKalshiPositions,
   getKalshiBalance,
-  getUILockStatus,
-  pauseAllWorkers,
-  resumeAllWorkers,
-  lockUILock,
-  sendUILockActivity,
   judgeOpportunitiesBulk,
-  getSimulationAccounts,
   getNewsWorkflowFindings,
   getWeatherWorkflowOpportunityIds,
-  getCryptoMarkets,
-  getSignalStats,
-  Opportunity,
-  WorkerStatus,
-  unlockUILock,
-} from './services/api'
+} from './services/apiIntelligence'
 import { useWebSocket } from './hooks/useWebSocket'
 import { useKeyboardShortcuts, Shortcut } from './hooks/useKeyboardShortcuts'
 import { useRealtimeInvalidation } from './hooks/useRealtimeInvalidation'
