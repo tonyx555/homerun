@@ -59,6 +59,16 @@ def _sigmoid(z: float) -> float:
     return 1.0 / (1.0 + math.exp(-bounded))
 
 
+def _ml_probability_yes(row: dict[str, Any]) -> float | None:
+    prediction = row.get("ml_prediction")
+    if not isinstance(prediction, dict):
+        return None
+    probability_yes = safe_float(prediction.get("probability_yes"), None)
+    if probability_yes is None:
+        return None
+    return clamp(float(probability_yes), 0.03, 0.97)
+
+
 class BTC5mReversalSniperStrategy(BaseStrategy):
     """Snipes the last-second reversal in BTC 5-minute binary markets.
 
@@ -300,9 +310,12 @@ class BTC5mReversalSniperStrategy(BaseStrategy):
         # The edge = (oracle_prob * $1 - selected_price) / selected_price
 
         # Model oracle probability using sigmoid on price divergence
-        oracle_scale = max(0.05, to_float(cfg.get("oracle_confidence_scale", 0.35), 0.35))
-        z_value = diff_pct / oracle_scale
-        model_prob_yes = clamp(_sigmoid(z_value), 0.03, 0.97)
+        model_prob_yes = _ml_probability_yes(row)
+        model_source = "active_model" if model_prob_yes is not None else "heuristic_sigmoid"
+        if model_prob_yes is None:
+            oracle_scale = max(0.05, to_float(cfg.get("oracle_confidence_scale", 0.35), 0.35))
+            z_value = diff_pct / oracle_scale
+            model_prob_yes = clamp(_sigmoid(z_value), 0.03, 0.97)
         model_prob_no = 1.0 - model_prob_yes
 
         if oracle_direction == "buy_yes":
@@ -411,6 +424,7 @@ class BTC5mReversalSniperStrategy(BaseStrategy):
             "expected_prob": float(expected_prob),
             "model_prob_yes": float(model_prob_yes),
             "model_prob_no": float(model_prob_no),
+            "model_source": model_source,
             "oracle_age_seconds": float(oracle_age_seconds),
             "mid_price": float(mid_price),
             "market_consensus": market_consensus,
@@ -467,6 +481,7 @@ class BTC5mReversalSniperStrategy(BaseStrategy):
             "expected_prob": signal["expected_prob"],
             "model_prob_yes": signal["model_prob_yes"],
             "model_prob_no": signal["model_prob_no"],
+            "model_source": signal["model_source"],
             "oracle_age_seconds": signal["oracle_age_seconds"],
             "mid_price": signal["mid_price"],
             "market_consensus": signal["market_consensus"],

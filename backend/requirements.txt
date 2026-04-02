@@ -12,7 +12,7 @@ greenlet>=3.0.0
 cryptography>=42.0.0
 
 # urllib3 is pulled in transitively by requests (via sentence-transformers /
-# huggingface-hub).  v2 requires OpenSSL 1.1.1+ which is available on
+# huggingface-hub). v2 requires OpenSSL 1.1.1+ which is available on
 # Python 3.9+ from Homebrew/python.org (macOS) and all Windows installs.
 urllib3>=1.26.0
 
@@ -25,8 +25,9 @@ feedparser>=6.0
 
 # News Intelligence Layer (semantic matching)
 numpy>=1.24.0
-sentence-transformers>=2.2.0  # Embedding model (optional — TF-IDF fallback if missing)
-faiss-cpu>=1.7.0              # Fast vector search (optional — numpy fallback if missing)
+scikit-learn>=1.8.0
+sentence-transformers>=2.2.0
+faiss-cpu>=1.7.0
 
 # GUI uses tkinter (ships with Python, no pip install needed)
 pytest-asyncio>=0.23.0,<1.0

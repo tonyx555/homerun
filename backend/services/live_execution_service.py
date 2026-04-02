@@ -1566,11 +1566,20 @@ class LiveExecutionService:
                             if row is None:
                                 row = LiveTradingOrder(id=order.id, wallet_address=wallet)
                                 session.add(row)
+                            token_key = str(order.token_id or "").strip()
+                            authoritative_market_question = order.market_question
+                            if token_key:
+                                position = self._positions.get(token_key)
+                                if position is not None:
+                                    position_market_question = str(position.market_question or "").strip()
+                                    if position_market_question:
+                                        authoritative_market_question = position_market_question
+                                        order.market_question = position_market_question
                             created_at = _normalize_utc_datetime(order.created_at) or utcnow()
                             updated_at = _normalize_utc_datetime(order.updated_at) or utcnow()
                             row.wallet_address = wallet
                             row.clob_order_id = str(order.clob_order_id or "").strip() or None
-                            row.token_id = str(order.token_id or "").strip()
+                            row.token_id = token_key
                             row.side = order.side.value
                             row.price = float(order.price)
                             row.size = float(order.size)
@@ -1578,7 +1587,7 @@ class LiveExecutionService:
                             row.status = order.status.value
                             row.filled_size = float(order.filled_size)
                             row.average_fill_price = float(order.average_fill_price)
-                            row.market_question = order.market_question
+                            row.market_question = authoritative_market_question
                             row.opportunity_id = order.opportunity_id
                             row.error_message = order.error_message
                             row.created_at = created_at
@@ -1726,43 +1735,6 @@ class LiveExecutionService:
                         )
                         runtime_row = runtime_result.scalar_one_or_none()
 
-                        self._orders.clear()
-                        orders_result = await session.execute(
-                            select(LiveTradingOrder)
-                            .where(LiveTradingOrder.wallet_address == wallet)
-                            .order_by(LiveTradingOrder.created_at.desc())
-                            .limit(self._max_order_history)
-                        )
-                        persisted_orders = list(orders_result.scalars().all())
-                        persisted_orders.reverse()
-                        for row in persisted_orders:
-                            side_raw = str(row.side or "").strip().upper()
-                            side = OrderSide.SELL if side_raw == OrderSide.SELL.value else OrderSide.BUY
-                            order_type = _normalize_order_type(row.order_type)
-                            status_raw = str(row.status or "").strip().lower()
-                            try:
-                                status = OrderStatus(status_raw)
-                            except ValueError:
-                                status = OrderStatus.PENDING
-                            order = Order(
-                                id=str(row.id),
-                                token_id=str(row.token_id or ""),
-                                side=side,
-                                price=float(safe_float(row.price, 0.0) or 0.0),
-                                size=float(safe_float(row.size, 0.0) or 0.0),
-                                order_type=order_type,
-                                status=status,
-                                filled_size=float(safe_float(row.filled_size, 0.0) or 0.0),
-                                average_fill_price=float(safe_float(row.average_fill_price, 0.0) or 0.0),
-                                created_at=_normalize_utc_datetime(row.created_at) or utcnow(),
-                                updated_at=_normalize_utc_datetime(row.updated_at) or utcnow(),
-                                clob_order_id=str(row.clob_order_id or "").strip() or None,
-                                error_message=row.error_message,
-                                market_question=row.market_question,
-                                opportunity_id=row.opportunity_id,
-                            )
-                            self._remember_order(order)
-
                         self._positions.clear()
                         positions_result = await session.execute(
                             select(LiveTradingPosition).where(LiveTradingPosition.wallet_address == wallet)
@@ -1782,6 +1754,50 @@ class LiveExecutionService:
                                 unrealized_pnl=float(safe_float(row.unrealized_pnl, 0.0) or 0.0),
                                 created_at=_normalize_utc_datetime(row.created_at) or utcnow(),
                             )
+
+                        self._orders.clear()
+                        orders_result = await session.execute(
+                            select(LiveTradingOrder)
+                            .where(LiveTradingOrder.wallet_address == wallet)
+                            .order_by(LiveTradingOrder.created_at.desc())
+                            .limit(self._max_order_history)
+                        )
+                        persisted_orders = list(orders_result.scalars().all())
+                        persisted_orders.reverse()
+                        for row in persisted_orders:
+                            token_key = str(row.token_id or "").strip()
+                            side_raw = str(row.side or "").strip().upper()
+                            side = OrderSide.SELL if side_raw == OrderSide.SELL.value else OrderSide.BUY
+                            order_type = _normalize_order_type(row.order_type)
+                            status_raw = str(row.status or "").strip().lower()
+                            try:
+                                status = OrderStatus(status_raw)
+                            except ValueError:
+                                status = OrderStatus.PENDING
+                            market_question = row.market_question
+                            position = self._positions.get(token_key)
+                            if position is not None:
+                                position_market_question = str(position.market_question or "").strip()
+                                if position_market_question:
+                                    market_question = position_market_question
+                            order = Order(
+                                id=str(row.id),
+                                token_id=token_key,
+                                side=side,
+                                price=float(safe_float(row.price, 0.0) or 0.0),
+                                size=float(safe_float(row.size, 0.0) or 0.0),
+                                order_type=order_type,
+                                status=status,
+                                filled_size=float(safe_float(row.filled_size, 0.0) or 0.0),
+                                average_fill_price=float(safe_float(row.average_fill_price, 0.0) or 0.0),
+                                created_at=_normalize_utc_datetime(row.created_at) or utcnow(),
+                                updated_at=_normalize_utc_datetime(row.updated_at) or utcnow(),
+                                clob_order_id=str(row.clob_order_id or "").strip() or None,
+                                error_message=row.error_message,
+                                market_question=market_question,
+                                opportunity_id=row.opportunity_id,
+                            )
+                            self._remember_order(order)
 
                         if runtime_row is not None:
                             self._stats.total_trades = int(runtime_row.total_trades or 0)

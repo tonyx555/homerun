@@ -64,6 +64,8 @@ import {
   type TraderConfigSchema,
   type TraderEvent,
   type TraderOrder,
+  type TraderOrderTradeBundle,
+  type TraderOrderTradeBundleLeg,
   type TraderStopPayload,
   type TraderStopLifecycleMode,
   type TraderSourceConfig,
@@ -136,6 +138,119 @@ type TerminalLeg = {
   marketId: string | null
   marketQuestion: string | null
   price: number | null
+}
+
+type TradeTableOrderRow = {
+  order: TraderOrder
+  status: string
+  lifecycleLabel: string
+  pnl: number
+  fillPx: number
+  markPx: number
+  filledSize: number
+  filledNotional: number
+  requestedNotional: number
+  currentValue: number
+  unrealized: number
+  fillProgressPercent: number | null
+  dynamicEdgePercent: number
+  exitProgressPercent: number | null
+  markUpdatedAt: string | null
+  exitEvaluatedAt: string | null
+  providerSnapshotStatus: string
+  pendingExitStatus: string
+  closeTrigger: string | null
+  pendingExit: Record<string, unknown>
+  markFresh: boolean
+  links: {
+    polymarket: string | null
+    kalshi: string | null
+  }
+  directionSide: DirectionSide | null
+  directionLabel: string
+  yesLabel: string | null
+  noLabel: string | null
+  executionSummary: string
+  outcomeHeadline: string
+  outcomeDetail: string
+  venuePresentation: {
+    label: string
+    detail: string
+    className: string
+  }
+}
+
+type TradeTableBundleLegRow = {
+  leg: TraderOrderTradeBundleLeg
+  rows: TradeTableOrderRow[]
+  row: TradeTableOrderRow | null
+  filledSize: number
+  filledNotional: number
+  currentValue: number
+  unrealized: number
+  pnl: number
+  fillPx: number | null
+  markPx: number | null
+}
+
+type TradeTableDisplayRow =
+  | {
+      kind: 'single'
+      key: string
+      row: TradeTableOrderRow
+    }
+  | {
+      kind: 'bundle'
+      key: string
+      bundle: TraderOrderTradeBundle
+      rows: TradeTableOrderRow[]
+      primaryRow: TradeTableOrderRow
+      status: string
+      lifecycleLabel: string
+      filledNotional: number
+      requestedNotional: number
+      currentValue: number
+      unrealized: number
+      realizedPnl: number
+      fillPx: number | null
+      markPx: number | null
+      fillProgressPercent: number | null
+      exitProgressPercent: number | null
+      dynamicEdgePercent: number
+      providerSnapshotStatus: string
+      pendingExitStatus: string
+      closeTrigger: string | null
+      markUpdatedAt: string | null
+      exitEvaluatedAt: string | null
+      executionSummary: string
+      outcomeHeadline: string
+      outcomeDetail: string
+      directionLabel: string
+      bundleLabel: string
+      venuePresentation: {
+        label: string
+        detail: string
+        className: string
+      }
+      legs: TradeTableBundleLegRow[]
+      resolutionPayoutLow: number | null
+      resolutionPayoutHigh: number | null
+      resolutionProfitLow: number | null
+      resolutionProfitHigh: number | null
+      guaranteedAnomaly: boolean
+    }
+
+type TradeSummarySnapshot = {
+  total: number
+  open: number
+  resolved: number
+  wins: number
+  losses: number
+  failed: number
+  totalNotional: number
+  realizedPnl: number
+  unrealizedPnl: number
+  winRate: number
 }
 
 type ActivityRow = {
@@ -213,6 +328,7 @@ type BotMarketModalScope = {
     polymarket: string | null
     kalshi: string | null
   }
+  displayRow: TradeTableDisplayRow | null
 }
 
 type BotMarketModalState = {
@@ -1300,6 +1416,7 @@ function buildOrderMarketLinks(
 ): { polymarket: string | null; kalshi: string | null } {
   const mergedPayload = signalPayload ? { ...signalPayload, ...payload } : payload
   const links = getTraderOrderPlatformLinks({
+    allowSearchFallback: false,
     source: order.source,
     marketId: order.market_id,
     marketQuestion: order.market_question,
@@ -1309,6 +1426,46 @@ function buildOrderMarketLinks(
     polymarket: links.polymarketUrl,
     kalshi: links.kalshiUrl,
   }
+}
+
+function resolveTradeDisplayRowLinks(
+  displayRow: TradeTableDisplayRow,
+): { polymarket: string | null; kalshi: string | null } {
+  if (displayRow.kind === 'single') {
+    return displayRow.row.links
+  }
+  for (const leg of displayRow.legs) {
+    for (const row of leg.rows) {
+      if (row.links.polymarket || row.links.kalshi) {
+        return row.links
+      }
+    }
+  }
+  return displayRow.primaryRow.links
+}
+
+function collectTradeDisplayRowMarketAliasIds(displayRow: TradeTableDisplayRow): string[] {
+  if (displayRow.kind === 'single') {
+    return collectOrderMarketAliasIds(displayRow.row.order)
+  }
+  return collectMarketAliases([
+    ...displayRow.rows.flatMap((row) => collectOrderMarketAliasIds(row.order)),
+    ...displayRow.bundle.legs.flatMap((leg) => [leg.market_id, leg.condition_id]),
+  ])
+}
+
+function buildTradeDisplayRowModalTitle(displayRow: TradeTableDisplayRow): string {
+  if (displayRow.kind === 'single') {
+    return String(displayRow.row.order.market_question || displayRow.row.order.market_id || 'Unknown market')
+  }
+  const primaryLabel = (
+    cleanText(displayRow.bundle.legs[0]?.market_question)
+    || cleanText(displayRow.primaryRow.order.market_question)
+    || shortId(displayRow.primaryRow.order.market_id)
+  )
+  return displayRow.bundle.leg_count > 1
+    ? `${primaryLabel} +${displayRow.bundle.leg_count - 1} more`
+    : primaryLabel
 }
 
 function isTraderExecutionEnabled(
@@ -2342,6 +2499,528 @@ function summarizeExecutionTypes(labels: Iterable<string>): string {
   return `${unique.slice(0, 2).join(' | ')} +${unique.length - 2}`
 }
 
+function formatSignedCurrencyRange(low: number | null, high: number | null): string {
+  if (low === null || high === null) return '—'
+  if (Math.abs(low - high) < 0.005) {
+    return formatSignedCurrency(low)
+  }
+  return `${formatSignedCurrency(low)} → ${formatSignedCurrency(high)}`
+}
+
+function formatSignedPercentRange(low: number | null, high: number | null, digits = 2): string {
+  if (low === null || high === null) return '—'
+  if (Math.abs(low - high) < 0.005) {
+    return formatSignedPercent(low, digits)
+  }
+  return `${formatSignedPercent(low, digits)} → ${formatSignedPercent(high, digits)}`
+}
+
+function tradeBundleLegGroupingKey(leg: TraderOrderTradeBundleLeg): string {
+  const legId = cleanText(leg.leg_id)
+  if (legId) return `leg:${legId}`
+  const tokenId = cleanText(leg.token_id)
+  if (tokenId) return `token:${tokenId}`
+  const marketId = cleanText(leg.market_id)
+  const outcome = normalizeOutcome(leg.outcome)
+  if (marketId || outcome) return `market:${marketId || 'unknown'}:${outcome || 'unknown'}`
+  return `index:${leg.leg_index}`
+}
+
+function extractTradeOrderTokenId(order: TraderOrder): string | null {
+  const payload = isRecord(order.payload) ? order.payload : null
+  const legPayload = payload && isRecord(payload.leg) ? payload.leg : null
+  return (
+    cleanText(order.trade_bundle?.current_leg_token_id)
+    || cleanText(legPayload ? legPayload.token_id : null)
+    || cleanText(payload ? payload.token_id : null)
+    || null
+  )
+}
+
+function resolveTradeBundleRowGroupingKey(
+  row: TradeTableOrderRow,
+  bundleLegs: TraderOrderTradeBundleLeg[],
+): string | null {
+  const currentLegId = cleanText(row.order.trade_bundle?.current_leg_id)
+  if (currentLegId) {
+    const matched = bundleLegs.find((leg) => cleanText(leg.leg_id) === currentLegId)
+    if (matched) return tradeBundleLegGroupingKey(matched)
+  }
+
+  const tokenId = extractTradeOrderTokenId(row.order)
+  if (tokenId) {
+    const matched = bundleLegs.find((leg) => cleanText(leg.token_id) === tokenId)
+    if (matched) return tradeBundleLegGroupingKey(matched)
+  }
+
+  const marketId = cleanText(row.order.market_id)
+  const side = normalizeDirectionSide(row.order.direction_side ?? row.order.direction)
+  if (marketId || side) {
+    const matched = bundleLegs.find((leg) => {
+      const legMarketId = cleanText(leg.market_id)
+      const legOutcome = normalizeOutcome(leg.outcome)
+      if (marketId && legMarketId && marketId !== legMarketId) return false
+      if (side && legOutcome && side !== legOutcome) return false
+      return Boolean(legMarketId || legOutcome)
+    })
+    if (matched) return tradeBundleLegGroupingKey(matched)
+  }
+
+  return null
+}
+
+function buildTradeBundleDirectionLabel(bundle: TraderOrderTradeBundle): string {
+  if (bundle.kind === 'paired_binary') return 'YES+NO'
+  if (bundle.kind === 'multi_outcome_yes') return `${Math.max(2, bundle.leg_count)}L ARB`
+  return `${Math.max(2, bundle.leg_count)}L`
+}
+
+function buildTradeBundleLabel(bundle: TraderOrderTradeBundle): string {
+  if (bundle.kind === 'paired_binary') {
+    return bundle.is_guaranteed ? 'Guaranteed paired settlement trade' : 'Paired binary trade'
+  }
+  if (bundle.kind === 'multi_outcome_yes') {
+    return bundle.is_guaranteed ? 'Guaranteed mutually exclusive YES bundle' : 'Mutually exclusive YES bundle'
+  }
+  return bundle.is_guaranteed ? `Guaranteed ${bundle.leg_count}-leg bundle` : `${bundle.leg_count}-leg linked trade`
+}
+
+function buildTradeBundleLegSummaryLabel(leg: TradeTableBundleLegRow): string {
+  const marketLabel = compactText(
+    cleanText(leg.leg.market_question) || cleanText(leg.leg.market_id) || 'Unknown market',
+    44
+  )
+  const outcome = normalizeOutcome(leg.leg.outcome) || normalizeOutcome(leg.row?.order.direction_side ?? leg.row?.order.direction)
+  const outcomeLabel = outcome ? ` ${outcome}` : ''
+  return `${marketLabel}${outcomeLabel}`
+}
+
+function buildBundleResolutionRange(args: {
+  bundle: TraderOrderTradeBundle
+  legs: TradeTableBundleLegRow[]
+}): {
+  payoutLow: number | null
+  payoutHigh: number | null
+  profitLow: number | null
+  profitHigh: number | null
+} {
+  const { bundle, legs } = args
+  const basis = legs.reduce((sum, leg) => sum + leg.filledNotional, 0)
+  if (basis <= 0) {
+    return {
+      payoutLow: null,
+      payoutHigh: null,
+      profitLow: null,
+      profitHigh: null,
+    }
+  }
+
+  const winningPayouts: number[] = []
+  if (bundle.kind === 'paired_binary') {
+    const yesPayout = legs
+      .filter((leg) => normalizeOutcome(leg.leg.outcome) === 'YES')
+      .reduce((sum, leg) => sum + leg.filledSize, 0)
+    const noPayout = legs
+      .filter((leg) => normalizeOutcome(leg.leg.outcome) === 'NO')
+      .reduce((sum, leg) => sum + leg.filledSize, 0)
+    if (yesPayout > 0) winningPayouts.push(yesPayout)
+    if (noPayout > 0) winningPayouts.push(noPayout)
+  } else if (bundle.kind === 'multi_outcome_yes') {
+    for (const leg of legs) {
+      if (normalizeOutcome(leg.leg.outcome) !== 'YES') continue
+      if (leg.filledSize > 0) winningPayouts.push(leg.filledSize)
+    }
+    if (!bundle.is_guaranteed) {
+      winningPayouts.push(0)
+    }
+  }
+
+  if (winningPayouts.length === 0) {
+    return {
+      payoutLow: null,
+      payoutHigh: null,
+      profitLow: null,
+      profitHigh: null,
+    }
+  }
+
+  const payoutLow = Math.min(...winningPayouts)
+  const payoutHigh = Math.max(...winningPayouts)
+  return {
+    payoutLow,
+    payoutHigh,
+    profitLow: payoutLow - basis,
+    profitHigh: payoutHigh - basis,
+  }
+}
+
+function buildTradeDisplayRows(orderRows: TradeTableOrderRow[]): TradeTableDisplayRow[] {
+  const bundleGroups = new Map<string, { bundle: TraderOrderTradeBundle; rows: TradeTableOrderRow[] }>()
+  const orderedItems: Array<
+    | { kind: 'single'; row: TradeTableOrderRow }
+    | { kind: 'bundle'; key: string }
+  > = []
+
+  for (const row of orderRows) {
+    const bundle = row.order.trade_bundle
+    if (!bundle || bundle.leg_count <= 1) {
+      orderedItems.push({ kind: 'single', row })
+      continue
+    }
+    const traderId = cleanText(row.order.trader_id) || 'unknown'
+    const bundleKey = `bundle:${traderId}:${bundle.bundle_id}`
+    const existing = bundleGroups.get(bundleKey)
+    if (existing) {
+      existing.rows.push(row)
+      if (bundle.legs.length > existing.bundle.legs.length) {
+        existing.bundle = bundle
+      }
+      continue
+    }
+    bundleGroups.set(bundleKey, {
+      bundle,
+      rows: [row],
+    })
+    orderedItems.push({ kind: 'bundle', key: bundleKey })
+  }
+
+  const displayRows: TradeTableDisplayRow[] = []
+  for (const item of orderedItems) {
+    if (item.kind === 'single') {
+      displayRows.push({
+        kind: 'single',
+        key: `single:${item.row.order.id}`,
+        row: item.row,
+      })
+      continue
+    }
+
+    const group = bundleGroups.get(item.key)
+    if (!group || group.rows.length === 0) continue
+
+    const bundleLegs = [...group.bundle.legs].sort((left, right) => left.leg_index - right.leg_index)
+    const rowsByLegKey = new Map<string, TradeTableOrderRow[]>()
+    const unmatchedRows: TradeTableOrderRow[] = []
+
+    for (const row of group.rows) {
+      const legKey = resolveTradeBundleRowGroupingKey(row, bundleLegs)
+      if (!legKey) {
+        unmatchedRows.push(row)
+        continue
+      }
+      const existing = rowsByLegKey.get(legKey) || []
+      existing.push(row)
+      rowsByLegKey.set(legKey, existing)
+    }
+
+    const bundleLegRows: TradeTableBundleLegRow[] = bundleLegs.map((leg) => {
+      const matchedRows = rowsByLegKey.get(tradeBundleLegGroupingKey(leg)) || []
+      const primaryRow = matchedRows[0] || null
+      const filledSize = matchedRows.reduce((sum, row) => sum + row.filledSize, 0)
+      const filledNotional = matchedRows.reduce((sum, row) => sum + row.filledNotional, 0)
+      const currentValue = matchedRows.reduce((sum, row) => sum + row.currentValue, 0)
+      const unrealized = matchedRows.reduce((sum, row) => sum + row.unrealized, 0)
+      const pnl = matchedRows.reduce((sum, row) => sum + row.pnl, 0)
+      const fillPx = filledSize > 0 && filledNotional > 0
+        ? filledNotional / filledSize
+        : (primaryRow?.fillPx ?? (leg.limit_price ?? null))
+      const markPx = filledSize > 0 && currentValue > 0
+        ? currentValue / filledSize
+        : (primaryRow?.markPx ?? null)
+
+      return {
+        leg,
+        rows: matchedRows,
+        row: primaryRow,
+        filledSize,
+        filledNotional,
+        currentValue,
+        unrealized,
+        pnl,
+        fillPx,
+        markPx,
+      }
+    })
+
+    if (unmatchedRows.length > 0) {
+      for (const row of unmatchedRows) {
+        bundleLegRows.push({
+          leg: {
+            leg_index: bundleLegRows.length,
+            leg_id: cleanText(row.order.trade_bundle?.current_leg_id) || null,
+            market_id: cleanText(row.order.market_id) || null,
+            market_question: cleanText(row.order.market_question) || null,
+            token_id: extractTradeOrderTokenId(row.order),
+            side: normalizeTradeAction(row.order.direction) === 'SELL' ? 'sell' : 'buy',
+            outcome: normalizeOutcome(row.order.direction_side ?? row.order.direction),
+            limit_price: row.fillPx > 0 ? row.fillPx : null,
+            notional_weight: null,
+            condition_id: null,
+          },
+          rows: [row],
+          row,
+          filledSize: row.filledSize,
+          filledNotional: row.filledNotional,
+          currentValue: row.currentValue,
+          unrealized: row.unrealized,
+          pnl: row.pnl,
+          fillPx: row.fillPx > 0 ? row.fillPx : null,
+          markPx: row.markPx > 0 ? row.markPx : null,
+        })
+      }
+    }
+
+    const rowsSorted = [...group.rows].sort((left, right) => {
+      const leftIndex = left.order.trade_bundle?.current_leg_index ?? Number.MAX_SAFE_INTEGER
+      const rightIndex = right.order.trade_bundle?.current_leg_index ?? Number.MAX_SAFE_INTEGER
+      if (leftIndex !== rightIndex) return leftIndex - rightIndex
+      return toTs(right.order.created_at) - toTs(left.order.created_at)
+    })
+    const primaryRow = rowsSorted[0] || group.rows[0]
+    const requestedNotional = group.rows.reduce((sum, row) => sum + row.requestedNotional, 0)
+    const filledNotional = bundleLegRows.reduce((sum, leg) => sum + leg.filledNotional, 0)
+    const currentValue = bundleLegRows.reduce((sum, leg) => sum + leg.currentValue, 0)
+    const unrealized = group.rows
+      .filter((row) => OPEN_ORDER_STATUSES.has(normalizeStatus(row.status)))
+      .reduce((sum, row) => sum + row.unrealized, 0)
+    const realizedPnl = group.rows
+      .filter((row) => RESOLVED_ORDER_STATUSES.has(normalizeStatus(row.status)))
+      .reduce((sum, row) => sum + row.pnl, 0)
+    const fillPxValues = bundleLegRows
+      .map((leg) => leg.fillPx)
+      .filter((value): value is number => typeof value === 'number' && value > 0)
+    const markPxValues = bundleLegRows
+      .map((leg) => leg.markPx)
+      .filter((value): value is number => typeof value === 'number' && value > 0)
+    const fillPx = fillPxValues.length > 0 ? fillPxValues.reduce((sum, value) => sum + value, 0) : null
+    const markPx = markPxValues.length > 0 ? markPxValues.reduce((sum, value) => sum + value, 0) : null
+    const fillProgressPercent = requestedNotional > 0
+      ? Math.min(100, (filledNotional / requestedNotional) * 100)
+      : null
+    const exitProgressValues = group.rows
+      .map((row) => row.exitProgressPercent)
+      .filter((value): value is number => value !== null)
+    const exitProgressPercent = exitProgressValues.length > 0
+      ? exitProgressValues.reduce((sum, value) => sum + value, 0) / exitProgressValues.length
+      : null
+    const dynamicEdgePercent = filledNotional > 0
+      ? ((realizedPnl + unrealized) / filledNotional) * 100
+      : 0
+    const providerSnapshotStatuses = Array.from(
+      new Set(group.rows.map((row) => normalizeStatus(row.providerSnapshotStatus)).filter(Boolean))
+    )
+    const providerSnapshotStatus = providerSnapshotStatuses[0] || ''
+    const pendingExitStatuses = Array.from(
+      new Set(group.rows.map((row) => normalizeStatus(row.pendingExitStatus)).filter(Boolean))
+    )
+    const pendingExitStatus = pendingExitStatuses.includes('failed')
+      ? 'failed'
+      : pendingExitStatuses.find((status) => status !== 'unknown') || ''
+    const closeTrigger = cleanText(group.rows.map((row) => row.closeTrigger).find(Boolean)) || null
+    const markUpdatedAt = latestTimestampValue(...group.rows.map((row) => row.markUpdatedAt))
+    const exitEvaluatedAt = latestTimestampValue(...group.rows.map((row) => row.exitEvaluatedAt))
+    const executionSummary = summarizeExecutionTypes(group.rows.map((row) => row.executionSummary))
+    const venueLabels = Array.from(new Set(group.rows.map((row) => row.venuePresentation.label).filter(Boolean)))
+    const venuePresentation = venueLabels.length === 1
+      ? primaryRow.venuePresentation
+      : {
+          label: 'Bundle',
+          detail: venueLabels.join(' | '),
+          className: 'border-cyan-300 bg-cyan-100 text-cyan-900 dark:border-cyan-400/45 dark:bg-cyan-500/12 dark:text-cyan-200',
+        }
+
+    const hasOpen = group.rows.some((row) => OPEN_ORDER_STATUSES.has(normalizeStatus(row.status)))
+    const hasResolved = group.rows.some((row) => RESOLVED_ORDER_STATUSES.has(normalizeStatus(row.status)))
+    const hasFailed = group.rows.some((row) => FAILED_ORDER_STATUSES.has(normalizeStatus(row.status)))
+    let status = normalizeStatus(primaryRow.status)
+    if (hasOpen) {
+      status = 'open'
+    } else if (hasResolved) {
+      status = realizedPnl >= 0 ? 'resolved_win' : 'resolved_loss'
+    } else if (hasFailed) {
+      status = 'failed'
+    }
+
+    const { payoutLow, payoutHigh, profitLow, profitHigh } = buildBundleResolutionRange({
+      bundle: group.bundle,
+      legs: bundleLegRows,
+    })
+    const guaranteedAnomaly = Boolean(group.bundle.is_guaranteed && profitLow !== null && profitLow < -0.01)
+    const bundleLabel = buildTradeBundleLabel(group.bundle)
+    let outcomeHeadline = bundleLabel
+    let outcomeDetail = `${bundleLabel}.`
+    if (status === 'open' && profitLow !== null && profitHigh !== null) {
+      if (group.bundle.is_guaranteed && !guaranteedAnomaly) {
+        outcomeHeadline = profitLow === profitHigh ? 'Locked spread' : 'Locked payout range'
+      } else if (guaranteedAnomaly) {
+        outcomeHeadline = 'Guarantee drift'
+      } else {
+        outcomeHeadline = 'Bundle working'
+      }
+      outcomeDetail = (
+        `Resolution P&L ${formatSignedCurrencyRange(profitLow, profitHigh)} `
+        + `on ${formatCurrency(filledNotional, true)} cost basis `
+        + `(${formatCurrency(payoutLow || 0, true)}-${formatCurrency(payoutHigh || 0, true)} payout).`
+      )
+    } else if (RESOLVED_ORDER_STATUSES.has(status)) {
+      outcomeHeadline = realizedPnl >= 0 ? 'Bundle resolved green' : 'Bundle resolved red'
+      outcomeDetail = `Realized ${formatSignedCurrency(realizedPnl)} across ${group.rows.length} linked legs.`
+    } else if (FAILED_ORDER_STATUSES.has(status)) {
+      outcomeHeadline = 'Bundle failed'
+      const reasons = Array.from(new Set(group.rows.map((row) => cleanText(row.outcomeDetail)).filter(Boolean)))
+      outcomeDetail = reasons[0] || 'One or more linked legs failed.'
+    }
+
+    displayRows.push({
+      kind: 'bundle',
+      key: item.key,
+      bundle: group.bundle,
+      rows: group.rows,
+      primaryRow,
+      status,
+      lifecycleLabel: resolveOrderLifecycleLabel(status),
+      filledNotional,
+      requestedNotional,
+      currentValue,
+      unrealized,
+      realizedPnl,
+      fillPx,
+      markPx,
+      fillProgressPercent,
+      exitProgressPercent,
+      dynamicEdgePercent,
+      providerSnapshotStatus,
+      pendingExitStatus,
+      closeTrigger,
+      markUpdatedAt,
+      exitEvaluatedAt,
+      executionSummary,
+      outcomeHeadline,
+      outcomeDetail,
+      directionLabel: buildTradeBundleDirectionLabel(group.bundle),
+      bundleLabel,
+      venuePresentation,
+      legs: bundleLegRows,
+      resolutionPayoutLow: payoutLow,
+      resolutionPayoutHigh: payoutHigh,
+      resolutionProfitLow: profitLow,
+      resolutionProfitHigh: profitHigh,
+      guaranteedAnomaly,
+    })
+  }
+  return displayRows
+}
+
+function summarizeTradeDisplayRows(rows: TradeTableDisplayRow[]): TradeSummarySnapshot {
+  let total = 0
+  let open = 0
+  let resolved = 0
+  let wins = 0
+  let losses = 0
+  let failed = 0
+  let totalNotional = 0
+  let realizedPnl = 0
+  let unrealizedPnl = 0
+
+  for (const row of rows) {
+    total += 1
+    const status = normalizeStatus(row.kind === 'single' ? row.row.status : row.status)
+    if (row.kind === 'single') {
+      totalNotional += row.row.filledNotional > 0 ? row.row.filledNotional : row.row.requestedNotional
+      if (OPEN_ORDER_STATUSES.has(status)) {
+        open += 1
+        unrealizedPnl += row.row.unrealized
+      }
+      if (RESOLVED_ORDER_STATUSES.has(status)) {
+        resolved += 1
+        realizedPnl += row.row.pnl
+        if (row.row.pnl > 0) wins += 1
+        if (row.row.pnl < 0) losses += 1
+      }
+      if (FAILED_ORDER_STATUSES.has(status)) {
+        failed += 1
+      }
+      continue
+    }
+
+    totalNotional += row.filledNotional > 0 ? row.filledNotional : row.requestedNotional
+    if (OPEN_ORDER_STATUSES.has(status)) {
+      open += 1
+      unrealizedPnl += row.unrealized
+    }
+    if (RESOLVED_ORDER_STATUSES.has(status)) {
+      resolved += 1
+      realizedPnl += row.realizedPnl
+      if (row.realizedPnl > 0) wins += 1
+      if (row.realizedPnl < 0) losses += 1
+    }
+    if (FAILED_ORDER_STATUSES.has(status)) {
+      failed += 1
+    }
+  }
+
+  return {
+    total,
+    open,
+    resolved,
+    wins,
+    losses,
+    failed,
+    totalNotional,
+    realizedPnl,
+    unrealizedPnl,
+    winRate: resolved > 0 ? (wins / resolved) * 100 : 0,
+  }
+}
+
+function matchesTradeStatusFilter(status: string, filter: TradeStatusFilter): boolean {
+  const normalizedStatus = normalizeStatus(status)
+  return (
+    filter === 'all'
+    || (filter === 'open_resolved' && (OPEN_ORDER_STATUSES.has(normalizedStatus) || RESOLVED_ORDER_STATUSES.has(normalizedStatus)))
+    || (filter === 'open' && OPEN_ORDER_STATUSES.has(normalizedStatus))
+    || (filter === 'resolved' && RESOLVED_ORDER_STATUSES.has(normalizedStatus))
+    || (filter === 'failed' && FAILED_ORDER_STATUSES.has(normalizedStatus))
+  )
+}
+
+function tradeDisplayRowSearchText(row: TradeTableDisplayRow, traderLabel?: string | null): string {
+  if (row.kind === 'single') {
+    const order = row.row.order
+    return [
+      order.market_question,
+      order.market_id,
+      order.source,
+      order.direction,
+      order.direction_label,
+      order.direction_side,
+      row.row.executionSummary,
+      row.row.outcomeDetail,
+      traderLabel || null,
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase()
+  }
+
+  return [
+    row.primaryRow.order.market_question,
+    row.primaryRow.order.market_id,
+    row.primaryRow.order.source,
+    row.bundle.kind,
+    row.bundle.label,
+    row.bundleLabel,
+    row.directionLabel,
+    row.executionSummary,
+    row.outcomeDetail,
+    ...row.legs.map((leg) => buildTradeBundleLegSummaryLabel(leg)),
+    traderLabel || null,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+}
+
 function eventReasonDetail(event: TraderEvent): string {
   const payload = isRecord(event.payload) ? event.payload : null
   return (
@@ -3208,6 +3887,45 @@ function positionMetaLine(row: PositionBookRow): string {
   return `${sourceOrStatus} • ${row.executionSummary}`
 }
 
+function describeTradeBundleSettlement(bundle: TraderOrderTradeBundle): string {
+  if (bundle.kind === 'paired_binary') {
+    return bundle.is_guaranteed
+      ? 'Both sides were bought below $1 total. Exactly one leg settles to $1, so profit is locked if the fills are intact.'
+      : 'This binary bundle holds both sides of one market. One leg settles to $1 and the other to $0.'
+  }
+  if (bundle.kind === 'multi_outcome_yes') {
+    return bundle.is_guaranteed
+      ? 'This bundle holds YES across mutually exclusive outcomes priced below $1 in total. Exactly one winning leg should settle to $1.'
+      : 'This bundle holds YES across multiple outcomes. The resolution range depends on which leg wins, and downside can remain if the set is not exhaustive.'
+  }
+  return bundle.is_guaranteed
+    ? 'This linked trade is marked guaranteed. Review per-leg fills and payout range below.'
+    : 'This linked trade spans multiple legs. Review the per-leg fills and resolution range below.'
+}
+
+function resolveBundleLegStatus(leg: TradeTableBundleLegRow): string {
+  const statuses = leg.rows.map((row) => normalizeStatus(row.status))
+  if (statuses.some((status) => OPEN_ORDER_STATUSES.has(status))) return 'open'
+  if (statuses.some((status) => RESOLVED_ORDER_STATUSES.has(status))) {
+    const realizedPnl = leg.rows.reduce((sum, row) => sum + row.pnl, 0)
+    return realizedPnl >= 0 ? 'resolved_win' : 'resolved_loss'
+  }
+  if (statuses.some((status) => FAILED_ORDER_STATUSES.has(status))) return 'failed'
+  return normalizeStatus(leg.row?.status)
+}
+
+function resolveBundleLegLinks(leg: TradeTableBundleLegRow): { polymarket: string | null; kalshi: string | null } {
+  for (const row of leg.rows) {
+    if (row.links.polymarket || row.links.kalshi) {
+      return row.links
+    }
+  }
+  return {
+    polymarket: null,
+    kalshi: null,
+  }
+}
+
 function BotTradePositionModal({
   market,
   sharedHistory,
@@ -3237,6 +3955,9 @@ function BotTradePositionModal({
   sellSuccess: string | null
   onClose: () => void
 }) {
+  const bundleDisplayRow = scope.kind === 'trade' && scope.displayRow?.kind === 'bundle'
+    ? scope.displayRow
+    : null
   const scopeMarketIds = useMemo(
     () => new Set(
       collectMarketAliases([
@@ -3246,10 +3967,17 @@ function BotTradePositionModal({
     ),
     [scope.marketId, scope.marketIds]
   )
+  const bundleOrderIds = useMemo(
+    () => new Set((bundleDisplayRow?.rows || []).map((row) => String(row.order.id || '').trim()).filter(Boolean)),
+    [bundleDisplayRow]
+  )
 
   const relatedOrders = useMemo(() => {
     const filtered = orders.filter((order) => {
       if (scope.traderId && String(order.trader_id || '') !== scope.traderId) return false
+      if (bundleDisplayRow) {
+        return bundleOrderIds.has(String(order.id || '').trim())
+      }
       const matchesScopeIds = collectOrderMarketAliasIds(order).some((alias) => scopeMarketIds.has(alias))
       if (
         !marketMatchesCryptoIdentity(order.market_id, market)
@@ -3268,6 +3996,8 @@ function BotTradePositionModal({
     })
     return filtered
   }, [
+    bundleDisplayRow,
+    bundleOrderIds,
     market,
     orders,
     scope.directionSide,
@@ -3282,13 +4012,18 @@ function BotTradePositionModal({
     return relatedOrders.find((order) => order.id === scope.anchorOrderId) || relatedOrders[0] || null
   }, [relatedOrders, scope.anchorOrderId])
 
-  const scopedOrders = scope.kind === 'trade' && anchorOrder ? [anchorOrder] : relatedOrders
+  const scopedOrders = bundleDisplayRow
+    ? relatedOrders
+    : scope.kind === 'trade' && anchorOrder
+      ? [anchorOrder]
+      : relatedOrders
   const anchorSnapshot = useMemo(
     () => (anchorOrder ? resolveOrderModalSnapshot(anchorOrder) : null),
     [anchorOrder]
   )
   const canSellAnchorOrder = Boolean(
     scope.kind === 'trade'
+    && !bundleDisplayRow
     && anchorOrder
     && scope.traderId
     && anchorSnapshot
@@ -3636,6 +4371,30 @@ function BotTradePositionModal({
   const returnLabel = metrics.openCount > 0 ? 'Live Return' : 'Return'
   const oracleAgeSeconds = toFiniteNumber(market?.oracle_age_seconds)
   const markUpdatedAge = formatRelativeAge(metrics.updatedAt)
+  const bundleResolutionLabel = bundleDisplayRow
+    ? formatSignedCurrencyRange(bundleDisplayRow.resolutionProfitLow, bundleDisplayRow.resolutionProfitHigh)
+    : 'â€”'
+  const bundlePayoutLabel = bundleDisplayRow
+    ? (
+      bundleDisplayRow.resolutionPayoutLow !== null && bundleDisplayRow.resolutionPayoutHigh !== null
+        ? `${formatCurrency(bundleDisplayRow.resolutionPayoutLow, true)}-${formatCurrency(bundleDisplayRow.resolutionPayoutHigh, true)}`
+        : 'â€”'
+    )
+    : 'â€”'
+  const bundleRangeClassName = bundleDisplayRow
+    ? (
+      bundleDisplayRow.resolutionProfitLow !== null && bundleDisplayRow.resolutionProfitHigh !== null
+        ? (
+          bundleDisplayRow.resolutionProfitLow >= 0
+            ? 'text-emerald-500'
+            : bundleDisplayRow.resolutionProfitHigh <= 0
+              ? 'text-red-500'
+              : 'text-amber-600 dark:text-amber-300'
+        )
+        : ''
+    )
+    : ''
+  const bundleSettlementDetail = bundleDisplayRow ? describeTradeBundleSettlement(bundleDisplayRow.bundle) : null
 
   return (
     <Card className="w-[min(1150px,calc(100vw-2rem))] max-h-[90vh] overflow-hidden rounded-2xl border-border/70 bg-background shadow-[0_40px_120px_rgba(0,0,0,0.55)]">
@@ -3647,7 +4406,7 @@ function BotTradePositionModal({
                 {scope.marketQuestion}
               </h3>
               <Badge variant="outline" className="h-5 px-1.5 text-[10px]">
-                {scope.kind === 'trade' ? 'Trade' : 'Position'}
+                {bundleDisplayRow ? 'Bundle Trade' : scope.kind === 'trade' ? 'Trade' : 'Position'}
               </Badge>
               <Badge variant="outline" className="h-5 px-1.5 text-[10px]">
                 {scope.directionLabel || 'N/A'}
@@ -3657,8 +4416,15 @@ function BotTradePositionModal({
               </Badge>
             </div>
             <p className="mt-1 text-[11px] text-muted-foreground">
-              {String(market?.asset || 'N/A').toUpperCase()} · {String(market?.timeframe || 'n/a').toUpperCase()} · {metrics.sourceSummary || 'n/a'} · {metrics.modeSummary || 'n/a'}
+              {bundleDisplayRow
+                ? `${bundleDisplayRow.bundle.leg_count} legs | ${bundleDisplayRow.bundle.label} | ${metrics.sourceSummary || 'n/a'} | ${metrics.modeSummary || 'n/a'}`
+                : `${String(market?.asset || 'N/A').toUpperCase()} | ${String(market?.timeframe || 'n/a').toUpperCase()} | ${metrics.sourceSummary || 'n/a'} | ${metrics.modeSummary || 'n/a'}`}
             </p>
+            {bundleDisplayRow && bundleSettlementDetail ? (
+              <p className="mt-1 max-w-[820px] text-[11px] text-muted-foreground">
+                {bundleSettlementDetail}
+              </p>
+            ) : null}
           </div>
           <div className="flex items-center gap-1">
             {canSellAnchorOrder && anchorOrder ? (
@@ -3749,6 +4515,115 @@ function BotTradePositionModal({
             <p className="text-[10px] text-muted-foreground">{metrics.liveOrderCount} live · {metrics.shadowOrderCount} shadow</p>
           </div>
         </div>
+
+        {bundleDisplayRow ? (
+          <div className="grid gap-2 lg:grid-cols-[minmax(0,0.82fr)_minmax(0,1.18fr)]">
+            <div className="rounded-md border border-cyan-500/25 bg-cyan-500/5 px-2.5 py-2">
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Bundle Settlement</p>
+                  <p className={cn('mt-1 text-sm font-mono', bundleRangeClassName)}>
+                    {RESOLVED_ORDER_STATUSES.has(normalizeStatus(bundleDisplayRow.status))
+                      ? formatCurrency(bundleDisplayRow.realizedPnl, true)
+                      : bundleResolutionLabel}
+                  </p>
+                </div>
+                <Badge
+                  variant="outline"
+                  className={cn(
+                    'h-5 px-1.5 text-[10px]',
+                    bundleDisplayRow.guaranteedAnomaly
+                      ? 'border-red-300 bg-red-100 text-red-900 dark:border-red-400/45 dark:bg-red-500/12 dark:text-red-200'
+                      : 'border-cyan-300 bg-cyan-100 text-cyan-900 dark:border-cyan-400/45 dark:bg-cyan-500/12 dark:text-cyan-200'
+                  )}
+                >
+                  {bundleDisplayRow.bundle.is_guaranteed ? 'Guaranteed' : 'Linked'}
+                </Badge>
+              </div>
+              <div className="mt-2 grid gap-2 sm:grid-cols-3">
+                <div className="rounded border border-border/50 bg-background/70 px-2 py-1.5">
+                  <p className="text-[9px] uppercase text-muted-foreground">Basis</p>
+                  <p className="text-xs font-mono">
+                    {formatCurrency(bundleDisplayRow.filledNotional > 0 ? bundleDisplayRow.filledNotional : bundleDisplayRow.requestedNotional, true)}
+                  </p>
+                </div>
+                <div className="rounded border border-border/50 bg-background/70 px-2 py-1.5">
+                  <p className="text-[9px] uppercase text-muted-foreground">Resolution Payout</p>
+                  <p className="text-xs font-mono">{bundlePayoutLabel}</p>
+                </div>
+                <div className="rounded border border-border/50 bg-background/70 px-2 py-1.5">
+                  <p className="text-[9px] uppercase text-muted-foreground">Mark To Market</p>
+                  <p className={cn('text-xs font-mono', bundleDisplayRow.unrealized > 0 ? 'text-emerald-500' : bundleDisplayRow.unrealized < 0 ? 'text-red-500' : '')}>
+                    {formatCurrency(bundleDisplayRow.unrealized, true)}
+                  </p>
+                </div>
+              </div>
+              <p className="mt-2 text-[11px] text-muted-foreground">
+                {bundleDisplayRow.bundle.label}. {bundleDisplayRow.outcomeDetail}
+              </p>
+            </div>
+
+            <div className="rounded-md border border-border/60 bg-card/80">
+              <div className="border-b border-border/50 px-2.5 py-2">
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Leg Breakdown</p>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-border/40 text-[10px] text-muted-foreground">
+                      <th className="px-2.5 py-2 text-left font-medium">Market</th>
+                      <th className="px-2 py-2 text-left font-medium">Leg</th>
+                      <th className="px-2 py-2 text-right font-medium">Shares</th>
+                      <th className="px-2 py-2 text-right font-medium">Fill</th>
+                      <th className="px-2 py-2 text-right font-medium">Mark</th>
+                      <th className="px-2 py-2 text-right font-medium">Value</th>
+                      <th className="px-2 py-2 text-right font-medium">Win Payout</th>
+                      <th className="px-2 py-2 text-left font-medium">State</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {bundleDisplayRow.legs.map((leg) => {
+                      const legLinks = resolveBundleLegLinks(leg)
+                      const legPrimaryLink = legLinks.polymarket || legLinks.kalshi
+                      const legStatus = resolveBundleLegStatus(leg)
+                      return (
+                        <tr key={`bundle-leg-${bundleDisplayRow.key}-${leg.leg.leg_index}`} className="border-b border-border/30 last:border-b-0">
+                          <td className="px-2.5 py-2">
+                            {legPrimaryLink ? (
+                              <a
+                                href={legPrimaryLink}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="hover:underline underline-offset-2"
+                              >
+                                {buildTradeBundleLegSummaryLabel(leg)}
+                              </a>
+                            ) : (
+                              <span>{buildTradeBundleLegSummaryLabel(leg)}</span>
+                            )}
+                          </td>
+                          <td className="px-2 py-2">
+                            <span className="font-mono">{normalizeOutcome(leg.leg.outcome) || 'n/a'}</span>
+                          </td>
+                          <td className="px-2 py-2 text-right font-mono">{leg.filledSize > 0 ? leg.filledSize.toFixed(1) : 'n/a'}</td>
+                          <td className="px-2 py-2 text-right font-mono">{leg.fillPx !== null ? leg.fillPx.toFixed(3) : 'n/a'}</td>
+                          <td className="px-2 py-2 text-right font-mono">{leg.markPx !== null ? leg.markPx.toFixed(3) : 'n/a'}</td>
+                          <td className="px-2 py-2 text-right font-mono">{leg.currentValue > 0 ? formatCurrency(leg.currentValue, true) : 'n/a'}</td>
+                          <td className="px-2 py-2 text-right font-mono">{leg.filledSize > 0 ? formatCurrency(leg.filledSize, true) : 'n/a'}</td>
+                          <td className="px-2 py-2">
+                            <Badge variant="outline" className="h-5 px-1.5 text-[10px]">
+                              {resolveOrderLifecycleLabel(legStatus)}
+                            </Badge>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        ) : null}
 
         <div className={cn(
           'rounded-lg border overflow-hidden',
@@ -6484,6 +7359,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   }
 
   const openTradeMarketModal = (params: {
+    displayRow: TradeTableDisplayRow
     market: CryptoMarket | null
     order: TraderOrder
     directionSide: DirectionSide | null
@@ -6501,6 +7377,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     setMarketModalSellError(null)
     setMarketModalSellSuccess(null)
     const {
+      displayRow,
       market,
       order,
       directionSide,
@@ -6510,9 +7387,9 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       statusSummary,
       executionSummary,
       outcomeSummary,
-      links,
     } = params
-    const marketAliases = collectOrderMarketAliasIds(order)
+    const marketAliases = collectTradeDisplayRowMarketAliasIds(displayRow)
+    const links = resolveTradeDisplayRowLinks(displayRow)
     const resolvedMarket = market || resolveCryptoMarketFromAliases([
       order.market_id,
       ...marketAliases,
@@ -6528,7 +7405,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         traderName,
         marketId: String(order.market_id || ''),
         marketIds: marketAliases,
-        marketQuestion: String(order.market_question || order.market_id || resolvedMarket?.question || 'Unknown market'),
+        marketQuestion: buildTradeDisplayRowModalTitle(displayRow),
         directionSide,
         directionLabel,
         yesLabel,
@@ -6540,6 +7417,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         executionSummary,
         outcomeSummary,
         links,
+        displayRow,
       },
     })
   }
@@ -6577,6 +7455,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         executionSummary: row.executionSummary,
         outcomeSummary: null,
         links: row.links,
+        displayRow: null,
       },
     })
   }
@@ -6631,8 +7510,13 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
           traderId: tr.trader_id,
           traderName: traderNameById[tr.trader_id] || shortId(tr.trader_id),
           orders: tr.orders,
-          open: tr.open,
-          resolved: tr.resolved,
+          openOrders: tr.open,
+          resolvedOrders: tr.resolved,
+          tradeCount: tr.trade_count,
+          open: tr.open_trades,
+          resolved: tr.resolved_trades,
+          failedTrades: tr.failed_trades,
+          partialOpenBundles: tr.partial_open_bundles,
           pnl: tr.pnl,
           notional: tr.notional,
           wins: tr.wins,
@@ -6660,7 +7544,23 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       open, resolved, wins, losses, failed,
       totalNotional: 0, resolvedPnl, winRate: resolved > 0 ? (wins / resolved) * 100 : 0,
       avgEdge: 0, avgConfidence: 0,
-      traderRows: [] as Array<{ traderId: string; traderName: string; orders: number; open: number; resolved: number; pnl: number; notional: number; wins: number; losses: number; latest_activity_ts: number }>,
+      traderRows: [] as Array<{
+        traderId: string
+        traderName: string
+        orders: number
+        openOrders: number
+        resolvedOrders: number
+        tradeCount: number
+        open: number
+        resolved: number
+        failedTrades: number
+        partialOpenBundles: number
+        pnl: number
+        notional: number
+        wins: number
+        losses: number
+        latest_activity_ts: number
+      }>,
       sourceRows: [] as Array<{ source: string; orders: number; resolved: number; pnl: number; notional: number; wins: number; losses: number }>,
     }
   }, [ordersSummaryQuery.data, allOrders, traderNameById])
@@ -7237,243 +8137,195 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     })
   }, [filteredDecisions])
 
-  const filteredTradeHistoryFull = useMemo(() => {
-    const q = tradeSearch.trim().toLowerCase()
-    return selectedOrders
-      .filter((order) => {
-        const status = normalizeStatus(order.status)
-        const matchesStatus =
-          tradeStatusFilter === 'all' ||
-          (tradeStatusFilter === 'open_resolved' && (OPEN_ORDER_STATUSES.has(status) || RESOLVED_ORDER_STATUSES.has(status))) ||
-          (tradeStatusFilter === 'open' && OPEN_ORDER_STATUSES.has(status)) ||
-          (tradeStatusFilter === 'resolved' && RESOLVED_ORDER_STATUSES.has(status)) ||
-          (tradeStatusFilter === 'failed' && FAILED_ORDER_STATUSES.has(status))
-
-        if (!matchesStatus) return false
-        if (!q) return true
-
-        const haystack = `${order.market_question || ''} ${order.market_id || ''} ${order.source || ''} ${order.direction || ''} ${order.direction_label || ''} ${order.direction_side || ''} ${orderExecutionTypeSummary(order)}`.toLowerCase()
-        return haystack.includes(q)
-      })
-  }, [selectedOrders, tradeSearch, tradeStatusFilter])
-
-  const filteredTradeHistory = useMemo(
-    () => filteredTradeHistoryFull.slice(0, 250),
-    [filteredTradeHistoryFull]
-  )
-
-  const selectedTradeRows = useMemo(() => {
-    return filteredTradeHistory.map((order) => {
-      const status = normalizeStatus(order.status)
-      const lifecycleLabel = resolveOrderLifecycleLabel(status)
-      const pnl = toNumber(order.actual_profit)
-      const directionPresentation = resolveOrderDirectionPresentation(order)
-      const orderPayload = order.payload && typeof order.payload === 'object' ? order.payload : {}
-      const providerReconciliation = orderPayload.provider_reconciliation && typeof orderPayload.provider_reconciliation === 'object'
-        ? orderPayload.provider_reconciliation
-        : {}
-      const providerSnapshot = providerReconciliation.snapshot && typeof providerReconciliation.snapshot === 'object'
-        ? providerReconciliation.snapshot
-        : {}
-      const positionState = orderPayload.position_state && typeof orderPayload.position_state === 'object'
-        ? orderPayload.position_state
-        : {}
-      const pendingExit = orderPayload.pending_live_exit && typeof orderPayload.pending_live_exit === 'object'
-        ? orderPayload.pending_live_exit
-        : {}
-      const positionClose = orderPayload.position_close && typeof orderPayload.position_close === 'object'
-        ? orderPayload.position_close
-        : {}
-      const pendingExitStatus = normalizeStatus(String(pendingExit.status || ''))
-      const closeTrigger = cleanText(
-        order.close_trigger
-        || positionClose.close_trigger
-        || pendingExit.close_trigger
-      )
-      const fillPx = toNumber(
-        order.average_fill_price
-        ?? providerReconciliation.average_fill_price
-        ?? providerSnapshot.average_fill_price
-        ?? order.effective_price
-        ?? order.entry_price
-      )
-      const realtimeCrypto = resolveOrderRealtimeCryptoSnapshot(order, directionPresentation.side)
-      const liveMark = liveMarksByOrderId.get(String(order.id || ''))
-      const markPx = toNumber(
-        liveMark?.mark_price
-        ?? realtimeCrypto.markPrice
-        ?? order.current_price
-        ?? positionState.last_mark_price
-        ?? orderPayload.market_price
-        ?? orderPayload.resolved_price
-      )
-      const filledSize = toNumber(
-        order.filled_shares
-        ?? providerReconciliation.filled_size
-        ?? providerSnapshot.filled_size
-        ?? orderPayload.filled_size
-      )
-      const filledNotional = toNumber(
-        order.filled_notional_usd
-        ?? providerReconciliation.filled_notional_usd
-        ?? providerSnapshot.filled_notional_usd
-        ?? order.notional_usd
-      )
-      let unrealized = toNumber(order.unrealized_pnl)
-      if ((order.unrealized_pnl === null || order.unrealized_pnl === undefined) && markPx > 0 && filledSize > 0 && filledNotional > 0) {
-        unrealized = (markPx * filledSize) - filledNotional
-      }
-      // Prefer live mark U-P&L from real-time WS feed over stale API value
-      if (liveMark && typeof liveMark.unrealized_pnl === 'number' && liveMark.mark_price > 0) {
-        unrealized = liveMark.unrealized_pnl
-      }
-      const fillProgressPercent = computeOrderFillProgressPercent(
-        orderPayload as Record<string, unknown>,
-        {
-          filledSize,
-          filledNotional,
-          requestedNotionalFallback: Math.abs(toNumber(order.notional_usd)),
-        }
-      )
-      const dynamicEdgePercent = computeOrderDynamicEdgePercent({
-        status,
-        edgePercent: toNumber(order.edge_percent),
-        unrealizedPnl: unrealized,
-        realizedPnl: pnl,
-        filledNotional,
-      })
-      const exitProgressPercent = computePendingExitProgressPercent(pendingExit as Record<string, unknown>)
-      // Prefer live mark timestamp from event-driven WS push (epoch seconds)
-      const liveMarkTs = liveMark?.mark_updated_at
-      const liveMarkIso = typeof liveMarkTs === 'number' && liveMarkTs > 0
-        ? new Date(liveMarkTs * 1000).toISOString()
-        : null
-      const markUpdatedAt = latestTimestampValue(
-        liveMarkIso,
-        realtimeCrypto.updatedAt,
-        resolveOrderMarketUpdateTimestamp(order, orderPayload),
-      )
-      const exitEvaluatedAt = resolveOrderExitEvaluationTimestamp(order, orderPayload)
-      const markUpdatedAtRaw = markUpdatedAt
-      const markUpdatedTs = toTs(markUpdatedAtRaw)
-      const markFresh = markUpdatedTs > 0 && (Date.now() - markUpdatedTs) <= 15_000
-      const providerSnapshotStatus = normalizeStatus(
-        String(
-          order.provider_snapshot_status
-          || providerReconciliation.snapshot_status
-          || providerSnapshot.normalized_status
-          || providerSnapshot.status
-          || ''
-        )
-      )
-      const linkedDecisionId = String(order.decision_id || '').trim()
-      const signalPayload = linkedDecisionId
-        ? decisionSignalPayloadByDecisionId.get(linkedDecisionId) || null
-        : null
-      const links = buildOrderMarketLinks(order, orderPayload, signalPayload)
-      const outcome = orderOutcomeSummary(order)
-      const executionSummary = orderExecutionTypeSummary(order)
-      const venuePresentation = resolveVenueStatusPresentation(providerSnapshotStatus)
-      return {
-        order,
-        status,
-        lifecycleLabel,
-        pnl,
-        fillPx,
-        markPx,
+  const buildTradeTableOrderRow = (order: TraderOrder): TradeTableOrderRow => {
+    const status = normalizeStatus(order.status)
+    const lifecycleLabel = resolveOrderLifecycleLabel(status)
+    const pnl = toNumber(order.actual_profit)
+    const directionPresentation = resolveOrderDirectionPresentation(order)
+    const orderPayload = order.payload && typeof order.payload === 'object' ? order.payload : {}
+    const providerReconciliation = orderPayload.provider_reconciliation && typeof orderPayload.provider_reconciliation === 'object'
+      ? orderPayload.provider_reconciliation
+      : {}
+    const providerSnapshot = providerReconciliation.snapshot && typeof providerReconciliation.snapshot === 'object'
+      ? providerReconciliation.snapshot
+      : {}
+    const positionState = orderPayload.position_state && typeof orderPayload.position_state === 'object'
+      ? orderPayload.position_state
+      : {}
+    const pendingExit = orderPayload.pending_live_exit && typeof orderPayload.pending_live_exit === 'object'
+      ? orderPayload.pending_live_exit
+      : {}
+    const positionClose = orderPayload.position_close && typeof orderPayload.position_close === 'object'
+      ? orderPayload.position_close
+      : {}
+    const pendingExitStatus = normalizeStatus(String((pendingExit as Record<string, unknown>).status || ''))
+    const closeTrigger = cleanText(
+      order.close_trigger
+      || (positionClose as Record<string, unknown>).close_trigger
+      || (pendingExit as Record<string, unknown>).close_trigger
+    )
+    const fillPx = toNumber(
+      order.average_fill_price
+      ?? providerReconciliation.average_fill_price
+      ?? providerSnapshot.average_fill_price
+      ?? order.effective_price
+      ?? order.entry_price
+    )
+    const realtimeCrypto = resolveOrderRealtimeCryptoSnapshot(order, directionPresentation.side)
+    const liveMark = liveMarksByOrderId.get(String(order.id || ''))
+    const markPx = toNumber(
+      liveMark?.mark_price
+      ?? realtimeCrypto.markPrice
+      ?? order.current_price
+      ?? positionState.last_mark_price
+      ?? orderPayload.market_price
+      ?? orderPayload.resolved_price
+    )
+    const filledSize = toNumber(
+      order.filled_shares
+      ?? providerReconciliation.filled_size
+      ?? providerSnapshot.filled_size
+      ?? orderPayload.filled_size
+    )
+    const requestedNotional = Math.abs(toNumber(order.notional_usd))
+    const filledNotional = toNumber(
+      order.filled_notional_usd
+      ?? providerReconciliation.filled_notional_usd
+      ?? providerSnapshot.filled_notional_usd
+      ?? order.notional_usd
+    )
+    let unrealized = toNumber(order.unrealized_pnl)
+    if ((order.unrealized_pnl === null || order.unrealized_pnl === undefined) && markPx > 0 && filledSize > 0 && filledNotional > 0) {
+      unrealized = (markPx * filledSize) - filledNotional
+    }
+    if (liveMark && typeof liveMark.unrealized_pnl === 'number' && liveMark.mark_price > 0) {
+      unrealized = liveMark.unrealized_pnl
+    }
+    const fillProgressPercent = computeOrderFillProgressPercent(
+      orderPayload as Record<string, unknown>,
+      {
         filledSize,
         filledNotional,
-        unrealized,
-        fillProgressPercent,
-        dynamicEdgePercent,
-        exitProgressPercent,
-        markUpdatedAt,
-        exitEvaluatedAt,
-        providerSnapshotStatus,
-        pendingExitStatus,
-        closeTrigger,
-        pendingExit,
-        markFresh,
-        links,
-        directionSide: directionPresentation.side,
-        directionLabel: directionPresentation.label,
-        yesLabel: directionPresentation.yesLabel,
-        noLabel: directionPresentation.noLabel,
-        executionSummary,
-        outcomeHeadline: outcome.headline,
-        outcomeDetail: outcome.detail,
-        venuePresentation,
+        requestedNotionalFallback: requestedNotional,
       }
+    )
+    const dynamicEdgePercent = computeOrderDynamicEdgePercent({
+      status,
+      edgePercent: toNumber(order.edge_percent),
+      unrealizedPnl: unrealized,
+      realizedPnl: pnl,
+      filledNotional,
     })
-  }, [cryptoMarkets, decisionSignalPayloadByDecisionId, filteredTradeHistory])
+    const exitProgressPercent = computePendingExitProgressPercent(pendingExit as Record<string, unknown>)
+    const liveMarkTs = liveMark?.mark_updated_at
+    const liveMarkIso = typeof liveMarkTs === 'number' && liveMarkTs > 0
+      ? new Date(liveMarkTs * 1000).toISOString()
+      : null
+    const markUpdatedAt = latestTimestampValue(
+      liveMarkIso,
+      realtimeCrypto.updatedAt,
+      resolveOrderMarketUpdateTimestamp(order, orderPayload),
+    )
+    const exitEvaluatedAt = resolveOrderExitEvaluationTimestamp(order, orderPayload)
+    const markUpdatedTs = toTs(markUpdatedAt)
+    const markFresh = markUpdatedTs > 0 && (Date.now() - markUpdatedTs) <= 15_000
+    const providerSnapshotStatus = normalizeStatus(
+      String(
+        order.provider_snapshot_status
+        || providerReconciliation.snapshot_status
+        || providerSnapshot.normalized_status
+        || providerSnapshot.status
+        || ''
+      )
+    )
+    const linkedDecisionId = String(order.decision_id || '').trim()
+    const signalPayload = linkedDecisionId
+      ? decisionSignalPayloadByDecisionId.get(linkedDecisionId) || null
+      : null
+    const links = buildOrderMarketLinks(order, orderPayload, signalPayload)
+    const outcome = orderOutcomeSummary(order)
+    const executionSummary = orderExecutionTypeSummary(order)
+    const venuePresentation = resolveVenueStatusPresentation(providerSnapshotStatus)
+    const currentValue = markPx > 0 && filledSize > 0
+      ? markPx * filledSize
+      : filledNotional > 0 ? filledNotional : requestedNotional
 
-  const selectedTradeTotals = useMemo(() => {
-    let total = 0
-    let open = 0
-    let resolved = 0
-    let wins = 0
-    let losses = 0
-    let failed = 0
-    let totalNotional = 0
-    let realizedPnl = 0
-    let unrealizedPnl = 0
-    for (const order of filteredTradeHistoryFull) {
-      const status = normalizeStatus(order.status)
-      const pnl = toNumber(order.actual_profit)
-      total += 1
-      totalNotional += Math.abs(toNumber(order.notional_usd))
-      if (OPEN_ORDER_STATUSES.has(status)) {
-        open += 1
-        const lm = liveMarksByOrderId.get(String(order.id || ''))
-        if (lm && typeof lm.unrealized_pnl === 'number' && lm.mark_price > 0) {
-          unrealizedPnl += lm.unrealized_pnl
-        } else {
-          unrealizedPnl += toNumber(order.unrealized_pnl)
-        }
-      }
-      if (RESOLVED_ORDER_STATUSES.has(status)) {
-        resolved += 1
-        realizedPnl += pnl
-        if (pnl > 0) wins += 1
-        if (pnl < 0) losses += 1
-      }
-      if (FAILED_ORDER_STATUSES.has(status)) {
-        failed += 1
-      }
-    }
     return {
-      total,
-      open,
-      resolved,
-      wins,
-      losses,
-      failed,
-      totalNotional,
-      realizedPnl,
-      unrealizedPnl,
-      winRate: resolved > 0 ? (wins / resolved) * 100 : 0,
+      order,
+      status,
+      lifecycleLabel,
+      pnl,
+      fillPx,
+      markPx,
+      filledSize,
+      filledNotional,
+      requestedNotional,
+      currentValue,
+      unrealized,
+      fillProgressPercent,
+      dynamicEdgePercent,
+      exitProgressPercent,
+      markUpdatedAt,
+      exitEvaluatedAt,
+      providerSnapshotStatus,
+      pendingExitStatus,
+      closeTrigger,
+      pendingExit: pendingExit as Record<string, unknown>,
+      markFresh,
+      links,
+      directionSide: directionPresentation.side,
+      directionLabel: directionPresentation.label,
+      yesLabel: directionPresentation.yesLabel,
+      noLabel: directionPresentation.noLabel,
+      executionSummary,
+      outcomeHeadline: outcome.headline,
+      outcomeDetail: outcome.detail,
+      venuePresentation,
     }
-  }, [filteredTradeHistoryFull, liveMarksByOrderId])
+  }
+
+  const selectedTradeOrderRows = useMemo(
+    () => selectedOrders.map((order) => buildTradeTableOrderRow(order)),
+    [selectedOrders, cryptoMarkets, decisionSignalPayloadByDecisionId, liveMarksByOrderId]
+  )
+
+  const selectedTradeRowsFull = useMemo(() => {
+    const q = tradeSearch.trim().toLowerCase()
+    return buildTradeDisplayRows(selectedTradeOrderRows).filter((row) => {
+      const status = row.kind === 'single' ? row.row.status : row.status
+      if (!matchesTradeStatusFilter(status, tradeStatusFilter)) return false
+      if (!q) return true
+      return tradeDisplayRowSearchText(row).includes(q)
+    })
+  }, [selectedTradeOrderRows, tradeSearch, tradeStatusFilter])
+
+  const selectedTradeRows = useMemo(
+    () => selectedTradeRowsFull.slice(0, 250),
+    [selectedTradeRowsFull]
+  )
+
+  const selectedTradeTotals = useMemo(
+    () => summarizeTradeDisplayRows(selectedTradeRowsFull),
+    [selectedTradeRowsFull]
+  )
+
+  const allTradeOrderRows = useMemo(
+    () => allOrders.map((order) => buildTradeTableOrderRow(order)),
+    [allOrders, cryptoMarkets, decisionSignalPayloadByDecisionId, liveMarksByOrderId]
+  )
 
   const filteredAllTradeHistory = useMemo(() => {
     const q = allBotsTradeSearch.trim().toLowerCase()
-    return allOrders
-      .filter((order) => {
-        const status = normalizeStatus(order.status)
-        const matchesStatus =
-          allBotsTradeStatusFilter === 'all' ||
-          (allBotsTradeStatusFilter === 'open_resolved' && (OPEN_ORDER_STATUSES.has(status) || RESOLVED_ORDER_STATUSES.has(status))) ||
-          (allBotsTradeStatusFilter === 'open' && OPEN_ORDER_STATUSES.has(status)) ||
-          (allBotsTradeStatusFilter === 'resolved' && RESOLVED_ORDER_STATUSES.has(status)) ||
-          (allBotsTradeStatusFilter === 'failed' && FAILED_ORDER_STATUSES.has(status))
-
-        if (!matchesStatus) return false
-        if (!q) return true
-
-        const haystack = `${order.market_question || ''} ${order.market_id || ''} ${order.source || ''} ${order.direction || ''} ${order.direction_label || ''} ${order.direction_side || ''} ${traderNameById[String(order.trader_id || '')] || ''} ${orderExecutionTypeSummary(order)}`.toLowerCase()
-        return haystack.includes(q)
-      })
-  }, [allBotsTradeSearch, allBotsTradeStatusFilter, allOrders, traderNameById])
+    return buildTradeDisplayRows(allTradeOrderRows).filter((row) => {
+      const status = row.kind === 'single' ? row.row.status : row.status
+      if (!matchesTradeStatusFilter(status, allBotsTradeStatusFilter)) return false
+      if (!q) return true
+      const traderLabel = row.kind === 'single'
+        ? traderNameById[String(row.row.order.trader_id || '')] || shortId(row.row.order.trader_id)
+        : traderNameById[String(row.primaryRow.order.trader_id || '')] || shortId(row.primaryRow.order.trader_id)
+      return tradeDisplayRowSearchText(row, traderLabel).includes(q)
+    })
+  }, [allBotsTradeSearch, allBotsTradeStatusFilter, allTradeOrderRows, traderNameById])
 
   const ordersTotalCount = ordersSummaryQuery.data?.total_count ?? allOrders.length
   const ordersTotalPages = Math.max(1, Math.ceil(ordersTotalCount / ordersPageSize))
@@ -7772,6 +8624,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         primarySourceKey: sourceKeys.length === 1 ? sourceKeys[0] : sourceKeys.length > 1 ? 'multi' : 'unknown',
         open: toNumber(performance?.open),
         resolved: toNumber(performance?.resolved),
+        partialOpenBundles: toNumber(performance?.partialOpenBundles),
         pnl: toNumber(performance?.pnl),
         latestActivityTs,
         isInactive: !isTraderActive(trader),
@@ -7885,8 +8738,10 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         return {
           trader,
           orders: toNumber(row?.orders),
+          tradeCount: toNumber(row?.tradeCount),
           open: toNumber(row?.open),
           resolved,
+          partialOpenBundles: toNumber(row?.partialOpenBundles),
           pnl: toNumber(row?.pnl),
           notional: toNumber(row?.notional),
           wins,
@@ -8416,6 +9271,484 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     requestOrchestratorStart()
   }
 
+  const renderTradeDisplayRow = (displayRow: TradeTableDisplayRow, showTraderLabel: boolean): ReactNode => {
+    if (displayRow.kind === 'single') {
+      const row = displayRow.row
+      const {
+        order,
+        status,
+        pnl,
+        lifecycleLabel,
+        fillPx,
+        markPx,
+        filledSize,
+        filledNotional,
+        requestedNotional,
+        currentValue,
+        unrealized,
+        fillProgressPercent,
+        dynamicEdgePercent,
+        exitProgressPercent,
+        markUpdatedAt,
+        exitEvaluatedAt,
+        providerSnapshotStatus,
+        pendingExitStatus,
+        closeTrigger,
+        links,
+        directionSide,
+        directionLabel,
+        yesLabel,
+        noLabel,
+        executionSummary,
+        outcomeHeadline,
+        outcomeDetail,
+        venuePresentation,
+      } = row
+      const pendingExitLabel = pendingExitStatus && pendingExitStatus !== 'unknown'
+        ? (pendingExitStatus === 'failed' && OPEN_ORDER_STATUSES.has(status)
+          ? 'Exit:RETRY'
+          : `Exit:${pendingExitStatus.slice(0, 4).toUpperCase()}`)
+        : null
+      const pendingExitTone: 'neutral' | 'warning' =
+        pendingExitStatus === 'failed' && OPEN_ORDER_STATUSES.has(status)
+          ? 'warning'
+          : 'neutral'
+      const marketForModal = resolveCryptoMarketFromAliases(collectOrderMarketAliasIds(order))
+      const openModal = () => {
+        openTradeMarketModal({
+          displayRow,
+          market: marketForModal,
+          order,
+          directionSide,
+          directionLabel,
+          yesLabel,
+          noLabel,
+          statusSummary: lifecycleLabel,
+          executionSummary,
+          outcomeSummary: outcomeDetail,
+          links,
+        })
+      }
+      const primaryMarketLink = links.polymarket || links.kalshi
+      const traderLabel = traderNameById[String(order.trader_id || '')] || shortId(order.trader_id)
+
+      return (
+        <Fragment key={displayRow.key}>
+          <TableRow
+            className="border-b-0 bg-muted/[0.08] text-[11px] leading-tight cursor-pointer hover:bg-muted/[0.16] [&>td]:border-t [&>td]:border-border/70 [&>td:first-child]:border-l [&>td:last-child]:border-r"
+            onClick={openModal}
+          >
+            <TableCell className="max-w-[260px] py-0.5" title={order.market_question || order.market_id}>
+              <div className="flex min-w-0 items-center gap-1">
+                <div className="flex shrink-0 items-center gap-0.5">
+                  {links.polymarket && (
+                    <a
+                      href={links.polymarket}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={(event) => event.stopPropagation()}
+                      className="inline-flex h-4 w-4 items-center justify-center rounded border border-border/70 text-muted-foreground transition-colors hover:text-foreground"
+                      title="Open Polymarket market"
+                    >
+                      <ExternalLink className="h-3 w-3" />
+                    </a>
+                  )}
+                  {links.kalshi && (
+                    <a
+                      href={links.kalshi}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={(event) => event.stopPropagation()}
+                      className="inline-flex h-4 w-4 items-center justify-center rounded border border-border/70 text-muted-foreground transition-colors hover:text-foreground"
+                      title="Open Kalshi market"
+                    >
+                      <ExternalLink className="h-3 w-3" />
+                    </a>
+                  )}
+                </div>
+                {primaryMarketLink ? (
+                  <a
+                    href={primaryMarketLink}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={(event) => event.stopPropagation()}
+                    className="truncate hover:underline underline-offset-2"
+                    title="Open market"
+                  >
+                    {order.market_question || shortId(order.market_id)}
+                  </a>
+                ) : (
+                  <span className="truncate">{order.market_question || shortId(order.market_id)}</span>
+                )}
+              </div>
+              {showTraderLabel ? (
+                <p className="truncate text-[9px] leading-none text-muted-foreground" title={traderLabel}>
+                  {traderLabel}
+                </p>
+              ) : null}
+            </TableCell>
+            <TableCell className="py-0.5">
+              <Badge
+                variant="outline"
+                className="h-4 max-w-[120px] truncate border-border/80 bg-muted/60 px-1 text-[9px] text-muted-foreground"
+                title={directionLabel}
+              >
+                {directionLabel}
+              </Badge>
+            </TableCell>
+            <TableCell
+              className="text-right font-mono py-0.5 text-[10px]"
+              title={`Entry: ${formatCurrency(filledNotional > 0 ? filledNotional : requestedNotional, true)} | Shares: ${filledSize > 0 ? filledSize.toFixed(1) : '—'}`}
+            >
+              {currentValue > 0 ? formatCurrency(currentValue, true) : '—'}
+            </TableCell>
+            <TableCell className="text-right font-mono py-0.5 text-[10px]">{fillPx > 0 ? fillPx.toFixed(3) : '—'}</TableCell>
+            <TableCell className="text-right font-mono py-0.5 text-[10px]">{fillProgressPercent !== null ? formatPercent(fillProgressPercent, 0) : '—'}</TableCell>
+            <TableCell className="text-right font-mono py-0.5 text-[10px]">
+              {markPx > 0 ? (
+                <FlashNumber
+                  value={markPx}
+                  decimals={3}
+                  className="font-mono text-[10px]"
+                />
+              ) : '—'}
+            </TableCell>
+            <TableCell className={cn('text-right font-mono py-0.5 text-[10px] font-semibold', unrealized > 0 ? 'text-emerald-500' : unrealized < 0 ? 'text-red-500' : '')}>
+              {OPEN_ORDER_STATUSES.has(status) ? (
+                <FlashNumber
+                  value={unrealized}
+                  decimals={2}
+                  prefix="$"
+                  className={cn('font-mono text-[10px] font-semibold', unrealized > 0 ? 'text-emerald-500' : unrealized < 0 ? 'text-red-500' : '')}
+                />
+              ) : '—'}
+            </TableCell>
+            <TableCell className={cn('text-right font-mono py-0.5 text-[10px] font-semibold', dynamicEdgePercent > 0 ? 'text-emerald-500' : dynamicEdgePercent < 0 ? 'text-red-500' : '')}>{formatPercent(dynamicEdgePercent)}</TableCell>
+            <TableCell className={cn('text-right font-mono py-0.5 text-[10px] font-semibold', pnl > 0 ? 'text-emerald-500' : pnl < 0 ? 'text-red-500' : '')}>
+              {RESOLVED_ORDER_STATUSES.has(status) ? formatCurrency(pnl, true) : '—'}
+            </TableCell>
+            <TableCell className="py-0.5">
+              <Badge
+                variant="outline"
+                title={
+                  `${venuePresentation.detail}`
+                  + (providerSnapshotStatus ? ` • provider:${providerSnapshotStatus}` : '')
+                  + (
+                    order.provider_clob_order_id || order.provider_order_id
+                      ? ` • order_ref:${order.provider_clob_order_id || order.provider_order_id}`
+                      : ''
+                  )
+                }
+                className={cn('h-4 max-w-[120px] truncate px-1 text-[9px] font-semibold', venuePresentation.className)}
+              >
+                {venuePresentation.label}
+              </Badge>
+            </TableCell>
+            <TableCell className="text-right font-mono py-0.5 text-[10px]">
+              {exitProgressPercent !== null ? formatPercent(exitProgressPercent, 0) : '—'}
+            </TableCell>
+            <TableCell className="py-0.5 text-[9px] text-muted-foreground">
+              <span title={`${String(order.mode || '').toUpperCase()} • mark:${formatTimestamp(markUpdatedAt)} • created:${formatTimestamp(order.created_at)}`}>
+                {formatRelativeAge(markUpdatedAt)}
+              </span>
+            </TableCell>
+            <TableCell className="py-0.5 text-[9px] text-muted-foreground">
+              <span title={`${String(order.mode || '').toUpperCase()} • exit eval:${formatTimestamp(exitEvaluatedAt)} • updated:${formatTimestamp(order.updated_at)}`}>
+                {formatRelativeAge(exitEvaluatedAt)}
+              </span>
+            </TableCell>
+          </TableRow>
+          <TableRow className="cursor-pointer bg-muted/[0.08] hover:bg-muted/[0.16]" onClick={openModal}>
+            <TableCell colSpan={13} className="border-b-2 border-l border-r border-border/80 px-0 py-0.5">
+              {renderTradeLifecycleFlow({
+                status,
+                outcomeHeadline,
+                outcomeDetail,
+                executionSummary,
+                venueLabel: venuePresentation.label,
+                closeTrigger,
+                pendingExitLabel,
+                pendingExitTone,
+                pulseCurrentStage: OPEN_ORDER_STATUSES.has(status) && String(order.mode || '').toLowerCase() === 'live',
+              })}
+            </TableCell>
+          </TableRow>
+        </Fragment>
+      )
+    }
+
+    const {
+      bundle,
+      primaryRow,
+      status,
+      lifecycleLabel,
+      filledNotional,
+      requestedNotional,
+      currentValue,
+      unrealized,
+      realizedPnl,
+      fillPx,
+      markPx,
+      fillProgressPercent,
+      dynamicEdgePercent,
+      exitProgressPercent,
+      markUpdatedAt,
+      exitEvaluatedAt,
+      providerSnapshotStatus,
+      pendingExitStatus,
+      closeTrigger,
+      executionSummary,
+      outcomeHeadline,
+      outcomeDetail,
+      directionLabel,
+      bundleLabel,
+      venuePresentation,
+      legs,
+      resolutionPayoutLow,
+      resolutionPayoutHigh,
+      resolutionProfitLow,
+      resolutionProfitHigh,
+      guaranteedAnomaly,
+    } = displayRow
+    const order = primaryRow.order
+    const traderLabel = traderNameById[String(order.trader_id || '')] || shortId(order.trader_id)
+    const links = resolveTradeDisplayRowLinks(displayRow)
+    const primaryMarketLink = links.polymarket || links.kalshi
+    const marketForModal = resolveCryptoMarketFromAliases(collectOrderMarketAliasIds(order))
+    const openModal = () => {
+      openTradeMarketModal({
+        displayRow,
+        market: marketForModal,
+        order,
+        directionSide: primaryRow.directionSide,
+        directionLabel: primaryRow.directionLabel,
+        yesLabel: primaryRow.yesLabel,
+        noLabel: primaryRow.noLabel,
+        statusSummary: lifecycleLabel,
+        executionSummary,
+        outcomeSummary: outcomeDetail,
+        links,
+      })
+    }
+    const pendingExitLabel = pendingExitStatus && pendingExitStatus !== 'unknown'
+      ? (pendingExitStatus === 'failed' && OPEN_ORDER_STATUSES.has(status)
+        ? 'Exit:RETRY'
+        : `Exit:${pendingExitStatus.slice(0, 4).toUpperCase()}`)
+      : null
+    const pendingExitTone: 'neutral' | 'warning' =
+      pendingExitStatus === 'failed' && OPEN_ORDER_STATUSES.has(status)
+        ? 'warning'
+        : 'neutral'
+    const rangeClassName = resolutionProfitLow !== null && resolutionProfitHigh !== null
+      ? resolutionProfitLow >= 0
+        ? 'text-emerald-500'
+        : resolutionProfitHigh <= 0
+          ? 'text-red-500'
+          : 'text-amber-600 dark:text-amber-300'
+      : ''
+    const bundleLegSummary = legs.map((leg) => buildTradeBundleLegSummaryLabel(leg)).join(' • ')
+    const bundleLegTooltip = legs
+      .map((leg) => {
+        const priceLabel = leg.fillPx !== null ? ` @${leg.fillPx.toFixed(3)}` : ''
+        const sizeLabel = leg.filledSize > 0 ? ` ${leg.filledSize.toFixed(1)}sh` : ''
+        return `${buildTradeBundleLegSummaryLabel(leg)}${sizeLabel}${priceLabel}`
+      })
+      .join(' | ')
+    const primaryMarketLabel = cleanText(bundle.legs[0]?.market_question) || cleanText(order.market_question) || shortId(order.market_id)
+    const marketTitle = bundle.leg_count > 1 ? `${primaryMarketLabel} +${bundle.leg_count - 1} more` : primaryMarketLabel
+    const resolutionRangeLabel = formatSignedCurrencyRange(resolutionProfitLow, resolutionProfitHigh)
+    const hasOpenResolutionProfile = OPEN_ORDER_STATUSES.has(status) && filledNotional > 0 && resolutionProfitLow !== null && resolutionProfitHigh !== null
+    const resolutionRoiLow = hasOpenResolutionProfile ? (resolutionProfitLow / filledNotional) * 100 : null
+    const resolutionRoiHigh = hasOpenResolutionProfile ? (resolutionProfitHigh / filledNotional) * 100 : null
+    const resolutionRoiLabel = formatSignedPercentRange(resolutionRoiLow, resolutionRoiHigh, 2)
+    const bundleEdgeClassName = hasOpenResolutionProfile
+      ? (
+        resolutionRoiLow !== null && resolutionRoiHigh !== null
+          ? (
+            resolutionRoiLow >= 0
+              ? 'text-emerald-500'
+              : resolutionRoiHigh <= 0
+                ? 'text-red-500'
+                : 'text-amber-600 dark:text-amber-300'
+          )
+          : ''
+      )
+      : (dynamicEdgePercent > 0 ? 'text-emerald-500' : dynamicEdgePercent < 0 ? 'text-red-500' : '')
+
+    return (
+      <Fragment key={displayRow.key}>
+        <TableRow
+          className="border-b-0 bg-cyan-500/[0.06] text-[11px] leading-tight cursor-pointer hover:bg-cyan-500/[0.10] [&>td]:border-t [&>td]:border-border/70 [&>td:first-child]:border-l [&>td:last-child]:border-r"
+          onClick={openModal}
+        >
+          <TableCell className="max-w-[260px] py-0.5" title={bundleLegTooltip || marketTitle}>
+            <div className="flex min-w-0 items-center gap-1">
+              <div className="flex shrink-0 items-center gap-0.5">
+                {links.polymarket && (
+                  <a
+                    href={links.polymarket}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={(event) => event.stopPropagation()}
+                    className="inline-flex h-4 w-4 items-center justify-center rounded border border-border/70 text-muted-foreground transition-colors hover:text-foreground"
+                    title="Open primary Polymarket market"
+                  >
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
+                )}
+                {links.kalshi && (
+                  <a
+                    href={links.kalshi}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={(event) => event.stopPropagation()}
+                    className="inline-flex h-4 w-4 items-center justify-center rounded border border-border/70 text-muted-foreground transition-colors hover:text-foreground"
+                    title="Open primary Kalshi market"
+                  >
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
+                )}
+              </div>
+              {primaryMarketLink ? (
+                <a
+                  href={primaryMarketLink}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(event) => event.stopPropagation()}
+                  className="truncate hover:underline underline-offset-2"
+                  title="Open primary market"
+                >
+                  {marketTitle}
+                </a>
+              ) : (
+                <span className="truncate">{marketTitle}</span>
+              )}
+            </div>
+            <p className={cn('truncate text-[9px] leading-none', guaranteedAnomaly ? 'text-red-600 dark:text-red-300' : 'text-cyan-700 dark:text-cyan-300')} title={bundleLabel}>
+              {bundleLabel}
+            </p>
+            <p className="truncate text-[9px] leading-none text-muted-foreground" title={bundleLegTooltip}>
+              {bundleLegSummary}
+            </p>
+            {showTraderLabel ? (
+              <p className="truncate text-[9px] leading-none text-muted-foreground" title={traderLabel}>
+                {traderLabel}
+              </p>
+            ) : null}
+          </TableCell>
+          <TableCell className="py-0.5">
+            <Badge
+              variant="outline"
+              className={cn(
+                'h-4 max-w-[120px] truncate px-1 text-[9px] font-semibold',
+                guaranteedAnomaly
+                  ? 'border-red-300 bg-red-100 text-red-900 dark:border-red-400/45 dark:bg-red-500/12 dark:text-red-200'
+                  : 'border-cyan-300 bg-cyan-100 text-cyan-900 dark:border-cyan-400/45 dark:bg-cyan-500/12 dark:text-cyan-200'
+              )}
+              title={bundleLabel}
+            >
+              {directionLabel}
+            </Badge>
+          </TableCell>
+          <TableCell
+            className="text-right font-mono py-0.5 text-[10px]"
+            title={`Basis: ${formatCurrency(filledNotional > 0 ? filledNotional : requestedNotional, true)} | Resolution payout: ${resolutionPayoutLow !== null && resolutionPayoutHigh !== null ? `${formatCurrency(resolutionPayoutLow, true)}-${formatCurrency(resolutionPayoutHigh, true)}` : 'n/a'}`}
+          >
+            {currentValue > 0 ? formatCurrency(currentValue, true) : '—'}
+          </TableCell>
+          <TableCell className="text-right font-mono py-0.5 text-[10px]">{fillPx !== null && fillPx > 0 ? fillPx.toFixed(3) : '—'}</TableCell>
+          <TableCell className="text-right font-mono py-0.5 text-[10px]">{fillProgressPercent !== null ? formatPercent(fillProgressPercent, 0) : '—'}</TableCell>
+          <TableCell className="text-right font-mono py-0.5 text-[10px]">
+            {markPx !== null && markPx > 0 ? (
+              <FlashNumber
+                value={markPx}
+                decimals={3}
+                className="font-mono text-[10px]"
+              />
+            ) : '—'}
+          </TableCell>
+          <TableCell
+            className={cn(
+              'text-right font-mono py-0.5 text-[10px] font-semibold',
+              hasOpenResolutionProfile
+                ? rangeClassName
+                : unrealized > 0
+                  ? 'text-emerald-500'
+                  : unrealized < 0
+                    ? 'text-red-500'
+                    : ''
+            )}
+            title={hasOpenResolutionProfile ? `Current mark-to-market: ${formatCurrency(unrealized, true)}` : undefined}
+          >
+            {OPEN_ORDER_STATUSES.has(status)
+              ? hasOpenResolutionProfile
+                ? resolutionRangeLabel
+                : formatCurrency(unrealized, true)
+              : '—'}
+          </TableCell>
+          <TableCell
+            className={cn('text-right font-mono py-0.5 text-[10px] font-semibold', bundleEdgeClassName)}
+            title={hasOpenResolutionProfile ? `Current mark edge: ${formatPercent(dynamicEdgePercent)}` : undefined}
+          >
+            {hasOpenResolutionProfile ? resolutionRoiLabel : formatPercent(dynamicEdgePercent)}
+          </TableCell>
+          <TableCell className={cn('text-right font-mono py-0.5 text-[10px] font-semibold', RESOLVED_ORDER_STATUSES.has(status) ? (realizedPnl > 0 ? 'text-emerald-500' : realizedPnl < 0 ? 'text-red-500' : '') : '')}>
+            {RESOLVED_ORDER_STATUSES.has(status)
+              ? formatCurrency(realizedPnl, true)
+              : '—'}
+          </TableCell>
+          <TableCell className="py-0.5">
+            <Badge
+              variant="outline"
+              title={`${venuePresentation.detail}${providerSnapshotStatus ? ` • provider:${providerSnapshotStatus}` : ''}`}
+              className={cn('h-4 max-w-[120px] truncate px-1 text-[9px] font-semibold', venuePresentation.className)}
+            >
+              {venuePresentation.label}
+            </Badge>
+          </TableCell>
+          <TableCell className="text-right font-mono py-0.5 text-[10px]">
+            {exitProgressPercent !== null ? formatPercent(exitProgressPercent, 0) : '—'}
+          </TableCell>
+          <TableCell className="py-0.5 text-[9px] text-muted-foreground">
+            <span title={`${String(order.mode || '').toUpperCase()} • mark:${formatTimestamp(markUpdatedAt)} • created:${formatTimestamp(order.created_at)}`}>
+              {formatRelativeAge(markUpdatedAt)}
+            </span>
+          </TableCell>
+          <TableCell className="py-0.5 text-[9px] text-muted-foreground">
+            <span title={`${String(order.mode || '').toUpperCase()} • exit eval:${formatTimestamp(exitEvaluatedAt)} • updated:${formatTimestamp(order.updated_at)}`}>
+              {formatRelativeAge(exitEvaluatedAt)}
+            </span>
+          </TableCell>
+        </TableRow>
+        <TableRow className="cursor-pointer bg-cyan-500/[0.06] hover:bg-cyan-500/[0.10]" onClick={openModal}>
+          <TableCell colSpan={13} className="border-b-2 border-l border-r border-border/80 px-0 py-0.5">
+            {renderTradeLifecycleFlow({
+              status,
+              outcomeHeadline,
+              outcomeDetail,
+              executionSummary,
+              venueLabel: venuePresentation.label,
+              closeTrigger,
+              pendingExitLabel,
+              pendingExitTone,
+              pulseCurrentStage: OPEN_ORDER_STATUSES.has(status) && String(order.mode || '').toLowerCase() === 'live',
+            })}
+            <div className="flex items-center justify-between gap-2 px-2 pb-1 text-[9px]">
+              <span className="min-w-0 truncate text-muted-foreground" title={bundleLegTooltip}>
+                {bundleLegSummary}
+              </span>
+              {resolutionProfitLow !== null && resolutionProfitHigh !== null ? (
+                <span className={cn('shrink-0 font-mono', rangeClassName)}>
+                  {resolutionRangeLabel}
+                </span>
+              ) : null}
+            </div>
+          </TableCell>
+        </TableRow>
+      </Fragment>
+    )
+  }
+
   const shellLoading = overviewQuery.isLoading || tradersQuery.isLoading
 
   if (shellLoading) {
@@ -8745,7 +10078,13 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                       <span className="text-[11px] font-medium truncate leading-tight">{row.trader.name}</span>
                                     </div>
                                     <div className="pl-3 mt-0.5 text-[9px] text-muted-foreground">
-                                      {row.open} open · {row.resolved} resolved
+                                      <span>{row.open} open</span>
+                                      {row.partialOpenBundles > 0 && (
+                                        <span className="text-amber-500" title="Bundles with one filled leg and one still working">
+                                          {' · '}{row.partialOpenBundles} partial
+                                        </span>
+                                      )}
+                                      <span>{' · '}{row.resolved} resolved</span>
                                     </div>
                                   </div>
                                   <span className={cn('shrink-0 text-[10px] font-mono', row.pnl > 0 ? 'text-emerald-500' : row.pnl < 0 ? 'text-red-500' : 'text-muted-foreground')}>
@@ -9123,7 +10462,13 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                       </div>
                                       <div className="mt-1.5 flex items-center justify-between gap-2">
                                         <span className="text-[9px] text-muted-foreground">
-                                          {row.open} open · {row.resolved} resolved
+                                          <span>{row.open} open</span>
+                                          {row.partialOpenBundles > 0 && (
+                                            <span className="text-amber-500" title="Bundles with one filled leg and one still working">
+                                              {' · '}{row.partialOpenBundles} partial
+                                            </span>
+                                          )}
+                                          <span>{' · '}{row.resolved} resolved</span>
                                         </span>
                                         {row.trend.length >= 2 && (
                                           <Liveline
@@ -9210,264 +10555,8 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                             <div className="flex-1 min-h-0 overflow-auto" ref={tradesTableParentRef}>
                               <Table className="w-full table-fixed">
                                 <TableBody>
-                                {filteredAllTradeHistory.map((order) => {
-                                  const status = normalizeStatus(order.status)
-                                  const lifecycleLabel = resolveOrderLifecycleLabel(status)
-                                  const pnl = toNumber(order.actual_profit)
-                                  const orderPayload = order.payload && typeof order.payload === 'object' ? order.payload : {}
-                                  const providerReconciliation = orderPayload.provider_reconciliation && typeof orderPayload.provider_reconciliation === 'object'
-                                    ? orderPayload.provider_reconciliation
-                                    : {}
-                                  const providerSnapshot = providerReconciliation.snapshot && typeof providerReconciliation.snapshot === 'object'
-                                    ? providerReconciliation.snapshot
-                                    : {}
-                                  const positionState = orderPayload.position_state && typeof orderPayload.position_state === 'object'
-                                    ? orderPayload.position_state
-                                    : {}
-                                  const pendingExit = orderPayload.pending_live_exit && typeof orderPayload.pending_live_exit === 'object'
-                                    ? orderPayload.pending_live_exit
-                                    : {}
-                                  const providerSnapshotStatus = normalizeStatus(
-                                    String(
-                                      order.provider_snapshot_status
-                                      || providerReconciliation.snapshot_status
-                                      || providerSnapshot.normalized_status
-                                      || providerSnapshot.status
-                                      || ''
-                                    )
-                                  )
-                                  const fillPx = toNumber(
-                                    order.average_fill_price
-                                    ?? providerReconciliation.average_fill_price
-                                    ?? providerSnapshot.average_fill_price
-                                    ?? order.effective_price
-                                    ?? order.entry_price
-                                  )
-                                  const directionPresentation = resolveOrderDirectionPresentation(order)
-                                  const realtimeCrypto = resolveOrderRealtimeCryptoSnapshot(order, directionPresentation.side)
-                                  const liveMark2 = liveMarksByOrderId.get(String(order.id || ''))
-                                  const markPx = toNumber(
-                                    liveMark2?.mark_price
-                                    ?? realtimeCrypto.markPrice
-                                    ?? order.current_price
-                                    ?? positionState.last_mark_price
-                                    ?? orderPayload.market_price
-                                    ?? orderPayload.resolved_price
-                                  )
-                                  const filledSize = toNumber(
-                                    order.filled_shares
-                                    ?? providerReconciliation.filled_size
-                                    ?? providerSnapshot.filled_size
-                                    ?? orderPayload.filled_size
-                                  )
-                                  const filledNotional = toNumber(
-                                    order.filled_notional_usd
-                                    ?? providerReconciliation.filled_notional_usd
-                                    ?? providerSnapshot.filled_notional_usd
-                                    ?? order.notional_usd
-                                  )
-                                  let unrealized = toNumber(order.unrealized_pnl)
-                                  if ((order.unrealized_pnl === null || order.unrealized_pnl === undefined) && markPx > 0 && filledSize > 0 && filledNotional > 0) {
-                                    unrealized = (markPx * filledSize) - filledNotional
-                                  }
-                                  // Prefer live mark U-P&L from real-time WS feed over stale API value
-                                  if (liveMark2 && typeof liveMark2.unrealized_pnl === 'number' && liveMark2.mark_price > 0) {
-                                    unrealized = liveMark2.unrealized_pnl
-                                  }
-                                  const fillProgressPercent = computeOrderFillProgressPercent(
-                                    orderPayload as Record<string, unknown>,
-                                    {
-                                      filledSize,
-                                      filledNotional,
-                                      requestedNotionalFallback: Math.abs(toNumber(order.notional_usd)),
-                                    }
-                                  )
-                                   const dynamicEdgePercent = computeOrderDynamicEdgePercent({
-                                     status,
-                                     edgePercent: toNumber(order.edge_percent),
-                                     unrealizedPnl: unrealized,
-                                     realizedPnl: pnl,
-                                     filledNotional,
-                                   })
-                                  const exitProgressPercent = computePendingExitProgressPercent(pendingExit as Record<string, unknown>)
-                                  const linkedDecisionId = String(order.decision_id || '').trim()
-                                  const signalPayload = linkedDecisionId
-                                    ? decisionSignalPayloadByDecisionId.get(linkedDecisionId) || null
-                                    : null
-                                  const links = buildOrderMarketLinks(order, orderPayload, signalPayload)
-                                  const primaryMarketLink = links.polymarket || links.kalshi
-                                  const liveMark2Ts = liveMark2?.mark_updated_at
-                                  const liveMark2Iso = typeof liveMark2Ts === 'number' && liveMark2Ts > 0
-                                    ? new Date(liveMark2Ts * 1000).toISOString()
-                                    : null
-                                  const markUpdatedAt = latestTimestampValue(
-                                    liveMark2Iso,
-                                    realtimeCrypto.updatedAt,
-                                    resolveOrderMarketUpdateTimestamp(order, orderPayload),
-                                  )
-                                  const exitEvaluatedAt = resolveOrderExitEvaluationTimestamp(order, orderPayload)
-                                  const positionClose = orderPayload.position_close && typeof orderPayload.position_close === 'object'
-                                    ? orderPayload.position_close
-                                    : {}
-                                  const closeTrigger = cleanText(
-                                    order.close_trigger
-                                    || (positionClose as Record<string, unknown>).close_trigger
-                                    || (pendingExit as Record<string, unknown>).close_trigger
-                                  )
-                                  const pendingExitStatus = normalizeStatus(String((pendingExit as Record<string, unknown>).status || ''))
-                                  const pendingExitLabel = pendingExitStatus && pendingExitStatus !== 'unknown'
-                                    ? `Exit:${pendingExitStatus.slice(0, 4).toUpperCase()}`
-                                    : null
-                                  const pendingExitTone: 'neutral' | 'warning' =
-                                    pendingExitStatus === 'failed' && OPEN_ORDER_STATUSES.has(status)
-                                      ? 'warning'
-                                      : 'neutral'
-                                  const outcome = orderOutcomeSummary(order)
-                                  const executionSummary = orderExecutionTypeSummary(order)
-                                  const venuePresentation = resolveVenueStatusPresentation(providerSnapshotStatus)
-                                  const traderLabel = traderNameById[String(order.trader_id || '')] || shortId(order.trader_id)
-                                  const marketForModal = resolveCryptoMarketFromAliases(collectOrderMarketAliasIds(order))
-                                  const openModal = () => {
-                                    openTradeMarketModal({
-                                      market: marketForModal,
-                                      order,
-                                      directionSide: directionPresentation.side,
-                                      directionLabel: directionPresentation.label,
-                                      yesLabel: directionPresentation.yesLabel,
-                                      noLabel: directionPresentation.noLabel,
-                                      statusSummary: lifecycleLabel,
-                                      executionSummary,
-                                      outcomeSummary: outcome.detail,
-                                      links,
-                                    })
-                                  }
-                                  return (
-                                    <Fragment key={order.id}>
-                                      <TableRow
-                                        className="border-b-0 bg-muted/[0.08] text-[11px] leading-tight cursor-pointer hover:bg-muted/[0.16] [&>td]:border-t [&>td]:border-border/70 [&>td:first-child]:border-l [&>td:last-child]:border-r"
-                                        onClick={openModal}
-                                      >
-                                        <TableCell className="max-w-[260px] py-0.5" title={order.market_question || order.market_id}>
-                                          <div className="flex min-w-0 items-center gap-1">
-                                            <div className="flex shrink-0 items-center gap-0.5">
-                                              {links.polymarket && (
-                                                <a
-                                                  href={links.polymarket}
-                                                  target="_blank"
-                                                  rel="noopener noreferrer"
-                                                  onClick={(event) => event.stopPropagation()}
-                                                  className="inline-flex h-4 w-4 items-center justify-center rounded border border-border/70 text-muted-foreground transition-colors hover:text-foreground"
-                                                  title="Open Polymarket market"
-                                                >
-                                                  <ExternalLink className="h-3 w-3" />
-                                                </a>
-                                              )}
-                                              {links.kalshi && (
-                                                <a
-                                                  href={links.kalshi}
-                                                  target="_blank"
-                                                  rel="noopener noreferrer"
-                                                  onClick={(event) => event.stopPropagation()}
-                                                  className="inline-flex h-4 w-4 items-center justify-center rounded border border-border/70 text-muted-foreground transition-colors hover:text-foreground"
-                                                  title="Open Kalshi market"
-                                                >
-                                                  <ExternalLink className="h-3 w-3" />
-                                                </a>
-                                              )}
-                                            </div>
-                                            {primaryMarketLink ? (
-                                              <a
-                                                href={primaryMarketLink}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                                onClick={(event) => event.stopPropagation()}
-                                                className="truncate hover:underline underline-offset-2"
-                                                title="Open market"
-                                              >
-                                                {order.market_question || shortId(order.market_id)}
-                                              </a>
-                                            ) : (
-                                              <span className="truncate">
-                                                {order.market_question || shortId(order.market_id)}
-                                              </span>
-                                            )}
-                                          </div>
-                                          <p className="truncate text-[9px] leading-none text-muted-foreground" title={traderLabel}>
-                                            {traderLabel}
-                                          </p>
-                                        </TableCell>
-                                        <TableCell className="py-0.5">
-                                          <Badge
-                                            variant="outline"
-                                            className="h-4 max-w-[120px] truncate border-border/80 bg-muted/60 px-1 text-[9px] text-muted-foreground"
-                                            title={directionPresentation.label}
-                                          >
-                                            {directionPresentation.label}
-                                          </Badge>
-                                        </TableCell>
-                                        <TableCell
-                                          className="text-right font-mono py-0.5 text-[10px]"
-                                          title={`Entry: ${formatCurrency(filledNotional > 0 ? filledNotional : toNumber(order.notional_usd), true)} | Shares: ${filledSize > 0 ? filledSize.toFixed(1) : '\u2014'}`}
-                                        >
-                                          {(() => {
-                                            const cv = markPx > 0 && filledSize > 0
-                                              ? markPx * filledSize
-                                              : filledNotional > 0 ? filledNotional : toNumber(order.notional_usd)
-                                            return cv > 0 ? formatCurrency(cv, true) : '\u2014'
-                                          })()}
-                                        </TableCell>
-                                        <TableCell className="text-right font-mono py-0.5 text-[10px]">{fillPx > 0 ? fillPx.toFixed(3) : '\u2014'}</TableCell>
-                                        <TableCell className="text-right font-mono py-0.5 text-[10px]">{fillProgressPercent !== null ? formatPercent(fillProgressPercent, 0) : '\u2014'}</TableCell>
-                                        <TableCell className="text-right font-mono py-0.5 text-[10px]">{markPx > 0 ? <FlashNumber value={markPx} decimals={3} className="font-mono" /> : '\u2014'}</TableCell>
-                                        <TableCell className={cn('text-right font-mono py-0.5 text-[10px] font-semibold', unrealized > 0 ? 'text-emerald-500' : unrealized < 0 ? 'text-red-500' : '')}>
-                                          {OPEN_ORDER_STATUSES.has(status) ? formatCurrency(unrealized) : '\u2014'}
-                                        </TableCell>
-                                        <TableCell className={cn('text-right font-mono py-0.5 text-[10px] font-semibold', dynamicEdgePercent > 0 ? 'text-emerald-500' : dynamicEdgePercent < 0 ? 'text-red-500' : '')}>{formatPercent(dynamicEdgePercent)}</TableCell>
-                                        <TableCell className={cn('text-right font-mono py-0.5 text-[10px] font-semibold', pnl > 0 ? 'text-emerald-500' : pnl < 0 ? 'text-red-500' : '')}>
-                                          {RESOLVED_ORDER_STATUSES.has(status) ? formatCurrency(pnl) : '\u2014'}
-                                        </TableCell>
-                                        <TableCell className="py-0.5">
-                                          <Badge
-                                            variant="outline"
-                                            title={`Venue: ${venuePresentation.detail}${providerSnapshotStatus ? ` • provider:${providerSnapshotStatus}` : ''}`}
-                                            className={cn('h-4 max-w-[120px] truncate px-1 text-[9px] font-semibold', venuePresentation.className)}
-                                          >
-                                            {venuePresentation.label}
-                                          </Badge>
-                                        </TableCell>
-                                        <TableCell className="text-right font-mono py-0.5 text-[10px]">
-                                          {exitProgressPercent !== null ? formatPercent(exitProgressPercent, 0) : '\u2014'}
-                                        </TableCell>
-                                      <TableCell className="py-0.5 text-[9px] text-muted-foreground">
-                                        <span title={`${String(order.mode || '').toUpperCase()} • mark:${formatTimestamp(markUpdatedAt)} • created:${formatTimestamp(order.created_at)}`}>
-                                          {formatRelativeAge(markUpdatedAt)}
-                                        </span>
-                                      </TableCell>
-                                      <TableCell className="py-0.5 text-[9px] text-muted-foreground">
-                                        <span title={`${String(order.mode || '').toUpperCase()} • exit eval:${formatTimestamp(exitEvaluatedAt)} • updated:${formatTimestamp(order.updated_at)}`}>
-                                          {formatRelativeAge(exitEvaluatedAt)}
-                                        </span>
-                                      </TableCell>
-                                      </TableRow>
-                                      <TableRow className="cursor-pointer bg-muted/[0.08] hover:bg-muted/[0.16]" onClick={openModal}>
-                                        <TableCell colSpan={13} className="border-b-2 border-l border-r border-border/80 px-0 py-0.5">
-                                          {renderTradeLifecycleFlow({
-                                            status,
-                                            outcomeHeadline: outcome.headline,
-                                            outcomeDetail: outcome.detail,
-                                            executionSummary,
-                                            venueLabel: venuePresentation.label,
-                                            closeTrigger,
-                                            pendingExitLabel,
-                                            pendingExitTone,
-                                            pulseCurrentStage: OPEN_ORDER_STATUSES.has(status) && String(order.mode || '').toLowerCase() === 'live',
-                                          })}
-                                        </TableCell>
-                                      </TableRow>
-                                    </Fragment>
-                                  )
-                                })}
-                              </TableBody>
+                                {filteredAllTradeHistory.map((row) => renderTradeDisplayRow(row, true))}
+                                </TableBody>
                             </Table>
                             </div>
                             {ordersTotalPages > 1 && (
@@ -10007,7 +11096,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                     </div>
                     <div className="shrink-0 grid grid-cols-2 gap-1 px-1 sm:grid-cols-4 lg:grid-cols-8">
                       <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
-                        <p className="text-[9px] uppercase text-muted-foreground">Orders</p>
+                        <p className="text-[9px] uppercase text-muted-foreground">Trades</p>
                         <p className="text-xs font-mono">{selectedTradeTotals.total}</p>
                       </div>
                       <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
@@ -10067,203 +11156,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                               </TableRow>
                             </TableHeader>
                             <TableBody>
-                              {selectedTradeRows.map((row) => {
-                                const {
-                                  order,
-                                  status,
-                                  pnl,
-                                  lifecycleLabel,
-                                  fillPx,
-                                  markPx,
-                                  filledSize,
-                                  filledNotional,
-                                  unrealized,
-                                  fillProgressPercent,
-                                  dynamicEdgePercent,
-                                  exitProgressPercent,
-                                  markUpdatedAt,
-                                  exitEvaluatedAt,
-                                  providerSnapshotStatus,
-                                  pendingExitStatus,
-                                  closeTrigger,
-                                  markFresh: _markFresh,
-                                  links,
-                                  directionSide,
-                                  directionLabel,
-                                  yesLabel,
-                                  noLabel,
-                                  executionSummary,
-                                  outcomeHeadline,
-                                  outcomeDetail,
-                                  venuePresentation,
-                                } = row
-                                const currentValue = markPx > 0 && filledSize > 0
-                                  ? markPx * filledSize
-                                  : filledNotional > 0 ? filledNotional : toNumber(order.notional_usd)
-                                const pendingExitLabel = pendingExitStatus && pendingExitStatus !== 'unknown'
-                                  ? (pendingExitStatus === 'failed' && OPEN_ORDER_STATUSES.has(status)
-                                    ? 'Exit:RETRY'
-                                    : `Exit:${pendingExitStatus.slice(0, 4).toUpperCase()}`)
-                                  : null
-                                const pendingExitTone: 'neutral' | 'warning' =
-                                  pendingExitStatus === 'failed' && OPEN_ORDER_STATUSES.has(status)
-                                    ? 'warning'
-                                    : 'neutral'
-                                const marketForModal = resolveCryptoMarketFromAliases(collectOrderMarketAliasIds(order))
-                                const openModal = () => {
-                                  openTradeMarketModal({
-                                    market: marketForModal,
-                                    order,
-                                    directionSide,
-                                    directionLabel,
-                                    yesLabel,
-                                    noLabel,
-                                    statusSummary: lifecycleLabel,
-                                    executionSummary,
-                                    outcomeSummary: outcomeDetail,
-                                    links,
-                                  })
-                                }
-                                const primaryMarketLink = links.polymarket || links.kalshi
-                                return (
-                                  <Fragment key={order.id}>
-                                    <TableRow
-                                      className="border-b-0 bg-muted/[0.08] text-[11px] leading-tight cursor-pointer hover:bg-muted/[0.16] [&>td]:border-t [&>td]:border-border/70 [&>td:first-child]:border-l [&>td:last-child]:border-r"
-                                      onClick={openModal}
-                                    >
-                                      <TableCell className="max-w-[260px] py-0.5" title={order.market_question || order.market_id}>
-                                        <div className="flex min-w-0 items-center gap-1">
-                                          <div className="flex shrink-0 items-center gap-0.5">
-                                            {links.polymarket && (
-                                              <a
-                                                href={links.polymarket}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                                onClick={(event) => event.stopPropagation()}
-                                                className="inline-flex h-4 w-4 items-center justify-center rounded border border-border/70 text-muted-foreground transition-colors hover:text-foreground"
-                                                title="Open Polymarket market"
-                                              >
-                                                <ExternalLink className="h-3 w-3" />
-                                              </a>
-                                            )}
-                                            {links.kalshi && (
-                                              <a
-                                                href={links.kalshi}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                                onClick={(event) => event.stopPropagation()}
-                                                className="inline-flex h-4 w-4 items-center justify-center rounded border border-border/70 text-muted-foreground transition-colors hover:text-foreground"
-                                                title="Open Kalshi market"
-                                              >
-                                                <ExternalLink className="h-3 w-3" />
-                                              </a>
-                                            )}
-                                          </div>
-                                          {primaryMarketLink ? (
-                                            <a
-                                              href={primaryMarketLink}
-                                              target="_blank"
-                                              rel="noopener noreferrer"
-                                              onClick={(event) => event.stopPropagation()}
-                                              className="truncate hover:underline underline-offset-2"
-                                              title="Open market"
-                                            >
-                                              {order.market_question || shortId(order.market_id)}
-                                            </a>
-                                          ) : (
-                                            <span className="truncate">{order.market_question || shortId(order.market_id)}</span>
-                                          )}
-                                        </div>
-                                      </TableCell>
-                                      <TableCell className="py-0.5">
-                                        <Badge
-                                          variant="outline"
-                                          className="h-4 max-w-[120px] truncate border-border/80 bg-muted/60 px-1 text-[9px] text-muted-foreground"
-                                          title={directionLabel}
-                                        >
-                                          {directionLabel}
-                                        </Badge>
-                                      </TableCell>
-                                      <TableCell
-                                        className="text-right font-mono py-0.5 text-[10px]"
-                                        title={`Entry: ${formatCurrency(filledNotional > 0 ? filledNotional : toNumber(order.notional_usd), true)} | Shares: ${filledSize > 0 ? filledSize.toFixed(1) : '\u2014'}`}
-                                      >
-                                        {currentValue > 0 ? formatCurrency(currentValue, true) : '\u2014'}
-                                      </TableCell>
-                                      <TableCell className="text-right font-mono py-0.5 text-[10px]">{fillPx > 0 ? fillPx.toFixed(3) : '\u2014'}</TableCell>
-                                      <TableCell className="text-right font-mono py-0.5 text-[10px]">{fillProgressPercent !== null ? formatPercent(fillProgressPercent, 0) : '\u2014'}</TableCell>
-                                      <TableCell className="text-right font-mono py-0.5 text-[10px]">
-                                        {markPx > 0 ? (
-                                          <FlashNumber
-                                            value={markPx}
-                                            decimals={3}
-                                            className="font-mono text-[10px]"
-                                          />
-                                        ) : '\u2014'}
-                                      </TableCell>
-                                      <TableCell className={cn('text-right font-mono py-0.5 text-[10px] font-semibold', unrealized > 0 ? 'text-emerald-500' : unrealized < 0 ? 'text-red-500' : '')}>
-                                        {OPEN_ORDER_STATUSES.has(status) ? (
-                                          <FlashNumber
-                                            value={unrealized}
-                                            decimals={2}
-                                            prefix="$"
-                                            className={cn('font-mono text-[10px] font-semibold', unrealized > 0 ? 'text-emerald-500' : unrealized < 0 ? 'text-red-500' : '')}
-                                          />
-                                        ) : '\u2014'}
-                                      </TableCell>
-                                      <TableCell className={cn('text-right font-mono py-0.5 text-[10px] font-semibold', dynamicEdgePercent > 0 ? 'text-emerald-500' : dynamicEdgePercent < 0 ? 'text-red-500' : '')}>{formatPercent(dynamicEdgePercent)}</TableCell>
-                                      <TableCell className={cn('text-right font-mono py-0.5 text-[10px] font-semibold', pnl > 0 ? 'text-emerald-500' : pnl < 0 ? 'text-red-500' : '')}>
-                                        {RESOLVED_ORDER_STATUSES.has(status) ? formatCurrency(pnl, true) : '\u2014'}
-                                      </TableCell>
-                                      <TableCell className="py-0.5">
-                                        <Badge
-                                          variant="outline"
-                                          title={
-                                            `${venuePresentation.detail}`
-                                            + (providerSnapshotStatus ? ` • provider:${providerSnapshotStatus}` : '')
-                                            + (
-                                              order.provider_clob_order_id || order.provider_order_id
-                                                ? ` • order_ref:${order.provider_clob_order_id || order.provider_order_id}`
-                                                : ''
-                                            )
-                                          }
-                                          className={cn('h-4 max-w-[120px] truncate px-1 text-[9px] font-semibold', venuePresentation.className)}
-                                        >
-                                          {venuePresentation.label}
-                                        </Badge>
-                                      </TableCell>
-                                      <TableCell className="text-right font-mono py-0.5 text-[10px]">
-                                        {exitProgressPercent !== null ? formatPercent(exitProgressPercent, 0) : '\u2014'}
-                                      </TableCell>
-                                      <TableCell className="py-0.5 text-[9px] text-muted-foreground">
-                                        <span title={`${String(order.mode || '').toUpperCase()} • mark:${formatTimestamp(markUpdatedAt)} • created:${formatTimestamp(order.created_at)}`}>
-                                          {formatRelativeAge(markUpdatedAt)}
-                                        </span>
-                                      </TableCell>
-                                      <TableCell className="py-0.5 text-[9px] text-muted-foreground">
-                                        <span title={`${String(order.mode || '').toUpperCase()} • exit eval:${formatTimestamp(exitEvaluatedAt)} • updated:${formatTimestamp(order.updated_at)}`}>
-                                          {formatRelativeAge(exitEvaluatedAt)}
-                                        </span>
-                                      </TableCell>
-                                    </TableRow>
-                                    <TableRow className="cursor-pointer bg-muted/[0.08] hover:bg-muted/[0.16]" onClick={openModal}>
-                                      <TableCell colSpan={13} className="border-b-2 border-l border-r border-border/80 px-0 py-0.5">
-                                        {renderTradeLifecycleFlow({
-                                          status,
-                                          outcomeHeadline,
-                                          outcomeDetail,
-                                          executionSummary,
-                                          venueLabel: venuePresentation.label,
-                                          closeTrigger,
-                                          pendingExitLabel,
-                                          pendingExitTone,
-                                          pulseCurrentStage: OPEN_ORDER_STATUSES.has(status) && String(order.mode || '').toLowerCase() === 'live',
-                                        })}
-                                      </TableCell>
-                                    </TableRow>
-                                  </Fragment>
-                                )
-                              })}
+                              {selectedTradeRows.map((row) => renderTradeDisplayRow(row, false))}
                             </TableBody>
                           </Table>
                         </div>
@@ -12193,3 +13086,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     </div>
   )
 }
+
+
+

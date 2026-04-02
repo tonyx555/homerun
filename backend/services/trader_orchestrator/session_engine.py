@@ -71,6 +71,55 @@ def _parse_iso_utc(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _resolve_leg_market_question(signal_payload: dict[str, Any], leg: dict[str, Any], fallback_question: str) -> str:
+    explicit_question = str(leg.get("market_question") or "").strip()
+    if explicit_question:
+        return explicit_question
+
+    leg_market_id = str(leg.get("market_id") or "").strip()
+    raw_markets = signal_payload.get("markets")
+    if isinstance(raw_markets, list):
+        normalized_leg_market_id = leg_market_id.lower()
+        for raw_market in raw_markets:
+            if not isinstance(raw_market, dict):
+                continue
+            candidate_ids = (
+                raw_market.get("question"),
+                raw_market.get("market_question"),
+                raw_market.get("id"),
+                raw_market.get("market_id"),
+                raw_market.get("condition_id"),
+                raw_market.get("conditionId"),
+                raw_market.get("slug"),
+                raw_market.get("market_slug"),
+                raw_market.get("ticker"),
+            )
+            if normalized_leg_market_id and any(
+                str(candidate or "").strip().lower() == normalized_leg_market_id for candidate in candidate_ids
+            ):
+                resolved_question = str(
+                    raw_market.get("question") or raw_market.get("market_question") or leg_market_id
+                ).strip()
+                if resolved_question:
+                    return resolved_question
+
+    return leg_market_id or fallback_question
+
+
+def _resolve_leg_direction(leg: dict[str, Any], fallback_direction: str) -> str:
+    explicit_direction = str(leg.get("direction") or "").strip().lower()
+    if explicit_direction:
+        return explicit_direction
+
+    side = str(leg.get("side") or "").strip().lower()
+    outcome = str(leg.get("outcome") or "").strip().lower()
+    if side in {"buy", "sell"} and outcome in {"yes", "no"}:
+        return f"{side}_{outcome}"
+    if side in {"buy", "sell"}:
+        return side
+    return str(fallback_direction or "").strip().lower()
+
+
 def _strategy_instance_for_execution(strategy_key: str) -> Any | None:
     key = str(strategy_key or "").strip().lower()
     if not key:
@@ -234,6 +283,12 @@ class ExecutionSessionEngine:
                 strategy_key=strategy_key,
                 legs_count=1,
             )
+
+        fallback_market_question = str(getattr(signal, "market_question", "") or "")
+        for leg in legs:
+            resolved_market_question = _resolve_leg_market_question(payload, leg, fallback_market_question)
+            if resolved_market_question:
+                leg["market_question"] = resolved_market_question
 
         policy = normalize_execution_policy(execution_plan.get("policy") or profile["policy"], legs_count=len(legs))
         raw_constraints = execution_plan.get("constraints")
@@ -750,6 +805,40 @@ class ExecutionSessionEngine:
                     if selected_value is not None:
                         exit_config[target_key] = selected_value
 
+                resolved_signal_payload = signal_payload if isinstance(signal_payload, dict) else {}
+                leg_market_id = str(leg_payload.get("market_id") or getattr(signal, "market_id", "") or "").strip()
+                leg_market_question = _resolve_leg_market_question(
+                    resolved_signal_payload,
+                    leg_payload,
+                    str(getattr(signal, "market_question", "") or "").strip(),
+                )
+                leg_direction = _resolve_leg_direction(leg_payload, str(getattr(signal, "direction", "") or ""))
+                leg_entry_price = safe_float(leg_payload.get("limit_price"), safe_float(result.effective_price, None))
+                if leg_market_id:
+                    order_payload["market_id"] = leg_market_id
+                if leg_market_question:
+                    order_payload["market_question"] = leg_market_question
+                if leg_direction:
+                    order_payload["direction"] = leg_direction
+                if leg_entry_price is not None and leg_entry_price > 0.0:
+                    order_payload["entry_price"] = float(leg_entry_price)
+                live_market_payload = order_payload.get("live_market")
+                live_market = dict(live_market_payload) if isinstance(live_market_payload, dict) else {}
+                if leg_market_id:
+                    live_market["market_id"] = leg_market_id
+                if leg_market_question:
+                    live_market["market_question"] = leg_market_question
+                selected_token_id = str(order_payload.get("token_id") or leg_payload.get("token_id") or "").strip()
+                if selected_token_id:
+                    live_market["selected_token_id"] = selected_token_id
+                selected_outcome = str(leg_payload.get("outcome") or "").strip().lower()
+                if selected_outcome:
+                    live_market["selected_outcome"] = selected_outcome
+                live_selected_price = safe_float(result.effective_price, leg_entry_price)
+                if live_selected_price is not None and live_selected_price > 0.0:
+                    live_market["live_selected_price"] = float(live_selected_price)
+                if live_market:
+                    order_payload["live_market"] = live_market
                 order_payload["strategy_exit_config"] = exit_config
                 if normalized_status != "skipped":
                     order_write_inputs.append(
@@ -757,6 +846,10 @@ class ExecutionSessionEngine:
                             "leg_id": leg_id,
                             "leg_row_id": leg_row.id,
                             "leg_payload": dict(leg_payload),
+                            "market_id": leg_market_id,
+                            "market_question": leg_market_question,
+                            "direction": leg_direction,
+                            "entry_price": leg_entry_price,
                             "normalized_status": normalized_status,
                             "result": result,
                             "order_payload": order_payload,
@@ -888,6 +981,19 @@ class ExecutionSessionEngine:
             normalized_status = str(item.get("normalized_status") or "").strip().lower()
             exit_config = dict(item.get("exit_config") or {})
             leg_row_id = str(item.get("leg_row_id") or "").strip()
+            leg_market_id = str(item.get("market_id") or leg_payload.get("market_id") or getattr(signal, "market_id", "") or "").strip()
+            leg_market_question = (
+                str(item.get("market_question") or "").strip()
+                or str(leg_payload.get("market_question") or getattr(signal, "market_question", "") or "").strip()
+            )
+            leg_direction = str(item.get("direction") or "").strip().lower() or _resolve_leg_direction(
+                leg_payload,
+                str(getattr(signal, "direction", "") or ""),
+            )
+            leg_entry_price = safe_float(
+                item.get("entry_price"),
+                safe_float(leg_payload.get("limit_price"), safe_float(result.effective_price, None)),
+            )
 
             take_profit_pct = safe_float(exit_config.get("take_profit_pct"), None)
             entry_side = str(leg_payload.get("side") or "buy").strip().lower()
@@ -930,9 +1036,7 @@ class ExecutionSessionEngine:
                             side="SELL",
                             size=float(exit_size),
                             fallback_price=target_price,
-                            market_question=str(
-                                leg_payload.get("market_question") or getattr(signal, "market_question", "") or ""
-                            ),
+                            market_question=leg_market_question,
                             opportunity_id=str(getattr(signal, "id", "") or ""),
                             time_in_force="GTC",
                             post_only=True,
@@ -982,17 +1086,21 @@ class ExecutionSessionEngine:
                 reason=reason,
                 payload=order_payload,
                 error_message=result.error_message,
+                market_id=leg_market_id,
+                market_question=leg_market_question,
+                direction=leg_direction,
+                entry_price=leg_entry_price,
             )
             trader_orders.append(trader_order)
             orders_written += 1
             created_order_records.append(
                 {
                     "order_id": trader_order.id,
-                    "market_id": str(getattr(signal, "market_id", "") or ""),
-                    "direction": str(getattr(signal, "direction", "") or ""),
+                    "market_id": str(trader_order.market_id or ""),
+                    "direction": str(trader_order.direction or ""),
                     "source": str(getattr(signal, "source", "") or ""),
                     "notional_usd": safe_float(result.notional_usd, 0.0),
-                    "entry_price": safe_float(result.effective_price, 0.0),
+                    "entry_price": safe_float(trader_order.entry_price, safe_float(result.effective_price, 0.0)),
                     "token_id": str(leg_payload.get("token_id") or ""),
                     "filled_shares": safe_float(result.shares, 0.0),
                     "status": persisted_order_status,

@@ -6891,22 +6891,33 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 direction = "buy_no"
                 entry_price = down_price
 
-            # Latency-arb edge & confidence: larger oracle moves + more elapsed
-            # time in the market window = higher probability the current price
-            # trend holds through resolution.
-            edge_percent = oracle_move_pct
             elapsed_ratio = clamp(
                 1.0 - (seconds_left / float(max(1, timeframe_seconds))),
                 0.0,
                 1.0,
             )
-            confidence = clamp(
+            base_confidence = clamp(
                 0.55
                 + clamp(oracle_move_pct / 10.0, 0.0, 0.25)
                 + clamp(elapsed_ratio * 0.15, 0.0, 0.15),
                 0.55,
                 0.92,
             )
+            ml_prediction = dict(market.get("ml_prediction")) if isinstance(market.get("ml_prediction"), dict) else None
+            ml_probability_yes = self._float(ml_prediction.get("probability_yes")) if ml_prediction else None
+            if ml_probability_yes is not None:
+                ml_probability_yes = clamp(ml_probability_yes, 0.03, 0.97)
+                expected_prob = ml_probability_yes if direction == "buy_yes" else (1.0 - ml_probability_yes)
+                model_edge_percent = max(0.0, (expected_prob - entry_price) * 100.0)
+                edge_percent = max(oracle_move_pct, model_edge_percent)
+                confidence = clamp(
+                    max(base_confidence, 0.48 + (abs(ml_probability_yes - 0.5) * 1.1)),
+                    0.55,
+                    0.97,
+                )
+            else:
+                edge_percent = oracle_move_pct
+                confidence = base_confidence
             min_required_edge = 0.0  # evaluate() handles final gating
 
             side = "YES" if direction == "buy_yes" else "NO"
@@ -7024,6 +7035,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                         "oracle_status": dict(oracle_status),
                         "oracle_source": oracle_status.get("source"),
                         "oracle_prices_by_source": _json_safe(market.get("oracle_prices_by_source") or {}),
+                        "ml_prediction": _json_safe(market.get("ml_prediction") or {}),
                         "oracle_diff_pct": diff_pct,
                         "taker_fee_gate": min_required_edge,
                         "edge_percent": edge_percent,
@@ -7079,6 +7091,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 "oracle_status": dict(oracle_status),
                 "oracle_source": oracle_status.get("source"),
                 "oracle_prices_by_source": _json_safe(market.get("oracle_prices_by_source") or {}),
+                "ml_prediction": _json_safe(market.get("ml_prediction") or {}),
                 "oracle_diff_pct": diff_pct,
                 "taker_fee_gate": min_required_edge,
                 "edge_percent": edge_percent,

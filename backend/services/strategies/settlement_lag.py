@@ -217,6 +217,7 @@ class SettlementLagStrategy(BaseStrategy):
                     "outcome": "YES",
                     "market": market.question[:50],
                     "price": yes_price,
+                    "notional_weight": yes_price,
                     "token_id": market.clob_token_ids[0],
                 },
                 {
@@ -224,6 +225,7 @@ class SettlementLagStrategy(BaseStrategy):
                     "outcome": "NO",
                     "market": market.question[:50],
                     "price": no_price,
+                    "notional_weight": no_price,
                     "token_id": market.clob_token_ids[1],
                 },
             ]
@@ -364,6 +366,7 @@ class SettlementLagStrategy(BaseStrategy):
                             "outcome": "YES",
                             "market": m.question[:50],
                             "price": price,
+                            "notional_weight": price,
                             "token_id": m.clob_token_ids[0],
                         }
                     )

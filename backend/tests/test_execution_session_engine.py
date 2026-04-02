@@ -346,6 +346,124 @@ async def test_execute_signal_skips_position_cap_failures_without_order_writes(m
 
 
 @pytest.mark.asyncio
+async def test_execute_signal_persists_leg_specific_market_metadata(monkeypatch):
+    db = _FailureProjectionDb()
+    engine = session_engine_module.ExecutionSessionEngine(db)
+
+    plan = {"policy": "SEQUENTIAL_HEDGE", "plan_id": "plan-leg-metadata"}
+    legs = [
+        {
+            "leg_id": "leg-atletico",
+            "side": "buy",
+            "outcome": "yes",
+            "market_id": "market-atletico",
+            "market_question": "Will Atletico Nacional win?",
+            "token_id": "token-atletico",
+            "requested_notional_usd": 80.26,
+            "limit_price": 0.79,
+        },
+        {
+            "leg_id": "leg-cucuta",
+            "side": "buy",
+            "outcome": "yes",
+            "market_id": "market-cucuta",
+            "market_question": "Will Cucuta Deportivo FC win?",
+            "token_id": "token-cucuta",
+            "requested_notional_usd": 7.11,
+            "limit_price": 0.07,
+        },
+    ]
+    constraints = {
+        "max_unhedged_notional_usd": 0.0,
+        "hedge_timeout_seconds": 20,
+    }
+    monkeypatch.setattr(engine, "_build_plan", lambda *args, **kwargs: (plan, legs, constraints))
+    monkeypatch.setattr(session_engine_module, "set_trade_signal_status", AsyncMock(return_value=True))
+    monkeypatch.setattr(session_engine_module, "sync_trader_position_inventory", AsyncMock(return_value={}))
+    monkeypatch.setattr(session_engine_module.event_bus, "publish", AsyncMock(return_value=None))
+    monkeypatch.setattr(session_engine_module, "supports_reprice", lambda _policy: False)
+    monkeypatch.setattr(session_engine_module, "execution_waves", lambda _policy, leg_rows: [leg_rows])
+    monkeypatch.setattr(session_engine_module, "requires_pair_lock", lambda _policy, _constraints: False)
+    monkeypatch.setattr(
+        session_engine_module,
+        "submit_execution_wave",
+        AsyncMock(
+            return_value=[
+                _leg_result(leg_id="leg-atletico", status="executed", notional_usd=80.26, shares=101.6),
+                _leg_result(leg_id="leg-cucuta", status="executed", notional_usd=7.11, shares=101.6),
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        session_engine_module,
+        "get_execution_session_detail",
+        AsyncMock(return_value={"session": {"unhedged_notional_usd": 0.0}}),
+    )
+    intent_runtime = SimpleNamespace(update_signal_status=AsyncMock())
+    monkeypatch.setattr(intent_runtime_module, "get_intent_runtime", lambda: intent_runtime)
+
+    signal = SimpleNamespace(
+        id="signal-leg-metadata",
+        source="scanner",
+        trace_id="trace-leg-metadata",
+        strategy_type="settlement_lag",
+        strategy_context_json={},
+        payload_json={
+            "markets": [
+                {"market_id": "market-atletico", "question": "Will Atletico Nacional win?"},
+                {"market_id": "market-cucuta", "question": "Will Cucuta Deportivo FC win?"},
+            ],
+            "live_market": {
+                "market_id": "market-parent",
+                "market_question": "Parent market question",
+            },
+        },
+        market_id="market-parent",
+        market_question="Parent market question",
+        direction="buy_no",
+        entry_price=0.33,
+        edge_percent=13.65,
+        confidence=0.5,
+    )
+    result = await engine.execute_signal(
+        trader_id="trader-leg-metadata",
+        signal=signal,
+        decision_id="decision-leg-metadata",
+        strategy_key="settlement_lag",
+        strategy_version=None,
+        strategy_params={},
+        risk_limits={},
+        mode="live",
+        size_usd=87.37,
+        reason="persist-leg-metadata",
+    )
+
+    assert result.status == "completed"
+    assert result.orders_written == 2
+    order_rows = db.persisted_rows_by_type.get("TraderOrder") or []
+    assert len(order_rows) == 2
+
+    rows_by_market = {str(row.market_id): row for row in order_rows}
+    assert set(rows_by_market.keys()) == {"market-atletico", "market-cucuta"}
+
+    atletico = rows_by_market["market-atletico"]
+    assert atletico.market_question == "Will Atletico Nacional win?"
+    assert atletico.direction == "buy_yes"
+    assert atletico.entry_price == pytest.approx(0.79)
+    assert atletico.payload_json["market_question"] == "Will Atletico Nacional win?"
+    assert atletico.payload_json["live_market"]["market_id"] == "market-atletico"
+    assert atletico.payload_json["live_market"]["selected_outcome"] == "yes"
+
+    cucuta = rows_by_market["market-cucuta"]
+    assert cucuta.market_question == "Will Cucuta Deportivo FC win?"
+    assert cucuta.direction == "buy_yes"
+    assert cucuta.entry_price == pytest.approx(0.07)
+    assert cucuta.payload_json["market_question"] == "Will Cucuta Deportivo FC win?"
+    assert cucuta.payload_json["live_market"]["market_id"] == "market-cucuta"
+    assert cucuta.payload_json["live_market"]["selected_outcome"] == "yes"
+
+
+@pytest.mark.asyncio
 async def test_execute_signal_failed_projection_flushes_parents_before_signal_status_update(monkeypatch):
     db = _FailureProjectionDb()
     engine = session_engine_module.ExecutionSessionEngine(db)

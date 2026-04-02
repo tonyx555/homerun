@@ -18,7 +18,6 @@ import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { Label } from './ui/label'
 import { ScrollArea } from './ui/scroll-area'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
 import { Switch } from './ui/switch'
 import { cn } from '../lib/utils'
 import {
@@ -30,9 +29,11 @@ import {
   getMLTrainingJobs,
   getMLTrainingJob,
   getMLModels,
+  getActiveMLModel,
   promoteMLModel,
   archiveMLModel,
   deleteMLModel,
+  type MLActiveModelResponse,
   type MLRecorderStats,
   type MLTrainingJob,
   type MLTrainedModel,
@@ -92,6 +93,27 @@ function FeatureImportanceChart({ importance }: { importance: Record<string, num
   )
 }
 
+function getErrorMessage(error: unknown): string | null {
+  const detail = (error as any)?.response?.data?.detail
+  if (typeof detail === 'string' && detail.trim().length > 0) {
+    return detail.trim()
+  }
+  const message = (error as any)?.message
+  if (typeof message === 'string' && message.trim().length > 0) {
+    return message.trim()
+  }
+  return null
+}
+
+function ErrorBanner({ message }: { message: string | null }) {
+  if (!message) return null
+  return (
+    <div className="rounded-md border border-red-500/30 bg-red-500/5 px-3 py-2 text-xs text-red-300">
+      {message}
+    </div>
+  )
+}
+
 // ==================== Data Recording Tab ====================
 
 function DataRecordingTab() {
@@ -129,6 +151,7 @@ function DataRecordingTab() {
 
   const config = recorderStats?.config
   const isRecording = config?.is_recording ?? false
+  const recorderError = getErrorMessage(toggleMutation.error ?? updateMutation.error ?? pruneMutation.error)
 
   const [interval, setInterval_] = useState('')
   const [retention, setRetention] = useState('')
@@ -150,6 +173,8 @@ function DataRecordingTab() {
 
   return (
     <div className="space-y-6 p-4">
+      <ErrorBanner message={recorderError} />
+
       {/* Recording toggle */}
       <div className="flex items-center justify-between rounded-lg border border-border/50 bg-card/30 p-4">
         <div className="flex items-center gap-3">
@@ -288,7 +313,7 @@ function DataRecordingTab() {
 
 function TrainingTab() {
   const queryClient = useQueryClient()
-  const [modelType, setModelType] = useState('xgboost')
+  const modelType = 'logistic'
   const [daysLookback, setDaysLookback] = useState('30')
   const [pollingJobId, setPollingJobId] = useState<string | null>(null)
 
@@ -327,9 +352,14 @@ function TrainingTab() {
   })
 
   const runningJob = activeJob?.status === 'running' ? activeJob : jobs.find((j) => j.status === 'running')
+  const trainingError =
+    getErrorMessage(trainMutation.error) ||
+    (activeJob?.status === 'failed' ? activeJob.error || activeJob.message || 'Training failed' : null)
 
   return (
     <div className="space-y-6 p-4">
+      <ErrorBanner message={trainingError} />
+
       {/* Train controls */}
       <div className="rounded-lg border border-border/50 bg-card/30 p-4 space-y-3">
         <div className="flex items-center gap-2">
@@ -338,16 +368,10 @@ function TrainingTab() {
         </div>
         <div className="grid grid-cols-3 gap-3">
           <div>
-            <Label className="text-xs">Model Type</Label>
-            <Select value={modelType} onValueChange={setModelType}>
-              <SelectTrigger className="h-8 text-xs mt-1">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="xgboost">XGBoost</SelectItem>
-                <SelectItem value="lightgbm">LightGBM</SelectItem>
-              </SelectContent>
-            </Select>
+            <Label className="text-xs">Model</Label>
+            <div className="h-8 mt-1 rounded-md border border-border/50 bg-muted/20 px-3 text-xs flex items-center">
+              Logistic Regression
+            </div>
           </div>
           <div>
             <Label className="text-xs">Lookback (days)</Label>
@@ -452,23 +476,59 @@ function ModelsTab() {
     refetchInterval: 10000,
   })
 
+  const { data: activeModel } = useQuery<MLActiveModelResponse>({
+    queryKey: ['ml-active-model'],
+    queryFn: () => getActiveMLModel(),
+    refetchInterval: 10000,
+  })
+
   const promoteMutation = useMutation({
     mutationFn: promoteMLModel,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['ml-models'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['ml-models'] })
+      queryClient.invalidateQueries({ queryKey: ['ml-active-model'] })
+    },
   })
 
   const archiveMutation = useMutation({
     mutationFn: archiveMLModel,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['ml-models'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['ml-models'] })
+      queryClient.invalidateQueries({ queryKey: ['ml-active-model'] })
+    },
   })
 
   const deleteMutation = useMutation({
     mutationFn: deleteMLModel,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['ml-models'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['ml-models'] })
+      queryClient.invalidateQueries({ queryKey: ['ml-active-model'] })
+    },
   })
+
+  const modelActionError = getErrorMessage(promoteMutation.error ?? archiveMutation.error ?? deleteMutation.error)
 
   return (
     <div className="space-y-4 p-4">
+      <ErrorBanner message={modelActionError} />
+
+      {activeModel?.active && activeModel.model && (
+        <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-medium text-emerald-300">Active Runtime Model</div>
+              <div className="text-xs text-muted-foreground">
+                {activeModel.model.name} v{activeModel.model.version}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <MetricBadge value={activeModel.model.test_accuracy} label="Acc" good={0.6} />
+              <MetricBadge value={activeModel.model.test_auc} label="AUC" good={0.65} />
+            </div>
+          </div>
+        </div>
+      )}
+
       {models.length === 0 && (
         <div className="text-center py-8 text-sm text-muted-foreground">
           No trained models yet. Record some data and train a model to get started.
