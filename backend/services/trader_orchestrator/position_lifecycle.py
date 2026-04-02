@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time as _time_mod
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -1354,6 +1355,33 @@ async def _load_execution_wallet_recent_sell_trades_by_token() -> dict[str, dict
     return latest_by_token
 
 
+# Module-level TTL cache for market metadata to avoid redundant REST API calls.
+# Each entry maps lookup_id -> (fetched_at_monotonic, market_info_dict).
+_market_info_cache: dict[str, tuple[float, Optional[dict[str, Any]]]] = {}
+_MARKET_INFO_CACHE_TTL_SECONDS = 60.0
+_MARKET_INFO_NEAR_RESOLUTION_SECONDS = 300.0  # 5 minutes
+
+
+def _market_info_needs_refresh(lookup_id: str, now_mono: float) -> bool:
+    entry = _market_info_cache.get(lookup_id)
+    if entry is None:
+        return True
+    fetched_at, info = entry
+    age = now_mono - fetched_at
+    if age >= _MARKET_INFO_CACHE_TTL_SECONDS:
+        return True
+    if isinstance(info, dict):
+        if info.get("winning_outcome") is not None:
+            return True
+        end_time = _extract_market_end_time_naive(info)
+        if end_time is not None:
+            now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+            seconds_left = (end_time - now_utc).total_seconds()
+            if seconds_left <= _MARKET_INFO_NEAR_RESOLUTION_SECONDS:
+                return True
+    return False
+
+
 async def load_market_info_for_orders(orders: list[TraderOrder]) -> dict[str, Optional[dict[str, Any]]]:
     lookup_candidates_by_market_id: dict[str, list[str]] = {}
 
@@ -1391,12 +1419,16 @@ async def load_market_info_for_orders(orders: list[TraderOrder]) -> dict[str, Op
     if not lookup_ids:
         return {}
 
+    now_mono = _time_mod.monotonic()
+
     async def _fetch(lookup_id: str) -> tuple[str, Optional[dict[str, Any]]]:
+        needs_refresh = _market_info_needs_refresh(lookup_id, now_mono)
+        if not needs_refresh:
+            _, cached_info = _market_info_cache[lookup_id]
+            return lookup_id, cached_info
+
         info: Optional[dict[str, Any]] = None
         if lookup_id.startswith("0x"):
-            # Lifecycle decisions must use fresh market metadata so terminal
-            # resolution state (closed/winner/outcome prices) is not blocked
-            # by stale in-memory cache entries in long-lived workers.
             info = await polymarket_client.get_market_by_condition_id(lookup_id, force_refresh=True)
             if info is None:
                 info = await polymarket_client.get_market_by_condition_id(lookup_id)
@@ -1404,6 +1436,8 @@ async def load_market_info_for_orders(orders: list[TraderOrder]) -> dict[str, Op
             info = await polymarket_client.get_market_by_token_id(lookup_id, force_refresh=True)
             if info is None:
                 info = await polymarket_client.get_market_by_token_id(lookup_id)
+
+        _market_info_cache[lookup_id] = (now_mono, info)
         return lookup_id, info
 
     pairs = await asyncio.gather(*[_fetch(lookup_id) for lookup_id in lookup_ids], return_exceptions=True)
@@ -1607,7 +1641,7 @@ async def reconcile_paper_positions(
         )
         mark_updated_at_value = (
             _iso_utc(now)
-            if (current_price is not None and (mark_changed or prev_marked_at is None))
+            if current_price is not None
             else (
                 _iso_utc(prev_marked_at.replace(tzinfo=timezone.utc))
                 if prev_marked_at is not None
@@ -2394,10 +2428,7 @@ async def reconcile_live_positions(
         )
         pending_mark_updated_at_value = (
             _iso_utc(now)
-            if (
-                pending_current_price is not None
-                and (pending_mark_changed or pending_prev_marked_at is None)
-            )
+            if pending_current_price is not None
             else (
                 _iso_utc(pending_prev_marked_at.replace(tzinfo=timezone.utc))
                 if pending_prev_marked_at is not None
@@ -3781,7 +3812,7 @@ async def reconcile_live_positions(
         )
         mark_updated_at_value = (
             _iso_utc(now)
-            if (current_price is not None and (mark_changed or prev_marked_at is None))
+            if current_price is not None
             else (
                 _iso_utc(prev_marked_at.replace(tzinfo=timezone.utc))
                 if prev_marked_at is not None
@@ -4392,4 +4423,122 @@ async def reconcile_live_positions(
         "skipped_reasons": skipped_reasons,
         "reverse_signals_emitted": sum(len(ids) for ids in reverse_signal_ids_by_source.values()),
         "details": details,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Event-driven exit evaluation
+# ---------------------------------------------------------------------------
+# In-memory registry of open orders by token_id for event-driven exit checks.
+# Populated by the reconciliation worker safety net to keep the registry fresh.
+_open_orders_by_token: dict[str, list[dict[str, Any]]] = {}
+
+
+def register_open_orders(token_id: str, orders: list[dict[str, Any]]) -> None:
+    _open_orders_by_token[token_id] = orders
+
+
+def unregister_token(token_id: str) -> None:
+    _open_orders_by_token.pop(token_id, None)
+
+
+def get_registered_token_ids() -> list[str]:
+    return list(_open_orders_by_token.keys())
+
+
+async def evaluate_exit_for_token(
+    token_id: str,
+    mid_price: float,
+    bid: float,
+    ask: float,
+) -> dict[str, Any]:
+    """Event-driven exit evaluation triggered by significant price changes.
+
+    Called by the FeedManager on_change callback (>0.5% price move) for tokens
+    that have open positions. This replaces the polling-based exit checks for
+    latency-sensitive triggers (stop-loss, take-profit, trailing stop).
+
+    Returns a summary dict with orders that triggered exit conditions.
+    No heavy DB work is performed here; the actual exit submission is delegated
+    to the reconciliation safety-net or a direct live execution call.
+    """
+    orders = _open_orders_by_token.get(token_id)
+    if not orders:
+        return {"token_id": token_id, "evaluated": 0, "triggered": []}
+
+    now = utcnow()
+    triggered: list[dict[str, Any]] = []
+
+    for order in orders:
+        order_id = str(order.get("order_id") or "").strip()
+        if not order_id:
+            continue
+
+        entry_price = safe_float(order.get("entry_price"))
+        if entry_price is None or entry_price <= 0:
+            continue
+
+        # Skip orders that already have a pending exit in flight
+        if order.get("has_pending_exit"):
+            continue
+
+        take_profit_pct = safe_float(order.get("take_profit_pct"))
+        stop_loss_pct = safe_float(order.get("stop_loss_pct"))
+        trailing_stop_pct = safe_float(order.get("trailing_stop_pct"))
+        min_hold_minutes = max(0.0, safe_float(order.get("min_hold_minutes")) or 0.0)
+        highest_price = safe_float(order.get("highest_price"))
+
+        age_anchor_iso = order.get("age_anchor")
+        age_minutes: Optional[float] = None
+        if age_anchor_iso:
+            age_anchor = _parse_iso_utc_naive(age_anchor_iso)
+            if age_anchor is not None:
+                now_naive = now.astimezone(timezone.utc).replace(tzinfo=None) if now.tzinfo else now
+                age_minutes = max(0.0, (now_naive - age_anchor).total_seconds() / 60.0)
+
+        min_hold_passed = age_minutes is None or age_minutes >= min_hold_minutes
+        if not min_hold_passed:
+            continue
+
+        pnl_pct = ((mid_price - entry_price) / entry_price) * 100.0
+
+        close_trigger: Optional[str] = None
+
+        if take_profit_pct is not None and pnl_pct >= take_profit_pct:
+            close_trigger = "take_profit"
+        elif stop_loss_pct is not None and pnl_pct <= -abs(stop_loss_pct):
+            close_trigger = "stop_loss"
+        elif (
+            trailing_stop_pct is not None
+            and trailing_stop_pct > 0
+            and highest_price is not None
+            and highest_price > entry_price
+        ):
+            # Update highest price in the registry opportunistically
+            if mid_price > highest_price:
+                order["highest_price"] = mid_price
+                highest_price = mid_price
+            trailing_trigger = highest_price * (1.0 - (trailing_stop_pct / 100.0))
+            if mid_price <= trailing_trigger:
+                close_trigger = "trailing_stop"
+
+        if close_trigger is not None:
+            triggered.append({
+                "order_id": order_id,
+                "trader_id": order.get("trader_id", ""),
+                "token_id": token_id,
+                "close_trigger": close_trigger,
+                "mid_price": mid_price,
+                "bid": bid,
+                "ask": ask,
+                "entry_price": entry_price,
+                "pnl_pct": round(pnl_pct, 4),
+                "highest_price": highest_price,
+                "age_minutes": round(age_minutes, 2) if age_minutes is not None else None,
+            })
+
+    return {
+        "token_id": token_id,
+        "evaluated": len(orders),
+        "triggered": triggered,
     }
