@@ -69,7 +69,8 @@ class Settings(BaseSettings):
     MARKET_UNIVERSE_INCREMENTAL_SINCE_MINUTES: int = 5  # Delta fetch horizon for updated markets
     MARKET_UNIVERSE_INCREMENTAL_MAX_EVENT_SLUGS: int = 250  # Cap slug fanout for event-diff fetch
     MARKET_UNIVERSE_FULL_RECONCILE_INTERVAL_SECONDS: int = 900  # Forced full reconcile cadence
-    MARKET_DATA_PRICE_STREAM_INTERVAL_SECONDS: float = 1.0  # WS price topic stream cadence
+    MARKET_DATA_PRICE_STREAM_INTERVAL_SECONDS: float = 30.0  # Safety-net fallback cadence (event-driven push is primary)
+    WS_PRICE_PUSH_COALESCE_MS: int = 100  # Coalesce WS price push updates over this window (ms)
     SCANNER_DEGRADE_HEAVY_ON_BACKLOG: bool = True  # Pause heavy lane under queue pressure
     SCANNER_DEGRADE_HEAVY_BACKLOG_THRESHOLD: int = 120  # Queue threshold for heavy-lane degradation
     SCANNER_SLO_WORKER_INTERVAL_SECONDS: int = 5  # Scanner SLO evaluator cadence

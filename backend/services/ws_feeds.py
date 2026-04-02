@@ -1344,6 +1344,16 @@ class FeedManager:
         self._debounce_seconds: float = 2.0  # coalesce changes over 2s window
         self._dispatch_tasks: set[asyncio.Task] = set()
         self._eviction_task: Optional[asyncio.Task] = None
+        # -- WS price push state -----------------------------------------------
+        # Registered frontends: ws_id -> {token_ids: set, callback: async callable}
+        self._ws_push_lock = Lock()
+        self._ws_push_clients: Dict[int, Dict[str, Any]] = {}
+        # token_id -> set of ws_ids wanting that token's prices
+        self._token_to_ws_clients: Dict[str, Set[int]] = {}
+        # Coalesced price updates pending push: token_id -> price dict
+        self._pending_price_updates: Dict[str, Dict[str, Any]] = {}
+        self._price_push_task: Optional[asyncio.Task] = None
+        self._coalesce_ms: float = max(10, int(settings.WS_PRICE_PUSH_COALESCE_MS or 100))
         self._cache.add_on_change_callback(self._on_price_change)
         self._cache.add_on_trade_callback(self._on_trade)
         self._cache.add_on_update_callback(self._on_price_update)
@@ -1396,6 +1406,11 @@ class FeedManager:
         self._started = True
         loop = asyncio.get_running_loop()
         self._eviction_task = loop.create_task(self._cache_eviction_loop())
+        # Wire PositionMarkState to receive every price tick
+        from services.position_mark_state import get_position_mark_state
+
+        pms = get_position_mark_state()
+        self._cache.add_on_update_callback(pms.on_price_update)
         logger.info(
             "FeedManager started",
             polymarket_ws=True,
@@ -1408,9 +1423,15 @@ class FeedManager:
             self._debounce_task.cancel()
         if self._eviction_task and not self._eviction_task.done():
             self._eviction_task.cancel()
+        if self._price_push_task and not self._price_push_task.done():
+            self._price_push_task.cancel()
         await self._polymarket_feed.stop()
         await self._kalshi_feed.stop()
         self._cache.clear()
+        with self._ws_push_lock:
+            self._ws_push_clients.clear()
+            self._token_to_ws_clients.clear()
+            self._pending_price_updates.clear()
         self._started = False
         logger.info("FeedManager stopped")
 
@@ -1498,7 +1519,122 @@ class FeedManager:
         ingest_ts: float | None = None,
         sequence: int | None = None,
     ) -> None:
-        return
+        """Called by PriceCache on every cache replacement.
+
+        Accumulates updates for the coalescing window, then a background task
+        flushes them to registered WS clients.
+        """
+        with self._ws_push_lock:
+            ws_ids = self._token_to_ws_clients.get(token_id)
+            if not ws_ids:
+                return
+            self._pending_price_updates[token_id] = {
+                "mid": mid,
+                "bid": bid,
+                "ask": ask,
+                "exchange_ts": exchange_ts or 0.0,
+                "ingest_ts": ingest_ts or 0.0,
+                "sequence": sequence or 0,
+                "is_fresh": True,
+            }
+        # Ensure the coalescing flush task is scheduled
+        try:
+            loop = asyncio.get_running_loop()
+            if self._price_push_task is None or self._price_push_task.done():
+                self._price_push_task = loop.create_task(self._coalesced_price_push())
+        except RuntimeError:
+            pass
+
+    # -- WS price push registration -----------------------------------------
+
+    def register_ws_client(
+        self,
+        ws_id: int,
+        token_ids: Set[str],
+        push_callback: Callable[..., Any],
+    ) -> None:
+        """Register a frontend WS connection to receive price pushes.
+
+        *ws_id* must be a unique identifier for the websocket (``id(ws)``).
+        *token_ids* is the initial set of token_ids to receive.
+        *push_callback* is an async callable ``(list[dict]) -> None`` that
+        sends the batched price messages to the frontend.
+        """
+        with self._ws_push_lock:
+            self._ws_push_clients[ws_id] = {
+                "token_ids": set(token_ids),
+                "callback": push_callback,
+            }
+            for tid in token_ids:
+                if tid not in self._token_to_ws_clients:
+                    self._token_to_ws_clients[tid] = set()
+                self._token_to_ws_clients[tid].add(ws_id)
+
+    def unregister_ws_client(self, ws_id: int) -> None:
+        """Remove a frontend WS connection from price push."""
+        with self._ws_push_lock:
+            client = self._ws_push_clients.pop(ws_id, None)
+            if client:
+                for tid in client.get("token_ids", set()):
+                    ws_set = self._token_to_ws_clients.get(tid)
+                    if ws_set:
+                        ws_set.discard(ws_id)
+                        if not ws_set:
+                            del self._token_to_ws_clients[tid]
+
+    def update_ws_client_tokens(self, ws_id: int, token_ids: Set[str]) -> None:
+        """Update the set of token_ids a frontend WS client is watching."""
+        with self._ws_push_lock:
+            client = self._ws_push_clients.get(ws_id)
+            if client is None:
+                return
+            old_tokens = client["token_ids"]
+            removed = old_tokens - token_ids
+            added = token_ids - old_tokens
+            client["token_ids"] = set(token_ids)
+            for tid in removed:
+                ws_set = self._token_to_ws_clients.get(tid)
+                if ws_set:
+                    ws_set.discard(ws_id)
+                    if not ws_set:
+                        del self._token_to_ws_clients[tid]
+            for tid in added:
+                if tid not in self._token_to_ws_clients:
+                    self._token_to_ws_clients[tid] = set()
+                self._token_to_ws_clients[tid].add(ws_id)
+
+    async def _coalesced_price_push(self) -> None:
+        """Wait for the coalescing window, then push accumulated updates."""
+        await asyncio.sleep(self._coalesce_ms / 1000.0)
+        with self._ws_push_lock:
+            pending = dict(self._pending_price_updates)
+            self._pending_price_updates.clear()
+        if not pending:
+            return
+        # Build per-client batch: for each client, collect updates for tokens they care about
+        client_batches: Dict[int, Dict[str, Dict[str, Any]]] = {}
+        with self._ws_push_lock:
+            for token_id, price_data in pending.items():
+                ws_ids = self._token_to_ws_clients.get(token_id)
+                if not ws_ids:
+                    continue
+                for ws_id in ws_ids:
+                    if ws_id not in client_batches:
+                        client_batches[ws_id] = {}
+                    client_batches[ws_id][token_id] = price_data
+            callbacks = {
+                ws_id: self._ws_push_clients[ws_id]["callback"]
+                for ws_id in client_batches
+                if ws_id in self._ws_push_clients
+            }
+        for ws_id, token_updates in client_batches.items():
+            cb = callbacks.get(ws_id)
+            if cb is None:
+                continue
+            try:
+                await cb(token_updates)
+            except Exception:
+                pass
 
     async def _cache_eviction_loop(self) -> None:
         """Periodically evict stale entries from the price cache and prune
