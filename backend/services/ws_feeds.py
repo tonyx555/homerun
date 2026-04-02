@@ -22,6 +22,7 @@ import json
 import time
 from dataclasses import dataclass
 from enum import Enum
+from threading import Lock
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Set
 
 from sqlalchemy import select
@@ -1365,7 +1366,7 @@ class FeedManager:
         self._eviction_task: Optional[asyncio.Task] = None
         # -- WS price push state -----------------------------------------------
         # Registered frontends: ws_id -> {token_ids: set, callback: async callable}
-        # No lock needed — all access from single-threaded asyncio event loop.
+        self._ws_push_lock = Lock()
         self._ws_push_clients: Dict[int, Dict[str, Any]] = {}
         # token_id -> set of ws_ids wanting that token's prices
         self._token_to_ws_clients: Dict[str, Set[int]] = {}
@@ -1447,9 +1448,10 @@ class FeedManager:
         await self._polymarket_feed.stop()
         await self._kalshi_feed.stop()
         self._cache.clear()
-        self._ws_push_clients.clear()
-        self._token_to_ws_clients.clear()
-        self._pending_price_updates.clear()
+        with self._ws_push_lock:
+            self._ws_push_clients.clear()
+            self._token_to_ws_clients.clear()
+            self._pending_price_updates.clear()
         self._started = False
         logger.info("FeedManager stopped")
 
@@ -1566,21 +1568,21 @@ class FeedManager:
         flushes them to registered WS clients.
         """
         should_schedule = False
-        ws_ids = self._token_to_ws_clients.get(token_id)
-        if not ws_ids:
-            return
-        self._pending_price_updates[token_id] = {
-            "mid": mid,
-            "bid": bid,
-            "ask": ask,
-            "exchange_ts": exchange_ts or 0.0,
-            "ingest_ts": ingest_ts or 0.0,
-            "sequence": sequence or 0,
-            "is_fresh": True,
-        }
-        # Check under the same lock to prevent duplicate task creation
-        if self._price_push_task is None or self._price_push_task.done():
-            should_schedule = True
+        with self._ws_push_lock:
+            ws_ids = self._token_to_ws_clients.get(token_id)
+            if not ws_ids:
+                return
+            self._pending_price_updates[token_id] = {
+                "mid": mid,
+                "bid": bid,
+                "ask": ask,
+                "exchange_ts": exchange_ts or 0.0,
+                "ingest_ts": ingest_ts or 0.0,
+                "sequence": sequence or 0,
+                "is_fresh": True,
+            }
+            if self._price_push_task is None or self._price_push_task.done():
+                should_schedule = True
         # Schedule outside the lock to avoid holding it during asyncio calls.
         # NOTE: This callback fires from WS receive threads, NOT the asyncio
         # event loop, so asyncio.get_running_loop() would raise RuntimeError.
@@ -1630,68 +1632,73 @@ class FeedManager:
         *push_callback* is an async callable ``(list[dict]) -> None`` that
         sends the batched price messages to the frontend.
         """
-        self._ws_push_clients[ws_id] = {
-            "token_ids": set(token_ids),
-            "callback": push_callback,
-        }
-        for tid in token_ids:
-            if tid not in self._token_to_ws_clients:
-                self._token_to_ws_clients[tid] = set()
-            self._token_to_ws_clients[tid].add(ws_id)
+        with self._ws_push_lock:
+            self._ws_push_clients[ws_id] = {
+                "token_ids": set(token_ids),
+                "callback": push_callback,
+            }
+            for tid in token_ids:
+                if tid not in self._token_to_ws_clients:
+                    self._token_to_ws_clients[tid] = set()
+                self._token_to_ws_clients[tid].add(ws_id)
 
     def unregister_ws_client(self, ws_id: int) -> None:
         """Remove a frontend WS connection from price push."""
-        client = self._ws_push_clients.pop(ws_id, None)
-        if client:
-            for tid in client.get("token_ids", set()):
+        with self._ws_push_lock:
+            client = self._ws_push_clients.pop(ws_id, None)
+            if client:
+                for tid in client.get("token_ids", set()):
+                    ws_set = self._token_to_ws_clients.get(tid)
+                    if ws_set:
+                        ws_set.discard(ws_id)
+                        if not ws_set:
+                            del self._token_to_ws_clients[tid]
+
+    def update_ws_client_tokens(self, ws_id: int, token_ids: Set[str]) -> None:
+        """Update the set of token_ids a frontend WS client is watching."""
+        with self._ws_push_lock:
+            client = self._ws_push_clients.get(ws_id)
+            if client is None:
+                return
+            old_tokens = client["token_ids"]
+            removed = old_tokens - token_ids
+            added = token_ids - old_tokens
+            client["token_ids"] = set(token_ids)
+            for tid in removed:
                 ws_set = self._token_to_ws_clients.get(tid)
                 if ws_set:
                     ws_set.discard(ws_id)
                     if not ws_set:
                         del self._token_to_ws_clients[tid]
-
-    def update_ws_client_tokens(self, ws_id: int, token_ids: Set[str]) -> None:
-        """Update the set of token_ids a frontend WS client is watching."""
-        client = self._ws_push_clients.get(ws_id)
-        if client is None:
-            return
-        old_tokens = client["token_ids"]
-        removed = old_tokens - token_ids
-        added = token_ids - old_tokens
-        client["token_ids"] = set(token_ids)
-        for tid in removed:
-            ws_set = self._token_to_ws_clients.get(tid)
-            if ws_set:
-                ws_set.discard(ws_id)
-                if not ws_set:
-                    del self._token_to_ws_clients[tid]
-        for tid in added:
-            if tid not in self._token_to_ws_clients:
-                self._token_to_ws_clients[tid] = set()
-            self._token_to_ws_clients[tid].add(ws_id)
+            for tid in added:
+                if tid not in self._token_to_ws_clients:
+                    self._token_to_ws_clients[tid] = set()
+                self._token_to_ws_clients[tid].add(ws_id)
 
     async def _coalesced_price_push(self) -> None:
         """Wait for the coalescing window, then push accumulated updates."""
         await asyncio.sleep(self._coalesce_ms / 1000.0)
-        pending = dict(self._pending_price_updates)
-        self._pending_price_updates.clear()
+        with self._ws_push_lock:
+            pending = dict(self._pending_price_updates)
+            self._pending_price_updates.clear()
         if not pending:
             return
         # Build per-client batch: for each client, collect updates for tokens they care about
         client_batches: Dict[int, Dict[str, Dict[str, Any]]] = {}
-        for token_id, price_data in pending.items():
-            ws_ids = self._token_to_ws_clients.get(token_id)
-            if not ws_ids:
-                continue
-            for ws_id in ws_ids:
-                if ws_id not in client_batches:
-                    client_batches[ws_id] = {}
-                client_batches[ws_id][token_id] = price_data
-        callbacks = {
-            ws_id: self._ws_push_clients[ws_id]["callback"]
-            for ws_id in client_batches
-            if ws_id in self._ws_push_clients
-        }
+        with self._ws_push_lock:
+            for token_id, price_data in pending.items():
+                ws_ids = self._token_to_ws_clients.get(token_id)
+                if not ws_ids:
+                    continue
+                for ws_id in ws_ids:
+                    if ws_id not in client_batches:
+                        client_batches[ws_id] = {}
+                    client_batches[ws_id][token_id] = price_data
+            callbacks = {
+                ws_id: self._ws_push_clients[ws_id]["callback"]
+                for ws_id in client_batches
+                if ws_id in self._ws_push_clients
+            }
         for ws_id, token_updates in client_batches.items():
             cb = callbacks.get(ws_id)
             if cb is None:
