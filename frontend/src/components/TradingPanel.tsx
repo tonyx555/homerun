@@ -7510,8 +7510,13 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
           traderId: tr.trader_id,
           traderName: traderNameById[tr.trader_id] || shortId(tr.trader_id),
           orders: tr.orders,
-          open: tr.open,
-          resolved: tr.resolved,
+          openOrders: tr.open,
+          resolvedOrders: tr.resolved,
+          tradeCount: tr.trade_count,
+          open: tr.open_trades,
+          resolved: tr.resolved_trades,
+          failedTrades: tr.failed_trades,
+          partialOpenBundles: tr.partial_open_bundles,
           pnl: tr.pnl,
           notional: tr.notional,
           wins: tr.wins,
@@ -7539,7 +7544,23 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       open, resolved, wins, losses, failed,
       totalNotional: 0, resolvedPnl, winRate: resolved > 0 ? (wins / resolved) * 100 : 0,
       avgEdge: 0, avgConfidence: 0,
-      traderRows: [] as Array<{ traderId: string; traderName: string; orders: number; open: number; resolved: number; pnl: number; notional: number; wins: number; losses: number; latest_activity_ts: number }>,
+      traderRows: [] as Array<{
+        traderId: string
+        traderName: string
+        orders: number
+        openOrders: number
+        resolvedOrders: number
+        tradeCount: number
+        open: number
+        resolved: number
+        failedTrades: number
+        partialOpenBundles: number
+        pnl: number
+        notional: number
+        wins: number
+        losses: number
+        latest_activity_ts: number
+      }>,
       sourceRows: [] as Array<{ source: string; orders: number; resolved: number; pnl: number; notional: number; wins: number; losses: number }>,
     }
   }, [ordersSummaryQuery.data, allOrders, traderNameById])
@@ -8603,6 +8624,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         primarySourceKey: sourceKeys.length === 1 ? sourceKeys[0] : sourceKeys.length > 1 ? 'multi' : 'unknown',
         open: toNumber(performance?.open),
         resolved: toNumber(performance?.resolved),
+        partialOpenBundles: toNumber(performance?.partialOpenBundles),
         pnl: toNumber(performance?.pnl),
         latestActivityTs,
         isInactive: !isTraderActive(trader),
@@ -8716,8 +8738,10 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         return {
           trader,
           orders: toNumber(row?.orders),
+          tradeCount: toNumber(row?.tradeCount),
           open: toNumber(row?.open),
           resolved,
+          partialOpenBundles: toNumber(row?.partialOpenBundles),
           pnl: toNumber(row?.pnl),
           notional: toNumber(row?.notional),
           wins,
@@ -10054,7 +10078,13 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                       <span className="text-[11px] font-medium truncate leading-tight">{row.trader.name}</span>
                                     </div>
                                     <div className="pl-3 mt-0.5 text-[9px] text-muted-foreground">
-                                      {row.open} open · {row.resolved} resolved
+                                      <span>{row.open} open</span>
+                                      {row.partialOpenBundles > 0 && (
+                                        <span className="text-amber-500" title="Bundles with one filled leg and one still working">
+                                          {' · '}{row.partialOpenBundles} partial
+                                        </span>
+                                      )}
+                                      <span>{' · '}{row.resolved} resolved</span>
                                     </div>
                                   </div>
                                   <span className={cn('shrink-0 text-[10px] font-mono', row.pnl > 0 ? 'text-emerald-500' : row.pnl < 0 ? 'text-red-500' : 'text-muted-foreground')}>
@@ -10432,7 +10462,13 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                       </div>
                                       <div className="mt-1.5 flex items-center justify-between gap-2">
                                         <span className="text-[9px] text-muted-foreground">
-                                          {row.open} open · {row.resolved} resolved
+                                          <span>{row.open} open</span>
+                                          {row.partialOpenBundles > 0 && (
+                                            <span className="text-amber-500" title="Bundles with one filled leg and one still working">
+                                              {' · '}{row.partialOpenBundles} partial
+                                            </span>
+                                          )}
+                                          <span>{' · '}{row.resolved} resolved</span>
                                         </span>
                                         {row.trend.length >= 2 && (
                                           <Liveline

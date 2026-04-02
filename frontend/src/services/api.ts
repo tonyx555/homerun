@@ -2576,6 +2576,11 @@ export interface TraderOrdersSummary {
   open: number
   resolved: number
   failed: number
+  total_trades: number
+  open_trades: number
+  resolved_trades: number
+  failed_trades: number
+  partial_open_bundles: number
   resolved_pnl: number
   wins: number
   losses: number
@@ -2588,6 +2593,11 @@ export interface TraderOrdersSummary {
     orders: number
     open: number
     resolved: number
+    trade_count: number
+    open_trades: number
+    resolved_trades: number
+    failed_trades: number
+    partial_open_bundles: number
     pnl: number
     notional: number
     wins: number

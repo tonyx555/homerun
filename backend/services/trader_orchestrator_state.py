@@ -6,6 +6,7 @@ import uuid
 import asyncio
 import copy
 import os
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -7684,6 +7685,96 @@ async def list_serialized_trader_decisions(
     return serialized_rows
 
 
+def _trade_bundle_leg_count_for_summary(signal: TradeSignal | None, row: TraderOrder) -> int:
+    payload = signal.payload_json if signal is not None and isinstance(signal.payload_json, dict) else {}
+    if not payload and isinstance(row.payload_json, dict):
+        payload = row.payload_json
+    execution_plan = payload.get("execution_plan")
+    execution_plan = execution_plan if isinstance(execution_plan, dict) else {}
+    raw_plan_legs = execution_plan.get("legs")
+    raw_positions = payload.get("positions_to_take")
+    plan_leg_count = len([leg for leg in raw_plan_legs if isinstance(leg, dict)]) if isinstance(raw_plan_legs, list) else 0
+    position_count = len([position for position in raw_positions if isinstance(position, dict)]) if isinstance(raw_positions, list) else 0
+    return max(plan_leg_count, position_count)
+
+
+def _trade_group_key_for_summary(signal: TradeSignal | None, row: TraderOrder) -> tuple[str, bool]:
+    leg_count = _trade_bundle_leg_count_for_summary(signal, row)
+    if leg_count > 1:
+        bundle_id = str(signal.id if signal is not None else row.signal_id or row.id).strip() or str(row.id)
+        return f"bundle:{bundle_id}", True
+    return f"order:{row.id}", False
+
+
+def _grouped_trade_counts(
+    rows: list[TraderOrder],
+    signals_by_id: dict[str, TradeSignal],
+    *,
+    open_statuses: tuple[str, ...],
+    resolved_statuses: tuple[str, ...],
+    failed_statuses: tuple[str, ...],
+) -> tuple[dict[str, int], dict[str, dict[str, int]]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    per_trader: dict[str, dict[str, int]] = defaultdict(
+        lambda: {
+            "trade_count": 0,
+            "open_trades": 0,
+            "resolved_trades": 0,
+            "failed_trades": 0,
+            "partial_open_bundles": 0,
+        }
+    )
+    open_status_set = set(open_statuses)
+    resolved_status_set = set(resolved_statuses)
+    failed_status_set = set(failed_statuses)
+    incomplete_bundle_statuses = {"submitted", "open"}
+
+    for row in rows:
+        signal_key = str(row.signal_id or "").strip()
+        signal = signals_by_id.get(signal_key)
+        group_key, is_bundle = _trade_group_key_for_summary(signal, row)
+        group = grouped.setdefault(
+            group_key,
+            {
+                "trader_id": str(row.trader_id or "").strip(),
+                "statuses": set(),
+                "is_bundle": is_bundle,
+            },
+        )
+        status = str(row.status or "").strip().lower()
+        if status:
+            group["statuses"].add(status)
+
+    totals = {
+        "total_trades": 0,
+        "open_trades": 0,
+        "resolved_trades": 0,
+        "failed_trades": 0,
+        "partial_open_bundles": 0,
+    }
+
+    for group in grouped.values():
+        trader_id = str(group.get("trader_id") or "").strip()
+        trader_counts = per_trader[trader_id]
+        statuses = set(group.get("statuses") or ())
+        totals["total_trades"] += 1
+        trader_counts["trade_count"] += 1
+        if statuses & open_status_set:
+            totals["open_trades"] += 1
+            trader_counts["open_trades"] += 1
+        elif statuses & resolved_status_set:
+            totals["resolved_trades"] += 1
+            trader_counts["resolved_trades"] += 1
+        elif statuses & failed_status_set:
+            totals["failed_trades"] += 1
+            trader_counts["failed_trades"] += 1
+        if bool(group.get("is_bundle")) and "executed" in statuses and bool(statuses & incomplete_bundle_statuses):
+            totals["partial_open_bundles"] += 1
+            trader_counts["partial_open_bundles"] += 1
+
+    return totals, per_trader
+
+
 async def get_trader_orders_summary(
     session: AsyncSession,
     *,
@@ -7734,6 +7825,23 @@ async def get_trader_orders_summary(
         by_trader_query = by_trader_query.where(func.lower(TraderOrder.mode) == mode.strip().lower())
     trader_rows = (await session.execute(by_trader_query)).all()
 
+    all_orders_query = select(TraderOrder)
+    if mode:
+        all_orders_query = all_orders_query.where(func.lower(TraderOrder.mode) == mode.strip().lower())
+    all_order_rows = list((await session.execute(all_orders_query)).scalars().all())
+    signal_ids = sorted({str(order.signal_id).strip() for order in all_order_rows if str(order.signal_id or "").strip()})
+    signals_by_id: dict[str, TradeSignal] = {}
+    if signal_ids:
+        signal_rows = (await session.execute(select(TradeSignal).where(TradeSignal.id.in_(signal_ids)))).scalars().all()
+        signals_by_id = {str(signal.id).strip(): signal for signal in signal_rows}
+    trade_totals, trade_counts_by_trader = _grouped_trade_counts(
+        all_order_rows,
+        signals_by_id,
+        open_statuses=open_statuses,
+        resolved_statuses=resolved_statuses,
+        failed_statuses=failed_statuses,
+    )
+
     by_source_query = select(
         TraderOrder.source,
         func.count().label("orders"),
@@ -7760,12 +7868,22 @@ async def get_trader_orders_summary(
         "win_rate": (wins_count / resolved_count * 100) if resolved_count > 0 else 0,
         "avg_edge": float(row.avg_edge or 0),
         "avg_confidence": float(row.avg_confidence or 0),
+        "total_trades": int(trade_totals["total_trades"] or 0),
+        "open_trades": int(trade_totals["open_trades"] or 0),
+        "resolved_trades": int(trade_totals["resolved_trades"] or 0),
+        "failed_trades": int(trade_totals["failed_trades"] or 0),
+        "partial_open_bundles": int(trade_totals["partial_open_bundles"] or 0),
         "by_trader": [
             {
                 "trader_id": str(tr.trader_id or ""),
                 "orders": int(tr.orders or 0),
                 "open": int(tr.open or 0),
                 "resolved": int(tr.resolved or 0),
+                "trade_count": int((trade_counts_by_trader.get(str(tr.trader_id or "")) or {}).get("trade_count", tr.orders or 0)),
+                "open_trades": int((trade_counts_by_trader.get(str(tr.trader_id or "")) or {}).get("open_trades", tr.open or 0)),
+                "resolved_trades": int((trade_counts_by_trader.get(str(tr.trader_id or "")) or {}).get("resolved_trades", tr.resolved or 0)),
+                "failed_trades": int((trade_counts_by_trader.get(str(tr.trader_id or "")) or {}).get("failed_trades", 0)),
+                "partial_open_bundles": int((trade_counts_by_trader.get(str(tr.trader_id or "")) or {}).get("partial_open_bundles", 0)),
                 "pnl": float(tr.pnl or 0),
                 "notional": float(tr.notional or 0),
                 "wins": int(tr.wins or 0),
