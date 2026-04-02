@@ -3,7 +3,7 @@ from typing import Optional
 import warnings
 
 from pydantic import field_validator
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 warnings.filterwarnings(
     "ignore",
@@ -480,8 +480,7 @@ class Settings(BaseSettings):
             return value
         return normalized
 
-    class Config:
-        pass
+    model_config = SettingsConfigDict()
 
 
 settings = Settings()

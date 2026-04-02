@@ -9,7 +9,6 @@ from __future__ import annotations
 from functools import lru_cache
 import re
 import uuid
-from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -69,6 +68,7 @@ from services.strategies.traders_copy_trade import (
 )
 from services.strategy_runtime import bump_strategy_runtime_revisions
 from utils.logger import get_logger
+from utils.utcnow import utcnow
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/strategy-manager", tags=["Strategies (Unified)"])
@@ -2190,12 +2190,12 @@ async def delete_strategy(strategy_id: str):
                 session.add(
                     StrategyTombstone(
                         slug=row.slug,
-                        deleted_at=datetime.utcnow(),
+                        deleted_at=utcnow(),
                         reason="user_deleted_system_strategy",
                     )
                 )
             else:
-                tombstone.deleted_at = datetime.utcnow()
+                tombstone.deleted_at = utcnow()
                 tombstone.reason = "user_deleted_system_strategy"
 
         strategy_loader.unload(row.slug)

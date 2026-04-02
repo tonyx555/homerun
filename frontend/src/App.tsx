@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAtom } from 'jotai'
 // framer-motion used in AnimatedNumber component
@@ -93,14 +93,9 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrig
 import OpportunityCard from './components/OpportunityCard'
 import OpportunityTable from './components/OpportunityTable'
 import OpportunityTerminal from './components/OpportunityTerminal'
-import AccountsPanel from './components/AccountsPanel'
 import WalletAnalysisPanel from './components/WalletAnalysisPanel'
-import TradingPanel from './components/TradingPanel'
 import RecentTradesPanel from './components/RecentTradesPanel'
 import TrackedTradersPanel from './components/TrackedTradersPanel'
-import DiscoveryProfilesManager from './components/DiscoveryProfilesManager'
-import SettingsPanel from './components/SettingsPanel'
-import StrategiesPanel from './components/StrategiesPanel'
 import AITab from './components/ai/AITab'
 
 interface AICopilotLaunchOptions {
@@ -112,11 +107,8 @@ interface AICopilotLaunchOptions {
 }
 import AICopilotPanel from './components/AICopilotPanel'
 import AICommandBar from './components/AICommandBar'
-import PositionsPanel from './components/PositionsPanel'
-import PerformancePanel from './components/PerformancePanel'
 import ThemeToggle from './components/ThemeToggle'
 import KeyboardShortcutsHelp from './components/KeyboardShortcutsHelp'
-import DiscoveryPanel from './components/DiscoveryPanel'
 import LiveTickerTape from './components/LiveTickerTape'
 import AnimatedNumber, { FlashNumber } from './components/AnimatedNumber'
 import AccountSettingsFlyout from './components/AccountSettingsFlyout'
@@ -129,9 +121,18 @@ import CryptoMarketsPanel from './components/CryptoMarketsPanel'
 import WeatherOpportunitiesPanel from './components/WeatherOpportunitiesPanel'
 import OpportunityEmptyState from './components/OpportunityEmptyState'
 import SportsOpportunitiesPanel from './components/SportsOpportunitiesPanel'
-import DataPanel, { DataView } from './components/DataPanel'
+import type { DataView } from './components/DataPanel'
 import UILockScreen from './components/UILockScreen'
-import TradersNetworkPanel from './components/TradersNetworkPanel'
+const AccountsPanel = lazy(() => import('./components/AccountsPanel'))
+const TradingPanel = lazy(() => import('./components/TradingPanel'))
+const DiscoveryProfilesManager = lazy(() => import('./components/DiscoveryProfilesManager'))
+const SettingsPanel = lazy(() => import('./components/SettingsPanel'))
+const StrategiesPanel = lazy(() => import('./components/StrategiesPanel'))
+const PositionsPanel = lazy(() => import('./components/PositionsPanel'))
+const PerformancePanel = lazy(() => import('./components/PerformancePanel'))
+const DiscoveryPanel = lazy(() => import('./components/DiscoveryPanel'))
+const DataPanel = lazy(() => import('./components/DataPanel'))
+const TradersNetworkPanel = lazy(() => import('./components/TradersNetworkPanel'))
 
 type Tab = 'opportunities' | 'data' | 'trading' | 'strategies' | 'accounts' | 'traders' | 'positions' | 'performance' | 'ai' | 'settings'
 type TradersSubTab = 'discovery' | 'pool' | 'tracked' | 'analysis' | 'graph' | 'manage'
@@ -140,6 +141,14 @@ type CopilotSeedPrompt = { id: number; prompt: string; autoSend: boolean }
 
 const ITEMS_PER_PAGE = 20
 const ANALYZE_ALL_IDS_PAGE_SIZE = 500
+
+function PanelFallback({ label }: { label: string }) {
+  return (
+    <div className="flex h-full min-h-[240px] items-center justify-center rounded-xl border border-border/60 bg-card/60 text-sm text-muted-foreground">
+      {label}
+    </div>
+  )
+}
 
 const NAV_ITEMS: { id: Tab; icon: React.ElementType; label: string; shortcut: string }[] = [
   { id: 'opportunities', icon: Zap, label: 'Opportunities', shortcut: '1' },
@@ -2797,19 +2806,23 @@ function App() {
 
             {/* ==================== Data ==================== */}
             {activeTab === 'data' && (
-              <DataPanel
-                isConnected={isConnected}
-                view={dataView}
-                onViewChange={setDataView}
-                onOpenCopilot={handleOpenCopilotRequest}
-              />
+              <Suspense fallback={<PanelFallback label="Loading data workspace" />}>
+                <DataPanel
+                  isConnected={isConnected}
+                  view={dataView}
+                  onViewChange={setDataView}
+                  onOpenCopilot={handleOpenCopilotRequest}
+                />
+              </Suspense>
             )}
 
             {/* ==================== Trading ==================== */}
             {activeTab === 'trading' && (
               <div className="flex-1 overflow-hidden flex flex-col section-enter">
                 <div className="flex-1 overflow-hidden px-6 py-4 min-h-0">
-                  <TradingPanel isConnected={isConnected} />
+                  <Suspense fallback={<PanelFallback label="Loading trading workspace" />}>
+                    <TradingPanel isConnected={isConnected} />
+                  </Suspense>
                 </div>
               </div>
             )}
@@ -2818,11 +2831,13 @@ function App() {
             {activeTab === 'strategies' && (
               <div className="flex-1 overflow-hidden flex flex-col section-enter">
                 <div className="flex-1 overflow-hidden px-6 py-4 min-h-0">
-                  <StrategiesPanel
-                    initialSourceFilter={pendingStrategiesSourceFilter}
-                    onSourceFilterApplied={() => setPendingStrategiesSourceFilter(null)}
-                    onOpenCopilot={handleOpenCopilotRequest}
-                  />
+                  <Suspense fallback={<PanelFallback label="Loading strategies" />}>
+                    <StrategiesPanel
+                      initialSourceFilter={pendingStrategiesSourceFilter}
+                      onSourceFilterApplied={() => setPendingStrategiesSourceFilter(null)}
+                      onOpenCopilot={handleOpenCopilotRequest}
+                    />
+                  </Suspense>
                 </div>
               </div>
             )}
@@ -2831,7 +2846,9 @@ function App() {
             {activeTab === 'accounts' && (
               <div className="flex-1 overflow-hidden flex flex-col section-enter">
                 <div className="flex-1 overflow-hidden px-6 py-4 min-h-0">
-                  <AccountsPanel onOpenSettings={() => setAccountSettingsOpen(true)} />
+                  <Suspense fallback={<PanelFallback label="Loading accounts" />}>
+                    <AccountsPanel onOpenSettings={() => setAccountSettingsOpen(true)} />
+                  </Suspense>
                 </div>
               </div>
             )}
@@ -2936,16 +2953,20 @@ function App() {
                   )}
                 >
                   <div className={tradersSubTab === 'discovery' ? '' : 'hidden'}>
-                    <DiscoveryPanel
-                      view="discovery"
-                      onAnalyzeWallet={handleAnalyzeWallet}
-                    />
+                    <Suspense fallback={<PanelFallback label="Loading discovery" />}>
+                      <DiscoveryPanel
+                        view="discovery"
+                        onAnalyzeWallet={handleAnalyzeWallet}
+                      />
+                    </Suspense>
                   </div>
                   <div className={tradersSubTab === 'pool' ? '' : 'hidden'}>
-                    <DiscoveryPanel
-                      view="pool"
-                      onAnalyzeWallet={handleAnalyzeWallet}
-                    />
+                    <Suspense fallback={<PanelFallback label="Loading pool" />}>
+                      <DiscoveryPanel
+                        view="pool"
+                        onAnalyzeWallet={handleAnalyzeWallet}
+                      />
+                    </Suspense>
                   </div>
                   <div className={tradersSubTab === 'tracked' ? '' : 'hidden'}>
                     <TrackedTradersPanel
@@ -2964,16 +2985,20 @@ function App() {
                     />
                   </div>
                   <div className={cn("h-full min-h-0", tradersSubTab === 'graph' ? '' : 'hidden')}>
-                    <TradersNetworkPanel
-                      onAnalyzeWallet={handleAnalyzeWallet}
-                      onNavigateToWallet={(address) => {
-                        setWalletToAnalyze(address)
-                        setTradersSubTab('analysis')
-                      }}
-                    />
+                    <Suspense fallback={<PanelFallback label="Loading network graph" />}>
+                      <TradersNetworkPanel
+                        onAnalyzeWallet={handleAnalyzeWallet}
+                        onNavigateToWallet={(address) => {
+                          setWalletToAnalyze(address)
+                          setTradersSubTab('analysis')
+                        }}
+                      />
+                    </Suspense>
                   </div>
                   <div className={cn("h-full min-h-0", tradersSubTab === 'manage' ? '' : 'hidden')}>
-                    <DiscoveryProfilesManager />
+                    <Suspense fallback={<PanelFallback label="Loading profile manager" />}>
+                      <DiscoveryProfilesManager />
+                    </Suspense>
                   </div>
                 </div>
               </div>
@@ -2983,7 +3008,9 @@ function App() {
             {activeTab === 'positions' && (
               <div className="flex-1 overflow-hidden flex flex-col section-enter">
                 <div className="flex-1 overflow-hidden px-6 py-4 min-h-0">
-                  <PositionsPanel />
+                  <Suspense fallback={<PanelFallback label="Loading positions" />}>
+                    <PositionsPanel />
+                  </Suspense>
                 </div>
               </div>
             )}
@@ -2992,7 +3019,9 @@ function App() {
             {activeTab === 'performance' && (
               <div className="flex-1 overflow-hidden flex flex-col section-enter">
                 <div className="flex-1 overflow-hidden px-6 py-4 min-h-0">
-                  <PerformancePanel />
+                  <Suspense fallback={<PanelFallback label="Loading performance" />}>
+                    <PerformancePanel />
+                  </Suspense>
                 </div>
               </div>
             )}
@@ -3011,7 +3040,9 @@ function App() {
             {/* ==================== Settings ==================== */}
             {activeTab === 'settings' && (
               <div className="flex-1 overflow-y-auto px-6 py-5 section-enter">
-                <SettingsPanel />
+                <Suspense fallback={<PanelFallback label="Loading settings" />}>
+                  <SettingsPanel />
+                </Suspense>
               </div>
             )}
           </main>

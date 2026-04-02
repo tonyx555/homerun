@@ -31,6 +31,7 @@ from models.database import (
     DiscoveryProfileVersion,
 )
 from utils.logger import get_logger
+from utils.utcnow import utcnow
 
 logger = get_logger(__name__)
 
@@ -191,7 +192,7 @@ class DiscoveryScoringProfile(BaseDiscoveryProfile):
         )
 
         # -- Rolling windows --
-        rolling_out = self._calculate_rolling_windows(trades, datetime.utcnow())
+        rolling_out = self._calculate_rolling_windows(trades, utcnow())
 
         # -- Timing skill --
         timing = self._compute_timing_skill(closed_positions)
@@ -1146,7 +1147,7 @@ class PoolSelectionProfile(BaseDiscoveryProfile):
         cfg = self.config
         target_size = int(cfg.get("target_pool_size", 500))
         max_pool_size = int(cfg.get("max_pool_size", 600))
-        now = datetime.utcnow()
+        now = utcnow()
 
         # -- Phase 1: Score all wallets --
         wallet_scores = {}
@@ -1805,7 +1806,7 @@ async def seed_discovery_profiles() -> int:
             str(row.slug): row for row in existing_rows
         }
 
-        now = datetime.utcnow()
+        now = utcnow()
         created = 0
         updated = 0
 

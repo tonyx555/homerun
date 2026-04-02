@@ -18,6 +18,7 @@ from services.strategies.late_favorite_alpha import late_favorite_alpha_config_s
 from services.strategies.news_edge import news_edge_config_schema
 from services.strategies.traders_copy_trade import traders_copy_trade_config_schema
 from utils.logger import get_logger
+from utils.utcnow import utcnow
 
 logger = get_logger(__name__)
 
@@ -1313,7 +1314,7 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
 
 
 def build_system_opportunity_strategy_rows(*, now: datetime | None = None) -> list[dict]:
-    ts = now or datetime.utcnow()
+    ts = now or utcnow()
     rows: list[dict] = []
     for seed in SYSTEM_OPPORTUNITY_STRATEGY_SEEDS:
         meta = _derive_class_metadata(seed)
@@ -1535,6 +1536,6 @@ async def reset_strategy_to_factory(session: AsyncSession, slug: str) -> dict:
     current.status = "unloaded"
     current.error_message = None
     current.version = int(current.version or 0) + 1
-    current.updated_at = datetime.utcnow()
+    current.updated_at = utcnow()
     await session.commit()
     return {"status": "reset", "detail": f"Strategy '{slug}' reset to factory defaults"}

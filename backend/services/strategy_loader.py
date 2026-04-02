@@ -1079,7 +1079,7 @@ def serialize_strategy_definition(row: Any) -> dict[str, Any]:
         "source_code": row.source_code,
         "default_params_json": row.config or {},
         "param_schema_json": row.config_schema or {},
-        "aliases_json": [],  # Deprecated — aliases system removed
+        "aliases_json": [],
         "is_system": bool(row.is_system),
         "enabled": bool(row.enabled),
         "status": row.status,

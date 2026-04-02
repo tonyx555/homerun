@@ -15,6 +15,8 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
+from utils.utcnow import utcnow
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -916,7 +918,7 @@ class BaseDiscoveryProfile:
         current_pool: list[str],
         config: dict,
     ) -> dict:
-        now = datetime.utcnow()
+        now = utcnow()
         target_pool_size = int(config.get(
             "target_pool_size",
             POOL_ELIGIBILITY_DEFAULTS["target_pool_size"],

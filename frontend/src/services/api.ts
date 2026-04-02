@@ -1210,14 +1210,14 @@ export const discoverByWinRate = async (filters?: WinRateFilters): Promise<Disco
 }
 
 export const getWalletWinRate = async (address: string, timePeriod?: TimePeriod): Promise<WalletWinRate> => {
-  const { data } = await api.get(`/discover/wallet/${address}/win-rate`, {
+  const { data } = await api.get(`/discovery/wallet/${address}/win-rate`, {
     params: timePeriod ? { time_period: timePeriod } : undefined
   })
   return unwrapApiData(data)
 }
 
 export const analyzeWalletPnL = async (address: string, timePeriod?: TimePeriod): Promise<WalletPnL> => {
-  const { data } = await api.get(`/discover/wallet/${address}`, {
+  const { data } = await api.get(`/discovery/wallet/${address}/pnl`, {
     params: timePeriod ? { time_period: timePeriod } : undefined
   })
   return unwrapApiData(data)
@@ -1236,19 +1236,14 @@ export const getWalletProfile = async (address: string): Promise<WalletProfile> 
   return unwrapApiData(data)
 }
 
-// Add time-filtered wallet PnL (for future time filter support)
-export const analyzeWalletPnLWithFilter = async (address: string, timePeriod?: TimePeriod): Promise<WalletPnL> => {
-  const { data } = await api.get(`/discover/wallet/${address}`, {
-    params: timePeriod ? { time_period: timePeriod } : undefined
-  })
-  return unwrapApiData(data)
-}
-
 export const analyzeAndTrackWallet = async (params: {
   address: string
   label?: string
 }) => {
-  const { data } = await api.post('/discover/analyze-and-track', null, { params })
+  const { data } = await api.post(
+    `/discovery/wallet/${params.address}/track`,
+    params.label ? { label: params.label } : {}
+  )
   return unwrapApiData(data)
 }
 

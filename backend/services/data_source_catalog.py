@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import DataSource, DataSourceTombstone
 from utils.logger import get_logger
+from utils.utcnow import utcnow
 
 logger = get_logger(__name__)
 
@@ -85,7 +86,7 @@ class SystemDataSourceSeed:
 
 
 def _now_or_default(now: datetime | None) -> datetime:
-    return now or datetime.utcnow()
+    return now or utcnow()
 
 
 def _slug_fragment(value: str, *, max_len: int = 20) -> str:

@@ -49,9 +49,11 @@ from services.trader_data_access import (
     annotate_trader_signal_source_context,
 )
 from services.strategy_sdk import StrategySDK
+from utils.logger import get_logger
 from utils.validation import validate_eth_address
 
 _safe_float = partial(safe_float, reject_nan_inf=True)
+logger = get_logger(__name__)
 
 # Maps time_period query values to rolling window keys stored in the DB
 TIME_PERIOD_TO_WINDOW_KEY = {
@@ -80,6 +82,85 @@ def _resolve_query_default(value: Any) -> Any:
 
 def _resolve_query_bool(value: Any) -> bool:
     return bool(_resolve_query_default(value))
+
+
+async def _resolve_wallet_address(wallet_identifier: str) -> str:
+    try:
+        resolved = await polymarket_client.resolve_wallet_identifier(wallet_identifier)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return str(resolved.get("address") or "").lower()
+
+
+def _resolve_wallet_summary_window_key(time_period: str) -> Optional[str]:
+    normalized = str(time_period or "ALL").upper()
+    mapping = {
+        "DAY": "1d",
+        "WEEK": "7d",
+        "MONTH": "30d",
+        "ALL": None,
+    }
+    if normalized not in mapping:
+        raise HTTPException(status_code=400, detail="Invalid time_period. Use DAY/WEEK/MONTH/ALL")
+    return mapping[normalized]
+
+
+def _build_wallet_win_rate_payload(
+    *,
+    address: str,
+    profile: dict[str, Any],
+    window_key: Optional[str],
+) -> dict[str, Any]:
+    if window_key:
+        win_rate = (profile.get("rolling_win_rate", {}) or {}).get(window_key, 0.0)
+        trade_count = (profile.get("rolling_trade_count", {}) or {}).get(window_key, 0)
+    else:
+        win_rate = profile.get("win_rate", 0.0)
+        trade_count = profile.get("total_trades", 0)
+
+    wins = profile.get("wins", 0)
+    losses = profile.get("losses", 0)
+    if window_key and trade_count > 0 and wins + losses > 0:
+        wins = int(round((win_rate or 0.0) * trade_count))
+        losses = max(int(trade_count) - wins, 0)
+
+    return {
+        "address": address,
+        "win_rate": (win_rate or 0.0) * 100.0,
+        "wins": wins,
+        "losses": losses,
+        "total_markets": profile.get("unique_markets", 0),
+        "trade_count": trade_count,
+    }
+
+
+def _build_wallet_pnl_payload(
+    *,
+    address: str,
+    profile: dict[str, Any],
+    window_key: Optional[str],
+) -> dict[str, Any]:
+    if window_key:
+        pnl = (profile.get("rolling_pnl", {}) or {}).get(window_key, 0.0)
+        trade_count = (profile.get("rolling_trade_count", {}) or {}).get(window_key, 0)
+    else:
+        pnl = profile.get("total_pnl", 0.0)
+        trade_count = profile.get("total_trades", 0)
+
+    total_invested = float(profile.get("total_invested", 0.0) or 0.0)
+    roi_percent = (pnl / total_invested * 100.0) if total_invested > 0 else 0.0
+    return {
+        "address": address,
+        "total_trades": trade_count,
+        "open_positions": profile.get("open_positions", 0),
+        "total_invested": total_invested,
+        "total_returned": profile.get("total_returned", 0.0),
+        "position_value": 0.0,
+        "realized_pnl": profile.get("realized_pnl", 0.0),
+        "unrealized_pnl": profile.get("unrealized_pnl", 0.0),
+        "total_pnl": pnl,
+        "roi_percent": roi_percent,
+    }
 
 
 async def _load_tracked_trader_opportunities(
@@ -138,6 +219,10 @@ class UpdateTraderGroupMembersRequest(BaseModel):
 
 class PoolFlagRequest(BaseModel):
     reason: Optional[str] = Field(default=None, max_length=240)
+
+
+class TrackWalletRequest(BaseModel):
+    label: Optional[str] = Field(default=None, max_length=120)
 
 
 def _normalize_wallet_addresses(addresses: list[str]) -> list[str]:
@@ -1496,6 +1581,125 @@ async def get_wallet_profile(wallet_address: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@discovery_router.get("/wallet/{wallet_identifier}/win-rate")
+async def get_wallet_win_rate(
+    wallet_identifier: str,
+    time_period: str = Query("ALL", description="Time period: DAY, WEEK, MONTH, or ALL"),
+):
+    try:
+        resolved_address = await _resolve_wallet_address(wallet_identifier)
+        window_key = _resolve_wallet_summary_window_key(time_period)
+        profile = await wallet_discovery.get_wallet_profile(resolved_address)
+        if profile:
+            return _build_wallet_win_rate_payload(
+                address=resolved_address,
+                profile=profile,
+                window_key=window_key,
+            )
+
+        fast_result = await polymarket_client.calculate_win_rate_fast(resolved_address, min_positions=1)
+        if fast_result:
+            return {
+                "address": resolved_address,
+                "win_rate": fast_result["win_rate"],
+                "wins": fast_result["wins"],
+                "losses": fast_result["losses"],
+                "total_markets": fast_result["closed_positions"],
+                "trade_count": fast_result["closed_positions"],
+            }
+        return {
+            "address": resolved_address,
+            "win_rate": 0.0,
+            "wins": 0,
+            "losses": 0,
+            "total_markets": 0,
+            "trade_count": 0,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@discovery_router.get("/wallet/{wallet_identifier}/pnl")
+async def get_wallet_pnl(
+    wallet_identifier: str,
+    time_period: str = Query("ALL", description="Time period: DAY, WEEK, MONTH, or ALL"),
+):
+    try:
+        resolved_address = await _resolve_wallet_address(wallet_identifier)
+        window_key = _resolve_wallet_summary_window_key(time_period)
+        profile = await wallet_discovery.get_wallet_profile(resolved_address)
+        if profile:
+            return _build_wallet_pnl_payload(
+                address=resolved_address,
+                profile=profile,
+                window_key=window_key,
+            )
+
+        return await polymarket_client.get_wallet_pnl(resolved_address, time_period=time_period)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@discovery_router.post("/wallet/{wallet_identifier}/track")
+async def track_wallet(
+    wallet_identifier: str,
+    payload: Optional[TrackWalletRequest] = None,
+):
+    try:
+        resolved_address = await _resolve_wallet_address(wallet_identifier)
+        analysis_upserted = False
+        profile = await wallet_discovery.get_wallet_profile(resolved_address)
+        if profile is None:
+            analysis = await wallet_discovery.analyze_wallet(resolved_address)
+            if analysis is not None:
+                await wallet_discovery._upsert_wallet(analysis)
+                await wallet_discovery.refresh_leaderboard()
+                analysis_upserted = True
+                profile = await wallet_discovery.get_wallet_profile(resolved_address)
+
+        if analysis_upserted:
+            try:
+                await smart_wallet_pool.recompute_pool()
+            except Exception as exc:
+                logger.warning(
+                    "Smart pool recompute after wallet track failed",
+                    address=resolved_address,
+                    exc_info=exc,
+                )
+
+        analysis_payload = (
+            _build_wallet_pnl_payload(
+                address=resolved_address,
+                profile=profile,
+                window_key=None,
+            )
+            if profile
+            else await polymarket_client.get_wallet_pnl(resolved_address)
+        )
+        wallet_label = (
+            payload.label
+            if payload and payload.label
+            else f"Discovered ({analysis_payload.get('roi_percent', 0):.1f}% ROI)"
+        )
+        await wallet_tracker.add_wallet(resolved_address, wallet_label)
+
+        return {
+            "status": "success",
+            "wallet": resolved_address,
+            "label": wallet_label,
+            "analysis": analysis_payload,
+            "tracking": True,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 # ==================== DISCOVERY CONTROL ====================
