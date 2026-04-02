@@ -21,7 +21,6 @@ from models.database import (
 )
 from services import polymarket_client
 from services.wallet_tracker import wallet_tracker
-from services.smart_wallet_pool import smart_wallet_pool
 from services.kalshi_client import kalshi_client
 from services.opportunity_strategy_catalog import ensure_system_opportunity_strategies_seeded
 from services import shared_state
