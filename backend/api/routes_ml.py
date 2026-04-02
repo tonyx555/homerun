@@ -14,7 +14,7 @@ import uuid
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, func, select
 
 from models.database import (
@@ -25,10 +25,61 @@ from models.database import (
     MLTrainingSnapshot,
 )
 from services.ml_recorder import ml_recorder
-from services.ml_trainer import archive_model, promote_model, run_training_job
+from services.ml_runtime import crypto_ml_runtime
+from services.ml_trainer import archive_model, is_training_backend_available, promote_model, run_training_job
 from utils.utcnow import utcnow
 
 router = APIRouter(prefix="/ml", tags=["ML Training Pipeline"])
+
+_ALLOWED_ML_ASSETS = ("btc", "eth", "sol", "xrp")
+_ALLOWED_ML_TIMEFRAMES = ("5m", "15m", "1h", "4h")
+
+
+def _normalize_ml_timeframe(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"5m", "5min", "5-minute", "5minutes"}:
+        return "5m"
+    if text in {"15m", "15min", "15-minute", "15minutes"}:
+        return "15m"
+    if text in {"1h", "1hr", "1hour", "60m"}:
+        return "1h"
+    if text in {"4h", "4hr", "4hour", "240m"}:
+        return "4h"
+    return text
+
+
+def _normalize_ml_assets(values: list[str]) -> list[str]:
+    normalized: list[str] = []
+    invalid: list[str] = []
+    for value in values:
+        asset = str(value or "").strip().lower()
+        if asset not in _ALLOWED_ML_ASSETS:
+            invalid.append(str(value))
+            continue
+        if asset not in normalized:
+            normalized.append(asset)
+    if invalid:
+        raise HTTPException(400, f"Unsupported ML assets: {', '.join(invalid)}")
+    if not normalized:
+        raise HTTPException(400, "At least one ML asset is required")
+    return normalized
+
+
+def _normalize_ml_timeframes(values: list[str]) -> list[str]:
+    normalized: list[str] = []
+    invalid: list[str] = []
+    for value in values:
+        timeframe = _normalize_ml_timeframe(value)
+        if timeframe not in _ALLOWED_ML_TIMEFRAMES:
+            invalid.append(str(value))
+            continue
+        if timeframe not in normalized:
+            normalized.append(timeframe)
+    if invalid:
+        raise HTTPException(400, f"Unsupported ML timeframes: {', '.join(invalid)}")
+    if not normalized:
+        raise HTTPException(400, "At least one ML timeframe is required")
+    return normalized
 
 
 # ── Pydantic request/response models ──────────────────────────────────────
@@ -46,28 +97,17 @@ class RecorderConfigUpdate(BaseModel):
 
 
 class TrainRequest(BaseModel):
-    model_config = {"protected_namespaces": ()}
-    model_type: str = Field("xgboost", pattern=r"^(xgboost|lightgbm)$")
+    model_config = ConfigDict(protected_namespaces=())
+    model_type: str = Field("logistic", pattern=r"^(logistic)$")
     assets: Optional[list[str]] = None
     timeframes: Optional[list[str]] = None
     days_lookback: int = Field(30, ge=1, le=365)
     hyperparams: Optional[dict] = None
 
 
-class PromoteRequest(BaseModel):
-    model_config = {"protected_namespaces": ()}
-    model_id: str
-
-
 class PruneRequest(BaseModel):
     older_than_days: Optional[int] = Field(None, ge=1, le=365)
     confirm: bool = False
-
-
-class ExportRequest(BaseModel):
-    asset: Optional[str] = None
-    timeframe: Optional[str] = None
-    days: int = Field(7, ge=1, le=90)
 
 
 # ── Recorder config endpoints ─────────────────────────────────────────────
@@ -97,11 +137,9 @@ async def update_recorder_config(body: RecorderConfigUpdate):
         if body.retention_days is not None:
             row.retention_days = body.retention_days
         if body.assets is not None:
-            allowed = {"btc", "eth", "sol", "xrp"}
-            row.assets = [a for a in body.assets if a in allowed]
+            row.assets = _normalize_ml_assets(body.assets)
         if body.timeframes is not None:
-            allowed = {"5m", "15m", "1h", "4h"}
-            row.timeframes = [t for t in body.timeframes if t in allowed]
+            row.timeframes = _normalize_ml_timeframes(body.timeframes)
         if body.schedule_enabled is not None:
             row.schedule_enabled = body.schedule_enabled
         if body.schedule_start_utc is not None:
@@ -163,13 +201,12 @@ async def get_data_stats():
 @router.post("/data/prune")
 async def prune_data(body: PruneRequest):
     """Delete old snapshots.  Requires confirm=true."""
-    if not body.confirm:
-        # Dry-run: show what would be deleted
-        days = body.older_than_days
-        if days is None:
-            config = await ml_recorder._get_config()
-            days = config.get("retention_days", 90)
+    days = body.older_than_days
+    if days is None:
+        config = await ml_recorder.get_config()
+        days = int(config.get("retention_days", 90))
 
+    if not body.confirm:
         from datetime import timedelta
 
         cutoff = utcnow() - timedelta(days=days)
@@ -182,8 +219,8 @@ async def prune_data(body: PruneRequest):
 
         return {"action": "dry_run", "would_delete": count, "older_than_days": days, "cutoff": cutoff.isoformat()}
 
-    deleted = await ml_recorder.prune_old_snapshots()
-    return {"action": "pruned", "deleted": deleted}
+    deleted = await ml_recorder.prune_old_snapshots(older_than_days=days)
+    return {"action": "pruned", "deleted": deleted, "older_than_days": days}
 
 
 @router.delete("/data/all")
@@ -207,16 +244,35 @@ _training_tasks: set[asyncio.Task] = set()
 @router.post("/train")
 async def start_training(body: TrainRequest):
     """Start an ML training job (async).  Returns job ID for polling."""
+    backend_ok, backend_error = is_training_backend_available(body.model_type)
+    if not backend_ok:
+        raise HTTPException(503, backend_error or "ML training backend unavailable")
+
+    assets = _normalize_ml_assets(body.assets if body.assets is not None else list(_ALLOWED_ML_ASSETS))
+    timeframes = _normalize_ml_timeframes(
+        body.timeframes if body.timeframes is not None else list(_ALLOWED_ML_TIMEFRAMES)
+    )
+
     job_id = str(uuid.uuid4())
 
     # Create job row
     async with AsyncSessionLocal() as session:
+        existing_job_id = (
+            await session.execute(
+                select(MLTrainingJob.id)
+                .where(MLTrainingJob.status.in_(("queued", "running")))
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if existing_job_id:
+            raise HTTPException(409, f"ML training job {existing_job_id} is already queued or running")
+
         job = MLTrainingJob(
             id=job_id,
             status="queued",
             model_type=body.model_type,
-            assets=body.assets or ["btc", "eth", "sol", "xrp"],
-            timeframes=body.timeframes or ["5m", "15m", "1h", "4h"],
+            assets=assets,
+            timeframes=timeframes,
             created_at=utcnow(),
         )
         session.add(job)
@@ -228,8 +284,8 @@ async def start_training(body: TrainRequest):
         run_training_job(
             job_id=job_id,
             model_type=body.model_type,
-            assets=body.assets,
-            timeframes=body.timeframes,
+            assets=assets,
+            timeframes=timeframes,
             hyperparams=body.hyperparams,
             days_lookback=body.days_lookback,
         )
@@ -402,6 +458,7 @@ async def delete_model(model_id: str, confirm: bool = Query(False)):
 
         await session.delete(model)
         await session.commit()
+        crypto_ml_runtime.invalidate_cache()
         return {"deleted": model_id}
 
 

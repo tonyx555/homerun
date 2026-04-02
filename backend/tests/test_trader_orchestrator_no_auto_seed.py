@@ -252,6 +252,32 @@ async def test_create_trader_scopes_by_mode_and_list_filter(postgres_session_fac
 
 
 @pytest.mark.asyncio
+async def test_create_trader_pauses_live_start_without_explicit_risk_caps(postgres_session_factory):
+    async with postgres_session_factory() as session:
+        trader = await create_trader(
+            session,
+            {
+                "name": "Live Trader Missing Caps",
+                "mode": "live",
+                "source_configs": [
+                    {
+                        "source_key": "scanner",
+                        "strategy_key": "settlement_lag",
+                        "strategy_params": {},
+                    }
+                ],
+                "is_enabled": True,
+            },
+        )
+
+    assert trader["mode"] == "live"
+    assert trader["is_enabled"] is True
+    assert trader["is_paused"] is True
+    assert float(trader["risk_limits"]["max_trade_notional_usd"]) == 350.0
+    assert float(trader["risk_limits"]["max_position_notional_usd"]) == 350.0
+
+
+@pytest.mark.asyncio
 async def test_create_trader_rejects_invalid_mode(postgres_session_factory):
     async with postgres_session_factory() as session:
         with pytest.raises(ValueError, match="mode must be 'shadow' or 'live'"):

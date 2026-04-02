@@ -15,6 +15,8 @@ from services.data_events import DataEvent, EventType
 from services.event_bus import event_bus
 from services.event_dispatcher import event_dispatcher
 from services.intent_runtime import get_intent_runtime
+from services.ml_recorder import ml_recorder
+from services.ml_runtime import crypto_ml_runtime
 from services.reference_runtime import get_reference_runtime
 from services.runtime_status import runtime_status
 from services.worker_state import read_worker_control, summarize_worker_stats, write_worker_snapshot
@@ -30,6 +32,7 @@ _CATALOG_REFRESH_SECONDS = 5.0
 _CRYPTO_SNAPSHOT_PERSIST_INTERVAL_SECONDS = 5.0
 _CRYPTO_SNAPSHOT_MARKETS_LIMIT = 64
 _FULL_REFRESH_FLOOR_SECONDS = 0.5
+_ML_PRUNE_INTERVAL_SECONDS = 3600.0
 _BOUNDARY_INTERVALS_SECONDS = (300, 900, 3600, 14400)
 _BOUNDARY_PREFETCH_WINDOW_SECONDS = 15
 _BOUNDARY_LINGER_WINDOW_SECONDS = 10
@@ -93,6 +96,7 @@ class MarketRuntime:
         self._last_error: str | None = None
         self._last_catalog_refresh_mono = 0.0
         self._last_snapshot_persist_mono = 0.0
+        self._last_ml_prune_mono = 0.0
         self._pending_tokens: set[str] = set()
         self._pending_assets: set[str] = set()
         self._pending_reactive_lock = asyncio.Lock()
@@ -590,6 +594,29 @@ class MarketRuntime:
             payload.append(row)
         return payload
 
+    async def _refresh_ml_pipeline(self, payload: list[dict[str, Any]], *, allow_record: bool) -> None:
+        if not payload:
+            return
+        try:
+            await crypto_ml_runtime.annotate_markets(payload)
+        except Exception as exc:
+            logger.warning("Failed to annotate crypto markets with ML predictions", exc_info=exc)
+
+        if allow_record:
+            try:
+                await ml_recorder.maybe_record(payload)
+            except Exception as exc:
+                logger.warning("Failed to record ML training snapshots", exc_info=exc)
+
+        now_mono = time.monotonic()
+        if (now_mono - self._last_ml_prune_mono) < _ML_PRUNE_INTERVAL_SECONDS:
+            return
+        try:
+            await ml_recorder.prune_old_snapshots()
+            self._last_ml_prune_mono = now_mono
+        except Exception as exc:
+            logger.warning("Failed to prune ML training snapshots", exc_info=exc)
+
     async def _refresh_crypto_markets(
         self,
         *,
@@ -600,6 +627,7 @@ class MarketRuntime:
         svc = get_crypto_service()
         markets = await asyncio.to_thread(svc.get_live_markets, bool(force_refresh))
         payload = self._build_crypto_market_payload(markets or [])
+        await self._refresh_ml_pipeline(payload, allow_record=True)
         self._crypto_markets = payload
         self._crypto_markets_by_lookup = {}
         self._crypto_token_to_market_ids = {}
@@ -796,6 +824,7 @@ class MarketRuntime:
         if not selected_rows:
             return
         refreshed_rows = self._rebuild_crypto_rows_from_cache(selected_rows)
+        await self._refresh_ml_pipeline(refreshed_rows, allow_record=False)
         merged_by_id = {
             _normalize_market_id(row.get("id") or row.get("slug")): row
             for row in self._crypto_markets

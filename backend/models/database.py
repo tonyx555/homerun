@@ -755,15 +755,15 @@ class MLTrainingSnapshot(Base):
 class MLTrainedModel(Base):
     """Trained ML model artifacts for crypto directional prediction.
 
-    Stores XGBoost/LightGBM model weights, feature definitions, metrics,
-    and promotion status. Strategies load the active model at runtime.
+    Stores serialized model artifacts, feature definitions, metrics, and
+    promotion status. Strategies load the active model at runtime.
     """
 
     __tablename__ = "ml_trained_models"
 
     id = Column(String, primary_key=True)
     name = Column(String, nullable=False)  # e.g. "crypto_directional_v3"
-    model_type = Column(String, nullable=False)  # xgboost, lightgbm, logistic
+    model_type = Column(String, nullable=False)  # logistic
     version = Column(Integer, nullable=False, default=1)
     status = Column(String, nullable=False, default="trained")  # trained, active, archived
 
@@ -831,7 +831,7 @@ class MLTrainingJob(Base):
 
     id = Column(String, primary_key=True)
     status = Column(String, nullable=False, default="queued")  # queued, running, completed, failed
-    model_type = Column(String, nullable=False, default="xgboost")  # xgboost, lightgbm
+    model_type = Column(String, nullable=False, default="logistic")  # logistic
     assets = Column(JSON, nullable=False)
     timeframes = Column(JSON, nullable=False)
 

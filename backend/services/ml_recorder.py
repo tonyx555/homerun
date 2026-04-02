@@ -1,17 +1,7 @@
-"""ML Training Data Recorder — captures live crypto market snapshots for model training.
-
-Taps into the crypto worker's market payload on each cycle and writes time-series
-rows to ``ml_training_snapshots``.  Recording is controlled by the
-``ml_recorder_config`` table (toggled via API or UI).
-
-Usage in crypto_worker.py:
-    from services.ml_recorder import ml_recorder
-    await ml_recorder.maybe_record(markets_payload)
-"""
+"""ML training data recorder for live crypto market snapshots."""
 
 from __future__ import annotations
 
-import logging
 import math
 import time
 import uuid
@@ -19,9 +9,10 @@ import uuid
 from sqlalchemy import delete, func, select
 
 from models.database import AsyncSessionLocal, MLRecorderConfig, MLTrainingSnapshot
+from utils.logger import get_logger
 from utils.utcnow import utcnow
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def _to_float(value: object) -> float | None:
@@ -30,6 +21,23 @@ def _to_float(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return v if math.isfinite(v) else None
+
+
+def _normalize_asset(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
+def _normalize_timeframe(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"5m", "5min", "5-minute", "5minutes"}:
+        return "5m"
+    if text in {"15m", "15min", "15-minute", "15minutes"}:
+        return "15m"
+    if text in {"1h", "1hr", "1hour", "60m"}:
+        return "1h"
+    if text in {"4h", "4hr", "4hour", "240m"}:
+        return "4h"
+    return text
 
 
 class MLRecorder:
@@ -42,7 +50,6 @@ class MLRecorder:
         self._CONFIG_CACHE_TTL = 30.0  # re-read config from DB every 30s
 
     async def _get_config(self) -> dict:
-        """Fetch recorder config with in-memory caching."""
         now = time.monotonic()
         if self._config_cache is not None and (now - self._config_fetched_mono) < self._CONFIG_CACHE_TTL:
             return self._config_cache
@@ -57,23 +64,25 @@ class MLRecorder:
                         "is_recording": bool(row.is_recording),
                         "interval_seconds": max(5, int(row.interval_seconds or 60)),
                         "retention_days": max(1, int(row.retention_days or 90)),
-                        "assets": list(row.assets or ["btc", "eth", "sol", "xrp"]),
-                        "timeframes": list(row.timeframes or ["5m", "15m", "1h", "4h"]),
+                        "assets": [_normalize_asset(value) for value in list(row.assets or ["btc", "eth", "sol", "xrp"])],
+                        "timeframes": [_normalize_timeframe(value) for value in list(row.timeframes or ["5m", "15m", "1h", "4h"])],
                         "schedule_enabled": bool(row.schedule_enabled),
                         "schedule_start_utc": row.schedule_start_utc,
                         "schedule_end_utc": row.schedule_end_utc,
                     }
                 self._config_fetched_mono = now
         except Exception as exc:
-            logger.debug("MLRecorder config fetch failed: %s", exc)
+            logger.debug("MLRecorder config fetch failed", exc_info=exc)
             if self._config_cache is None:
                 self._config_cache = {"is_recording": False, "interval_seconds": 60, "retention_days": 90, "assets": ["btc", "eth", "sol", "xrp"], "timeframes": ["5m", "15m", "1h", "4h"], "schedule_enabled": False}
         return self._config_cache
 
+    async def get_config(self) -> dict:
+        return dict(await self._get_config())
+
     def _in_schedule(self, config: dict) -> bool:
-        """Check if current UTC time is within the configured recording schedule."""
         if not config.get("schedule_enabled"):
-            return True  # no schedule = always record
+            return True
 
         now = utcnow()
         current_minutes = now.hour * 60 + now.minute
@@ -97,10 +106,7 @@ class MLRecorder:
             return current_minutes >= start_min or current_minutes <= end_min
 
     async def maybe_record(self, markets_payload: list[dict]) -> int:
-        """Called every crypto worker cycle.  Records snapshots if enabled and interval elapsed.
-
-        Returns number of snapshots written.
-        """
+        """Record snapshots when enabled and the configured interval has elapsed."""
         if not markets_payload:
             return 0
 
@@ -117,15 +123,15 @@ class MLRecorder:
         if not self._in_schedule(config):
             return 0
 
-        allowed_assets = set(config.get("assets", []))
-        allowed_timeframes = set(config.get("timeframes", []))
+        allowed_assets = {_normalize_asset(value) for value in config.get("assets", [])}
+        allowed_timeframes = {_normalize_timeframe(value) for value in config.get("timeframes", [])}
 
         snapshots: list[MLTrainingSnapshot] = []
         now = utcnow()
 
         for market in markets_payload:
-            asset = str(market.get("asset") or "").lower()
-            timeframe = str(market.get("timeframe") or "").lower()
+            asset = _normalize_asset(market.get("asset"))
+            timeframe = _normalize_timeframe(market.get("timeframe"))
 
             if asset not in allowed_assets or timeframe not in allowed_timeframes:
                 continue
@@ -136,7 +142,6 @@ class MLRecorder:
             if up_price is None and down_price is None:
                 continue
 
-            # mid_price: average of up and (1 - down)
             if up_price is not None and down_price is not None:
                 mid = (up_price + (1.0 - down_price)) / 2.0
             elif up_price is not None:
@@ -175,16 +180,15 @@ class MLRecorder:
                 session.add_all(snapshots)
                 await session.commit()
             self._last_record_mono = now_mono
-            logger.debug("MLRecorder wrote %d snapshots", len(snapshots))
+            logger.debug("MLRecorder wrote snapshots", snapshot_count=len(snapshots))
             return len(snapshots)
         except Exception as exc:
-            logger.warning("MLRecorder write failed: %s", exc)
+            logger.warning("MLRecorder write failed", exc_info=exc)
             return 0
 
-    async def prune_old_snapshots(self) -> int:
-        """Delete snapshots older than retention_days.  Call periodically (e.g. hourly)."""
+    async def prune_old_snapshots(self, *, older_than_days: int | None = None) -> int:
         config = await self._get_config()
-        retention_days = config.get("retention_days", 90)
+        retention_days = max(1, int(older_than_days or config.get("retention_days", 90)))
 
         from datetime import timedelta
 
@@ -198,14 +202,13 @@ class MLRecorder:
                 await session.commit()
                 deleted = result.rowcount
                 if deleted:
-                    logger.info("MLRecorder pruned %d snapshots older than %s days", deleted, retention_days)
+                    logger.info("MLRecorder pruned snapshots", deleted=deleted, retention_days=retention_days)
                 return deleted
         except Exception as exc:
-            logger.warning("MLRecorder prune failed: %s", exc)
+            logger.warning("MLRecorder prune failed", exc_info=exc)
             return 0
 
     async def get_stats(self) -> dict:
-        """Return recording statistics for the API/UI."""
         config = await self._get_config()
         try:
             async with AsyncSessionLocal() as session:
@@ -230,11 +233,10 @@ class MLRecorder:
                 "snapshots_by_asset": asset_counts,
             }
         except Exception as exc:
-            logger.warning("MLRecorder stats failed: %s", exc)
+            logger.warning("MLRecorder stats failed", exc_info=exc)
             return {"config": config, "total_snapshots": 0, "error": str(exc)}
 
     def invalidate_config_cache(self) -> None:
-        """Force re-read of config on next cycle (call after API updates config)."""
         self._config_cache = None
         self._config_fetched_mono = 0.0
 

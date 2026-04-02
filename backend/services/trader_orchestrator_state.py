@@ -419,6 +419,186 @@ def _extract_order_token_id(row: TraderOrder) -> str:
     return ""
 
 
+def _normalize_bundle_side(value: Any) -> str | None:
+    text = str(value or "").strip().lower()
+    if text in {"buy", "sell"}:
+        return text
+    return None
+
+
+def _normalize_bundle_outcome(value: Any) -> str | None:
+    text = str(value or "").strip().lower()
+    if text in {"yes", "no"}:
+        return text
+    return None
+
+
+def _build_trade_bundle(signal: TradeSignal | None, row: TraderOrder) -> dict[str, Any] | None:
+    signal_payload = signal.payload_json if signal is not None and isinstance(signal.payload_json, dict) else {}
+    execution_plan = signal_payload.get("execution_plan")
+    execution_plan = execution_plan if isinstance(execution_plan, dict) else {}
+    raw_plan_legs = execution_plan.get("legs")
+    raw_plan_legs = raw_plan_legs if isinstance(raw_plan_legs, list) else []
+    raw_positions = signal_payload.get("positions_to_take")
+    raw_positions = raw_positions if isinstance(raw_positions, list) else []
+    if len(raw_plan_legs) <= 1 and len(raw_positions) <= 1:
+        return None
+
+    raw_markets = signal_payload.get("markets")
+    raw_markets = raw_markets if isinstance(raw_markets, list) else []
+
+    market_lookup_by_token: dict[str, dict[str, Any]] = {}
+    for market in raw_markets:
+        if not isinstance(market, dict):
+            continue
+        token_ids = market.get("clob_token_ids")
+        if not isinstance(token_ids, list):
+            continue
+        market_question = str(market.get("question") or market.get("market_question") or "").strip()
+        condition_id = str(market.get("condition_id") or market.get("conditionId") or "").strip()
+        for token in token_ids:
+            token_id = str(token or "").strip()
+            if not token_id:
+                continue
+            market_lookup_by_token[token_id] = {
+                "market_question": market_question or None,
+                "condition_id": condition_id or None,
+            }
+
+    position_lookup_by_token: dict[str, dict[str, Any]] = {}
+    for position in raw_positions:
+        if not isinstance(position, dict):
+            continue
+        token_id = str(position.get("token_id") or "").strip()
+        if token_id:
+            position_lookup_by_token[token_id] = position
+
+    bundle_legs: list[dict[str, Any]] = []
+    order_token_id = _extract_order_token_id(row)
+    current_leg_id: str | None = None
+    current_leg_index: int | None = None
+
+    def _append_leg(
+        *,
+        leg_index: int,
+        leg_id: str | None,
+        market_id: str | None,
+        market_question: str | None,
+        token_id: str | None,
+        side: str | None,
+        outcome: str | None,
+        limit_price: float | None,
+        notional_weight: float | None,
+        condition_id: str | None,
+    ) -> None:
+        nonlocal current_leg_id, current_leg_index
+        normalized_token = str(token_id or "").strip() or None
+        normalized_market_id = str(market_id or "").strip() or None
+        normalized_question = str(market_question or "").strip() or normalized_market_id
+        normalized_leg_id = str(leg_id or f"leg_{leg_index + 1}").strip() or f"leg_{leg_index + 1}"
+        bundle_legs.append(
+            {
+                "leg_index": int(leg_index),
+                "leg_id": normalized_leg_id,
+                "market_id": normalized_market_id,
+                "market_question": normalized_question,
+                "token_id": normalized_token,
+                "side": side,
+                "outcome": outcome,
+                "limit_price": float(limit_price) if limit_price is not None and limit_price > 0.0 else None,
+                "notional_weight": float(notional_weight) if notional_weight is not None and notional_weight > 0.0 else None,
+                "condition_id": str(condition_id or "").strip() or None,
+            }
+        )
+        if not current_leg_id and normalized_token and order_token_id and normalized_token == order_token_id:
+            current_leg_id = normalized_leg_id
+            current_leg_index = int(leg_index)
+
+    if raw_plan_legs:
+        for index, raw_leg in enumerate(raw_plan_legs):
+            if not isinstance(raw_leg, dict):
+                continue
+            token_id = str(raw_leg.get("token_id") or "").strip() or None
+            position = position_lookup_by_token.get(token_id or "", {})
+            market_meta = market_lookup_by_token.get(token_id or "", {})
+            _append_leg(
+                leg_index=index,
+                leg_id=str(raw_leg.get("leg_id") or "").strip() or None,
+                market_id=str(raw_leg.get("market_id") or position.get("market") or "").strip() or None,
+                market_question=(
+                    str(raw_leg.get("market_question") or position.get("market") or market_meta.get("market_question") or "").strip()
+                    or None
+                ),
+                token_id=token_id,
+                side=_normalize_bundle_side(raw_leg.get("side") or position.get("action")),
+                outcome=_normalize_bundle_outcome(raw_leg.get("outcome") or position.get("outcome")),
+                limit_price=safe_float(raw_leg.get("limit_price"), safe_float(position.get("price"), None)),
+                notional_weight=safe_float(raw_leg.get("notional_weight"), None),
+                condition_id=market_meta.get("condition_id"),
+            )
+    else:
+        for index, raw_position in enumerate(raw_positions):
+            if not isinstance(raw_position, dict):
+                continue
+            token_id = str(raw_position.get("token_id") or "").strip() or None
+            market_meta = market_lookup_by_token.get(token_id or "", {})
+            _append_leg(
+                leg_index=index,
+                leg_id=None,
+                market_id=str(raw_position.get("market_id") or raw_position.get("market") or "").strip() or None,
+                market_question=(
+                    str(raw_position.get("market_question") or raw_position.get("market") or market_meta.get("market_question") or "").strip()
+                    or None
+                ),
+                token_id=token_id,
+                side=_normalize_bundle_side(raw_position.get("action")),
+                outcome=_normalize_bundle_outcome(raw_position.get("outcome")),
+                limit_price=safe_float(raw_position.get("price"), None),
+                notional_weight=safe_float(raw_position.get("notional_weight"), None),
+                condition_id=market_meta.get("condition_id"),
+            )
+
+    if len(bundle_legs) <= 1:
+        return None
+
+    distinct_market_keys = {
+        str(leg.get("condition_id") or leg.get("market_id") or leg.get("market_question") or "").strip().lower()
+        for leg in bundle_legs
+        if str(leg.get("condition_id") or leg.get("market_id") or leg.get("market_question") or "").strip()
+    }
+    outcome_set = {str(leg.get("outcome") or "").strip().lower() for leg in bundle_legs if str(leg.get("outcome") or "").strip()}
+
+    if len(bundle_legs) == 2 and len(distinct_market_keys) == 1 and outcome_set == {"yes", "no"}:
+        bundle_kind = "paired_binary"
+        bundle_label = "Binary paired trade"
+    elif len(bundle_legs) >= 2 and outcome_set == {"yes"}:
+        bundle_kind = "multi_outcome_yes"
+        bundle_label = "Mutually exclusive YES bundle"
+    else:
+        bundle_kind = "multi_leg"
+        bundle_label = "Multi-leg trade"
+
+    return {
+        "bundle_id": str(signal.id if signal is not None else row.signal_id or "").strip() or str(row.id),
+        "plan_id": str(execution_plan.get("plan_id") or "").strip() or None,
+        "kind": bundle_kind,
+        "label": bundle_label,
+        "leg_count": len(bundle_legs),
+        "is_guaranteed": bool(signal_payload.get("is_guaranteed", False)),
+        "roi_type": str(signal_payload.get("roi_type") or "").strip() or None,
+        "mispricing_type": str(signal_payload.get("mispricing_type") or "").strip() or None,
+        "total_cost": safe_float(signal_payload.get("total_cost"), None),
+        "expected_payout": safe_float(signal_payload.get("expected_payout"), None),
+        "gross_profit": safe_float(signal_payload.get("gross_profit"), None),
+        "net_profit": safe_float(signal_payload.get("net_profit"), safe_float(signal_payload.get("guaranteed_profit"), None)),
+        "roi_percent": safe_float(signal_payload.get("roi_percent"), None),
+        "current_leg_id": current_leg_id,
+        "current_leg_index": current_leg_index,
+        "current_leg_token_id": order_token_id or None,
+        "legs": bundle_legs,
+    }
+
+
 def _extract_copy_source_wallet_from_payload(payload: Any) -> str:
     data = payload if isinstance(payload, dict) else {}
     copy_attribution = data.get("copy_attribution")
@@ -2720,6 +2900,8 @@ def _serialize_order(
     if copy_attribution:
         serialized_payload["copy_attribution"] = copy_attribution
 
+    trade_bundle = _build_trade_bundle(signal, row)
+
     return {
         "id": row.id,
         "trader_id": row.trader_id,
@@ -2758,6 +2940,7 @@ def _serialize_order(
         "reason": row.reason,
         "close_trigger": close_trigger or None,
         "close_reason": close_reason or None,
+        "trade_bundle": trade_bundle,
         "payload": serialized_payload,
         "copy_attribution": copy_attribution,
         "error_message": row.error_message,
@@ -3175,6 +3358,29 @@ async def create_trader(session: AsyncSession, payload: dict[str, Any]) -> dict[
         }
         copied_payload.update(create_payload)
         create_payload = copied_payload
+
+    live_mode_requested = _normalize_trader_mode(create_payload.get("mode")) == "live"
+    live_start_requested = bool(create_payload.get("is_enabled", True)) and not bool(create_payload.get("is_paused", False))
+    raw_risk_limits = create_payload.get("risk_limits")
+    explicit_live_trade_cap = safe_float(
+        raw_risk_limits.get("max_trade_notional_usd") if isinstance(raw_risk_limits, dict) else None,
+        None,
+    )
+    explicit_live_position_cap = safe_float(
+        raw_risk_limits.get("max_position_notional_usd") if isinstance(raw_risk_limits, dict) else None,
+        None,
+    )
+    if (
+        live_mode_requested
+        and live_start_requested
+        and (
+            explicit_live_trade_cap is None
+            or explicit_live_trade_cap <= 0.0
+            or explicit_live_position_cap is None
+            or explicit_live_position_cap <= 0.0
+        )
+    ):
+        create_payload["is_paused"] = True
 
     normalized = await _normalize_trader_payload(session, create_payload)
     if not normalized["name"]:
@@ -3944,6 +4150,12 @@ def build_trader_order_row(
     error_message: Optional[str] = None,
     trace_id: Optional[str] = None,
     created_at: datetime | None = None,
+    market_id: Optional[str] = None,
+    market_question: Optional[str] = None,
+    direction: Optional[str] = None,
+    entry_price: Optional[float] = None,
+    edge_percent: Optional[float] = None,
+    confidence: Optional[float] = None,
 ) -> TraderOrder:
     now = created_at or _now()
     order_payload = _sync_order_runtime_payload(
@@ -4062,6 +4274,17 @@ def build_trader_order_row(
 
         order_payload["copy_attribution"] = copy_attribution
 
+    resolved_market_id = str(market_id or getattr(signal, "market_id", "") or "")
+    resolved_market_question = (
+        str(market_question).strip()
+        if market_question is not None
+        else str(getattr(signal, "market_question", "") or "").strip()
+    )
+    resolved_direction = str(direction or getattr(signal, "direction", "") or "").strip()
+    resolved_entry_price = entry_price if entry_price is not None else getattr(signal, "entry_price", None)
+    resolved_edge_percent = edge_percent if edge_percent is not None else getattr(signal, "edge_percent", None)
+    resolved_confidence = confidence if confidence is not None else getattr(signal, "confidence", None)
+
     row = TraderOrder(
         id=_new_id(),
         trader_id=trader_id,
@@ -4070,16 +4293,16 @@ def build_trader_order_row(
         source=str(signal.source),
         strategy_key=str(strategy_key or "").strip().lower() or None,
         strategy_version=int(strategy_version) if strategy_version is not None else None,
-        market_id=str(signal.market_id),
-        market_question=signal.market_question,
-        direction=signal.direction,
+        market_id=resolved_market_id,
+        market_question=resolved_market_question or None,
+        direction=resolved_direction or None,
         mode=str(mode),
         status=str(status),
         notional_usd=notional_usd,
-        entry_price=signal.entry_price,
+        entry_price=resolved_entry_price,
         effective_price=effective_price,
-        edge_percent=signal.edge_percent,
-        confidence=signal.confidence,
+        edge_percent=resolved_edge_percent,
+        confidence=resolved_confidence,
         reason=reason,
         payload_json=order_payload,
         error_message=error_message,

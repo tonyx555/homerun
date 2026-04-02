@@ -226,6 +226,7 @@ export function getOpportunityPlatformLinks(opportunity: OpportunityForLinks | n
 }
 
 type TraderOrderLinkInput = {
+  allowSearchFallback?: boolean
   source?: NullableString
   marketId?: NullableString
   marketQuestion?: NullableString
@@ -526,10 +527,10 @@ export function getTraderOrderPlatformLinks(input: TraderOrderLinkInput): Opport
   if (!polymarketUrl) polymarketUrl = directPolymarketUrl
   if (!kalshiUrl) kalshiUrl = directKalshiUrl
 
-  if (!polymarketUrl && inferredPlatform !== 'kalshi') {
+  if (input.allowSearchFallback && !polymarketUrl && inferredPlatform !== 'kalshi') {
     polymarketUrl = buildPolymarketSearchUrl(marketQuestion || marketSlug || eventSlug || marketId)
   }
-  if (!kalshiUrl && inferredPlatform === 'kalshi') {
+  if (input.allowSearchFallback && !kalshiUrl && inferredPlatform === 'kalshi') {
     kalshiUrl = buildKalshiSearchUrl(marketQuestion || marketTicker || eventTicker || marketId)
   }
 

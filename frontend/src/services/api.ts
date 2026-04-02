@@ -559,6 +559,7 @@ export interface CryptoMarket {
   }>
   price_to_beat: number | null
   oracle_history: { t: number; p: number }[]
+  ml_prediction?: MLCryptoPrediction | null
 }
 
 export const getCryptoMarkets = async (params?: { viewer_active?: boolean }): Promise<CryptoMarket[]> => {
@@ -2004,6 +2005,7 @@ export interface TraderOrder {
   reason: string | null
   close_trigger?: string | null
   close_reason?: string | null
+  trade_bundle?: TraderOrderTradeBundle | null
   payload: Record<string, any>
   copy_attribution?: {
     source_wallet?: string
@@ -2026,6 +2028,39 @@ export interface TraderOrder {
   created_at: string | null
   executed_at: string | null
   updated_at: string | null
+}
+
+export interface TraderOrderTradeBundleLeg {
+  leg_index: number
+  leg_id: string | null
+  market_id: string | null
+  market_question: string | null
+  token_id: string | null
+  side: string | null
+  outcome: string | null
+  limit_price: number | null
+  notional_weight: number | null
+  condition_id: string | null
+}
+
+export interface TraderOrderTradeBundle {
+  bundle_id: string
+  plan_id: string | null
+  kind: string
+  label: string
+  leg_count: number
+  is_guaranteed: boolean
+  roi_type: string | null
+  mispricing_type: string | null
+  total_cost: number | null
+  expected_payout: number | null
+  gross_profit: number | null
+  net_profit: number | null
+  roi_percent: number | null
+  current_leg_id: string | null
+  current_leg_index: number | null
+  current_leg_token_id: string | null
+  legs: TraderOrderTradeBundleLeg[]
 }
 
 export interface TraderLiveWalletPosition {
@@ -4878,6 +4913,23 @@ export interface MLTrainingJob {
   finished_at: string | null
 }
 
+export type MLModelType = 'logistic'
+
+export interface MLCryptoPrediction {
+  model_id: string
+  model_name: string
+  model_type: string
+  model_version: number
+  probability_yes: number
+  probability_no: number
+  confidence: number
+  feature_count: number
+  predicted_at: string
+  test_accuracy: number | null
+  test_auc: number | null
+  promoted_at: string | null
+}
+
 export interface MLTrainedModel {
   id: string
   name: string
@@ -4912,6 +4964,19 @@ export interface MLDataStats {
   }>
 }
 
+export interface MLActiveModelResponse {
+  active: boolean
+  model: {
+    id: string
+    name: string
+    model_type: string
+    version: number
+    test_accuracy: number | null
+    test_auc: number | null
+    promoted_at: string | null
+  } | null
+}
+
 // Recorder
 export const getMLRecorderConfig = async (): Promise<MLRecorderStats> => {
   const { data } = await api.get('/ml/recorder/config')
@@ -4941,7 +5006,7 @@ export const deleteAllMLData = async () => {
 
 // Training
 export const startMLTraining = async (params: {
-  model_type?: string
+  model_type?: MLModelType
   assets?: string[]
   timeframes?: string[]
   days_lookback?: number
@@ -4987,7 +5052,7 @@ export const deleteMLModel = async (modelId: string) => {
   return data
 }
 
-export const getActiveMLModel = async (modelType?: string) => {
+export const getActiveMLModel = async (modelType?: MLModelType): Promise<MLActiveModelResponse> => {
   const { data } = await api.get('/ml/active-model', { params: { model_type: modelType } })
   return data
 }

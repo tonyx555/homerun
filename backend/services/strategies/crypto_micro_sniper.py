@@ -72,6 +72,16 @@ def _sigmoid(z: float) -> float:
     return 1.0 / (1.0 + math.exp(-bounded))
 
 
+def _ml_probability_yes(row: dict[str, Any]) -> float | None:
+    prediction = row.get("ml_prediction")
+    if not isinstance(prediction, dict):
+        return None
+    probability_yes = safe_float(prediction.get("probability_yes"), None)
+    if probability_yes is None:
+        return None
+    return clamp(float(probability_yes), 0.03, 0.97)
+
+
 class CryptoMicroSniperStrategy(BaseStrategy):
     strategy_type = "crypto_micro_sniper"
     name = "Crypto Micro Sniper"
@@ -277,8 +287,11 @@ class CryptoMicroSniperStrategy(BaseStrategy):
         scale_multiplier = max(0.25, 1.0 - (time_pressure_weight * 0.65 * elapsed_ratio))
         adaptive_scale_pct = base_scale_pct * scale_multiplier
 
-        z_value = diff_pct / adaptive_scale_pct
-        model_up = clamp(_sigmoid(z_value), 0.03, 0.97)
+        model_up = _ml_probability_yes(row)
+        model_source = "active_model" if model_up is not None else "heuristic_sigmoid"
+        if model_up is None:
+            z_value = diff_pct / adaptive_scale_pct
+            model_up = clamp(_sigmoid(z_value), 0.03, 0.97)
         model_down = 1.0 - model_up
         expected_prob = model_up if direction == "buy_yes" else model_down
 
@@ -357,6 +370,7 @@ class CryptoMicroSniperStrategy(BaseStrategy):
             "expected_prob": float(expected_prob),
             "model_up": float(model_up),
             "model_down": float(model_down),
+            "model_source": model_source,
             "target_exit_price": float(target_exit_price),
             "score": float(score),
             "model_side_prob_key": model_side_prob_key,
@@ -400,6 +414,7 @@ class CryptoMicroSniperStrategy(BaseStrategy):
             "expected_prob": signal["expected_prob"],
             "model_up": signal["model_up"],
             "model_down": signal["model_down"],
+            "model_source": signal["model_source"],
             "target_exit_price": signal["target_exit_price"],
             "oracle_age_seconds": signal["oracle_age_seconds"],
             "market_data_age_ms": safe_float(row.get("market_data_age_ms"), None),
