@@ -272,6 +272,30 @@ class TestEventFromGammaResponse:
         assert event.markets[1].id == "789"
         assert event.markets[1].neg_risk is True
 
+    def test_nested_markets_inherit_parent_event_slug_and_neg_risk(self):
+        data = {
+            "id": "evt_soccer_1",
+            "slug": "soccer-match-1",
+            "title": "Soccer Match",
+            "category": "Soccer",
+            "negRisk": True,
+            "markets": [
+                {
+                    "id": "market_soccer_1",
+                    "condition_id": "cond_soccer_1",
+                    "question": "Will Team A win?",
+                    "slug": "team-a-win",
+                    "negRisk": False,
+                }
+            ],
+        }
+
+        event = Event.from_gamma_response(data)
+
+        assert len(event.markets) == 1
+        assert event.markets[0].event_slug == "soccer-match-1"
+        assert event.markets[0].neg_risk is True
+
     def test_category_from_category_string(self):
         """Category field as a plain string is used directly."""
         data = {

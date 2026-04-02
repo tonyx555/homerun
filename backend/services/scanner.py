@@ -861,6 +861,34 @@ class ArbitrageScanner:
             return False
         return True
 
+    @staticmethod
+    def _overlay_event_market_context(target_market: object, source_market: object, event_key: str) -> None:
+        event_slug = str(getattr(source_market, "event_slug", "") or event_key or "").strip()
+        if event_slug and not str(getattr(target_market, "event_slug", "") or "").strip():
+            target_market.event_slug = event_slug
+
+        if not str(getattr(target_market, "group_item_title", "") or "").strip():
+            group_item_title = str(getattr(source_market, "group_item_title", "") or "").strip()
+            if group_item_title:
+                target_market.group_item_title = group_item_title
+
+        if not str(getattr(target_market, "sports_market_type", "") or "").strip():
+            sports_market_type = str(getattr(source_market, "sports_market_type", "") or "").strip()
+            if sports_market_type:
+                target_market.sports_market_type = sports_market_type
+
+        if not bool(getattr(target_market, "neg_risk", False)) and bool(getattr(source_market, "neg_risk", False)):
+            target_market.neg_risk = True
+
+        if not list(getattr(target_market, "tags", None) or []) and list(getattr(source_market, "tags", None) or []):
+            target_market.tags = list(source_market.tags)
+
+        if getattr(target_market, "game_start_time", None) is None and getattr(source_market, "game_start_time", None):
+            target_market.game_start_time = source_market.game_start_time
+
+        if getattr(target_market, "line", None) is None and getattr(source_market, "line", None) is not None:
+            target_market.line = source_market.line
+
     def _prune_active_catalog(self, events: list, markets: list, now: datetime) -> tuple[list, list]:
         deduped_markets: dict[str, object] = {}
         for market in markets:
@@ -2398,15 +2426,20 @@ class ArbitrageScanner:
             now = datetime.now(timezone.utc)
 
             # Merge event-embedded markets into the flat list (with later hard caps).
-            flat_ids = {str(getattr(m, "id", "") or "") for m in markets}
+            flat_market_by_id = {str(getattr(m, "id", "") or ""): m for m in markets if str(getattr(m, "id", "") or "")}
             extra_from_events = 0
             for event in events:
+                event_key = str(getattr(event, "slug", "") or getattr(event, "id", "") or "").strip()
                 for market in list(getattr(event, "markets", None) or []):
                     market_id = str(getattr(market, "id", "") or "")
-                    if not market_id or market_id in flat_ids:
+                    if not market_id:
+                        continue
+                    existing_market = flat_market_by_id.get(market_id)
+                    if existing_market is not None:
+                        self._overlay_event_market_context(existing_market, market, event_key)
                         continue
                     markets.append(market)
-                    flat_ids.add(market_id)
+                    flat_market_by_id[market_id] = market
                     extra_from_events += 1
 
             # Phase 2 — Fetch Kalshi markets
@@ -2637,7 +2670,7 @@ class ArbitrageScanner:
             if key:
                 cached_event_keys.add(key)
 
-        event_fetch_candidates = [slug for slug in event_slug_candidates if slug not in cached_event_keys]
+        event_fetch_candidates = list(event_slug_candidates)
         delta_events: list = []
         if event_fetch_candidates:
             try:
@@ -2680,7 +2713,6 @@ class ArbitrageScanner:
             else:
                 market_map.pop(market_id, None)
 
-        merged_markets = list(market_map.values())
         event_map: dict[str, object] = {}
         for event in self._cached_events:
             key = str(getattr(event, "slug", "") or getattr(event, "id", "") or "").strip()
@@ -2696,8 +2728,19 @@ class ArbitrageScanner:
             if bool(getattr(event, "closed", False)):
                 event_map.pop(key, None)
                 continue
+            for event_market in list(getattr(event, "markets", None) or []):
+                market_id = str(getattr(event_market, "id", "") or "").strip()
+                if not market_id:
+                    continue
+                existing_market = market_map.get(market_id)
+                if existing_market is not None:
+                    self._overlay_event_market_context(existing_market, event_market, key)
+                    continue
+                if self._is_market_active(event_market, now):
+                    market_map[market_id] = event_market
             event_map[key] = event
 
+        merged_markets = list(market_map.values())
         markets_by_slug: dict[str, list] = {}
         for market in merged_markets:
             slug = str(getattr(market, "event_slug", "") or "").strip()

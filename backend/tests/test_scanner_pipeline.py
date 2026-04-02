@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from utils.utcnow import utcnow
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from models.market import Market
+from models.market import Event, Market
 from models.opportunity import (
     Opportunity,
     MispricingType,
@@ -185,6 +185,135 @@ class TestScanPipeline:
 
         mock_polymarket_client.get_all_events.assert_awaited_once_with(closed=False)
         mock_polymarket_client.get_all_markets.assert_awaited_once_with(active=True)
+
+    @pytest.mark.asyncio
+    async def test_refresh_catalog_backfills_flat_market_event_context_from_event_payload(self, mock_polymarket_client):
+        flat_market = Market(
+            id="market-antigua",
+            condition_id="condition-antigua",
+            question="Will Antigua GFC win on 2026-04-01?",
+            slug="gtm-ant-mic-2026-04-01-ant",
+            event_slug="",
+            neg_risk=False,
+        )
+        event_market = Market(
+            id="market-antigua",
+            condition_id="condition-antigua",
+            question="Will Antigua GFC win on 2026-04-01?",
+            slug="gtm-ant-mic-2026-04-01-ant",
+            event_slug="gtm-ant-mic-2026-04-01",
+            group_item_title="Antigua GFC",
+            sports_market_type="moneyline",
+            neg_risk=True,
+        )
+        event = Event(
+            id="event-antigua",
+            slug="gtm-ant-mic-2026-04-01",
+            title="Antigua GFC vs. CSD Mictlán",
+            category="Soccer",
+            markets=[event_market],
+            neg_risk=True,
+        )
+        mock_polymarket_client.get_all_events.return_value = [event]
+        mock_polymarket_client.get_all_markets.return_value = [flat_market]
+
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+        with (
+            patch.object(scanner, "_ensure_runtime_strategies_loaded", new_callable=AsyncMock),
+            patch.object(scanner, "_set_activity", new_callable=AsyncMock),
+            patch("services.scanner.settings.WS_FEED_ENABLED", False),
+            patch("services.scanner.settings.NEWS_EDGE_ENABLED", False),
+        ):
+            await scanner.refresh_catalog()
+
+        assert len(scanner._cached_markets) == 1
+        refreshed_market = scanner._cached_markets[0]
+        assert refreshed_market.event_slug == "gtm-ant-mic-2026-04-01"
+        assert refreshed_market.group_item_title == "Antigua GFC"
+        assert refreshed_market.sports_market_type == "moneyline"
+        assert refreshed_market.neg_risk is True
+
+    @pytest.mark.asyncio
+    async def test_refresh_catalog_incremental_refetches_touched_cached_event_and_restores_sibling_markets(
+        self,
+        mock_polymarket_client,
+    ):
+        cached_antigua = Market(
+            id="market-antigua",
+            condition_id="condition-antigua",
+            question="Will Antigua GFC win on 2026-04-01?",
+            slug="gtm-ant-mic-2026-04-01-ant",
+            event_slug="gtm-ant-mic-2026-04-01",
+            group_item_title="Antigua GFC",
+            sports_market_type="moneyline",
+            neg_risk=True,
+        )
+        cached_mictlan = Market(
+            id="market-mictlan",
+            condition_id="condition-mictlan",
+            question="Will CSD Mictlán win on 2026-04-01?",
+            slug="gtm-ant-mic-2026-04-01-mic",
+            event_slug="gtm-ant-mic-2026-04-01",
+            group_item_title="CSD Mictlán",
+            sports_market_type="moneyline",
+            neg_risk=True,
+        )
+        cached_event = Event(
+            id="event-antigua",
+            slug="gtm-ant-mic-2026-04-01",
+            title="Antigua GFC vs. CSD Mictlán",
+            category="Soccer",
+            markets=[cached_antigua, cached_mictlan],
+            neg_risk=True,
+        )
+        draw_market = Market(
+            id="market-draw",
+            condition_id="condition-draw",
+            question="Will Antigua GFC vs. CSD Mictlán end in a draw?",
+            slug="gtm-ant-mic-2026-04-01-draw",
+            event_slug="gtm-ant-mic-2026-04-01",
+            group_item_title="Draw (Antigua GFC vs. CSD Mictlán)",
+            sports_market_type="moneyline",
+            neg_risk=True,
+        )
+        fetched_event = Event(
+            id="event-antigua",
+            slug="gtm-ant-mic-2026-04-01",
+            title="Antigua GFC vs. CSD Mictlán",
+            category="Soccer",
+            markets=[cached_antigua.model_copy(deep=True), draw_market, cached_mictlan.model_copy(deep=True)],
+            neg_risk=True,
+        )
+        mock_polymarket_client.get_recent_markets.return_value = [cached_antigua.model_copy(deep=True)]
+        mock_polymarket_client.get_events_by_slugs = AsyncMock(return_value=[fetched_event])
+
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+        scanner._cached_markets = [cached_antigua, cached_mictlan]
+        scanner._cached_events = [cached_event]
+
+        with (
+            patch.object(scanner, "_ensure_runtime_strategies_loaded", new_callable=AsyncMock),
+            patch.object(scanner, "_set_activity", new_callable=AsyncMock),
+            patch("services.scanner.settings.WS_FEED_ENABLED", False),
+            patch("services.scanner.settings.NEWS_EDGE_ENABLED", False),
+        ):
+            await scanner.refresh_catalog_incremental()
+
+        mock_polymarket_client.get_events_by_slugs.assert_awaited_once_with(
+            ["gtm-ant-mic-2026-04-01"],
+            closed=False,
+        )
+        assert {market.slug for market in scanner._cached_markets} == {
+            "gtm-ant-mic-2026-04-01-ant",
+            "gtm-ant-mic-2026-04-01-draw",
+            "gtm-ant-mic-2026-04-01-mic",
+        }
+        refreshed_event = next(event for event in scanner._cached_events if event.slug == "gtm-ant-mic-2026-04-01")
+        assert {market.slug for market in refreshed_event.markets} == {
+            "gtm-ant-mic-2026-04-01-ant",
+            "gtm-ant-mic-2026-04-01-draw",
+            "gtm-ant-mic-2026-04-01-mic",
+        }
 
     @pytest.mark.asyncio
     async def test_scan_fast_returns_opportunities_sorted_by_roi(

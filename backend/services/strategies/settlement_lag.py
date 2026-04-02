@@ -287,6 +287,8 @@ class SettlementLagStrategy(BaseStrategy):
 
         if len(active_markets) < 2:
             return []
+        if self._is_incomplete_soccer_moneyline_bundle(event, active_markets):
+            return []
 
         # --- Gate: Event must be near resolution ---
         # Check if ANY market in the event has a resolution date within the window.
@@ -399,6 +401,7 @@ class SettlementLagStrategy(BaseStrategy):
                 total_cost=total_yes,
                 markets=active_markets,
                 positions=positions,
+                event=event,
             )
 
             if opp:
@@ -417,6 +420,39 @@ class SettlementLagStrategy(BaseStrategy):
                 opportunities.append(opp)
 
         return opportunities
+
+    @staticmethod
+    def _is_incomplete_soccer_moneyline_bundle(event: Event, active_markets: list[Market]) -> bool:
+        if len(active_markets) != 2:
+            return False
+
+        category = str(getattr(event, "category", "") or "").strip().lower()
+        if category != "soccer":
+            return False
+
+        title = str(getattr(event, "title", "") or "").strip().lower()
+        if " vs " not in title and " vs. " not in title:
+            return False
+
+        if not all(str(getattr(market, "sports_market_type", "") or "").strip().lower() == "moneyline" for market in active_markets):
+            return False
+
+        market_texts = [
+            " ".join(
+                part
+                for part in (
+                    str(getattr(market, "question", "") or "").strip().lower(),
+                    str(getattr(market, "group_item_title", "") or "").strip().lower(),
+                )
+                if part
+            )
+            for market in active_markets
+        ]
+        if any("draw" in text or "tie" in text for text in market_texts):
+            return False
+        if not all(" win " in text or text.startswith("will ") for text in market_texts):
+            return False
+        return True
 
     def custom_checks(self, signal: Any, context: dict, params: dict, payload: dict) -> list[DecisionCheck]:
         min_liquidity = max(0.0, to_float(params.get("min_liquidity", 25.0), 25.0))

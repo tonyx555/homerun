@@ -71,4 +71,50 @@ def test_negrisk_settlement_execution_plan_uses_price_weights():
 
     assert len(opportunities) == 1
     assert opportunities[0].execution_plan is not None
+    assert opportunities[0].event_slug == "event-negrisk"
+    assert opportunities[0].event_title == "NegRisk event"
     assert [leg.notional_weight for leg in opportunities[0].execution_plan.legs] == pytest.approx([0.62, 0.30])
+
+
+def test_negrisk_settlement_rejects_incomplete_soccer_moneyline_bundle():
+    strategy = SettlementLagStrategy()
+    markets = [
+        Market(
+            id="market-antigua",
+            condition_id="condition-antigua",
+            question="Will Antigua GFC win on 2026-04-01?",
+            slug="gtm-ant-mic-2026-04-01-ant",
+            group_item_title="Antigua GFC",
+            clob_token_ids=["token-antigua"],
+            outcome_prices=[0.665],
+            liquidity=250.0,
+            end_date=utcnow() - timedelta(hours=2),
+            neg_risk=True,
+            sports_market_type="moneyline",
+        ),
+        Market(
+            id="market-mictlan",
+            condition_id="condition-mictlan",
+            question="Will CSD Mictlán win on 2026-04-01?",
+            slug="gtm-ant-mic-2026-04-01-mic",
+            group_item_title="CSD Mictlán",
+            clob_token_ids=["token-mictlan"],
+            outcome_prices=[0.14],
+            liquidity=250.0,
+            end_date=utcnow() - timedelta(hours=2),
+            neg_risk=True,
+            sports_market_type="moneyline",
+        ),
+    ]
+    event = Event(
+        id="event-soccer",
+        slug="gtm-ant-mic-2026-04-01",
+        title="Antigua GFC vs. CSD Mictlán",
+        category="Soccer",
+        markets=markets,
+        neg_risk=True,
+    )
+
+    opportunities = strategy._check_negrisk_settlement(event, {})
+
+    assert opportunities == []

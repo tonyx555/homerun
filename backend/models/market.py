@@ -233,12 +233,19 @@ class Event(BaseModel):
     @classmethod
     def from_gamma_response(cls, data: dict) -> "Event":
         """Parse event from Gamma API response"""
+        event_slug = str(data.get("slug", "") or "").strip()
+        event_neg_risk = bool(data.get("negRisk", data.get("neg_risk", False)))
         markets = []
         for m in data.get("markets", []):
             try:
-                markets.append(Market.from_gamma_response(m))
+                market = Market.from_gamma_response(m)
             except Exception:
-                pass
+                continue
+            if event_slug and not str(market.event_slug or "").strip():
+                market.event_slug = event_slug
+            if event_neg_risk and not market.neg_risk:
+                market.neg_risk = True
+            markets.append(market)
 
         # Extract category from tags or category field
         category = None
@@ -277,13 +284,13 @@ class Event(BaseModel):
 
         return cls(
             id=str(data.get("id", "")),
-            slug=data.get("slug", ""),
+            slug=event_slug,
             title=data.get("title", ""),
             description=data.get("description", ""),
             category=category,
             tags=event_tags,
             markets=markets,
-            neg_risk=data.get("negRisk", False),
+            neg_risk=event_neg_risk,
             active=data.get("active", True),
             closed=data.get("closed", False),
         )
