@@ -158,7 +158,11 @@ def _has_signal_material_change(
         return True
     if _normalize_number(row.liquidity) != _normalize_number(liquidity):
         return True
-    existing_payload = _normalize_reactivation_value(_safe_json(row.payload_json))
+    existing_raw = _safe_json(row.payload_json)
+    existing_normalized = ensure_market_roster_payload(
+        existing_raw, market_id=market_id, market_question=market_question
+    )
+    existing_payload = _normalize_reactivation_value(existing_normalized)
     incoming_payload = _normalize_reactivation_value(_safe_json(payload_json))
     if existing_payload != incoming_payload:
         return True

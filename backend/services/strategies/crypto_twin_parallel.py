@@ -10,14 +10,13 @@ depending on btc_eth_highfreq.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import Any
 
 from models import Market, Opportunity
 from services.data_events import DataEvent, EventType
 from services.quality_filter import QualityFilterOverrides
 from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision, _trader_size_limits
-from services.strategies.crypto_strategy_utils import build_binary_crypto_market, parse_datetime_utc
+from services.strategies.crypto_strategy_utils import build_binary_crypto_market
 from services.trader_orchestrator.strategies.sizing import compute_position_size
 from utils.converters import clamp, safe_float, to_confidence, to_float
 from utils.signal_helpers import signal_payload

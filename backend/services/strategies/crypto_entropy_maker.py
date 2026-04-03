@@ -421,7 +421,7 @@ class CryptoEntropyMakerStrategy(BaseStrategy):
             safe_float(live_market.get("live_no_price"), safe_float(payload.get("no_price"), safe_float(payload.get("down_price"), None))),
         )
         spread_pct = safe_float(live_market.get("spread"), safe_float(payload.get("spread"), None))
-        cancel_rate_30s = _normalize_ratio(
+        cancel_rate_30s = normalize_ratio(
             live_market.get("cancel_rate_30s")
             if live_market.get("cancel_rate_30s") is not None
             else payload.get("cancel_rate_30s")

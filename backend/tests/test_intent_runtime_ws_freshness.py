@@ -176,6 +176,7 @@ def test_build_signal_contract_persists_full_event_market_roster():
         description="Test event roster persistence",
         total_cost=0.8,
         expected_payout=1.0,
+        is_guaranteed=False,
         markets=[home, away],
         positions=[
             {"market_id": "market-home", "token_id": "token-home", "outcome": "YES", "side": "buy", "price": 0.4},
