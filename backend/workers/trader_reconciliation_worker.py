@@ -106,6 +106,8 @@ def _empty_cycle_summary() -> dict[str, Any]:
         "provider_price_updates": 0,
         "positions_would_close": 0,
         "positions_closed": 0,
+        "positions_held": 0,
+        "positions_skipped": 0,
         "inventory_open_positions": 0,
         "inventory_updates": 0,
         "inventory_inserts": 0,
@@ -615,17 +617,28 @@ async def _run_reconciliation_cycle(
         if heartbeat_activity and idx < len(traders) - 1:
             try:
                 async with AsyncSessionLocal() as hb_session:
+                    processed = int(summary["traders_processed"]) + (1 if result and not isinstance(result, BaseException) else 0)
                     await write_worker_snapshot(
                         hb_session,
                         WORKER_NAME,
                         running=True,
                         enabled=True,
                         current_activity=(
-                            f"{heartbeat_activity} {int(summary['traders_processed']) + (1 if result and not isinstance(result, BaseException) else 0)}/"
+                            f"{heartbeat_activity} {processed}/"
                             f"{len(traders)} traders"
                         ),
                         interval_seconds=DEFAULT_INTERVAL_SECONDS,
                         last_run_at=utcnow(),
+                        stats={
+                            "cycle_reason": reason,
+                            "provider_pass": bool(provider_pass),
+                            "traders_seen": len(traders),
+                            "traders_processed": processed,
+                            "provider_updates": int(summary["provider_updates"]),
+                            "positions_closed": int(summary["positions_closed"]),
+                            "inventory_open_positions": int(summary["inventory_open_positions"]),
+                            **_wallet_monitor_snapshot_stats(),
+                        },
                     )
             except Exception:
                 pass
@@ -655,6 +668,8 @@ async def _run_reconciliation_cycle(
             lifecycle.get("would_close", 0) or 0
         )
         summary["positions_closed"] = int(summary["positions_closed"]) + int(lifecycle.get("closed", 0) or 0)
+        summary["positions_held"] = int(summary["positions_held"]) + int(lifecycle.get("held", 0) or 0)
+        summary["positions_skipped"] = int(summary["positions_skipped"]) + int(lifecycle.get("skipped", 0) or 0)
         summary["inventory_open_positions"] = int(summary["inventory_open_positions"]) + int(
             inventory.get("open_positions", 0) or 0
         )
@@ -679,6 +694,7 @@ async def _run_reconciliation_cycle(
                     "reason": reason,
                     "provider_pass": bool(provider_pass),
                     **summary,
+                    **_wallet_monitor_snapshot_stats(),
                 },
                 commit=True,
             )

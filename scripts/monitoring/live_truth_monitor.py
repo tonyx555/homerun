@@ -649,6 +649,14 @@ async def run_monitor(config: MonitorConfig) -> int:
                 decisions: list[TraderDecision] = cycle_state["decisions"]
                 events: list[TraderEvent] = cycle_state["events"]
                 active_count = sum(cycle_state["status_counts"].get(k, 0) for k in LIVE_ACTIVE_STATUSES)
+                latest_reconciliation_event = next(
+                    (
+                        event
+                        for event in events
+                        if str(getattr(event, "event_type", "") or "").strip().lower() == "live_reconciliation_cycle"
+                    ),
+                    None,
+                )
 
                 exec_rows_by_order: dict[str, list[ExecutionSessionOrder]] = {}
                 for exec_row in exec_rows:
@@ -1284,6 +1292,19 @@ async def run_monitor(config: MonitorConfig) -> int:
                 wallet_last_event_age = None
                 wallet_last_block_age = None
                 wallet_last_fallback_poll_age = None
+                latest_reconciliation_payload = (
+                    dict(latest_reconciliation_event.payload_json or {})
+                    if latest_reconciliation_event is not None and isinstance(latest_reconciliation_event.payload_json, dict)
+                    else {}
+                )
+                latest_reconciliation_event_age = None
+                if latest_reconciliation_event is not None and latest_reconciliation_event.created_at is not None:
+                    latest_reconciliation_created_at = (
+                        latest_reconciliation_event.created_at.replace(tzinfo=timezone.utc)
+                        if latest_reconciliation_event.created_at.tzinfo is None
+                        else latest_reconciliation_event.created_at.astimezone(timezone.utc)
+                    )
+                    latest_reconciliation_event_age = (now - latest_reconciliation_created_at).total_seconds()
                 for worker_row in worker_snapshots:
                     if str(worker_row.worker_name) == "trader_reconciliation":
                         stats_json = dict(worker_row.stats_json or {})
@@ -1318,6 +1339,11 @@ async def run_monitor(config: MonitorConfig) -> int:
                         ):
                             provider_fallback_recent = True
                             provider_fallback_age = worker_age_seconds
+                        elif worker_age_seconds is not None and worker_age_seconds <= provider_staleness_limit:
+                            current_activity = str(getattr(worker_row, "current_activity", "") or "").strip().lower()
+                            if current_activity.startswith("reconciled") or current_activity.startswith("reconciling"):
+                                provider_fallback_recent = True
+                                provider_fallback_age = worker_age_seconds
                         wallet_monitor_running = bool(stats_json.get("wallet_monitor_running"))
                         wallet_monitor_ws_connected = bool(stats_json.get("wallet_monitor_ws_connected"))
                         wallet_monitor_fallback_polling = bool(stats_json.get("wallet_monitor_fallback_polling"))
@@ -1345,6 +1371,64 @@ async def run_monitor(config: MonitorConfig) -> int:
                             wallet_last_block_age = (now - worker_wallet_block_at).total_seconds()
                         if worker_wallet_poll_at is not None:
                             wallet_last_fallback_poll_age = (now - worker_wallet_poll_at).total_seconds()
+                if latest_reconciliation_payload:
+                    if not provider_updates_recent:
+                        provider_updates_recent = safe_int(latest_reconciliation_payload.get("provider_updates"), 0) > 0
+                    if not provider_fallback_recent and latest_reconciliation_event_age is not None:
+                        event_cycle_reason = normalize_status(latest_reconciliation_payload.get("cycle_reason"))
+                        event_provider_pass = bool(latest_reconciliation_payload.get("provider_pass"))
+                        event_staleness_limit = max(3.0, config.poll_seconds * 3.0)
+                        if latest_reconciliation_event_age <= event_staleness_limit and (
+                            event_provider_pass
+                            or event_cycle_reason.startswith("event:")
+                            or event_cycle_reason in {"scheduled", "requested", "startup"}
+                        ):
+                            provider_fallback_recent = True
+                            provider_fallback_age = latest_reconciliation_event_age
+                    if not wallet_monitor_running and latest_reconciliation_payload.get("wallet_monitor_running") is not None:
+                        wallet_monitor_running = bool(latest_reconciliation_payload.get("wallet_monitor_running"))
+                    if (
+                        not wallet_monitor_ws_connected
+                        and latest_reconciliation_payload.get("wallet_monitor_ws_connected") is not None
+                    ):
+                        wallet_monitor_ws_connected = bool(
+                            latest_reconciliation_payload.get("wallet_monitor_ws_connected")
+                        )
+                    if (
+                        not wallet_monitor_fallback_polling
+                        and latest_reconciliation_payload.get("wallet_monitor_fallback_polling") is not None
+                    ):
+                        wallet_monitor_fallback_polling = bool(
+                            latest_reconciliation_payload.get("wallet_monitor_fallback_polling")
+                        )
+                    wallet_monitor_tracked_wallets = max(
+                        wallet_monitor_tracked_wallets,
+                        max(0, safe_int(latest_reconciliation_payload.get("wallet_monitor_tracked_wallets"), 0)),
+                    )
+                    wallet_monitor_events_detected_total = max(
+                        wallet_monitor_events_detected_total,
+                        max(0, safe_int(latest_reconciliation_payload.get("wallet_monitor_events_detected_total"), 0)),
+                    )
+                    if wallet_last_event_age is None:
+                        payload_wallet_event_at = parse_iso(
+                            latest_reconciliation_payload.get("wallet_monitor_last_event_detected_at")
+                        )
+                        if payload_wallet_event_at is not None:
+                            wallet_last_event_age = (now - payload_wallet_event_at).total_seconds()
+                            wallet_monitor_last_detected_at_iso = to_iso(payload_wallet_event_at)
+                    if wallet_last_block_age is None:
+                        payload_wallet_block_at = parse_iso(
+                            latest_reconciliation_payload.get("wallet_monitor_last_block_processed_at")
+                            or latest_reconciliation_payload.get("wallet_monitor_last_block_seen_at")
+                        )
+                        if payload_wallet_block_at is not None:
+                            wallet_last_block_age = (now - payload_wallet_block_at).total_seconds()
+                    if wallet_last_fallback_poll_age is None:
+                        payload_wallet_poll_at = parse_iso(
+                            latest_reconciliation_payload.get("wallet_monitor_last_fallback_poll_at")
+                        )
+                        if payload_wallet_poll_at is not None:
+                            wallet_last_fallback_poll_age = (now - payload_wallet_poll_at).total_seconds()
                 wallet_event_recent = (
                     wallet_last_event_age is not None
                     and wallet_last_event_age <= WALLET_EVENT_STALE_SECONDS

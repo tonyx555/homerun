@@ -17,26 +17,12 @@ from models import Market, Opportunity
 from services.data_events import DataEvent, EventType
 from services.quality_filter import QualityFilterOverrides
 from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision, _trader_size_limits
+from services.strategies.crypto_strategy_utils import build_binary_crypto_market, parse_datetime_utc
 from services.trader_orchestrator.strategies.sizing import compute_position_size
 from utils.converters import clamp, safe_float, to_confidence, to_float
 from utils.signal_helpers import signal_payload
 
 logger = logging.getLogger(__name__)
-
-
-def _parse_datetime_utc(value: Any) -> datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except Exception:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
 def _normalize_tif(value: Any, default: str = "GTC") -> str:
     tif = str(value or default).strip().upper()
     if tif in {"GTC", "IOC", "FOK"}:
@@ -120,33 +106,7 @@ class CryptoTwinParallelStrategy(BaseStrategy):
 
     @staticmethod
     def _row_market(row: dict[str, Any]) -> Market | None:
-        market_id = str(row.get("condition_id") or row.get("id") or "").strip()
-        if not market_id:
-            return None
-
-        up_price = safe_float(row.get("up_price"), None)
-        down_price = safe_float(row.get("down_price"), None)
-        if up_price is None or down_price is None:
-            return None
-
-        end_date = _parse_datetime_utc(row.get("end_time"))
-        token_ids = [
-            str(token).strip()
-            for token in list(row.get("clob_token_ids") or [])
-            if str(token).strip() and len(str(token).strip()) > 20
-        ]
-
-        return Market(
-            id=market_id,
-            condition_id=market_id,
-            question=str(row.get("question") or row.get("slug") or market_id),
-            slug=str(row.get("slug") or market_id),
-            outcome_prices=[float(up_price), float(down_price)],
-            liquidity=max(0.0, float(safe_float(row.get("liquidity"), 0.0) or 0.0)),
-            end_date=end_date,
-            platform="polymarket",
-            clob_token_ids=token_ids,
-        )
+        return build_binary_crypto_market(row)
 
     def _score_market(self, row: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any] | None:
         up_price = safe_float(row.get("up_price"), None)

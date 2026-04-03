@@ -15,8 +15,7 @@ from services.data_events import DataEvent, EventType
 from services.event_bus import event_bus
 from services.event_dispatcher import event_dispatcher
 from services.intent_runtime import get_intent_runtime
-from services.ml_recorder import ml_recorder
-from services.ml_runtime import crypto_ml_runtime
+from services.machine_learning_sdk import get_machine_learning_sdk
 from services.reference_runtime import get_reference_runtime
 from services.runtime_status import runtime_status
 from services.worker_state import read_worker_control, summarize_worker_stats, write_worker_snapshot
@@ -33,9 +32,11 @@ _CRYPTO_SNAPSHOT_PERSIST_INTERVAL_SECONDS = 5.0
 _CRYPTO_SNAPSHOT_MARKETS_LIMIT = 64
 _FULL_REFRESH_FLOOR_SECONDS = 0.5
 _ML_PRUNE_INTERVAL_SECONDS = 3600.0
+_ML_RUNTIME_GATE_TTL_SECONDS = 10.0
 _BOUNDARY_INTERVALS_SECONDS = (300, 900, 3600, 14400)
 _BOUNDARY_PREFETCH_WINDOW_SECONDS = 15
 _BOUNDARY_LINGER_WINDOW_SECONDS = 10
+_CRYPTO_ML_TASK_KEY = "crypto_directional"
 
 
 def _to_float(value: Any) -> float | None:
@@ -44,6 +45,7 @@ def _to_float(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if math.isfinite(parsed) else None
+
 
 def _copy_dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
@@ -97,6 +99,9 @@ class MarketRuntime:
         self._last_catalog_refresh_mono = 0.0
         self._last_snapshot_persist_mono = 0.0
         self._last_ml_prune_mono = 0.0
+        self._last_ml_gate_check_mono = 0.0
+        self._ml_runtime_recording_enabled = False
+        self._ml_runtime_deployment_active = False
         self._pending_tokens: set[str] = set()
         self._pending_assets: set[str] = set()
         self._pending_reactive_lock = asyncio.Lock()
@@ -597,25 +602,61 @@ class MarketRuntime:
     async def _refresh_ml_pipeline(self, payload: list[dict[str, Any]], *, allow_record: bool) -> None:
         if not payload:
             return
-        try:
-            await crypto_ml_runtime.annotate_markets(payload)
-        except Exception as exc:
-            logger.warning("Failed to annotate crypto markets with ML predictions", exc_info=exc)
+        runtime_state = await self._resolve_ml_runtime_state(allow_record=allow_record)
+        if runtime_state is None:
+            return
+        should_record = bool(runtime_state.get("recording_enabled")) if allow_record else False
+        is_active = bool(runtime_state.get("deployment_active"))
+        if not should_record and not is_active:
+            return
+        sdk = get_machine_learning_sdk()
 
-        if allow_record:
+        if is_active:
             try:
-                await ml_recorder.maybe_record(payload)
+                await sdk.annotate_market_batch(task_key=_CRYPTO_ML_TASK_KEY, markets=payload)
+            except Exception as exc:
+                logger.warning("Failed to annotate crypto markets with ML predictions", exc_info=exc)
+
+        if should_record:
+            try:
+                await sdk.record_market_batch(task_key=_CRYPTO_ML_TASK_KEY, markets=payload)
             except Exception as exc:
                 logger.warning("Failed to record ML training snapshots", exc_info=exc)
 
         now_mono = time.monotonic()
-        if (now_mono - self._last_ml_prune_mono) < _ML_PRUNE_INTERVAL_SECONDS:
+        if not should_record or (now_mono - self._last_ml_prune_mono) < _ML_PRUNE_INTERVAL_SECONDS:
             return
         try:
-            await ml_recorder.prune_old_snapshots()
+            await sdk.prune_data(task_key=_CRYPTO_ML_TASK_KEY)
             self._last_ml_prune_mono = now_mono
         except Exception as exc:
             logger.warning("Failed to prune ML training snapshots", exc_info=exc)
+
+    async def _resolve_ml_runtime_state(self, *, allow_record: bool) -> dict[str, bool] | None:
+        now_mono = time.monotonic()
+        if (now_mono - self._last_ml_gate_check_mono) < _ML_RUNTIME_GATE_TTL_SECONDS:
+            return {
+                "recording_enabled": (self._ml_runtime_recording_enabled if allow_record else False),
+                "deployment_active": self._ml_runtime_deployment_active,
+            }
+
+        sdk = get_machine_learning_sdk()
+        try:
+            runtime_state = await sdk.get_runtime_state(_CRYPTO_ML_TASK_KEY)
+        except Exception as exc:
+            logger.warning("Failed to resolve ML runtime state for crypto markets", exc_info=exc)
+            self._last_ml_gate_check_mono = now_mono
+            self._ml_runtime_recording_enabled = False
+            self._ml_runtime_deployment_active = False
+            return None
+
+        self._last_ml_gate_check_mono = now_mono
+        self._ml_runtime_recording_enabled = bool(runtime_state.get("recording_enabled"))
+        self._ml_runtime_deployment_active = bool(runtime_state.get("deployment_active"))
+        return {
+            "recording_enabled": (self._ml_runtime_recording_enabled if allow_record else False),
+            "deployment_active": self._ml_runtime_deployment_active,
+        }
 
     async def _refresh_crypto_markets(
         self,

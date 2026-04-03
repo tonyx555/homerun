@@ -9,31 +9,23 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timezone
 from typing import Any
 
 from models import Market, Opportunity
 from services.data_events import DataEvent, EventType
 from services.quality_filter import QualityFilterOverrides
 from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision, _trader_size_limits
+from services.strategies.crypto_strategy_utils import (
+    build_binary_crypto_market,
+    history_cancel_peak,
+    normalize_ratio,
+    normalize_signed_ratio,
+)
 from services.trader_orchestrator.strategies.sizing import compute_position_size
 from utils.converters import clamp, safe_float, to_confidence, to_float
 from utils.signal_helpers import selected_probability, signal_payload
 
 logger = logging.getLogger(__name__)
-
-
-def _parse_datetime_utc(value: Any) -> datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except Exception:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
 
 
 def _probability_entropy(prob_yes: float) -> float:
@@ -43,20 +35,10 @@ def _probability_entropy(prob_yes: float) -> float:
     return max(0.0, min(1.0, entropy))
 
 
-def _normalize_ratio(value: Any) -> float | None:
-    parsed = safe_float(value, None)
-    if parsed is None:
-        return None
-    ratio = float(parsed)
-    if ratio > 1.0 and ratio <= 100.0:
-        ratio /= 100.0
-    return max(0.0, min(1.0, ratio))
-
-
 class CryptoEntropyMakerStrategy(BaseStrategy):
     strategy_type = "crypto_entropy_maker"
     name = "Crypto Entropy Maker"
-    description = "Scales maker entries by binary entropy and live tape quality."
+    description = "Canonical crypto microstructure strategy using entropy, cancel recovery, and orderflow quality."
     mispricing_type = "within_market"
     source_key = "crypto"
     market_categories = ["crypto"]
@@ -75,7 +57,12 @@ class CryptoEntropyMakerStrategy(BaseStrategy):
         "min_entropy": 0.82,
         "min_spread_pct": 0.006,
         "max_spread_pct": 0.065,
+        "max_spread_widening_bps": 22.0,
         "max_cancel_rate_30s": 0.75,
+        "min_prior_peak_cancel_rate": 0.80,
+        "min_cancel_drop": 0.14,
+        "min_orderflow_alignment": 0.05,
+        "min_recent_move_zscore": 1.25,
         "min_liquidity_usd": 1000.0,
         "max_entry_price": 0.92,
         "max_markets_per_event": 24,
@@ -92,33 +79,7 @@ class CryptoEntropyMakerStrategy(BaseStrategy):
 
     @staticmethod
     def _row_market(row: dict[str, Any]) -> Market | None:
-        market_id = str(row.get("condition_id") or row.get("id") or "").strip()
-        if not market_id:
-            return None
-
-        up_price = safe_float(row.get("up_price"), None)
-        down_price = safe_float(row.get("down_price"), None)
-        if up_price is None or down_price is None:
-            return None
-
-        end_date = _parse_datetime_utc(row.get("end_time"))
-        token_ids = [
-            str(token).strip()
-            for token in list(row.get("clob_token_ids") or [])
-            if str(token).strip() and len(str(token).strip()) > 20
-        ]
-
-        return Market(
-            id=market_id,
-            condition_id=market_id,
-            question=str(row.get("question") or row.get("slug") or market_id),
-            slug=str(row.get("slug") or market_id),
-            outcome_prices=[float(up_price), float(down_price)],
-            liquidity=max(0.0, float(safe_float(row.get("liquidity"), 0.0) or 0.0)),
-            end_date=end_date,
-            platform="polymarket",
-            clob_token_ids=token_ids,
-        )
+        return build_binary_crypto_market(row)
 
     def _score_market(self, row: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any] | None:
         up_price = safe_float(row.get("up_price"), None)
@@ -145,10 +106,44 @@ class CryptoEntropyMakerStrategy(BaseStrategy):
             return None
 
         # Cancel rate
-        cancel_rate_30s = _normalize_ratio(row.get("cancel_rate_30s") or row.get("maker_cancel_rate_30s"))
+        cancel_rate_30s = normalize_ratio(row.get("cancel_rate_30s") or row.get("maker_cancel_rate_30s"))
         max_cancel_rate_30s = max(0.0, min(1.0, to_float(cfg.get("max_cancel_rate_30s", 0.75), 0.75)))
         if cancel_rate_30s is not None and cancel_rate_30s > max_cancel_rate_30s:
             return None
+
+        spread_widening_bps = safe_float(row.get("spread_widening_bps"), None)
+        max_spread_widening_bps = max(0.0, to_float(cfg.get("max_spread_widening_bps", 22.0), 22.0))
+        if spread_widening_bps is not None and spread_widening_bps > max_spread_widening_bps:
+            return None
+
+        prior_peak_cancel_rate = normalize_ratio(row.get("cancel_peak_2m"))
+        if prior_peak_cancel_rate is None:
+            prior_peak_cancel_rate = history_cancel_peak(row.get("history_tail"))
+        cancel_recovery = None
+        min_prior_peak_cancel_rate = max(
+            0.0,
+            min(1.0, to_float(cfg.get("min_prior_peak_cancel_rate", 0.80), 0.80)),
+        )
+        min_cancel_drop = max(0.0, min(1.0, to_float(cfg.get("min_cancel_drop", 0.14), 0.14)))
+        if cancel_rate_30s is not None and prior_peak_cancel_rate is not None:
+            recovered = prior_peak_cancel_rate - cancel_rate_30s
+            if prior_peak_cancel_rate >= min_prior_peak_cancel_rate and recovered >= min_cancel_drop:
+                cancel_recovery = recovered
+
+        flow_imbalance = normalize_signed_ratio(row.get("flow_imbalance") or row.get("orderflow_imbalance"))
+        if flow_imbalance is not None:
+            flow_imbalance = abs(flow_imbalance)
+        min_orderflow_alignment = max(
+            0.0,
+            min(1.0, to_float(cfg.get("min_orderflow_alignment", 0.05), 0.05)),
+        )
+        if flow_imbalance is not None and flow_imbalance < min_orderflow_alignment:
+            flow_imbalance = None
+
+        recent_move_zscore = safe_float(row.get("recent_move_zscore"), None)
+        min_recent_move_zscore = max(0.0, to_float(cfg.get("min_recent_move_zscore", 1.25), 1.25))
+        if recent_move_zscore is not None and abs(recent_move_zscore) < min_recent_move_zscore:
+            recent_move_zscore = None
 
         # Liquidity
         liquidity = max(0.0, float(safe_float(row.get("liquidity"), 0.0) or 0.0))
@@ -191,6 +186,12 @@ class CryptoEntropyMakerStrategy(BaseStrategy):
         # Entropy-weighted edge
         entropy_multiplier = 0.55 + (0.80 * entropy)
         edge = abs(diff_pct) * entropy_multiplier
+        if cancel_recovery is not None:
+            edge += cancel_recovery * 5.0
+        if flow_imbalance is not None:
+            edge += flow_imbalance * 1.5
+        if recent_move_zscore is not None:
+            edge += min(3.0, abs(recent_move_zscore)) * 0.4
 
         min_edge_percent = max(0.0, to_float(cfg.get("min_edge_percent", 1.0), 1.0))
         if edge < min_edge_percent:
@@ -205,6 +206,16 @@ class CryptoEntropyMakerStrategy(BaseStrategy):
             0.40,
             0.92,
         )
+        if cancel_recovery is not None:
+            confidence = clamp(confidence + clamp(cancel_recovery * 0.12, 0.0, 0.08), 0.40, 0.92)
+        if flow_imbalance is not None:
+            confidence = clamp(confidence + clamp(flow_imbalance * 0.08, 0.0, 0.05), 0.40, 0.92)
+        if recent_move_zscore is not None:
+            confidence = clamp(
+                confidence + clamp(abs(recent_move_zscore) / 6.0, 0.0, 0.04),
+                0.40,
+                0.92,
+            )
 
         min_confidence = to_confidence(cfg.get("min_confidence", 0.40), 0.40)
         if confidence < min_confidence:
@@ -232,7 +243,14 @@ class CryptoEntropyMakerStrategy(BaseStrategy):
             "edge": float(edge),
             "confidence": float(confidence),
             "spread": float(spread),
+            "spread_widening_bps": float(spread_widening_bps) if spread_widening_bps is not None else None,
             "cancel_rate_30s": float(cancel_rate_30s) if cancel_rate_30s is not None else None,
+            "prior_peak_cancel_rate": (
+                float(prior_peak_cancel_rate) if prior_peak_cancel_rate is not None else None
+            ),
+            "cancel_recovery": float(cancel_recovery) if cancel_recovery is not None else None,
+            "flow_imbalance": float(flow_imbalance) if flow_imbalance is not None else None,
+            "recent_move_zscore": float(recent_move_zscore) if recent_move_zscore is not None else None,
             "liquidity": float(liquidity),
             "score": float(score),
         }

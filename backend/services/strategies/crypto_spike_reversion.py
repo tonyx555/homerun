@@ -17,24 +17,13 @@ from models import Market, Opportunity
 from services.data_events import DataEvent, EventType
 from services.quality_filter import QualityFilterOverrides
 from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision, _trader_size_limits
+from services.strategies.crypto_strategy_utils import build_binary_crypto_market, parse_datetime_utc
+from services.strategies.reversion_helpers import direction_opposes_impulse, market_move_pct, reversion_shape_ok
 from services.trader_orchestrator.strategies.sizing import compute_position_size
 from utils.converters import clamp, safe_float, to_confidence, to_float
-from utils.signal_helpers import live_move, selected_probability, signal_payload
+from utils.signal_helpers import selected_probability, signal_payload
 
 logger = logging.getLogger(__name__)
-
-
-def _parse_datetime_utc(value: Any) -> datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except Exception:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
 
 
 class CryptoSpikeReversionStrategy(BaseStrategy):
@@ -83,33 +72,7 @@ class CryptoSpikeReversionStrategy(BaseStrategy):
 
     @staticmethod
     def _row_market(row: dict[str, Any]) -> Market | None:
-        market_id = str(row.get("condition_id") or row.get("id") or "").strip()
-        if not market_id:
-            return None
-
-        up_price = safe_float(row.get("up_price"), None)
-        down_price = safe_float(row.get("down_price"), None)
-        if up_price is None or down_price is None:
-            return None
-
-        end_date = _parse_datetime_utc(row.get("end_time"))
-        token_ids = [
-            str(token).strip()
-            for token in list(row.get("clob_token_ids") or [])
-            if str(token).strip() and len(str(token).strip()) > 20
-        ]
-
-        return Market(
-            id=market_id,
-            condition_id=market_id,
-            question=str(row.get("question") or row.get("slug") or market_id),
-            slug=str(row.get("slug") or market_id),
-            outcome_prices=[float(up_price), float(down_price)],
-            liquidity=max(0.0, float(safe_float(row.get("liquidity"), 0.0) or 0.0)),
-            end_date=end_date,
-            platform="polymarket",
-            clob_token_ids=token_ids,
-        )
+        return build_binary_crypto_market(row)
 
     # ------------------------------------------------------------------
     # Signal scoring — spike-reversion specific
@@ -136,13 +99,13 @@ class CryptoSpikeReversionStrategy(BaseStrategy):
             return None
 
         # Reversion shape: short-horizon impulse dominates the 30m trend
-        shape_ok = True
-        if require_reversion_shape:
-            shape_ok = False
-            if move_30m is not None:
-                shape_ok = abs(move_5m) >= abs(move_30m) * 0.55
-            if shape_ok and move_2h is not None:
-                shape_ok = abs(move_2h) <= max_abs_move_2h
+        shape_ok = reversion_shape_ok(
+            move_5m,
+            move_30m,
+            move_2h,
+            require_shape=require_reversion_shape,
+            max_abs_move_2h=max_abs_move_2h,
+        )
 
         if require_reversion_shape and not shape_ok:
             return None
@@ -173,7 +136,7 @@ class CryptoSpikeReversionStrategy(BaseStrategy):
             edge = abs(move_5m) * 0.6
 
         # Elapsed ratio from end_time
-        end_date = _parse_datetime_utc(row.get("end_time"))
+        end_date = parse_datetime_utc(row.get("end_time"))
         elapsed_ratio = 0.5  # default mid-window
         if end_date is not None:
             seconds_left = max(0.0, (end_date - datetime.now(timezone.utc)).total_seconds())
@@ -406,32 +369,21 @@ class CryptoSpikeReversionStrategy(BaseStrategy):
         confidence = to_confidence(getattr(signal, "confidence", 0.0), 0.0)
         liquidity = max(0.0, to_float(getattr(signal, "liquidity", 0.0), 0.0))
 
-        move_5m = live_move(live_market, "move_5m")
-        if move_5m is None:
-            move_5m = safe_float(payload.get("move_5m_percent"), default=safe_float(payload.get("move_5m_pct")))
-        move_30m = live_move(live_market, "move_30m")
-        if move_30m is None:
-            move_30m = safe_float(payload.get("move_30m_percent"), default=safe_float(payload.get("move_30m_pct")))
-        move_2h = live_move(live_market, "move_2h")
-        if move_2h is None:
-            move_2h = safe_float(payload.get("move_2h_percent"), default=safe_float(payload.get("move_2h_pct")))
+        move_5m = market_move_pct(live_market, payload, "move_5m")
+        move_30m = market_move_pct(live_market, payload, "move_30m")
+        move_2h = market_move_pct(live_market, payload, "move_2h")
 
         # Direction alignment: signal direction must oppose the spike
-        direction_alignment = False
-        if move_5m is not None:
-            if direction == "buy_yes":
-                direction_alignment = move_5m <= -min_abs_move_5m
-            elif direction == "buy_no":
-                direction_alignment = move_5m >= min_abs_move_5m
+        direction_alignment = direction_opposes_impulse(direction, move_5m, min_abs_move_5m)
 
         # Reversion shape: short-horizon impulse dominates the 30m trend
-        shape_ok = True
-        if require_reversion_shape:
-            shape_ok = False
-            if move_5m is not None and move_30m is not None:
-                shape_ok = abs(move_5m) >= abs(move_30m) * 0.55
-            if shape_ok and move_2h is not None:
-                shape_ok = abs(move_2h) <= max_abs_move_2h
+        shape_ok = reversion_shape_ok(
+            move_5m,
+            move_30m,
+            move_2h,
+            require_shape=require_reversion_shape,
+            max_abs_move_2h=max_abs_move_2h,
+        )
 
         origin_ok = bool(payload.get("strategy_origin") == "crypto_worker") or signal_type.startswith("crypto_worker")
 

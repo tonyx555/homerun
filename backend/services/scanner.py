@@ -124,6 +124,8 @@ class ArbitrageScanner:
         self._token_to_market_ids: dict[str, set[str]] = {}
         self._market_to_event_id: dict[str, str] = {}
         self._event_to_market_ids: dict[str, set[str]] = {}
+        self._event_to_market_order: dict[str, list[str]] = {}
+        self._verified_event_keys: set[str] = set()
         self._market_id_to_condition_id: dict[str, str] = {}
         self._condition_id_to_market_id: dict[str, str] = {}
 
@@ -639,6 +641,8 @@ class ArbitrageScanner:
         token_to_market_ids: dict[str, set[str]] = {}
         market_to_event_id: dict[str, str] = {}
         event_to_market_ids: dict[str, set[str]] = {}
+        event_to_market_order: dict[str, list[str]] = {}
+        verified_event_keys: set[str] = set()
         market_id_to_condition_id: dict[str, str] = {}
         condition_id_to_market_id: dict[str, str] = {}
 
@@ -662,12 +666,16 @@ class ArbitrageScanner:
             if not event_id:
                 continue
             mids: set[str] = set()
+            ordered_mids: list[str] = []
             for market in getattr(event, "markets", None) or []:
                 market_id = str(getattr(market, "id", "") or "")
                 if not market_id:
                     continue
+                if market_id in mids:
+                    continue
                 condition_id = str(getattr(market, "condition_id", "") or "").strip()
                 mids.add(market_id)
+                ordered_mids.append(market_id)
                 market_to_event_id[market_id] = event_id
                 if condition_id and condition_id != market_id:
                     market_to_event_id[condition_id] = event_id
@@ -682,13 +690,87 @@ class ArbitrageScanner:
                     token_to_market_ids.setdefault(token, set()).add(market_id)
             if mids:
                 event_to_market_ids[event_id] = mids
+                event_to_market_order[event_id] = ordered_mids
+                verified_event_keys.add(event_id)
 
         self._cached_market_by_id = market_by_id
         self._token_to_market_ids = token_to_market_ids
         self._market_to_event_id = market_to_event_id
         self._event_to_market_ids = event_to_market_ids
+        self._event_to_market_order = event_to_market_order
+        self._verified_event_keys = verified_event_keys
         self._market_id_to_condition_id = market_id_to_condition_id
         self._condition_id_to_market_id = condition_id_to_market_id
+
+    def _market_event_key(self, market: object) -> str:
+        market_id = str(getattr(market, "id", "") or "").strip()
+        if market_id:
+            event_key = str(self._market_to_event_id.get(market_id) or "").strip()
+            if event_key:
+                return event_key
+        return str(getattr(market, "event_slug", "") or "").strip()
+
+    def _build_dispatch_market_groups(self, markets: list) -> list[list]:
+        groups: list[list] = []
+        seen_event_keys: set[str] = set()
+        seen_market_ids: set[str] = set()
+
+        for market in markets:
+            market_id = str(getattr(market, "id", "") or "").strip()
+            if not market_id:
+                continue
+            event_key = self._market_event_key(market)
+            if event_key:
+                if event_key not in self._verified_event_keys or event_key in seen_event_keys:
+                    continue
+                peer_ids = list(self._event_to_market_order.get(event_key) or [])
+                if not peer_ids:
+                    peer_ids = sorted(self._event_to_market_ids.get(event_key, set()))
+                group: list = []
+                for peer_id in peer_ids:
+                    peer_market = self._cached_market_by_id.get(peer_id)
+                    if peer_market is None:
+                        continue
+                    if peer_id in seen_market_ids:
+                        continue
+                    seen_market_ids.add(peer_id)
+                    group.append(peer_market)
+                if group:
+                    seen_event_keys.add(event_key)
+                    groups.append(group)
+                continue
+            if market_id in seen_market_ids:
+                continue
+            seen_market_ids.add(market_id)
+            groups.append([market])
+        return groups
+
+    def _expand_markets_to_event_rosters(self, markets: list, *, market_cap: int | None = None) -> list:
+        groups = self._build_dispatch_market_groups(markets)
+        if not groups:
+            return []
+        if market_cap is None or market_cap <= 0:
+            return [market for group in groups for market in group]
+
+        selected: list = []
+        total = 0
+        oversize_group: list | None = None
+        for group in groups:
+            group_size = len(group)
+            if group_size <= 0:
+                continue
+            if group_size > market_cap:
+                if oversize_group is None:
+                    oversize_group = group
+                continue
+            if total > 0 and total + group_size > market_cap:
+                continue
+            selected.extend(group)
+            total += group_size
+
+        if not selected and oversize_group is not None:
+            return list(oversize_group)
+        return selected
 
     @staticmethod
     def _collect_polymarket_tokens(markets: list) -> list[str]:
@@ -960,45 +1042,105 @@ class ArbitrageScanner:
             market_cap = int(getattr(settings, "MAX_MARKETS_TO_SCAN", 0) or 0)
             event_cap = int(getattr(settings, "MAX_EVENTS_TO_SCAN", 0) or 0)
 
-        capped_markets = list(markets)
-        if market_cap > 0 and len(capped_markets) > market_cap:
-            capped_markets.sort(key=self._market_priority_key, reverse=True)
-            capped_markets = capped_markets[:market_cap]
+        market_by_id: dict[str, object] = {}
+        for market in markets:
+            market_id = str(getattr(market, "id", "") or "").strip()
+            if market_id:
+                market_by_id[market_id] = market
 
-        kept_market_ids = {str(getattr(market, "id", "") or "") for market in capped_markets}
-        capped_events: list = []
+        event_rows: list[tuple[object, list]] = []
+        grouped_market_ids: set[str] = set()
         for event in events:
-            event_markets = [
-                market
-                for market in list(getattr(event, "markets", None) or [])
-                if str(getattr(market, "id", "") or "") in kept_market_ids
-            ]
+            event_markets: list = []
+            seen_event_market_ids: set[str] = set()
+            for market in list(getattr(event, "markets", None) or []):
+                market_id = str(getattr(market, "id", "") or "").strip()
+                if not market_id or market_id in seen_event_market_ids or market_id not in market_by_id:
+                    continue
+                seen_event_market_ids.add(market_id)
+                grouped_market_ids.add(market_id)
+                event_markets.append(market_by_id[market_id])
             if not event_markets:
                 continue
             event.markets = event_markets
-            capped_events.append(event)
+            event_rows.append((event, event_markets))
 
-        if event_cap > 0 and len(capped_events) > event_cap:
+        def _event_priority_key(row: tuple[object, list]) -> tuple[int, float, float]:
+            _, event_markets = row
+            return (
+                len(event_markets),
+                sum(float(getattr(market, "volume", 0.0) or 0.0) for market in event_markets),
+                sum(float(getattr(market, "liquidity", 0.0) or 0.0) for market in event_markets),
+            )
 
-            def _event_priority_key(event_obj: object) -> tuple[int, float, float]:
-                mkts = list(getattr(event_obj, "markets", None) or [])
-                return (
-                    len(mkts),
-                    sum(float(getattr(m, "volume", 0.0) or 0.0) for m in mkts),
-                    sum(float(getattr(m, "liquidity", 0.0) or 0.0) for m in mkts),
-                )
+        event_rows.sort(key=_event_priority_key, reverse=True)
+        if event_cap > 0 and len(event_rows) > event_cap:
+            event_rows = event_rows[:event_cap]
 
-            capped_events.sort(key=_event_priority_key, reverse=True)
-            capped_events = capped_events[:event_cap]
-            kept_market_ids = {
-                str(getattr(market, "id", "") or "")
-                for event in capped_events
-                for market in list(getattr(event, "markets", None) or [])
+        selected_event_rows: list[tuple[object, list]] = []
+        selected_market_ids: set[str] = set()
+        selected_market_total = 0
+
+        if market_cap > 0:
+            oversize_row: tuple[object, list] | None = None
+            for row in event_rows:
+                _, event_markets = row
+                group_size = len(event_markets)
+                if group_size > market_cap:
+                    if oversize_row is None:
+                        oversize_row = row
+                    continue
+                if selected_market_total > 0 and selected_market_total + group_size > market_cap:
+                    continue
+                selected_event_rows.append(row)
+                selected_market_total += group_size
+                for market in event_markets:
+                    selected_market_ids.add(str(getattr(market, "id", "") or "").strip())
+            if not selected_event_rows and oversize_row is not None:
+                selected_event_rows.append(oversize_row)
+                for market in oversize_row[1]:
+                    selected_market_ids.add(str(getattr(market, "id", "") or "").strip())
+        else:
+            selected_event_rows = list(event_rows)
+            selected_market_ids = {
+                str(getattr(market, "id", "") or "").strip()
+                for _, event_markets in event_rows
+                for market in event_markets
             }
-            capped_markets = [
-                market for market in capped_markets if str(getattr(market, "id", "") or "") in kept_market_ids
-            ]
 
+        orphan_markets = [
+            market
+            for market in markets
+            if str(getattr(market, "id", "") or "").strip() not in grouped_market_ids
+        ]
+        orphan_markets.sort(key=self._market_priority_key, reverse=True)
+
+        capped_markets = [
+            market
+            for _, event_markets in selected_event_rows
+            for market in event_markets
+        ]
+        if market_cap > 0:
+            remaining_capacity = max(0, market_cap - len(capped_markets))
+            if remaining_capacity > 0:
+                for market in orphan_markets:
+                    market_id = str(getattr(market, "id", "") or "").strip()
+                    if not market_id or market_id in selected_market_ids:
+                        continue
+                    capped_markets.append(market)
+                    selected_market_ids.add(market_id)
+                    remaining_capacity -= 1
+                    if remaining_capacity <= 0:
+                        break
+        else:
+            for market in orphan_markets:
+                market_id = str(getattr(market, "id", "") or "").strip()
+                if not market_id or market_id in selected_market_ids:
+                    continue
+                capped_markets.append(market)
+                selected_market_ids.add(market_id)
+
+        capped_events = [event for event, _ in selected_event_rows]
         return capped_events, capped_markets
 
     def _trim_runtime_market_caches(self, active_market_ids: set[str]) -> None:
@@ -1007,6 +1149,8 @@ class ArbitrageScanner:
             self._market_price_history = {}
             self._market_token_ids = {}
             self._market_outcome_token_ids = {}
+            self._event_to_market_order = {}
+            self._verified_event_keys = set()
             self._market_id_to_condition_id = {}
             self._condition_id_to_market_id = {}
             return
@@ -1101,31 +1245,23 @@ class ArbitrageScanner:
         """Resolve changed tokens to a bounded market batch, expanded by event peers."""
         if not changed_token_ids:
             return []
-        ordered: list[str] = []
+        direct_markets: list = []
         seen: set[str] = set()
-
         for token_id in changed_token_ids:
             for market_id in sorted(self._token_to_market_ids.get(token_id, set())):
                 if market_id in seen:
                     continue
                 seen.add(market_id)
-                ordered.append(market_id)
-
-        direct_ids = list(ordered)
-        for market_id in direct_ids:
-            event_id = self._market_to_event_id.get(market_id)
-            if not event_id:
-                continue
-            for peer_id in sorted(self._event_to_market_ids.get(event_id, set())):
-                if peer_id in seen:
+                market = self._cached_market_by_id.get(market_id)
+                if market is None:
                     continue
-                seen.add(peer_id)
-                ordered.append(peer_id)
+                direct_markets.append(market)
 
         cap = max(10, int(settings.REALTIME_SCAN_MAX_BATCH_MARKETS or 800))
+        expanded_markets = self._expand_markets_to_event_rosters(direct_markets, market_cap=cap)
+        ordered = [str(getattr(market, "id", "") or "").strip() for market in expanded_markets if str(getattr(market, "id", "") or "").strip()]
         if len(ordered) > cap:
             self._reactive_backpressure_dropped_markets += len(ordered) - cap
-            ordered = ordered[:cap]
         return ordered
 
     @staticmethod
@@ -2588,8 +2724,6 @@ class ArbitrageScanner:
     ) -> dict[str, object]:
         """Incremental market/event sync with periodic full-reconcile fallback."""
         import time as _time
-        from models.market import Event
-
         _t0 = _time.monotonic()
         now = datetime.now(timezone.utc)
 
@@ -2757,21 +2891,7 @@ class ArbitrageScanner:
                 event_map.pop(event_key, None)
                 continue
             event = event_map.get(event_key)
-            if event is None:
-                event = Event(
-                    id=event_key,
-                    slug=event_key,
-                    title=event_key.replace("-", " ").strip().title(),
-                    description="",
-                    category=None,
-                    tags=[],
-                    markets=linked_markets,
-                    neg_risk=False,
-                    active=True,
-                    closed=False,
-                )
-                event_map[event_key] = event
-            else:
+            if event is not None:
                 event.markets = linked_markets
 
         merged_events = list(event_map.values())
@@ -3111,14 +3231,19 @@ class ArbitrageScanner:
                     return self._opportunities
 
                 if reactive_mode:
-                    markets_for_strategies = candidate_markets
+                    dispatch_seed_markets = candidate_markets
                     source = "scanner_fast_reactive"
                     scan_mode = "realtime_reactive"
                 else:
-                    markets_for_strategies = changed_markets
+                    dispatch_seed_markets = changed_markets
                     source = "scanner_fast_timer"
                     scan_mode = "fast_timer"
 
+                dispatch_cap = max(10, int(settings.REALTIME_SCAN_MAX_BATCH_MARKETS or 800))
+                markets_for_strategies = self._expand_markets_to_event_rosters(
+                    dispatch_seed_markets,
+                    market_cap=dispatch_cap,
+                )
                 markets_for_strategies = [m for m in markets_for_strategies if self._is_market_active(m, now)]
                 changed_market_ids = [str(getattr(m, "id", "") or "") for m in changed_markets]
                 affected_ids_payload = [str(getattr(m, "id", "") or "") for m in markets_for_strategies]
@@ -3130,8 +3255,8 @@ class ArbitrageScanner:
 
                 await self._ensure_runtime_strategies_loaded()
                 incremental_slugs, _ = self._partition_market_refresh_strategies()
-                if not incremental_slugs:
-                    logger.info("  No incremental MARKET_DATA_REFRESH strategies enabled; skipping dispatch")
+                if not incremental_slugs or not markets_for_strategies:
+                    logger.info("  Fast scan dispatch skipped: no eligible strategies or no verified market batch")
                     self._opportunities = await self.refresh_opportunity_prices(
                         self._opportunities,
                         now=now,
@@ -3295,16 +3420,109 @@ class ArbitrageScanner:
                     async with self._scan_lock:
                         return self._opportunities
 
+                snapshot_market_by_id: dict[str, object] = {}
+                for market in cached_markets_snapshot:
+                    market_id = str(getattr(market, "id", "") or "").strip()
+                    if market_id:
+                        snapshot_market_by_id[market_id] = market
+
+                snapshot_event_to_market_order: dict[str, list[str]] = {}
+                snapshot_market_to_event_key: dict[str, str] = {}
+                snapshot_verified_event_keys: set[str] = set()
+                for event in cached_events_snapshot:
+                    event_key = str(getattr(event, "id", "") or getattr(event, "slug", "") or "").strip()
+                    if not event_key:
+                        continue
+                    ordered_ids: list[str] = []
+                    seen_event_market_ids: set[str] = set()
+                    for market in list(getattr(event, "markets", None) or []):
+                        market_id = str(getattr(market, "id", "") or "").strip()
+                        if not market_id or market_id in seen_event_market_ids or market_id not in snapshot_market_by_id:
+                            continue
+                        seen_event_market_ids.add(market_id)
+                        ordered_ids.append(market_id)
+                        snapshot_market_to_event_key[market_id] = event_key
+                    if not ordered_ids:
+                        continue
+                    event.markets = [snapshot_market_by_id[market_id] for market_id in ordered_ids]
+                    snapshot_event_to_market_order[event_key] = ordered_ids
+                    snapshot_verified_event_keys.add(event_key)
+
+                def _snapshot_market_event_key(market: object) -> str:
+                    market_id = str(getattr(market, "id", "") or "").strip()
+                    if market_id:
+                        event_key = str(snapshot_market_to_event_key.get(market_id) or "").strip()
+                        if event_key:
+                            return event_key
+                    return str(getattr(market, "event_slug", "") or "").strip()
+
+                def _snapshot_build_groups(seed_markets: list) -> list[list]:
+                    groups: list[list] = []
+                    seen_event_keys: set[str] = set()
+                    seen_market_ids: set[str] = set()
+                    for market in seed_markets:
+                        market_id = str(getattr(market, "id", "") or "").strip()
+                        if not market_id:
+                            continue
+                        event_key = _snapshot_market_event_key(market)
+                        if event_key:
+                            if event_key not in snapshot_verified_event_keys or event_key in seen_event_keys:
+                                continue
+                            ordered_ids = list(snapshot_event_to_market_order.get(event_key) or [])
+                            group: list = []
+                            for peer_id in ordered_ids:
+                                peer_market = snapshot_market_by_id.get(peer_id)
+                                if peer_market is None or peer_id in seen_market_ids:
+                                    continue
+                                seen_market_ids.add(peer_id)
+                                group.append(peer_market)
+                            if group:
+                                seen_event_keys.add(event_key)
+                                groups.append(group)
+                            continue
+                        if market_id in seen_market_ids:
+                            continue
+                        seen_market_ids.add(market_id)
+                        groups.append([market])
+                    return groups
+
+                def _snapshot_expand(seed_markets: list, market_cap: int | None = None) -> list:
+                    groups = _snapshot_build_groups(seed_markets)
+                    if not groups:
+                        return []
+                    if market_cap is None or market_cap <= 0:
+                        return [market for group in groups for market in group]
+
+                    selected: list = []
+                    total = 0
+                    oversize_group: list | None = None
+                    for group in groups:
+                        group_size = len(group)
+                        if group_size <= 0:
+                            continue
+                        if group_size > market_cap:
+                            if oversize_group is None:
+                                oversize_group = group
+                            continue
+                        if total > 0 and total + group_size > market_cap:
+                            continue
+                        selected.extend(group)
+                        total += group_size
+                    if not selected and oversize_group is not None:
+                        return list(oversize_group)
+                    return selected
+
                 if targeted_condition_ids:
                     target_set = {
                         str(cid or "").strip().lower() for cid in targeted_condition_ids if str(cid or "").strip()
                     }
-                    full_snapshot_markets = [
+                    targeted_markets = [
                         market
                         for market in cached_markets_snapshot
                         if str(getattr(market, "condition_id", getattr(market, "id", "")) or "").lower() in target_set
                         and self._is_market_active(market, now)
                     ]
+                    full_snapshot_markets = _snapshot_expand(targeted_markets)
                 else:
                     if bool(getattr(settings, "SCANNER_FORCE_FULL_UNIVERSE", True)):
                         cap = 0
@@ -3317,7 +3535,7 @@ class ArbitrageScanner:
                         ]
                         tail_priority.sort(key=lambda market: self._tail_end_priority_key(market, now), reverse=True)
                         if cap > 0 and len(tail_priority) >= cap:
-                            full_snapshot_markets = tail_priority[:cap]
+                            seed_markets = tail_priority[:cap]
                         else:
                             seen_ids = {str(getattr(market, "id", "") or "") for market in tail_priority}
                             remaining = [
@@ -3325,13 +3543,14 @@ class ArbitrageScanner:
                                 for market in sorted(active_markets, key=self._market_priority_key, reverse=True)
                                 if str(getattr(market, "id", "") or "") not in seen_ids
                             ]
-                            full_snapshot_markets = tail_priority + remaining
-                            if cap > 0 and len(full_snapshot_markets) > cap:
-                                full_snapshot_markets = full_snapshot_markets[:cap]
+                            seed_markets = tail_priority + remaining
+                            if cap > 0 and len(seed_markets) > cap:
+                                seed_markets = seed_markets[:cap]
                     else:
-                        full_snapshot_markets = sorted(active_markets, key=self._market_priority_key, reverse=True)
-                        if cap > 0 and len(full_snapshot_markets) > cap:
-                            full_snapshot_markets = full_snapshot_markets[:cap]
+                        seed_markets = sorted(active_markets, key=self._market_priority_key, reverse=True)
+                        if cap > 0 and len(seed_markets) > cap:
+                            seed_markets = seed_markets[:cap]
+                    full_snapshot_markets = _snapshot_expand(seed_markets, market_cap=cap if cap > 0 else None)
 
                 if not full_snapshot_markets:
                     async with self._scan_lock:
@@ -3354,6 +3573,7 @@ class ArbitrageScanner:
                 universe_count = len(universe_markets)
                 chunk_size = max(1, int(getattr(settings, "SCANNER_FULL_SNAPSHOT_CHUNK_SIZE", 300) or 300))
                 targeted_mode = bool(targeted_condition_ids)
+                universe_groups = _snapshot_build_groups(universe_markets)
                 chunk_start = 0
                 chunk_end = universe_count
                 chunk_markets = universe_markets
@@ -3363,17 +3583,46 @@ class ArbitrageScanner:
                 processed_markets = universe_count
 
                 if not targeted_mode:
-                    cursor_start = max(0, int(self._full_snapshot_cursor_index or 0))
-                    if cursor_start >= universe_count or self._full_snapshot_cycle_total_markets != universe_count:
-                        cursor_start = 0
+                    requested_cursor = max(0, int(self._full_snapshot_cursor_index or 0))
+                    if requested_cursor >= universe_count or self._full_snapshot_cycle_total_markets != universe_count:
+                        requested_cursor = 0
                         cycle_started_at = now
                     elif self._full_snapshot_cycle_started_at is None:
                         cycle_started_at = now
 
-                    chunk_start = cursor_start
-                    chunk_end = min(universe_count, cursor_start + chunk_size)
-                    chunk_markets = universe_markets[chunk_start:chunk_end]
-                    cycle_completed = chunk_end >= universe_count
+                    cursor_consumed = 0
+                    start_group_index = 0
+                    while start_group_index < len(universe_groups) and cursor_consumed < requested_cursor:
+                        cursor_consumed += len(universe_groups[start_group_index])
+                        start_group_index += 1
+
+                    if start_group_index >= len(universe_groups):
+                        start_group_index = 0
+                        cursor_consumed = 0
+                        cycle_started_at = now
+
+                    selected_groups: list[list] = []
+                    selected_count = 0
+                    group_index = start_group_index
+                    while group_index < len(universe_groups):
+                        group = universe_groups[group_index]
+                        if selected_groups and selected_count + len(group) > chunk_size:
+                            break
+                        selected_groups.append(group)
+                        selected_count += len(group)
+                        group_index += 1
+                        if selected_count >= chunk_size:
+                            break
+
+                    if not selected_groups and start_group_index < len(universe_groups):
+                        selected_groups = [universe_groups[start_group_index]]
+                        selected_count = len(universe_groups[start_group_index])
+                        group_index = start_group_index + 1
+
+                    chunk_start = cursor_consumed
+                    chunk_markets = [market for group in selected_groups for market in group]
+                    chunk_end = min(universe_count, chunk_start + selected_count)
+                    cycle_completed = group_index >= len(universe_groups)
                     next_cursor_index = 0 if cycle_completed else chunk_end
                     processed_markets = universe_count if cycle_completed else chunk_end
 

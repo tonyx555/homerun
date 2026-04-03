@@ -73,6 +73,7 @@ class WeatherDistributionStrategy(BaseStrategy):
     DEFAULT_CONFIG = {
         "min_edge_percent": 5.0,
         "sigma_c": 1.8,  # std dev for normal distribution (when no ensemble)
+        "min_ensemble_members": 10,
         "min_confidence": 0.50,
         "max_entry_price": 0.85,
         "max_buckets_per_event": 2,  # max simultaneous positions in one event
@@ -335,6 +336,8 @@ class WeatherDistributionStrategy(BaseStrategy):
         bucket_high_f = float(bucket_high)
         consensus_f = float(consensus_value_c)
         sigma = float(cfg["sigma_c"])
+        min_ensemble_members = max(1, int(to_float(cfg.get("min_ensemble_members", 10), 10)))
+        use_ensemble = isinstance(ensemble_members, list) and len(ensemble_members) >= min_ensemble_members
 
         # -----------------------------------------------------------
         # 1. Build list of ALL buckets: current market + siblings
@@ -390,7 +393,7 @@ class WeatherDistributionStrategy(BaseStrategy):
             low = bucket["bucket_low_c"]
             high = bucket["bucket_high_c"]
 
-            if ensemble_members and len(ensemble_members) > 0:
+            if use_ensemble:
                 prob = ensemble_bucket_probability(ensemble_members, low, high)
             else:
                 prob = _norm_cdf(high, consensus_f, sigma) - _norm_cdf(low, consensus_f, sigma)
@@ -458,7 +461,7 @@ class WeatherDistributionStrategy(BaseStrategy):
         source_spread_c = float(intent.get("source_spread_c") or 0)
         agreement = float(intent.get("model_agreement", 0))
 
-        if agreement == 0 and ensemble_members:
+        if agreement == 0 and use_ensemble:
             agreement = compute_model_agreement({"ensemble": model_prob})
 
         confidence = compute_confidence(agreement, model_prob, source_count, source_spread_c)
@@ -558,7 +561,7 @@ class WeatherDistributionStrategy(BaseStrategy):
                     "bucket_rank": current_rank,
                     "total_buckets": total_buckets,
                     "distribution": distribution_snapshot,
-                    "used_ensemble": bool(ensemble_members),
+                    "used_ensemble": use_ensemble,
                 },
             }
         ]
@@ -597,7 +600,7 @@ class WeatherDistributionStrategy(BaseStrategy):
                     "model_probability": model_prob,
                     "edge_percent": edge_percent,
                     "target_time": intent.get("target_time"),
-                    "used_ensemble": bool(ensemble_members),
+                    "used_ensemble": use_ensemble,
                 },
             }
             opp.risk_factors = risk_factors

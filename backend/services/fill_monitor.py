@@ -86,10 +86,10 @@ class FillMonitor:
             self._poll_interval,
         )
         # Register with wallet WS monitor for real-time fill detection
-        self._register_ws_monitor()
+        await self._register_ws_monitor()
         self._poll_task = asyncio.create_task(self._poll_loop())
 
-    def _register_ws_monitor(self):
+    async def _register_ws_monitor(self):
         """Hook into the wallet WS monitor so fills on our wallet are instant."""
         if self._ws_registered:
             return
@@ -101,6 +101,7 @@ class FillMonitor:
                 wallet_addr = live_execution_service.get_execution_wallet_address()
                 if wallet_addr:
                     wallet_ws_monitor.add_wallet(wallet_addr)
+                    await wallet_ws_monitor.start()
                     wallet_ws_monitor.add_callback(self._on_ws_fill)
                     self._ws_registered = True
                     logger.info(
@@ -126,7 +127,7 @@ class FillMonitor:
             try:
                 # Retry WS registration if not done yet
                 if not self._ws_registered:
-                    self._register_ws_monitor()
+                    await self._register_ws_monitor()
                 await self._check_fills()
             except Exception as e:
                 logger.error("Fill monitor error", error=str(e))

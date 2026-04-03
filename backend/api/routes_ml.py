@@ -1,492 +1,235 @@
-"""ML Training Pipeline API Routes
-
-Provides endpoints for:
-- Recording control (start/stop/configure snapshots)
-- Training (trigger, status, list models)
-- Model management (promote, archive, delete)
-- Data stats & pruning
-"""
-
 from __future__ import annotations
 
-import asyncio
-import uuid
-from typing import Optional
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, func, select
 
-from models.database import (
-    AsyncSessionLocal,
-    MLRecorderConfig,
-    MLTrainedModel,
-    MLTrainingJob,
-    MLTrainingSnapshot,
-)
-from services.ml_recorder import ml_recorder
-from services.ml_runtime import crypto_ml_runtime
-from services.ml_trainer import archive_model, is_training_backend_available, promote_model, run_training_job
-from utils.utcnow import utcnow
+from services.machine_learning_sdk import get_machine_learning_sdk
 
-router = APIRouter(prefix="/ml", tags=["ML Training Pipeline"])
-
-_ALLOWED_ML_ASSETS = ("btc", "eth", "sol", "xrp")
-_ALLOWED_ML_TIMEFRAMES = ("5m", "15m", "1h", "4h")
+router = APIRouter(prefix="/ml", tags=["Machine Learning"])
 
 
-def _normalize_ml_timeframe(value: object) -> str:
-    text = str(value or "").strip().lower()
-    if text in {"5m", "5min", "5-minute", "5minutes"}:
-        return "5m"
-    if text in {"15m", "15min", "15-minute", "15minutes"}:
-        return "15m"
-    if text in {"1h", "1hr", "1hour", "60m"}:
-        return "1h"
-    if text in {"4h", "4hr", "4hour", "240m"}:
-        return "4h"
-    return text
-
-
-def _normalize_ml_assets(values: list[str]) -> list[str]:
-    normalized: list[str] = []
-    invalid: list[str] = []
-    for value in values:
-        asset = str(value or "").strip().lower()
-        if asset not in _ALLOWED_ML_ASSETS:
-            invalid.append(str(value))
-            continue
-        if asset not in normalized:
-            normalized.append(asset)
-    if invalid:
-        raise HTTPException(400, f"Unsupported ML assets: {', '.join(invalid)}")
-    if not normalized:
-        raise HTTPException(400, "At least one ML asset is required")
-    return normalized
-
-
-def _normalize_ml_timeframes(values: list[str]) -> list[str]:
-    normalized: list[str] = []
-    invalid: list[str] = []
-    for value in values:
-        timeframe = _normalize_ml_timeframe(value)
-        if timeframe not in _ALLOWED_ML_TIMEFRAMES:
-            invalid.append(str(value))
-            continue
-        if timeframe not in normalized:
-            normalized.append(timeframe)
-    if invalid:
-        raise HTTPException(400, f"Unsupported ML timeframes: {', '.join(invalid)}")
-    if not normalized:
-        raise HTTPException(400, "At least one ML timeframe is required")
-    return normalized
-
-
-# ── Pydantic request/response models ──────────────────────────────────────
+def _translate_ml_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, FileNotFoundError):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, RuntimeError):
+        return HTTPException(status_code=503, detail=str(exc))
+    return HTTPException(status_code=400, detail=str(exc))
 
 
 class RecorderConfigUpdate(BaseModel):
-    is_recording: Optional[bool] = None
-    interval_seconds: Optional[int] = Field(None, ge=5, le=3600)
-    retention_days: Optional[int] = Field(None, ge=1, le=365)
-    assets: Optional[list[str]] = None
-    timeframes: Optional[list[str]] = None
-    schedule_enabled: Optional[bool] = None
-    schedule_start_utc: Optional[str] = None
-    schedule_end_utc: Optional[str] = None
+    is_recording: bool | None = None
+    interval_seconds: int | None = Field(None, ge=5, le=3600)
+    retention_days: int | None = Field(None, ge=1, le=365)
+    assets: list[str] | None = None
+    timeframes: list[str] | None = None
+    schedule_enabled: bool | None = None
+    schedule_start_utc: str | None = None
+    schedule_end_utc: str | None = None
 
 
-class TrainRequest(BaseModel):
+class ImportModelRequest(BaseModel):
+    source_uri: str = Field(..., min_length=1)
+    backend: str = Field(..., min_length=1)
+    task_key: str = Field(default="crypto_directional", min_length=1)
+    name: str | None = None
+    version: str | None = None
+    manifest_uri: str | None = None
+    metadata: dict[str, Any] | None = None
+    options: dict[str, Any] | None = None
+
+
+class TrainAdapterRequest(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
-    model_type: str = Field("logistic", pattern=r"^(logistic)$")
-    assets: Optional[list[str]] = None
-    timeframes: Optional[list[str]] = None
-    days_lookback: int = Field(30, ge=1, le=365)
-    hyperparams: Optional[dict] = None
+    task_key: str = Field(default="crypto_directional", min_length=1)
+    base_model_id: str = Field(..., min_length=1)
+    adapter_kind: str = Field(..., min_length=1)
+    name: str | None = None
+    training_window_days: int = Field(default=90, ge=7, le=365)
+    holdout_days: int = Field(default=7, ge=1, le=90)
+    params: dict[str, Any] | None = None
 
 
-class PruneRequest(BaseModel):
-    older_than_days: Optional[int] = Field(None, ge=1, le=365)
+class PruneDataRequest(BaseModel):
+    older_than_days: int | None = Field(default=None, ge=1, le=365)
     confirm: bool = False
 
 
-# ── Recorder config endpoints ─────────────────────────────────────────────
+class UpdateDeploymentRequest(BaseModel):
+    base_model_id: str | None = None
+    adapter_id: str | None = None
+    is_active: bool
+
+
+class TriggerEvaluationRequest(BaseModel):
+    target_type: str = Field(..., pattern=r"^(model|adapter|deployment)$")
+    target_id: str = Field(..., min_length=1)
+
+
+@router.get("/capabilities")
+async def get_capabilities() -> Any:
+    return await get_machine_learning_sdk().get_capabilities()
 
 
 @router.get("/recorder/config")
-async def get_recorder_config():
-    """Get current recorder configuration and recording stats."""
-    stats = await ml_recorder.get_stats()
-    return stats
+async def get_recorder_config() -> Any:
+    return await get_machine_learning_sdk().get_recorder_config()
 
 
 @router.put("/recorder/config")
-async def update_recorder_config(body: RecorderConfigUpdate):
-    """Update recorder configuration (start/stop recording, change interval, etc)."""
-    async with AsyncSessionLocal() as session:
-        row = (await session.execute(select(MLRecorderConfig).where(MLRecorderConfig.id == "default"))).scalar_one_or_none()
-
-        if row is None:
-            row = MLRecorderConfig(id="default")
-            session.add(row)
-
-        if body.is_recording is not None:
-            row.is_recording = body.is_recording
-        if body.interval_seconds is not None:
-            row.interval_seconds = body.interval_seconds
-        if body.retention_days is not None:
-            row.retention_days = body.retention_days
-        if body.assets is not None:
-            row.assets = _normalize_ml_assets(body.assets)
-        if body.timeframes is not None:
-            row.timeframes = _normalize_ml_timeframes(body.timeframes)
-        if body.schedule_enabled is not None:
-            row.schedule_enabled = body.schedule_enabled
-        if body.schedule_start_utc is not None:
-            row.schedule_start_utc = body.schedule_start_utc
-        if body.schedule_end_utc is not None:
-            row.schedule_end_utc = body.schedule_end_utc
-
-        row.updated_at = utcnow()
-        await session.commit()
-
-    ml_recorder.invalidate_config_cache()
-
-    return await ml_recorder.get_stats()
-
-
-# ── Data stats & management ───────────────────────────────────────────────
+async def update_recorder_config(body: RecorderConfigUpdate) -> Any:
+    try:
+        return await get_machine_learning_sdk().update_recorder_config(body.model_dump(exclude_none=True))
+    except Exception as exc:
+        raise _translate_ml_error(exc) from exc
 
 
 @router.get("/data/stats")
-async def get_data_stats():
-    """Get detailed snapshot statistics."""
-    async with AsyncSessionLocal() as session:
-        total = (await session.execute(select(func.count(MLTrainingSnapshot.id)))).scalar() or 0
-        oldest = (await session.execute(select(func.min(MLTrainingSnapshot.timestamp)))).scalar()
-        newest = (await session.execute(select(func.max(MLTrainingSnapshot.timestamp)))).scalar()
-
-        # Per asset+timeframe
-        breakdown = (
-            await session.execute(
-                select(
-                    MLTrainingSnapshot.asset,
-                    MLTrainingSnapshot.timeframe,
-                    func.count(MLTrainingSnapshot.id),
-                    func.min(MLTrainingSnapshot.timestamp),
-                    func.max(MLTrainingSnapshot.timestamp),
-                ).group_by(MLTrainingSnapshot.asset, MLTrainingSnapshot.timeframe)
-            )
-        ).all()
-
-        groups = [
-            {
-                "asset": row[0],
-                "timeframe": row[1],
-                "count": row[2],
-                "oldest": row[3].isoformat() if row[3] else None,
-                "newest": row[4].isoformat() if row[4] else None,
-            }
-            for row in breakdown
-        ]
-
-    return {
-        "total_snapshots": total,
-        "oldest": oldest.isoformat() if oldest else None,
-        "newest": newest.isoformat() if newest else None,
-        "groups": groups,
-    }
+async def get_data_stats() -> Any:
+    return await get_machine_learning_sdk().get_data_stats()
 
 
 @router.post("/data/prune")
-async def prune_data(body: PruneRequest):
-    """Delete old snapshots.  Requires confirm=true."""
-    days = body.older_than_days
-    if days is None:
-        config = await ml_recorder.get_config()
-        days = int(config.get("retention_days", 90))
-
-    if not body.confirm:
-        from datetime import timedelta
-
-        cutoff = utcnow() - timedelta(days=days)
-        async with AsyncSessionLocal() as session:
-            count = (
-                await session.execute(
-                    select(func.count(MLTrainingSnapshot.id)).where(MLTrainingSnapshot.timestamp < cutoff)
-                )
-            ).scalar() or 0
-
-        return {"action": "dry_run", "would_delete": count, "older_than_days": days, "cutoff": cutoff.isoformat()}
-
-    deleted = await ml_recorder.prune_old_snapshots(older_than_days=days)
-    return {"action": "pruned", "deleted": deleted, "older_than_days": days}
+async def prune_data(body: PruneDataRequest) -> Any:
+    sdk = get_machine_learning_sdk()
+    if body.confirm:
+        return await sdk.prune_data(body.older_than_days)
+    return await sdk.preview_prune_data(body.older_than_days)
 
 
-@router.delete("/data/all")
-async def delete_all_data(confirm: bool = Query(False)):
-    """Delete ALL training snapshots.  Requires confirm=true."""
+@router.delete("/data")
+async def delete_data(confirm: bool = Query(default=False)) -> Any:
     if not confirm:
-        raise HTTPException(400, "Pass confirm=true to delete all ML training data")
-
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(delete(MLTrainingSnapshot))
-        await session.commit()
-        return {"deleted": result.rowcount}
+        raise HTTPException(status_code=400, detail="Pass confirm=true to delete recorded data")
+    return await get_machine_learning_sdk().delete_all_data()
 
 
-# ── Training endpoints ────────────────────────────────────────────────────
-
-
-_training_tasks: set[asyncio.Task] = set()
-
-
-@router.post("/train")
-async def start_training(body: TrainRequest):
-    """Start an ML training job (async).  Returns job ID for polling."""
-    backend_ok, backend_error = is_training_backend_available(body.model_type)
-    if not backend_ok:
-        raise HTTPException(503, backend_error or "ML training backend unavailable")
-
-    assets = _normalize_ml_assets(body.assets if body.assets is not None else list(_ALLOWED_ML_ASSETS))
-    timeframes = _normalize_ml_timeframes(
-        body.timeframes if body.timeframes is not None else list(_ALLOWED_ML_TIMEFRAMES)
-    )
-
-    job_id = str(uuid.uuid4())
-
-    # Create job row
-    async with AsyncSessionLocal() as session:
-        existing_job_id = (
-            await session.execute(
-                select(MLTrainingJob.id)
-                .where(MLTrainingJob.status.in_(("queued", "running")))
-                .limit(1)
-            )
-        ).scalar_one_or_none()
-        if existing_job_id:
-            raise HTTPException(409, f"ML training job {existing_job_id} is already queued or running")
-
-        job = MLTrainingJob(
-            id=job_id,
-            status="queued",
-            model_type=body.model_type,
-            assets=assets,
-            timeframes=timeframes,
-            created_at=utcnow(),
-        )
-        session.add(job)
-        await session.commit()
-
-    # Launch training in background — hold a strong reference so
-    # the task isn't GC'd (which would leak DB connections).
-    task = asyncio.create_task(
-        run_training_job(
-            job_id=job_id,
-            model_type=body.model_type,
-            assets=assets,
-            timeframes=timeframes,
-            hyperparams=body.hyperparams,
-            days_lookback=body.days_lookback,
-        )
-    )
-    _training_tasks.add(task)
-    task.add_done_callback(_training_tasks.discard)
-
-    return {"job_id": job_id, "status": "queued"}
-
-
-@router.get("/train/jobs")
-async def list_training_jobs(
-    status: Optional[str] = Query(None),
-    limit: int = Query(20, ge=1, le=100),
-):
-    """List training jobs, newest first."""
-    async with AsyncSessionLocal() as session:
-        query = select(MLTrainingJob).order_by(MLTrainingJob.created_at.desc()).limit(limit)
-        if status:
-            query = query.where(MLTrainingJob.status == status)
-        rows = (await session.execute(query)).scalars().all()
-
-    return [
-        {
-            "id": r.id,
-            "status": r.status,
-            "model_type": r.model_type,
-            "assets": r.assets,
-            "timeframes": r.timeframes,
-            "progress": r.progress,
-            "message": r.message,
-            "error": r.error,
-            "trained_model_id": r.trained_model_id,
-            "result_summary": r.result_summary,
-            "created_at": r.created_at.isoformat() if r.created_at else None,
-            "started_at": r.started_at.isoformat() if r.started_at else None,
-            "finished_at": r.finished_at.isoformat() if r.finished_at else None,
-        }
-        for r in rows
-    ]
-
-
-@router.get("/train/jobs/{job_id}")
-async def get_training_job(job_id: str):
-    """Get a specific training job's status and results."""
-    async with AsyncSessionLocal() as session:
-        job = (await session.execute(select(MLTrainingJob).where(MLTrainingJob.id == job_id))).scalar_one_or_none()
-        if not job:
-            raise HTTPException(404, "Training job not found")
-
-    return {
-        "id": job.id,
-        "status": job.status,
-        "model_type": job.model_type,
-        "assets": job.assets,
-        "timeframes": job.timeframes,
-        "progress": job.progress,
-        "message": job.message,
-        "error": job.error,
-        "trained_model_id": job.trained_model_id,
-        "result_summary": job.result_summary,
-        "created_at": job.created_at.isoformat() if job.created_at else None,
-        "started_at": job.started_at.isoformat() if job.started_at else None,
-        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
-    }
-
-
-# ── Model management endpoints ────────────────────────────────────────────
+@router.post("/models/import")
+async def import_model(body: ImportModelRequest) -> Any:
+    try:
+        return await get_machine_learning_sdk().import_model(body.model_dump(exclude_none=True))
+    except Exception as exc:
+        raise _translate_ml_error(exc) from exc
 
 
 @router.get("/models")
-async def list_models(
-    status: Optional[str] = Query(None),
-    limit: int = Query(20, ge=1, le=100),
-):
-    """List trained models, newest first."""
-    async with AsyncSessionLocal() as session:
-        query = select(MLTrainedModel).order_by(MLTrainedModel.created_at.desc()).limit(limit)
-        if status:
-            query = query.where(MLTrainedModel.status == status)
-        rows = (await session.execute(query)).scalars().all()
-
-    return [
-        {
-            "id": r.id,
-            "name": r.name,
-            "model_type": r.model_type,
-            "version": r.version,
-            "status": r.status,
-            "assets": r.assets,
-            "timeframes": r.timeframes,
-            "train_accuracy": r.train_accuracy,
-            "test_accuracy": r.test_accuracy,
-            "test_auc": r.test_auc,
-            "feature_importance": r.feature_importance,
-            "train_samples": r.train_samples,
-            "test_samples": r.test_samples,
-            "training_date_range": r.training_date_range,
-            "walkforward_results": r.walkforward_results,
-            "created_at": r.created_at.isoformat() if r.created_at else None,
-            "promoted_at": r.promoted_at.isoformat() if r.promoted_at else None,
-            "notes": r.notes,
-        }
-        for r in rows
-    ]
+async def list_models(status: str | None = Query(default=None), limit: int = Query(default=100, ge=1, le=500)) -> Any:
+    return {"models": await get_machine_learning_sdk().list_models(status=status, limit=limit)}
 
 
 @router.get("/models/{model_id}")
-async def get_model(model_id: str):
-    """Get a specific model's details (including walk-forward results)."""
-    async with AsyncSessionLocal() as session:
-        model = (await session.execute(select(MLTrainedModel).where(MLTrainedModel.id == model_id))).scalar_one_or_none()
-        if not model:
-            raise HTTPException(404, "Model not found")
-
-    return {
-        "id": model.id,
-        "name": model.name,
-        "model_type": model.model_type,
-        "version": model.version,
-        "status": model.status,
-        "assets": model.assets,
-        "timeframes": model.timeframes,
-        "train_accuracy": model.train_accuracy,
-        "test_accuracy": model.test_accuracy,
-        "test_auc": model.test_auc,
-        "feature_importance": model.feature_importance,
-        "train_samples": model.train_samples,
-        "test_samples": model.test_samples,
-        "training_date_range": model.training_date_range,
-        "walkforward_results": model.walkforward_results,
-        "hyperparams": model.hyperparams,
-        "feature_names": model.feature_names,
-        "created_at": model.created_at.isoformat() if model.created_at else None,
-        "promoted_at": model.promoted_at.isoformat() if model.promoted_at else None,
-        "notes": model.notes,
-    }
-
-
-@router.post("/models/{model_id}/promote")
-async def promote_model_endpoint(model_id: str):
-    """Promote a trained model to 'active' status (demotes any currently active)."""
-    result = await promote_model(model_id)
-    if "error" in result:
-        raise HTTPException(404, result["error"])
-    return result
+async def get_model(model_id: str) -> Any:
+    model = await get_machine_learning_sdk().get_model(model_id)
+    if model is None:
+        raise HTTPException(status_code=404, detail="Model not found")
+    return {"model": model}
 
 
 @router.post("/models/{model_id}/archive")
-async def archive_model_endpoint(model_id: str):
-    """Archive a model (remove from active use)."""
-    result = await archive_model(model_id)
-    if "error" in result:
-        raise HTTPException(404, result["error"])
+async def archive_model(model_id: str) -> Any:
+    try:
+        result = await get_machine_learning_sdk().archive_model(model_id)
+    except Exception as exc:
+        raise _translate_ml_error(exc) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="Model not found")
     return result
 
 
 @router.delete("/models/{model_id}")
-async def delete_model(model_id: str, confirm: bool = Query(False)):
-    """Permanently delete a model.  Cannot delete 'active' models."""
+async def delete_model(model_id: str, confirm: bool = Query(default=False)) -> Any:
     if not confirm:
-        raise HTTPException(400, "Pass confirm=true to delete the model")
-
-    async with AsyncSessionLocal() as session:
-        model = (await session.execute(select(MLTrainedModel).where(MLTrainedModel.id == model_id))).scalar_one_or_none()
-        if not model:
-            raise HTTPException(404, "Model not found")
-        if model.status == "active":
-            raise HTTPException(400, "Cannot delete an active model. Archive it first.")
-
-        await session.delete(model)
-        await session.commit()
-        crypto_ml_runtime.invalidate_cache()
-        return {"deleted": model_id}
+        raise HTTPException(status_code=400, detail="Pass confirm=true to delete the model")
+    try:
+        result = await get_machine_learning_sdk().delete_model(model_id)
+    except Exception as exc:
+        raise _translate_ml_error(exc) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="Model not found")
+    return result
 
 
-# ── Active model (for strategies to consume) ──────────────────────────────
+@router.post("/adapters/train")
+async def train_adapter(body: TrainAdapterRequest) -> Any:
+    try:
+        return await get_machine_learning_sdk().start_adapter_training(body.model_dump(exclude_none=True))
+    except Exception as exc:
+        raise _translate_ml_error(exc) from exc
 
 
-@router.get("/active-model")
-async def get_active_model(model_type: Optional[str] = Query(None)):
-    """Get the currently active model (used by strategies at runtime)."""
-    async with AsyncSessionLocal() as session:
-        query = select(MLTrainedModel).where(MLTrainedModel.status == "active")
-        if model_type:
-            query = query.where(MLTrainedModel.model_type == model_type)
-        query = query.order_by(MLTrainedModel.promoted_at.desc()).limit(1)
-        model = (await session.execute(query)).scalar_one_or_none()
+@router.get("/adapters")
+async def list_adapters(status: str | None = Query(default=None), limit: int = Query(default=100, ge=1, le=500)) -> Any:
+    return {"adapters": await get_machine_learning_sdk().list_adapters(status=status, limit=limit)}
 
-    if not model:
-        return {"active": False, "model": None}
 
-    return {
-        "active": True,
-        "model": {
-            "id": model.id,
-            "name": model.name,
-            "model_type": model.model_type,
-            "version": model.version,
-            "test_accuracy": model.test_accuracy,
-            "test_auc": model.test_auc,
-            "promoted_at": model.promoted_at.isoformat() if model.promoted_at else None,
-        },
-    }
+@router.get("/adapters/{adapter_id}")
+async def get_adapter(adapter_id: str) -> Any:
+    adapter = await get_machine_learning_sdk().get_adapter(adapter_id)
+    if adapter is None:
+        raise HTTPException(status_code=404, detail="Adapter not found")
+    return {"adapter": adapter}
+
+
+@router.post("/adapters/{adapter_id}/archive")
+async def archive_adapter(adapter_id: str) -> Any:
+    try:
+        result = await get_machine_learning_sdk().archive_adapter(adapter_id)
+    except Exception as exc:
+        raise _translate_ml_error(exc) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="Adapter not found")
+    return result
+
+
+@router.delete("/adapters/{adapter_id}")
+async def delete_adapter(adapter_id: str, confirm: bool = Query(default=False)) -> Any:
+    if not confirm:
+        raise HTTPException(status_code=400, detail="Pass confirm=true to delete the adapter")
+    try:
+        result = await get_machine_learning_sdk().delete_adapter(adapter_id)
+    except Exception as exc:
+        raise _translate_ml_error(exc) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="Adapter not found")
+    return result
+
+
+@router.get("/deployments")
+async def list_deployments() -> Any:
+    return {"deployments": await get_machine_learning_sdk().list_deployments()}
+
+
+@router.get("/deployments/{task_key}")
+async def get_deployment(task_key: str) -> Any:
+    return {"deployment": await get_machine_learning_sdk().get_deployment(task_key)}
+
+
+@router.put("/deployments/{task_key}")
+async def update_deployment(task_key: str, body: UpdateDeploymentRequest) -> Any:
+    try:
+        deployment = await get_machine_learning_sdk().update_deployment(task_key, body.model_dump(exclude_none=True))
+    except Exception as exc:
+        raise _translate_ml_error(exc) from exc
+    return {"deployment": deployment}
+
+
+@router.get("/jobs")
+async def list_jobs(kind: str | None = Query(default=None), status: str | None = Query(default=None), limit: int = Query(default=100, ge=1, le=500)) -> Any:
+    return {"jobs": await get_machine_learning_sdk().list_jobs(kind=kind, status=status, limit=limit)}
+
+
+@router.get("/jobs/{job_id}")
+async def get_job(job_id: str) -> Any:
+    job = await get_machine_learning_sdk().get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"job": job}
+
+
+@router.post("/evaluations")
+async def trigger_evaluation(body: TriggerEvaluationRequest) -> Any:
+    try:
+        return await get_machine_learning_sdk().trigger_evaluation(body.model_dump())
+    except Exception as exc:
+        raise _translate_ml_error(exc) from exc

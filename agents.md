@@ -527,7 +527,7 @@ Use `atomWithStorage` for anything that should survive page refresh. Use plain `
 - Do not add empty `except: pass` blocks
 - Do not add input validation for internal service-to-service calls
 - Do not preserve old function signatures when changing them — update all callers
-- NEVER write tests tied to specific strategy slugs/classes (for example `tail_end_carry`). Strategies are dynamic DB-driven and may be missing or replaced across deployments. Test shared strategy infrastructure/behavior instead.
+- NEVER write tests tied to specific strategy slugs/classes (for example `tail_end_carry`). Strategies are dynamic, DB-driven, user-definable, and may be missing or replaced across deployments. Test shared strategy infrastructure/behavior instead.
 
 ## Proactive Cleanup
 

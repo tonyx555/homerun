@@ -24,6 +24,7 @@ from services.trader_orchestrator.execution_policies import (
     supports_reprice,
 )
 from services.trader_orchestrator.order_manager import (
+    LegSubmitResult,
     cancel_live_provider_order,
     submit_execution_wave,
 )
@@ -51,6 +52,9 @@ from services.trader_orchestrator_state import (
 from utils.converters import safe_float, safe_int
 from utils.utcnow import utcnow
 import services.trader_hot_state as hot_state
+
+
+_MIN_BUNDLE_EXECUTION_SHARES = 5.0
 
 
 def _iso_utc(value: datetime) -> str:
@@ -173,6 +177,13 @@ def _execution_profile_for_signal(
     context_source = (
         str(strategy_context.get("source_key") or "").strip().lower() if isinstance(strategy_context, dict) else ""
     )
+    market_roster = payload.get("market_roster")
+    market_roster = market_roster if isinstance(market_roster, dict) else {}
+    is_guaranteed_bundle = (
+        bool(payload.get("is_guaranteed"))
+        and legs_count > 1
+        and str(market_roster.get("scope") or "").strip().lower() == "event"
+    )
 
     is_traders = (
         source_key == "traders"
@@ -194,6 +205,20 @@ def _execution_profile_for_signal(
                 "leg_fill_tolerance_ratio": 0.02,
             },
         }
+    if is_guaranteed_bundle:
+        return {
+            "policy": "PAIR_LOCK",
+            "price_policy": "taker_limit",
+            "time_in_force": "IOC",
+            "constraints": {
+                "max_unhedged_notional_usd": 0.0,
+                "hedge_timeout_seconds": 3,
+                "session_timeout_seconds": 90,
+                "max_reprice_attempts": 0,
+                "pair_lock": True,
+                "leg_fill_tolerance_ratio": 0.02,
+            },
+        }
     return {
         "policy": "PARALLEL_MAKER" if legs_count > 1 else "SINGLE_LEG",
         "price_policy": "maker_limit",
@@ -209,6 +234,189 @@ def _execution_profile_for_signal(
     }
 
 
+def _signal_payload(signal: Any) -> dict[str, Any]:
+    payload = getattr(signal, "payload_json", None)
+    return payload if isinstance(payload, dict) else {}
+
+
+def _requires_full_bundle_execution(signal: Any, legs: list[dict[str, Any]]) -> bool:
+    if len(legs) < 2:
+        return False
+    payload = _signal_payload(signal)
+    if not bool(payload.get("is_guaranteed")):
+        return False
+    selected_market_ids = _selected_market_ids(legs)
+    if len(selected_market_ids) == 1:
+        return True
+    roster = payload.get("market_roster")
+    if isinstance(roster, dict) and str(roster.get("scope") or "").strip().lower() == "event":
+        return len(_required_roster_market_ids(signal)) > 1
+    execution_plan = payload.get("execution_plan")
+    execution_plan = execution_plan if isinstance(execution_plan, dict) else {}
+    metadata = execution_plan.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    market_coverage = metadata.get("market_coverage")
+    market_coverage = market_coverage if isinstance(market_coverage, dict) else {}
+    return bool(market_coverage.get("requires_full_market_coverage"))
+
+
+def _required_roster_market_ids(signal: Any) -> list[str]:
+    payload = _signal_payload(signal)
+    roster = payload.get("market_roster")
+    if not isinstance(roster, dict):
+        return []
+    if str(roster.get("scope") or "").strip().lower() != "event":
+        return []
+
+    required_ids: list[str] = []
+    for market in roster.get("markets") or []:
+        if not isinstance(market, dict):
+            continue
+        market_id = str(market.get("id") or market.get("market_id") or "").strip()
+        if market_id and market_id not in required_ids:
+            required_ids.append(market_id)
+    return required_ids
+
+
+def _selected_market_ids(legs: list[dict[str, Any]]) -> list[str]:
+    selected_ids: list[str] = []
+    for leg in legs:
+        market_id = str(leg.get("market_id") or "").strip()
+        if market_id and market_id not in selected_ids:
+            selected_ids.append(market_id)
+    return selected_ids
+
+
+def _entry_fill_metrics(result: Any, *, normalized_status: str) -> tuple[float, float, float | None]:
+    payload = dict(getattr(result, "payload", None) or {})
+    filled_shares = safe_float(payload.get("filled_size"), None)
+    avg_fill_price = safe_float(payload.get("average_fill_price"), None)
+    filled_notional = safe_float(payload.get("filled_notional_usd"), None)
+
+    if filled_shares is None and normalized_status == "executed":
+        filled_shares = safe_float(getattr(result, "shares", None), None)
+    if avg_fill_price is None:
+        avg_fill_price = safe_float(getattr(result, "effective_price", None), None)
+    if filled_notional is None:
+        if filled_shares is not None and filled_shares > 0.0 and avg_fill_price is not None and avg_fill_price > 0.0:
+            filled_notional = filled_shares * avg_fill_price
+        elif normalized_status == "executed":
+            filled_notional = safe_float(getattr(result, "notional_usd", None), None)
+
+    return (
+        max(0.0, float(filled_notional or 0.0)),
+        max(0.0, float(filled_shares or 0.0)),
+        avg_fill_price if avg_fill_price is not None and avg_fill_price > 0.0 else None,
+    )
+
+
+def _bundle_preflight_violation(
+    *,
+    signal: Any,
+    legs: list[dict[str, Any]],
+    strategy_params: dict[str, Any],
+    mode: str,
+    size_usd: float,
+) -> dict[str, Any] | None:
+    if str(mode or "").strip().lower() != "live":
+        return None
+    if not _requires_full_bundle_execution(signal, legs):
+        return None
+
+    required_market_ids = _required_roster_market_ids(signal)
+    if required_market_ids:
+        selected_market_ids = _selected_market_ids(legs)
+        if set(selected_market_ids) != set(required_market_ids):
+            return {
+                "reason": "incomplete_market_roster",
+                "required_market_ids": required_market_ids,
+                "selected_market_ids": selected_market_ids,
+            }
+
+    min_order_size_usd = StrategySDK.resolve_min_order_size_usd(strategy_params, mode=mode, fallback=1.0)
+    bundle_scale_required = 1.0
+    leg_shortfalls: list[dict[str, Any]] = []
+    for leg in legs:
+        leg_id = str(leg.get("leg_id") or "").strip() or "leg"
+        market_id = str(leg.get("market_id") or "").strip()
+        requested_notional = safe_float(leg.get("requested_notional_usd"), 0.0)
+        requested_shares = safe_float(leg.get("requested_shares"), 0.0)
+        limit_price = safe_float(leg.get("limit_price"), None)
+
+        if limit_price is None or limit_price <= 0.0:
+            return {
+                "reason": "missing_limit_price",
+                "leg_id": leg_id,
+                "market_id": market_id,
+            }
+        if requested_notional <= 0.0 or requested_shares <= 0.0:
+            return {
+                "reason": "invalid_leg_size",
+                "leg_id": leg_id,
+                "market_id": market_id,
+                "requested_notional_usd": requested_notional,
+                "requested_shares": requested_shares,
+            }
+
+        leg_scale_required = 1.0
+        if requested_shares < _MIN_BUNDLE_EXECUTION_SHARES:
+            leg_scale_required = max(leg_scale_required, _MIN_BUNDLE_EXECUTION_SHARES / requested_shares)
+        if requested_notional < min_order_size_usd:
+            leg_scale_required = max(leg_scale_required, min_order_size_usd / requested_notional)
+        if leg_scale_required > 1.0 + 1e-9:
+            bundle_scale_required = max(bundle_scale_required, leg_scale_required)
+            leg_shortfalls.append(
+                {
+                    "leg_id": leg_id,
+                    "market_id": market_id,
+                    "requested_notional_usd": requested_notional,
+                    "requested_shares": requested_shares,
+                    "minimum_notional_usd": float(min_order_size_usd),
+                    "minimum_shares": float(_MIN_BUNDLE_EXECUTION_SHARES),
+                    "required_scale": float(leg_scale_required),
+                }
+            )
+
+    if leg_shortfalls:
+        return {
+            "reason": "bundle_below_minimum_executable_size",
+            "requested_total_notional_usd": float(max(0.0, size_usd)),
+            "minimum_total_notional_usd": float(max(0.0, size_usd) * bundle_scale_required),
+            "minimum_order_size_usd": float(min_order_size_usd),
+            "leg_shortfalls": leg_shortfalls,
+        }
+    return None
+
+
+def _enforce_live_full_bundle_plan(
+    *,
+    signal: Any,
+    plan: dict[str, Any],
+    legs: list[dict[str, Any]],
+    constraints: dict[str, Any],
+) -> None:
+    if not _requires_full_bundle_execution(signal, legs):
+        return
+
+    plan["policy"] = "PAIR_LOCK"
+    plan["time_in_force"] = "IOC"
+    constraints["max_unhedged_notional_usd"] = 0.0
+    constraints["pair_lock"] = True
+    constraints["max_reprice_attempts"] = 0
+    constraints["hedge_timeout_seconds"] = min(max(1, safe_int(constraints.get("hedge_timeout_seconds"), 20)), 10)
+    plan["constraints"] = dict(constraints)
+
+    metadata = dict(plan.get("metadata") or {})
+    metadata["full_bundle_execution_required"] = True
+    metadata["full_bundle_execution_mode"] = "live_ioc_complete_or_flatten"
+    plan["metadata"] = metadata
+
+    for leg in legs:
+        leg["time_in_force"] = "IOC"
+        leg["price_policy"] = "taker_limit"
+        leg["post_only"] = False
+
+
 def _is_live_position_cap_skip(*, mode: str, status: str, error_message: str | None) -> bool:
     if str(mode or "").strip().lower() != "live":
         return False
@@ -218,6 +426,126 @@ def _is_live_position_cap_skip(*, mode: str, status: str, error_message: str | N
     if not error_text:
         return False
     return "maximum open positions" in error_text and "reached" in error_text
+
+
+_BUNDLE_FLATTEN_PRICE_BPS = 500.0
+
+
+def _result_payload(result: Any) -> dict[str, Any]:
+    payload = getattr(result, "payload", None)
+    return payload if isinstance(payload, dict) else {}
+
+
+def _result_fill_price(result: Any) -> float | None:
+    payload = _result_payload(result)
+    average_fill_price = safe_float(payload.get("average_fill_price"), None)
+    if average_fill_price is not None and average_fill_price > 0.0:
+        return float(average_fill_price)
+    effective_price = safe_float(getattr(result, "effective_price", None), None)
+    if effective_price is not None and effective_price > 0.0:
+        return float(effective_price)
+    return None
+
+
+def _result_filled_shares(result: Any) -> float:
+    payload = _result_payload(result)
+    filled_size = max(0.0, safe_float(payload.get("filled_size"), 0.0) or 0.0)
+    if filled_size > 0.0:
+        return float(filled_size)
+    status_key = str(getattr(result, "status", "") or "").strip().lower()
+    if status_key == "executed":
+        return max(0.0, safe_float(getattr(result, "shares", None), 0.0) or 0.0)
+    return 0.0
+
+
+def _result_filled_notional(result: Any) -> float:
+    payload = _result_payload(result)
+    filled_notional = max(0.0, safe_float(payload.get("filled_notional_usd"), 0.0) or 0.0)
+    if filled_notional > 0.0:
+        return float(filled_notional)
+    filled_shares = _result_filled_shares(result)
+    fill_price = _result_fill_price(result)
+    if filled_shares > 0.0 and fill_price is not None and fill_price > 0.0:
+        return float(filled_shares * fill_price)
+    status_key = str(getattr(result, "status", "") or "").strip().lower()
+    if status_key == "executed":
+        return max(0.0, safe_float(getattr(result, "notional_usd", None), 0.0) or 0.0)
+    return 0.0
+
+
+def _remaining_requested_shares(*, requested_shares: Any, filled_shares: Any, tolerance_ratio: Any) -> float:
+    requested = max(0.0, safe_float(requested_shares, 0.0) or 0.0)
+    if requested <= 0.0:
+        return 0.0
+    filled = max(0.0, safe_float(filled_shares, 0.0) or 0.0)
+    remaining = max(0.0, requested - filled)
+    tolerance = max(0.0, min(1.0, safe_float(tolerance_ratio, 0.0) or 0.0))
+    if remaining <= requested * tolerance:
+        return 0.0
+    return float(remaining)
+
+
+def _event_bundle_coverage(signal_payload: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any] | None:
+    roster = signal_payload.get("market_roster")
+    if not isinstance(roster, dict):
+        return None
+    if str(roster.get("scope") or "").strip().lower() != "event":
+        return None
+    if not bool(signal_payload.get("is_guaranteed")):
+        return None
+
+    roster_market_ids: list[str] = []
+    seen_roster_market_ids: set[str] = set()
+    for raw_market in roster.get("markets") or []:
+        if not isinstance(raw_market, dict):
+            continue
+        market_id = str(raw_market.get("id") or raw_market.get("market_id") or "").strip()
+        if not market_id or market_id in seen_roster_market_ids:
+            continue
+        seen_roster_market_ids.add(market_id)
+        roster_market_ids.append(market_id)
+    if len(roster_market_ids) <= 1:
+        return None
+
+    plan_market_ids: list[str] = []
+    seen_plan_market_ids: set[str] = set()
+    for raw_leg in plan.get("legs") or []:
+        if not isinstance(raw_leg, dict):
+            continue
+        market_id = str(raw_leg.get("market_id") or "").strip()
+        if not market_id or market_id in seen_plan_market_ids:
+            continue
+        seen_plan_market_ids.add(market_id)
+        plan_market_ids.append(market_id)
+    if len(plan_market_ids) <= 1:
+        return None
+
+    roster_market_id_set = set(roster_market_ids)
+    event_internal_bundle = all(market_id in roster_market_id_set for market_id in plan_market_ids)
+    if not event_internal_bundle:
+        return None
+
+    missing_market_ids = [market_id for market_id in roster_market_ids if market_id not in seen_plan_market_ids]
+    return {
+        "event_id": str(roster.get("event_id") or "").strip() or None,
+        "event_slug": str(roster.get("event_slug") or "").strip() or None,
+        "roster_hash": str(roster.get("roster_hash") or "").strip() or None,
+        "roster_market_ids": roster_market_ids,
+        "plan_market_ids": plan_market_ids,
+        "missing_market_ids": missing_market_ids,
+    }
+
+
+def _recovery_price(*, side: str, base_price: float | None, price_bps: float) -> float | None:
+    if base_price is None or base_price <= 0.0:
+        return None
+    bps = max(0.0, float(price_bps))
+    side_key = str(side or "").strip().upper()
+    if side_key == "SELL":
+        adjusted = float(base_price) * (1.0 - (bps / 10_000.0))
+    else:
+        adjusted = float(base_price) * (1.0 + (bps / 10_000.0))
+    return max(0.01, min(0.99, adjusted))
 
 
 @dataclass
@@ -417,6 +745,9 @@ class ExecutionSessionEngine:
             size_usd=size_usd,
             risk_limits=risk_limits,
         )
+        signal_payload = getattr(signal, "payload_json", None)
+        signal_payload = signal_payload if isinstance(signal_payload, dict) else {}
+        _enforce_live_full_bundle_plan(signal=signal, plan=plan, legs=legs, constraints=constraints)
         session_timeout_seconds = safe_int(constraints.get("session_timeout_seconds"), 300)
         expires_at = utcnow() + timedelta(seconds=max(1, session_timeout_seconds))
         session_row, built_leg_rows = build_execution_session_rows(
@@ -446,6 +777,7 @@ class ExecutionSessionEngine:
         trader_orders: list[TraderOrder] = []
         leg_execution_records: list[dict[str, Any]] = []
         order_write_inputs: list[dict[str, Any]] = []
+        recovery_order_write_inputs: list[dict[str, Any]] = []
         created_order_records: list[dict[str, Any]] = []
         orders_written = 0
         failed_legs = 0
@@ -453,6 +785,7 @@ class ExecutionSessionEngine:
         open_legs = 0
         completed_legs = 0
         skip_reasons: list[str] = []
+        bundle_recovery_outcome: dict[str, Any] | None = None
 
         def _append_event(
             *,
@@ -599,7 +932,78 @@ class ExecutionSessionEngine:
             message=f"Execution session created with {len(legs)} leg(s)",
             payload={"policy": plan["policy"], "mode": mode},
         )
+
+        bundle_coverage = _event_bundle_coverage(signal_payload, plan)
+        if bundle_coverage is not None and list(bundle_coverage.get("missing_market_ids") or []):
+            rejection_reason = "Guaranteed event bundle does not cover the full event market roster."
+            _append_event(
+                event_type="session_rejected",
+                severity="error",
+                message=rejection_reason,
+                payload=bundle_coverage,
+            )
+            _update_session_status(
+                status="failed",
+                error_message=rejection_reason,
+                payload_patch={
+                    "orders_written": 0,
+                    "bundle_coverage": bundle_coverage,
+                },
+            )
+            await _persist_execution_projection(signal_status="failed", effective_price=None)
+            return SessionExecutionResult(
+                session_id=session_row.id,
+                status="failed",
+                effective_price=None,
+                error_message=rejection_reason,
+                orders_written=0,
+                payload={
+                    "execution_plan": plan,
+                    "bundle_coverage": bundle_coverage,
+                    "legs": [],
+                },
+                created_orders=[],
+            )
+
         _update_session_status(status="placing")
+
+        preflight_violation = _bundle_preflight_violation(
+            signal=signal,
+            legs=legs,
+            strategy_params=strategy_params,
+            mode=mode,
+            size_usd=size_usd,
+        )
+        if preflight_violation is not None:
+            rejection_reason = "Bundle cannot be executed safely at the selected size."
+            _append_event(
+                event_type="session_rejected",
+                severity="error",
+                message=rejection_reason,
+                payload=preflight_violation,
+            )
+            _update_session_status(
+                status="failed",
+                error_message=rejection_reason,
+                payload_patch={
+                    "orders_written": 0,
+                    "bundle_preflight": preflight_violation,
+                },
+            )
+            await _persist_execution_projection(signal_status="failed", effective_price=None)
+            return SessionExecutionResult(
+                session_id=session_row.id,
+                status="failed",
+                effective_price=None,
+                error_message=rejection_reason,
+                orders_written=0,
+                payload={
+                    "execution_plan": plan,
+                    "bundle_preflight": preflight_violation,
+                    "legs": [],
+                },
+                created_orders=[],
+            )
 
         waves = execution_waves(plan["policy"], legs)
         reprice_enabled = supports_reprice(plan["policy"])
@@ -617,6 +1021,7 @@ class ExecutionSessionEngine:
                     mode=mode,
                     signal=signal,
                     legs_with_notionals=wave_with_notionals,
+                    strategy_params=strategy_params,
                 )
 
             for result in wave_results:
@@ -675,6 +1080,7 @@ class ExecutionSessionEngine:
                                     legs_with_notionals=[
                                         (leg_payload, safe_float(leg_payload.get("requested_notional_usd"), 0.0))
                                     ],
+                                    strategy_params=strategy_params,
                                 )
                             )[0]
                         normalized_retry = str(retry_result.status or "").strip().lower()
@@ -694,21 +1100,16 @@ class ExecutionSessionEngine:
                                 payload={"new_limit_price": reprice_price},
                             )
 
-                filled_notional = (
-                    safe_float(result.notional_usd, 0.0)
-                    if normalized_status in {"executed", "open", "submitted"}
-                    else 0.0
-                )
-                filled_shares = (
-                    safe_float(result.shares, 0.0) if normalized_status in {"executed", "open", "submitted"} else 0.0
-                )
+                actual_filled_shares = _result_filled_shares(result)
+                actual_filled_notional = _result_filled_notional(result)
+                actual_fill_price = _result_fill_price(result)
 
                 _update_leg_row(
                     leg_row=leg_row,
                     status=mapped_leg_status,
-                    filled_notional_usd=filled_notional,
-                    filled_shares=filled_shares,
-                    avg_fill_price=safe_float(result.effective_price, None),
+                    filled_notional_usd=actual_filled_notional,
+                    filled_shares=actual_filled_shares,
+                    avg_fill_price=actual_fill_price,
                     last_error=result.error_message if mapped_leg_status in {"failed", "skipped"} else None,
                     metadata_patch={
                         "wave_index": wave_index,
@@ -735,10 +1136,6 @@ class ExecutionSessionEngine:
                     getattr(signal, "strategy_context_json", None) or getattr(signal, "strategy_context", None) or {}
                 )
                 signal_payload = getattr(signal, "payload_json", None)
-                if isinstance(signal_payload, dict):
-                    live_market_payload = signal_payload.get("live_market")
-                    if isinstance(live_market_payload, dict):
-                        order_payload["live_market"] = dict(live_market_payload)
                 params = dict(strategy_params or {})
                 order_payload["strategy_params"] = dict(params)
                 exit_config: dict[str, Any] = {}
@@ -822,6 +1219,25 @@ class ExecutionSessionEngine:
                     order_payload["direction"] = leg_direction
                 if leg_entry_price is not None and leg_entry_price > 0.0:
                     order_payload["entry_price"] = float(leg_entry_price)
+                if isinstance(signal_payload, dict):
+                    live_market_payload = signal_payload.get("live_market")
+                    if isinstance(live_market_payload, dict):
+                        signal_selected_token_id = str(live_market_payload.get("selected_token_id") or "").strip()
+                        signal_market_key = str(
+                            live_market_payload.get("market_id") or live_market_payload.get("condition_id") or ""
+                        ).strip().lower()
+                        leg_token_id = str(leg_payload.get("token_id") or "").strip()
+                        leg_market_key = leg_market_id.strip().lower() if leg_market_id else ""
+                        if (
+                            signal_selected_token_id
+                            and leg_token_id
+                            and signal_selected_token_id == leg_token_id
+                        ) or (
+                            signal_market_key
+                            and leg_market_key
+                            and signal_market_key == leg_market_key
+                        ):
+                            order_payload["live_market"] = dict(live_market_payload)
                 live_market_payload = order_payload.get("live_market")
                 live_market = dict(live_market_payload) if isinstance(live_market_payload, dict) else {}
                 if leg_market_id:
@@ -854,6 +1270,10 @@ class ExecutionSessionEngine:
                             "result": result,
                             "order_payload": order_payload,
                             "exit_config": exit_config,
+                            "requested_shares": safe_float(leg_payload.get("requested_shares"), None),
+                            "actual_filled_shares": actual_filled_shares,
+                            "actual_filled_notional_usd": actual_filled_notional,
+                            "actual_fill_price": actual_fill_price,
                         }
                     )
 
@@ -861,8 +1281,9 @@ class ExecutionSessionEngine:
                     {
                         "leg_id": leg_id,
                         "status": normalized_status,
-                        "effective_price": safe_float(result.effective_price, None),
-                        "notional_usd": safe_float(result.notional_usd, 0.0),
+                        "effective_price": actual_fill_price,
+                        "notional_usd": actual_filled_notional,
+                        "filled_shares": actual_filled_shares,
                     }
                 )
 
@@ -870,6 +1291,11 @@ class ExecutionSessionEngine:
         max_unhedged = safe_float(constraints.get("max_unhedged_notional_usd"), 0.0)
         if pair_lock_enabled and max_unhedged > 0:
             current_unhedged = safe_float(getattr(session_row, "unhedged_notional_usd", None), 0.0)
+            if current_unhedged <= 0.0:
+                session_detail = await get_execution_session_detail(self.db, session_row.id)
+                session_view = session_detail.get("session") if isinstance(session_detail, dict) else {}
+                if isinstance(session_view, dict):
+                    current_unhedged = safe_float(session_view.get("unhedged_notional_usd"), current_unhedged)
             if current_unhedged > max_unhedged:
                 violation_reason = (
                     f"Pair lock violation: unhedged notional {current_unhedged:.2f} exceeded {max_unhedged:.2f}."
@@ -974,12 +1400,398 @@ class ExecutionSessionEngine:
                     created_orders=created_order_records,
                 )
 
-        for item in order_write_inputs:
+        tolerance_ratio = max(0.0, min(1.0, safe_float(constraints.get("leg_fill_tolerance_ratio"), 0.02) or 0.02))
+        has_partial_bundle_fill = len(legs) > 1 and any(
+            safe_float(item.get("actual_filled_shares"), 0.0) > 0.0 for item in order_write_inputs
+        ) and any(
+            _remaining_requested_shares(
+                requested_shares=item.get("requested_shares"),
+                filled_shares=item.get("actual_filled_shares"),
+                tolerance_ratio=tolerance_ratio,
+            )
+            > 0.0
+            for item in order_write_inputs
+        )
+        if has_partial_bundle_fill:
+            _append_event(
+                event_type="bundle_recovery_started",
+                severity="warn",
+                message="Multi-leg entry partially filled; attempting completion rescue before flatten.",
+                payload={"leg_fill_tolerance_ratio": tolerance_ratio},
+            )
+
+            cancelled_provider_orders: list[str] = []
+            cancel_failed_provider_orders: list[str] = []
+            for item in order_write_inputs:
+                remaining_shares = _remaining_requested_shares(
+                    requested_shares=item.get("requested_shares"),
+                    filled_shares=item.get("actual_filled_shares"),
+                    tolerance_ratio=tolerance_ratio,
+                )
+                if remaining_shares <= 0.0:
+                    continue
+                normalized_status = str(item.get("normalized_status") or "").strip().lower()
+                if normalized_status not in {"open", "submitted"}:
+                    continue
+                result = item.get("result")
+                candidate_ids = [
+                    str(getattr(result, "provider_clob_order_id", "") or "").strip(),
+                    str(getattr(result, "provider_order_id", "") or "").strip(),
+                ]
+                for candidate_id in candidate_ids:
+                    if not candidate_id:
+                        continue
+                    async with release_conn(self.db):
+                        cancelled = await cancel_live_provider_order(candidate_id)
+                    if cancelled:
+                        cancelled_provider_orders.append(candidate_id)
+                        break
+                else:
+                    cancel_failed_provider_orders.extend([candidate_id for candidate_id in candidate_ids if candidate_id])
+
+            rescue_inputs: list[tuple[dict[str, Any], float, dict[str, Any], float, float]] = []
+            for item in order_write_inputs:
+                remaining_shares = _remaining_requested_shares(
+                    requested_shares=item.get("requested_shares"),
+                    filled_shares=item.get("actual_filled_shares"),
+                    tolerance_ratio=tolerance_ratio,
+                )
+                if remaining_shares <= 0.0:
+                    continue
+                leg_payload = dict(item.get("leg_payload") or {})
+                side_key = str(leg_payload.get("side") or "buy").strip().lower()
+                base_price = safe_float(
+                    leg_payload.get("limit_price"),
+                    safe_float(item.get("actual_fill_price"), safe_float(getattr(item.get("result"), "effective_price", None), None)),
+                )
+                rescue_price = reprice_limit_price(base_price, side_key, 2) if base_price is not None else None
+                if rescue_price is None or rescue_price <= 0.0:
+                    rescue_price = base_price
+                leg_payload["price_policy"] = "taker_limit"
+                leg_payload["time_in_force"] = "IOC"
+                leg_payload["post_only"] = False
+                if rescue_price is not None and rescue_price > 0.0:
+                    leg_payload["limit_price"] = rescue_price
+                rescue_notional = remaining_shares * max(0.0001, safe_float(leg_payload.get("limit_price"), 0.01) or 0.01)
+                rescue_inputs.append((leg_payload, rescue_notional, item, rescue_price or 0.0, remaining_shares))
+
+            rescue_results: list[Any] = []
+            if rescue_inputs:
+                async with release_conn(self.db):
+                    rescue_results = await submit_execution_wave(
+                        mode=mode,
+                        signal=signal,
+                        legs_with_notionals=[(leg_payload, rescue_notional) for leg_payload, rescue_notional, _, _, _ in rescue_inputs],
+                        strategy_params=strategy_params,
+                    )
+
+            for rescue_result, (_, _, item, rescue_price, remaining_shares) in zip(rescue_results, rescue_inputs):
+                rescue_filled_shares = _result_filled_shares(rescue_result)
+                rescue_filled_notional = _result_filled_notional(rescue_result)
+                rescue_fill_price = _result_fill_price(rescue_result)
+                item["actual_filled_shares"] = float(max(0.0, safe_float(item.get("actual_filled_shares"), 0.0) + rescue_filled_shares))
+                item["actual_filled_notional_usd"] = float(
+                    max(0.0, safe_float(item.get("actual_filled_notional_usd"), 0.0) + rescue_filled_notional)
+                )
+                if rescue_fill_price is not None and rescue_fill_price > 0.0:
+                    item["actual_fill_price"] = rescue_fill_price
+
+                leg_row_id = str(item.get("leg_row_id") or "").strip()
+                leg_row = next(
+                    (candidate for candidate in leg_rows.values() if str(candidate.id or "") == leg_row_id),
+                    None,
+                )
+                if leg_row is not None:
+                    post_rescue_remaining = _remaining_requested_shares(
+                        requested_shares=item.get("requested_shares"),
+                        filled_shares=item.get("actual_filled_shares"),
+                        tolerance_ratio=tolerance_ratio,
+                    )
+                    rescue_status_key = str(getattr(rescue_result, "status", "") or "").strip().lower()
+                    if post_rescue_remaining <= 0.0:
+                        updated_leg_status = "completed"
+                    elif rescue_status_key in {"open", "submitted"}:
+                        updated_leg_status = "failed"
+                    else:
+                        updated_leg_status = "failed"
+                    _update_leg_row(
+                        leg_row=leg_row,
+                        status=updated_leg_status,
+                        filled_notional_usd=safe_float(item.get("actual_filled_notional_usd"), 0.0),
+                        filled_shares=safe_float(item.get("actual_filled_shares"), 0.0),
+                        avg_fill_price=safe_float(item.get("actual_fill_price"), None),
+                        last_error=(
+                            None
+                            if updated_leg_status == "completed"
+                            else str(getattr(rescue_result, "error_message", "") or "completion_rescue_incomplete")
+                        ),
+                        metadata_patch={
+                            "completion_rescue": {
+                                "requested_remaining_shares": remaining_shares,
+                                "fallback_price": rescue_price if rescue_price > 0.0 else None,
+                                "status": rescue_status_key,
+                                "filled_shares": rescue_filled_shares,
+                                "effective_price": rescue_fill_price,
+                            }
+                        },
+                    )
+
+                for record in leg_execution_records:
+                    if str(record.get("leg_id") or "") != str(item.get("leg_id") or ""):
+                        continue
+                    record["status"] = str(getattr(rescue_result, "status", "") or "").strip().lower() or record.get("status")
+                    record["effective_price"] = safe_float(item.get("actual_fill_price"), record.get("effective_price"))
+                    record["notional_usd"] = safe_float(item.get("actual_filled_notional_usd"), record.get("notional_usd"))
+                    record["filled_shares"] = safe_float(item.get("actual_filled_shares"), record.get("filled_shares"))
+                    break
+
+                recovery_payload = {
+                    **dict(item.get("order_payload") or {}),
+                    "bundle_recovery": {
+                        "recovery_action": "completion_rescue",
+                        "requested_remaining_shares": float(remaining_shares),
+                        "filled_shares": float(rescue_filled_shares),
+                        "effective_price": rescue_fill_price,
+                    },
+                }
+                recovery_order_write_inputs.append(
+                    {
+                        "leg_id": str(item.get("leg_id") or ""),
+                        "leg_row_id": leg_row_id,
+                        "leg_payload": dict(item.get("leg_payload") or {}),
+                        "market_id": str(item.get("market_id") or ""),
+                        "market_question": str(item.get("market_question") or ""),
+                        "direction": str(item.get("direction") or ""),
+                        "entry_price": safe_float(rescue_price, safe_float(rescue_fill_price, None)),
+                        "normalized_status": str(getattr(rescue_result, "status", "") or "").strip().lower() or "failed",
+                        "result": rescue_result,
+                        "order_payload": recovery_payload,
+                        "exit_config": {},
+                        "requested_shares": float(max(0.0, remaining_shares)),
+                        "actual_filled_shares": float(max(0.0, rescue_filled_shares)),
+                        "actual_filled_notional_usd": float(max(0.0, rescue_filled_notional)),
+                        "actual_fill_price": rescue_fill_price,
+                        "session_order_action": "hedge_rescue",
+                    }
+                )
+                _append_event(
+                    event_type="bundle_completion_rescue",
+                    severity="warn" if rescue_filled_shares <= 0.0 else "info",
+                    leg_id=leg_row_id or None,
+                    message="Completion rescue attempted for incomplete leg.",
+                    payload={
+                        "requested_remaining_shares": remaining_shares,
+                        "rescue_status": str(getattr(rescue_result, "status", "") or "").strip().lower() or "failed",
+                        "rescue_filled_shares": rescue_filled_shares,
+                        "rescue_filled_notional_usd": rescue_filled_notional,
+                        "rescue_effective_price": rescue_fill_price,
+                    },
+                )
+
+            residual_bundle_items = [
+                item
+                for item in order_write_inputs
+                if _remaining_requested_shares(
+                    requested_shares=item.get("requested_shares"),
+                    filled_shares=item.get("actual_filled_shares"),
+                    tolerance_ratio=tolerance_ratio,
+                )
+                > 0.0
+            ]
+            if residual_bundle_items:
+                flatten_attempts: list[dict[str, Any]] = []
+                for item in order_write_inputs:
+                    filled_shares = max(0.0, safe_float(item.get("actual_filled_shares"), 0.0) or 0.0)
+                    if filled_shares <= 0.0:
+                        continue
+                    leg_payload = dict(item.get("leg_payload") or {})
+                    flatten_side = "SELL" if str(leg_payload.get("side") or "buy").strip().lower() == "buy" else "BUY"
+                    token_id = str(item.get("order_payload", {}).get("token_id") or leg_payload.get("token_id") or "").strip()
+                    base_price = safe_float(
+                        item.get("actual_fill_price"),
+                        safe_float(leg_payload.get("limit_price"), safe_float(getattr(item.get("result"), "effective_price", None), None)),
+                    )
+                    fallback_price = _recovery_price(
+                        side=flatten_side,
+                        base_price=base_price,
+                        price_bps=_BUNDLE_FLATTEN_PRICE_BPS,
+                    )
+                    flatten_execution = await execute_live_order(
+                        token_id=token_id,
+                        side=flatten_side,
+                        size=float(filled_shares),
+                        fallback_price=fallback_price,
+                        market_question=str(item.get("market_question") or ""),
+                        opportunity_id=str(getattr(signal, "id", "") or ""),
+                        time_in_force="IOC",
+                        post_only=False,
+                        resolve_live_price=True,
+                        prefer_cached_price=True,
+                    )
+                    flatten_filled_shares = max(
+                        0.0,
+                        safe_float(flatten_execution.payload.get("filled_size"), 0.0) or 0.0,
+                    )
+                    if flatten_filled_shares <= 0.0 and flatten_execution.status == "executed":
+                        flatten_filled_shares = filled_shares
+                    flatten_price = safe_float(
+                        flatten_execution.payload.get("average_fill_price"),
+                        safe_float(flatten_execution.effective_price, None),
+                    )
+                    flatten_notional = 0.0
+                    if flatten_filled_shares > 0.0 and flatten_price is not None and flatten_price > 0.0:
+                        flatten_notional = flatten_filled_shares * flatten_price
+                    flatten_residual = max(0.0, filled_shares - flatten_filled_shares)
+                    flatten_attempts.append(
+                        {
+                            "leg_id": str(item.get("leg_id") or ""),
+                            "leg_row_id": str(item.get("leg_row_id") or ""),
+                            "token_id": token_id or None,
+                            "status": str(flatten_execution.status or "").strip().lower() or "failed",
+                            "filled_shares": flatten_filled_shares,
+                            "requested_shares": filled_shares,
+                            "residual_shares": flatten_residual,
+                            "effective_price": flatten_price,
+                            "error_message": flatten_execution.error_message,
+                        }
+                    )
+                    item["bundle_recovery"] = {
+                        "recovery_action": "flatten_after_incomplete_entry",
+                        "flatten_status": str(flatten_execution.status or "").strip().lower() or "failed",
+                        "flatten_filled_shares": flatten_filled_shares,
+                        "residual_shares": flatten_residual,
+                        "effective_price": flatten_price,
+                    }
+                    flatten_payload = {
+                        **dict(item.get("order_payload") or {}),
+                        "bundle_recovery": {
+                            "recovery_action": "flatten_after_incomplete_entry",
+                            "entry_filled_shares": float(filled_shares),
+                            "flatten_filled_shares": float(flatten_filled_shares),
+                            "residual_shares": float(flatten_residual),
+                            "effective_price": flatten_price,
+                        },
+                    }
+                    if flatten_filled_shares > 0.0 and flatten_price is not None and flatten_price > 0.0:
+                        flatten_payload["position_close"] = {
+                            "close_price": float(flatten_price),
+                            "price_source": "bundle_recovery_flatten",
+                            "close_trigger": "bundle_partial_fill_flatten",
+                            "filled_size": float(flatten_filled_shares),
+                            "filled_notional_usd": float(flatten_notional),
+                            "closed_at": _iso_utc(utcnow()),
+                            "reason": "Bundle entry failed; flatten executed.",
+                        }
+                    flatten_leg_payload = dict(leg_payload)
+                    flatten_leg_payload["side"] = flatten_side.lower()
+                    flatten_leg_payload["time_in_force"] = "IOC"
+                    flatten_leg_payload["post_only"] = False
+                    if fallback_price is not None and fallback_price > 0.0:
+                        flatten_leg_payload["limit_price"] = fallback_price
+                    recovery_order_write_inputs.append(
+                        {
+                            "leg_id": str(item.get("leg_id") or ""),
+                            "leg_row_id": str(item.get("leg_row_id") or ""),
+                            "leg_payload": flatten_leg_payload,
+                            "market_id": str(item.get("market_id") or ""),
+                            "market_question": str(item.get("market_question") or ""),
+                            "direction": _resolve_leg_direction(
+                                flatten_leg_payload,
+                                str(item.get("direction") or ""),
+                            ),
+                            "entry_price": safe_float(fallback_price, flatten_price),
+                            "normalized_status": str(flatten_execution.status or "").strip().lower() or "failed",
+                            "result": LegSubmitResult(
+                                leg_id=str(item.get("leg_id") or ""),
+                                status=str(flatten_execution.status or "").strip().lower() or "failed",
+                                effective_price=flatten_price,
+                                error_message=flatten_execution.error_message,
+                                payload=dict(flatten_execution.payload or {}),
+                                provider_order_id=flatten_execution.order_id,
+                                provider_clob_order_id=str(flatten_execution.payload.get("clob_order_id") or "").strip() or None,
+                                shares=float(filled_shares),
+                                notional_usd=float(flatten_notional),
+                            ),
+                            "order_payload": flatten_payload,
+                            "exit_config": {},
+                            "requested_shares": float(max(0.0, filled_shares)),
+                            "actual_filled_shares": float(max(0.0, flatten_filled_shares)),
+                            "actual_filled_notional_usd": float(max(0.0, flatten_notional)),
+                            "actual_fill_price": flatten_price,
+                            "session_order_action": "flatten",
+                            "persisted_order_status": (
+                                "executed"
+                                if flatten_filled_shares > 0.0
+                                else str(flatten_execution.status or "").strip().lower() or "failed"
+                            ),
+                        }
+                    )
+                    _append_event(
+                        event_type="bundle_flatten",
+                        severity="warn" if flatten_residual > 0.0 else "info",
+                        leg_id=str(item.get("leg_row_id") or "") or None,
+                        message="Flatten order submitted after incomplete multi-leg entry.",
+                        payload={
+                            "flatten_status": str(flatten_execution.status or "").strip().lower() or "failed",
+                            "requested_shares": filled_shares,
+                            "flatten_filled_shares": flatten_filled_shares,
+                            "residual_shares": flatten_residual,
+                            "effective_price": flatten_price,
+                        },
+                    )
+
+                residual_exposure = any(
+                    max(0.0, safe_float(attempt.get("residual_shares"), 0.0) or 0.0) > 0.0 for attempt in flatten_attempts
+                )
+                bundle_recovery_outcome = {
+                    "cancelled_provider_orders": cancelled_provider_orders,
+                    "cancel_failed_provider_orders": cancel_failed_provider_orders,
+                    "flatten_attempts": flatten_attempts,
+                    "residual_exposure": residual_exposure,
+                    "recovered_to_flat": not residual_exposure,
+                }
+                _append_event(
+                    event_type="bundle_recovery_completed",
+                    severity="error" if residual_exposure else "warn",
+                    message=(
+                        "Bundle recovery left residual exposure after flatten attempts."
+                        if residual_exposure
+                        else "Bundle recovery flattened filled legs after incomplete entry."
+                    ),
+                    payload=bundle_recovery_outcome,
+                )
+            else:
+                bundle_recovery_outcome = {
+                    "cancelled_provider_orders": cancelled_provider_orders,
+                    "cancel_failed_provider_orders": cancel_failed_provider_orders,
+                    "residual_exposure": False,
+                    "recovered_to_flat": False,
+                    "completion_rescue_succeeded": True,
+                }
+                _append_event(
+                    event_type="bundle_recovery_completed",
+                    severity="info",
+                    message="Bundle completion rescue filled the remaining legs.",
+                    payload=bundle_recovery_outcome,
+                )
+            failed_legs = sum(
+                1 for leg_row in leg_rows.values() if str(leg_row.status or "").strip().lower() in {"failed", "cancelled"}
+            )
+            open_legs = sum(1 for leg_row in leg_rows.values() if str(leg_row.status or "").strip().lower() == "open")
+            completed_legs = sum(
+                1 for leg_row in leg_rows.values() if str(leg_row.status or "").strip().lower() == "completed"
+            )
+
+        all_order_write_inputs = list(order_write_inputs) + list(recovery_order_write_inputs)
+        for item in all_order_write_inputs:
             result = item["result"]
             leg_payload = dict(item.get("leg_payload") or {})
             order_payload = dict(item.get("order_payload") or {})
             normalized_status = str(item.get("normalized_status") or "").strip().lower()
             exit_config = dict(item.get("exit_config") or {})
+            actual_filled_shares = max(0.0, safe_float(item.get("actual_filled_shares"), 0.0) or 0.0)
+            actual_filled_notional = max(0.0, safe_float(item.get("actual_filled_notional_usd"), 0.0) or 0.0)
+            actual_fill_price = safe_float(item.get("actual_fill_price"), None)
             leg_row_id = str(item.get("leg_row_id") or "").strip()
             leg_market_id = str(item.get("market_id") or leg_payload.get("market_id") or getattr(signal, "market_id", "") or "").strip()
             leg_market_question = (
@@ -1069,10 +1881,16 @@ class ExecutionSessionEngine:
                         pending_exit["last_error"] = str(tp_submit.error_message or "failed_to_place_take_profit_exit")
                     order_payload["pending_live_exit"] = pending_exit
 
+            bundle_recovery = item.get("bundle_recovery")
+            if isinstance(bundle_recovery, dict):
+                order_payload["bundle_recovery"] = dict(bundle_recovery)
+
             persisted_order_status = (
                 "open" if mode in {"live", "shadow"} and normalized_status == "executed" else normalized_status
             )
-
+            explicit_persisted_status = str(item.get("persisted_order_status") or "").strip().lower()
+            if explicit_persisted_status:
+                persisted_order_status = explicit_persisted_status
             trader_order = build_trader_order_row(
                 trader_id=trader_id,
                 signal=signal,
@@ -1081,8 +1899,8 @@ class ExecutionSessionEngine:
                 strategy_version=strategy_version,
                 mode=mode,
                 status=persisted_order_status,
-                notional_usd=safe_float(result.notional_usd, 0.0),
-                effective_price=safe_float(result.effective_price, None),
+                notional_usd=actual_filled_notional,
+                effective_price=actual_fill_price,
                 reason=reason,
                 payload=order_payload,
                 error_message=result.error_message,
@@ -1099,10 +1917,10 @@ class ExecutionSessionEngine:
                     "market_id": str(trader_order.market_id or ""),
                     "direction": str(trader_order.direction or ""),
                     "source": str(getattr(signal, "source", "") or ""),
-                    "notional_usd": safe_float(result.notional_usd, 0.0),
-                    "entry_price": safe_float(trader_order.entry_price, safe_float(result.effective_price, 0.0)),
+                    "notional_usd": actual_filled_notional,
+                    "entry_price": safe_float(trader_order.entry_price, actual_fill_price),
                     "token_id": str(leg_payload.get("token_id") or ""),
-                    "filled_shares": safe_float(result.shares, 0.0),
+                    "filled_shares": actual_filled_shares,
                     "status": persisted_order_status,
                     "payload": order_payload,
                 }
@@ -1116,11 +1934,11 @@ class ExecutionSessionEngine:
                     trader_order_id=trader_order.id,
                     provider_order_id=result.provider_order_id,
                     provider_clob_order_id=result.provider_clob_order_id,
-                    action="submit",
+                    action=str(item.get("session_order_action") or "submit"),
                     side=str(leg_payload.get("side") or "buy"),
-                    price=safe_float(result.effective_price, None),
-                    size=safe_float(result.shares, None),
-                    notional_usd=safe_float(result.notional_usd, None),
+                    price=actual_fill_price,
+                    size=actual_filled_shares if actual_filled_shares > 0.0 else None,
+                    notional_usd=actual_filled_notional if actual_filled_notional > 0.0 else None,
                     status=normalized_status,
                     reason=reason,
                     payload_json=dict(result.payload or {}),
@@ -1136,7 +1954,22 @@ class ExecutionSessionEngine:
         hedging_timeout_seconds: int | None = None
         hedging_started_at: datetime | None = None
         hedging_deadline_at: datetime | None = None
-        if failed_legs == 0 and completed_legs == 0 and open_legs == 0 and skipped_legs > 0:
+        if bundle_recovery_outcome is not None:
+            residual_exposure = bool(bundle_recovery_outcome.get("residual_exposure"))
+            recovered_to_flat = bool(bundle_recovery_outcome.get("recovered_to_flat"))
+            completion_rescue_succeeded = bool(bundle_recovery_outcome.get("completion_rescue_succeeded"))
+            if residual_exposure or recovered_to_flat:
+                final_status = "failed"
+                signal_status = "executed" if residual_exposure else "failed"
+                error_message = (
+                    "Partial fill: attempted bundle recovery, but residual exposure remains."
+                    if residual_exposure
+                    else "Partial fill: bundle recovery flattened filled legs after incomplete entry."
+                )
+            elif completion_rescue_succeeded:
+                bundle_recovery_outcome = dict(bundle_recovery_outcome)
+                bundle_recovery_outcome["recovered_to_flat"] = False
+        elif failed_legs == 0 and completed_legs == 0 and open_legs == 0 and skipped_legs > 0:
             final_status = "skipped"
             signal_status = "skipped"
             error_message = skip_reasons[0] if skip_reasons else "Execution skipped before order submission."
@@ -1161,6 +1994,8 @@ class ExecutionSessionEngine:
             session_payload_patch["skipped_legs"] = skipped_legs
             if skip_reasons:
                 session_payload_patch["skip_reasons"] = skip_reasons[:5]
+        if bundle_recovery_outcome is not None:
+            session_payload_patch["bundle_recovery"] = bundle_recovery_outcome
         if final_status == "hedging" and hedging_started_at is not None and hedging_deadline_at is not None:
             session_payload_patch.update(
                 {

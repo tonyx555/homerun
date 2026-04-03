@@ -1019,6 +1019,9 @@ export interface TraderOrderTradeBundle {
   label: string
   leg_count: number
   is_guaranteed: boolean
+  signal_is_guaranteed: boolean
+  guarantee_proven: boolean
+  guarantee_reason: string | null
   roi_type: string | null
   mispricing_type: string | null
   total_cost: number | null
@@ -1026,6 +1029,8 @@ export interface TraderOrderTradeBundle {
   gross_profit: number | null
   net_profit: number | null
   roi_percent: number | null
+  planned_market_count: number
+  market_roster_count: number | null
   current_leg_id: string | null
   current_leg_index: number | null
   current_leg_token_id: string | null

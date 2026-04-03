@@ -110,6 +110,55 @@ async def test_submit_execution_leg_live_prefers_live_context_price_over_stale_l
 
 
 @pytest.mark.asyncio
+async def test_submit_execution_leg_live_taker_limit_caps_execution_to_dynamic_price_bound(monkeypatch):
+    execution_mock = AsyncMock(
+        return_value=LiveOrderExecution(
+            status="open",
+            effective_price=0.95,
+            error_message=None,
+            payload={"order_id": "ord-bounded-taker"},
+            order_id="ord-bounded-taker",
+        )
+    )
+    monkeypatch.setattr(order_manager, "execute_live_order", execution_mock)
+
+    signal = SimpleNamespace(
+        id="sig-bounded-taker",
+        market_id="123456789012345678",
+        direction="buy_yes",
+        entry_price=0.99,
+        market_question="Will capped taker execution hold?",
+        payload_json={"selected_token_id": "123456789012345678901"},
+    )
+
+    result = await order_manager.submit_execution_leg(
+        mode="live",
+        signal=signal,
+        leg={
+            "leg_id": "leg_1",
+            "market_id": signal.market_id,
+            "market_question": signal.market_question,
+            "side": "buy",
+            "outcome": "yes",
+            "limit_price": 0.99,
+            "price_policy": "taker_limit",
+        },
+        notional_usd=99.0,
+        strategy_params={
+            "min_upside_percent": 5.0,
+            "max_probability": 0.999,
+        },
+    )
+
+    assert result.status == "open"
+    execution_mock.assert_awaited_once()
+    submit_kwargs = execution_mock.await_args.kwargs
+    assert submit_kwargs["quote_aggressively"] is True
+    assert submit_kwargs["enforce_fallback_bound"] is False
+    assert submit_kwargs["max_execution_price"] == pytest.approx(100.0 / 105.0, rel=1e-9)
+
+
+@pytest.mark.asyncio
 async def test_submit_execution_leg_live_resolves_outcome_specific_token_and_price(monkeypatch):
     execution_mock = AsyncMock(
         return_value=LiveOrderExecution(
@@ -165,6 +214,61 @@ async def test_submit_execution_leg_live_resolves_outcome_specific_token_and_pri
     submit_kwargs = execution_mock.await_args.kwargs
     assert submit_kwargs["token_id"] == yes_token
     assert submit_kwargs["fallback_price"] == pytest.approx(0.88, rel=1e-9)
+
+
+@pytest.mark.asyncio
+async def test_submit_execution_leg_live_ignores_mismatched_signal_live_context(monkeypatch):
+    execution_mock = AsyncMock(
+        return_value=LiveOrderExecution(
+            status="open",
+            effective_price=0.50,
+            error_message=None,
+            payload={"order_id": "ord-mismatched-live-context"},
+            order_id="ord-mismatched-live-context",
+        )
+    )
+    monkeypatch.setattr(order_manager, "execute_live_order", execution_mock)
+
+    signal = SimpleNamespace(
+        id="sig-mismatched-live-context",
+        market_id="market-draw",
+        direction="buy_yes",
+        entry_price=0.29,
+        market_question="Will draw happen?",
+        payload_json={"selected_token_id": "123456789012345678901"},
+        live_context={
+            "market_id": "market-draw",
+            "selected_outcome": "yes",
+            "selected_token_id": "123456789012345678901",
+            "yes_token_id": "123456789012345678901",
+            "no_token_id": "223456789012345678901",
+            "token_ids": ["123456789012345678901", "223456789012345678901"],
+            "live_selected_price": 0.29,
+            "live_yes_price": 0.29,
+            "live_no_price": 0.71,
+        },
+    )
+
+    result = await order_manager.submit_execution_leg(
+        mode="live",
+        signal=signal,
+        leg={
+            "leg_id": "leg-home",
+            "market_id": "market-home",
+            "market_question": "Will home side win?",
+            "token_id": "323456789012345678901",
+            "side": "buy",
+            "outcome": "yes",
+            "limit_price": 0.50,
+        },
+        notional_usd=50.0,
+    )
+
+    assert result.status == "open"
+    execution_mock.assert_awaited_once()
+    submit_kwargs = execution_mock.await_args.kwargs
+    assert submit_kwargs["token_id"] == "323456789012345678901"
+    assert submit_kwargs["fallback_price"] == pytest.approx(0.50, rel=1e-9)
 
 
 @pytest.mark.asyncio

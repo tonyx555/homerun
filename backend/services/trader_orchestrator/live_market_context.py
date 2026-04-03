@@ -22,6 +22,20 @@ _POLYMARKET_NUMERIC_TOKEN_ID_RE = re.compile(r"^\d{18,}$")
 _POLYMARKET_HEX_TOKEN_ID_RE = re.compile(r"^(?:0x)?[0-9a-f]{40,}$")
 
 
+def _extract_machine_learning_probability(payload: dict[str, Any], *, direction: str) -> Optional[float]:
+    machine_learning = payload.get("machine_learning")
+    if not isinstance(machine_learning, dict):
+        return None
+    prediction = machine_learning.get("prediction")
+    candidate = prediction if isinstance(prediction, dict) else machine_learning
+    probability_yes = safe_float(candidate.get("probability_yes"))
+    if probability_yes is None or not (0.0 <= probability_yes <= 1.0):
+        return None
+    if direction == "buy_no":
+        return 1.0 - probability_yes
+    return probability_yes
+
+
 def _strict_ws_ttl_seconds_for_source(source: Any) -> float:
     default_ttl = max(0.05, float(getattr(settings, "WS_EXECUTION_PRICE_STALE_SECONDS", 1.0) or 1.0))
     normalized_source = str(source or "").strip().lower()
@@ -477,6 +491,16 @@ def _build_history_summary(
 
 
 def _extract_model_probability(signal: Any, *, direction: str) -> Optional[float]:
+    payload = getattr(signal, "payload_json", None)
+    if isinstance(payload, dict):
+        resolved = _extract_machine_learning_probability(payload, direction=direction)
+        if resolved is None:
+            live_market = payload.get("live_market")
+            if isinstance(live_market, dict):
+                resolved = _extract_machine_learning_probability(live_market, direction=direction)
+        if resolved is not None:
+            return resolved
+
     # Generic fallback for directional signals where edge = model_probability - entry_price.
     entry = safe_float(getattr(signal, "entry_price", None))
     edge = safe_float(getattr(signal, "edge_percent", None))
@@ -485,7 +509,6 @@ def _extract_model_probability(signal: Any, *, direction: str) -> Optional[float
         if 0.0 <= implied <= 1.0:
             return implied
 
-    payload = getattr(signal, "payload_json", None)
     if not isinstance(payload, dict):
         return None
 

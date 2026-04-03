@@ -109,3 +109,41 @@ async def test_execute_live_order_uses_fallback_when_live_quote_notional_below_s
     _, kwargs = place_mock.await_args
     assert kwargs["price"] == pytest.approx(0.80)
     assert get_price_mock.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_execute_live_order_aggressive_quote_respects_max_execution_price(monkeypatch):
+    ensure_mock = AsyncMock(return_value=True)
+    place_mock = AsyncMock(
+        return_value=SimpleNamespace(
+            status=OrderStatus.OPEN,
+            error_message=None,
+            average_fill_price=0.0,
+            id="order-789",
+            clob_order_id="clob-789",
+            filled_size=0.0,
+        )
+    )
+    monkeypatch.setattr(live_execution_adapter.live_execution_service, "ensure_initialized", ensure_mock)
+    monkeypatch.setattr(live_execution_adapter.live_execution_service, "place_order", place_mock)
+    get_price_mock = AsyncMock(side_effect=[0.94, 0.96])
+    monkeypatch.setattr(
+        live_execution_adapter.polymarket_client,
+        "get_price",
+        get_price_mock,
+    )
+
+    result = await live_execution_adapter.execute_live_order(
+        token_id="123456789012345678901",
+        side="BUY",
+        size=10.0,
+        fallback_price=0.95,
+        quote_aggressively=True,
+        max_execution_price=0.92,
+    )
+
+    assert result.status == "open"
+    assert "bounded_by_max_execution" in str(result.payload.get("price_resolution") or "")
+    assert result.payload["resolved_price"] == pytest.approx(0.92)
+    _, kwargs = place_mock.await_args
+    assert kwargs["price"] == pytest.approx(0.92)

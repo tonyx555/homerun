@@ -26,6 +26,7 @@ from models.database import (
     TradeSignalEmission,
 )
 from services.event_bus import event_bus
+from services.market_roster import ensure_market_roster_payload
 from models.opportunity import Opportunity
 from services.market_tradability import get_market_tradability_map
 
@@ -415,6 +416,7 @@ def _execution_profile_for_opportunity(opportunity: Opportunity, legs_count: int
     if isinstance(strategy_context, dict):
         source_key = source_key or str(strategy_context.get("source_key") or "").strip().lower()
     is_traders = source_key == "traders" or strategy_key.startswith("traders")
+    is_guaranteed_bundle = bool(getattr(opportunity, "is_guaranteed", False)) and legs_count > 1
 
     if is_traders:
         return {
@@ -427,6 +429,20 @@ def _execution_profile_for_opportunity(opportunity: Opportunity, legs_count: int
                 "session_timeout_seconds": 90,
                 "max_reprice_attempts": 2,
                 "pair_lock": legs_count > 1,
+                "leg_fill_tolerance_ratio": 0.02,
+            },
+        }
+    if is_guaranteed_bundle:
+        return {
+            "policy": "PAIR_LOCK",
+            "price_policy": "taker_limit",
+            "time_in_force": "IOC",
+            "constraints": {
+                "max_unhedged_notional_usd": 0.0,
+                "hedge_timeout_seconds": 3,
+                "session_timeout_seconds": 90,
+                "max_reprice_attempts": 0,
+                "pair_lock": True,
                 "leg_fill_tolerance_ratio": 0.02,
             },
         }
@@ -519,6 +535,35 @@ def _normalize_execution_plan(opportunity: Opportunity) -> dict[str, Any] | None
     if not legs:
         return None
     profile = _execution_profile_for_opportunity(opportunity, len(legs))
+    roster_payload = getattr(opportunity, "market_roster", None)
+    roster_scope = str((roster_payload or {}).get("scope") or "").strip().lower() if isinstance(roster_payload, dict) else ""
+    roster_market_ids: list[str] = []
+    if isinstance(roster_payload, dict):
+        seen_roster_market_ids: set[str] = set()
+        for raw_market in list(roster_payload.get("markets") or []):
+            if not isinstance(raw_market, dict):
+                continue
+            market_id = str(raw_market.get("id") or raw_market.get("market_id") or "").strip()
+            if not market_id or market_id in seen_roster_market_ids:
+                continue
+            seen_roster_market_ids.add(market_id)
+            roster_market_ids.append(market_id)
+    planned_market_ids: list[str] = []
+    seen_planned_market_ids: set[str] = set()
+    for leg in legs:
+        market_id = str(leg.get("market_id") or "").strip()
+        if not market_id or market_id in seen_planned_market_ids:
+            continue
+        seen_planned_market_ids.add(market_id)
+        planned_market_ids.append(market_id)
+    roster_market_id_set = set(roster_market_ids)
+    event_internal_bundle = (
+        roster_scope == "event"
+        and len(planned_market_ids) > 1
+        and bool(planned_market_ids)
+        and all(market_id in roster_market_id_set for market_id in planned_market_ids)
+    )
+    missing_market_ids = [market_id for market_id in roster_market_ids if market_id not in seen_planned_market_ids]
 
     packed = "|".join(
         sorted(
@@ -537,6 +582,23 @@ def _normalize_execution_plan(opportunity: Opportunity) -> dict[str, Any] | None
         "metadata": {
             "strategy_type": str(getattr(opportunity, "strategy", "") or ""),
             "source_item_id": str(getattr(opportunity, "stable_id", "") or ""),
+            "is_guaranteed": bool(getattr(opportunity, "is_guaranteed", False)),
+            "market_coverage": {
+                "scope": roster_scope or None,
+                "market_roster_hash": (
+                    str(roster_payload.get("roster_hash") or "").strip() or None
+                    if isinstance(roster_payload, dict)
+                    else None
+                ),
+                "roster_market_count": len(roster_market_ids),
+                "planned_market_count": len(planned_market_ids),
+                "planned_market_ids": planned_market_ids,
+                "missing_market_ids": missing_market_ids,
+                "event_internal_bundle": event_internal_bundle,
+                "requires_full_market_coverage": bool(
+                    getattr(opportunity, "is_guaranteed", False) and event_internal_bundle
+                ),
+            },
         },
     }
 
@@ -568,9 +630,25 @@ def build_signal_contract_from_opportunity(
         first_position = (opportunity.positions_to_take or [{}])[0]
         entry_price = first_position.get("price")
 
+    opportunity_market_roster = getattr(opportunity, "market_roster", None)
+    roster_markets = (
+        list(opportunity_market_roster.get("markets") or [])
+        if isinstance(opportunity_market_roster, dict)
+        else list(getattr(opportunity, "markets", None) or [])
+    )
     payload = opportunity.model_dump(mode="json")
     if plan is not None:
         payload["execution_plan"] = plan
+    payload = ensure_market_roster_payload(
+        payload,
+        markets=roster_markets,
+        market_id=market_id,
+        market_question=market_question,
+        event_id=str(getattr(opportunity, "event_id", "") or "") or None,
+        event_slug=str(getattr(opportunity, "event_slug", "") or "") or None,
+        event_title=str(getattr(opportunity, "event_title", "") or "") or None,
+        category=str(getattr(opportunity, "category", "") or "") or None,
+    )
     strategy_context = dict(opportunity.strategy_context or {})
     runtime_metadata = _strategy_runtime_metadata(opportunity)
     if runtime_metadata:
@@ -703,6 +781,11 @@ async def upsert_trade_signal(
     commit: bool = True,
 ) -> TradeSignal:
     """Idempotently upsert a normalized trade signal by ``(source, dedupe_key)``."""
+    normalized_payload_json = ensure_market_roster_payload(
+        payload_json,
+        market_id=market_id,
+        market_question=market_question,
+    )
     row: Optional[TradeSignal] = None
     emission_event_type = "upsert_insert"
     emission_reason: str | None = None
@@ -742,7 +825,7 @@ async def upsert_trade_signal(
             confidence=confidence,
             liquidity=liquidity,
             expires_at=_to_utc_naive(expires_at),
-            payload_json=_safe_json(payload_json),
+            payload_json=_safe_json(normalized_payload_json),
             strategy_context_json=_safe_json(strategy_context_json),
             quality_passed=quality_passed,
             quality_rejection_reasons=quality_rejection_reasons if quality_rejection_reasons else None,
@@ -780,7 +863,7 @@ async def upsert_trade_signal(
                     edge_percent=edge_percent,
                     confidence=confidence,
                     liquidity=liquidity,
-                    payload_json=payload_json,
+                    payload_json=normalized_payload_json,
                     strategy_context_json=strategy_context_json,
                     quality_passed=quality_passed,
                     quality_rejection_reasons=quality_rejection_reasons,
@@ -803,7 +886,7 @@ async def upsert_trade_signal(
                     edge_percent=edge_percent,
                     confidence=confidence,
                     liquidity=liquidity,
-                    payload_json=payload_json,
+                    payload_json=normalized_payload_json,
                     strategy_context_json=strategy_context_json,
                     expires_at=expires_at,
                     quality_passed=quality_passed,
@@ -833,7 +916,7 @@ async def upsert_trade_signal(
                     row.confidence = confidence
                     row.liquidity = liquidity
                     row.expires_at = _to_utc_naive(expires_at)
-                    row.payload_json = _safe_json(payload_json)
+                    row.payload_json = _safe_json(normalized_payload_json)
                     row.strategy_context_json = _safe_json(strategy_context_json)
                     if quality_passed is not None:
                         row.quality_passed = quality_passed

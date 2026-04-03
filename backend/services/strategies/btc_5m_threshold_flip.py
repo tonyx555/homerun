@@ -8,26 +8,12 @@ from models import Market, Opportunity
 from services.data_events import DataEvent, EventType
 from services.strategy_sdk import StrategySDK
 from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision, _trader_size_limits
+from services.strategies.crypto_strategy_utils import build_binary_crypto_market, parse_datetime_utc
 from utils.converters import clamp, safe_float, to_float
 from utils.logger import get_logger
 from utils.signal_helpers import signal_payload
 
 logger = get_logger(__name__)
-
-
-def _parse_datetime_utc(value: Any) -> datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except Exception:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
 def _normalize_timeframe(value: Any) -> str:
     text = str(value or "").strip().lower()
     if text in {"5m", "5min", "5-minute", "5minutes"}:
@@ -65,7 +51,7 @@ def _trade_timestamp_ms(trade: Any) -> float | None:
     text = str(raw or "").strip()
     if not text:
         return None
-    parsed_dt = _parse_datetime_utc(text)
+    parsed_dt = parse_datetime_utc(text)
     if parsed_dt is not None:
         return parsed_dt.timestamp() * 1000.0
     parsed = safe_float(text, None)
@@ -211,36 +197,14 @@ class BTC5mThresholdFlipStrategy(BaseStrategy):
 
     @staticmethod
     def _row_market(row: dict[str, Any]) -> Market | None:
-        market_id = BTC5mThresholdFlipStrategy._market_key(row)
-        if not market_id:
-            return None
-        yes_mid = _as_float(row.get("up_price"))
-        no_mid = _as_float(row.get("down_price"))
-        if yes_mid is None or no_mid is None:
-            return None
-        token_ids = [
-            str(token).strip()
-            for token in list(row.get("clob_token_ids") or [])
-            if str(token).strip() and len(str(token).strip()) > 20
-        ]
-        return Market(
-            id=market_id,
-            condition_id=market_id,
-            question=str(row.get("question") or row.get("slug") or market_id),
-            slug=str(row.get("slug") or market_id),
-            outcome_prices=[float(yes_mid), float(no_mid)],
-            liquidity=max(0.0, float(_as_float(row.get("liquidity")) or 0.0)),
-            end_date=_parse_datetime_utc(row.get("end_time")),
-            platform="polymarket",
-            clob_token_ids=token_ids,
-        )
+        return build_binary_crypto_market(row)
 
     @staticmethod
     def _seconds_left(row: dict[str, Any]) -> float | None:
         direct = _as_float(row.get("seconds_left"))
         if direct is not None and direct >= 0.0:
             return direct
-        end_time = _parse_datetime_utc(row.get("end_time"))
+        end_time = parse_datetime_utc(row.get("end_time"))
         if end_time is None:
             return None
         return max(0.0, (end_time - datetime.now(timezone.utc)).total_seconds())

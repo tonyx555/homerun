@@ -239,6 +239,9 @@ type TradeTableDisplayRow =
       resolutionProfitLow: number | null
       resolutionProfitHigh: number | null
       guaranteedAnomaly: boolean
+      effectiveGuaranteed: boolean
+      bundleSettlementReady: boolean
+      guaranteeBadgeLabel: string
     }
 
 type TradeSummarySnapshot = {
@@ -442,6 +445,7 @@ type StrategyParamGroup = {
 
 type DynamicStrategyParamSection = {
   sectionKey: string
+  sourceKey: string
   sourceLabel: string
   strategyLabel: string
   groups: StrategyParamGroup[]
@@ -2576,14 +2580,14 @@ function buildTradeBundleDirectionLabel(bundle: TraderOrderTradeBundle): string 
   return `${Math.max(2, bundle.leg_count)}L`
 }
 
-function buildTradeBundleLabel(bundle: TraderOrderTradeBundle): string {
+function buildTradeBundleLabel(bundle: TraderOrderTradeBundle, effectiveGuaranteed = bundle.is_guaranteed): string {
   if (bundle.kind === 'paired_binary') {
-    return bundle.is_guaranteed ? 'Guaranteed paired settlement trade' : 'Paired binary trade'
+    return effectiveGuaranteed ? 'Guaranteed paired settlement trade' : 'Paired binary trade'
   }
   if (bundle.kind === 'multi_outcome_yes') {
-    return bundle.is_guaranteed ? 'Guaranteed mutually exclusive YES bundle' : 'Mutually exclusive YES bundle'
+    return effectiveGuaranteed ? 'Guaranteed mutually exclusive YES bundle' : 'Mutually exclusive YES bundle'
   }
-  return bundle.is_guaranteed ? `Guaranteed ${bundle.leg_count}-leg bundle` : `${bundle.leg_count}-leg linked trade`
+  return effectiveGuaranteed ? `Guaranteed ${bundle.leg_count}-leg bundle` : `${bundle.leg_count}-leg linked trade`
 }
 
 function buildTradeBundleLegSummaryLabel(leg: TradeTableBundleLegRow): string {
@@ -2599,13 +2603,14 @@ function buildTradeBundleLegSummaryLabel(leg: TradeTableBundleLegRow): string {
 function buildBundleResolutionRange(args: {
   bundle: TraderOrderTradeBundle
   legs: TradeTableBundleLegRow[]
+  effectiveGuaranteed: boolean
 }): {
   payoutLow: number | null
   payoutHigh: number | null
   profitLow: number | null
   profitHigh: number | null
 } {
-  const { bundle, legs } = args
+  const { bundle, legs, effectiveGuaranteed } = args
   const basis = legs.reduce((sum, leg) => sum + leg.filledNotional, 0)
   if (basis <= 0) {
     return {
@@ -2626,12 +2631,15 @@ function buildBundleResolutionRange(args: {
       .reduce((sum, leg) => sum + leg.filledSize, 0)
     if (yesPayout > 0) winningPayouts.push(yesPayout)
     if (noPayout > 0) winningPayouts.push(noPayout)
+    if (!effectiveGuaranteed) {
+      winningPayouts.push(0)
+    }
   } else if (bundle.kind === 'multi_outcome_yes') {
     for (const leg of legs) {
       if (normalizeOutcome(leg.leg.outcome) !== 'YES') continue
       if (leg.filledSize > 0) winningPayouts.push(leg.filledSize)
     }
-    if (!bundle.is_guaranteed) {
+    if (!effectiveGuaranteed) {
       winningPayouts.push(0)
     }
   }
@@ -2653,6 +2661,20 @@ function buildBundleResolutionRange(args: {
     profitLow: payoutLow - basis,
     profitHigh: payoutHigh - basis,
   }
+}
+
+function bundleHasCompleteFilledCoverage(bundle: TraderOrderTradeBundle, legs: TradeTableBundleLegRow[]): boolean {
+  if (bundle.leg_count <= 0) return false
+  const plannedLegs = legs.slice(0, bundle.leg_count)
+  if (plannedLegs.length < bundle.leg_count) return false
+  return plannedLegs.every((leg) => leg.filledSize > 0 && leg.filledNotional > 0)
+}
+
+function buildTradeBundleGuaranteeBadgeLabel(bundle: TraderOrderTradeBundle, effectiveGuaranteed: boolean): string {
+  if (effectiveGuaranteed) return 'Guaranteed'
+  if (bundle.is_guaranteed) return 'Incomplete'
+  if (bundle.signal_is_guaranteed) return 'Unproven'
+  return 'Linked'
 }
 
 function buildTradeDisplayRows(orderRows: TradeTableOrderRow[]): TradeTableDisplayRow[] {
@@ -2798,6 +2820,8 @@ function buildTradeDisplayRows(orderRows: TradeTableOrderRow[]): TradeTableDispl
     const fillProgressPercent = requestedNotional > 0
       ? Math.min(100, (filledNotional / requestedNotional) * 100)
       : null
+    const bundleSettlementReady = bundleHasCompleteFilledCoverage(group.bundle, bundleLegRows)
+    const effectiveGuaranteed = group.bundle.is_guaranteed && bundleSettlementReady
     const exitProgressValues = group.rows
       .map((row) => row.exitProgressPercent)
       .filter((value): value is number => value !== null)
@@ -2845,14 +2869,20 @@ function buildTradeDisplayRows(orderRows: TradeTableOrderRow[]): TradeTableDispl
     const { payoutLow, payoutHigh, profitLow, profitHigh } = buildBundleResolutionRange({
       bundle: group.bundle,
       legs: bundleLegRows,
+      effectiveGuaranteed,
     })
-    const guaranteedAnomaly = Boolean(group.bundle.is_guaranteed && profitLow !== null && profitLow < -0.01)
-    const bundleLabel = buildTradeBundleLabel(group.bundle)
+    const guaranteedAnomaly = Boolean(effectiveGuaranteed && profitLow !== null && profitLow < -0.01)
+    const bundleLabel = buildTradeBundleLabel(group.bundle, effectiveGuaranteed)
+    const guaranteeBadgeLabel = buildTradeBundleGuaranteeBadgeLabel(group.bundle, effectiveGuaranteed)
     let outcomeHeadline = bundleLabel
     let outcomeDetail = `${bundleLabel}.`
     if (status === 'open' && profitLow !== null && profitHigh !== null) {
-      if (group.bundle.is_guaranteed && !guaranteedAnomaly) {
+      if (effectiveGuaranteed && !guaranteedAnomaly) {
         outcomeHeadline = profitLow === profitHigh ? 'Locked spread' : 'Locked payout range'
+      } else if (group.bundle.is_guaranteed) {
+        outcomeHeadline = 'Bundle incomplete'
+      } else if (group.bundle.signal_is_guaranteed) {
+        outcomeHeadline = 'Bundle unproven'
       } else if (guaranteedAnomaly) {
         outcomeHeadline = 'Guarantee drift'
       } else {
@@ -2907,6 +2937,9 @@ function buildTradeDisplayRows(orderRows: TradeTableOrderRow[]): TradeTableDispl
       resolutionProfitLow: profitLow,
       resolutionProfitHigh: profitHigh,
       guaranteedAnomaly,
+      effectiveGuaranteed,
+      bundleSettlementReady,
+      guaranteeBadgeLabel,
     })
   }
   return displayRows
@@ -3498,6 +3531,15 @@ function buildSourceStrategyParams(
   return next
 }
 
+function cloneStrategyParamsRecord(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) return {}
+  try {
+    return JSON.parse(JSON.stringify(value)) as Record<string, unknown>
+  } catch {
+    return { ...value }
+  }
+}
+
 function traderSourceKeys(trader: Trader): string[] {
   if (Array.isArray(trader.source_configs) && trader.source_configs.length > 0) {
     const seen = new Set<string>()
@@ -3888,20 +3930,27 @@ function positionMetaLine(row: PositionBookRow): string {
   return `${sourceOrStatus} • ${row.executionSummary}`
 }
 
-function describeTradeBundleSettlement(bundle: TraderOrderTradeBundle): string {
+function describeTradeBundleSettlement(displayRow: Extract<TradeTableDisplayRow, { kind: 'bundle' }>): string {
+  const { bundle, effectiveGuaranteed } = displayRow
   if (bundle.kind === 'paired_binary') {
-    return bundle.is_guaranteed
+    return effectiveGuaranteed
       ? 'Both sides were bought below $1 total. Exactly one leg settles to $1, so profit is locked if the fills are intact.'
-      : 'This binary bundle holds both sides of one market. One leg settles to $1 and the other to $0.'
+      : bundle.signal_is_guaranteed
+        ? 'This binary bundle is not fully covered yet. Review missing fills before treating the payout as locked.'
+        : 'This binary bundle holds both sides of one market. One leg settles to $1 and the other to $0.'
   }
   if (bundle.kind === 'multi_outcome_yes') {
-    return bundle.is_guaranteed
+    return effectiveGuaranteed
       ? 'This bundle holds YES across mutually exclusive outcomes priced below $1 in total. Exactly one winning leg should settle to $1.'
-      : 'This bundle holds YES across multiple outcomes. The resolution range depends on which leg wins, and downside can remain if the set is not exhaustive.'
+      : bundle.signal_is_guaranteed
+        ? 'This bundle is not proven or fully covered yet. Downside remains until the full market set is verified and every planned leg is filled.'
+        : 'This bundle holds YES across multiple outcomes. The resolution range depends on which leg wins, and downside can remain if the set is not exhaustive.'
   }
-  return bundle.is_guaranteed
+  return effectiveGuaranteed
     ? 'This linked trade is marked guaranteed. Review per-leg fills and payout range below.'
-    : 'This linked trade spans multiple legs. Review the per-leg fills and resolution range below.'
+    : bundle.signal_is_guaranteed
+      ? 'This linked trade is not yet proven or fully covered. Review per-leg fills and payout range below.'
+      : 'This linked trade spans multiple legs. Review the per-leg fills and resolution range below.'
 }
 
 function resolveBundleLegStatus(leg: TradeTableBundleLegRow): string {
@@ -4395,7 +4444,7 @@ function BotTradePositionModal({
         : ''
     )
     : ''
-  const bundleSettlementDetail = bundleDisplayRow ? describeTradeBundleSettlement(bundleDisplayRow.bundle) : null
+  const bundleSettlementDetail = bundleDisplayRow ? describeTradeBundleSettlement(bundleDisplayRow) : null
 
   return (
     <Card className="w-[min(1150px,calc(100vw-2rem))] max-h-[90vh] overflow-hidden rounded-2xl border-border/70 bg-background shadow-[0_40px_120px_rgba(0,0,0,0.55)]">
@@ -4538,7 +4587,7 @@ function BotTradePositionModal({
                       : 'border-cyan-300 bg-cyan-100 text-cyan-900 dark:border-cyan-400/45 dark:bg-cyan-500/12 dark:text-cyan-200'
                   )}
                 >
-                  {bundleDisplayRow.bundle.is_guaranteed ? 'Guaranteed' : 'Linked'}
+                  {bundleDisplayRow.guaranteeBadgeLabel}
                 </Badge>
               </div>
               <div className="mt-2 grid gap-2 sm:grid-cols-3">
@@ -5285,7 +5334,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const [draftSourceStrategyVersions, setDraftSourceStrategyVersions] = useState<Record<string, number | null>>({})
   const [draftInterval, setDraftInterval] = useState('60')
   const [draftSources, setDraftSources] = useState('')
-  const [draftParams, setDraftParams] = useState('{}')
+  const [draftSourceStrategyParams, setDraftSourceStrategyParams] = useState<Record<string, Record<string, unknown>>>({})
   const [draftRisk, setDraftRisk] = useState('{}')
   const [draftMetadata, setDraftMetadata] = useState('{}')
   const [draftMode, setDraftMode] = useState<'shadow' | 'live'>('shadow')
@@ -5933,11 +5982,18 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         .sort((left, right) => left.label.localeCompare(right.label)),
     [tradersScopeGroups]
   )
-  const parsedDraftParams = useMemo(() => parseJsonObject(draftParams || '{}'), [draftParams])
+  const draftSourceParamsByKey = useMemo(() => {
+    const next: Record<string, Record<string, unknown>> = {}
+    for (const [sourceKey, params] of Object.entries(draftSourceStrategyParams)) {
+      const normalizedSource = normalizeSourceKey(sourceKey)
+      if (!normalizedSource) continue
+      next[normalizedSource] = cloneStrategyParamsRecord(params)
+    }
+    return next
+  }, [draftSourceStrategyParams])
   const parsedDraftRisk = useMemo(() => parseJsonObject(draftRisk || '{}'), [draftRisk])
   const parsedDraftMetadata = useMemo(() => parseJsonObject(draftMetadata || '{}'), [draftMetadata])
   const dynamicStrategyParamSections = useMemo(() => {
-    const sharedParams = isRecord(parsedDraftParams.value) ? parsedDraftParams.value : {}
     const sections: DynamicStrategyParamSection[] = []
 
     for (const sourceKey of effectiveDraftSources) {
@@ -5991,8 +6047,11 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         .filter(Boolean)
       if (fieldKeys.length === 0) continue
 
-      const defaults = isRecord(strategyDetail.defaultParams) ? strategyDetail.defaultParams : {}
-      const merged = { ...defaults, ...sharedParams }
+      const merged = buildSourceStrategyParams(
+        draftSourceParamsByKey[sourceKey] || {},
+        sourceKey,
+        strategyDetail,
+      )
       const values: Record<string, unknown> = {}
       for (const fieldKey of fieldKeys) {
         if (Object.prototype.hasOwnProperty.call(merged, fieldKey)) {
@@ -6003,6 +6062,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       const sourceLabel = sourceCards.find((source) => normalizeSourceKey(source.key) === sourceKey)?.label || sourceKey.toUpperCase()
       sections.push({
         sectionKey: `${sourceKey}:${strategyKey}`,
+        sourceKey,
         sourceLabel,
         strategyLabel: strategyDetail.label || strategyLabelForKey(strategyKey, sourceCards),
         groups: groupStrategyParamFields(filteredFields),
@@ -6013,9 +6073,9 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
 
     return sections
   }, [
+    draftSourceParamsByKey,
     effectiveDraftSources,
     effectiveSourceStrategies,
-    parsedDraftParams.value,
     sourceCards,
     sourceStrategyDetailsLookup,
     tradersScopeGroupOptions,
@@ -6040,6 +6100,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const setSourceStrategy = (sourceKey: string, strategyKey: string) => {
     const normalizedSource = normalizeSourceKey(sourceKey)
     const normalizedStrategy = normalizeStrategyKeyForSource(normalizedSource, strategyKey)
+    const strategyDetail = sourceStrategyDetailsLookup[normalizedSource]?.[normalizedStrategy] || null
     setDraftSourceStrategies((current) => ({
       ...current,
       [normalizedSource]: normalizedStrategy,
@@ -6047,6 +6108,10 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     setDraftSourceStrategyVersions((current) => ({
       ...current,
       [normalizedSource]: null,
+    }))
+    setDraftSourceStrategyParams((current) => ({
+      ...current,
+      [normalizedSource]: buildSourceStrategyParams({}, normalizedSource, strategyDetail),
     }))
     if (normalizedSource === 'crypto') {
       setDraftStrategyKey(normalizedStrategy)
@@ -6085,10 +6150,23 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         delete next[normalizedTarget]
         return next
       })
+      setDraftSourceStrategyParams((current) => {
+        const next = { ...current }
+        delete next[normalizedTarget]
+        return next
+      })
     } else {
       const defaultStrategy = defaultStrategyForSource(normalizedTarget, sourceCards)
       setDraftSourceStrategies((current) => ({ ...current, [normalizedTarget]: defaultStrategy }))
       setDraftSourceStrategyVersions((current) => ({ ...current, [normalizedTarget]: null }))
+      setDraftSourceStrategyParams((current) => ({
+        ...current,
+        [normalizedTarget]: buildSourceStrategyParams(
+          {},
+          normalizedTarget,
+          sourceStrategyDetailsLookup[normalizedTarget]?.[defaultStrategy] || null,
+        ),
+      }))
     }
   }
 
@@ -6096,19 +6174,28 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     setDraftSources(uniqueSourceList(sourceCards.map((source) => source.key)).join(', '))
     const next: Record<string, string> = {}
     const nextVersions: Record<string, number | null> = {}
+    const nextParams: Record<string, Record<string, unknown>> = {}
     for (const source of sourceCards) {
       const sourceKey = normalizeSourceKey(source.key)
-      next[sourceKey] = defaultStrategyForSource(sourceKey, sourceCards)
+      const strategyKey = defaultStrategyForSource(sourceKey, sourceCards)
+      next[sourceKey] = strategyKey
       nextVersions[sourceKey] = null
+      nextParams[sourceKey] = buildSourceStrategyParams(
+        {},
+        sourceKey,
+        sourceStrategyDetailsLookup[sourceKey]?.[strategyKey] || null,
+      )
     }
     setDraftSourceStrategies(next)
     setDraftSourceStrategyVersions(nextVersions)
+    setDraftSourceStrategyParams(nextParams)
   }
 
   const disableAllSourceCards = () => {
     setDraftSources('')
     setDraftSourceStrategies({})
     setDraftSourceStrategyVersions({})
+    setDraftSourceStrategyParams({})
   }
 
   useEffect(() => {
@@ -6172,21 +6259,21 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     )
     const sourceStrategyMap: Record<string, string> = {}
     const sourceVersionMap: Record<string, number | null> = {}
+    const sourceParamMap: Record<string, Record<string, unknown>> = {}
     for (const config of traderSourceConfigs) {
       const sourceKey = normalizeSourceKey(String(config.source_key || ''))
       if (!sourceKey) continue
-      sourceStrategyMap[sourceKey] = normalizeStrategyKeyForSource(
+      const strategyKey = normalizeStrategyKeyForSource(
         sourceKey,
         config.strategy_key || defaultStrategyForSource(sourceKey, sourceCards)
       )
+      sourceStrategyMap[sourceKey] = strategyKey
       sourceVersionMap[sourceKey] = normalizeStrategyVersion(config.strategy_version)
-    }
-    const primaryParams = (traderSourceConfigs[0]?.strategy_params || {}) as Record<string, unknown>
-    const tradersScope = traderSourceConfigs.find((config) => normalizeSourceKey(String(config.source_key || '')) === 'traders')
-      ?.strategy_params?.traders_scope
-    const mergedDraftParams: Record<string, unknown> = { ...primaryParams }
-    if (tradersScope !== undefined) {
-      mergedDraftParams.traders_scope = normalizeTradersScopeConfig(tradersScope)
+      sourceParamMap[sourceKey] = buildSourceStrategyParams(
+        cloneStrategyParamsRecord(config.strategy_params),
+        sourceKey,
+        sourceStrategyDetailsLookup[sourceKey]?.[strategyKey] || null,
+      )
     }
 
     if (!options.preserveName) {
@@ -6199,11 +6286,11 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     setDraftStrategyKey(normalizeStrategyKey(sourceStrategyMap.crypto || DEFAULT_STRATEGY_KEY))
     setDraftSourceStrategies(sourceStrategyMap)
     setDraftSourceStrategyVersions(sourceVersionMap)
+    setDraftSourceStrategyParams(sourceParamMap)
     setDraftInterval(String(trader.interval_seconds || 60))
     setDraftSources(normalizedSourceKeys.join(', ') || defaultSourceCsv)
     const risk = trader.risk_limits || {}
     const metadata = trader.metadata || {}
-    setDraftParams(JSON.stringify(mergedDraftParams, null, 2))
     setDraftRisk(JSON.stringify(risk, null, 2))
     setDraftMetadata(JSON.stringify(metadata, null, 2))
     if (!options.preserveCopyFrom) {
@@ -6269,9 +6356,20 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     setDraftStrategyKey(normalizeStrategyKey(defaultStrategies.crypto || DEFAULT_STRATEGY_KEY))
     setDraftSourceStrategies(defaultStrategies)
     setDraftSourceStrategyVersions(defaultStrategyVersions)
+    setDraftSourceStrategyParams(
+      Object.fromEntries(
+        defaultSources.map((sourceKey) => [
+          sourceKey,
+          buildSourceStrategyParams(
+            {},
+            sourceKey,
+            sourceStrategyDetailsLookup[sourceKey]?.[defaultStrategies[sourceKey]] || null,
+          ),
+        ]),
+      ) as Record<string, Record<string, unknown>>
+    )
     setDraftInterval('5')
     setDraftSources(defaultSources.join(', '))
-    setDraftParams('{}')
     setDraftRisk(JSON.stringify(isRecord(traderConfigSchema?.shared_risk_defaults) ? traderConfigSchema.shared_risk_defaults : {}, null, 2))
     setDraftMetadata('{}')
     setDraftMode(selectedAccountMode)
@@ -6323,15 +6421,17 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   }
 
   const applyDynamicStrategyFormValues = (
+    sourceKey: string,
     fieldKeys: string[],
     values: Record<string, unknown>,
   ) => {
+    const normalizedSource = normalizeSourceKey(sourceKey)
     setTuneDraftDirty(true)
     setTuneSaveError(null)
     setTuneRevertError(null)
-    setDraftParams((current) => {
-      const parsed = parseJsonObject(current || '{}')
-      const nextValues = isRecord(parsed.value) ? { ...parsed.value } : {}
+    setDraftSourceStrategyParams((current) => {
+      const next = { ...current }
+      const nextValues = cloneStrategyParamsRecord(current[normalizedSource])
       for (const key of fieldKeys) {
         if (!Object.prototype.hasOwnProperty.call(values, key)) continue
         const value = values[key]
@@ -6345,7 +6445,8 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
           nextValues[key] = value
         }
       }
-      return JSON.stringify(nextValues, null, 2)
+      next[normalizedSource] = nextValues
+      return next
     })
   }
 
@@ -6388,7 +6489,9 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     })
   }
 
-  const buildDraftSourceConfigs = (rawStrategyParams: Record<string, unknown>): TraderSourceConfig[] => {
+  const buildDraftSourceConfigs = (
+    sourceParamMap: Record<string, Record<string, unknown>>,
+  ): TraderSourceConfig[] => {
     const configs: TraderSourceConfig[] = []
     for (const sourceKey of effectiveDraftSources) {
       const strategyKey = normalizeStrategyKey(
@@ -6403,11 +6506,30 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         source_key: sourceKey,
         strategy_key: strategyKey,
         strategy_version: strategyVersion,
-        strategy_params: buildSourceStrategyParams(rawStrategyParams, sourceKey, strategyDetail),
+        strategy_params: buildSourceStrategyParams(
+          cloneStrategyParamsRecord(sourceParamMap[sourceKey]),
+          sourceKey,
+          strategyDetail,
+        ),
       }
       configs.push(nextConfig)
     }
     return configs
+  }
+
+  const validateDraftSourceConfigs = (configs: TraderSourceConfig[]) => {
+    if (configs.length === 0) {
+      throw new Error('Enable at least one source.')
+    }
+    const tradersConfig = configs.find((config) => normalizeSourceKey(String(config.source_key || '')) === 'traders') || null
+    if (!tradersConfig) return
+    const tradersScope = normalizeTradersScopeConfig(tradersConfig.strategy_params?.traders_scope)
+    if (tradersScope.modes.includes('individual') && tradersScope.individual_wallets.length === 0) {
+      throw new Error('Select at least one individual wallet for wallet scope.')
+    }
+    if (tradersScope.modes.includes('group') && tradersScope.group_ids.length === 0) {
+      throw new Error('Select at least one group for wallet scope.')
+    }
   }
 
   const cloneSourceConfigsForTuneSnapshot = (configs: TraderSourceConfig[]): TraderSourceConfig[] => {
@@ -6952,23 +7074,10 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       if (!selectedTrader) {
         throw new Error('Select a bot before saving tune parameters.')
       }
-      const parsedParams = parseJsonObject(draftParams || '{}')
-      if (!parsedParams.value) {
-        throw new Error(`Strategy params JSON error: ${parsedParams.error || 'invalid object'}`)
-      }
-      if (effectiveDraftSources.length === 0) {
-        throw new Error('Enable at least one source.')
-      }
-      const tradersEnabled = effectiveDraftSources.includes('traders')
-      const tradersScope = normalizeTradersScopeConfig(parsedParams.value.traders_scope)
-      if (tradersEnabled && tradersScope.modes.includes('individual') && tradersScope.individual_wallets.length === 0) {
-        throw new Error('Select at least one individual wallet for wallet scope.')
-      }
-      if (tradersEnabled && tradersScope.modes.includes('group') && tradersScope.group_ids.length === 0) {
-        throw new Error('Select at least one group for wallet scope.')
-      }
+      const sourceConfigs = buildDraftSourceConfigs(draftSourceParamsByKey)
+      validateDraftSourceConfigs(sourceConfigs)
       return updateTrader(selectedTrader.id, {
-        source_configs: buildDraftSourceConfigs(parsedParams.value),
+        source_configs: sourceConfigs,
       })
     },
     onMutate: () => {
@@ -7096,11 +7205,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const createTraderMutation = useMutation({
     mutationFn: async () => {
       const copyFromTraderId = String(draftCopyFromTraderId || '').trim()
-      const parsedParams = parseJsonObject(draftParams || '{}')
-      if (!parsedParams.value) {
-        throw new Error(`Strategy params JSON error: ${parsedParams.error || 'invalid object'}`)
-      }
-
       const parsedRisk = parseJsonObject(draftRisk || '{}')
       if (!parsedRisk.value) {
         throw new Error(`Risk limits JSON error: ${parsedRisk.error || 'invalid object'}`)
@@ -7110,25 +7214,15 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       if (!parsedMetadata.value) {
         throw new Error(`Metadata JSON error: ${parsedMetadata.error || 'invalid object'}`)
       }
-
-      if (effectiveDraftSources.length === 0) {
-        throw new Error('Enable at least one source.')
-      }
-      const tradersEnabled = effectiveDraftSources.includes('traders')
-      const tradersScope = normalizeTradersScopeConfig(parsedParams.value.traders_scope)
-      if (tradersEnabled && tradersScope.modes.includes('individual') && tradersScope.individual_wallets.length === 0) {
-        throw new Error('Select at least one individual wallet for wallet scope.')
-      }
-      if (tradersEnabled && tradersScope.modes.includes('group') && tradersScope.group_ids.length === 0) {
-        throw new Error('Select at least one group for wallet scope.')
-      }
+      const sourceConfigs = buildDraftSourceConfigs(draftSourceParamsByKey)
+      validateDraftSourceConfigs(sourceConfigs)
 
       const payload: Record<string, unknown> = {
         name: draftName.trim(),
         description: draftDescription.trim() || null,
         mode: draftMode,
         interval_seconds: Math.max(1, Math.trunc(toNumber(draftInterval || 60))),
-        source_configs: buildDraftSourceConfigs(parsedParams.value),
+        source_configs: sourceConfigs,
         risk_limits: parsedRisk.value,
         metadata: parsedMetadata.value,
         is_enabled: true,
@@ -7168,11 +7262,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
 
   const saveTraderMutation = useMutation({
     mutationFn: async (traderId: string) => {
-      const parsedParams = parseJsonObject(draftParams || '{}')
-      if (!parsedParams.value) {
-        throw new Error(`Strategy params JSON error: ${parsedParams.error || 'invalid object'}`)
-      }
-
       const parsedRisk = parseJsonObject(draftRisk || '{}')
       if (!parsedRisk.value) {
         throw new Error(`Risk limits JSON error: ${parsedRisk.error || 'invalid object'}`)
@@ -7182,25 +7271,15 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       if (!parsedMetadata.value) {
         throw new Error(`Metadata JSON error: ${parsedMetadata.error || 'invalid object'}`)
       }
-
-      if (effectiveDraftSources.length === 0) {
-        throw new Error('Enable at least one source.')
-      }
-      const tradersEnabled = effectiveDraftSources.includes('traders')
-      const tradersScope = normalizeTradersScopeConfig(parsedParams.value.traders_scope)
-      if (tradersEnabled && tradersScope.modes.includes('individual') && tradersScope.individual_wallets.length === 0) {
-        throw new Error('Select at least one individual wallet for wallet scope.')
-      }
-      if (tradersEnabled && tradersScope.modes.includes('group') && tradersScope.group_ids.length === 0) {
-        throw new Error('Select at least one group for wallet scope.')
-      }
+      const sourceConfigs = buildDraftSourceConfigs(draftSourceParamsByKey)
+      validateDraftSourceConfigs(sourceConfigs)
 
       return updateTrader(traderId, {
         name: draftName.trim(),
         description: draftDescription.trim() || null,
         mode: draftMode,
         interval_seconds: Math.max(1, Math.trunc(toNumber(draftInterval || 60))),
-        source_configs: buildDraftSourceConfigs(parsedParams.value),
+        source_configs: sourceConfigs,
         risk_limits: parsedRisk.value,
         metadata: parsedMetadata.value,
       })
@@ -9510,6 +9589,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       resolutionProfitLow,
       resolutionProfitHigh,
       guaranteedAnomaly,
+      bundleSettlementReady,
     } = displayRow
     const order = primaryRow.order
     const traderLabel = traderNameById[String(order.trader_id || '')] || shortId(order.trader_id)
@@ -9558,7 +9638,13 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     const primaryMarketLabel = cleanText(bundle.legs[0]?.market_question) || cleanText(order.market_question) || shortId(order.market_id)
     const marketTitle = bundle.leg_count > 1 ? `${primaryMarketLabel} +${bundle.leg_count - 1} more` : primaryMarketLabel
     const resolutionRangeLabel = formatSignedCurrencyRange(resolutionProfitLow, resolutionProfitHigh)
-    const hasOpenResolutionProfile = OPEN_ORDER_STATUSES.has(status) && filledNotional > 0 && resolutionProfitLow !== null && resolutionProfitHigh !== null
+    const hasOpenResolutionProfile = (
+      OPEN_ORDER_STATUSES.has(status)
+      && bundleSettlementReady
+      && filledNotional > 0
+      && resolutionProfitLow !== null
+      && resolutionProfitHigh !== null
+    )
     const resolutionRoiLow = hasOpenResolutionProfile ? (resolutionProfitLow / filledNotional) * 100 : null
     const resolutionRoiHigh = hasOpenResolutionProfile ? (resolutionProfitHigh / filledNotional) * 100 : null
     const resolutionRoiLabel = formatSignedPercentRange(resolutionRoiLow, resolutionRoiHigh, 2)

@@ -118,6 +118,7 @@ class Opportunity(BaseModel):
 
     # Market details
     markets: list[dict] = []  # List of markets involved
+    market_roster: Optional[dict] = None
     polymarket_url: Optional[str] = None
     kalshi_url: Optional[str] = None
     event_id: Optional[str] = None

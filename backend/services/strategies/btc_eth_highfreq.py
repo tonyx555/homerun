@@ -38,6 +38,7 @@ import math
 from models import Market, Event, Opportunity
 from config import settings as _cfg
 from .base import BaseStrategy, DecisionCheck, StrategyDecision, ExitDecision, _trader_size_limits
+from .crypto_strategy_utils import parse_datetime_utc
 from services.data_events import DataEvent
 from services.strategy_sdk import StrategySDK
 from utils.converters import clamp, coerce_bool as _coerce_bool, safe_float, to_bool, to_confidence, to_float
@@ -125,6 +126,32 @@ def _normalize_timeframe(value: Any) -> str:
     if tf in {"4h", "4hr", "240m", "240min"}:
         return "4h"
     return tf
+
+
+def _market_ml_contract(market: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(market, dict):
+        return None
+
+    machine_learning = market.get("machine_learning")
+    if isinstance(machine_learning, dict):
+        return dict(machine_learning)
+    return None
+
+
+def _market_ml_probability_yes(market: dict[str, Any]) -> float | None:
+    contract = _market_ml_contract(market)
+    if not isinstance(contract, dict):
+        return None
+
+    prediction = contract.get("prediction")
+    if isinstance(prediction, dict):
+        probability_yes = safe_float(prediction.get("probability_yes"), None)
+        if probability_yes is not None:
+            return clamp(float(probability_yes), 0.03, 0.97)
+    probability_yes = safe_float(contract.get("probability_yes"), None)
+    if probability_yes is not None:
+        return clamp(float(probability_yes), 0.03, 0.97)
+    return None
 
 
 _TIMEFRAME_PARAM_SUFFIXES: dict[str, tuple[str, ...]] = {
@@ -1581,32 +1608,6 @@ def _first_present(*values: Any) -> Any:
         if value is not None:
             return value
     return None
-
-
-def _parse_datetime_utc(value: Any) -> Optional[datetime]:
-    if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    if isinstance(value, (int, float)):
-        ts = float(value)
-        if ts <= 0:
-            return None
-        if ts > 1_000_000_000_000:
-            ts /= 1000.0
-        try:
-            return datetime.fromtimestamp(ts, tz=timezone.utc)
-        except Exception:
-            return None
-    text = str(value or "").strip()
-    if not text:
-        return None
-    numeric = to_float(text)
-    if numeric is not None and numeric > 0:
-        return _parse_datetime_utc(numeric)
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except Exception:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def _to_iso_utc(value: Optional[datetime]) -> Optional[str]:
@@ -4017,7 +4018,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             0.1,
             to_float(params.get("max_live_context_age_seconds", 3.0), 3.0),
         )
-        live_context_fetched_at = _parse_datetime_utc(
+        live_context_fetched_at = parse_datetime_utc(
             _first_present(
                 live_market.get("fetched_at"),
                 payload.get("live_market_fetched_at"),
@@ -4033,7 +4034,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             live_context_age_seconds is None or live_context_age_seconds <= max_live_context_age_seconds
         )
 
-        signal_timestamp_used = _parse_datetime_utc(
+        signal_timestamp_used = parse_datetime_utc(
             _first_present(
                 live_market.get("signal_updated_at"),
                 live_market.get("updated_at"),
@@ -4045,8 +4046,8 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 getattr(signal, "created_at", None),
             )
         )
-        signal_created_at = _parse_datetime_utc(getattr(signal, "created_at", None))
-        signal_updated_at = _parse_datetime_utc(getattr(signal, "updated_at", None))
+        signal_created_at = parse_datetime_utc(getattr(signal, "created_at", None))
+        signal_updated_at = parse_datetime_utc(getattr(signal, "updated_at", None))
         signal_age_seconds: Optional[float] = None
         if isinstance(signal_timestamp_used, datetime):
             signal_ts_utc = (
@@ -4073,7 +4074,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             )
         )
         if market_data_age_ms is None:
-            observed_at = _parse_datetime_utc(
+            observed_at = parse_datetime_utc(
                 _first_present(
                     live_market.get("source_observed_at"),
                     payload.get("source_observed_at"),
@@ -6805,7 +6806,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             )
             market_data_age_ms = self._float(market.get("market_data_age_ms"))
             if market_data_age_ms is None and live_market_fetched_at:
-                parsed_fetched_at = _parse_datetime_utc(live_market_fetched_at)
+                parsed_fetched_at = parse_datetime_utc(live_market_fetched_at)
                 if parsed_fetched_at is not None:
                     market_data_age_ms = max(
                         0.0,
@@ -6903,8 +6904,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 0.55,
                 0.92,
             )
-            ml_prediction = dict(market.get("ml_prediction")) if isinstance(market.get("ml_prediction"), dict) else None
-            ml_probability_yes = self._float(ml_prediction.get("probability_yes")) if ml_prediction else None
+            ml_probability_yes = _market_ml_probability_yes(market)
             if ml_probability_yes is not None:
                 ml_probability_yes = clamp(ml_probability_yes, 0.03, 0.97)
                 expected_prob = ml_probability_yes if direction == "buy_yes" else (1.0 - ml_probability_yes)
@@ -7035,7 +7035,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                         "oracle_status": dict(oracle_status),
                         "oracle_source": oracle_status.get("source"),
                         "oracle_prices_by_source": _json_safe(market.get("oracle_prices_by_source") or {}),
-                        "ml_prediction": _json_safe(market.get("ml_prediction") or {}),
+                        "machine_learning": _json_safe(_market_ml_contract(market) or {}),
                         "oracle_diff_pct": diff_pct,
                         "taker_fee_gate": min_required_edge,
                         "edge_percent": edge_percent,
@@ -7091,7 +7091,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 "oracle_status": dict(oracle_status),
                 "oracle_source": oracle_status.get("source"),
                 "oracle_prices_by_source": _json_safe(market.get("oracle_prices_by_source") or {}),
-                "ml_prediction": _json_safe(market.get("ml_prediction") or {}),
+                "machine_learning": _json_safe(_market_ml_contract(market) or {}),
                 "oracle_diff_pct": diff_pct,
                 "taker_fee_gate": min_required_edge,
                 "edge_percent": edge_percent,

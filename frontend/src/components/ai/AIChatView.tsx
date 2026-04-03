@@ -33,6 +33,7 @@ import {
   ChevronRight,
   Sparkles,
   ArrowDown,
+  RefreshCw,
 } from 'lucide-react'
 import { cn } from '../../lib/utils'
 import { Button } from '../ui/button'
@@ -43,6 +44,7 @@ import {
   getAIChatSession,
   streamAIChat,
   type AIChatSession,
+  type AIChatSessionDetail,
   type ChatStreamEvent,
 } from '../../services/api'
 import { activeChatSessionIdAtom } from '../../store/atoms'
@@ -75,40 +77,84 @@ function groupSessionsByDate(sessions: AIChatSession[]): Record<string, AIChatSe
   return groups
 }
 
+function toThreadMessages(messages: AIChatSessionDetail['messages'] | undefined): ThreadMessageLike[] {
+  return (messages ?? [])
+    .filter((message) => message.role === 'user' || message.role === 'assistant')
+    .map((message) => ({
+      role: message.role,
+      content: [{ type: 'text' as const, text: message.content }],
+    }))
+}
+
+function getSessionSortValue(session: AIChatSession): number {
+  const timestamp = session.updated_at ?? session.created_at
+  if (!timestamp) return 0
+  const value = Date.parse(timestamp)
+  return Number.isFinite(value) ? value : 0
+}
+
+function upsertSessionList(sessions: AIChatSession[], session: AIChatSession): AIChatSession[] {
+  return [...sessions.filter((item) => item.session_id !== session.session_id), session]
+    .sort((left, right) => getSessionSortValue(right) - getSessionSortValue(left))
+}
+
+function coerceSessionPayload(data: Record<string, unknown>): AIChatSession | null {
+  const sessionId = typeof data.session_id === 'string' ? data.session_id : null
+  if (!sessionId) return null
+
+  return {
+    session_id: sessionId,
+    context_type: typeof data.context_type === 'string' ? data.context_type : null,
+    context_id: typeof data.context_id === 'string' ? data.context_id : null,
+    title: typeof data.title === 'string' ? data.title : null,
+    created_at: typeof data.created_at === 'string' ? data.created_at : null,
+    updated_at: typeof data.updated_at === 'string' ? data.updated_at : null,
+  }
+}
+
+type ChatPaneState = {
+  paneKey: string
+  sessionId: string | null
+  initialMessages: readonly ThreadMessageLike[]
+}
+
 function SessionSidebar({
+  sessions,
   activeSessionId,
   onSelectSession,
   onNewChat,
+  onArchiveSession,
   collapsed,
   onToggleCollapse,
 }: {
+  sessions: AIChatSession[]
   activeSessionId: string | null
   onSelectSession: (id: string) => void
   onNewChat: () => void
+  onArchiveSession: (id: string) => void
   collapsed: boolean
   onToggleCollapse: () => void
 }) {
   const queryClient = useQueryClient()
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
-
-  const { data: sessionsData } = useQuery({
-    queryKey: ['ai-chat-sessions'],
-    queryFn: () => listAIChatSessions({ limit: 100 }),
-    refetchInterval: 15000,
-  })
-
-  const sessions = sessionsData?.sessions ?? []
   const grouped = useMemo(() => groupSessionsByDate(sessions), [sessions])
   const groupOrder = ['Today', 'Yesterday', 'This Week', 'Older']
 
   const handleArchive = async (sessionId: string, e: React.MouseEvent) => {
     e.stopPropagation()
     await archiveAIChatSession(sessionId)
+    queryClient.setQueryData<{ sessions: AIChatSession[]; total: number } | undefined>(['ai-chat-sessions'], (current) => {
+      if (!current) return current
+      const nextSessions = current.sessions.filter((session) => session.session_id !== sessionId)
+      const removed = nextSessions.length !== current.sessions.length
+      return {
+        sessions: nextSessions,
+        total: removed ? Math.max(0, current.total - 1) : current.total,
+      }
+    })
     queryClient.invalidateQueries({ queryKey: ['ai-chat-sessions'] })
-    if (activeSessionId === sessionId) {
-      onNewChat()
-    }
+    onArchiveSession(sessionId)
   }
 
   const startRename = (session: AIChatSession, e: React.MouseEvent) => {
@@ -165,14 +211,14 @@ function SessionSidebar({
       </div>
       <div className="flex-1 overflow-y-auto overflow-x-hidden">
         <div className="p-2 space-y-3">
-          {groupOrder.map(group => {
+          {groupOrder.map((group) => {
             const items = grouped[group]
             if (!items?.length) return null
             return (
               <div key={group}>
                 <p className="text-[10px] uppercase tracking-wider text-muted-foreground/60 px-2 mb-1.5">{group}</p>
                 <div className="space-y-0.5">
-                  {items.map(session => (
+                  {items.map((session) => (
                     <div
                       key={session.session_id}
                       onClick={() => onSelectSession(session.session_id)}
@@ -180,7 +226,7 @@ function SessionSidebar({
                         'group flex items-center gap-2 px-2 py-2 rounded-lg cursor-pointer transition-colors min-w-0 max-w-full overflow-hidden',
                         activeSessionId === session.session_id
                           ? 'bg-purple-500/15 text-purple-700 dark:text-purple-200'
-                          : 'hover:bg-muted/40 text-muted-foreground hover:text-foreground'
+                          : 'hover:bg-muted/40 text-muted-foreground hover:text-foreground',
                       )}
                     >
                       <MessageSquare className="w-3.5 h-3.5 shrink-0 opacity-60" />
@@ -188,16 +234,16 @@ function SessionSidebar({
                         <div className="flex-1 flex items-center gap-1">
                           <input
                             value={renameValue}
-                            onChange={e => setRenameValue(e.target.value)}
-                            onKeyDown={e => {
+                            onChange={(e) => setRenameValue(e.target.value)}
+                            onKeyDown={(e) => {
                               if (e.key === 'Enter') commitRename(session.session_id)
                               if (e.key === 'Escape') setRenamingId(null)
                             }}
-                            onClick={e => e.stopPropagation()}
+                            onClick={(e) => e.stopPropagation()}
                             autoFocus
                             className="flex-1 bg-transparent border-b border-purple-500/40 text-xs outline-none px-0.5"
                           />
-                          <button onClick={(e) => { e.stopPropagation(); commitRename(session.session_id) }}>
+                          <button onClick={(e) => { e.stopPropagation(); void commitRename(session.session_id) }}>
                             <Check className="w-3 h-3 text-emerald-400" />
                           </button>
                           <button onClick={(e) => { e.stopPropagation(); setRenamingId(null) }}>
@@ -211,13 +257,13 @@ function SessionSidebar({
                           </span>
                           <div className="hidden group-hover:flex items-center gap-0.5">
                             <button
-                              onClick={e => startRename(session, e)}
+                              onClick={(e) => startRename(session, e)}
                               className="p-0.5 rounded hover:bg-muted/60"
                             >
                               <Pencil className="w-3 h-3" />
                             </button>
                             <button
-                              onClick={e => handleArchive(session.session_id, e)}
+                              onClick={(e) => { void handleArchive(session.session_id, e) }}
                               className="p-0.5 rounded hover:bg-red-500/20 text-red-400"
                             >
                               <Trash2 className="w-3 h-3" />
@@ -265,18 +311,15 @@ function UserMessage() {
   )
 }
 
-
 function AssistantTextContent() {
   const part = useMessagePartText()
   const raw = part.text
   const isStreaming = useMessage((state) => state.status?.type === 'running')
 
-  // Segmented content — delegate to shared renderer
   if (raw.includes('\u00AB\u00ABSEG:')) {
     return <SegmentedContent raw={raw} isStreaming={isStreaming} />
   }
 
-  // Plain text — use MarkdownTextPrimitive (reads from assistant-ui message context)
   return (
     <motion.div
       initial={{ opacity: 0 }}
@@ -306,7 +349,7 @@ function AssistantMessage() {
   )
 }
 
-function ChatThread() {
+function ChatThread({ autoFocus }: { autoFocus: boolean }) {
   return (
     <ThreadPrimitive.Root className="flex flex-col h-full border-l border-border/20">
       <ThreadPrimitive.Viewport className="flex-1 overflow-y-auto border-b border-border/20">
@@ -333,7 +376,7 @@ function ChatThread() {
           <ComposerPrimitive.Input
             placeholder="Ask about markets, strategies, opportunities..."
             className="flex-1 bg-transparent text-sm text-foreground resize-none outline-none min-h-[36px] max-h-[120px] px-2 py-1.5 placeholder:text-muted-foreground/50"
-            autoFocus
+            autoFocus={autoFocus}
           />
           <ComposerPrimitive.Send asChild>
             <Button
@@ -352,7 +395,22 @@ function ChatThread() {
   )
 }
 
+function LoadingChatPane() {
+  return (
+    <div className="flex-1 flex items-center justify-center border-l border-border/20">
+      <RefreshCw className="w-5 h-5 animate-spin text-purple-400" />
+    </div>
+  )
+}
+
 function WelcomeScreen() {
+  const suggestions = [
+    'Analyze top opportunities',
+    'Explain resolution risks',
+    'Compare market spreads',
+    'Review portfolio exposure',
+  ]
+
   return (
     <div className="flex flex-col items-center justify-center h-full px-8 py-12">
       <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-purple-500/20 to-blue-500/20 border border-purple-500/20 flex items-center justify-center mb-6">
@@ -363,22 +421,16 @@ function WelcomeScreen() {
         Your prediction market copilot. Ask about opportunities, analyze markets, get strategy recommendations, or explore resolution criteria.
       </p>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full max-w-lg">
-        {[
-          { label: 'Analyze top opportunities', icon: '📊' },
-          { label: 'Explain resolution risks', icon: '🔍' },
-          { label: 'Compare market spreads', icon: '📈' },
-          { label: 'Review portfolio exposure', icon: '🎯' },
-        ].map(item => (
+        {suggestions.map((suggestion) => (
           <ThreadPrimitive.Suggestion
-            key={item.label}
-            prompt={item.label}
+            key={suggestion}
+            prompt={suggestion}
             method="replace"
             autoSend
             asChild
           >
-            <button className="flex items-center gap-3 px-4 py-3 rounded-xl border border-border/40 bg-muted/30 hover:bg-muted/50 hover:border-purple-500/20 transition-colors text-left">
-              <span className="text-lg">{item.icon}</span>
-              <span className="text-sm text-muted-foreground">{item.label}</span>
+            <button className="flex items-center justify-center px-4 py-3 rounded-xl border border-border/40 bg-muted/30 hover:bg-muted/50 hover:border-purple-500/20 transition-colors text-center">
+              <span className="text-sm text-muted-foreground">{suggestion}</span>
             </button>
           </ThreadPrimitive.Suggestion>
         ))}
@@ -388,13 +440,17 @@ function WelcomeScreen() {
 }
 
 function ChatRuntime({
+  paneKey,
   sessionId,
   initialMessages,
-  onSessionChange,
+  isActive,
+  onSessionBound,
 }: {
+  paneKey: string
   sessionId: string | null
   initialMessages: readonly ThreadMessageLike[]
-  onSessionChange: (id: string) => void
+  isActive: boolean
+  onSessionBound: (paneKey: string, session: AIChatSession) => void
 }) {
   const queryClient = useQueryClient()
   const sessionIdRef = useRef<string | null>(sessionId)
@@ -402,26 +458,24 @@ function ChatRuntime({
 
   const chatModelAdapter = useMemo<ChatModelAdapter>(() => ({
     async *run({ messages, abortSignal }) {
-      const lastUserMessage = [...messages].reverse().find(m => m.role === 'user')
+      const lastUserMessage = [...messages].reverse().find((message) => message.role === 'user')
       if (!lastUserMessage) return
 
       const userText = lastUserMessage.content
-        .filter((p): p is { type: 'text'; text: string } => p.type === 'text')
-        .map(p => p.text)
+        .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
+        .map((part) => part.text)
         .join('\n')
 
-      // Mutable state shared with SSE callbacks
       const state = {
-        segments: [] as string[],      // Tool event segments (persisted)
-        answerChunks: [] as string[],   // Streaming answer text chunks
-        isThinking: true,               // Start true — show dots immediately while waiting
+        segments: [] as string[],
+        answerChunks: [] as string[],
+        isThinking: true,
         done: false,
         error: null as string | null,
-        sessionId: null as string | null,
-        changed: true,                  // Trigger initial render with thinking dots
+        sessionId: sessionIdRef.current,
+        changed: true,
       }
 
-      // Thinking indicator segment (transient — shown during streaming, not persisted)
       const THINKING_SEG = encodeSeg('thinking', { content: '' })
 
       streamAIChat(
@@ -429,38 +483,48 @@ function ChatRuntime({
           message: userText,
           session_id: sessionIdRef.current || undefined,
         },
-        // onToken — receives partial chunks, accumulate them
         (chunk) => {
-          state.isThinking = false  // Answer started, hide thinking
+          state.isThinking = false
           state.answerChunks.push(chunk)
           state.changed = true
         },
-        // onDone
         (data) => {
-          if (data.session_id && data.session_id !== sessionIdRef.current) {
+          if (data.session_id && data.session_id !== state.sessionId) {
             state.sessionId = data.session_id
+            onSessionBound(paneKey, {
+              session_id: data.session_id,
+              context_type: null,
+              context_id: null,
+              title: null,
+              created_at: null,
+              updated_at: new Date().toISOString(),
+            })
           }
           state.isThinking = false
           state.done = true
           state.changed = true
         },
-        // onError
         (error) => {
           state.isThinking = false
           state.error = error
           state.changed = true
         },
         abortSignal,
-        // onEvent — structured events for tool widgets
         (event: ChatStreamEvent) => {
           switch (event.event) {
+            case 'session': {
+              const boundSession = coerceSessionPayload(event.data)
+              if (!boundSession) break
+              state.sessionId = boundSession.session_id
+              onSessionBound(paneKey, boundSession)
+              break
+            }
             case 'thinking':
-              // Just set the flag — don't add a segment (transient UI only)
               state.isThinking = true
               state.changed = true
               break
             case 'tool_start':
-              state.isThinking = false  // Tool started, hide thinking dots
+              state.isThinking = false
               state.segments.push(encodeSeg('tool_start', {
                 tool: event.data.tool,
                 input: event.data.input || {},
@@ -472,7 +536,6 @@ function ChatRuntime({
                 tool: event.data.tool,
                 output: event.data.output || {},
               }))
-              // Don't show thinking dots after tool completes — content is already visible
               state.isThinking = false
               state.changed = true
               break
@@ -487,17 +550,14 @@ function ChatRuntime({
         },
       )
 
-      // Poll and yield updates as they arrive
       let lastYielded = ''
       const startTime = Date.now()
       const maxWait = 180_000
 
       while (true) {
-        await new Promise(r => setTimeout(r, 40))
+        await new Promise((resolve) => setTimeout(resolve, 40))
 
         if (state.error) {
-          // Yield error as part of the message — do NOT throw, or assistant-ui
-          // discards the entire message (including tool widgets already shown).
           const errorDisplay = state.segments.join('') + `\n\n**Error:** ${state.error}`
           yield { content: [{ type: 'text' as const, text: errorDisplay }] }
           return
@@ -506,7 +566,6 @@ function ChatRuntime({
         if (state.changed) {
           state.changed = false
           const answerSoFar = state.answerChunks.join('')
-          // Prepend transient thinking segment only while actively thinking
           const thinkingPrefix = state.isThinking ? THINKING_SEG : ''
           const display = thinkingPrefix + state.segments.join('') + answerSoFar
 
@@ -517,17 +576,9 @@ function ChatRuntime({
         }
 
         if (state.done) {
-          // Final display — NO thinking segment (it's done)
           const finalAnswer = state.answerChunks.join('') || 'No response generated.'
           const finalDisplay = state.segments.join('') + finalAnswer
-
-          // Always yield the final content to ensure the runtime has
-          // the correct completed message before we trigger side-effects.
           yield { content: [{ type: 'text' as const, text: finalDisplay }] }
-
-          // Side-effects AFTER the final yield so re-renders can't
-          // race with message finalization.
-          if (state.sessionId) onSessionChange(state.sessionId)
           queryClient.invalidateQueries({ queryKey: ['ai-chat-sessions'] })
           return
         }
@@ -538,104 +589,209 @@ function ChatRuntime({
         }
       }
     },
-  }), [onSessionChange, queryClient])
+  }), [onSessionBound, paneKey, queryClient])
 
   const runtime = useLocalRuntime(chatModelAdapter, { initialMessages })
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <ChatThread />
+      <ChatThread autoFocus={isActive} />
     </AssistantRuntimeProvider>
   )
 }
 
 export default function AIChatView() {
+  const queryClient = useQueryClient()
   const [activeSessionId, setActiveSessionId] = useAtom(activeChatSessionIdAtom)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [initialMessages, setInitialMessages] = useState<readonly ThreadMessageLike[]>([])
-  // Key forces full remount of runtime when session changes
-  const [runtimeKey, setRuntimeKey] = useState(0)
+  const [panes, setPanes] = useState<ChatPaneState[]>([])
+  const [activePaneKey, setActivePaneKey] = useState<string | null>(null)
+  const [isLoadingSession, setIsLoadingSession] = useState(false)
   const didAutoSelect = useRef(false)
+  const draftCounterRef = useRef(0)
+  const activePaneKeyRef = useRef<string | null>(null)
+  const activeSessionIdRef = useRef<string | null>(activeSessionId)
+  const sessionPaneKeysRef = useRef<Record<string, string>>({})
+  const selectionRequestRef = useRef(0)
 
-  // Auto-select latest session on first mount, or restore active session after tab switch
+  useEffect(() => {
+    activePaneKeyRef.current = activePaneKey
+  }, [activePaneKey])
+
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId
+  }, [activeSessionId])
+
   const { data: sessionsData } = useQuery({
-    queryKey: ['ai-chat-sessions', 'auto-select'],
-    queryFn: () => listAIChatSessions({ limit: 1 }),
+    queryKey: ['ai-chat-sessions'],
+    queryFn: () => listAIChatSessions({ limit: 100 }),
+    refetchInterval: 15000,
   })
+  const sessions = sessionsData?.sessions ?? []
+
+  const createDraftPane = useCallback((): ChatPaneState => {
+    draftCounterRef.current += 1
+    return {
+      paneKey: `draft:${draftCounterRef.current}`,
+      sessionId: null,
+      initialMessages: [],
+    }
+  }, [])
+
+  const handleNewChat = useCallback(() => {
+    selectionRequestRef.current += 1
+    const draftPane = createDraftPane()
+    setIsLoadingSession(false)
+    setPanes((current) => [...current, draftPane])
+    setActivePaneKey(draftPane.paneKey)
+    setActiveSessionId(null)
+  }, [createDraftPane, setActiveSessionId])
+
+  const handleSelectSession = useCallback(async (sessionId: string) => {
+    const requestId = ++selectionRequestRef.current
+    const existingPaneKey = sessionPaneKeysRef.current[sessionId]
+    const previousPaneKey = activePaneKeyRef.current
+    const previousSessionId = activeSessionIdRef.current
+
+    setActiveSessionId(sessionId)
+
+    if (existingPaneKey) {
+      setIsLoadingSession(false)
+      setActivePaneKey(existingPaneKey)
+      return
+    }
+
+    setIsLoadingSession(true)
+    setActivePaneKey(null)
+
+    try {
+      const detail = await getAIChatSession(sessionId)
+      if (selectionRequestRef.current !== requestId) return
+
+      const paneKey = `session:${sessionId}`
+      sessionPaneKeysRef.current[sessionId] = paneKey
+      setPanes((current) => {
+        if (current.some((pane) => pane.paneKey === paneKey)) {
+          return current
+        }
+        return [...current, { paneKey, sessionId, initialMessages: toThreadMessages(detail.messages) }]
+      })
+      setActivePaneKey(paneKey)
+    } catch {
+      if (selectionRequestRef.current !== requestId) return
+
+      setActiveSessionId(previousSessionId)
+      if (previousPaneKey) {
+        setActivePaneKey(previousPaneKey)
+      } else {
+        const draftPane = createDraftPane()
+        setPanes((current) => [...current, draftPane])
+        setActivePaneKey(draftPane.paneKey)
+      }
+    } finally {
+      if (selectionRequestRef.current === requestId) {
+        setIsLoadingSession(false)
+      }
+    }
+  }, [createDraftPane, setActiveSessionId])
+
+  const handleArchiveSession = useCallback((sessionId: string) => {
+    const removedPaneKey = sessionPaneKeysRef.current[sessionId]
+    delete sessionPaneKeysRef.current[sessionId]
+
+    const shouldOpenDraft = activePaneKeyRef.current === removedPaneKey || activeSessionIdRef.current === sessionId
+    const nextDraftPane = shouldOpenDraft ? createDraftPane() : null
+
+    if (shouldOpenDraft) {
+      selectionRequestRef.current += 1
+      setIsLoadingSession(false)
+    }
+
+    setPanes((current) => {
+      const filtered = current.filter((pane) => pane.sessionId !== sessionId)
+      return nextDraftPane ? [...filtered, nextDraftPane] : filtered
+    })
+
+    if (nextDraftPane) {
+      setActivePaneKey(nextDraftPane.paneKey)
+      setActiveSessionId(null)
+    }
+  }, [createDraftPane, setActiveSessionId])
+
+  const handleSessionBound = useCallback((paneKey: string, session: AIChatSession) => {
+    const normalizedSession: AIChatSession = {
+      ...session,
+      updated_at: session.updated_at ?? session.created_at ?? new Date().toISOString(),
+    }
+
+    sessionPaneKeysRef.current[normalizedSession.session_id] = paneKey
+    setPanes((current) => current.map((pane) => (
+      pane.paneKey === paneKey
+        ? { ...pane, sessionId: normalizedSession.session_id }
+        : pane
+    )))
+
+    queryClient.setQueryData<{ sessions: AIChatSession[]; total: number } | undefined>(['ai-chat-sessions'], (current) => {
+      if (!current) {
+        return { sessions: [normalizedSession], total: 1 }
+      }
+
+      const exists = current.sessions.some((item) => item.session_id === normalizedSession.session_id)
+      return {
+        sessions: upsertSessionList(current.sessions, normalizedSession),
+        total: exists ? current.total : current.total + 1,
+      }
+    })
+
+    if (activePaneKeyRef.current === paneKey) {
+      setActiveSessionId(normalizedSession.session_id)
+    }
+
+    queryClient.invalidateQueries({ queryKey: ['ai-chat-sessions'] })
+  }, [queryClient, setActiveSessionId])
 
   useEffect(() => {
     if (didAutoSelect.current) return
 
-    // Determine which session to load
-    const sessionToLoad = activeSessionId || sessionsData?.sessions?.[0]?.session_id
+    const sessionToLoad = activeSessionId || sessions[0]?.session_id
     if (!sessionToLoad) {
-      // Only mark done if sessions data has loaded (empty list) — otherwise
-      // the query is still in flight and we should wait for it.
-      if (sessionsData) didAutoSelect.current = true
+      if (sessionsData) {
+        didAutoSelect.current = true
+        if (panes.length === 0) {
+          handleNewChat()
+        }
+      }
       return
     }
 
     didAutoSelect.current = true
-    setActiveSessionId(sessionToLoad)
-    getAIChatSession(sessionToLoad)
-      .then(detail => {
-        const msgs: ThreadMessageLike[] = (detail.messages || [])
-          .filter((m: { role: string }) => m.role === 'user' || m.role === 'assistant')
-          .map((m: { role: string; content: string }) => ({
-            role: m.role as 'user' | 'assistant',
-            content: [{ type: 'text' as const, text: m.content }],
-          }))
-        setInitialMessages(msgs)
-        setRuntimeKey(k => k + 1)
-      })
-      .catch(() => {
-        setRuntimeKey(k => k + 1)
-      })
-  }, [sessionsData, activeSessionId, setActiveSessionId])
-
-  const handleNewChat = useCallback(() => {
-    setActiveSessionId(null)
-    setInitialMessages([])
-    setRuntimeKey(k => k + 1)
-  }, [setActiveSessionId])
-
-  const handleSelectSession = useCallback(async (sessionId: string) => {
-    setActiveSessionId(sessionId)
-    try {
-      const detail = await getAIChatSession(sessionId)
-      const msgs: ThreadMessageLike[] = (detail.messages || [])
-        .filter(m => m.role === 'user' || m.role === 'assistant')
-        .map(m => ({
-          role: m.role as 'user' | 'assistant',
-          content: [{ type: 'text' as const, text: m.content }],
-        }))
-      setInitialMessages(msgs)
-    } catch {
-      setInitialMessages([])
-    }
-    setRuntimeKey(k => k + 1)
-  }, [setActiveSessionId])
-
-  const handleSessionChange = useCallback((id: string) => {
-    setActiveSessionId(id)
-  }, [setActiveSessionId])
+    void handleSelectSession(sessionToLoad)
+  }, [activeSessionId, handleNewChat, handleSelectSession, panes.length, sessions, sessionsData])
 
   return (
     <div className="flex h-full">
       <SessionSidebar
+        sessions={sessions}
         activeSessionId={activeSessionId}
-        onSelectSession={handleSelectSession}
+        onSelectSession={(sessionId) => { void handleSelectSession(sessionId) }}
         onNewChat={handleNewChat}
+        onArchiveSession={handleArchiveSession}
         collapsed={sidebarCollapsed}
         onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
       />
       <div className="flex-1 flex flex-col min-w-0">
-        <ChatRuntime
-          key={runtimeKey}
-          sessionId={activeSessionId}
-          initialMessages={initialMessages}
-          onSessionChange={handleSessionChange}
-        />
+        {panes.map((pane) => (
+          <div key={pane.paneKey} className={cn('flex-1 min-h-0', activePaneKey !== pane.paneKey && 'hidden')}>
+            <ChatRuntime
+              paneKey={pane.paneKey}
+              sessionId={pane.sessionId}
+              initialMessages={pane.initialMessages}
+              isActive={activePaneKey === pane.paneKey}
+              onSessionBound={handleSessionBound}
+            />
+          </div>
+        ))}
+        {(isLoadingSession || (!activePaneKey && panes.length === 0)) && <LoadingChatPane />}
       </div>
     </div>
   )

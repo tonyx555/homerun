@@ -315,6 +315,164 @@ class TestScanPipeline:
             "gtm-ant-mic-2026-04-01-mic",
         }
 
+    def test_enforce_catalog_caps_keeps_event_rosters_atomic(self, mock_polymarket_client):
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+
+        home = Market(
+            id="market-home",
+            condition_id="condition-home",
+            question="Will home team win?",
+            slug="event-home",
+            event_slug="event-atomic",
+            group_item_title="Home",
+            sports_market_type="moneyline",
+            neg_risk=True,
+        )
+        draw = Market(
+            id="market-draw",
+            condition_id="condition-draw",
+            question="Will the match end in a draw?",
+            slug="event-draw",
+            event_slug="event-atomic",
+            group_item_title="Draw",
+            sports_market_type="moneyline",
+            neg_risk=True,
+        )
+        away = Market(
+            id="market-away",
+            condition_id="condition-away",
+            question="Will away team win?",
+            slug="event-away",
+            event_slug="event-atomic",
+            group_item_title="Away",
+            sports_market_type="moneyline",
+            neg_risk=True,
+        )
+        event = Event(
+            id="event-atomic",
+            slug="event-atomic",
+            title="Atomic roster event",
+            category="Sports",
+            markets=[home, draw, away],
+            neg_risk=True,
+        )
+
+        with (
+            patch("services.scanner.settings.SCANNER_FORCE_FULL_UNIVERSE", False),
+            patch("services.scanner.settings.MAX_MARKETS_TO_SCAN", 2),
+            patch("services.scanner.settings.MAX_EVENTS_TO_SCAN", 0),
+        ):
+            capped_events, capped_markets = scanner._enforce_catalog_caps([event], [home, draw, away])
+
+        assert len(capped_events) == 1
+        assert len(capped_markets) == 3
+        assert {market.id for market in capped_events[0].markets} == {"market-home", "market-draw", "market-away"}
+
+    @pytest.mark.asyncio
+    async def test_scan_fast_dispatches_verified_event_peers_for_partial_hot_batch(self, mock_polymarket_client):
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+
+        home = Market(
+            id="market-home",
+            condition_id="condition-home",
+            question="Will home team win?",
+            slug="event-home",
+            event_slug="event-atomic",
+            group_item_title="Home",
+            sports_market_type="moneyline",
+            neg_risk=True,
+            clob_token_ids=["tok-home-yes", "tok-home-no"],
+            outcome_prices=[0.4, 0.6],
+        )
+        draw = Market(
+            id="market-draw",
+            condition_id="condition-draw",
+            question="Will the match end in a draw?",
+            slug="event-draw",
+            event_slug="event-atomic",
+            group_item_title="Draw",
+            sports_market_type="moneyline",
+            neg_risk=True,
+            clob_token_ids=["tok-draw-yes", "tok-draw-no"],
+            outcome_prices=[0.2, 0.8],
+        )
+        away = Market(
+            id="market-away",
+            condition_id="condition-away",
+            question="Will away team win?",
+            slug="event-away",
+            event_slug="event-atomic",
+            group_item_title="Away",
+            sports_market_type="moneyline",
+            neg_risk=True,
+            clob_token_ids=["tok-away-yes", "tok-away-no"],
+            outcome_prices=[0.4, 0.6],
+        )
+        event = Event(
+            id="event-atomic",
+            slug="event-atomic",
+            title="Atomic roster event",
+            category="Sports",
+            markets=[home, draw, away],
+            neg_risk=True,
+        )
+
+        scanner._cached_markets = [home, draw, away]
+        scanner._cached_events = [event]
+        scanner._cached_market_by_id = {market.id: market for market in scanner._cached_markets}
+        scanner._rebuild_realtime_graph(scanner._cached_events, scanner._cached_markets)
+
+        from services.market_prioritizer import MarketTier
+
+        scanner._prioritizer = MagicMock()
+        scanner._prioritizer.classify_all = MagicMock(
+            return_value={
+                MarketTier.HOT: [home],
+                MarketTier.WARM: [],
+                MarketTier.COLD: [],
+            }
+        )
+        scanner._prioritizer.get_changed_markets = MagicMock(return_value=[home])
+        scanner._prioritizer.update_after_evaluation = MagicMock(return_value=0)
+        scanner._prioritizer.compute_attention_scores = MagicMock()
+        scanner._prioritizer.update_stability_scores = MagicMock()
+
+        dispatch_mock = AsyncMock(return_value=[])
+        with (
+            patch.object(scanner, "_dispatch_market_refresh", dispatch_mock),
+            patch.object(scanner, "_partition_market_refresh_strategies", return_value=({"settlement_lag"}, set())),
+            patch.object(scanner, "_ensure_runtime_strategies_loaded", new_callable=AsyncMock),
+            patch.object(scanner, "_set_activity", new_callable=AsyncMock),
+            patch.object(scanner, "refresh_opportunity_prices", new_callable=AsyncMock, return_value=[]),
+            patch.object(scanner, "_snapshot_ws_prices", new_callable=AsyncMock, return_value={}),
+            patch("services.scanner.settings.INCREMENTAL_FETCH_ENABLED", False),
+        ):
+            await scanner.scan_fast()
+
+        dispatched_event = dispatch_mock.await_args.args[0]
+        assert {market.id for market in dispatched_event.markets} == {"market-home", "market-draw", "market-away"}
+
+    def test_build_dispatch_market_groups_skips_unverified_event_markets(self, mock_polymarket_client):
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+
+        unverified_market = Market(
+            id="market-unverified",
+            condition_id="condition-unverified",
+            question="Will team win?",
+            slug="event-unverified-home",
+            event_slug="event-unverified",
+            group_item_title="Home",
+            sports_market_type="moneyline",
+            neg_risk=True,
+        )
+
+        scanner._cached_markets = [unverified_market]
+        scanner._cached_events = []
+        scanner._cached_market_by_id = {unverified_market.id: unverified_market}
+        scanner._rebuild_realtime_graph([], [unverified_market])
+
+        assert scanner._build_dispatch_market_groups([unverified_market]) == []
+
     @pytest.mark.asyncio
     async def test_scan_fast_returns_opportunities_sorted_by_roi(
         self,

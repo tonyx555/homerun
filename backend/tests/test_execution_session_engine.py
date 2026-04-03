@@ -24,17 +24,19 @@ def _leg_result(
     provider_order_id: str | None = None,
     provider_clob_order_id: str | None = None,
     error_message: str | None = None,
+    effective_price: float = 0.41,
+    payload: dict | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         leg_id=leg_id,
         status=status,
-        effective_price=0.41,
+        effective_price=effective_price,
         error_message=(
             error_message
             if error_message is not None
             else (None if status != "failed" else "submission_failed")
         ),
-        payload={"provider": "test"},
+        payload=payload if payload is not None else {"provider": "test"},
         provider_order_id=provider_order_id,
         provider_clob_order_id=provider_clob_order_id,
         shares=shares,
@@ -74,6 +76,71 @@ class _FailureProjectionDb:
             if trader_order_id:
                 assert trader_order_id in self.persisted_trader_order_ids
         self.pending.clear()
+
+
+def test_build_execution_session_rows_carries_market_roster_into_session_payload():
+    signal = SimpleNamespace(
+        id="signal-roster",
+        source="scanner",
+        market_id="market-home",
+        market_question="Will home team win?",
+        payload_json={
+            "markets": [
+                {"id": "market-home", "question": "Will home team win?"},
+                {"id": "market-draw", "question": "Will the match end in a draw?"},
+                {"id": "market-away", "question": "Will away team win?"},
+            ],
+            "market_roster": {
+                "scope": "event",
+                "event_id": "event-atomic",
+                "event_slug": "event-atomic",
+                "event_title": "Atomic roster event",
+                "category": "Sports",
+                "market_count": 3,
+                "roster_hash": "hash1234",
+                "markets": [
+                    {"id": "market-home", "question": "Will home team win?"},
+                    {"id": "market-draw", "question": "Will the match end in a draw?"},
+                    {"id": "market-away", "question": "Will away team win?"},
+                ],
+            },
+        },
+    )
+
+    row, leg_rows = session_engine_module.build_execution_session_rows(
+        trader_id="trader-roster",
+        signal=signal,
+        decision_id="decision-roster",
+        strategy_key="settlement_lag",
+        strategy_version=None,
+        mode="live",
+        policy="PARALLEL_MAKER",
+        plan_id="plan-roster",
+        legs=[
+            {
+                "leg_id": "leg-home",
+                "market_id": "market-home",
+                "market_question": "Will home team win?",
+                "token_id": "token-home",
+                "side": "buy",
+                "outcome": "yes",
+                "limit_price": 0.4,
+            }
+        ],
+        requested_notional_usd=10.0,
+        max_unhedged_notional_usd=0.0,
+        expires_at=utcnow() + timedelta(minutes=5),
+        payload={"execution_plan": {"plan_id": "plan-roster", "policy": "PARALLEL_MAKER", "legs": []}},
+        trace_id="trace-roster",
+    )
+
+    assert len(leg_rows) == 1
+    assert row.payload_json["market_roster"]["market_count"] == 3
+    assert {market["id"] for market in row.payload_json["market_roster"]["markets"]} == {
+        "market-home",
+        "market-draw",
+        "market-away",
+    }
 
 
 @pytest.mark.asyncio
@@ -124,6 +191,7 @@ async def test_execute_signal_aborts_before_order_writes_on_pair_lock_violation(
     )
     set_signal_status_mock = AsyncMock()
     monkeypatch.setattr(session_engine_module, "set_trade_signal_status", set_signal_status_mock)
+    monkeypatch.setattr(session_engine_module, "sync_trader_position_inventory", AsyncMock(return_value={}))
     intent_runtime = SimpleNamespace(update_signal_status=AsyncMock())
     monkeypatch.setattr(intent_runtime_module, "get_intent_runtime", lambda: intent_runtime)
 
@@ -658,4 +726,325 @@ async def test_cancel_session_skips_already_terminal_trader_orders(monkeypatch):
     assert update_status_mock.await_count == 1
     assert set_signal_status_mock.await_count == 1
     assert create_event_mock.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_signal_rejects_incomplete_event_roster_before_submission(monkeypatch):
+    db = _FailureProjectionDb()
+    engine = session_engine_module.ExecutionSessionEngine(db)
+
+    plan = {
+        "policy": "PARALLEL_MAKER",
+        "plan_id": "plan-missing-roster-leg",
+        "legs": [
+            {"leg_id": "leg-home", "market_id": "market-home"},
+            {"leg_id": "leg-away", "market_id": "market-away"},
+        ],
+    }
+    legs = [
+        {
+            "leg_id": "leg-home",
+            "market_id": "market-home",
+            "side": "buy",
+            "requested_notional_usd": 5.0,
+            "requested_shares": 10.0,
+            "limit_price": 0.5,
+        },
+        {
+            "leg_id": "leg-away",
+            "market_id": "market-away",
+            "side": "buy",
+            "requested_notional_usd": 5.0,
+            "requested_shares": 10.0,
+            "limit_price": 0.5,
+        },
+    ]
+    constraints = {"max_unhedged_notional_usd": 0.0, "hedge_timeout_seconds": 20}
+    monkeypatch.setattr(engine, "_build_plan", lambda *args, **kwargs: (plan, legs, constraints))
+    submit_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(session_engine_module, "submit_execution_wave", submit_mock)
+    monkeypatch.setattr(session_engine_module, "set_trade_signal_status", AsyncMock(return_value=True))
+    monkeypatch.setattr(session_engine_module, "sync_trader_position_inventory", AsyncMock(return_value={}))
+    monkeypatch.setattr(session_engine_module.event_bus, "publish", AsyncMock(return_value=None))
+    intent_runtime = SimpleNamespace(update_signal_status=AsyncMock())
+    monkeypatch.setattr(intent_runtime_module, "get_intent_runtime", lambda: intent_runtime)
+
+    signal = SimpleNamespace(
+        id="signal-missing-roster-leg",
+        source="scanner",
+        trace_id="trace-missing-roster-leg",
+        strategy_type="settlement_lag",
+        strategy_context_json={},
+        payload_json={
+            "is_guaranteed": True,
+            "market_roster": {
+                "scope": "event",
+                "market_count": 3,
+                "markets": [
+                    {"id": "market-home"},
+                    {"id": "market-draw"},
+                    {"id": "market-away"},
+                ],
+            },
+        },
+        market_id="market-home",
+        market_question="Will home team win?",
+        direction="buy_yes",
+        entry_price=0.5,
+        edge_percent=8.0,
+        confidence=0.7,
+    )
+
+    result = await engine.execute_signal(
+        trader_id="trader-missing-roster-leg",
+        signal=signal,
+        decision_id="decision-missing-roster-leg",
+        strategy_key="settlement_lag",
+        strategy_version=None,
+        strategy_params={},
+        risk_limits={},
+        mode="live",
+        size_usd=10.0,
+        reason="roster-gap",
+    )
+
+    assert result.status == "failed"
+    assert result.orders_written == 0
+    assert submit_mock.await_count == 0
+    session_rows = db.persisted_rows_by_type.get("ExecutionSession") or []
+    assert len(session_rows) == 1
+    assert session_rows[0].status == "failed"
+    assert session_rows[0].payload_json["bundle_coverage"]["missing_market_ids"] == ["market-draw"]
+
+
+@pytest.mark.asyncio
+async def test_execute_signal_rejects_bundle_below_minimum_executable_size(monkeypatch):
+    db = _FailureProjectionDb()
+    engine = session_engine_module.ExecutionSessionEngine(db)
+
+    plan = {"policy": "PARALLEL_MAKER", "plan_id": "plan-too-small", "legs": []}
+    legs = [
+        {
+            "leg_id": "leg-yes",
+            "market_id": "market-binary",
+            "side": "buy",
+            "requested_notional_usd": 0.13,
+            "requested_shares": 8.8,
+            "limit_price": 0.0145,
+        },
+        {
+            "leg_id": "leg-no",
+            "market_id": "market-binary",
+            "side": "buy",
+            "requested_notional_usd": 8.29,
+            "requested_shares": 8.8,
+            "limit_price": 0.9395,
+        },
+    ]
+    constraints = {"max_unhedged_notional_usd": 0.0, "hedge_timeout_seconds": 20}
+    monkeypatch.setattr(engine, "_build_plan", lambda *args, **kwargs: (plan, legs, constraints))
+    submit_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(session_engine_module, "submit_execution_wave", submit_mock)
+    monkeypatch.setattr(session_engine_module, "set_trade_signal_status", AsyncMock(return_value=True))
+    monkeypatch.setattr(session_engine_module, "sync_trader_position_inventory", AsyncMock(return_value={}))
+    monkeypatch.setattr(session_engine_module.event_bus, "publish", AsyncMock(return_value=None))
+    intent_runtime = SimpleNamespace(update_signal_status=AsyncMock())
+    monkeypatch.setattr(intent_runtime_module, "get_intent_runtime", lambda: intent_runtime)
+
+    signal = SimpleNamespace(
+        id="signal-too-small",
+        source="scanner",
+        trace_id="trace-too-small",
+        strategy_type="settlement_lag",
+        strategy_context_json={},
+        payload_json={"is_guaranteed": True},
+        market_id="market-binary",
+        market_question="Google (GOOGL) Up or Down?",
+        direction="buy_yes",
+        entry_price=0.0145,
+        edge_percent=4.0,
+        confidence=0.5,
+    )
+
+    result = await engine.execute_signal(
+        trader_id="trader-too-small",
+        signal=signal,
+        decision_id="decision-too-small",
+        strategy_key="settlement_lag",
+        strategy_version=None,
+        strategy_params={},
+        risk_limits={},
+        mode="live",
+        size_usd=8.42,
+        reason="too-small",
+    )
+
+    assert result.status == "failed"
+    assert result.orders_written == 0
+    assert submit_mock.await_count == 0
+    session_rows = db.persisted_rows_by_type.get("ExecutionSession") or []
+    assert len(session_rows) == 1
+    payload = session_rows[0].payload_json["bundle_preflight"]
+    assert payload["reason"] == "bundle_below_minimum_executable_size"
+    assert payload["minimum_total_notional_usd"] > 8.42
+
+
+@pytest.mark.asyncio
+async def test_execute_signal_requests_bundle_recovery_after_partial_fill(monkeypatch):
+    db = _FailureProjectionDb()
+    engine = session_engine_module.ExecutionSessionEngine(db)
+
+    plan = {"policy": "PARALLEL_MAKER", "plan_id": "plan-recovery", "legs": []}
+    legs = [
+        {
+            "leg_id": "leg-1",
+            "market_id": "market-one",
+            "token_id": "token-1",
+            "side": "buy",
+            "requested_notional_usd": 5.0,
+            "requested_shares": 10.0,
+            "limit_price": 0.5,
+        },
+        {
+            "leg_id": "leg-2",
+            "market_id": "market-two",
+            "token_id": "token-2",
+            "side": "buy",
+            "requested_notional_usd": 5.0,
+            "requested_shares": 10.0,
+            "limit_price": 0.5,
+        },
+    ]
+    constraints = {"max_unhedged_notional_usd": 0.0, "hedge_timeout_seconds": 20}
+    monkeypatch.setattr(engine, "_build_plan", lambda *args, **kwargs: (plan, legs, constraints))
+    monkeypatch.setattr(session_engine_module, "supports_reprice", lambda _policy: False)
+    monkeypatch.setattr(session_engine_module, "execution_waves", lambda _policy, leg_rows: [leg_rows])
+    monkeypatch.setattr(session_engine_module, "requires_pair_lock", lambda _policy, _constraints: False)
+    submit_mock = AsyncMock(
+        side_effect=[
+            [
+                _leg_result(
+                    leg_id="leg-1",
+                    status="executed",
+                    notional_usd=1.1,
+                    shares=5.0,
+                    provider_order_id="provider-filled",
+                    provider_clob_order_id="clob-filled",
+                    effective_price=0.22,
+                    payload={
+                        "provider": "test",
+                        "filled_size": 5.0,
+                        "average_fill_price": 0.22,
+                        "filled_notional_usd": 1.1,
+                    },
+                ),
+                _leg_result(
+                    leg_id="leg-2",
+                    status="open",
+                    notional_usd=0.0,
+                    shares=10.0,
+                    provider_order_id="provider-open",
+                    provider_clob_order_id="clob-open",
+                    effective_price=0.5,
+                    payload={
+                        "provider": "test",
+                        "filled_size": 0.0,
+                        "average_fill_price": None,
+                        "filled_notional_usd": 0.0,
+                    },
+                ),
+            ],
+            [
+                _leg_result(
+                    leg_id="leg-2",
+                    status="failed",
+                    notional_usd=0.0,
+                    shares=0.0,
+                    provider_order_id="provider-rescue",
+                    provider_clob_order_id="clob-rescue",
+                    effective_price=0.51,
+                    payload={
+                        "provider": "test",
+                        "filled_size": 0.0,
+                        "average_fill_price": None,
+                        "filled_notional_usd": 0.0,
+                    },
+                    error_message="rescue_unfilled",
+                )
+            ],
+        ]
+    )
+    monkeypatch.setattr(session_engine_module, "submit_execution_wave", submit_mock)
+    cancel_provider_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(session_engine_module, "cancel_live_provider_order", cancel_provider_mock)
+    flatten_mock = AsyncMock(
+        return_value=SimpleNamespace(
+            status="executed",
+            order_id="flatten-order",
+            effective_price=0.21,
+            error_message=None,
+            payload={
+                "clob_order_id": "flatten-clob",
+                "filled_size": 5.0,
+                "average_fill_price": 0.21,
+                "filled_notional_usd": 1.05,
+            },
+        )
+    )
+    monkeypatch.setattr(session_engine_module, "execute_live_order", flatten_mock)
+    monkeypatch.setattr(session_engine_module, "set_trade_signal_status", AsyncMock(return_value=True))
+    monkeypatch.setattr(session_engine_module, "sync_trader_position_inventory", AsyncMock(return_value={}))
+    monkeypatch.setattr(session_engine_module.event_bus, "publish", AsyncMock(return_value=None))
+    intent_runtime = SimpleNamespace(update_signal_status=AsyncMock())
+    monkeypatch.setattr(intent_runtime_module, "get_intent_runtime", lambda: intent_runtime)
+
+    signal = SimpleNamespace(
+        id="signal-recovery",
+        source="scanner",
+        trace_id="trace-recovery",
+        strategy_type="settlement_lag",
+        strategy_context_json={},
+        payload_json={
+            "is_guaranteed": True,
+            "market_roster": {
+                "scope": "event",
+                "market_count": 2,
+                "markets": [
+                    {"id": "market-one"},
+                    {"id": "market-two"},
+                ],
+            },
+        },
+        market_id="market-one",
+        market_question="Will team one win?",
+        direction="buy_yes",
+        entry_price=0.5,
+        edge_percent=9.0,
+        confidence=0.8,
+    )
+
+    result = await engine.execute_signal(
+        trader_id="trader-recovery",
+        signal=signal,
+        decision_id="decision-recovery",
+        strategy_key="settlement_lag",
+        strategy_version=None,
+        strategy_params={},
+        risk_limits={},
+        mode="live",
+        size_usd=10.0,
+        reason="partial-fill",
+    )
+
+    assert result.status == "failed"
+    assert cancel_provider_mock.await_count == 1
+    assert submit_mock.await_count == 2
+    assert flatten_mock.await_count == 1
+    assert flatten_mock.await_args.kwargs["token_id"] == "token-1"
+    assert flatten_mock.await_args.kwargs["side"] == "SELL"
+    session_rows = db.persisted_rows_by_type.get("ExecutionSession") or []
+    assert len(session_rows) == 1
+    bundle_recovery = session_rows[0].payload_json["bundle_recovery"]
+    assert bundle_recovery["recovered_to_flat"] is True
+    assert bundle_recovery["residual_exposure"] is False
 

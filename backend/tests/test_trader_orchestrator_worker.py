@@ -1433,7 +1433,7 @@ async def test_run_trader_once_persists_heartbeat_when_idle_gate_short_circuits(
                 "source_configs": [
                     {
                         "source_key": "weather",
-                        "strategy_key": "weather_ensemble_edge",
+                        "strategy_key": "weather_primary",
                         "strategy_params": {},
                     }
                 ],
@@ -1558,7 +1558,7 @@ async def test_run_trader_once_skips_heavy_maintenance_when_manage_only_cycle_is
                 "source_configs": [
                     {
                         "source_key": "weather",
-                        "strategy_key": "weather_ensemble_edge",
+                        "strategy_key": "weather_primary",
                         "strategy_params": {},
                     }
                 ],

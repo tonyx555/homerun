@@ -43,6 +43,7 @@ from models.database import (
 )
 from utils.logger import get_logger
 from services.event_bus import event_bus
+from services.market_roster import ensure_market_roster_payload
 from services.market_cache import CachedMarket
 from services.runtime_status import runtime_status
 from services.worker_state import (
@@ -447,6 +448,10 @@ def _build_trade_bundle(signal: TradeSignal | None, row: TraderOrder) -> dict[st
 
     raw_markets = signal_payload.get("markets")
     raw_markets = raw_markets if isinstance(raw_markets, list) else []
+    raw_market_roster = signal_payload.get("market_roster")
+    raw_market_roster = raw_market_roster if isinstance(raw_market_roster, dict) else {}
+    raw_roster_markets = raw_market_roster.get("markets")
+    raw_roster_markets = raw_roster_markets if isinstance(raw_roster_markets, list) else []
 
     market_lookup_by_token: dict[str, dict[str, Any]] = {}
     for market in raw_markets:
@@ -478,6 +483,19 @@ def _build_trade_bundle(signal: TradeSignal | None, row: TraderOrder) -> dict[st
     order_token_id = _extract_order_token_id(row)
     current_leg_id: str | None = None
     current_leg_index: int | None = None
+
+    def _bundle_market_key(value: dict[str, Any]) -> str | None:
+        if not isinstance(value, dict):
+            return None
+        raw_key = str(
+            value.get("condition_id")
+            or value.get("id")
+            or value.get("market_id")
+            or value.get("question")
+            or value.get("market_question")
+            or ""
+        ).strip().lower()
+        return raw_key or None
 
     def _append_leg(
         *,
@@ -567,6 +585,7 @@ def _build_trade_bundle(signal: TradeSignal | None, row: TraderOrder) -> dict[st
         for leg in bundle_legs
         if str(leg.get("condition_id") or leg.get("market_id") or leg.get("market_question") or "").strip()
     }
+    roster_market_keys = {key for key in (_bundle_market_key(market) for market in raw_roster_markets) if key}
     outcome_set = {str(leg.get("outcome") or "").strip().lower() for leg in bundle_legs if str(leg.get("outcome") or "").strip()}
 
     if len(bundle_legs) == 2 and len(distinct_market_keys) == 1 and outcome_set == {"yes", "no"}:
@@ -579,13 +598,31 @@ def _build_trade_bundle(signal: TradeSignal | None, row: TraderOrder) -> dict[st
         bundle_kind = "multi_leg"
         bundle_label = "Multi-leg trade"
 
+    signal_is_guaranteed = bool(signal_payload.get("is_guaranteed", False))
+    guarantee_proven = False
+    guarantee_reason: str | None = None
+    if signal_is_guaranteed:
+        if bundle_kind == "paired_binary":
+            guarantee_proven = len(bundle_legs) == 2 and len(distinct_market_keys) == 1 and outcome_set == {"yes", "no"}
+            guarantee_reason = "paired_binary_complete" if guarantee_proven else "paired_binary_incomplete"
+        elif roster_market_keys and distinct_market_keys == roster_market_keys:
+            guarantee_proven = True
+            guarantee_reason = "full_market_roster"
+        elif not roster_market_keys:
+            guarantee_reason = "missing_market_roster"
+        else:
+            guarantee_reason = "partial_market_roster"
+
     return {
         "bundle_id": str(signal.id if signal is not None else row.signal_id or "").strip() or str(row.id),
         "plan_id": str(execution_plan.get("plan_id") or "").strip() or None,
         "kind": bundle_kind,
         "label": bundle_label,
         "leg_count": len(bundle_legs),
-        "is_guaranteed": bool(signal_payload.get("is_guaranteed", False)),
+        "is_guaranteed": guarantee_proven,
+        "signal_is_guaranteed": signal_is_guaranteed,
+        "guarantee_proven": guarantee_proven,
+        "guarantee_reason": guarantee_reason,
         "roi_type": str(signal_payload.get("roi_type") or "").strip() or None,
         "mispricing_type": str(signal_payload.get("mispricing_type") or "").strip() or None,
         "total_cost": safe_float(signal_payload.get("total_cost"), None),
@@ -593,6 +630,8 @@ def _build_trade_bundle(signal: TradeSignal | None, row: TraderOrder) -> dict[st
         "gross_profit": safe_float(signal_payload.get("gross_profit"), None),
         "net_profit": safe_float(signal_payload.get("net_profit"), safe_float(signal_payload.get("guaranteed_profit"), None)),
         "roi_percent": safe_float(signal_payload.get("roi_percent"), None),
+        "planned_market_count": len(distinct_market_keys),
+        "market_roster_count": len(roster_market_keys) if roster_market_keys else None,
         "current_leg_id": current_leg_id,
         "current_leg_index": current_leg_index,
         "current_leg_token_id": order_token_id or None,
@@ -4415,6 +4454,18 @@ def build_execution_session_rows(
     created_at: datetime | None = None,
 ) -> tuple[ExecutionSession, list[ExecutionSessionLeg]]:
     now = created_at or _now()
+    signal_payload = getattr(signal, "payload_json", None)
+    signal_payload = signal_payload if isinstance(signal_payload, dict) else {}
+    normalized_payload = ensure_market_roster_payload(
+        payload,
+        markets=list(signal_payload.get("markets") or []),
+        market_id=str(getattr(signal, "market_id", "") or "") or None,
+        market_question=str(getattr(signal, "market_question", "") or "") or None,
+        event_id=str(signal_payload.get("event_id") or "") or None,
+        event_slug=str(signal_payload.get("event_slug") or "") or None,
+        event_title=str(signal_payload.get("event_title") or "") or None,
+        category=str(signal_payload.get("category") or "") or None,
+    )
     row = ExecutionSession(
         id=_new_id(),
         trader_id=trader_id,
@@ -4442,7 +4493,7 @@ def build_execution_session_rows(
         started_at=now,
         completed_at=None,
         expires_at=expires_at,
-        payload_json=payload or {},
+        payload_json=normalized_payload,
         created_at=now,
         updated_at=now,
     )
@@ -5489,7 +5540,9 @@ async def reconcile_live_provider_orders(
                 if not session_row.error_message:
                     session_row.error_message = "All execution legs failed during provider reconciliation."
             elif legs_completed > 0 and legs_failed > 0:
-                next_session_status = "completed"
+                next_session_status = "failed"
+                if not session_row.error_message:
+                    session_row.error_message = "Execution session closed with partial fills and failed legs."
         elif previous_session_status in {"pending", "placing", "partial", "hedging"}:
             next_session_status = "working"
 

@@ -663,49 +663,6 @@ class DetectedAnomaly(Base):
     )
 
 
-# ==================== ML CLASSIFIER ====================
-
-
-class MLModelWeights(Base):
-    """Stored weights and metadata for the ML false-positive classifier"""
-
-    __tablename__ = "ml_model_weights"
-
-    id = Column(String, primary_key=True)
-    model_version = Column(Integer, nullable=False, default=1)
-    weights = Column(JSON, nullable=False)  # Model parameters (weights, bias, thresholds)
-    feature_names = Column(JSON, nullable=False)  # Ordered list of feature names
-    metrics = Column(JSON, nullable=True)  # accuracy, precision, recall, f1
-    training_samples = Column(Integer, default=0)
-    created_at = Column(DateTime, default=_utcnow)
-    is_active = Column(Boolean, default=True)
-
-
-class MLPredictionLog(Base):
-    """Log of ML classifier predictions for auditing and retraining"""
-
-    __tablename__ = "ml_prediction_log"
-
-    id = Column(String, primary_key=True)
-    opportunity_id = Column(String, nullable=False)
-    strategy_type = Column(String, nullable=False)
-    features = Column(JSON, nullable=False)
-    probability = Column(Float, nullable=False)
-    recommendation = Column(String, nullable=False)  # execute, skip, review
-    confidence = Column(Float, nullable=False)
-    model_version = Column(Integer, nullable=True)
-    predicted_at = Column(DateTime, default=_utcnow)
-
-    # Outcome tracking (filled in later)
-    actual_outcome = Column(Boolean, nullable=True)
-    actual_roi = Column(Float, nullable=True)
-
-    __table_args__ = (
-        Index("idx_ml_pred_opp", "opportunity_id"),
-        Index("idx_ml_pred_time", "predicted_at"),
-    )
-
-
 # ==================== ML TRAINING DATA ====================
 
 
@@ -719,6 +676,7 @@ class MLTrainingSnapshot(Base):
     __tablename__ = "ml_training_snapshots"
 
     id = Column(String, primary_key=True)
+    task_key = Column(String, nullable=False, default="crypto_directional")
     asset = Column(String(8), nullable=False)  # btc, eth, sol, xrp
     timeframe = Column(String(8), nullable=False)  # 5m, 15m, 1h, 4h
     timestamp = Column(DateTime, nullable=False)
@@ -746,57 +704,10 @@ class MLTrainingSnapshot(Base):
     is_live = Column(Boolean, nullable=True)  # is market currently active
 
     __table_args__ = (
+        Index("idx_mlt_task_asset_tf_ts", "task_key", "asset", "timeframe", "timestamp"),
         Index("idx_mlt_asset_tf_ts", "asset", "timeframe", "timestamp"),
         Index("idx_mlt_timestamp", "timestamp"),
         Index("idx_mlt_asset", "asset"),
-    )
-
-
-class MLTrainedModel(Base):
-    """Trained ML model artifacts for crypto directional prediction.
-
-    Stores serialized model artifacts, feature definitions, metrics, and
-    promotion status. Strategies load the active model at runtime.
-    """
-
-    __tablename__ = "ml_trained_models"
-
-    id = Column(String, primary_key=True)
-    name = Column(String, nullable=False)  # e.g. "crypto_directional_v3"
-    model_type = Column(String, nullable=False)  # logistic
-    version = Column(Integer, nullable=False, default=1)
-    status = Column(String, nullable=False, default="trained")  # trained, active, archived
-
-    # Model data
-    weights_json = Column(JSON, nullable=False)  # serialized model weights/trees
-    feature_names = Column(JSON, nullable=False)  # ordered feature list
-    hyperparams = Column(JSON, nullable=True)  # training hyperparameters
-
-    # Scope
-    assets = Column(JSON, nullable=False)  # ["btc", "eth", "sol", "xrp"]
-    timeframes = Column(JSON, nullable=False)  # ["5m", "15m", "1h", "4h"]
-
-    # Training metrics
-    train_accuracy = Column(Float, nullable=True)
-    test_accuracy = Column(Float, nullable=True)
-    test_auc = Column(Float, nullable=True)
-    feature_importance = Column(JSON, nullable=True)  # {feature: importance}
-    train_samples = Column(Integer, default=0)
-    test_samples = Column(Integer, default=0)
-    training_date_range = Column(JSON, nullable=True)  # {"start": iso, "end": iso}
-
-    # Walk-forward validation
-    walkforward_results = Column(JSON, nullable=True)  # [{fold, train_acc, test_acc, auc}]
-
-    # Metadata
-    created_at = Column(DateTime, default=_utcnow)
-    promoted_at = Column(DateTime, nullable=True)
-    notes = Column(Text, nullable=True)
-
-    __table_args__ = (
-        Index("idx_mlm_status", "status"),
-        Index("idx_mlm_created", "created_at"),
-        UniqueConstraint("name", "version", name="uq_ml_model_name_version"),
     )
 
 
@@ -824,34 +735,99 @@ class MLRecorderConfig(Base):
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
-class MLTrainingJob(Base):
-    """Tracks ML training job executions (manual or scheduled)."""
-
-    __tablename__ = "ml_training_jobs"
+class MachineLearningModelArtifact(Base):
+    __tablename__ = "machine_learning_model_artifacts"
 
     id = Column(String, primary_key=True)
-    status = Column(String, nullable=False, default="queued")  # queued, running, completed, failed
-    model_type = Column(String, nullable=False, default="logistic")  # logistic
-    assets = Column(JSON, nullable=False)
-    timeframes = Column(JSON, nullable=False)
+    task_key = Column(String, nullable=False)
+    name = Column(String, nullable=False)
+    backend = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="ready")
+    artifact_path = Column(String, nullable=False)
+    artifact_sha256 = Column(String, nullable=False)
+    manifest_json = Column(JSON, nullable=False)
+    metrics_json = Column(JSON, nullable=True)
+    source_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
+    archived_at = Column(DateTime, nullable=True)
 
-    # Progress
-    progress = Column(Float, default=0.0)
+    __table_args__ = (
+        Index("idx_mla_task_status", "task_key", "status"),
+        Index("idx_mla_created", "created_at"),
+        UniqueConstraint("task_key", "name", name="uq_mla_task_name"),
+    )
+
+
+class MachineLearningAdapterArtifact(Base):
+    __tablename__ = "machine_learning_adapter_artifacts"
+
+    id = Column(String, primary_key=True)
+    task_key = Column(String, nullable=False)
+    base_model_id = Column(String, ForeignKey("machine_learning_model_artifacts.id"), nullable=False)
+    name = Column(String, nullable=False)
+    adapter_type = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="ready")
+    artifact_path = Column(String, nullable=False)
+    artifact_sha256 = Column(String, nullable=False)
+    manifest_json = Column(JSON, nullable=False)
+    metrics_json = Column(JSON, nullable=True)
+    training_source_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
+    archived_at = Column(DateTime, nullable=True)
+
+    base_model = relationship("MachineLearningModelArtifact")
+
+    __table_args__ = (
+        Index("idx_mlad_task_status", "task_key", "status"),
+        Index("idx_mlad_base_model", "base_model_id"),
+        Index("idx_mlad_created", "created_at"),
+        UniqueConstraint("task_key", "name", name="uq_mlad_task_name"),
+    )
+
+
+class MachineLearningDeployment(Base):
+    __tablename__ = "machine_learning_deployments"
+
+    id = Column(String, primary_key=True)
+    task_key = Column(String, nullable=False)
+    base_model_id = Column(String, ForeignKey("machine_learning_model_artifacts.id"), nullable=False)
+    adapter_id = Column(String, ForeignKey("machine_learning_adapter_artifacts.id"), nullable=True)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
+    activated_at = Column(DateTime, default=_utcnow, nullable=False)
+
+    base_model = relationship("MachineLearningModelArtifact", foreign_keys=[base_model_id])
+    adapter = relationship("MachineLearningAdapterArtifact", foreign_keys=[adapter_id])
+
+    __table_args__ = (
+        Index("idx_mld_updated", "updated_at"),
+        UniqueConstraint("task_key", name="uq_mld_task_key"),
+    )
+
+
+class MachineLearningJob(Base):
+    __tablename__ = "machine_learning_jobs"
+
+    id = Column(String, primary_key=True)
+    task_key = Column(String, nullable=False)
+    job_type = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="queued")
+    target_id = Column(String, nullable=True)
     message = Column(String, nullable=True)
     error = Column(Text, nullable=True)
-
-    # Results (filled on completion)
-    trained_model_id = Column(String, nullable=True)  # FK to ml_trained_models.id
-    result_summary = Column(JSON, nullable=True)
-
-    # Timing
+    payload_json = Column(JSON, nullable=True)
+    result_json = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
 
     __table_args__ = (
-        Index("idx_mljob_status", "status"),
-        Index("idx_mljob_created", "created_at"),
+        Index("idx_mlj_task_created", "task_key", "created_at"),
+        Index("idx_mlj_status", "status"),
+        Index("idx_mlj_created", "created_at"),
     )
 
 

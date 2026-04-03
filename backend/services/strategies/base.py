@@ -17,6 +17,7 @@ from models import (
 from config import settings
 from services.fee_model import fee_model
 from services.data_events import DataEvent, EventType
+from services.market_roster import build_market_roster
 
 from utils.converters import to_float, to_confidence
 from utils.kelly import kalshi_taker_fee, polymarket_taker_fee
@@ -1198,6 +1199,8 @@ class BaseStrategy(ABC):
         *,
         positions: list[dict[str, Any]],
         markets: list[Market],
+        market_roster: dict[str, Any] | None = None,
+        is_guaranteed: bool = True,
     ) -> ExecutionPlan | None:
         if not positions:
             return None
@@ -1257,6 +1260,48 @@ class BaseStrategy(ABC):
             return None
 
         policy = str(config.get("execution_policy") or ("PARALLEL_MAKER" if len(legs) > 1 else "SINGLE_LEG"))
+        metadata: dict[str, Any] = {
+            "strategy_type": self.strategy_type,
+            "generated_by": "base_strategy.create_opportunity",
+        }
+        if isinstance(market_roster, dict):
+            roster_scope = str(market_roster.get("scope") or "").strip().lower()
+            roster_market_ids: list[str] = []
+            seen_roster_market_ids: set[str] = set()
+            for raw_market in market_roster.get("markets") or []:
+                if not isinstance(raw_market, dict):
+                    continue
+                market_id = str(raw_market.get("id") or raw_market.get("market_id") or "").strip()
+                if not market_id or market_id in seen_roster_market_ids:
+                    continue
+                seen_roster_market_ids.add(market_id)
+                roster_market_ids.append(market_id)
+            planned_market_ids: list[str] = []
+            seen_planned_market_ids: set[str] = set()
+            for leg in legs:
+                market_id = str(leg.market_id or "").strip()
+                if not market_id or market_id in seen_planned_market_ids:
+                    continue
+                seen_planned_market_ids.add(market_id)
+                planned_market_ids.append(market_id)
+            roster_market_id_set = set(roster_market_ids)
+            event_internal_bundle = (
+                roster_scope == "event"
+                and len(planned_market_ids) > 1
+                and bool(planned_market_ids)
+                and all(market_id in roster_market_id_set for market_id in planned_market_ids)
+            )
+            missing_market_ids = [market_id for market_id in roster_market_ids if market_id not in seen_planned_market_ids]
+            metadata["market_coverage"] = {
+                "scope": roster_scope or None,
+                "market_roster_hash": str(market_roster.get("roster_hash") or "").strip() or None,
+                "roster_market_count": len(roster_market_ids),
+                "planned_market_count": len(planned_market_ids),
+                "planned_market_ids": planned_market_ids,
+                "missing_market_ids": missing_market_ids,
+                "event_internal_bundle": event_internal_bundle,
+                "requires_full_market_coverage": bool(is_guaranteed and event_internal_bundle),
+            }
         return ExecutionPlan(
             policy=policy,
             time_in_force=str(config.get("time_in_force") or "GTC"),
@@ -1272,10 +1317,7 @@ class BaseStrategy(ABC):
                     min(1.0, to_float(config.get("leg_fill_tolerance_ratio"), 0.02)),
                 ),
             ),
-            metadata={
-                "strategy_type": self.strategy_type,
-                "generated_by": "base_strategy.create_opportunity",
-            },
+            metadata=metadata,
         )
 
     def create_opportunity(
@@ -1497,6 +1539,30 @@ class BaseStrategy(ABC):
             }
 
         roi_type = "guaranteed_spread" if is_guaranteed else "directional_payout"
+        roster_markets = list(getattr(event, "markets", None) or []) if event is not None else list(markets)
+        market_roster = build_market_roster(
+            roster_markets,
+            scope="event" if event is not None else "signal",
+            event_id=str(getattr(event, "id", "") or "") or None,
+            event_slug=str(getattr(event, "slug", "") or "") or None,
+            event_title=str(getattr(event, "title", "") or "") or None,
+            category=str(getattr(event, "category", "") or "") or None,
+        )
+
+        execution_plan = self._build_execution_plan(
+            positions=enriched_positions,
+            markets=markets,
+            market_roster=market_roster,
+            is_guaranteed=is_guaranteed,
+        )
+        plan_metadata = execution_plan.metadata if execution_plan is not None else {}
+        market_coverage = plan_metadata.get("market_coverage") if isinstance(plan_metadata, dict) else None
+        if (
+            isinstance(market_coverage, dict)
+            and bool(market_coverage.get("requires_full_market_coverage"))
+            and bool(market_coverage.get("missing_market_ids"))
+        ):
+            return None
 
         return Opportunity(
             strategy=self.strategy_type,
@@ -1514,6 +1580,7 @@ class BaseStrategy(ABC):
             risk_factors=risk_factors,
             confidence=confidence_score,
             markets=market_dicts,
+            market_roster=market_roster,
             event_id=event.id if event else None,
             event_slug=event.slug if event else None,
             event_title=event.title if event else None,
@@ -1522,8 +1589,5 @@ class BaseStrategy(ABC):
             max_position_size=max_position,
             resolution_date=resolution_date,
             positions_to_take=enriched_positions,
-            execution_plan=self._build_execution_plan(
-                positions=enriched_positions,
-                markets=markets,
-            ),
+            execution_plan=execution_plan,
         )

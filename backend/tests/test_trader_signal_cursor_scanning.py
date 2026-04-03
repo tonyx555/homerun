@@ -202,7 +202,7 @@ async def test_unconsumed_signals_can_filter_by_source_strategy_type(tmp_path):
                 source="weather",
                 source_item_id="weather-dist",
                 signal_type="weather_intent",
-                strategy_type="weather_distribution",
+                strategy_type="weather_primary",
                 market_id="weather-1",
                 direction="buy_yes",
                 dedupe_key="weather-dist",
@@ -215,7 +215,7 @@ async def test_unconsumed_signals_can_filter_by_source_strategy_type(tmp_path):
                 source="weather",
                 source_item_id="weather-other",
                 signal_type="weather_intent",
-                strategy_type="weather_ensemble_edge",
+                strategy_type="weather_secondary",
                 market_id="weather-2",
                 direction="buy_yes",
                 dedupe_key="weather-other",
@@ -228,7 +228,7 @@ async def test_unconsumed_signals_can_filter_by_source_strategy_type(tmp_path):
                 name="Source Strategy Filter Trader",
                 source_configs_json=[
                     {"source_key": "scanner", "strategy_key": "tail_end_carry", "strategy_params": {}},
-                    {"source_key": "weather", "strategy_key": "weather_distribution", "strategy_params": {}},
+                    {"source_key": "weather", "strategy_key": "weather_primary", "strategy_params": {}},
                 ],
             )
             session.add_all([trader, scanner_tail, scanner_other, weather_distribution, weather_other])
@@ -241,7 +241,7 @@ async def test_unconsumed_signals_can_filter_by_source_strategy_type(tmp_path):
                 statuses=["pending"],
                 strategy_types_by_source={
                     "scanner": "tail_end_carry",
-                    "weather": ["weather_distribution"],
+                    "weather": ["weather_primary"],
                 },
                 limit=20,
             )

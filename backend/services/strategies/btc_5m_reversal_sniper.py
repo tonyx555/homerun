@@ -24,7 +24,6 @@ Strategy logic:
 
 from __future__ import annotations
 
-import math
 from datetime import datetime, timezone
 from typing import Any
 
@@ -32,41 +31,21 @@ from models import Market, Opportunity
 from services.data_events import DataEvent, EventType
 from services.quality_filter import QualityFilterOverrides
 from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision, _trader_size_limits
+from services.strategies.crypto_strategy_utils import (
+    bounded_sigmoid,
+    build_binary_crypto_market,
+    market_ml_probability_yes,
+    parse_datetime_utc,
+    seconds_left_from_row,
+    spread_pct_from_row,
+    taker_fee_pct,
+)
 from utils.converters import clamp, safe_float, to_confidence, to_float
 from utils.signal_helpers import signal_payload
 
 
-def _parse_datetime_utc(value: Any) -> datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except Exception:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _taker_fee_pct(entry_price: float) -> float:
-    price = clamp(float(entry_price), 0.0001, 0.9999)
-    return 0.25 * ((price * (1.0 - price)) ** 2)
-
-
-def _sigmoid(z: float) -> float:
-    bounded = clamp(float(z), -60.0, 60.0)
-    return 1.0 / (1.0 + math.exp(-bounded))
-
-
 def _ml_probability_yes(row: dict[str, Any]) -> float | None:
-    prediction = row.get("ml_prediction")
-    if not isinstance(prediction, dict):
-        return None
-    probability_yes = safe_float(prediction.get("probability_yes"), None)
-    if probability_yes is None:
-        return None
-    return clamp(float(probability_yes), 0.03, 0.97)
+    return market_ml_probability_yes(row)
 
 
 class BTC5mReversalSniperStrategy(BaseStrategy):
@@ -166,55 +145,15 @@ class BTC5mReversalSniperStrategy(BaseStrategy):
 
     @staticmethod
     def _row_market(row: dict[str, Any]) -> Market | None:
-        market_id = str(row.get("condition_id") or row.get("id") or "").strip()
-        if not market_id:
-            return None
-
-        up_price = safe_float(row.get("up_price"), None)
-        down_price = safe_float(row.get("down_price"), None)
-        if up_price is None or down_price is None:
-            return None
-
-        end_date = _parse_datetime_utc(row.get("end_time"))
-        token_ids = [
-            str(token).strip()
-            for token in list(row.get("clob_token_ids") or [])
-            if str(token).strip() and len(str(token).strip()) > 20
-        ]
-
-        return Market(
-            id=market_id,
-            condition_id=market_id,
-            question=str(row.get("question") or row.get("slug") or market_id),
-            slug=str(row.get("slug") or market_id),
-            outcome_prices=[float(up_price), float(down_price)],
-            liquidity=max(0.0, float(safe_float(row.get("liquidity"), 0.0) or 0.0)),
-            end_date=end_date,
-            platform="polymarket",
-            clob_token_ids=token_ids,
-        )
+        return build_binary_crypto_market(row)
 
     @staticmethod
     def _seconds_left(row: dict[str, Any]) -> float:
-        seconds_left = safe_float(row.get("seconds_left"), None)
-        if seconds_left is not None and seconds_left >= 0.0:
-            return float(seconds_left)
-        end_date = _parse_datetime_utc(row.get("end_time"))
-        if end_date is not None:
-            return max(0.0, (end_date - datetime.now(timezone.utc)).total_seconds())
-        return 300.0  # Default to full 5m if unknown
+        return float(seconds_left_from_row(row, fallback_seconds=300.0) or 300.0)
 
     @staticmethod
     def _spread_pct(row: dict[str, Any]) -> float:
-        spread = safe_float(row.get("spread"), None)
-        if spread is None or spread < 0.0:
-            best_bid = safe_float(row.get("best_bid"), None)
-            best_ask = safe_float(row.get("best_ask"), None)
-            if best_bid is not None and best_ask is not None and best_ask >= best_bid:
-                spread = best_ask - best_bid
-        if spread is None:
-            spread = 0.0
-        return clamp(float(spread), 0.0, 1.0)
+        return spread_pct_from_row(row)
 
     # ── Core Scoring ────────────────────────────────────────────────────────
 
@@ -311,11 +250,11 @@ class BTC5mReversalSniperStrategy(BaseStrategy):
 
         # Model oracle probability using sigmoid on price divergence
         model_prob_yes = _ml_probability_yes(row)
-        model_source = "active_model" if model_prob_yes is not None else "heuristic_sigmoid"
+        model_source = "machine_learning" if model_prob_yes is not None else "heuristic_sigmoid"
         if model_prob_yes is None:
             oracle_scale = max(0.05, to_float(cfg.get("oracle_confidence_scale", 0.35), 0.35))
             z_value = diff_pct / oracle_scale
-            model_prob_yes = clamp(_sigmoid(z_value), 0.03, 0.97)
+            model_prob_yes = clamp(bounded_sigmoid(z_value), 0.03, 0.97)
         model_prob_no = 1.0 - model_prob_yes
 
         if oracle_direction == "buy_yes":
@@ -331,7 +270,7 @@ class BTC5mReversalSniperStrategy(BaseStrategy):
         raw_edge_percent = max(0.0, repricing_buffer * 100.0)
 
         # Costs
-        fee_percent = _taker_fee_pct(selected_price) * 100.0
+        fee_percent = taker_fee_pct(selected_price) * 100.0
         slippage_mult = max(0.01, to_float(cfg.get("slippage_spread_multiplier", 0.30), 0.30))
         min_slippage = max(0.0, to_float(cfg.get("min_slippage_pct", 0.10), 0.10))
         slippage_percent = max(min_slippage, (spread_pct * 100.0) * slippage_mult)
@@ -694,7 +633,7 @@ class BTC5mReversalSniperStrategy(BaseStrategy):
             or payload.get("end_time")
             or payload.get("strategy_context", {}).get("end_time")
         )
-        parsed_end = _parse_datetime_utc(end_time)
+        parsed_end = parse_datetime_utc(end_time)
         if parsed_end is None:
             return None
         return max(0.0, (parsed_end - datetime.now(timezone.utc)).total_seconds())

@@ -70,16 +70,36 @@ async def execute_live_order(
     post_only: bool = False,
     resolve_live_price: bool = True,
     prefer_cached_price: bool = True,
+    quote_aggressively: bool | None = None,
     enforce_fallback_bound: bool = False,
+    max_execution_price: float | None = None,
+    min_execution_price: float | None = None,
     skip_buy_pre_submit_gate: bool = False,
 ) -> LiveOrderExecution:
     normalized_token_id = str(token_id or "").strip()
     normalized_side = _normalize_side(side)
     requested_size = max(0.0, safe_float(size, 0.0) or 0.0)
     fallback = safe_float(fallback_price)
+    max_execution = safe_float(max_execution_price)
+    min_execution = safe_float(min_execution_price)
     min_order_size = StrategySDK.resolve_min_order_size_usd(
         {"min_order_size_usd": min_order_size_usd} if min_order_size_usd is not None else {},
         fallback=1.0,
+    )
+    if normalized_side == OrderSide.BUY and max_execution is not None and max_execution > 0:
+        if fallback is None or fallback <= 0:
+            fallback = float(max_execution)
+        else:
+            fallback = min(float(fallback), float(max_execution))
+    if normalized_side == OrderSide.SELL and min_execution is not None and min_execution > 0:
+        if fallback is None or fallback <= 0:
+            fallback = float(min_execution)
+        else:
+            fallback = max(float(fallback), float(min_execution))
+    aggressive_quote = (
+        bool(quote_aggressively)
+        if quote_aggressively is not None
+        else (not enforce_fallback_bound and not post_only)
     )
 
     base_payload = {
@@ -89,7 +109,10 @@ async def execute_live_order(
         "requested_size": requested_size,
         "fallback_price": fallback,
         "post_only": bool(post_only),
+        "quote_aggressively": bool(aggressive_quote),
         "enforce_fallback_bound": bool(enforce_fallback_bound),
+        "max_execution_price": max_execution,
+        "min_execution_price": min_execution,
     }
 
     if not normalized_token_id:
@@ -135,7 +158,7 @@ async def execute_live_order(
                     from services.ws_feeds import get_feed_manager
                     fm = get_feed_manager()
                     if fm.cache.is_fresh(normalized_token_id):
-                        is_taker = not enforce_fallback_bound and not post_only
+                        is_taker = aggressive_quote and not post_only
                         if is_taker:
                             bid_ask = fm.cache.get_best_bid_ask(normalized_token_id)
                             if bid_ask is not None:
@@ -194,6 +217,16 @@ async def execute_live_order(
 
             # Apply the resolved price with min notional guard
             if live_quote is not None and live_quote > 0:
+                if normalized_side == OrderSide.BUY and max_execution is not None and max_execution > 0:
+                    bounded_quote = min(float(live_quote), float(max_execution))
+                    if abs(bounded_quote - float(live_quote)) >= 1e-9:
+                        price_resolution = f"{price_resolution}|bounded_by_max_execution"
+                    live_quote = bounded_quote
+                elif normalized_side == OrderSide.SELL and min_execution is not None and min_execution > 0:
+                    bounded_quote = max(float(live_quote), float(min_execution))
+                    if abs(bounded_quote - float(live_quote)) >= 1e-9:
+                        price_resolution = f"{price_resolution}|bounded_by_min_execution"
+                    live_quote = bounded_quote
                 if (post_only or enforce_fallback_bound) and fallback is not None and fallback > 0:
                     if normalized_side == OrderSide.BUY:
                         bounded_quote = min(float(live_quote), float(fallback))

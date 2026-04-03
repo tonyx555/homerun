@@ -975,6 +975,65 @@ def _extract_live_fill_metrics(payload: dict[str, Any]) -> tuple[float, float, O
     return filled_notional, filled_size, average_fill_price
 
 
+def _provider_reconciliation_parts(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    provider_reconciliation = payload.get("provider_reconciliation")
+    if not isinstance(provider_reconciliation, dict):
+        provider_reconciliation = {}
+    snapshot = provider_reconciliation.get("snapshot")
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    return provider_reconciliation, snapshot
+
+
+def _provider_snapshot_status(payload: dict[str, Any]) -> str:
+    provider_reconciliation, snapshot = _provider_reconciliation_parts(payload)
+    for candidate in (
+        snapshot.get("normalized_status"),
+        provider_reconciliation.get("snapshot_status"),
+        provider_reconciliation.get("mapped_status"),
+        snapshot.get("status"),
+        snapshot.get("raw_status"),
+    ):
+        status = str(candidate or "").strip().lower()
+        if not status:
+            continue
+        if status in {"live", "active", "working", "partially_filled", "partially_matched"}:
+            return "open"
+        if status in {"matched", "executed"}:
+            return "filled"
+        return status
+    return ""
+
+
+def _provider_snapshot_remaining_size(payload: dict[str, Any]) -> Optional[float]:
+    provider_reconciliation, snapshot = _provider_reconciliation_parts(payload)
+    remaining_size = safe_float(
+        snapshot.get("remaining_size"),
+        safe_float(provider_reconciliation.get("remaining_size"), None),
+    )
+    if remaining_size is not None:
+        return max(0.0, float(remaining_size))
+    requested_size = _first_float_from_candidates(
+        [snapshot, provider_reconciliation, payload],
+        ("size", "original_size", "requested_size", "shares", "requested_shares"),
+    )
+    filled_size = _first_float_from_candidates(
+        [snapshot, provider_reconciliation, payload],
+        ("filled_size", "size_matched", "matched_size", "filled_shares", "executed_size"),
+    )
+    if requested_size is None:
+        return None
+    return max(0.0, float(requested_size) - max(0.0, float(filled_size or 0.0)))
+
+
+def _provider_entry_order_still_working(payload: dict[str, Any]) -> bool:
+    snapshot_status = _provider_snapshot_status(payload)
+    if snapshot_status not in {"open", "submitted", "pending"}:
+        return False
+    remaining_size = _provider_snapshot_remaining_size(payload)
+    return remaining_size is None or remaining_size > _WALLET_SIZE_EPSILON
+
+
 def _extract_live_token_id(payload: dict[str, Any]) -> str:
     token_id = str(payload.get("token_id") or payload.get("selected_token_id") or "").strip()
     if token_id:
@@ -2292,6 +2351,39 @@ async def reconcile_live_positions(
             continue
         payload = dict(row.payload_json or {})
         _exit_instance = None
+        position_close = payload.get("position_close")
+        if isinstance(position_close, dict):
+            close_trigger = str(position_close.get("close_trigger") or "").strip().lower()
+            if close_trigger == "wallet_absent_close" and _provider_entry_order_still_working(payload):
+                provider_status = _provider_snapshot_status(payload)
+                provider_remaining_size = _provider_snapshot_remaining_size(payload)
+                if not dry_run:
+                    row.status = "open"
+                    row.actual_profit = None
+                    row.updated_at = now
+                    payload.pop("position_close", None)
+                    payload["wallet_absent_reopen"] = {
+                        "reopened_at": _iso_utc(now),
+                        "reopen_reason": "provider_entry_order_still_open",
+                        "provider_status": provider_status,
+                        "provider_remaining_size": provider_remaining_size,
+                    }
+                    row.payload_json = payload
+                    state_updates += 1
+                details.append(
+                    {
+                        "order_id": row.id,
+                        "market_id": row.market_id,
+                        "close_trigger": close_trigger,
+                        "provider_status": provider_status,
+                        "provider_remaining_size": provider_remaining_size,
+                        "next_status": "open",
+                        "note": "reopened_wallet_absent_close_while_provider_entry_working",
+                    }
+                )
+                candidates.append(row)
+                candidate_ids.add(row_id)
+                continue
         pending_exit = payload.get("pending_live_exit")
         if not isinstance(pending_exit, dict):
             continue
@@ -2784,6 +2876,7 @@ async def reconcile_live_positions(
         _has_active_provider_exit = isinstance(_pending_exit_tmp, dict) and bool(
             _pending_exit_provider_clob_id(_pending_exit_tmp)
         )
+        _has_working_provider_entry = _provider_entry_order_still_working(payload)
         # Guard: do not wallet-absent-close orders placed in the last 120
         # seconds.  Polymarket's data API can lag behind the CLOB — a just-
         # placed buy may not appear in get_wallet_positions() yet, causing a
@@ -2803,6 +2896,7 @@ async def reconcile_live_positions(
             and wallet_settlement_price is None
             and not isinstance(latest_wallet_sell_trade, dict)
             and not _has_active_provider_exit
+            and not _has_working_provider_entry
             and _wab_min_age_ok
         ):
             _wab_price = (

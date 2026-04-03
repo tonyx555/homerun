@@ -178,6 +178,21 @@ async def test_list_serialized_trader_orders_includes_trade_bundle_metadata_for_
                     "is_guaranteed": True,
                     "roi_type": "guaranteed_spread",
                     "mispricing_type": "settlement_lag",
+                    "market_roster": {
+                        "market_count": 2,
+                        "markets": [
+                            {
+                                "id": "market-atletico",
+                                "condition_id": "market-atletico",
+                                "question": "Will AtlÃ©tico Nacional win on 2026-04-01?",
+                            },
+                            {
+                                "id": "market-cucuta",
+                                "condition_id": "market-cucuta",
+                                "question": "Will CÃºcuta Deportivo FC win on 2026-04-01?",
+                            },
+                        ],
+                    },
                     "positions_to_take": [
                         {
                             "action": "BUY",
@@ -251,6 +266,8 @@ async def test_list_serialized_trader_orders_includes_trade_bundle_metadata_for_
     assert bundle["kind"] == "multi_outcome_yes"
     assert bundle["leg_count"] == 2
     assert bundle["is_guaranteed"] is True
+    assert bundle["signal_is_guaranteed"] is True
+    assert bundle["guarantee_reason"] == "full_market_roster"
     assert bundle["total_cost"] == pytest.approx(0.865)
     assert bundle["expected_payout"] == pytest.approx(1.0)
     assert bundle["net_profit"] == pytest.approx(0.112405)
@@ -258,3 +275,92 @@ async def test_list_serialized_trader_orders_includes_trade_bundle_metadata_for_
     assert bundle["current_leg_index"] == 0
     assert [leg["token_id"] for leg in bundle["legs"]] == ["token-atletico", "token-cucuta"]
     assert [leg["notional_weight"] for leg in bundle["legs"]] == pytest.approx([0.79, 0.075])
+
+
+@pytest.mark.asyncio
+async def test_list_serialized_trader_orders_demotes_unproven_guaranteed_bundle_without_market_roster(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    async with session_factory() as session:
+        session.add(
+            TradeSignal(
+                id="signal_bundle_legacy",
+                source="scanner",
+                signal_type="opportunity",
+                strategy_type="settlement_lag",
+                market_id="market-draw",
+                market_question="Will draw happen?",
+                direction="buy_yes",
+                dedupe_key="bundle-legacy-1",
+                payload_json={
+                    "is_guaranteed": True,
+                    "positions_to_take": [
+                        {
+                            "action": "BUY",
+                            "outcome": "YES",
+                            "market": "Will draw happen?",
+                            "price": 0.29,
+                            "token_id": "token-draw",
+                        },
+                        {
+                            "action": "BUY",
+                            "outcome": "YES",
+                            "market": "Will home side win?",
+                            "price": 0.50,
+                            "token_id": "token-home",
+                        },
+                    ],
+                    "execution_plan": {
+                        "plan_id": "plan-legacy-bundle",
+                        "legs": [
+                            {
+                                "leg_id": "leg_1",
+                                "market_id": "market-draw",
+                                "market_question": "Will draw happen?",
+                                "token_id": "token-draw",
+                                "side": "buy",
+                                "outcome": "yes",
+                                "limit_price": 0.29,
+                                "notional_weight": 0.29,
+                            },
+                            {
+                                "leg_id": "leg_2",
+                                "market_id": "market-home",
+                                "market_question": "Will home side win?",
+                                "token_id": "token-home",
+                                "side": "buy",
+                                "outcome": "yes",
+                                "limit_price": 0.50,
+                                "notional_weight": 0.50,
+                            },
+                        ],
+                    },
+                },
+            )
+        )
+        session.add(
+            TraderOrder(
+                id="order_bundle_legacy",
+                trader_id="trader_bundle_legacy",
+                signal_id="signal_bundle_legacy",
+                source="scanner",
+                market_id="market-draw",
+                market_question="Will draw happen?",
+                direction="buy_yes",
+                mode="paper",
+                status="open",
+                payload_json={
+                    "token_id": "token-draw",
+                },
+            )
+        )
+        await session.commit()
+
+        rows = await list_serialized_trader_orders(session, trader_id="trader_bundle_legacy", limit=20)
+
+    await engine.dispose()
+    assert len(rows) == 1
+    bundle = rows[0]["trade_bundle"]
+    assert bundle is not None
+    assert bundle["signal_is_guaranteed"] is True
+    assert bundle["is_guaranteed"] is False
+    assert bundle["guarantee_reason"] == "missing_market_roster"

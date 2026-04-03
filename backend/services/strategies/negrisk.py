@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from models import Market, Event, Opportunity
@@ -9,6 +10,13 @@ from services.quality_filter import QualityFilterOverrides
 from utils.converters import to_float
 
 logger = logging.getLogger(__name__)
+
+
+_GENERIC_PLACEHOLDER_RE = re.compile(
+    r"\b(?:team|candidate|party|club|fighter|player|golfer|driver|school|country|city)\s+[a-z]\b",
+    re.IGNORECASE,
+)
+_SINGLE_LETTER_WINNER_RE = re.compile(r"^\s*will\s+[a-z]\s+win\b", re.IGNORECASE)
 
 
 class NegRiskStrategy(BaseStrategy):
@@ -63,7 +71,7 @@ class NegRiskStrategy(BaseStrategy):
         "min_edge_percent": 3.0,
         "min_confidence": 0.42,
         "max_risk_score": 0.68,
-        "min_markets": 2,
+        "min_markets": 3,
         "min_total_yes": 0.95,
         "warn_total_yes": 0.97,
         "election_min_total_yes": 0.97,
@@ -117,6 +125,10 @@ class NegRiskStrategy(BaseStrategy):
         """
         active_markets = [m for m in event.markets if m.active and not m.closed]
         if len(active_markets) < 2:
+            return None
+
+        verified_exhaustive, exhaustiveness_reason = self._verify_exhaustive_event_family(event, active_markets)
+        if not verified_exhaustive:
             return None
 
         # Get YES prices for all outcomes
@@ -207,17 +219,12 @@ class NegRiskStrategy(BaseStrategy):
         )
 
         if opp:
+            opp.risk_factors.insert(0, f"Exhaustiveness verified: {exhaustiveness_reason.replace('_', ' ')}")
             if total_yes < warn_total_yes:
                 opp.risk_factors.insert(
                     0,
                     f"Total YES ({total_yes:.1%}) below {warn_total_yes:.1%} — possible missing outcomes",
                 )
-            if is_election:
-                opp.risk_factors.insert(
-                    0,
-                    "Election/primary market: unlisted candidates or 'Other' outcome may not be covered",
-                )
-
         return opp
 
     def _detect_negrisk_short(
@@ -237,7 +244,11 @@ class NegRiskStrategy(BaseStrategy):
         ROI, max resolution window, fee-model adjustments) are applied.
         """
         n = len(active_markets)
-        if n < 2:
+        if n < 3:
+            return None
+
+        verified_exhaustive, exhaustiveness_reason = self._verify_exhaustive_event_family(event, active_markets)
+        if not verified_exhaustive:
             return None
 
         # Multi-winner and threshold markets are ESPECIALLY dangerous for short:
@@ -290,6 +301,7 @@ class NegRiskStrategy(BaseStrategy):
 
         if opp:
             opp.risk_factors.insert(0, f"Short NegRisk: buying NO on all {n} outcomes")
+            opp.risk_factors.insert(1, f"Exhaustiveness verified: {exhaustiveness_reason.replace('_', ' ')}")
 
         return opp
 
@@ -514,6 +526,111 @@ class NegRiskStrategy(BaseStrategy):
 
         return False
 
+    def _contains_catch_all_outcome(self, questions: list[str]) -> bool:
+        catch_all_keywords = (
+            "another party",
+            "another club",
+            "another team",
+            "another candidate",
+            "another driver",
+            "another fighter",
+            "another player",
+            "another school",
+            "another country",
+            "another city",
+            "another outcome",
+            "other candidate",
+            "other team",
+            "other party",
+            "other club",
+        )
+        return any(any(keyword in question.lower() for keyword in catch_all_keywords) for question in questions)
+
+    def _contains_placeholder_outcome(self, questions: list[str]) -> bool:
+        for question in questions:
+            text = str(question or "").strip()
+            if not text:
+                continue
+            if _GENERIC_PLACEHOLDER_RE.search(text):
+                return True
+            if _SINGLE_LETTER_WINNER_RE.search(text):
+                return True
+        return False
+
+    def _is_three_way_sports_match_family(self, event: Event, markets: list[Market]) -> bool:
+        if len(markets) != 3:
+            return False
+        questions = [str(m.question or "").strip().lower() for m in markets]
+        sports_markets = sum(1 for market in markets if str(market.sports_market_type or "").strip())
+        draw_count = sum(1 for question in questions if "draw" in question)
+        win_count = sum(1 for question in questions if " win " in f" {question} ")
+        sports_category = "sports" in str(event.category or "").strip().lower()
+        return (sports_markets > 0 or sports_category) and draw_count == 1 and win_count >= 2
+
+    def _is_monotone_threshold_family(self, event_title: str, questions: list[str]) -> bool:
+        threshold_keywords = (
+            "above $",
+            "above ",
+            "below $",
+            "below ",
+            "over $",
+            "under $",
+            "more than",
+            "less than",
+            "greater than",
+            "fewer than",
+            "at least",
+            "at most",
+            "reach $",
+            "reach ",
+            "hit $",
+            "hit ",
+            "dip to",
+            "drop to",
+            "fall to",
+            "climb to",
+            "rise to",
+            "touch $",
+            "surpass",
+            "exceed",
+            ">$",
+            "<$",
+            "> $",
+            "< $",
+        )
+        title_lower = event_title.lower()
+        if any(keyword in title_lower for keyword in ("price", "market cap", "fdv", "debt", "valuation")):
+            if len(questions) >= 2:
+                return True
+        threshold_count = 0
+        for question in questions:
+            question_lower = question.lower()
+            if any(keyword in question_lower for keyword in threshold_keywords):
+                threshold_count += 1
+        return len(questions) > 0 and threshold_count >= max(2, (len(questions) + 1) // 2)
+
+    def _verify_exhaustive_event_family(self, event: Event, markets: list[Market]) -> tuple[bool, str]:
+        questions = [str(m.question or "").strip() for m in markets if str(m.question or "").strip()]
+        if len(questions) != len(markets):
+            return False, "missing_question_text"
+        if len(markets) < 3:
+            return False, "requires_at_least_three_markets"
+        if self._is_open_ended_event(event.title):
+            return False, "open_ended_event"
+        if self._is_election_market(event.title):
+            return False, "election_field_unverifiable"
+        if self._is_multi_winner_event(event.title, questions):
+            return False, "multi_winner_family"
+        if self._is_threshold_market(questions) or self._is_monotone_threshold_family(event.title, questions):
+            return False, "threshold_family"
+        if self._contains_catch_all_outcome(questions):
+            return False, "catch_all_outcome_present"
+        if self._contains_placeholder_outcome(questions):
+            return False, "placeholder_outcome_present"
+        if self._is_three_way_sports_match_family(event, markets):
+            return True, "sports_three_way_complete"
+        return False, "unverified_exhaustiveness"
+
     def _is_threshold_market(self, questions: list[str]) -> bool:
         """Check if questions form a hierarchical threshold/cumulative set.
 
@@ -534,6 +651,15 @@ class NegRiskStrategy(BaseStrategy):
             "fewer than",
             "at least",
             "at most",
+            ">$",
+            "<$",
+            "> $",
+            "< $",
+            "reach $",
+            "hit $",
+            "dip to",
+            "drop to",
+            "fall to",
         ]
 
         threshold_count = 0
@@ -622,7 +748,15 @@ class NegRiskStrategy(BaseStrategy):
         questions = [m.question for m in exclusive_markets]
         if self._is_multi_winner_event(event.title, questions):
             return None
-        if self._is_threshold_market(questions):
+        if self._is_threshold_market(questions) or self._is_monotone_threshold_family(event.title, questions):
+            return None
+        if self._contains_catch_all_outcome(questions):
+            return None
+        if self._contains_placeholder_outcome(questions):
+            return None
+        if is_election:
+            return None
+        if not self._is_three_way_sports_match_family(event, exclusive_markets):
             return None
 
         # Resolution date mismatch check (same as NegRisk)
@@ -648,16 +782,11 @@ class NegRiskStrategy(BaseStrategy):
         )
 
         if opp:
-            opp.risk_factors.insert(0, "Verify manually: ensure all possible outcomes are listed")
+            opp.risk_factors.insert(0, "Exhaustiveness verified: sports three way complete")
             if total_yes < 0.85:
                 opp.risk_factors.insert(
                     0,
                     f"LOW TOTAL ({total_yes:.1%}) suggests possible missing outcomes",
-                )
-            if is_election:
-                opp.risk_factors.insert(
-                    0,
-                    "Election/primary market: unlisted candidates may not be covered",
                 )
 
         return opp
@@ -687,7 +816,15 @@ class NegRiskStrategy(BaseStrategy):
         questions = [m.question for m in exclusive_markets]
         if self._is_multi_winner_event(event.title, questions):
             return None
-        if self._is_threshold_market(questions):
+        if self._is_threshold_market(questions) or self._is_monotone_threshold_family(event.title, questions):
+            return None
+        if self._contains_catch_all_outcome(questions):
+            return None
+        if self._contains_placeholder_outcome(questions):
+            return None
+        if self._is_election_market(event.title):
+            return None
+        if not self._is_three_way_sports_match_family(event, exclusive_markets):
             return None
 
         total_no = 0.0
@@ -732,7 +869,7 @@ class NegRiskStrategy(BaseStrategy):
 
         if opp:
             opp.risk_factors.insert(0, f"Short Multi-Outcome: buying NO on all {n} outcomes")
-            opp.risk_factors.insert(1, "Verify manually: ensure all possible outcomes are listed")
+            opp.risk_factors.insert(1, "Exhaustiveness verified: sports three way complete")
 
         return opp
 
@@ -747,7 +884,7 @@ class NegRiskStrategy(BaseStrategy):
         structural_ok = guaranteed or mispricing_type in self.STRUCTURAL_TYPES
         payload["_structural_ok"] = structural_ok
 
-        min_markets = max(1, int(to_float(params.get("min_markets", 2), 2)))
+        min_markets = max(1, int(to_float(params.get("min_markets", 3), 3)))
         market_count = len(payload.get("markets") or [])
 
         return [

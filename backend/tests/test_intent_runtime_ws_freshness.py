@@ -8,6 +8,8 @@ import pytest
 
 from services.intent_runtime import IntentRuntime
 from services.signal_bus import build_signal_contract_from_opportunity
+from services.strategies.base import BaseStrategy
+from models.market import Event, Market
 from models.opportunity import Opportunity
 
 
@@ -121,6 +123,76 @@ def test_build_signal_contract_infers_runtime_metadata_from_loaded_strategy(monk
     assert payload["strategy_runtime"]["execution_activation"] == "ws_post_arm_tick"
     assert strategy_context["source_key"] == "scanner"
     assert strategy_context["execution_activation"] == "ws_post_arm_tick"
+
+
+def test_build_signal_contract_persists_full_event_market_roster():
+    class _TestStrategy(BaseStrategy):
+        strategy_type = "test_roster"
+        name = "Test Roster"
+        description = "Test roster persistence"
+
+    strategy = _TestStrategy()
+    home = Market(
+        id="market-home",
+        condition_id="condition-home",
+        question="Will home team win?",
+        slug="event-home",
+        event_slug="event-atomic",
+        group_item_title="Home",
+        sports_market_type="moneyline",
+        neg_risk=True,
+    )
+    draw = Market(
+        id="market-draw",
+        condition_id="condition-draw",
+        question="Will the match end in a draw?",
+        slug="event-draw",
+        event_slug="event-atomic",
+        group_item_title="Draw",
+        sports_market_type="moneyline",
+        neg_risk=True,
+    )
+    away = Market(
+        id="market-away",
+        condition_id="condition-away",
+        question="Will away team win?",
+        slug="event-away",
+        event_slug="event-atomic",
+        group_item_title="Away",
+        sports_market_type="moneyline",
+        neg_risk=True,
+    )
+    event = Event(
+        id="event-atomic",
+        slug="event-atomic",
+        title="Atomic roster event",
+        category="Sports",
+        markets=[home, draw, away],
+        neg_risk=True,
+    )
+
+    opportunity = strategy.create_opportunity(
+        title="Atomic roster opportunity",
+        description="Test event roster persistence",
+        total_cost=0.8,
+        expected_payout=1.0,
+        markets=[home, away],
+        positions=[
+            {"market_id": "market-home", "token_id": "token-home", "outcome": "YES", "side": "buy", "price": 0.4},
+            {"market_id": "market-away", "token_id": "token-away", "outcome": "YES", "side": "buy", "price": 0.4},
+        ],
+        event=event,
+    )
+
+    _market_id, _direction, _entry_price, _market_question, payload, _strategy_context = build_signal_contract_from_opportunity(opportunity)
+
+    assert payload["market_roster"]["scope"] == "event"
+    assert payload["market_roster"]["market_count"] == 3
+    assert {market["id"] for market in payload["market_roster"]["markets"]} == {
+        "market-home",
+        "market-draw",
+        "market-away",
+    }
 
 
 @pytest.mark.asyncio

@@ -43,6 +43,7 @@ import {
 
 interface StrategyParamSection {
   sectionKey: string
+  sourceKey: string
   sourceLabel: string
   strategyLabel: string
   fieldKeys: string[]
@@ -63,7 +64,7 @@ interface AutoresearchViewProps {
   tuneDraftDirty: boolean
   setTuneDraftDirty: (dirty: boolean) => void
   applyTraderDraftSettings: (trader: Trader, options?: Record<string, boolean>) => void
-  applyDynamicStrategyFormValues: (keys: string[], values: Record<string, unknown>) => void
+  applyDynamicStrategyFormValues: (sourceKey: string, keys: string[], values: Record<string, unknown>) => void
   saveTuneParametersMutation: UseMutationResult<unknown, unknown, void, unknown>
   revertTuneParametersMutation: UseMutationResult<unknown, unknown, void, unknown>
   tuneRevertSnapshot: RevertSnapshot | null
@@ -411,7 +412,9 @@ export default function AutoresearchView({
                               <StrategyConfigForm
                                 schema={{ param_fields: group.fields as any[] }}
                                 values={section.values}
-                                onChange={(nextValues: Record<string, unknown>) => applyDynamicStrategyFormValues(section.fieldKeys, nextValues)}
+                                  onChange={(nextValues: Record<string, unknown>) =>
+                                    applyDynamicStrategyFormValues(section.sourceKey, section.fieldKeys, nextValues)
+                                  }
                               />
                             </TabsContent>
                           ))}

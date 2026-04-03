@@ -1,5 +1,5 @@
 import { api, getStrategyManagerItems, unwrapApiData, unwrapStrategyManagerPayload } from './apiClient'
-import type { MLCryptoPrediction } from './apiIntelligence'
+import type { MLMarketRuntimePayload } from './apiMachineLearning'
 
 // ==================== TYPES ====================
 
@@ -502,7 +502,7 @@ export interface CryptoMarket {
   }>
   price_to_beat: number | null
   oracle_history: { t: number; p: number }[]
-  ml_prediction?: MLCryptoPrediction | null
+  machine_learning?: MLMarketRuntimePayload | null
 }
 
 export const getCryptoMarkets = async (params?: { viewer_active?: boolean }): Promise<CryptoMarket[]> => {

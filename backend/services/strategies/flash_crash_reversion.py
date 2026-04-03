@@ -27,9 +27,10 @@ from services.strategies.base import (
 import logging
 
 from utils.converters import to_float, to_confidence, clamp
-from utils.signal_helpers import signal_payload, selected_probability, live_move
+from utils.signal_helpers import signal_payload, selected_probability
 from utils.converters import safe_float
 from services.quality_filter import QualityFilterOverrides
+from services.strategies.reversion_helpers import direction_opposes_impulse, market_move_pct
 
 logger = logging.getLogger(__name__)
 
@@ -472,12 +473,7 @@ class FlashCrashReversionStrategy(BaseStrategy):
         strategy_ok = strategy_type == "flash_crash_reversion"
 
         liquidity = max(0.0, to_float(getattr(signal, "liquidity", 0.0), 0.0))
-        move_5m_pct = live_move(live_market, "move_5m")
-        if move_5m_pct is None:
-            move_5m_pct = to_float(
-                payload.get("move_5m_pct", payload.get("move_5m_percent", payload.get("move_5m"))),
-                None,
-            )
+        move_5m_pct = market_move_pct(live_market, payload, "move_5m")
         if move_5m_pct is None:
             positions = payload.get("positions_to_take") if isinstance(payload.get("positions_to_take"), list) else []
             first_position = positions[0] if positions and isinstance(positions[0], dict) else {}
@@ -493,14 +489,7 @@ class FlashCrashReversionStrategy(BaseStrategy):
 
         alignment_ok = True
         if require_alignment:
-            if move_5m_pct is None:
-                alignment_ok = False
-            elif direction == "buy_yes":
-                alignment_ok = move_5m_pct <= -min_abs_move_5m
-            elif direction == "buy_no":
-                alignment_ok = move_5m_pct >= min_abs_move_5m
-            else:
-                alignment_ok = False
+            alignment_ok = direction_opposes_impulse(direction, move_5m_pct, min_abs_move_5m)
 
         market_text = self._signal_market_text(signal, payload)
         is_crypto_market = self._is_crypto_market_text(market_text)

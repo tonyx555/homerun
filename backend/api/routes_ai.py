@@ -2143,6 +2143,7 @@ async def ai_chat_stream(
     markets, check portfolios, run analyses, etc. during the conversation.
 
     SSE event types:
+    - session: Session metadata for the bound/persisted chat
     - token: Streaming text chunk (final answer)
     - thinking: Agent reasoning / chain-of-thought
     - tool_start: Tool invocation beginning
@@ -2336,6 +2337,22 @@ async def ai_chat_stream(
         tool_event_segments: list[str] = []
 
         try:
+            yield (
+                "event: session\ndata: "
+                + json.dumps(
+                    {
+                        "session_id": session_id,
+                        "context_type": chat_session.get("context_type"),
+                        "context_id": chat_session.get("context_id"),
+                        "title": chat_session.get("title"),
+                        "created_at": chat_session.get("created_at"),
+                        "updated_at": chat_session.get("updated_at"),
+                    },
+                    default=str,
+                )
+                + "\n\n"
+            )
+
             async for event in agent.run(request.message):
                 etype = event.type
 

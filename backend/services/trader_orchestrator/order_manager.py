@@ -117,6 +117,15 @@ def _resolve_live_price_for_leg(leg: dict[str, Any], live_context: dict[str, Any
     selected_token = _normalize_id(live_context.get("selected_token_id"))
     yes_token = _normalize_id(live_context.get("yes_token_id"))
     no_token = _normalize_id(live_context.get("no_token_id"))
+    token_ids = live_context.get("token_ids")
+    context_token_ids = {
+        _normalize_id(token)
+        for token in (token_ids if isinstance(token_ids, list) else [])
+        if _normalize_id(token)
+    }
+    leg_market_id = _normalize_id(leg.get("market_id"))
+    context_market_id = _normalize_id(live_context.get("market_id"))
+    context_condition_id = _normalize_id(live_context.get("condition_id"))
     outcome = str(leg.get("outcome") or "").strip().lower()
     selected_outcome = str(live_context.get("selected_outcome") or "").strip().lower()
 
@@ -127,6 +136,11 @@ def _resolve_live_price_for_leg(leg: dict[str, Any], live_context: dict[str, Any
             return yes_price
         if no_token and leg_token == no_token and _valid(no_price):
             return no_price
+        if leg_token not in context_token_ids:
+            return None
+
+    if leg_market_id and context_market_id and leg_market_id != context_market_id and leg_market_id != context_condition_id:
+        return None
 
     if outcome == "yes":
         if _valid(yes_price):
@@ -157,6 +171,62 @@ def _resolve_leg_price(leg: dict[str, Any], signal: Any, live_context: dict[str,
     if signal_price is not None and signal_price > 0:
         return signal_price
     return None
+
+
+def _valid_execution_bound(value: Any) -> float | None:
+    bound = safe_float(value, None)
+    if bound is None or bound <= 0.0 or bound > 1.0:
+        return None
+    return float(bound)
+
+
+def _derive_min_upside_price_cap(min_upside_percent: Any) -> float | None:
+    upside = safe_float(min_upside_percent, None)
+    if upside is None or upside <= 0.0:
+        return None
+    return _valid_execution_bound(100.0 / (100.0 + float(upside)))
+
+
+def _resolve_execution_price_bounds(
+    *,
+    leg: dict[str, Any],
+    strategy_params: dict[str, Any],
+    fallback_price: float | None,
+) -> tuple[float | None, float | None]:
+    side_key = str(leg.get("side") or "buy").strip().lower()
+    price_policy = str(leg.get("price_policy") or "").strip().lower()
+    metadata = leg.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    fallback_bound = _valid_execution_bound(fallback_price)
+
+    if side_key == "buy":
+        candidates = [
+            _valid_execution_bound(leg.get("max_execution_price")),
+            _valid_execution_bound(metadata.get("max_execution_price")),
+            _valid_execution_bound(strategy_params.get("max_execution_price")),
+            _valid_execution_bound(strategy_params.get("max_entry_price")),
+            _valid_execution_bound(strategy_params.get("max_probability")),
+            _derive_min_upside_price_cap(strategy_params.get("min_upside_percent")),
+        ]
+        if price_policy == "taker_limit" and fallback_bound is not None:
+            candidates.append(fallback_bound)
+        resolved = min((candidate for candidate in candidates if candidate is not None), default=None)
+        return resolved, None
+
+    if side_key == "sell":
+        candidates = [
+            _valid_execution_bound(leg.get("min_execution_price")),
+            _valid_execution_bound(metadata.get("min_execution_price")),
+            _valid_execution_bound(strategy_params.get("min_execution_price")),
+            _valid_execution_bound(strategy_params.get("min_exit_price")),
+            _valid_execution_bound(strategy_params.get("min_sell_price")),
+        ]
+        if price_policy == "taker_limit" and fallback_bound is not None:
+            candidates.append(fallback_bound)
+        resolved = max((candidate for candidate in candidates if candidate is not None), default=None)
+        return None, resolved
+
+    return None, None
 
 
 def _resolve_condition_id_for_leg(
@@ -218,6 +288,7 @@ async def submit_execution_leg(
     signal: Any,
     leg: dict[str, Any],
     notional_usd: float,
+    strategy_params: dict[str, Any] | None = None,
 ) -> LegSubmitResult:
     requested_mode_key = str(mode or "").strip().lower()
     mode_key = requested_mode_key
@@ -463,6 +534,7 @@ async def submit_execution_leg(
 
     time_in_force = str(leg.get("time_in_force") or "GTC").strip().upper()
     post_only = bool(leg.get("post_only", False))
+    params = dict(strategy_params or {})
 
     if mode_key == "shadow":
         quote_price = None
@@ -543,6 +615,12 @@ async def submit_execution_leg(
 
     price_policy = str(leg.get("price_policy") or "").strip().lower()
     enforce_fallback = price_policy != "taker_limit"
+    quote_aggressively = price_policy == "taker_limit"
+    max_execution_price, min_execution_price = _resolve_execution_price_bounds(
+        leg=leg,
+        strategy_params=params,
+        fallback_price=price,
+    )
 
     execution = await execute_live_order(
         token_id=token_id,
@@ -553,7 +631,10 @@ async def submit_execution_leg(
         opportunity_id=str(getattr(signal, "id", "") or ""),
         time_in_force=time_in_force,
         post_only=post_only,
+        quote_aggressively=quote_aggressively,
         enforce_fallback_bound=enforce_fallback,
+        max_execution_price=max_execution_price,
+        min_execution_price=min_execution_price,
         skip_buy_pre_submit_gate=skip_buy_pre_submit_gate,
     )
 
@@ -577,7 +658,10 @@ async def submit_execution_leg(
                     opportunity_id=str(getattr(signal, "id", "") or ""),
                     time_in_force=time_in_force,
                     post_only=post_only,
+                    quote_aggressively=quote_aggressively,
                     enforce_fallback_bound=enforce_fallback,
+                    max_execution_price=max_execution_price,
+                    min_execution_price=min_execution_price,
                     skip_buy_pre_submit_gate=skip_buy_pre_submit_gate,
                 )
                 if retry_execution.status != "failed":
@@ -619,6 +703,7 @@ async def submit_execution_wave(
     mode: str,
     signal: Any,
     legs_with_notionals: list[tuple[dict[str, Any], float]],
+    strategy_params: dict[str, Any] | None = None,
 ) -> list[LegSubmitResult]:
     if not legs_with_notionals:
         return []
@@ -628,6 +713,7 @@ async def submit_execution_wave(
             signal=signal,
             leg=leg,
             notional_usd=notional,
+            strategy_params=strategy_params,
         )
         for leg, notional in legs_with_notionals
     ]

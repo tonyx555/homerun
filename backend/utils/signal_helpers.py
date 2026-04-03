@@ -26,6 +26,21 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
+def _extract_machine_learning_probability(payload: dict[str, Any], *, direction: str | None = None) -> float | None:
+    machine_learning = payload.get("machine_learning")
+    if not isinstance(machine_learning, dict):
+        return None
+    prediction = machine_learning.get("prediction")
+    candidate = prediction if isinstance(prediction, dict) else machine_learning
+    probability_yes = safe_float(candidate.get("probability_yes"), default=None)
+    if probability_yes is None:
+        return None
+    probability_yes = max(0.0, min(1.0, float(probability_yes)))
+    if str(direction or "").strip().lower() == "buy_no":
+        return max(0.0, min(1.0, 1.0 - probability_yes))
+    return probability_yes
+
+
 def _extract_position_context(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
     positions = payload.get("positions_to_take") if isinstance(payload.get("positions_to_take"), list) else []
     crypto_context: dict[str, Any] = {}
@@ -189,6 +204,14 @@ def selected_probability(
     direction: str,
 ) -> float | None:
     """Extract the best probability estimate for the selected side."""
+    ml_probability = _extract_machine_learning_probability(payload, direction=direction)
+    if ml_probability is None:
+        live_market = payload.get("live_market")
+        if isinstance(live_market, dict):
+            ml_probability = _extract_machine_learning_probability(live_market, direction=direction)
+    if ml_probability is not None:
+        return ml_probability
+
     entry = _to_float(getattr(signal, "entry_price", None), -1.0)
     if 0.0 < entry < 1.0:
         return entry
