@@ -330,21 +330,79 @@ class CryptoTwinParallelStrategy(BaseStrategy):
         }
         return opp
 
+    def _rejection_reason(self, row: dict[str, Any], cfg: dict[str, Any]) -> str:
+        up_price = safe_float(row.get("up_price"), None)
+        down_price = safe_float(row.get("down_price"), None)
+        if up_price is None or down_price is None:
+            return "missing_prices"
+        if not (0.0 < up_price < 1.0 and 0.0 < down_price < 1.0):
+            return "invalid_prices"
+
+        token_ids = [
+            str(token).strip()
+            for token in list(row.get("clob_token_ids") or [])
+            if str(token).strip() and len(str(token).strip()) > 20
+        ]
+        if len(token_ids) < 2:
+            return "missing_token_ids"
+
+        combined_entry = up_price + down_price
+        max_combined_entry_price = min(
+            1.0, max(0.01, to_float(cfg.get("max_combined_entry_price", 0.985), 0.985))
+        )
+        if combined_entry > max_combined_entry_price:
+            return "combined_entry_too_high"
+
+        max_leg_entry_price = min(1.0, max(0.01, to_float(cfg.get("max_leg_entry_price", 0.88), 0.88)))
+        if up_price > max_leg_entry_price or down_price > max_leg_entry_price:
+            return "leg_entry_too_high"
+
+        liquidity = max(0.0, float(safe_float(row.get("liquidity"), 0.0) or 0.0))
+        min_liquidity_usd = max(0.0, to_float(cfg.get("min_liquidity_usd", 700.0), 700.0))
+        if liquidity < min_liquidity_usd:
+            return "low_liquidity"
+
+        edge = max(0.0, (1.0 - combined_entry) * 100.0)
+        min_edge_percent = max(0.0, to_float(cfg.get("min_edge_percent", 0.8), 0.8))
+        if edge < min_edge_percent:
+            return "edge_too_small"
+        return "filtered"
+
     def _detect_from_rows(self, rows: list[dict[str, Any]]) -> list[Opportunity]:
         cfg = dict(self.default_config)
         cfg.update(getattr(self, "config", {}) or {})
 
         candidates: list[tuple[float, Opportunity]] = []
+        rejection_counts: dict[str, int] = {}
         for row in rows:
             if not isinstance(row, dict):
                 continue
             signal = self._score_market(row, cfg)
             if signal is None:
+                reason = self._rejection_reason(row, cfg)
+                rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
                 continue
             opp = self._build_opportunity(row, signal)
             if opp is None:
+                rejection_counts["invalid_opportunity"] = rejection_counts.get("invalid_opportunity", 0) + 1
                 continue
             candidates.append((float(signal["score"]), opp))
+
+        top_rejections = sorted(rejection_counts.items(), key=lambda item: item[1], reverse=True)[:4]
+        message_parts = [f"Scanned {len(rows)} markets, {len(candidates)} signals"]
+        if top_rejections:
+            message_parts.append(
+                "rejected: " + ", ".join(f"{count} {reason}" for reason, count in top_rejections)
+            )
+        self._filter_diagnostics = {
+            "strategy_key": self.strategy_type,
+            "scanned_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            "markets_scanned": len(rows),
+            "signals_emitted": len(candidates),
+            "rejections": rejection_counts,
+            "message": " \u2014 ".join(message_parts),
+            "summary": {f"rejected_{reason}": count for reason, count in rejection_counts.items()},
+        }
 
         if not candidates:
             return []

@@ -49,6 +49,7 @@ async def get_pipeline_debug() -> dict:
     """
     stats = await _read_crypto_stats()
     dispatch = stats.get("dispatch") or {}
+    filter_diagnostics = dict(stats.get("filter_diagnostics") or {})
 
     # Also show web-server-local dispatcher state for comparison
     from services.event_dispatcher import event_dispatcher
@@ -60,8 +61,9 @@ async def get_pipeline_debug() -> dict:
 
     return {
         "worker_dispatch": dispatch,
+        "worker_filter_diagnostics": filter_diagnostics,
         "worker_filter_diagnostics_keys": sorted(
-            (stats.get("filter_diagnostics") or {}).keys()
+            filter_diagnostics.keys()
         ),
         "web_server_event_dispatcher_running": event_dispatcher._running,
         "web_server_subscriptions": web_subs,

@@ -84,6 +84,18 @@ MAX_RECONNECT_EXTENDED_DELAY = 60.0  # 1 minute max between attempts (was 5min â
 # ---------------------------------------------------------------------------
 
 
+def _normalize_epoch_timestamp(value: Any) -> float | None:
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return None
+    if timestamp <= 0.0:
+        return None
+    if timestamp > 1e12:
+        timestamp /= 1000.0
+    return timestamp
+
+
 def _clean_secret(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
@@ -799,9 +811,10 @@ class PolymarketWSFeed:
                 async for raw in ws:
                     if self._stop_event.is_set():
                         break
-                    recv_time = time.monotonic()
+                    recv_time_mono = time.monotonic()
+                    recv_time_epoch = time.time()
                     self.stats.messages_received += 1
-                    self.stats.last_message_at = recv_time
+                    self.stats.last_message_at = recv_time_mono
 
                     # Reset failure counters after the connection has been
                     # stable for 10s.  This is long enough to confirm the
@@ -809,7 +822,7 @@ class PolymarketWSFeed:
                     # resets reasonably fast after transient outages (the
                     # previous 30s threshold meant backoff never reset when
                     # the server dropped connections every 20-30 seconds).
-                    if reconnect_at_connect > 0 and (recv_time - connect_time) >= 10.0:
+                    if reconnect_at_connect > 0 and (recv_time_mono - connect_time) >= 10.0:
                         was_failing = self.stats.consecutive_failures >= MAX_RECONNECT_ATTEMPTS
                         self._reconnect_attempt = 0
                         self.stats.consecutive_failures = 0
@@ -825,9 +838,9 @@ class PolymarketWSFeed:
                         if isinstance(data, list):
                             for item in data:
                                 if isinstance(item, dict):
-                                    self._handle_message(item, recv_time)
+                                    self._handle_message(item, recv_time_epoch)
                         elif isinstance(data, dict):
-                            self._handle_message(data, recv_time)
+                            self._handle_message(data, recv_time_epoch)
                         self.stats.messages_parsed += 1
                     except Exception:
                         self.stats.parse_errors += 1
@@ -885,12 +898,12 @@ class PolymarketWSFeed:
 
     # -- message handling ---------------------------------------------------
 
-    def _handle_message(self, data: dict, recv_time: float) -> None:
+    def _handle_message(self, data: dict, recv_time_epoch: float) -> None:
         """Route an incoming WebSocket message to the right handler."""
         # Trade execution messages (from "trades" channel)
         event_type = data.get("event_type", "")
         if event_type == "trade" or ("price" in data and "size" in data and "side" in data and "bids" not in data):
-            self._apply_trade(data, recv_time)
+            self._apply_trade(data, recv_time_epoch)
             return
 
         # Polymarket book messages typically carry an "event_type" or can be
@@ -902,20 +915,20 @@ class PolymarketWSFeed:
 
         # If bids/asks are directly on the top-level dict, apply immediately
         if "bids" in data or "asks" in data:
-            self._apply_book_update(data, recv_time)
+            self._apply_book_update(data, recv_time_epoch)
             return
 
         # Nested payload under "data" key (common Polymarket wrapper pattern)
         nested = data.get("data")
         if isinstance(nested, dict):
-            self._apply_book_update(nested, recv_time)
+            self._apply_book_update(nested, recv_time_epoch)
         elif isinstance(nested, list):
             for item in nested:
                 if isinstance(item, dict):
-                    self._apply_book_update(item, recv_time)
+                    self._apply_book_update(item, recv_time_epoch)
         # Silently ignore heartbeat acks, subscribe confirmations, etc.
 
-    def _apply_book_update(self, data: dict, recv_time: float) -> None:
+    def _apply_book_update(self, data: dict, recv_time_epoch: float) -> None:
         """Parse bids/asks arrays and push into PriceCache."""
         asset_id = data.get("asset_id") or data.get("token_id") or data.get("market", "")
         if not asset_id:
@@ -927,15 +940,7 @@ class PolymarketWSFeed:
         bids = self._parse_levels(raw_bids)
         asks = self._parse_levels(raw_asks)
 
-        exchange_ts: float | None = None
-        ts = data.get("timestamp")
-        if ts is not None:
-            try:
-                exchange_ts = float(ts)
-                if exchange_ts > 1e12:
-                    exchange_ts /= 1000.0
-            except (TypeError, ValueError):
-                exchange_ts = None
+        exchange_ts = _normalize_epoch_timestamp(data.get("timestamp"))
 
         if bids or asks:
             self._cache.update(asset_id, bids, asks, exchange_ts=exchange_ts)
@@ -943,11 +948,11 @@ class PolymarketWSFeed:
         # Compute server-to-cache latency if a timestamp is present
         if exchange_ts is not None:
             try:
-                self.stats.last_latency_ms = (recv_time - exchange_ts) * 1000
+                self.stats.last_latency_ms = max(0.0, (recv_time_epoch - exchange_ts) * 1000.0)
             except Exception:
                 pass
 
-    def _apply_trade(self, data: dict, recv_time: float) -> None:
+    def _apply_trade(self, data: dict, recv_time_epoch: float) -> None:
         """Parse a trade execution message and record it."""
         asset_id = data.get("asset_id") or data.get("token_id") or data.get("market", "")
         if not asset_id:
@@ -958,13 +963,9 @@ class PolymarketWSFeed:
             side = str(data.get("side", "")).upper()
             if side not in ("BUY", "SELL"):
                 side = "BUY"  # default
-            ts = data.get("timestamp")
-            if ts is not None:
-                timestamp = float(ts)
-                if timestamp > 1e12:
-                    timestamp /= 1000.0  # ms -> s
-            else:
-                timestamp = recv_time
+            timestamp = _normalize_epoch_timestamp(data.get("timestamp"))
+            if timestamp is None:
+                timestamp = recv_time_epoch
             if price > 0 and size > 0:
                 self._cache.record_trade(asset_id, price, size, side, timestamp)
         except (TypeError, ValueError):
@@ -1184,12 +1185,13 @@ class KalshiWSFeed:
                 async for raw in ws:
                     if self._stop_event.is_set():
                         break
-                    recv_time = time.monotonic()
+                    recv_time_mono = time.monotonic()
+                    recv_time_epoch = time.time()
                     self.stats.messages_received += 1
-                    self.stats.last_message_at = recv_time
+                    self.stats.last_message_at = recv_time_mono
                     try:
                         data = json.loads(raw)
-                        self._handle_message(data, recv_time)
+                        self._handle_message(data, recv_time_epoch)
                         self.stats.messages_parsed += 1
                     except Exception:
                         self.stats.parse_errors += 1
@@ -1253,7 +1255,7 @@ class KalshiWSFeed:
 
     # -- message handling ---------------------------------------------------
 
-    def _handle_message(self, data: dict, recv_time: float) -> None:
+    def _handle_message(self, data: dict, recv_time_epoch: float) -> None:
         """Route incoming Kalshi messages."""
         # Kalshi pushes channel data under a "msg" or "data" key, and can
         # also have a "type" field.  Common shapes:
@@ -1265,11 +1267,11 @@ class KalshiWSFeed:
         payload = data.get("msg") or data.get("data") or data
 
         if "orderbook" in msg_type:
-            self._apply_orderbook(payload, recv_time)
+            self._apply_orderbook(payload, recv_time_epoch)
         elif isinstance(payload, dict) and "market_ticker" in payload:
-            self._apply_orderbook(payload, recv_time)
+            self._apply_orderbook(payload, recv_time_epoch)
 
-    def _apply_orderbook(self, payload: dict, recv_time: float) -> None:
+    def _apply_orderbook(self, payload: dict, recv_time_epoch: float) -> None:
         """Parse a Kalshi orderbook snapshot/delta into PriceCache."""
         ticker = payload.get("market_ticker", "")
         if not ticker:
@@ -1297,7 +1299,10 @@ class KalshiWSFeed:
             OrderBookLevel(price=round(1.0 - lvl.price, 4), size=lvl.size) for lvl in no_asks if lvl.price < 1.0
         ]
 
-        self._cache.update(ticker, implied_bids, yes_asks)
+        exchange_ts = _normalize_epoch_timestamp(payload.get("timestamp") or payload.get("ts"))
+        self._cache.update(ticker, implied_bids, yes_asks, exchange_ts=exchange_ts)
+        if exchange_ts is not None:
+            self.stats.last_latency_ms = max(0.0, (recv_time_epoch - exchange_ts) * 1000.0)
 
     @staticmethod
     def _parse_kalshi_levels(raw: list) -> List[OrderBookLevel]:

@@ -45,3 +45,28 @@ async def test_get_oracle_prices_returns_runtime_projection(monkeypatch):
         "BTC": {"price": 67890.12, "updated_at_ms": 1234, "age_seconds": 0.2},
         "ETH": {"price": 3456.78, "updated_at_ms": 5678, "age_seconds": 0.4},
     }
+
+
+@pytest.mark.asyncio
+async def test_get_filter_diagnostics_returns_rich_worker_snapshot(monkeypatch):
+    fake_stats = {
+        "filter_diagnostics": {
+            "primary_strategy_key": "alpha",
+            "signals_emitted": 3,
+            "strategies": {
+                "alpha": {"signals_emitted": 2},
+                "beta": {"signals_emitted": 1},
+            },
+            "dispatch_summary": {
+                "strategies_loaded": 2,
+                "opportunities_by_strategy": {"alpha": 2, "beta": 1},
+            },
+        }
+    }
+    monkeypatch.setattr(routes_crypto, "_read_crypto_stats", AsyncMock(return_value=fake_stats))
+
+    out = await routes_crypto.get_filter_diagnostics()
+
+    assert out["primary_strategy_key"] == "alpha"
+    assert out["signals_emitted"] == 3
+    assert out["dispatch_summary"]["opportunities_by_strategy"] == {"alpha": 2, "beta": 1}

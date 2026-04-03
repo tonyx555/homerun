@@ -1238,11 +1238,28 @@ export interface CryptoFilterDiagnostics {
   scanned_at: string
   markets_scanned: number
   signals_emitted: number
-  rejections: CryptoFilterRejection[]
+  strategy_key?: string | null
+  primary_strategy_key?: string | null
+  rejections: CryptoFilterRejection[] | Record<string, number>
+  message?: string
+  thresholds_percent?: Record<string, number>
   summary: {
-    oracle_move: number
-    repriced: number
-    max_oracle_move_pct: number
+    oracle_move?: number
+    repriced?: number
+    max_oracle_move_pct?: number
+    strategies_loaded?: number
+    strategies_reporting_diagnostics?: number
+    strategies_with_signals?: number
+    total_signals_emitted?: number
+    [key: string]: unknown
+  }
+  strategies?: Record<string, CryptoFilterDiagnostics>
+  dispatch_summary?: {
+    strategies_loaded?: number
+    strategies_reporting_diagnostics?: number
+    strategies_missing_diagnostics?: string[]
+    opportunities_by_strategy?: Record<string, number>
+    rejection_counts_by_strategy?: Record<string, Record<string, number>>
   }
 }
 

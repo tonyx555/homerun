@@ -13,7 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import Strategy, StrategyTombstone
 from services.strategy_sdk import StrategySDK
-from services.strategies.btc_eth_highfreq import crypto_highfreq_scope_config_schema
+from services.strategies.btc_eth_highfreq import (
+    crypto_highfreq_scope_config_schema,
+    normalize_crypto_highfreq_legacy_config,
+)
 from services.strategies.late_favorite_alpha import late_favorite_alpha_config_schema
 from services.strategies.news_edge import news_edge_config_schema
 from services.strategies.traders_copy_trade import traders_copy_trade_config_schema
@@ -1194,6 +1197,8 @@ async def ensure_system_opportunity_strategies_seeded(session: AsyncSession) -> 
             current_config = dict(current.config or {})
             seed_defaults = dict(row.get("config") or {})
             merged_config = {**seed_defaults, **current_config}
+            if slug == "btc_eth_highfreq":
+                merged_config = normalize_crypto_highfreq_legacy_config(merged_config)
             config_changed = current_config != merged_config
             source_changed = (
                 str(current.source_key or "") != str(row["source_key"])

@@ -660,6 +660,162 @@ class BTC5mThresholdFlipStrategy(BaseStrategy):
 
         return None
 
+    def _rejection_reason(self, row: dict[str, Any], cfg: dict[str, Any]) -> str:
+        entry_mode = str(cfg.get("entry_mode", "two_stage") or "two_stage").strip().lower()
+        if entry_mode not in {"one_stage", "two_stage"}:
+            entry_mode = "two_stage"
+        asset = str(row.get("asset") or "").strip().upper()
+        timeframe = _normalize_timeframe(row.get("timeframe"))
+        if asset != str(cfg.get("asset", "BTC") or "BTC").strip().upper():
+            return "asset_mismatch"
+        if timeframe != str(cfg.get("timeframe", "5m") or "5m").strip().lower():
+            return "timeframe_mismatch"
+
+        typed_market = self._row_market(row)
+        if typed_market is None:
+            return "invalid_market"
+
+        seconds_left = self._seconds_left(row)
+        current_window_ok = self._current_window_ok(row, seconds_left)
+        oracle_price = _as_float(row.get("oracle_price"))
+        price_to_beat = _as_float(row.get("price_to_beat"))
+        oracle_age_seconds = _as_float(row.get("oracle_age_seconds"))
+        liquidity = max(0.0, float(_as_float(row.get("liquidity")) or 0.0))
+        flow_imbalance = _as_float(
+            row.get("flow_imbalance") if row.get("flow_imbalance") is not None else row.get("orderflow_imbalance")
+        )
+        recent_move_zscore = _as_float(row.get("recent_move_zscore"))
+        quotes = self._quotes_and_tape(typed_market, row)
+        yes_mid = quotes["yes_mid"]
+        no_mid = quotes["no_mid"]
+        no_best_ask = quotes["no_best_ask"]
+        no_best_bid = quotes["no_best_bid"]
+        no_last_trade = quotes["no_last_trade"]
+        no_breakout = bool(
+            (no_best_bid is not None and no_best_bid >= to_float(cfg.get("breakout_price", 0.50), 0.50))
+            or (no_last_trade is not None and no_last_trade >= to_float(cfg.get("breakout_price", 0.50), 0.50))
+            or quotes["no_breakout_trade"]
+        )
+        gap_usd = None
+        if oracle_price is not None and price_to_beat is not None:
+            gap_usd = oracle_price - price_to_beat
+
+        observation = {
+            "ts": _now_ts(),
+            "asset": asset,
+            "timeframe": timeframe,
+            "seconds_left": seconds_left,
+            "oracle_price": oracle_price,
+            "price_to_beat": price_to_beat,
+            "oracle_age_seconds": oracle_age_seconds,
+            "gap_usd": gap_usd,
+            "gap_abs_usd": abs(gap_usd) if gap_usd is not None else None,
+            "yes_mid": yes_mid,
+            "no_mid": no_mid,
+            "yes_best_bid": quotes["yes_best_bid"],
+            "yes_best_ask": quotes["yes_best_ask"],
+            "no_best_bid": no_best_bid,
+            "no_best_ask": no_best_ask,
+            "no_last_trade": no_last_trade,
+            "no_breakout": no_breakout,
+            "flow_imbalance": flow_imbalance,
+            "recent_move_zscore": recent_move_zscore,
+            "liquidity": liquidity,
+            "no_spread": quotes["no_spread"],
+            "visible_no_depth_usd": quotes["visible_no_depth_usd"],
+        }
+
+        market_key = self._market_key(row)
+        markets_state = self.state.get("markets") if isinstance(self.state.get("markets"), dict) else {}
+        state = markets_state.get(market_key) if isinstance(markets_state, dict) else {}
+        if not isinstance(state, dict):
+            state = {}
+        observations = state.get("observations") if isinstance(state.get("observations"), list) else []
+        observations = [dict(item) for item in observations if isinstance(item, dict)]
+        history_seconds = max(5.0, to_float(cfg.get("history_seconds", 15.0), 15.0))
+        cutoff = observation["ts"] - history_seconds
+        observations = [item for item in observations if float(item.get("ts", 0.0) or 0.0) >= cutoff]
+        max_observations = max(3, int(to_float(cfg.get("max_observations", 24), 24.0)))
+        observations = (observations + [observation])[-max_observations:]
+        compression_state = self._compression_state(observations, cfg)
+
+        if not current_window_ok:
+            return "not_current_window"
+        if price_to_beat is None or price_to_beat <= 0.0:
+            return "missing_reference"
+        if oracle_price is None or oracle_age_seconds is None:
+            return "oracle_missing"
+        if oracle_age_seconds > max(0.1, to_float(cfg.get("max_oracle_age_seconds", 2.0), 2.0)):
+            return "oracle_stale"
+        if seconds_left is None:
+            return "missing_seconds_left"
+        start_seconds = max(1.0, to_float(cfg.get("entry_window_start_seconds", 60.0), 60.0))
+        end_seconds = max(0.0, to_float(cfg.get("entry_window_end_seconds", 2.0), 2.0))
+        if not (end_seconds <= seconds_left <= start_seconds):
+            return "outside_entry_window"
+        if liquidity < max(0.0, to_float(cfg.get("liquidity_floor_usd", 2500.0), 2500.0)):
+            return "low_liquidity"
+        no_spread = _as_float(observation.get("no_spread"))
+        if no_spread is None:
+            return "missing_no_spread"
+        if no_spread > clamp(to_float(cfg.get("max_no_spread", 0.03), 0.03), 0.0, 0.25):
+            return "no_spread_too_wide"
+        if gap_usd is None:
+            return "missing_gap"
+        if gap_usd <= 0.0:
+            return "gap_not_compressing"
+        if gap_usd > max(0.0, to_float(cfg.get("max_gap_usd", 40.0), 40.0)):
+            return "gap_too_large"
+        if yes_mid is None or no_mid is None:
+            return "missing_mid_prices"
+        if yes_mid < to_float(cfg.get("arm_yes_mid_min", 0.75), 0.75):
+            return "yes_mid_too_low"
+        min_flow_imbalance = max(0.0, to_float(cfg.get("min_flow_imbalance", 0.0), 0.0))
+        if min_flow_imbalance > 0.0 and flow_imbalance is not None and abs(flow_imbalance) < min_flow_imbalance:
+            return "flow_imbalance_too_small"
+        max_recent_move_zscore = max(0.0, to_float(cfg.get("max_recent_move_zscore", 99.0), 99.0))
+        if recent_move_zscore is not None and recent_move_zscore > max_recent_move_zscore:
+            return "recent_move_too_large"
+        if not compression_state.get("compression"):
+            return "compression_not_ready"
+
+        probe_window_end = max(end_seconds, to_float(cfg.get("probe_window_end_seconds", 5.0), 5.0))
+        preferred_probe = (
+            gap_usd <= to_float(cfg.get("preferred_gap_usd", 20.0), 20.0)
+            and yes_mid >= to_float(cfg.get("preferred_yes_mid_min", 0.75), 0.75)
+            and no_best_ask is not None
+            and no_best_ask <= to_float(cfg.get("preferred_no_ask_max", 0.25), 0.25)
+            and bool(compression_state.get("compression"))
+        )
+        weak_probe = (
+            gap_usd > to_float(cfg.get("preferred_gap_usd", 20.0), 20.0)
+            and gap_usd <= to_float(cfg.get("max_gap_usd", 40.0), 40.0)
+            and yes_mid >= to_float(cfg.get("weak_yes_mid_min", 0.85), 0.85)
+            and no_best_ask is not None
+            and no_best_ask <= to_float(cfg.get("weak_no_ask_max", 0.20), 0.20)
+            and bool(compression_state.get("strong_compression"))
+        )
+        breakout_final_seconds = max(1.0, to_float(cfg.get("breakout_final_seconds", 10.0), 10.0))
+        confirm_gap_cap = max(0.0, to_float(cfg.get("breakout_gap_cap_usd", 5.0), 5.0))
+        confirm_on_breakout = seconds_left <= breakout_final_seconds and gap_usd <= confirm_gap_cap and no_breakout
+        confirm_on_threshold = bool(compression_state.get("below_two"))
+
+        if entry_mode == "one_stage":
+            if preferred_probe or weak_probe or confirm_on_threshold or confirm_on_breakout:
+                return "awaiting_state_refresh"
+            return "stage_conditions_not_met"
+        if not state.get("probe_emitted"):
+            if not (probe_window_end <= seconds_left <= start_seconds):
+                return "outside_probe_window"
+            if preferred_probe or weak_probe:
+                return "awaiting_state_refresh"
+            return "probe_not_ready"
+        if state.get("confirm_emitted"):
+            return "campaign_completed"
+        if confirm_on_threshold or confirm_on_breakout:
+            return "awaiting_state_refresh"
+        return "confirm_not_ready"
+
     def detect(self, events: list, markets: list, prices: dict[str, dict]) -> list[Opportunity]:
         return []
 
@@ -676,12 +832,31 @@ class BTC5mThresholdFlipStrategy(BaseStrategy):
             max(3, int(to_float(cfg.get("max_observations", 24), 24.0))),
         )
         out: list[Opportunity] = []
+        rejection_counts: dict[str, int] = {}
         for row in rows:
             if not isinstance(row, dict):
                 continue
             opp = self._detect_from_row(row, cfg)
             if opp is not None:
                 out.append(opp)
+                continue
+            reason = self._rejection_reason(row, cfg)
+            rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+        top_rejections = sorted(rejection_counts.items(), key=lambda item: item[1], reverse=True)[:4]
+        message_parts = [f"Scanned {len(rows)} markets, {len(out)} signals"]
+        if top_rejections:
+            message_parts.append(
+                "rejected: " + ", ".join(f"{count} {reason}" for reason, count in top_rejections)
+            )
+        self._filter_diagnostics = {
+            "strategy_key": self.strategy_type,
+            "scanned_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            "markets_scanned": len(rows),
+            "signals_emitted": len(out),
+            "rejections": rejection_counts,
+            "message": " \u2014 ".join(message_parts),
+            "summary": {f"rejected_{reason}": count for reason, count in rejection_counts.items()},
+        }
         return out
 
     def _evaluate_quotes(self, signal: Any, context: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:

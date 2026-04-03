@@ -376,3 +376,55 @@ async def test_opportunity_dispatch_coalesces_to_latest_pending_payload(monkeypa
     await asyncio.wait_for(runtime._opportunity_dispatch_task, timeout=1.0)
 
     assert seen_prices == [70000.0, 70020.0]
+
+
+def test_build_crypto_filter_diagnostics_aggregates_per_strategy():
+    class _FakeStrategy:
+        def __init__(self, diag):
+            self._diag = diag
+
+        def get_filter_diagnostics(self):
+            return self._diag
+
+    diagnostics = market_runtime._build_crypto_filter_diagnostics(
+        [
+            (
+                "alpha",
+                _FakeStrategy(
+                    {
+                        "markets_scanned": 15,
+                        "signals_emitted": 0,
+                        "rejections": [{"gate": "oracle_move"}, {"gate": "oracle_move"}],
+                        "message": "alpha filtered",
+                        "summary": {"oracle_move": 2},
+                    }
+                ),
+            ),
+            (
+                "beta",
+                _FakeStrategy(
+                    {
+                        "markets_scanned": 15,
+                        "signals_emitted": 0,
+                        "rejections": {"low_liquidity": 4},
+                        "message": "beta filtered",
+                        "summary": {"rejected_low_liquidity": 4},
+                    }
+                ),
+            ),
+            ("gamma", _FakeStrategy(None)),
+        ],
+        [
+            SimpleNamespace(strategy="alpha"),
+            SimpleNamespace(strategy="beta"),
+            SimpleNamespace(strategy="beta"),
+        ],
+    )
+
+    assert diagnostics["signals_emitted"] == 3
+    assert diagnostics["markets_scanned"] == 15
+    assert diagnostics["strategies"]["alpha"]["signals_emitted"] == 1
+    assert diagnostics["strategies"]["beta"]["signals_emitted"] == 2
+    assert diagnostics["dispatch_summary"]["strategies_missing_diagnostics"] == ["gamma"]
+    assert diagnostics["dispatch_summary"]["rejection_counts_by_strategy"]["alpha"]["oracle_move"] == 2
+    assert diagnostics["dispatch_summary"]["opportunities_by_strategy"] == {"alpha": 1, "beta": 2}

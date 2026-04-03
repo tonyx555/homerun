@@ -76,6 +76,154 @@ def _near_market_boundary() -> bool:
     return False
 
 
+def _loaded_crypto_strategy_instances() -> list[tuple[str, Any]]:
+    try:
+        from services.strategy_loader import strategy_loader
+    except Exception:
+        return []
+
+    seen: set[str] = set()
+    out: list[tuple[str, Any]] = []
+    for slug, _handler in list(event_dispatcher._handlers.get(EventType.CRYPTO_UPDATE, [])):
+        normalized_slug = str(slug or "").strip().lower()
+        if not normalized_slug or normalized_slug in seen:
+            continue
+        seen.add(normalized_slug)
+        instance = strategy_loader.get_instance(normalized_slug)
+        if instance is None:
+            continue
+        if str(getattr(instance, "source_key", "") or "").strip().lower() != "crypto":
+            continue
+        out.append((normalized_slug, instance))
+    return out
+
+
+def _diagnostic_rejection_counts(diag: dict[str, Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    rejections = diag.get("rejections")
+    if isinstance(rejections, dict):
+        for key, value in rejections.items():
+            try:
+                counts[str(key or "").strip() or "other"] = int(value)
+            except (TypeError, ValueError):
+                continue
+    elif isinstance(rejections, list):
+        for item in rejections:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("gate") or item.get("reason") or "other").strip() or "other"
+            counts[key] = counts.get(key, 0) + 1
+
+    summary = diag.get("summary")
+    if isinstance(summary, dict):
+        for key, value in summary.items():
+            normalized_key = str(key or "").strip()
+            if not normalized_key.startswith("rejected_"):
+                continue
+            try:
+                counts[normalized_key.removeprefix("rejected_") or "other"] = int(value)
+            except (TypeError, ValueError):
+                continue
+    return dict(sorted(counts.items()))
+
+
+def _build_crypto_filter_diagnostics(
+    strategy_instances: list[tuple[str, Any]],
+    opportunities: list[Any],
+) -> dict[str, Any]:
+    if not strategy_instances:
+        return {}
+
+    opportunity_counts: dict[str, int] = {}
+    for opportunity in opportunities:
+        strategy_key = str(getattr(opportunity, "strategy", "") or "").strip().lower()
+        if not strategy_key:
+            continue
+        opportunity_counts[strategy_key] = opportunity_counts.get(strategy_key, 0) + 1
+
+    per_strategy: dict[str, dict[str, Any]] = {}
+    rejection_counts_by_strategy: dict[str, dict[str, int]] = {}
+    strategies_missing_diagnostics: list[str] = []
+    primary_strategy_key = ""
+    primary_rank = (-1, -1)
+    markets_scanned = 0
+
+    for slug, instance in strategy_instances:
+        diag_fn = getattr(instance, "get_filter_diagnostics", None)
+        diag = diag_fn() if callable(diag_fn) else None
+        if isinstance(diag, dict) and diag:
+            strategy_diag = copy.deepcopy(diag)
+            has_diag = 1
+        else:
+            strategy_diag = {
+                "strategy_key": slug,
+                "markets_scanned": 0,
+                "signals_emitted": 0,
+                "message": "No diagnostics reported",
+                "summary": {},
+            }
+            strategies_missing_diagnostics.append(slug)
+            has_diag = 0
+
+        strategy_diag["strategy_key"] = slug
+        strategy_diag["signals_emitted"] = int(opportunity_counts.get(slug, strategy_diag.get("signals_emitted") or 0))
+        strategy_diag["opportunities_emitted"] = int(opportunity_counts.get(slug, 0))
+        per_strategy[slug] = strategy_diag
+        markets_scanned = max(markets_scanned, int(strategy_diag.get("markets_scanned") or 0))
+
+        rejection_counts = _diagnostic_rejection_counts(strategy_diag)
+        if rejection_counts:
+            rejection_counts_by_strategy[slug] = rejection_counts
+
+        rank = (int(strategy_diag.get("signals_emitted") or 0), has_diag)
+        if rank > primary_rank:
+            primary_rank = rank
+            primary_strategy_key = slug
+
+    primary = copy.deepcopy(per_strategy.get(primary_strategy_key) or {})
+    summary = dict(primary.get("summary") or {})
+    summary.update({
+        "strategies_loaded": len(strategy_instances),
+        "strategies_reporting_diagnostics": len(strategy_instances) - len(strategies_missing_diagnostics),
+        "strategies_with_signals": sum(1 for value in opportunity_counts.values() if value > 0),
+        "total_signals_emitted": len(opportunities),
+    })
+    ordered_strategy_keys = sorted(
+        per_strategy.keys(),
+        key=lambda slug: (-int(per_strategy[slug].get("signals_emitted") or 0), slug),
+    )
+    detail_parts: list[str] = []
+    for slug in ordered_strategy_keys[:4]:
+        detail = str(per_strategy[slug].get("message") or "").strip()
+        if not detail:
+            detail = f"{int(per_strategy[slug].get('signals_emitted') or 0)} signals"
+        detail_parts.append(f"{slug}: {detail}")
+
+    primary.update({
+        "strategy_key": primary_strategy_key or None,
+        "scanned_at": str(primary.get("scanned_at") or utcnow().isoformat().replace("+00:00", "Z")),
+        "markets_scanned": markets_scanned,
+        "signals_emitted": len(opportunities),
+        "summary": summary,
+        "primary_strategy_key": primary_strategy_key or None,
+        "strategies": per_strategy,
+        "dispatch_summary": {
+            "strategies_loaded": len(strategy_instances),
+            "strategies_reporting_diagnostics": len(strategy_instances) - len(strategies_missing_diagnostics),
+            "strategies_missing_diagnostics": strategies_missing_diagnostics,
+            "opportunities_by_strategy": dict(sorted(opportunity_counts.items())),
+            "rejection_counts_by_strategy": rejection_counts_by_strategy,
+        },
+    })
+    primary["message"] = (
+        f"Scanned {markets_scanned} markets across {len(strategy_instances)} crypto strategies, "
+        f"{len(opportunities)} signals total"
+    )
+    if detail_parts:
+        primary["message"] = f"{primary['message']} — {' | '.join(detail_parts)}"
+    return primary
+
+
 class MarketRuntime:
     def __init__(self) -> None:
         self._started = False
@@ -768,21 +916,13 @@ class MarketRuntime:
                 self._dispatch_last_opportunities = len(opportunities)
                 self._dispatch_last_signals_published = int(signals_published or 0)
                 self._dispatch_last_error = None
-                # Capture filter diagnostics from strategy instances.
                 try:
-                    from services.strategy_loader import strategy_loader as _sl
-                    for _slug in list(_sl._loaded.keys()):
-                        _inst = _sl.get_instance(_slug)
-                        if _inst is None:
-                            continue
-                        _diag_fn = getattr(_inst, "get_filter_diagnostics", None)
-                        if callable(_diag_fn):
-                            diag = _diag_fn()
-                            if diag:
-                                self._dispatch_filter_diagnostics = diag
-                                break
+                    self._dispatch_filter_diagnostics = _build_crypto_filter_diagnostics(
+                        _loaded_crypto_strategy_instances(),
+                        opportunities,
+                    )
                 except Exception:
-                    pass
+                    self._dispatch_filter_diagnostics = {}
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

@@ -288,6 +288,77 @@ class CryptoSpikeReversionStrategy(BaseStrategy):
         }
         return opp
 
+    def _rejection_reason(self, row: dict[str, Any], cfg: dict[str, Any]) -> str:
+        up_price = safe_float(row.get("up_price"), None)
+        down_price = safe_float(row.get("down_price"), None)
+        if up_price is None or down_price is None:
+            return "missing_prices"
+
+        move_5m = safe_float(row.get("move_5m_percent"), safe_float(row.get("move_5m_pct"), None))
+        move_30m = safe_float(row.get("move_30m_percent"), safe_float(row.get("move_30m_pct"), None))
+        move_2h = safe_float(row.get("move_2h_percent"), safe_float(row.get("move_2h_pct"), None))
+        if move_5m is None:
+            return "missing_move_5m"
+
+        min_abs_move_5m = max(0.2, to_float(cfg.get("min_abs_move_5m", 1.8), 1.8))
+        if abs(move_5m) < min_abs_move_5m:
+            return "move_below_threshold"
+
+        max_abs_move_2h = max(min_abs_move_5m, to_float(cfg.get("max_abs_move_2h", 14.0), 14.0))
+        require_reversion_shape = bool(cfg.get("require_reversion_shape", True))
+        shape_ok = reversion_shape_ok(
+            move_5m,
+            move_30m,
+            move_2h,
+            require_shape=require_reversion_shape,
+            max_abs_move_2h=max_abs_move_2h,
+        )
+        if require_reversion_shape and not shape_ok:
+            return "shape_invalid"
+
+        selected_price = float(down_price if move_5m > 0 else up_price)
+        max_entry_price = clamp(to_float(cfg.get("max_entry_price", 0.92), 0.92), 0.05, 0.99)
+        if selected_price <= 0.0 or selected_price >= 1.0:
+            return "invalid_entry_price"
+        if selected_price > max_entry_price:
+            return "entry_price_too_high"
+
+        oracle_price = safe_float(row.get("oracle_price"), None)
+        price_to_beat = safe_float(row.get("price_to_beat"), None)
+        if oracle_price is not None and price_to_beat is not None and price_to_beat > 0:
+            diff_pct = abs(((oracle_price - price_to_beat) / price_to_beat) * 100.0)
+            edge = abs(move_5m) * 0.6 + diff_pct
+        else:
+            diff_pct = 0.0
+            edge = abs(move_5m) * 0.6
+
+        end_date = parse_datetime_utc(row.get("end_time"))
+        elapsed_ratio = 0.5
+        if end_date is not None:
+            seconds_left = max(0.0, (end_date - datetime.now(timezone.utc)).total_seconds())
+            elapsed_ratio = clamp(1.0 - (seconds_left / 300.0), 0.0, 1.0)
+        confidence = clamp(
+            0.50
+            + clamp(abs(move_5m) / 12.0, 0, 0.20)
+            + (0.10 if shape_ok else 0)
+            + clamp(elapsed_ratio * 0.10, 0, 0.10),
+            0.44,
+            0.90,
+        )
+        min_confidence = to_confidence(cfg.get("min_confidence", 0.44), 0.44)
+        if confidence < min_confidence:
+            return "confidence_too_low"
+
+        liquidity = max(0.0, float(safe_float(row.get("liquidity"), 0.0) or 0.0))
+        min_liquidity_usd = max(0.0, to_float(cfg.get("min_liquidity_usd", 2000.0), 2000.0))
+        if liquidity < min_liquidity_usd:
+            return "low_liquidity"
+
+        min_edge_percent = max(0.0, to_float(cfg.get("min_edge_percent", 2.8), 2.8))
+        if edge < min_edge_percent:
+            return "edge_too_small"
+        return "filtered"
+
     # ------------------------------------------------------------------
     # Detection from raw crypto rows
     # ------------------------------------------------------------------
@@ -297,16 +368,36 @@ class CryptoSpikeReversionStrategy(BaseStrategy):
         cfg.update(getattr(self, "config", {}) or {})
 
         candidates: list[tuple[float, Opportunity]] = []
+        rejection_counts: dict[str, int] = {}
         for row in rows:
             if not isinstance(row, dict):
                 continue
             signal = self._score_market(row, cfg)
             if signal is None:
+                reason = self._rejection_reason(row, cfg)
+                rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
                 continue
             opp = self._build_opportunity(row, signal)
             if opp is None:
+                rejection_counts["invalid_opportunity"] = rejection_counts.get("invalid_opportunity", 0) + 1
                 continue
             candidates.append((float(signal["score"]), opp))
+
+        top_rejections = sorted(rejection_counts.items(), key=lambda item: item[1], reverse=True)[:4]
+        message_parts = [f"Scanned {len(rows)} markets, {len(candidates)} signals"]
+        if top_rejections:
+            message_parts.append(
+                "rejected: " + ", ".join(f"{count} {reason}" for reason, count in top_rejections)
+            )
+        self._filter_diagnostics = {
+            "strategy_key": self.strategy_type,
+            "scanned_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            "markets_scanned": len(rows),
+            "signals_emitted": len(candidates),
+            "rejections": rejection_counts,
+            "message": " \u2014 ".join(message_parts),
+            "summary": {f"rejected_{reason}": count for reason, count in rejection_counts.items()},
+        }
 
         if not candidates:
             return []

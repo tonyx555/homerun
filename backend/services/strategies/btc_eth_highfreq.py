@@ -191,6 +191,14 @@ def _crypto_hf_param_value(config: dict[str, Any], base_key: str, timeframe: Any
     return config.get(base_key)
 
 
+def _crypto_hf_default_param_value(base_key: str, timeframe: Any) -> Any:
+    timeframe_value = _normalize_timeframe(timeframe)
+    tf_value = _timeframe_override(CRYPTO_HF_SCOPE_DEFAULTS, base_key, timeframe_value)
+    if tf_value is not None:
+        return tf_value
+    return CRYPTO_HF_SCOPE_DEFAULTS.get(base_key)
+
+
 CRYPTO_HF_SCOPE_DEFAULTS: dict[str, Any] = {
     "min_edge_percent": 0.25,
     "min_confidence": 0.42,
@@ -420,6 +428,20 @@ CRYPTO_HF_SCOPE_DEFAULTS: dict[str, Any] = {
     "consecutive_loss_pause_minutes": 15.0,
 }
 
+_LEGACY_CRYPTO_HF_ORACLE_GATE_DEFAULTS: dict[str, float] = {
+    "min_oracle_move_pct": 2.5,
+    "min_oracle_move_pct_5m": 2.5,
+    "min_oracle_move_pct_15m": 2.0,
+    "min_oracle_move_pct_1h": 1.5,
+    "min_oracle_move_pct_4h": 1.0,
+}
+
+_LEGACY_CRYPTO_HF_REMOVED_SUB_STRATEGIES = {
+    "pure_arb",
+    "dump_hedge",
+    "pre_placed_limits",
+}
+
 
 CRYPTO_HF_SCOPE_CONFIG_SCHEMA: dict[str, Any] = {
     "param_fields": [
@@ -604,6 +626,54 @@ CRYPTO_HF_SCOPE_CONFIG_SCHEMA: dict[str, Any] = {
             "type": "number",
             "min": 100,
             "max": 3_600_000,
+            "phase": "signal",
+        },
+        {
+            "key": "min_oracle_move_pct",
+            "label": "Min Oracle Move (%)",
+            "type": "number",
+            "min": 0,
+            "max": 10,
+            "phase": "signal",
+        },
+        {
+            "key": "min_oracle_move_pct_5m",
+            "label": "Min Oracle Move 5m (%)",
+            "type": "number",
+            "min": 0,
+            "max": 10,
+            "phase": "signal",
+        },
+        {
+            "key": "min_oracle_move_pct_15m",
+            "label": "Min Oracle Move 15m (%)",
+            "type": "number",
+            "min": 0,
+            "max": 10,
+            "phase": "signal",
+        },
+        {
+            "key": "min_oracle_move_pct_1h",
+            "label": "Min Oracle Move 1h (%)",
+            "type": "number",
+            "min": 0,
+            "max": 10,
+            "phase": "signal",
+        },
+        {
+            "key": "min_oracle_move_pct_4h",
+            "label": "Min Oracle Move 4h (%)",
+            "type": "number",
+            "min": 0,
+            "max": 10,
+            "phase": "signal",
+        },
+        {
+            "key": "max_market_repricing_for_entry",
+            "label": "Max Market Repricing For Entry",
+            "type": "number",
+            "min": 0,
+            "max": 1,
             "phase": "signal",
         },
         {"key": "require_oracle_for_directional", "label": "Require Oracle For Directional", "type": "boolean", "phase": "signal"},
@@ -2542,6 +2612,36 @@ def _resolve_enabled_active_modes(config: Any) -> set[str]:
     return enabled_modes
 
 
+def _matches_legacy_crypto_hf_oracle_gate(config: dict[str, Any]) -> bool:
+    for key, legacy_value in _LEGACY_CRYPTO_HF_ORACLE_GATE_DEFAULTS.items():
+        current_value = safe_float(config.get(key), None)
+        if current_value is None or abs(float(current_value) - legacy_value) > 1e-9:
+            return False
+    return True
+
+
+def normalize_crypto_highfreq_legacy_config(config: Any) -> dict[str, Any]:
+    normalized = dict(config) if isinstance(config, dict) else {}
+    if not normalized:
+        return normalized
+
+    if _matches_legacy_crypto_hf_oracle_gate(normalized):
+        for key in _LEGACY_CRYPTO_HF_ORACLE_GATE_DEFAULTS:
+            normalized[key] = _crypto_hf_default_param_value(key, None)
+
+    raw_enabled = normalized.get("enabled_sub_strategies")
+    if isinstance(raw_enabled, (list, tuple, set)):
+        tokens = [
+            str(item or "").strip().lower().replace("-", "_").replace(" ", "_")
+            for item in raw_enabled
+            if str(item or "").strip()
+        ]
+        if any(token in _LEGACY_CRYPTO_HF_REMOVED_SUB_STRATEGIES for token in tokens):
+            normalized["enabled_sub_strategies"] = list(CRYPTO_HF_SCOPE_DEFAULTS.get("enabled_sub_strategies") or [])
+
+    return normalized
+
+
 # ---------------------------------------------------------------------------
 # Price history tracker
 # ---------------------------------------------------------------------------
@@ -2698,6 +2798,9 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         # Consecutive loss circuit breaker state.
         self._consecutive_losses: int = 0
         self._paused_until_ms: int = 0
+
+    def configure(self, config: dict) -> None:
+        super().configure(normalize_crypto_highfreq_legacy_config(config))
 
     # ------------------------------------------------------------------
     # Public API
@@ -6745,6 +6848,7 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         """
         opportunities: list[Opportunity] = []
         rejections: list[dict[str, Any]] = []
+        defaults = normalize_crypto_highfreq_legacy_config(self.config)
 
         for market in markets:
             market_id = str(market.get("condition_id") or market.get("id") or "")
@@ -6829,10 +6933,9 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             oracle_move_pct = abs(diff_pct)
 
             # Gate 1: Minimum oracle move — small moves are noise, not signal.
-            defaults = self.config
             min_oracle_move = to_float(
                 _crypto_hf_param_value(defaults, "min_oracle_move_pct", timeframe),
-                2.5,
+                _coerce_float(_crypto_hf_default_param_value("min_oracle_move_pct", timeframe), 0.30, 0.0, 100.0),
             )
             if oracle_move_pct < min_oracle_move:
                 rejection_detail: dict[str, Any] = {
@@ -6854,7 +6957,15 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             # Gate 2: Price lag detection — only enter when Polymarket hasn't
             # repriced to reflect the oracle move.  If the contract price on our
             # predicted winning side is already expensive, there's no lag to exploit.
-            max_repricing = to_float(defaults.get("max_market_repricing_for_entry"), 0.30)
+            max_repricing = to_float(
+                _crypto_hf_param_value(defaults, "max_market_repricing_for_entry", timeframe),
+                _coerce_float(
+                    _crypto_hf_default_param_value("max_market_repricing_for_entry", timeframe),
+                    0.30,
+                    0.0,
+                    1.0,
+                ),
+            )
             repricing_ceiling = round(0.50 + max_repricing, 3)
             if diff_pct > 0 and up_price > repricing_ceiling:
                 rejections.append({
@@ -6947,20 +7058,41 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         oracle_rejections = [r for r in rejections if r["gate"] == "oracle_move"]
         max_oracle_move = max((r["oracle_move_pct"] for r in oracle_rejections), default=0.0)
         repriced_count = sum(1 for r in rejections if r["gate"] == "repriced")
+        thresholds_percent = {
+            timeframe_key: round(
+                to_float(
+                    _crypto_hf_param_value(defaults, "min_oracle_move_pct", timeframe_key),
+                    _coerce_float(_crypto_hf_default_param_value("min_oracle_move_pct", timeframe_key), 0.30, 0.0, 100.0),
+                ),
+                4,
+            )
+            for timeframe_key in ("5m", "15m", "1h", "4h")
+        }
+        oracle_rejections_by_timeframe: dict[str, int] = {}
+        for rejection in oracle_rejections:
+            timeframe_key = str(rejection.get("timeframe") or "?").strip().lower() or "?"
+            oracle_rejections_by_timeframe[timeframe_key] = oracle_rejections_by_timeframe.get(timeframe_key, 0) + 1
+        min_threshold = min(thresholds_percent.values(), default=0.0)
+        max_threshold = max(thresholds_percent.values(), default=0.0)
         self._filter_diagnostics = {
+            "strategy_key": self.strategy_type,
             "scanned_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
             "markets_scanned": len(markets),
             "signals_emitted": len(opportunities),
             "rejections": rejections,
             "message": (
                 f"Scanned {len(markets)} markets, {len(opportunities)} signals"
-                f" \u2014 {len(oracle_rejections)} below oracle threshold (max {round(max_oracle_move, 4)}%),"
+                f" \u2014 {len(oracle_rejections)} below oracle threshold"
+                f" ({round(min_threshold, 4)}%-{round(max_threshold, 4)}%, max seen {round(max_oracle_move, 4)}%),"
                 f" {repriced_count} already repriced"
             ),
+            "thresholds_percent": thresholds_percent,
             "summary": {
                 "oracle_move": len(oracle_rejections),
                 "repriced": repriced_count,
                 "max_oracle_move_pct": round(max_oracle_move, 4),
+                "oracle_rejections_by_timeframe": dict(sorted(oracle_rejections_by_timeframe.items())),
+                "thresholds_percent": thresholds_percent,
             },
         }
         return opportunities
