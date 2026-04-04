@@ -1,13 +1,11 @@
 import sys
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from models.market import Market
 from services.strategy_sdk import StrategySDK
 from services.strategies.btc_eth_highfreq import (
     CRYPTO_HF_SCOPE_DEFAULTS,

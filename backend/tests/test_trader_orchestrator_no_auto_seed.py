@@ -17,13 +17,9 @@ from services.trader_orchestrator_state import (
     delete_trader,
     get_orchestrator_overview,
     list_traders,
-    read_orchestrator_snapshot,
-    update_orchestrator_control,
     update_trader,
-    write_orchestrator_snapshot,
 )
 from tests.postgres_test_db import build_postgres_session_factory
-from utils.utcnow import utcnow
 from workers import trader_orchestrator_worker
 
 

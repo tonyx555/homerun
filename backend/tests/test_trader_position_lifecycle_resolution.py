@@ -522,6 +522,7 @@ async def test_live_exit_submission_uses_gtc_for_lifecycle_close(tmp_path, monke
                 status="open",
                 payload_json={
                     "token_id": "token-1",
+                    "strategy_exit_config": {"take_profit_pct": 1.0},
                     "provider_reconciliation": {
                         "filled_size": 5.0,
                         "average_fill_price": 0.4,

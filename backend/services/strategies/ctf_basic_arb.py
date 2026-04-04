@@ -6,7 +6,7 @@ from typing import Any, Optional
 from models import Event, ExecutionConstraints, ExecutionLeg, ExecutionPlan, Market, Opportunity
 from services.quality_filter import QualityFilterOverrides
 from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, ScoringWeights, SizingConfig
-from utils.converters import clamp, safe_float, to_float
+from utils.converters import safe_float, to_float
 from utils.kelly import polymarket_taker_fee
 
 logger = logging.getLogger(__name__)
