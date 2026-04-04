@@ -13,6 +13,7 @@ from utils.converters import safe_float
 
 _MIN_EXECUTION_PRICE = 0.001
 _MIN_LIVE_SHARES = 5.0
+_LEG_SUBMIT_TIMEOUT_SECONDS = 8.0
 _NUMERIC_TOKEN_ID_RE = re.compile(r"^\d{18,}$")
 _HEX_TOKEN_ID_RE = re.compile(r"^(?:0x)?[0-9a-f]{40,}$")
 _CONDITION_ID_RE = re.compile(r"^0x[0-9a-f]{64}$")
@@ -708,12 +709,15 @@ async def submit_execution_wave(
     if not legs_with_notionals:
         return []
     tasks = [
-        submit_execution_leg(
-            mode=mode,
-            signal=signal,
-            leg=leg,
-            notional_usd=notional,
-            strategy_params=strategy_params,
+        asyncio.wait_for(
+            submit_execution_leg(
+                mode=mode,
+                signal=signal,
+                leg=leg,
+                notional_usd=notional,
+                strategy_params=strategy_params,
+            ),
+            timeout=_LEG_SUBMIT_TIMEOUT_SECONDS,
         )
         for leg, notional in legs_with_notionals
     ]
@@ -723,12 +727,15 @@ async def submit_execution_wave(
         leg, notional = legs_with_notionals[index]
         leg_id = str(leg.get("leg_id") or f"leg_{index + 1}")
         if isinstance(result, Exception):
+            error_message = "Order submission timed out."
+            if not isinstance(result, asyncio.TimeoutError):
+                error_message = str(result)
             normalized.append(
                 LegSubmitResult(
                     leg_id=leg_id,
                     status="failed",
                     effective_price=safe_float(leg.get("limit_price"), None),
-                    error_message=str(result),
+                    error_message=error_message,
                     payload={"mode": str(mode or "").lower(), "submission": "exception", "leg": dict(leg)},
                     shares=None,
                     notional_usd=notional,

@@ -77,17 +77,26 @@ function buildConfigFromOpportunity(opp: Opportunity): BuyConfig {
   }
 }
 
+function resolveTraderSignalOutcomeLabel(sig: UnifiedTraderSignal): string {
+  const yesLabel = String(sig.yes_label || sig.outcome_labels?.[0] || 'Yes').trim() || 'Yes'
+  const noLabel = String(sig.no_label || sig.outcome_labels?.[1] || 'No').trim() || 'No'
+  if (sig.selected_outcome_label) return String(sig.selected_outcome_label).trim() || yesLabel
+  if (sig.direction === 'SELL') return noLabel
+  if (sig.direction === 'BUY') return yesLabel
+  return String(sig.outcome || yesLabel).trim() || yesLabel
+}
+
 function buildConfigFromTraderSignal(sig: UnifiedTraderSignal): BuyConfig {
   const price = sig.direction === 'SELL'
     ? (sig.current_no_price ?? sig.no_price ?? 0.5)
     : (sig.current_yes_price ?? sig.yes_price ?? 0.5)
-  const outcome = sig.direction === 'SELL' ? 'No' : (sig.outcome || 'Yes')
+  const outcome = resolveTraderSignalOutcomeLabel(sig)
 
   return {
     title: sig.market_question,
     positions: [{
       token_id: '',
-      side: sig.direction || 'BUY',
+      side: 'BUY',
       price,
       market_id: sig.market_id || '',
       market_question: sig.market_question || '',
@@ -95,11 +104,16 @@ function buildConfigFromTraderSignal(sig: UnifiedTraderSignal): BuyConfig {
     }],
     defaultSizeUsd: sig.suggested_size_usd ?? 10,
     suggestedSizeUsd: sig.suggested_size_usd,
-    direction: sig.direction,
+    direction: 'BUY',
     confidence: sig.confidence ?? null,
     roi: sig.edge_percent ?? null,
     risk: null,
   }
+}
+
+function formatConfidencePercent(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return '—'
+  return `${(value > 1 ? value : value * 100).toFixed(0)}%`
 }
 
 function formatUsd(value: number): string {
@@ -304,7 +318,7 @@ export default function BuyButton({ opportunity, traderSignal, className, varian
                   {config?.confidence != null && (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-blue-500/10 text-blue-400 border border-blue-500/20">
                       <Target className="w-3 h-3" />
-                      {(config.confidence * 100).toFixed(0)}%
+                      {formatConfidencePercent(config.confidence)}
                     </span>
                   )}
                 </div>

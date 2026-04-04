@@ -153,40 +153,6 @@ TRADER_TEMPLATES: list[dict[str, Any]] = [
         },
     },
     {
-        "id": "btc_eth_twin_parallel",
-        "name": "Crypto Twin Parallel",
-        "description": "Single-bot simultaneous YES/NO execution with pair-lock constraints.",
-        "source_configs": [
-            {
-                "source_key": "crypto",
-                "strategy_key": "crypto_twin_parallel",
-                "strategy_params": {
-                    "min_edge_percent": 0.8,
-                    "min_confidence": 0.40,
-                    "max_combined_entry_price": 0.985,
-                    "max_leg_entry_price": 0.88,
-                    "execution_policy": "PARALLEL_MAKER",
-                    "time_in_force": "GTC",
-                    "max_unhedged_notional_usd": 2.0,
-                    "hedge_timeout_seconds": 20,
-                    "session_timeout_seconds": 300,
-                    "max_reprice_attempts": 2,
-                    "pair_lock": True,
-                    "yes_notional_weight": 1.0,
-                    "no_notional_weight": 1.0,
-                    "maker_price_offset_bps": 0.0,
-                },
-            }
-        ],
-        "interval_seconds": 1,
-        "risk_limits": {
-            "max_open_orders": 10,
-            "max_per_market_exposure_usd": 450.0,
-            "max_unhedged_notional_usd": 2.0,
-            "pair_lock": True,
-        },
-    },
-    {
         "id": "news_edge",
         "name": "News Trader",
         "description": "News-event reaction strategy on validated news intents.",

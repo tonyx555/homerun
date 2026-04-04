@@ -58,8 +58,8 @@ STRATEGY_META_BY_TYPE: dict[str, dict[str, object]] = {
         "timeframe": "event",
         "sources": ["scanner", "events"],
     },
-    "bayesian_cascade": {
-        "domain": "event_markets",
+    "ctf_basic_arb": {
+        "domain": "polymarket_ctf",
         "timeframe": "event",
         "sources": ["scanner", "events"],
     },
@@ -117,12 +117,11 @@ def _derive_opportunity_sub_strategy(opportunity: object) -> Optional[str]:
     positions_raw = _field("positions_to_take", [])
     positions = [p for p in positions_raw if isinstance(p, Mapping)] if isinstance(positions_raw, list) else []
 
-    if strategy == "temporal_decay":
+    if strategy == "stat_arb":
         if title.startswith("certainty shock:"):
             return "certainty_shock"
         if title.startswith("temporal decay:"):
             return "decay_curve"
-        return None
 
     if strategy == "btc_eth_highfreq":
         for pos in positions:

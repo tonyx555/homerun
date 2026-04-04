@@ -466,20 +466,30 @@ def _execution_profile_for_opportunity(opportunity: Opportunity, legs_count: int
 
 
 def _normalize_execution_plan(opportunity: Opportunity) -> dict[str, Any] | None:
+    positions = [position for position in (getattr(opportunity, "positions_to_take", None) or []) if isinstance(position, dict)]
+    expected_leg_count = len(positions)
     existing = getattr(opportunity, "execution_plan", None)
     if existing is not None:
         if hasattr(existing, "model_dump"):
             dumped = existing.model_dump(mode="json")
             if isinstance(dumped, dict) and list(dumped.get("legs") or []):
-                return dumped
+                existing_legs = [leg for leg in (dumped.get("legs") or []) if isinstance(leg, dict)]
+                if expected_leg_count <= 1 or len(existing_legs) >= expected_leg_count:
+                    return dumped
         elif isinstance(existing, dict) and list(existing.get("legs") or []):
-            return dict(existing)
+            existing_legs = [leg for leg in (existing.get("legs") or []) if isinstance(leg, dict)]
+            if expected_leg_count <= 1 or len(existing_legs) >= expected_leg_count:
+                return dict(existing)
 
-    positions = list(getattr(opportunity, "positions_to_take", None) or [])
     if not positions:
         return None
 
     markets = list(getattr(opportunity, "markets", None) or [])
+    single_market = (
+        markets[0]
+        if len(markets) == 1 and isinstance(markets[0], dict) and str(markets[0].get("id") or "").strip()
+        else None
+    )
     market_by_id: dict[str, dict[str, Any]] = {}
     for market in markets:
         if not isinstance(market, dict):
@@ -491,19 +501,20 @@ def _normalize_execution_plan(opportunity: Opportunity) -> dict[str, Any] | None
     profile = _execution_profile_for_opportunity(opportunity, len(positions))
     legs: list[dict[str, Any]] = []
     for index, position in enumerate(positions):
-        if not isinstance(position, dict):
-            continue
         market_id = str(
             position.get("market_id")
             or position.get("id")
             or position.get("market")
             or (markets[index].get("id") if index < len(markets) and isinstance(markets[index], dict) else "")
+            or (single_market.get("id") if isinstance(single_market, dict) else "")
             or ""
         ).strip()
         if not market_id:
             continue
         market = market_by_id.get(market_id) or (
-            markets[index] if index < len(markets) and isinstance(markets[index], dict) else {}
+            single_market
+            if isinstance(single_market, dict) and str(single_market.get("id") or "").strip() == market_id
+            else (markets[index] if index < len(markets) and isinstance(markets[index], dict) else {})
         )
         action = str(position.get("action") or position.get("side") or "").strip().lower()
         limit_price = position.get("price")
@@ -518,7 +529,12 @@ def _normalize_execution_plan(opportunity: Opportunity) -> dict[str, Any] | None
             {
                 "leg_id": str(position.get("leg_id") or f"leg_{index + 1}"),
                 "market_id": market_id,
-                "market_question": str(position.get("market_question") or market.get("question") or opportunity.title),
+                "market_question": str(
+                    position.get("market_question")
+                    or market.get("question")
+                    or (single_market.get("question") if isinstance(single_market, dict) else "")
+                    or opportunity.title
+                ),
                 "token_id": str(position.get("token_id") or "").strip() or None,
                 "side": "sell" if action.startswith("sell") else "buy",
                 "outcome": str(position.get("outcome") or "").strip().lower() or None,

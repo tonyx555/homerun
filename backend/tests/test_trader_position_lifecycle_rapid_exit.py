@@ -69,3 +69,29 @@ def test_failed_exit_retry_delay_expands_for_vpn_proxy_errors():
         "VPN check failed: Trading proxy unreachable: Invalid username/password"
     )
     assert delay == 90
+
+
+def test_pending_exit_verified_terminal_fill_requires_positive_fill_evidence():
+    assert position_lifecycle._pending_exit_has_verified_terminal_fill(
+        {
+            "provider_status": "filled",
+            "filled_size": 3.0,
+        }
+    ) is True
+    assert position_lifecycle._pending_exit_has_verified_terminal_fill(
+        {
+            "provider_status": "filled",
+            "filled_size": 0.0,
+            "average_fill_price": 0.0,
+        }
+    ) is False
+
+
+def test_pending_exit_verified_terminal_fill_rejects_cancelled_status_without_trade():
+    assert position_lifecycle._pending_exit_has_verified_terminal_fill(
+        {
+            "provider_status": "cancelled",
+            "filled_size": 4.0,
+            "average_fill_price": 0.41,
+        }
+    ) is False

@@ -27,7 +27,7 @@ async def test_bridge_publishes_stream_before_commit(monkeypatch):
     opportunity = SimpleNamespace(
         id="opp-1",
         stable_id="stable-1",
-        strategy="btc_5m_threshold_flip",
+        strategy="crypto_strategy",
         resolution_date=datetime(2026, 3, 10, 3, 0, tzinfo=timezone.utc),
         roi_percent=5.0,
         confidence=0.72,

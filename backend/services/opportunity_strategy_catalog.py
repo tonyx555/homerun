@@ -17,7 +17,6 @@ from services.strategies.btc_eth_highfreq import (
     crypto_highfreq_scope_config_schema,
     normalize_crypto_highfreq_legacy_config,
 )
-from services.strategies.late_favorite_alpha import late_favorite_alpha_config_schema
 from services.strategies.news_edge import news_edge_config_schema
 from services.strategies.traders_copy_trade import traders_copy_trade_config_schema
 from utils.logger import get_logger
@@ -248,28 +247,30 @@ _SCANNER_SCHEMA_CROSS_PLATFORM = {
     ]
 }
 
-_SCANNER_SCHEMA_BAYESIAN = {
-    "param_fields": [
-        *_COMMON_SCANNER_SCHEMA["param_fields"][:3],
-        {"key": "min_propagation_edge", "label": "Min Propagation Edge", "type": "number", "min": 0, "max": 1, "phase": "signal"},
-        {
-            "key": "max_propagation_depth",
-            "label": "Max Propagation Depth",
-            "type": "integer",
-            "min": 1,
-            "max": 10,
-            "phase": "signal",
-        },
-        *_COMMON_SCANNER_SCHEMA["param_fields"][3:],
-    ]
-}
-
 _SCANNER_SCHEMA_CORRELATION = {
     "param_fields": [
         *_COMMON_SCANNER_SCHEMA["param_fields"][:3],
         {"key": "min_correlation", "label": "Min Correlation", "type": "number", "min": 0, "max": 1, "phase": "signal"},
         {"key": "min_divergence", "label": "Min Divergence", "type": "number", "min": 0, "max": 1, "phase": "signal"},
         {"key": "z_score_threshold", "label": "Z-Score Threshold", "type": "number", "min": 0, "phase": "signal"},
+        *_COMMON_SCANNER_SCHEMA["param_fields"][3:],
+    ]
+}
+
+_SCANNER_SCHEMA_STAT_ARB = {
+    "param_fields": [
+        *_COMMON_SCANNER_SCHEMA["param_fields"][:3],
+        {"key": "enable_stat_signals", "label": "Enable Statistical Signals", "type": "boolean", "phase": "signal"},
+        {"key": "enable_certainty_shock", "label": "Enable Certainty Shock", "type": "boolean", "phase": "signal"},
+        {"key": "enable_decay_curve", "label": "Enable Decay Curve", "type": "boolean", "phase": "signal"},
+        {"key": "shock_lookback_seconds", "label": "Shock Lookback (sec)", "type": "number", "min": 60, "phase": "signal"},
+        {"key": "shock_min_abs_move", "label": "Shock Min Absolute Move", "type": "number", "min": 0.01, "max": 1, "phase": "signal"},
+        {"key": "shock_max_retrace", "label": "Shock Max Retrace", "type": "number", "min": 0, "max": 1, "phase": "signal"},
+        {"key": "shock_min_favored_price", "label": "Shock Min Favored Price", "type": "number", "min": 0.01, "max": 0.99, "phase": "signal"},
+        {"key": "shock_target_certainty", "label": "Shock Target Certainty", "type": "number", "min": 0.5, "max": 0.995, "phase": "signal"},
+        {"key": "min_days_to_deadline", "label": "Min Days To Deadline", "type": "number", "min": 0, "max": 365, "phase": "signal"},
+        {"key": "max_days_to_deadline", "label": "Max Days To Deadline", "type": "number", "min": 0, "max": 365, "phase": "signal"},
+        {"key": "exclude_market_keywords", "label": "Exclude Market Keywords", "type": "list", "phase": "signal"},
         *_COMMON_SCANNER_SCHEMA["param_fields"][3:],
     ]
 }
@@ -386,6 +387,26 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         },
     ),
     SystemOpportunityStrategySeed(
+        slug="ctf_basic_arb",
+        source_key="scanner",
+        import_module="services.strategies.ctf_basic_arb",
+        sort_order=15,
+        config_schema={
+            "param_fields": [
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100, "phase": "signal"},
+                {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1, "phase": "signal"},
+                {"key": "max_risk_score", "label": "Max Risk Score", "type": "number", "min": 0, "max": 1, "phase": "signal"},
+                {"key": "min_liquidity", "label": "Min Liquidity", "type": "number", "min": 0, "phase": "signal"},
+                {"key": "gas_buffer_usd", "label": "Gas Buffer (USD)", "type": "number", "min": 0, "phase": "signal"},
+                {"key": "assumed_trade_size_usd", "label": "Assumed Trade Size (USD)", "type": "number", "min": 1, "phase": "signal"},
+                {"key": "require_accepting_orders", "label": "Require Accepting Orders", "type": "boolean", "phase": "signal"},
+                {"key": "require_order_book", "label": "Require Order Book", "type": "boolean", "phase": "signal"},
+                {"key": "allow_split_sell", "label": "Allow Split/Sell", "type": "boolean", "phase": "signal"},
+                {"key": "allow_buy_merge", "label": "Allow Buy/Merge", "type": "boolean", "phase": "signal"},
+            ]
+        },
+    ),
+    SystemOpportunityStrategySeed(
         slug="negrisk",
         source_key="scanner",
         import_module="services.strategies.negrisk",
@@ -414,24 +435,10 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         config_schema=_SCANNER_SCHEMA_CROSS_PLATFORM,
     ),
     SystemOpportunityStrategySeed(
-        slug="bayesian_cascade",
-        source_key="scanner",
-        import_module="services.strategies.bayesian_cascade",
-        sort_order=100,
-        config_schema=_SCANNER_SCHEMA_BAYESIAN,
-    ),
-    SystemOpportunityStrategySeed(
         slug="vpin_toxicity",
         source_key="scanner",
         import_module="services.strategies.vpin_toxicity",
         sort_order=115,
-        config_schema=_COMMON_SCANNER_SCHEMA,
-    ),
-    SystemOpportunityStrategySeed(
-        slug="temporal_decay",
-        source_key="scanner",
-        import_module="services.strategies.temporal_decay",
-        sort_order=140,
         config_schema=_COMMON_SCANNER_SCHEMA,
     ),
     SystemOpportunityStrategySeed(
@@ -476,7 +483,7 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         source_key="scanner",
         import_module="services.strategies.stat_arb",
         sort_order=170,
-        config_schema=_COMMON_SCANNER_SCHEMA,
+        config_schema=_SCANNER_SCHEMA_STAT_ARB,
     ),
     SystemOpportunityStrategySeed(
         slug="flash_crash_reversion",
@@ -686,17 +693,6 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
             ]
         },
     ),
-    SystemOpportunityStrategySeed(
-        slug="late_favorite_alpha",
-        source_key="scanner",
-        import_module="services.strategies.late_favorite_alpha",
-        sort_order=177,
-        config_schema={
-            "param_fields": [
-                *late_favorite_alpha_config_schema().get("param_fields", []),
-            ]
-        },
-    ),
     # ── News strategies ──────────────────────────────────────
     SystemOpportunityStrategySeed(
         slug="news_edge",
@@ -774,42 +770,6 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         },
     ),
     SystemOpportunityStrategySeed(
-        slug="btc_5m_threshold_flip",
-        source_key="crypto",
-        import_module="services.strategies.btc_5m_threshold_flip",
-        sort_order=193,
-        config_schema={
-            "param_fields": [
-                {"key": "max_oracle_age_seconds", "label": "Max Oracle Age (sec)", "type": "number", "min": 0.1, "max": 10},
-                {"key": "entry_mode", "label": "Entry Mode", "type": "enum", "options": ["two_stage", "one_stage"]},
-                {"key": "entry_window_start_seconds", "label": "Entry Window Start (sec)", "type": "number", "min": 2, "max": 120},
-                {"key": "entry_window_end_seconds", "label": "Entry Window End (sec)", "type": "number", "min": 0, "max": 30},
-                {"key": "probe_window_end_seconds", "label": "Probe Window End (sec)", "type": "number", "min": 1, "max": 30},
-                {"key": "liquidity_floor_usd", "label": "Liquidity Floor (USD)", "type": "number", "min": 0},
-                {"key": "max_no_spread", "label": "Max NO Spread", "type": "number", "min": 0, "max": 0.2},
-                {"key": "max_gap_usd", "label": "Max Gap (USD)", "type": "number", "min": 1, "max": 500},
-                {"key": "preferred_gap_usd", "label": "Preferred Gap (USD)", "type": "number", "min": 1, "max": 500},
-                {"key": "arm_yes_mid_min", "label": "Arm YES Mid Min", "type": "number", "min": 0.5, "max": 0.99},
-                {"key": "preferred_yes_mid_min", "label": "Preferred YES Mid Min", "type": "number", "min": 0.5, "max": 0.99},
-                {"key": "weak_yes_mid_min", "label": "Weak YES Mid Min", "type": "number", "min": 0.5, "max": 0.99},
-                {"key": "preferred_no_ask_max", "label": "Preferred NO Ask Max", "type": "number", "min": 0.01, "max": 0.5},
-                {"key": "weak_no_ask_max", "label": "Weak NO Ask Max", "type": "number", "min": 0.01, "max": 0.5},
-                {"key": "compression_drop_usd", "label": "Compression Drop (USD)", "type": "number", "min": 0, "max": 100},
-                {"key": "strong_compression_drop_usd", "label": "Strong Compression Drop (USD)", "type": "number", "min": 0, "max": 100},
-                {"key": "breakout_price", "label": "Breakout Price", "type": "number", "min": 0.1, "max": 0.99},
-                {"key": "breakout_final_seconds", "label": "Breakout Final Seconds", "type": "number", "min": 1, "max": 30},
-                {"key": "breakout_gap_cap_usd", "label": "Breakout Gap Cap (USD)", "type": "number", "min": 0, "max": 100},
-                {"key": "max_depth_fraction", "label": "Max Depth Fraction", "type": "number", "min": 0.001, "max": 1},
-                {"key": "probe_fraction", "label": "Probe Fraction", "type": "number", "min": 0.01, "max": 0.99},
-                {"key": "confirm_fraction", "label": "Confirm Fraction", "type": "number", "min": 0.01, "max": 0.99},
-                {"key": "max_average_entry_price", "label": "Max Average Entry Price", "type": "number", "min": 0.05, "max": 0.95},
-                {"key": "max_confirmation_no_ask", "label": "Max Confirmation NO Ask", "type": "number", "min": 0.05, "max": 0.99},
-                {"key": "min_flow_imbalance", "label": "Min Flow Imbalance", "type": "number", "min": 0, "max": 1},
-                {"key": "max_recent_move_zscore", "label": "Max Recent Move Z-Score", "type": "number", "min": 0, "max": 100},
-            ]
-        },
-    ),
-    SystemOpportunityStrategySeed(
         slug="crypto_entropy_maker",
         source_key="crypto",
         import_module="services.strategies.crypto_entropy_maker",
@@ -860,143 +820,6 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
             ]
         },
     ),
-    SystemOpportunityStrategySeed(
-        slug="btc_5m_reversal_sniper",
-        source_key="crypto",
-        import_module="services.strategies.btc_5m_reversal_sniper",
-        sort_order=198,
-        config_schema={
-            "param_fields": [
-                {"key": "asset", "label": "Asset", "type": "enum", "options": ["BTC", "ETH", "SOL", "XRP"]},
-                {"key": "timeframe", "label": "Timeframe", "type": "enum", "options": ["5min"]},
-                {
-                    "key": "entry_window_start_seconds",
-                    "label": "Entry Window Start (sec left)",
-                    "type": "number",
-                    "min": 1,
-                    "max": 60,
-                },
-                {
-                    "key": "entry_window_end_seconds",
-                    "label": "Entry Window End (sec left)",
-                    "type": "number",
-                    "min": 0.5,
-                    "max": 30,
-                },
-                {
-                    "key": "optimal_entry_seconds",
-                    "label": "Optimal Entry (sec left)",
-                    "type": "number",
-                    "min": 1,
-                    "max": 30,
-                },
-                {
-                    "key": "min_oracle_divergence_pct",
-                    "label": "Min Oracle Divergence (%)",
-                    "type": "number",
-                    "min": 0.01,
-                    "max": 10,
-                },
-                {
-                    "key": "max_oracle_age_seconds",
-                    "label": "Max Oracle Age (sec)",
-                    "type": "number",
-                    "min": 0.1,
-                    "max": 30,
-                },
-                {"key": "contested_zone_lower", "label": "Contested Zone Lower", "type": "number", "min": 0.05, "max": 0.5},
-                {"key": "contested_zone_upper", "label": "Contested Zone Upper", "type": "number", "min": 0.5, "max": 0.95},
-                {
-                    "key": "contested_confidence_bonus",
-                    "label": "Contested Confidence Bonus",
-                    "type": "number",
-                    "min": 0,
-                    "max": 0.3,
-                },
-                {
-                    "key": "contested_size_multiplier",
-                    "label": "Contested Size Multiplier",
-                    "type": "number",
-                    "min": 1.0,
-                    "max": 3.0,
-                },
-                {"key": "max_spread_pct", "label": "Max Spread", "type": "number", "min": 0, "max": 0.3},
-                {"key": "min_liquidity_usd", "label": "Min Liquidity (USD)", "type": "number", "min": 0},
-                {"key": "min_net_edge_percent", "label": "Min Net Edge (%)", "type": "number", "min": 0, "max": 100},
-                {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
-                {"key": "max_entry_price", "label": "Max Entry Price", "type": "number", "min": 0.05, "max": 0.99},
-                {
-                    "key": "sizing_policy",
-                    "label": "Sizing Policy",
-                    "type": "enum",
-                    "options": ["fixed", "linear", "adaptive", "kelly"],
-                },
-                {
-                    "key": "kelly_fractional_scale",
-                    "label": "Kelly Fractional Scale",
-                    "type": "number",
-                    "min": 0.05,
-                    "max": 1,
-                },
-                {"key": "max_hold_seconds", "label": "Safety Max Hold (sec)", "type": "number", "min": 5, "max": 120},
-                {"key": "max_markets_per_event", "label": "Max Markets Per Event", "type": "integer", "min": 1, "max": 20},
-                {
-                    "key": "min_velocity_for_reversal",
-                    "label": "Min Price Velocity (/sec)",
-                    "type": "number",
-                    "min": 0.001,
-                    "max": 0.1,
-                },
-            ]
-        },
-    ),
-    SystemOpportunityStrategySeed(
-        slug="crypto_twin_parallel",
-        source_key="crypto",
-        import_module="services.strategies.crypto_twin_parallel",
-        sort_order=199,
-        config_schema={
-            "param_fields": [
-                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
-                {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
-                {
-                    "key": "max_combined_entry_price",
-                    "label": "Max YES+NO Entry Price",
-                    "type": "number",
-                    "min": 0.01,
-                    "max": 1,
-                },
-                {"key": "max_leg_entry_price", "label": "Max Leg Entry Price", "type": "number", "min": 0.01, "max": 1},
-                {"key": "min_liquidity_usd", "label": "Min Liquidity (USD)", "type": "number", "min": 0},
-                {
-                    "key": "execution_policy",
-                    "label": "Execution Policy",
-                    "type": "enum",
-                    "options": ["PARALLEL_MAKER"],
-                },
-                {"key": "time_in_force", "label": "Time In Force", "type": "enum", "options": ["GTC", "IOC", "FOK"]},
-                {
-                    "key": "maker_price_offset_bps",
-                    "label": "Maker Price Offset (bps)",
-                    "type": "number",
-                    "min": 0,
-                    "max": 100,
-                },
-                {"key": "yes_notional_weight", "label": "YES Notional Weight", "type": "number", "min": 0.0001},
-                {"key": "no_notional_weight", "label": "NO Notional Weight", "type": "number", "min": 0.0001},
-                {
-                    "key": "max_unhedged_notional_usd",
-                    "label": "Max Unhedged Notional (USD)",
-                    "type": "number",
-                    "min": 0,
-                },
-                {"key": "hedge_timeout_seconds", "label": "Hedge Timeout (sec)", "type": "integer", "min": 1, "max": 600},
-                {"key": "session_timeout_seconds", "label": "Session Timeout (sec)", "type": "integer", "min": 1, "max": 1800},
-                {"key": "max_reprice_attempts", "label": "Max Reprice Attempts", "type": "integer", "min": 0, "max": 10},
-                {"key": "pair_lock", "label": "Pair Lock", "type": "boolean"},
-            ]
-        },
-    ),
     # ── Weather strategies ───────────────────────────────────
     SystemOpportunityStrategySeed(
         slug="weather_distribution",
@@ -1031,14 +854,6 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
             "param_fields": [
                 {"key": "min_hold_minutes", "label": "Min Hold (min)", "type": "number", "min": 0},
                 {"key": "hard_stop_loss_pct", "label": "Hard Stop Loss (%)", "type": "number", "min": 0},
-                {
-                    "key": "backside_activation_profit_pct",
-                    "label": "Backside Activation Profit (%)",
-                    "type": "number",
-                    "min": 0,
-                },
-                {"key": "backside_drawdown_pct", "label": "Backside Drawdown (%)", "type": "number", "min": 0},
-                {"key": "backside_confirm_cycles", "label": "Backside Confirm Cycles", "type": "integer", "min": 1},
                 {"key": "breakeven_arm_profit_pct", "label": "Breakeven Arm Profit (%)", "type": "number", "min": 0},
                 {"key": "breakeven_buffer_pct", "label": "Breakeven Buffer (%)", "type": "number"},
                 {
@@ -1048,19 +863,11 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
                     "min": 0,
                 },
                 {
-                    "key": "near_resolution_hold_profit_pct",
-                    "label": "Near Resolution Hold Profit (%)",
-                    "type": "number",
-                },
-                {
                     "key": "near_resolution_stop_loss_pct",
                     "label": "Near Resolution Stop Loss (%)",
                     "type": "number",
                     "min": 0,
                 },
-                {"key": "neutral_exit_min_age_minutes", "label": "Neutral Exit Min Age (min)", "type": "number", "min": 0},
-                {"key": "neutral_exit_band_pct", "label": "Neutral Exit Band (%)", "type": "number", "min": 0},
-                {"key": "max_hold_minutes", "label": "Max Hold (min)", "type": "number", "min": 0},
             ]
         },
     ),
@@ -1273,6 +1080,12 @@ async def ensure_system_opportunity_strategies_seeded(session: AsyncSession) -> 
         "crypto_velocity_reversal",
         "weather_base",
         "weather_conservative_no",
+        "bayesian_cascade",
+        "late_favorite_alpha",
+        "temporal_decay",
+        "btc_5m_reversal_sniper",
+        "btc_5m_threshold_flip",
+        "crypto_twin_parallel",
     ]
     orphan_rows = {
         row.slug: row

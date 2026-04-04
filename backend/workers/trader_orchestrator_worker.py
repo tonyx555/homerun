@@ -1175,6 +1175,7 @@ async def submit_order(
     mode: str,
     size_usd: float,
     reason: str,
+    explicit_strategy_params: dict[str, Any] | None = None,
 ):
     return await session_engine.execute_signal(
         trader_id=trader_id,
@@ -1183,6 +1184,7 @@ async def submit_order(
         strategy_key=strategy_key,
         strategy_version=strategy_version,
         strategy_params=strategy_params,
+        explicit_strategy_params=explicit_strategy_params,
         risk_limits=risk_limits,
         mode=mode,
         size_usd=size_usd,
@@ -1415,14 +1417,18 @@ def _get_strategy_filter_diagnostics(trader: dict[str, Any] | None = None) -> di
     return None
 
 
-def _merged_strategy_params_for_source_config(source_config: dict[str, Any]) -> dict[str, Any]:
+def _merged_strategy_params_for_source_config(
+    source_config: dict[str, Any],
+    *,
+    include_strategy_defaults: bool = True,
+) -> dict[str, Any]:
     source_key = normalize_source_key(source_config.get("source_key"))
     strategy_key = str(source_config.get("strategy_key") or "").strip().lower()
     explicit_params = dict(source_config.get("strategy_params") or {})
     strategy_defaults: dict[str, Any] = {}
     strategy_version = normalize_strategy_version(source_config.get("strategy_version"))
 
-    if strategy_version is None:
+    if include_strategy_defaults and strategy_version is None:
         strategy_instance = _strategy_instance_for_source_config(source_config)
         if strategy_instance is not None:
             configured_defaults = getattr(strategy_instance, "config", None)
@@ -1764,12 +1770,17 @@ def _normalize_source_configs(trader: dict[str, Any]) -> dict[str, dict[str, Any
             "strategy_version": strategy_version,
             "strategy_params": strategy_params,
         }
+        explicit_strategy_params = _merged_strategy_params_for_source_config(
+            source_config,
+            include_strategy_defaults=False,
+        )
         strategy_params = _merged_strategy_params_for_source_config(source_config)
         normalized[source_key] = {
             "source_key": source_key,
             "strategy_key": strategy_key,
             "requested_strategy_key": requested_strategy_key,
             "strategy_version": strategy_version,
+            "explicit_strategy_params": explicit_strategy_params,
             "strategy_params": strategy_params,
         }
     return normalized
@@ -4648,6 +4659,27 @@ async def _run_trader_once(
                     limit=batch_limit,
                 )
             if not signals:
+                if process_signals and not stream_trigger_mode and processed_signals == 0:
+                    no_signal_payload: dict[str, Any] = {
+                        "processed_signals": processed_signals,
+                        "decisions_written": decisions_written,
+                        "orders_written": orders_written,
+                    }
+                    no_signal_message = "Idle cycle: no pending signals."
+                    try:
+                        filter_diagnostics = _get_strategy_filter_diagnostics(trader=trader)
+                        if filter_diagnostics:
+                            no_signal_payload["filter_diagnostics"] = filter_diagnostics
+                            no_signal_message = _format_filter_diagnostics_message(filter_diagnostics)
+                    except Exception:
+                        pass
+                    await _emit_cycle_heartbeat_if_due(
+                        session,
+                        trader_id=trader_id,
+                        message=no_signal_message,
+                        payload=no_signal_payload,
+                    )
+                    await _persist_trader_cycle_heartbeat(session, trader_id)
                 break
 
             scoped_signals: list[Any] = []
@@ -4897,6 +4929,7 @@ async def _run_trader_once(
                     requested_strategy_key = str(source_config.get("requested_strategy_key") or "").strip().lower()
                     strategy_key_for_output = requested_strategy_key or strategy_key
                     strategy_params = dict(source_config.get("strategy_params") or {})
+                    explicit_strategy_params = dict(source_config.get("explicit_strategy_params") or {})
                     prefetched_source_runtime = source_runtime_state_cache.get(signal_source) or {}
                     prefetched_version_resolutions = (
                         dict(prefetched_source_runtime.get("version_resolutions") or {})
@@ -6047,6 +6080,7 @@ async def _run_trader_once(
                                 strategy_key=resolved_strategy_key,
                                 strategy_version=resolved_strategy_version,
                                 strategy_params=strategy_params,
+                                explicit_strategy_params=explicit_strategy_params,
                                 risk_limits=effective_risk_limits,
                                 mode=str(control.get("mode", "shadow")),
                                 size_usd=size_usd,

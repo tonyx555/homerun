@@ -202,7 +202,7 @@ const WORKER_HEALTH_LABELS: Record<string, string> = {
 }
 
 const STRATEGY_SUBTYPE_LABELS: Record<string, Record<string, string>> = {
-  temporal_decay: {
+  stat_arb: {
     certainty_shock: 'Certainty Shock',
     decay_curve: 'Decay Curve',
   },
@@ -1259,7 +1259,7 @@ function App() {
       max_risk: maxRisk,
       search: searchQuery || undefined,
     }),
-    refetchInterval: isConnected ? false : 15000,
+    refetchInterval: 15000,
   })
 
   const {
@@ -1273,7 +1273,7 @@ function App() {
       max_risk: maxRisk,
       search: searchQuery || undefined,
     }),
-    refetchInterval: isConnected ? false : 15000,
+    refetchInterval: 15000,
   })
 
   const {
@@ -1288,7 +1288,7 @@ function App() {
       search: searchQuery || undefined,
     }),
     enabled: opportunitiesView === 'scanner' && !!selectedStrategy,
-    refetchInterval: isConnected ? false : 15000,
+    refetchInterval: 15000,
   })
 
   const { data: newsWorkflowFindingsCount } = useQuery({

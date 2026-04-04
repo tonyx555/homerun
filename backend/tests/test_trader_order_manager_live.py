@@ -1,3 +1,4 @@
+import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -441,3 +442,45 @@ async def test_submit_execution_leg_rejects_tiny_price_without_floor_inflation()
     assert result.status == "failed"
     assert result.payload["reason"] == "invalid_price_too_small"
     assert result.shares is None
+
+
+@pytest.mark.asyncio
+async def test_submit_execution_wave_fails_fast_when_leg_submission_hangs(monkeypatch):
+    async def _hung_leg(*args, **kwargs):
+        await asyncio.sleep(0.05)
+        raise AssertionError("submit_execution_leg should have timed out")
+
+    monkeypatch.setattr(order_manager, "submit_execution_leg", _hung_leg)
+    monkeypatch.setattr(order_manager, "_LEG_SUBMIT_TIMEOUT_SECONDS", 0.01)
+
+    signal = SimpleNamespace(
+        id="sig-timeout",
+        market_id="m-timeout",
+        direction="buy_yes",
+        entry_price=0.45,
+        market_question="Will timeout handling fail fast?",
+        payload_json={},
+    )
+
+    results = await order_manager.submit_execution_wave(
+        mode="live",
+        signal=signal,
+        legs_with_notionals=[
+            (
+                {
+                    "leg_id": "leg_1",
+                    "market_id": signal.market_id,
+                    "market_question": signal.market_question,
+                    "side": "buy",
+                    "outcome": "yes",
+                    "limit_price": signal.entry_price,
+                },
+                10.0,
+            )
+        ],
+        strategy_params={},
+    )
+
+    assert len(results) == 1
+    assert results[0].status == "failed"
+    assert results[0].error_message == "Order submission timed out."

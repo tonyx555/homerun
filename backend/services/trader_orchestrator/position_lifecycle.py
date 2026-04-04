@@ -33,7 +33,7 @@ _FAILED_EXIT_MIN_RETRY_INTERVAL_SECONDS = 15
 # calls when multiple traders share the same execution wallet.  The cache
 # is invalidated after _WALLET_CACHE_TTL_SECONDS so fresh data is always
 # fetched at the start of a new reconciliation cycle.
-_WALLET_CACHE_TTL_SECONDS = 90.0
+_WALLET_CACHE_TTL_SECONDS = 15.0
 _wallet_positions_cache: tuple[float, dict[str, dict[str, Any]]] = (0.0, {})
 _wallet_sell_trades_cache: tuple[float, dict[str, dict[str, Any]]] = (0.0, {})
 _WALLET_SIZE_EPSILON = 1e-9
@@ -283,6 +283,31 @@ def _resolve_position_min_order_size_usd(
         merged_params.update(payload_strategy_params)
 
     return StrategySDK.resolve_min_order_size_usd(merged_params, mode=mode, fallback=1.0)
+
+
+def _payload_strategy_exit_config(payload: dict[str, Any]) -> dict[str, Any]:
+    raw = payload.get("strategy_exit_config")
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _payload_exit_param(
+    payload: dict[str, Any],
+    *,
+    prefix_key: str,
+    name: str,
+    default: Any = None,
+) -> Any:
+    exit_config = _payload_strategy_exit_config(payload)
+    prefixed_key = f"{prefix_key}_{name}"
+    if prefixed_key in exit_config:
+        return exit_config.get(prefixed_key)
+    if name in exit_config:
+        return exit_config.get(name)
+    if prefix_key != "paper":
+        paper_key = f"paper_{name}"
+        if paper_key in exit_config:
+            return exit_config.get(paper_key)
+    return default
 
 
 def _extract_market_token_ids(market_info: Optional[dict[str, Any]]) -> list[str]:
@@ -1210,6 +1235,57 @@ def _pending_exit_provider_clob_id(pending_exit: dict[str, Any]) -> str:
     return str(getattr(cached, "clob_order_id", "") or "").strip()
 
 
+def _pending_exit_fill_evidence(pending_exit: dict[str, Any]) -> tuple[str, float, float, Optional[float]]:
+    snapshot = pending_exit.get("snapshot")
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    candidates: list[Any] = [snapshot, pending_exit]
+    provider_status = str(
+        snapshot.get("normalized_status")
+        or snapshot.get("status")
+        or pending_exit.get("provider_status")
+        or ""
+    ).strip().lower()
+    filled_size = max(
+        0.0,
+        _first_float_from_candidates(
+            candidates,
+            ("filled_size", "size_matched", "matched_size", "filled_shares", "executed_size"),
+        )
+        or 0.0,
+    )
+    filled_notional = max(
+        0.0,
+        _first_float_from_candidates(
+            candidates,
+            ("filled_notional_usd", "filled_notional", "executed_notional_usd", "matched_notional_usd"),
+        )
+        or 0.0,
+    )
+    average_fill_price = _first_float_from_candidates(
+        candidates,
+        ("average_fill_price", "avg_fill_price", "executed_price", "matched_price", "price"),
+    )
+    if filled_notional <= 0.0 and filled_size > 0.0 and average_fill_price is not None and average_fill_price > 0.0:
+        filled_notional = filled_size * average_fill_price
+    return provider_status, filled_size, filled_notional, average_fill_price
+
+
+def _pending_exit_has_verified_terminal_fill(pending_exit: dict[str, Any]) -> bool:
+    provider_status, filled_size, filled_notional, average_fill_price = _pending_exit_fill_evidence(pending_exit)
+    if provider_status not in {"filled", "matched", "executed"}:
+        return False
+    if filled_size > _WALLET_SIZE_EPSILON:
+        return True
+    if filled_notional > 0.0:
+        return True
+    return average_fill_price is not None and average_fill_price > 0.0
+
+
+def _position_close_wallet_trade_id(position_close: dict[str, Any]) -> str:
+    return str(position_close.get("wallet_trade_id") or "").strip()
+
+
 def _extract_wallet_trade_token_id(trade: dict[str, Any]) -> str:
     return str(
         trade.get("asset_id") or trade.get("asset") or trade.get("token_id") or trade.get("tokenId") or ""
@@ -1685,7 +1761,7 @@ async def reconcile_paper_positions(
         raise ValueError("position_mode must be 'paper' or 'shadow'")
     prefix_key = str(param_prefix or mode_key).strip().lower()
 
-    def _param(name: str, default: Any = None) -> Any:
+    def _trader_param(name: str, default: Any = None) -> Any:
         prefixed_key = f"{prefix_key}_{name}"
         if prefixed_key in params:
             return params.get(prefixed_key)
@@ -1697,17 +1773,10 @@ async def reconcile_paper_positions(
                 return params.get(paper_key)
         return default
 
-    take_profit_pct = safe_float(_param("take_profit_pct"))
-    stop_loss_pct = safe_float(_param("stop_loss_pct"))
-    max_hold_minutes = safe_float(_param("max_hold_minutes"))
-    min_hold_minutes = max(0.0, safe_float(_param("min_hold_minutes")) or 0.0)
-    trailing_stop_pct = safe_float(_param("trailing_stop_pct"))
-    resolve_only = _safe_bool(_param("resolve_only"), False)
-    close_on_inactive_market = _safe_bool(_param("close_on_inactive_market"), False)
-    resolution_infer_from_prices = _safe_bool(_param("resolution_infer_from_prices"), True)
+    resolution_infer_from_prices = _safe_bool(_trader_param("resolution_infer_from_prices"), True)
     resolution_settle_floor = min(
         1.0,
-        max(0.5, safe_float(_param("resolution_settle_floor")) or 0.98),
+        max(0.5, safe_float(_trader_param("resolution_settle_floor")) or 0.98),
     )
 
     candidates = list(
@@ -1814,9 +1883,22 @@ async def reconcile_paper_positions(
         age_minutes = None
         if age_anchor is not None:
             age_minutes = max(0.0, (now - age_anchor).total_seconds() / 60.0)
-        min_hold_passed = age_minutes is None or age_minutes >= min_hold_minutes
 
         payload = dict(row.payload_json or {})
+        take_profit_pct = safe_float(_payload_exit_param(payload, prefix_key=prefix_key, name="take_profit_pct"))
+        stop_loss_pct = safe_float(_payload_exit_param(payload, prefix_key=prefix_key, name="stop_loss_pct"))
+        max_hold_minutes = safe_float(_payload_exit_param(payload, prefix_key=prefix_key, name="max_hold_minutes"))
+        min_hold_minutes = max(
+            0.0,
+            safe_float(_payload_exit_param(payload, prefix_key=prefix_key, name="min_hold_minutes")) or 0.0,
+        )
+        trailing_stop_pct = safe_float(_payload_exit_param(payload, prefix_key=prefix_key, name="trailing_stop_pct"))
+        resolve_only = _safe_bool(_payload_exit_param(payload, prefix_key=prefix_key, name="resolve_only"), False)
+        close_on_inactive_market = _safe_bool(
+            _payload_exit_param(payload, prefix_key=prefix_key, name="close_on_inactive_market"),
+            False,
+        )
+        min_hold_passed = age_minutes is None or age_minutes >= min_hold_minutes
         _exit_instance = None
         position_state = _extract_position_state(payload)
         prev_high = safe_float(position_state.get("highest_price"))
@@ -2262,13 +2344,6 @@ async def reconcile_live_positions(
     simulation ledger (that is paper-only).
     """
     params = dict(trader_params or {})
-    take_profit_pct = safe_float(params.get("live_take_profit_pct"))
-    stop_loss_pct = safe_float(params.get("live_stop_loss_pct"))
-    max_hold_minutes = safe_float(params.get("live_max_hold_minutes"))
-    min_hold_minutes = max(0.0, safe_float(params.get("live_min_hold_minutes")) or 0.0)
-    trailing_stop_pct = safe_float(params.get("live_trailing_stop_pct"))
-    resolve_only = _safe_bool(params.get("live_resolve_only"), False)
-    close_on_inactive_market = _safe_bool(params.get("live_close_on_inactive_market"), False)
     resolution_infer_from_prices = _safe_bool(params.get("live_resolution_infer_from_prices"), True)
     resolution_settle_floor = min(
         1.0,
@@ -2354,36 +2429,50 @@ async def reconcile_live_positions(
         position_close = payload.get("position_close")
         if isinstance(position_close, dict):
             close_trigger = str(position_close.get("close_trigger") or "").strip().lower()
-            if close_trigger == "wallet_absent_close" and _provider_entry_order_still_working(payload):
+            if close_trigger in {"wallet_absent_close", "wallet_flat_override"}:
+                pending_exit = payload.get("pending_live_exit")
+                pending_exit = pending_exit if isinstance(pending_exit, dict) else {}
                 provider_status = _provider_snapshot_status(payload)
                 provider_remaining_size = _provider_snapshot_remaining_size(payload)
-                if not dry_run:
-                    row.status = "open"
-                    row.actual_profit = None
-                    row.updated_at = now
-                    payload.pop("position_close", None)
-                    payload["wallet_absent_reopen"] = {
-                        "reopened_at": _iso_utc(now),
-                        "reopen_reason": "provider_entry_order_still_open",
-                        "provider_status": provider_status,
-                        "provider_remaining_size": provider_remaining_size,
-                    }
-                    row.payload_json = payload
-                    state_updates += 1
-                details.append(
-                    {
-                        "order_id": row.id,
-                        "market_id": row.market_id,
-                        "close_trigger": close_trigger,
-                        "provider_status": provider_status,
-                        "provider_remaining_size": provider_remaining_size,
-                        "next_status": "open",
-                        "note": "reopened_wallet_absent_close_while_provider_entry_working",
-                    }
+                fallback_close_verified = (
+                    _pending_exit_has_verified_terminal_fill(pending_exit)
+                    or bool(_position_close_wallet_trade_id(position_close))
                 )
-                candidates.append(row)
-                candidate_ids.add(row_id)
-                continue
+                reopen_reason = ""
+                if not fallback_close_verified:
+                    if close_trigger == "wallet_absent_close" and _provider_entry_order_still_working(payload):
+                        reopen_reason = "provider_entry_order_still_open"
+                    else:
+                        reopen_reason = "fallback_close_not_verified"
+                if reopen_reason:
+                    reopen_key = "wallet_absent_reopen" if close_trigger == "wallet_absent_close" else "wallet_flat_reopen"
+                    if not dry_run:
+                        row.status = "open"
+                        row.actual_profit = None
+                        row.updated_at = now
+                        payload.pop("position_close", None)
+                        payload[reopen_key] = {
+                            "reopened_at": _iso_utc(now),
+                            "reopen_reason": reopen_reason,
+                            "provider_status": provider_status,
+                            "provider_remaining_size": provider_remaining_size,
+                        }
+                        row.payload_json = payload
+                        state_updates += 1
+                    details.append(
+                        {
+                            "order_id": row.id,
+                            "market_id": row.market_id,
+                            "close_trigger": close_trigger,
+                            "provider_status": provider_status,
+                            "provider_remaining_size": provider_remaining_size,
+                            "next_status": "open",
+                            "note": f"reopened_{close_trigger}_{reopen_reason}",
+                        }
+                    )
+                    candidates.append(row)
+                    candidate_ids.add(row_id)
+                    continue
         pending_exit = payload.get("pending_live_exit")
         if not isinstance(pending_exit, dict):
             continue
@@ -2599,6 +2688,19 @@ async def reconcile_live_positions(
         payload = dict(row.payload_json or {})
         _exit_instance = None
         token_id = _extract_live_token_id(payload)
+        take_profit_pct = safe_float(_payload_exit_param(payload, prefix_key="live", name="take_profit_pct"))
+        stop_loss_pct = safe_float(_payload_exit_param(payload, prefix_key="live", name="stop_loss_pct"))
+        max_hold_minutes = safe_float(_payload_exit_param(payload, prefix_key="live", name="max_hold_minutes"))
+        min_hold_minutes = max(
+            0.0,
+            safe_float(_payload_exit_param(payload, prefix_key="live", name="min_hold_minutes")) or 0.0,
+        )
+        trailing_stop_pct = safe_float(_payload_exit_param(payload, prefix_key="live", name="trailing_stop_pct"))
+        resolve_only = _safe_bool(_payload_exit_param(payload, prefix_key="live", name="resolve_only"), False)
+        close_on_inactive_market = _safe_bool(
+            _payload_exit_param(payload, prefix_key="live", name="close_on_inactive_market"),
+            False,
+        )
         wallet_position = wallet_positions_by_token.get(token_id) if token_id else None
         # Fallback: if exact token_id lookup fails (token versioning), try
         # conditionId:outcomeIndex which is stable across token versions.
@@ -2899,98 +3001,15 @@ async def reconcile_live_positions(
             and not _has_working_provider_entry
             and _wab_min_age_ok
         ):
-            _wab_price = (
-                pending_current_price
-                if pending_current_price is not None and pending_current_price > 0.0
-                else (
-                    wallet_mark_price
-                    if wallet_mark_price is not None and wallet_mark_price > 0.0
-                    else entry_fill_price
-                )
+            details.append(
+                {
+                    "order_id": row.id,
+                    "market_id": row.market_id,
+                    "close_trigger": "wallet_absent_close",
+                    "next_status": row.status,
+                    "note": "wallet_absent_without_verified_close_evidence",
+                }
             )
-            if _wab_price is not None and _wab_price > 0.0:
-                close_qty = entry_fill_size
-                close_notional = close_qty * _wab_price
-                close_trigger = "wallet_absent_close"
-                # If the order was never actually submitted to the CLOB
-                # (submit_method is absent and no clob_order_id), it's a
-                # phantom record that never had real money at risk.  Close
-                # it with zero P&L instead of fabricating a loss.
-                _submit_method = str(payload.get("submit_method") or "").strip()
-                _clob_order_id = str(payload.get("clob_order_id") or payload.get("provider_clob_order_id") or "").strip()
-                _never_submitted = not _submit_method and not _clob_order_id
-                if _never_submitted:
-                    pnl = 0.0
-                else:
-                    # Use the canonical DB notional as the cost basis when it is
-                    # smaller than the payload fill metrics.  This avoids phantom
-                    # losses from FAK/IOC orders whose requested size was recorded
-                    # instead of the actual fill (which may have been zero).  If the
-                    # order was manually reconciled the DB value is already correct.
-                    _db_notional = safe_float(row.notional_usd) or 0.0
-                    _effective_entry_notional = entry_fill_notional
-                    if 0.0 < _db_notional < entry_fill_notional:
-                        _effective_entry_notional = _db_notional
-                    pnl = close_notional - _effective_entry_notional
-                next_status = _status_for_close(pnl=pnl, close_trigger=close_trigger)
-                details.append(
-                    {
-                        "order_id": row.id,
-                        "market_id": row.market_id,
-                        "close_trigger": close_trigger,
-                        "close_price": _wab_price,
-                        "realized_pnl": pnl,
-                        "next_status": next_status,
-                    }
-                )
-                would_close += 1
-                total_realized_pnl += pnl
-                by_status[next_status] = int(by_status.get(next_status, 0)) + 1
-                if not dry_run:
-                    pending_exit_local = payload.get("pending_live_exit")
-                    if isinstance(pending_exit_local, dict):
-                        pending_exit_local["status"] = "superseded_wallet_absent"
-                        pending_exit_local["resolved_at"] = _iso_utc(now)
-                        payload["pending_live_exit"] = pending_exit_local
-                    row.status = next_status
-                    row.actual_profit = pnl
-                    row.updated_at = now
-                    payload["position_close"] = {
-                        "close_price": _wab_price,
-                        "price_source": "wallet_absent_best_available",
-                        "close_trigger": close_trigger,
-                        "realized_pnl": pnl,
-                        "filled_size": close_qty,
-                        "closed_at": _iso_utc(now),
-                        "reason": reason,
-                    }
-                    reverse_signal_id, reverse_source = await _emit_armed_reverse_signal(
-                        session,
-                        row=row,
-                        payload=payload,
-                        signal_payload=pending_signal_payload,
-                        market_info=pending_market_info,
-                        close_trigger=close_trigger,
-                        realized_pnl=pnl,
-                        now=now,
-                    )
-                    if reverse_signal_id and reverse_source:
-                        reverse_signal_ids_by_source.setdefault(reverse_source, []).append(reverse_signal_id)
-                    row.payload_json = payload
-                    hot_state.record_order_resolved(
-                        trader_id=trader_id,
-                        mode=str(row.mode or ""),
-                        order_id=str(row.id or ""),
-                        market_id=str(row.market_id or ""),
-                        direction=str(row.direction or ""),
-                        source=str(row.source or ""),
-                        status=next_status,
-                        actual_profit=pnl,
-                        payload=payload,
-                        copy_source_wallet=_extract_copy_source_wallet_from_payload(payload),
-                    )
-                    closed += 1
-                continue
 
         pending_exit = payload.get("pending_live_exit")
         pending_exit_status = (
@@ -4023,7 +4042,7 @@ async def reconcile_live_positions(
                 )
                 continue
             pending_provider_status = str(pending_exit.get("provider_status") or "").strip().lower()
-            provider_terminal = pending_provider_status in {"filled", "cancelled", "expired", "failed"}
+            provider_close_verified = _pending_exit_has_verified_terminal_fill(pending_exit)
             wallet_flat_by_snapshot = wallet_position_observed and wallet_position_size <= _WALLET_SIZE_EPSILON
             wallet_flat_by_absence = bool(token_id) and wallet_positions_loaded and wallet_position is None
             wallet_trade_confirms_exit = (
@@ -4032,7 +4051,7 @@ async def reconcile_live_positions(
             )
             wallet_flat_override = (
                 (wallet_flat_by_snapshot or wallet_flat_by_absence)
-                and (provider_terminal or wallet_trade_confirms_exit)
+                and (provider_close_verified or wallet_trade_confirms_exit)
             )
             if wallet_flat_override:
                 close_trigger = "wallet_flat_override"
@@ -4081,6 +4100,17 @@ async def reconcile_live_positions(
                             "age_minutes": pending_exit.get("age_minutes"),
                             "closed_at": _iso_utc(now),
                             "reason": reason,
+                            "wallet_trade_id": (
+                                str(latest_wallet_sell_trade.get("trade_id") or "")
+                                if isinstance(latest_wallet_sell_trade, dict)
+                                else ""
+                            ),
+                            "wallet_trade_timestamp": (
+                                _iso_utc(latest_wallet_sell_trade.get("timestamp"))
+                                if isinstance(latest_wallet_sell_trade, dict)
+                                and isinstance(latest_wallet_sell_trade.get("timestamp"), datetime)
+                                else None
+                            ),
                         }
                         row.payload_json = payload
                         hot_state.record_order_resolved(

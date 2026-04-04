@@ -63,9 +63,9 @@ Most trading bots give you a toy DSL and a rigid pipeline. Homerun gives you **f
 - **Trader Confluence** — Aggregate signals from multiple whale wallets
 - **Flash Crash Reversion** — Liquidity collapse recovery
 - **VPIN Toxicity** — Market microstructure attack detection
-- **Bayesian Cascade** — Information cascade detection
+- **CTF Basic Arb** — Split/merge structural arbitrage against live order books
 - **Insider Detection** — 27-point anomaly scoring on suspicious patterns
-- **Late Favorite Alpha, Miracle Bets, Sports Overreaction Fader** — And 20+ more
+- **Miracle Bets, Sports Overreaction Fader, Market Making** — And 20+ more
 
 Every strategy is a DB-managed Python class. Edit in the UI, validate, backtest, enable — hot-reloaded in seconds.
 

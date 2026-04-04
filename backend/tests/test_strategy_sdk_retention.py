@@ -15,12 +15,6 @@ from services.strategies.btc_eth_highfreq import (
     crypto_highfreq_scope_config_schema,
     crypto_highfreq_should_flatten_resolution_risk,
 )
-from services.strategies.late_favorite_alpha import (
-    LateFavoriteAlphaStrategy,
-    late_favorite_alpha_config_schema,
-    late_favorite_alpha_defaults,
-    validate_late_favorite_alpha_config,
-)
 from services.strategies.news_edge import validate_news_edge_config
 from services.strategies.traders_copy_trade import (
     traders_copy_trade_defaults,
@@ -84,41 +78,6 @@ def test_traders_copy_trade_defaults_and_validation_delegate_to_strategy_module(
     assert validated["min_confidence"] == 0.7
     assert validated["max_signal_age_seconds"] == 5
     assert validated["retention_max_age_minutes"] == 120
-
-
-def test_late_favorite_alpha_defaults_and_schema_are_exposed():
-    defaults = late_favorite_alpha_defaults()
-    assert defaults["min_favorite_prob"] == 0.58
-    assert defaults["max_favorite_prob"] == 0.88
-    assert defaults["max_hours_to_resolution"] == 6.0
-    assert defaults["min_alpha_prob"] == 0.014
-
-    schema = late_favorite_alpha_config_schema()
-    keys = {field.get("key") for field in schema.get("param_fields", []) if isinstance(field, dict)}
-    assert "min_favorite_prob" in keys
-    assert "max_favorite_prob" in keys
-    assert "min_hours_to_resolution" in keys
-    assert "max_hours_to_resolution" in keys
-    assert "min_alpha_prob" in keys
-    assert "max_target_exit_price" in keys
-
-
-def test_validate_late_favorite_alpha_config_clamps_ranges_and_retention():
-    cfg = validate_late_favorite_alpha_config(
-        {
-            "min_favorite_prob": "0.74",
-            "max_favorite_prob": "0.70",
-            "min_hours_to_resolution": "4",
-            "max_hours_to_resolution": "2",
-            "retention_window": "90m",
-            "max_opportunities": "120",
-        }
-    )
-    assert cfg["min_favorite_prob"] == 0.74
-    assert cfg["max_favorite_prob"] > cfg["min_favorite_prob"]
-    assert cfg["max_hours_to_resolution"] > cfg["min_hours_to_resolution"]
-    assert cfg["retention_max_age_minutes"] == 90
-    assert cfg["max_opportunities"] == 120
 
 
 def test_strategy_retention_schema_contains_expected_fields():
@@ -277,21 +236,6 @@ def test_crypto_highfreq_scope_defaults_include_stop_loss_policy():
     assert defaults["maker_max_entry_price_ceiling"] == 0.80
 
 
-def _late_favorite_test_market(entry_yes: float = 0.70, entry_no: float = 0.30) -> Market:
-    return Market(
-        id="m1",
-        condition_id="m1",
-        question="Will this resolve soon?",
-        slug="m1-resolve-soon",
-        clob_token_ids=["token-yes", "token-no"],
-        outcome_prices=[entry_yes, entry_no],
-        active=True,
-        closed=False,
-        liquidity=5000.0,
-        end_date=datetime.now(timezone.utc) + timedelta(hours=1),
-    )
-
-
 def test_get_spread_bps_accepts_bid_ask_keys():
     market = SimpleNamespace(clob_token_ids=["token-yes", "token-no"])
     prices = {"token-yes": {"mid": 0.80, "bid": 0.79, "ask": 0.81}}
@@ -306,49 +250,6 @@ def test_get_spread_bps_infers_mid_when_missing():
     spread = StrategySDK.get_spread_bps(market, prices, side="YES")
     assert spread is not None
     assert abs(spread - 250.0) < 1e-6
-
-
-def test_late_favorite_alpha_detect_falls_back_when_trade_tape_unavailable(monkeypatch):
-    monkeypatch.setattr(StrategySDK, "is_ws_feed_started", staticmethod(lambda: False))
-
-    strategy = LateFavoriteAlphaStrategy()
-    opportunities = strategy.detect(
-        events=[],
-        markets=[_late_favorite_test_market(entry_yes=0.70, entry_no=0.30)],
-        prices={},
-    )
-
-    assert len(opportunities) == 1
-    context = opportunities[0].strategy_context or {}
-    assert context.get("trade_tape_available") is False
-    assert context.get("flow_data_available") is False
-
-
-def test_late_favorite_alpha_requires_flow_volume_when_trade_tape_available(monkeypatch):
-    monkeypatch.setattr(StrategySDK, "is_ws_feed_started", staticmethod(lambda: True))
-    monkeypatch.setattr(
-        StrategySDK,
-        "get_trade_volume",
-        staticmethod(lambda token_id, lookback_seconds=300.0: {"buy_volume": 0.0, "sell_volume": 0.0, "total": 0.0, "trade_count": 0}),
-    )
-    monkeypatch.setattr(
-        StrategySDK,
-        "get_buy_sell_imbalance",
-        staticmethod(lambda token_id, lookback_seconds=300.0: 0.0),
-    )
-    monkeypatch.setattr(
-        StrategySDK,
-        "get_price_change",
-        staticmethod(lambda token_id, lookback_seconds=300: None),
-    )
-
-    strategy = LateFavoriteAlphaStrategy()
-    opportunities = strategy.detect(
-        events=[],
-        markets=[_late_favorite_test_market(entry_yes=0.70, entry_no=0.30)],
-        prices={"token-yes": {"mid": 0.70, "bid": 0.695, "ask": 0.705}},
-    )
-    assert opportunities == []
 
 
 def test_strategy_entry_take_profit_exit_param_resolution():

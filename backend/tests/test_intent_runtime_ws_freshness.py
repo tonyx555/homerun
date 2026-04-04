@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -11,6 +11,7 @@ from services.signal_bus import build_signal_contract_from_opportunity
 from services.strategies.base import BaseStrategy
 from models.market import Event, Market
 from models.opportunity import Opportunity
+from utils.utcnow import utcnow
 
 
 def test_tokens_have_fresh_ws_quotes_uses_scanner_age_budget(monkeypatch):
@@ -77,6 +78,110 @@ async def test_publish_opportunities_restamps_signal_emitted_at_to_actionable_pu
     snapshots = published_batches[0]["signal_snapshots"]
     snapshot = next(iter(snapshots.values()))
     assert snapshot["payload_json"]["signal_emitted_at"] == emitted_at
+
+
+@pytest.mark.asyncio
+async def test_project_upserts_scopes_source_sweep_by_strategy_type(monkeypatch):
+    class _Session:
+        async def commit(self) -> None:
+            return None
+
+    class _SessionContext:
+        async def __aenter__(self) -> _Session:
+            return _Session()
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            del exc_type, exc, tb
+            return False
+
+    async def _upsert_trade_signal(*args, **kwargs):
+        del args, kwargs
+        return SimpleNamespace(status="pending", runtime_sequence=None, effective_price=None)
+
+    expire_mock = AsyncMock(return_value=0)
+    monkeypatch.setattr("services.intent_runtime.AsyncSessionLocal", lambda: _SessionContext())
+    monkeypatch.setattr("services.intent_runtime.upsert_trade_signal", _upsert_trade_signal)
+    monkeypatch.setattr("services.intent_runtime.expire_source_signals_except", expire_mock)
+
+    runtime = IntentRuntime()
+    await runtime._project_upsert_batch(
+        {
+            "source": "scanner",
+            "snapshots": {
+                "sig-corr-1": {
+                    "id": "sig-corr-1",
+                    "source": "scanner",
+                    "source_item_id": "stable-corr-1",
+                    "signal_type": "scanner_opportunity",
+                    "strategy_type": "correlation_arb",
+                    "market_id": "market-corr-1",
+                    "market_question": "Question?",
+                    "direction": "buy_yes",
+                    "entry_price": 0.42,
+                    "edge_percent": 6.0,
+                    "confidence": 0.7,
+                    "liquidity": 1500.0,
+                    "status": "pending",
+                    "dedupe_key": "dedupe-corr-1",
+                    "payload_json": {},
+                    "strategy_context_json": {},
+                    "runtime_sequence": 101,
+                    "updated_at": utcnow(),
+                }
+            },
+            "sweep_missing": True,
+            "keep_dedupe_keys": ["dedupe-corr-1"],
+        }
+    )
+
+    assert expire_mock.await_count == 1
+    kwargs = expire_mock.await_args.kwargs
+    assert kwargs["source"] == "scanner"
+    assert kwargs["keep_dedupe_keys"] == {"dedupe-corr-1"}
+    assert kwargs["signal_types"] == ["scanner_opportunity"]
+    assert kwargs["strategy_types"] == ["correlation_arb"]
+
+
+@pytest.mark.asyncio
+async def test_publish_opportunities_uses_strategy_ttl_instead_of_resolution_date(monkeypatch):
+    monkeypatch.setattr(
+        "services.intent_runtime.build_signal_contract_from_opportunity",
+        lambda _opportunity: (
+            "market-1",
+            "buy_yes",
+            0.42,
+            "Will event happen?",
+            {"markets": [{"id": "market-1"}]},
+            {},
+        ),
+    )
+    monkeypatch.setattr("services.intent_runtime.publish_signal_batch", AsyncMock(return_value="batch-1"))
+    monkeypatch.setattr("services.intent_runtime.event_bus.publish", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        "services.intent_runtime.strategy_loader.get_instance",
+        lambda slug: SimpleNamespace(config={"retention_window": "15m"}) if slug == "ttl_strategy" else None,
+    )
+
+    runtime = IntentRuntime()
+    resolution_date = utcnow() + timedelta(days=2)
+    opportunity = SimpleNamespace(
+        id="opp-ttl-1",
+        stable_id="stable-ttl-1",
+        strategy="ttl_strategy",
+        roi_percent=7.5,
+        confidence=0.8,
+        min_liquidity=1000.0,
+        resolution_date=resolution_date,
+    )
+
+    published = await runtime.publish_opportunities([opportunity], source="scanner")
+
+    assert published == 1
+    snapshot = next(iter(runtime._signals_by_id.values()))
+    expires_at = datetime.fromisoformat(snapshot["expires_at"].replace("Z", "+00:00"))
+    ttl_seconds = (expires_at - utcnow()).total_seconds()
+    assert ttl_seconds < 20 * 60
+    assert expires_at < resolution_date
 
 
 def test_build_signal_contract_infers_runtime_metadata_from_loaded_strategy(monkeypatch):
@@ -284,6 +389,88 @@ async def test_publish_opportunities_defers_scanner_market_refresh_until_post_ar
     await runtime._reactivate_deferred_signals_for_token("scanner-token")
     assert len(published_batches) == 1
     reactivated_snapshot = next(iter(published_batches[0]["signal_snapshots"].values()))
+    assert reactivated_snapshot["payload_json"]["signal_emitted_at"] == published_batches[0]["emitted_at"]
+
+
+@pytest.mark.asyncio
+async def test_deferred_timeout_uses_stable_deferred_start_under_repeated_refresh(monkeypatch):
+    published_batches: list[dict[str, object]] = []
+
+    async def _publish_signal_batch(**kwargs):
+        published_batches.append(kwargs)
+        return "batch-1"
+
+    class _Cache:
+        def is_fresh(self, token_id: str, *, max_age_seconds: float | None = None) -> bool:
+            assert token_id == "scanner-token"
+            return False
+
+        def get_mid_price(self, token_id: str):
+            assert token_id == "scanner-token"
+            return 0.42
+
+    monkeypatch.setattr(
+        "services.intent_runtime.get_feed_manager",
+        lambda: SimpleNamespace(
+            _started=True,
+            cache=_Cache(),
+            polymarket_feed=SimpleNamespace(subscribe=AsyncMock(return_value=None)),
+        ),
+    )
+    monkeypatch.setattr("services.intent_runtime.publish_signal_batch", _publish_signal_batch)
+    monkeypatch.setattr("services.intent_runtime.event_bus.publish", AsyncMock(return_value=None))
+    monkeypatch.setattr("services.intent_runtime.settings.INTENT_RUNTIME_DEFERRED_MAX_AGE_SECONDS", 5.0)
+    monkeypatch.setattr(
+        "services.intent_runtime.build_signal_contract_from_opportunity",
+        lambda _opportunity: (
+            "market-1",
+            "buy_yes",
+            0.42,
+            "Will event happen?",
+            {
+                "markets": [{"id": "market-1"}],
+                "positions_to_take": [{"token_id": "scanner-token"}],
+            },
+            {},
+        ),
+    )
+
+    runtime = IntentRuntime()
+    runtime._ensure_hot_subscriptions = AsyncMock(return_value=None)
+    opportunity = SimpleNamespace(
+        id="opp-1",
+        stable_id="stable-1",
+        strategy="generic_scanner_strategy",
+        roi_percent=7.5,
+        confidence=0.8,
+        min_liquidity=1000.0,
+        resolution_date=None,
+    )
+
+    published = await runtime.publish_opportunities([opportunity], source="scanner")
+
+    assert published == 0
+    assert published_batches == []
+    snapshot = next(iter(runtime._signals_by_id.values()))
+    original_deferred_started_at = snapshot["deferred_started_at"]
+    assert snapshot["deferred_until_ws"] is True
+    assert original_deferred_started_at
+
+    await runtime.publish_opportunities([opportunity], source="scanner")
+    refreshed_snapshot = next(iter(runtime._signals_by_id.values()))
+    assert refreshed_snapshot["deferred_started_at"] == original_deferred_started_at
+
+    stale_start = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat().replace("+00:00", "Z")
+    refreshed_snapshot["deferred_started_at"] = stale_start
+    refreshed_snapshot["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    await runtime._release_stale_deferred_signals()
+
+    assert len(published_batches) == 1
+    reactivated_snapshot = next(iter(published_batches[0]["signal_snapshots"].values()))
+    assert reactivated_snapshot["deferred_until_ws"] is False
+    assert reactivated_snapshot["deferred_reason"] is None
+    assert reactivated_snapshot["runtime_sequence"] is not None
     assert reactivated_snapshot["payload_json"]["signal_emitted_at"] == published_batches[0]["emitted_at"]
 
 

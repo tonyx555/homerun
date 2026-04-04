@@ -383,7 +383,11 @@ async def _sync_position_marks_and_exit_registry() -> None:
             if token_id not in exit_registry_by_token:
                 exit_registry_by_token[token_id] = []
 
-            strategy_params = payload.get("strategy_params") if isinstance(payload.get("strategy_params"), dict) else {}
+            strategy_exit_config = (
+                payload.get("strategy_exit_config")
+                if isinstance(payload.get("strategy_exit_config"), dict)
+                else {}
+            )
             pending_exit = payload.get("pending_live_exit") if isinstance(payload.get("pending_live_exit"), dict) else {}
 
             exit_registry_by_token[token_id].append({
@@ -391,10 +395,10 @@ async def _sync_position_marks_and_exit_registry() -> None:
                 "trader_id": str(row.trader_id or ""),
                 "entry_price": entry_price,
                 "has_pending_exit": bool(pending_exit.get("status") in ("submitted", "working")),
-                "take_profit_pct": float(strategy_params.get("take_profit_pct") or 0) or None,
-                "stop_loss_pct": float(strategy_params.get("stop_loss_pct") or 0) or None,
-                "trailing_stop_pct": float(strategy_params.get("trailing_stop_pct") or 0) or None,
-                "min_hold_minutes": float(strategy_params.get("min_hold_minutes") or 0),
+                "take_profit_pct": float(strategy_exit_config.get("take_profit_pct") or 0) or None,
+                "stop_loss_pct": float(strategy_exit_config.get("stop_loss_pct") or 0) or None,
+                "trailing_stop_pct": float(strategy_exit_config.get("trailing_stop_pct") or 0) or None,
+                "min_hold_minutes": float(strategy_exit_config.get("min_hold_minutes") or 0),
                 "highest_price": float(position_state.get("highest_price") or 0) or None,
                 "age_anchor": str(
                     (row.executed_at or row.updated_at or row.created_at).isoformat()

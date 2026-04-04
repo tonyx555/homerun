@@ -15,7 +15,6 @@ from models.database import Base, Trader
 from services.trader_orchestrator_state import (
     create_trader,
     delete_trader,
-    enforce_manual_start_on_startup,
     get_orchestrator_overview,
     list_traders,
     read_orchestrator_snapshot,
@@ -328,35 +327,3 @@ async def test_update_trader_rejects_unknown_strategy_key(postgres_session_facto
                     ],
                 },
             )
-
-
-@pytest.mark.asyncio
-async def test_startup_enforces_manual_orchestrator_start(postgres_session_factory):
-    async with postgres_session_factory() as session:
-        started = await update_orchestrator_control(
-            session,
-            is_enabled=True,
-            is_paused=False,
-            mode="live",
-            requested_run_at=utcnow(),
-        )
-        await write_orchestrator_snapshot(
-            session,
-            running=True,
-            enabled=True,
-            current_activity="Cycle decisions=1 orders=1",
-            interval_seconds=int(started.get("run_interval_seconds") or 5),
-            last_run_at=utcnow(),
-        )
-
-        control = await enforce_manual_start_on_startup(session)
-        snapshot = await read_orchestrator_snapshot(session)
-
-    assert control["is_enabled"] is False
-    assert control["is_paused"] is True
-    assert control["mode"] == "shadow"
-    assert control["requested_run_at"] is None
-    assert snapshot["running"] is False
-    assert snapshot["enabled"] is False
-    assert snapshot["interval_seconds"] == int(control.get("run_interval_seconds") or 5)
-    assert snapshot["current_activity"] == "Stopped on startup; manual start required"

@@ -160,6 +160,53 @@ class TradersConfluenceStrategy(BaseStrategy):
         return "NO"
 
     @staticmethod
+    def _extract_outcome_labels(raw: object) -> list[str]:
+        if not isinstance(raw, list):
+            return []
+        labels: list[str] = []
+        for item in raw:
+            if isinstance(item, dict):
+                label = str(
+                    item.get("outcome")
+                    or item.get("label")
+                    or item.get("name")
+                    or item.get("title")
+                    or item.get("value")
+                    or ""
+                ).strip()
+            else:
+                label = str(item or "").strip()
+            if label and label not in labels:
+                labels.append(label)
+        return labels
+
+    @classmethod
+    def _resolve_binary_outcome_labels(cls, signal: dict, question: str) -> tuple[str, str]:
+        labels: list[str] = []
+        for key in ("outcome_labels", "outcomeLabels", "outcomes", "labels"):
+            labels = cls._extract_outcome_labels(signal.get(key))
+            if labels:
+                break
+
+        if not labels:
+            labels = cls._extract_outcome_labels(signal.get("tokens"))
+
+        if not labels:
+            lowered = question.lower()
+            splitter = " vs. " if " vs. " in lowered else " vs " if " vs " in lowered else ""
+            if splitter:
+                chunks = [chunk.strip() for chunk in question.split(splitter) if chunk.strip()]
+                if len(chunks) >= 2:
+                    left = chunks[0].split(":")[-1].strip() if ":" in chunks[0] else chunks[0]
+                    labels = [left or chunks[0], chunks[1]]
+
+        if not labels:
+            return "Yes", "No"
+        if len(labels) == 1:
+            return labels[0], "No"
+        return labels[0], labels[1]
+
+    @staticmethod
     def _price_checks(signal: dict) -> tuple[bool, bool]:
         prices = []
         for key in ("avg_entry_price", "entry_price", "yes_price", "no_price"):
@@ -451,6 +498,7 @@ class TradersConfluenceStrategy(BaseStrategy):
         market_id = str(signal.get("market_id") or "").strip()
         question = str(signal.get("market_question") or market_id or "Unknown market").strip()
         slug = str(signal.get("market_slug") or market_id).strip()
+        yes_label, no_label = self._resolve_binary_outcome_labels(signal, question)
 
         side = StrategySDK.normalize_trader_side(signal.get("side"), default="all")
         entry = _safe_float_nan(signal.get("avg_entry_price"), 0.5)
@@ -471,11 +519,10 @@ class TradersConfluenceStrategy(BaseStrategy):
 
         yes_token = str(signal.get("yes_token_id") or signal.get("yes_token") or "").strip()
         no_token = str(signal.get("no_token_id") or signal.get("no_token") or "").strip()
-        tokens = []
-        if yes_token:
-            tokens.append(Token(token_id=yes_token, outcome="Yes", price=yes_price))
-        if no_token:
-            tokens.append(Token(token_id=no_token, outcome="No", price=no_price))
+        tokens = [
+            Token(token_id=yes_token, outcome=yes_label, price=yes_price),
+            Token(token_id=no_token, outcome=no_label, price=no_price),
+        ]
 
         return Market(
             id=market_id,
@@ -484,7 +531,7 @@ class TradersConfluenceStrategy(BaseStrategy):
             slug=slug,
             event_slug=str(signal.get("event_slug") or "").strip(),
             tokens=tokens,
-            clob_token_ids=[t.token_id for t in tokens],
+            clob_token_ids=[t.token_id for t in tokens if t.token_id],
             outcome_prices=[yes_price, no_price],
             active=bool(signal.get("is_active", True)),
             closed=False,

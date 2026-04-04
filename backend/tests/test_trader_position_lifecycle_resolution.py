@@ -448,6 +448,7 @@ async def test_live_external_wallet_flatten_closes_position_from_wallet_trade(tm
                 status="open",
                 payload_json={
                     "token_id": "token-1",
+                    "strategy_exit_config": {"take_profit_pct": 1.0},
                     "provider_reconciliation": {
                         "filled_size": 5.0,
                         "average_fill_price": 0.4,
@@ -566,7 +567,7 @@ async def test_live_exit_submission_uses_gtc_for_lifecycle_close(tmp_path, monke
             result = await position_lifecycle.reconcile_live_positions(
                 session,
                 trader_id="trader-1",
-                trader_params={"live_take_profit_pct": 1.0},
+                trader_params={},
                 dry_run=False,
             )
             order = await session.get(TraderOrder, "order-1")
@@ -1024,6 +1025,7 @@ async def test_live_stale_mark_does_not_trigger_max_hold_exit(tmp_path, monkeypa
                 status="executed",
                 payload_json={
                     "token_id": "token-1",
+                    "strategy_exit_config": {"max_hold_minutes": 0.0},
                     "position_state": {
                         "last_mark_price": 0.45,
                         "last_mark_source": "clob_midpoint",
@@ -1070,7 +1072,7 @@ async def test_live_stale_mark_does_not_trigger_max_hold_exit(tmp_path, monkeypa
             result = await position_lifecycle.reconcile_live_positions(
                 session,
                 trader_id="trader-1",
-                trader_params={"live_max_hold_minutes": 0.0},
+                trader_params={},
                 dry_run=False,
             )
             order = await session.get(TraderOrder, "order-1")
@@ -1097,6 +1099,7 @@ async def test_live_fresh_mark_allows_max_hold_exit_attempt(tmp_path, monkeypatc
                 status="executed",
                 payload_json={
                     "token_id": "token-1",
+                    "strategy_exit_config": {"max_hold_minutes": 0.0},
                     "position_state": {
                         "last_mark_price": 0.45,
                         "last_mark_source": "clob_midpoint",
@@ -1142,7 +1145,7 @@ async def test_live_fresh_mark_allows_max_hold_exit_attempt(tmp_path, monkeypatc
             result = await position_lifecycle.reconcile_live_positions(
                 session,
                 trader_id="trader-1",
-                trader_params={"live_max_hold_minutes": 0.0},
+                trader_params={},
                 dry_run=False,
             )
             order = await session.get(TraderOrder, "order-1")
@@ -1357,6 +1360,7 @@ async def test_live_exit_blocks_no_inventory_after_pre_submit_gate_failure(tmp_p
                 status="open",
                 payload_json={
                     "token_id": "token-1",
+                    "strategy_exit_config": {"max_hold_minutes": 0.0},
                     "provider_reconciliation": {
                         "filled_size": 11.32,
                         "average_fill_price": 0.4,
@@ -1406,7 +1410,7 @@ async def test_live_exit_blocks_no_inventory_after_pre_submit_gate_failure(tmp_p
             result = await position_lifecycle.reconcile_live_positions(
                 session,
                 trader_id="trader-1",
-                trader_params={"live_max_hold_minutes": 0.0},
+                trader_params={},
                 dry_run=False,
             )
             order = await session.get(TraderOrder, "order-1")
@@ -1434,6 +1438,7 @@ async def test_live_blocked_no_inventory_does_not_resubmit_exit(tmp_path, monkey
                 status="open",
                 payload_json={
                     "token_id": "token-1",
+                    "strategy_exit_config": {"max_hold_minutes": 0.0},
                     "provider_reconciliation": {
                         "filled_size": 11.32,
                         "average_fill_price": 0.4,
@@ -1481,7 +1486,7 @@ async def test_live_blocked_no_inventory_does_not_resubmit_exit(tmp_path, monkey
             result = await position_lifecycle.reconcile_live_positions(
                 session,
                 trader_id="trader-1",
-                trader_params={"live_max_hold_minutes": 0.0},
+                trader_params={},
                 dry_run=False,
             )
             order = await session.get(TraderOrder, "order-1")

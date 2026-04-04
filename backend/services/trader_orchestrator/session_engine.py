@@ -152,11 +152,7 @@ def _resolve_preplace_take_profit_exit(
 ) -> bool:
     if not _strategy_supports_entry_take_profit_exit(strategy_instance):
         return False
-    default_enabled = False
-    defaults = getattr(strategy_instance, "default_config", None)
-    if isinstance(defaults, dict):
-        default_enabled = StrategySDK.should_preplace_take_profit_exit(defaults, default_enabled=False)
-    return StrategySDK.should_preplace_take_profit_exit(params, default_enabled=default_enabled)
+    return StrategySDK.should_preplace_take_profit_exit(dict(params or {}), default_enabled=False)
 
 
 def _execution_profile_for_signal(
@@ -738,6 +734,7 @@ class ExecutionSessionEngine:
         mode: str,
         size_usd: float,
         reason: str | None,
+        explicit_strategy_params: dict[str, Any] | None = None,
     ) -> SessionExecutionResult:
         plan, legs, constraints = self._build_plan(
             signal,
@@ -1011,7 +1008,7 @@ class ExecutionSessionEngine:
         strategy_instance = _strategy_instance_for_execution(strategy_key)
         preplace_take_profit_exit = _resolve_preplace_take_profit_exit(
             strategy_instance=strategy_instance,
-            params=dict(strategy_params or {}),
+            params=dict(explicit_strategy_params or {}),
         )
 
         for wave_index, wave in enumerate(waves):
@@ -1136,10 +1133,11 @@ class ExecutionSessionEngine:
                     getattr(signal, "strategy_context_json", None) or getattr(signal, "strategy_context", None) or {}
                 )
                 signal_payload = getattr(signal, "payload_json", None)
-                params = dict(strategy_params or {})
-                order_payload["strategy_params"] = dict(params)
+                runtime_params = dict(strategy_params or {})
+                explicit_params = dict(explicit_strategy_params or {})
+                order_payload["strategy_params"] = dict(runtime_params)
                 exit_config: dict[str, Any] = {}
-                for param_key, param_value in params.items():
+                for param_key, param_value in explicit_params.items():
                     key_text = str(param_key or "").strip()
                     if not key_text:
                         continue
@@ -1196,8 +1194,8 @@ class ExecutionSessionEngine:
                 for target_key, aliases in exit_key_aliases.items():
                     selected_value = None
                     for alias_key in aliases:
-                        if alias_key in params:
-                            selected_value = params.get(alias_key)
+                        if alias_key in explicit_params:
+                            selected_value = explicit_params.get(alias_key)
                             break
                     if selected_value is not None:
                         exit_config[target_key] = selected_value

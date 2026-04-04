@@ -189,7 +189,7 @@ async def test_unconsumed_signals_can_filter_by_source_strategy_type(tmp_path):
                 source="scanner",
                 source_item_id="scanner-other",
                 signal_type="scanner_opportunity",
-                strategy_type="stat_arb",
+                strategy_type="scanner_strategy",
                 market_id="scanner-2",
                 direction="buy_no",
                 dedupe_key="scanner-other",

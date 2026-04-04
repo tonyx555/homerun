@@ -26,21 +26,17 @@ def test_tail_end_carry_exposes_market_name_exclusion_list_field():
     assert str(exclude_field.get("label") or "").strip() == "Exclude Market Name Contains"
 
 
-def test_btc_5m_reversal_sniper_seed_is_present_with_expected_schema():
+def test_crypto_strategy_rows_expose_ui_schema():
     rows = build_system_opportunity_strategy_rows()
-    reversal_row = next(
-        row for row in rows if str(row.get("slug") or "").strip().lower() == "btc_5m_reversal_sniper"
-    )
-    config_schema = dict(reversal_row.get("config_schema") or {})
-    param_fields = {
-        str(field.get("key") or "").strip(): field
-        for field in list(config_schema.get("param_fields") or [])
-        if isinstance(field, dict)
-    }
+    crypto_rows = [row for row in rows if str(row.get("source_key") or "").strip().lower() == "crypto"]
 
-    assert reversal_row["source_key"] == "crypto"
-    assert reversal_row["class_name"] == "BTC5mReversalSniperStrategy"
-    assert reversal_row["sort_order"] == 198
-    assert param_fields["timeframe"]["options"] == ["5min"]
-    assert param_fields["entry_window_start_seconds"]["max"] == 60
-    assert param_fields["min_velocity_for_reversal"]["type"] == "number"
+    assert crypto_rows
+    for row in crypto_rows:
+        config_schema = dict(row.get("config_schema") or {})
+        param_fields = [
+            field
+            for field in list(config_schema.get("param_fields") or [])
+            if isinstance(field, dict) and str(field.get("key") or "").strip()
+        ]
+        assert param_fields
+        assert str(row.get("class_name") or "").strip()

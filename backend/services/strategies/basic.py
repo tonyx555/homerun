@@ -60,6 +60,7 @@ class BasicArbStrategy(BaseStrategy):
         "max_risk_score": 0.78,
         "min_liquidity": 25.0,
         "min_markets": 1,
+        "retention_window": "10m",
     }
 
     def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:

@@ -1114,11 +1114,6 @@ class AppSettings(Base):
     combinatorial_min_confidence = Column(Float, default=0.75)
     combinatorial_high_confidence = Column(Float, default=0.90)
 
-    # Bayesian Cascade
-    bayesian_cascade_enabled = Column(Boolean, default=True)
-    bayesian_min_edge_percent = Column(Float, default=5.0)
-    bayesian_propagation_depth = Column(Integer, default=3)
-
     # Liquidity Vacuum
     liquidity_vacuum_enabled = Column(Boolean, default=True)
     liquidity_vacuum_min_imbalance_ratio = Column(Float, default=5.0)
@@ -1130,9 +1125,6 @@ class AppSettings(Base):
 
     # Event-Driven Arbitrage
     event_driven_enabled = Column(Boolean, default=True)
-
-    # Temporal Decay
-    temporal_decay_enabled = Column(Boolean, default=True)
 
     # Correlation Arbitrage
     correlation_arb_enabled = Column(Boolean, default=True)

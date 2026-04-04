@@ -308,6 +308,7 @@ async def test_execute_signal_sets_hedging_timeout_payload(monkeypatch):
         strategy_key="tail_end_carry",
         strategy_version=None,
         strategy_params=strategy_params,
+        explicit_strategy_params={"max_market_data_age_ms": 250},
         risk_limits={},
         mode="paper",
         size_usd=160.0,
@@ -322,12 +323,225 @@ async def test_execute_signal_sets_hedging_timeout_payload(monkeypatch):
     assert len(order_rows) == 2
     assert session_rows[0].status == "hedging"
     assert order_rows[0].payload_json["strategy_params"] == strategy_params
+    assert "take_profit_pct" not in order_rows[0].payload_json["strategy_exit_config"]
+    assert order_rows[0].payload_json["strategy_exit_config"]["max_market_data_age_ms"] == 250
     payload_patch = session_rows[0].payload_json
     assert payload_patch["hedge_timeout_seconds"] == 33
     assert payload_patch["hedging_escalation"] == "auto_fail_on_timeout"
     assert isinstance(payload_patch.get("hedging_started_at"), str)
     assert isinstance(payload_patch.get("hedging_deadline_at"), str)
     assert publish_signal_status_mock.await_args.kwargs["status"] == "submitted"
+
+
+@pytest.mark.asyncio
+async def test_execute_signal_does_not_preplace_take_profit_exit_from_runtime_defaults(monkeypatch):
+    db = _FailureProjectionDb()
+    engine = session_engine_module.ExecutionSessionEngine(db)
+
+    plan = {"policy": "PARALLEL_MAKER", "plan_id": "plan-explicit-only"}
+    legs = [
+        {
+            "leg_id": "leg-1",
+            "side": "buy",
+            "token_id": "token-1",
+            "requested_notional_usd": 12.0,
+            "limit_price": 0.4,
+        }
+    ]
+    constraints = {"max_unhedged_notional_usd": 0.0, "hedge_timeout_seconds": 20}
+    monkeypatch.setattr(engine, "_build_plan", lambda *args, **kwargs: (plan, legs, constraints))
+    monkeypatch.setattr(session_engine_module, "supports_reprice", lambda _policy: False)
+    monkeypatch.setattr(session_engine_module, "execution_waves", lambda _policy, leg_rows: [leg_rows])
+    monkeypatch.setattr(session_engine_module, "requires_pair_lock", lambda _policy, _constraints: False)
+    monkeypatch.setattr(
+        session_engine_module,
+        "submit_execution_wave",
+        AsyncMock(
+            return_value=[
+                _leg_result(
+                    leg_id="leg-1",
+                    status="executed",
+                    notional_usd=12.0,
+                    shares=30.0,
+                    payload={
+                        "provider": "test",
+                        "token_id": "token-1",
+                        "filled_size": 30.0,
+                        "average_fill_price": 0.4,
+                        "filled_notional_usd": 12.0,
+                    },
+                )
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        session_engine_module,
+        "get_execution_session_detail",
+        AsyncMock(return_value={"session": {"unhedged_notional_usd": 0.0}}),
+    )
+    monkeypatch.setattr(session_engine_module, "set_trade_signal_status", AsyncMock(return_value=True))
+    monkeypatch.setattr(session_engine_module, "sync_trader_position_inventory", AsyncMock(return_value={}))
+    monkeypatch.setattr(session_engine_module.event_bus, "publish", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        session_engine_module,
+        "_strategy_instance_for_execution",
+        lambda _strategy_key: SimpleNamespace(supports_entry_take_profit_exit=True),
+    )
+    tp_submit_mock = AsyncMock()
+    monkeypatch.setattr(session_engine_module, "execute_live_order", tp_submit_mock)
+    monkeypatch.setattr(
+        session_engine_module.live_execution_service,
+        "prepare_sell_balance_allowance",
+        AsyncMock(return_value=None),
+    )
+    intent_runtime = SimpleNamespace(update_signal_status=AsyncMock())
+    monkeypatch.setattr(intent_runtime_module, "get_intent_runtime", lambda: intent_runtime)
+
+    signal = SimpleNamespace(
+        id="signal-explicit-only",
+        source="scanner",
+        trace_id="trace-explicit-only",
+        strategy_type="btc_eth_highfreq",
+        strategy_context_json={},
+        payload_json={},
+        market_id="market-explicit-only",
+        market_question="question",
+        direction="buy_yes",
+        entry_price=0.4,
+        edge_percent=6.0,
+        confidence=0.7,
+    )
+    result = await engine.execute_signal(
+        trader_id="trader-explicit-only",
+        signal=signal,
+        decision_id="decision-explicit-only",
+        strategy_key="btc_eth_highfreq",
+        strategy_version=None,
+        strategy_params={"preplace_take_profit_exit": True, "take_profit_pct": 12.0},
+        explicit_strategy_params={},
+        risk_limits={},
+        mode="live",
+        size_usd=12.0,
+        reason="explicit-only",
+    )
+
+    assert result.status == "completed"
+    assert result.orders_written == 1
+    assert tp_submit_mock.await_count == 0
+    order_rows = db.persisted_rows_by_type.get("TraderOrder") or []
+    assert len(order_rows) == 1
+    assert "pending_live_exit" not in order_rows[0].payload_json
+
+
+@pytest.mark.asyncio
+async def test_execute_signal_preplace_take_profit_exit_requires_explicit_enable(monkeypatch):
+    db = _FailureProjectionDb()
+    engine = session_engine_module.ExecutionSessionEngine(db)
+
+    plan = {"policy": "PARALLEL_MAKER", "plan_id": "plan-explicit-tp"}
+    legs = [
+        {
+            "leg_id": "leg-1",
+            "side": "buy",
+            "token_id": "token-1",
+            "requested_notional_usd": 12.0,
+            "limit_price": 0.4,
+        }
+    ]
+    constraints = {"max_unhedged_notional_usd": 0.0, "hedge_timeout_seconds": 20}
+    monkeypatch.setattr(engine, "_build_plan", lambda *args, **kwargs: (plan, legs, constraints))
+    monkeypatch.setattr(session_engine_module, "supports_reprice", lambda _policy: False)
+    monkeypatch.setattr(session_engine_module, "execution_waves", lambda _policy, leg_rows: [leg_rows])
+    monkeypatch.setattr(session_engine_module, "requires_pair_lock", lambda _policy, _constraints: False)
+    monkeypatch.setattr(
+        session_engine_module,
+        "submit_execution_wave",
+        AsyncMock(
+            return_value=[
+                _leg_result(
+                    leg_id="leg-1",
+                    status="executed",
+                    notional_usd=12.0,
+                    shares=30.0,
+                    payload={
+                        "provider": "test",
+                        "token_id": "token-1",
+                        "filled_size": 30.0,
+                        "average_fill_price": 0.4,
+                        "filled_notional_usd": 12.0,
+                    },
+                )
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        session_engine_module,
+        "get_execution_session_detail",
+        AsyncMock(return_value={"session": {"unhedged_notional_usd": 0.0}}),
+    )
+    monkeypatch.setattr(session_engine_module, "set_trade_signal_status", AsyncMock(return_value=True))
+    monkeypatch.setattr(session_engine_module, "sync_trader_position_inventory", AsyncMock(return_value={}))
+    monkeypatch.setattr(session_engine_module.event_bus, "publish", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        session_engine_module,
+        "_strategy_instance_for_execution",
+        lambda _strategy_key: SimpleNamespace(supports_entry_take_profit_exit=True),
+    )
+    tp_submit_mock = AsyncMock(
+        return_value=SimpleNamespace(
+            status="submitted",
+            order_id="tp-order-1",
+            effective_price=0.448,
+            error_message=None,
+            payload={"clob_order_id": "tp-clob-1", "trading_status": "live"},
+        )
+    )
+    monkeypatch.setattr(session_engine_module, "execute_live_order", tp_submit_mock)
+    monkeypatch.setattr(
+        session_engine_module.live_execution_service,
+        "prepare_sell_balance_allowance",
+        AsyncMock(return_value=None),
+    )
+    intent_runtime = SimpleNamespace(update_signal_status=AsyncMock())
+    monkeypatch.setattr(intent_runtime_module, "get_intent_runtime", lambda: intent_runtime)
+
+    signal = SimpleNamespace(
+        id="signal-explicit-tp",
+        source="scanner",
+        trace_id="trace-explicit-tp",
+        strategy_type="btc_eth_highfreq",
+        strategy_context_json={},
+        payload_json={},
+        market_id="market-explicit-tp",
+        market_question="question",
+        direction="buy_yes",
+        entry_price=0.4,
+        edge_percent=6.0,
+        confidence=0.7,
+    )
+    result = await engine.execute_signal(
+        trader_id="trader-explicit-tp",
+        signal=signal,
+        decision_id="decision-explicit-tp",
+        strategy_key="btc_eth_highfreq",
+        strategy_version=None,
+        strategy_params={"preplace_take_profit_exit": True, "take_profit_pct": 12.0},
+        explicit_strategy_params={"preplace_take_profit_exit": True, "take_profit_pct": 12.0},
+        risk_limits={},
+        mode="live",
+        size_usd=12.0,
+        reason="explicit-tp",
+    )
+
+    assert result.status == "completed"
+    assert result.orders_written == 1
+    assert tp_submit_mock.await_count == 1
+    order_rows = db.persisted_rows_by_type.get("TraderOrder") or []
+    assert len(order_rows) == 1
+    pending_exit = order_rows[0].payload_json.get("pending_live_exit")
+    assert isinstance(pending_exit, dict)
+    assert pending_exit["reason"] == "entry_bracket_take_profit"
+    assert pending_exit["target_take_profit_pct"] == pytest.approx(12.0)
 
 
 @pytest.mark.asyncio
@@ -381,7 +595,7 @@ async def test_execute_signal_skips_position_cap_failures_without_order_writes(m
         id="signal-skip",
         source="scanner",
         trace_id="trace-skip",
-        strategy_type="late_favorite_alpha",
+        strategy_type="scanner_strategy",
         strategy_context_json={},
         payload_json={},
         market_id="market-skip",
@@ -395,7 +609,7 @@ async def test_execute_signal_skips_position_cap_failures_without_order_writes(m
         trader_id="trader-skip",
         signal=signal,
         decision_id="decision-skip",
-        strategy_key="late_favorite_alpha",
+        strategy_key="scanner_strategy",
         strategy_version=None,
         strategy_params={},
         risk_limits={},

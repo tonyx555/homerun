@@ -3183,25 +3183,6 @@ async def read_orchestrator_snapshot(session: AsyncSession) -> dict[str, Any]:
     return _serialize_snapshot(await ensure_orchestrator_snapshot(session))
 
 
-async def enforce_manual_start_on_startup(session: AsyncSession) -> dict[str, Any]:
-    control = await update_orchestrator_control(
-        session,
-        is_enabled=False,
-        is_paused=True,
-        mode="shadow",
-        requested_run_at=None,
-    )
-    await write_orchestrator_snapshot(
-        session,
-        running=False,
-        enabled=False,
-        current_activity="Stopped on startup; manual start required",
-        interval_seconds=int(control.get("run_interval_seconds") or ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS),
-        last_error=None,
-    )
-    return control
-
-
 async def update_orchestrator_control(session: AsyncSession, **updates: Any) -> dict[str, Any]:
     row = await ensure_orchestrator_control(session)
     payload: dict[str, Any] = {}

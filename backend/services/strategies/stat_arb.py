@@ -21,13 +21,15 @@ from __future__ import annotations
 
 import re
 import statistics
+import time
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import logging
 
 from models import Market, Event, Opportunity
 from config import settings
-from .base import BaseStrategy, DecisionCheck, ExitDecision, ScoringWeights, SizingConfig, utcnow
+from .base import BaseStrategy, DecisionCheck, ExitDecision, ScoringWeights, SizingConfig, make_aware, utcnow
 from services.quality_filter import QualityFilterOverrides
 from utils.kelly import kelly_fraction
 
@@ -89,22 +91,79 @@ SIGNAL_WEIGHTS = {
     "liquidity_imbalance": 0.12,
 }
 
+_DEADLINE_PATTERNS = [
+    re.compile(r"\bby\s+(\w+\s+\d{1,2},?\s+\d{4}|\w+\s+\d{4})", re.IGNORECASE),
+    re.compile(r"\bbefore\s+(\w+\s+\d{1,2},?\s+\d{4}|\w+\s+\d{4})", re.IGNORECASE),
+    re.compile(r"\bin\s+(\w+\s+\d{4})", re.IGNORECASE),
+    re.compile(r"\bby\s+(?:the\s+)?end\s+of\s+(\d{4})", re.IGNORECASE),
+]
+
+_MONTH_MAP = {
+    "january": 1,
+    "jan": 1,
+    "february": 2,
+    "feb": 2,
+    "march": 3,
+    "mar": 3,
+    "april": 4,
+    "apr": 4,
+    "may": 5,
+    "june": 6,
+    "jun": 6,
+    "july": 7,
+    "jul": 7,
+    "august": 8,
+    "aug": 8,
+    "september": 9,
+    "sep": 9,
+    "sept": 9,
+    "october": 10,
+    "oct": 10,
+    "november": 11,
+    "nov": 11,
+    "december": 12,
+    "dec": 12,
+}
+
+_PLAYER_STAT_RE = re.compile(r"[A-Z][a-z]+ [A-Z][a-z]+:\s*\d+\+", re.IGNORECASE)
+_DEFAULT_DECAY_RATE = 0.5
+_MIN_DEVIATION = 0.05
+_MAX_DAYS_TO_DEADLINE = 30
+_MIN_DAYS_TO_DEADLINE = 1
+_MIN_HISTORY_POINTS = 5
+_MIN_ENTRY_PRICE = 0.08
+_MAX_ENTRY_PRICE = 0.92
+_MIN_EXPECTED_MOVE = 0.02
+_SHOCK_LOOKBACK_SECONDS = 6 * 3600
+_SHOCK_MIN_POINTS = 3
+_SHOCK_MAX_DAYS_TO_DEADLINE = 10.0
+_SHOCK_MIN_DAYS_TO_DEADLINE = -0.25
+_SHOCK_MIN_ABS_MOVE = 0.18
+_SHOCK_MAX_RETRACE = 0.12
+_SHOCK_MIN_FAVORED_PRICE = 0.55
+_SHOCK_MAX_FAVORED_PRICE = 0.97
+_SHOCK_TARGET_CERTAINTY = 0.96
+_SHOCK_EXTENSION_FACTOR = 0.45
+_SHOCK_MIN_EXPECTED_MOVE = 0.03
+_SHOCK_MIN_LIQUIDITY_HARD = 1000.0
+_SHOCK_MIN_POSITION_SIZE = 50.0
+_MULTILEG_MARKET_PREFIXES = ("KXMVESPORTSMULTIGAMEEXTENDED-",)
+
 
 class StatArbStrategy(BaseStrategy):
     """
-    Strategy: Statistical Arbitrage / Information Edge
+    Statistical mispricing strategy with a temporal deadline subfamily.
 
-    Trade deviations between estimated fair probability and market price.
-    Ensembles multiple weak signals into a composite probability estimate,
-    then trades when the deviation exceeds a configurable threshold.
+    Primary branch: ensemble fair-probability estimation from weak statistical
+    signals.
 
-    This is NOT risk-free arbitrage. It is informed directional speculation
-    with a statistical edge derived from combining independent signals.
+    Secondary branch: deadline-aware certainty-shock / decay-curve detection
+    folded in from the removed temporal_decay strategy.
     """
 
     strategy_type = "stat_arb"
     name = "Statistical Arbitrage"
-    description = "Trade deviations from estimated fair probability"
+    description = "Trade statistical mispricings and deadline-driven certainty shocks"
     mispricing_type = "within_market"
     subscriptions = ["market_data_refresh"]
 
@@ -117,7 +176,43 @@ class StatArbStrategy(BaseStrategy):
         "min_edge_percent": 5.0,
         "min_confidence": 0.45,
         "max_risk_score": 0.75,
+        "enable_stat_signals": True,
+        "enable_certainty_shock": True,
+        "enable_decay_curve": True,
+        "shock_lookback_seconds": 21600,
+        "shock_min_abs_move": 0.18,
+        "shock_max_retrace": 0.12,
+        "shock_min_favored_price": 0.55,
+        "shock_target_certainty": 0.96,
+        "max_days_to_deadline": 30.0,
+        "min_days_to_deadline": 1.0,
+        "exclude_market_keywords": [
+            "bitcoin",
+            "btc",
+            "ethereum",
+            "eth",
+            "solana",
+            "sol",
+            "xrp",
+            "crypto",
+            "up or down",
+            "doge",
+            "dogecoin",
+            "bnb",
+            "cardano",
+            "ada",
+            "polygon",
+            "matic",
+            "avax",
+            "avalanche",
+            "chainlink",
+            "link",
+            "litecoin",
+            "ltc",
+        ],
         "take_profit_pct": 12.0,
+        "stop_loss_pct": 25.0,
+        "trailing_stop_pct": 15.0,
     }
 
     pipeline_defaults = {
@@ -146,6 +241,82 @@ class StatArbStrategy(BaseStrategy):
         super().__init__()
         # Track previous prices for momentum signal across scans
         self._prev_prices: dict[str, float] = {}
+
+    @staticmethod
+    def _normalize_excluded_keywords(value: Any) -> list[str]:
+        if isinstance(value, str):
+            candidates = [token.strip() for token in value.split(",")]
+        elif isinstance(value, list):
+            candidates = list(value)
+        else:
+            return []
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw in candidates:
+            token = str(raw or "").strip().lower()
+            if not token or token in seen:
+                continue
+            seen.add(token)
+            normalized.append(token)
+        return normalized
+
+    @staticmethod
+    def _keyword_in_text(keyword: str, text: str) -> bool:
+        if not keyword or not text:
+            return False
+        if len(keyword) <= 4 and keyword.replace("-", "").replace("_", "").isalnum():
+            return re.search(rf"\b{re.escape(keyword)}\b", text) is not None
+        return keyword in text
+
+    @classmethod
+    def _first_blocked_keyword(cls, text: str, excluded_keywords: list[str]) -> Optional[str]:
+        for keyword in excluded_keywords:
+            if cls._keyword_in_text(keyword, text):
+                return keyword
+        return None
+
+    @classmethod
+    def _market_text(cls, market: Market) -> str:
+        chunks: list[str] = []
+        for value in (
+            market.id,
+            market.question,
+            getattr(market, "slug", None),
+            getattr(market, "group_item_title", None),
+            getattr(market, "event_slug", None),
+        ):
+            text = str(value or "").strip().lower()
+            if text:
+                chunks.append(text)
+        for tag in list(getattr(market, "tags", []) or []):
+            text = str(tag or "").strip().lower()
+            if text:
+                chunks.append(text)
+        return " | ".join(chunks)
+
+    @classmethod
+    def _signal_market_text(cls, signal: Any, payload: dict) -> str:
+        chunks: list[str] = []
+        for value in (
+            getattr(signal, "market_question", None),
+            payload.get("market_question"),
+            payload.get("title"),
+            payload.get("description"),
+            payload.get("market_id"),
+        ):
+            text = str(value or "").strip().lower()
+            if text:
+                chunks.append(text)
+        markets = payload.get("markets")
+        if isinstance(markets, list):
+            for raw_market in markets[:2]:
+                if not isinstance(raw_market, dict):
+                    continue
+                for value in (raw_market.get("id"), raw_market.get("question"), raw_market.get("slug")):
+                    text = str(value or "").strip().lower()
+                    if text:
+                        chunks.append(text)
+        return " | ".join(chunks)
 
     # ------------------------------------------------------------------
     # Signal 1: Anchoring Detection
@@ -383,8 +554,6 @@ class StatArbStrategy(BaseStrategy):
         # Check 1: Resolution date already passed (should be filtered
         # upstream but double-check)
         if market.end_date:
-            from .base import make_aware
-
             end_aware = make_aware(market.end_date)
             if end_aware < now:
                 return True
@@ -421,6 +590,287 @@ class StatArbStrategy(BaseStrategy):
             if no_token in prices:
                 no_price = prices[no_token].get("mid", no_price)
         return no_price
+
+    def _extract_deadline(self, market: Market) -> Optional[datetime]:
+        if market.end_date:
+            return make_aware(market.end_date)
+
+        for pattern in _DEADLINE_PATTERNS:
+            match = pattern.search(market.question or "")
+            if not match:
+                continue
+            parsed = self._parse_date_string(match.group(1).strip().rstrip(","))
+            if parsed is not None:
+                return parsed
+        return None
+
+    def _parse_date_string(self, date_str: str) -> Optional[datetime]:
+        parts = date_str.lower().split()
+        if len(parts) == 1:
+            try:
+                year = int(parts[0])
+            except ValueError:
+                return None
+            return datetime(year, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+
+        if len(parts) >= 2:
+            month = _MONTH_MAP.get(parts[0])
+            if month is None:
+                return None
+            if len(parts) == 2:
+                try:
+                    year = int(parts[1])
+                except ValueError:
+                    return None
+                import calendar
+
+                _, day = calendar.monthrange(year, month)
+                return datetime(year, month, day, 23, 59, 59, tzinfo=timezone.utc)
+            try:
+                day = int(parts[1].rstrip(","))
+                year = int(parts[2])
+            except (IndexError, ValueError):
+                return None
+            return datetime(year, month, day, 23, 59, 59, tzinfo=timezone.utc)
+        return None
+
+    def _is_sports_parlay(self, market: Market) -> bool:
+        question = str(market.question or "").lower()
+        if question.count("yes ") + question.count("no ") >= 2:
+            return True
+        if question.count(",") >= 2:
+            return True
+        if _PLAYER_STAT_RE.search(market.question or ""):
+            return True
+        sport_keywords = [
+            "nba",
+            "nfl",
+            "mlb",
+            "nhl",
+            "ufc",
+            "mma",
+            "boxing",
+            "ncaa",
+            "march madness",
+            "college basketball",
+            "ncaab",
+            "college",
+            "premier league",
+            "la liga",
+            "bundesliga",
+            "serie a",
+            "champions league",
+            "mls",
+            "ligue 1",
+            "epl",
+            "moneyline",
+            "parlay",
+            "spread",
+            "halftime",
+            "quarter",
+            "inning",
+            "period",
+            "overtime",
+            "points",
+            "rebounds",
+            "assists",
+            "touchdowns",
+            "yards",
+            "goals scored",
+        ]
+        return any(keyword in question for keyword in sport_keywords)
+
+    def _create_certainty_shock_opportunity(
+        self,
+        *,
+        market: Market,
+        yes_price: float,
+        no_price: float,
+        now: datetime,
+        scan_time: float,
+        lookback_seconds: int,
+        min_abs_move: float,
+        max_retrace: float,
+        min_favored_price: float,
+        target_certainty: float,
+    ) -> Optional[Opportunity]:
+        price_history = self.state.setdefault("price_history", {})
+        history = price_history.get(market.id, [])
+        min_points = int(_SHOCK_MIN_POINTS)
+        if len(history) < min_points:
+            return None
+
+        deadline = self._extract_deadline(market)
+        if deadline is None:
+            return None
+
+        days_remaining = (deadline - now).total_seconds() / 86400.0
+        if days_remaining > _SHOCK_MAX_DAYS_TO_DEADLINE or days_remaining < _SHOCK_MIN_DAYS_TO_DEADLINE:
+            return None
+
+        cutoff = scan_time - max(1, lookback_seconds)
+        window_prices = [price for ts, price in history if ts >= cutoff]
+        if len(window_prices) < min_points:
+            window_prices = [price for _, price in history[-min_points:]]
+        if len(window_prices) < min_points:
+            return None
+
+        peak = max(window_prices)
+        trough = min(window_prices)
+        up_move = yes_price - trough
+        down_move = peak - yes_price
+        if up_move < min_abs_move and down_move < min_abs_move:
+            return None
+
+        yes_token = market.clob_token_ids[0] if market.clob_token_ids else None
+        no_token = market.clob_token_ids[1] if len(market.clob_token_ids) > 1 else None
+
+        if up_move >= down_move:
+            outcome = "YES"
+            entry_price = yes_price
+            token_id = yes_token
+            move = up_move
+            retrace = max(peak - yes_price, 0.0)
+            shock_desc = "YES repricing upward"
+        else:
+            outcome = "NO"
+            entry_price = no_price
+            token_id = no_token
+            move = down_move
+            retrace = max(yes_price - trough, 0.0)
+            shock_desc = "YES repricing downward (NO upward)"
+
+        if retrace > max_retrace:
+            return None
+        if entry_price < min_favored_price or entry_price > _SHOCK_MAX_FAVORED_PRICE:
+            return None
+
+        target_exit_price = max(target_certainty, entry_price + move * _SHOCK_EXTENSION_FACTOR)
+        target_exit_price = max(0.01, min(0.995, target_exit_price))
+        expected_move = target_exit_price - entry_price
+        if expected_move < _SHOCK_MIN_EXPECTED_MOVE:
+            return None
+
+        positions = [
+            {
+                "action": "BUY",
+                "outcome": outcome,
+                "market": market.question[:50],
+                "price": entry_price,
+                "token_id": token_id,
+                "rationale": (
+                    f"{shock_desc}; lookback move {move:.3f}, retrace {retrace:.3f}, target ${target_exit_price:.3f}"
+                ),
+            }
+        ]
+        opportunity = self.create_opportunity(
+            title=f"Certainty Shock: {market.question[:50]}...",
+            description=(
+                f"Rapid repricing detected near deadline ({days_remaining:.2f}d). "
+                f"{shock_desc}: peak=${peak:.3f}, trough=${trough:.3f}, current YES=${yes_price:.3f}. "
+                f"Buy {outcome} @ ${entry_price:.3f}, target repricing ${target_exit_price:.3f}."
+            ),
+            total_cost=entry_price,
+            expected_payout=target_exit_price,
+            markets=[market],
+            positions=positions,
+            is_guaranteed=False,
+            min_liquidity_hard=_SHOCK_MIN_LIQUIDITY_HARD,
+            min_position_size=_SHOCK_MIN_POSITION_SIZE,
+        )
+        if opportunity is None or opportunity.roi_percent > 120.0:
+            return None
+
+        risk_score = 0.62 - min(move * 0.35, 0.20)
+        if days_remaining <= 1.0:
+            risk_score -= 0.05
+        opportunity.risk_score = max(0.35, min(risk_score, 0.75))
+        opportunity.risk_factors.insert(
+            0,
+            "DIRECTIONAL BET — certainty shock can reverse before final settlement.",
+        )
+        opportunity.risk_factors.append(f"Certainty shock: {shock_desc}, move={move:.1%}, retrace={retrace:.1%}")
+        opportunity.risk_factors.append(f"Near expiry window: {days_remaining:.2f} days to deadline")
+        opportunity.risk_factors.append(f"Target repricing edge: +${expected_move:.3f} per share")
+        opportunity.strategy_context["sub_strategy"] = "certainty_shock"
+        return opportunity
+
+    def _create_decay_opportunity(
+        self,
+        *,
+        market: Market,
+        actual_price: float,
+        expected_price: float,
+        deviation: float,
+        days_remaining: float,
+        deadline: datetime,
+        prices: dict[str, dict],
+    ) -> Optional[Opportunity]:
+        no_price = self._live_no_price(market, prices)
+        if deviation > 0:
+            outcome = "NO"
+            entry_price = no_price
+            token_id = market.clob_token_ids[1] if len(market.clob_token_ids) > 1 else None
+            direction_desc = "overpriced"
+        else:
+            outcome = "YES"
+            entry_price = actual_price
+            token_id = market.clob_token_ids[0] if market.clob_token_ids else None
+            direction_desc = "underpriced"
+
+        if entry_price < _MIN_ENTRY_PRICE or entry_price > _MAX_ENTRY_PRICE:
+            return None
+
+        target_exit_price = max(0.01, min(0.99, 1.0 - expected_price if deviation > 0 else expected_price))
+        expected_move = target_exit_price - entry_price
+        if expected_move < _MIN_EXPECTED_MOVE:
+            return None
+
+        positions = [
+            {
+                "action": "BUY",
+                "outcome": outcome,
+                "market": market.question[:50],
+                "price": entry_price,
+                "token_id": token_id,
+                "rationale": (
+                    f"Expected decay price: ${expected_price:.3f}, actual: ${actual_price:.3f} "
+                    f"({direction_desc} by {abs(deviation):.3f})"
+                ),
+            }
+        ]
+        opportunity = self.create_opportunity(
+            title=f"Temporal Decay: {market.question[:50]}...",
+            description=(
+                f"Deadline market {direction_desc} vs expected decay curve. "
+                f"YES actual: ${actual_price:.3f}, expected: ${expected_price:.3f} "
+                f"(deviation: {abs(deviation):.3f}). {days_remaining:.1f} days to deadline. "
+                f"Buy {outcome} at ${entry_price:.3f}, target re-price ${target_exit_price:.3f}."
+            ),
+            total_cost=entry_price,
+            expected_payout=target_exit_price,
+            markets=[market],
+            positions=positions,
+            is_guaranteed=False,
+            min_liquidity_hard=1500.0,
+            min_position_size=50.0,
+        )
+        if opportunity is None or opportunity.roi_percent > 120.0:
+            return None
+
+        deviation_adjustment = min(abs(deviation) * 1.5, 0.10)
+        opportunity.risk_score = max(0.55, 0.65 - deviation_adjustment)
+        opportunity.risk_factors.insert(
+            0,
+            "DIRECTIONAL BET — decay deviation may reflect new information instead of mispricing.",
+        )
+        opportunity.risk_factors.append(f"Statistical edge: decay deviation {abs(deviation):.1%}")
+        opportunity.risk_factors.append(f"Deadline in {days_remaining:.0f} days ({deadline.strftime('%Y-%m-%d')})")
+        opportunity.risk_factors.append(f"Expected repricing target: +${expected_move:.3f} per share")
+        if days_remaining < 7:
+            opportunity.risk_factors.append("Near-deadline: steep decay but higher event uncertainty")
+        opportunity.strategy_context["sub_strategy"] = "decay_curve"
+        return opportunity
 
     def _get_category(self, market: Market, events: list[Event]) -> Optional[str]:
         """Look up the category for a market via its parent event."""
@@ -523,9 +973,25 @@ class StatArbStrategy(BaseStrategy):
         fair probability, and if the edge exceeds the configured minimum
         create an opportunity.
         """
-        min_edge = max(0.0, float(self.config.get("min_edge_percent", 5.0) or 5.0) / 100.0)
-
+        config = dict(self.default_config)
+        config.update(getattr(self, "config", {}) or {})
+        min_edge = max(0.0, float(config.get("min_edge_percent", 5.0) or 5.0) / 100.0)
+        enable_stat_signals = bool(config.get("enable_stat_signals", True))
+        enable_certainty_shock = bool(config.get("enable_certainty_shock", True))
+        enable_decay_curve = bool(config.get("enable_decay_curve", True))
+        excluded_keywords = self._normalize_excluded_keywords(config.get("exclude_market_keywords"))
+        shock_lookback_seconds = max(1, int(float(config.get("shock_lookback_seconds", _SHOCK_LOOKBACK_SECONDS) or _SHOCK_LOOKBACK_SECONDS)))
+        shock_min_abs_move = max(0.0, float(config.get("shock_min_abs_move", _SHOCK_MIN_ABS_MOVE) or _SHOCK_MIN_ABS_MOVE))
+        shock_max_retrace = max(0.0, float(config.get("shock_max_retrace", _SHOCK_MAX_RETRACE) or _SHOCK_MAX_RETRACE))
+        shock_min_favored_price = max(0.0, float(config.get("shock_min_favored_price", _SHOCK_MIN_FAVORED_PRICE) or _SHOCK_MIN_FAVORED_PRICE))
+        shock_target_certainty = max(0.01, min(0.995, float(config.get("shock_target_certainty", _SHOCK_TARGET_CERTAINTY) or _SHOCK_TARGET_CERTAINTY)))
+        max_days_to_deadline = max(0.0, float(config.get("max_days_to_deadline", _MAX_DAYS_TO_DEADLINE) or _MAX_DAYS_TO_DEADLINE))
+        min_days_to_deadline = max(0.0, float(config.get("min_days_to_deadline", _MIN_DAYS_TO_DEADLINE) or _MIN_DAYS_TO_DEADLINE))
         opportunities: list[Opportunity] = []
+        price_history = self.state.setdefault("price_history", {})
+        market_baselines = self.state.setdefault("market_baselines", {})
+        now = utcnow()
+        scan_time = time.time()
 
         # Pre-build market-id -> event mapping for fast lookup
         market_to_event: dict[str, Event] = {}
@@ -542,6 +1008,20 @@ class StatArbStrategy(BaseStrategy):
             if market.closed or not market.active:
                 continue
 
+            if excluded_keywords:
+                market_text = self._market_text(market)
+                if self._first_blocked_keyword(market_text, excluded_keywords) is not None:
+                    continue
+
+            market_keys = [
+                str(getattr(market, "id", "") or "").upper(),
+                str(getattr(market, "condition_id", "") or "").upper(),
+            ]
+            if any(key.startswith(prefix) for key in market_keys for prefix in _MULTILEG_MARKET_PREFIXES):
+                continue
+            if self._is_sports_parlay(market):
+                continue
+
             # Skip markets whose subject matter has already occurred.
             # Statistical base-rate signals are meaningless when the market
             # price reflects actual known outcomes (e.g., "2025 revenue"
@@ -553,8 +1033,68 @@ class StatArbStrategy(BaseStrategy):
             yes_price = self._live_yes_price(market, prices)
             no_price = self._live_no_price(market, prices)
 
+            if enable_certainty_shock or enable_decay_curve:
+                if market.id not in price_history:
+                    price_history[market.id] = []
+                price_history[market.id].append((scan_time, yes_price))
+                if len(price_history[market.id]) > 100:
+                    price_history[market.id] = price_history[market.id][-100:]
+
+            if enable_certainty_shock:
+                certainty_opportunity = self._create_certainty_shock_opportunity(
+                    market=market,
+                    yes_price=yes_price,
+                    no_price=no_price,
+                    now=now,
+                    scan_time=scan_time,
+                    lookback_seconds=shock_lookback_seconds,
+                    min_abs_move=shock_min_abs_move,
+                    max_retrace=shock_max_retrace,
+                    min_favored_price=shock_min_favored_price,
+                    target_certainty=shock_target_certainty,
+                )
+                if certainty_opportunity is not None:
+                    opportunities.append(certainty_opportunity)
+                    continue
+
+            if enable_decay_curve:
+                deadline = self._extract_deadline(market)
+                if deadline is not None:
+                    days_remaining = (deadline - now).total_seconds() / 86400.0
+                    if min_days_to_deadline <= days_remaining <= max_days_to_deadline:
+                        if market.id not in market_baselines:
+                            market_baselines[market.id] = (deadline, max(yes_price, 0.10))
+                        else:
+                            stored_deadline, stored_price = market_baselines[market.id]
+                            market_baselines[market.id] = (stored_deadline, max(stored_price, yes_price))
+
+                        history = price_history.get(market.id, [])
+                        if len(history) >= _MIN_HISTORY_POINTS:
+                            first_seen_dt = datetime.fromtimestamp(history[0][0], tz=timezone.utc)
+                            total_days = max((deadline - first_seen_dt).total_seconds() / 86400.0, 1.0)
+                            ratio = min(days_remaining / total_days, 1.0)
+                            initial_price = market_baselines[market.id][1]
+                            expected_price = initial_price * (ratio**_DEFAULT_DECAY_RATE)
+                            deviation = yes_price - expected_price
+                            if abs(deviation) >= _MIN_DEVIATION:
+                                decay_opportunity = self._create_decay_opportunity(
+                                    market=market,
+                                    actual_price=yes_price,
+                                    expected_price=expected_price,
+                                    deviation=deviation,
+                                    days_remaining=days_remaining,
+                                    deadline=deadline,
+                                    prices=prices,
+                                )
+                                if decay_opportunity is not None:
+                                    opportunities.append(decay_opportunity)
+                                    continue
+
             # Skip extreme prices (nearly resolved, nothing to trade)
             if yes_price < 0.03 or yes_price > 0.97:
+                continue
+
+            if not enable_stat_signals:
                 continue
 
             # Look up parent event and category
@@ -626,8 +1166,6 @@ class StatArbStrategy(BaseStrategy):
             if absolute_profit < settings.MIN_ABSOLUTE_PROFIT:
                 continue
             if market.end_date:
-                from .base import make_aware, utcnow
-
                 resolution_aware = make_aware(market.end_date)
                 days_until = (resolution_aware - utcnow()).days
                 if days_until > settings.MAX_RESOLUTION_MONTHS * 30:
@@ -702,7 +1240,11 @@ class StatArbStrategy(BaseStrategy):
 
         # Sort by absolute edge (strongest signals first)
         opportunities.sort(
-            key=lambda o: abs(o.positions_to_take[0].get("edge", 0) if o.positions_to_take else 0),
+            key=lambda opportunity: abs(
+                float(opportunity.positions_to_take[0].get("edge", 0.0))
+                if opportunity.positions_to_take and isinstance(opportunity.positions_to_take[0], dict)
+                else float(opportunity.roi_percent or 0.0)
+            ),
             reverse=True,
         )
 
@@ -721,22 +1263,36 @@ class StatArbStrategy(BaseStrategy):
 
     def custom_checks(self, signal, context, params, payload):
         source = str(getattr(signal, "source", "") or "").strip().lower()
+        excluded_keywords = self._normalize_excluded_keywords(
+            params.get("exclude_market_keywords", self.config.get("exclude_market_keywords", ""))
+        )
+        blocked_keyword = self._first_blocked_keyword(self._signal_market_text(signal, payload), excluded_keywords)
         return [
             DecisionCheck("source", "Signal source", source == "scanner", detail=f"got={source}"),
+            DecisionCheck(
+                "keyword_exclusion",
+                "Market keyword exclusion",
+                blocked_keyword is None,
+                detail=f"blocked by '{blocked_keyword}'" if blocked_keyword else "no excluded keywords matched",
+            ),
         ]
 
     def should_exit(self, position: Any, market_state: dict) -> ExitDecision:
-        """Stat arb: standard TP/SL exit."""
+        """Stat arb: standard TP/SL exit with temporal defaults applied."""
         if market_state.get("is_resolved"):
             return self.default_exit_check(position, market_state)
         config = getattr(position, "config", None) or {}
         config = dict(config)
-        configured_tp = (getattr(self, "config", None) or {}).get("take_profit_pct", 12.0)
-        try:
-            default_tp = float(configured_tp)
-        except (TypeError, ValueError):
-            default_tp = 12.0
-        config.setdefault("take_profit_pct", default_tp)
+        for key, fallback in (
+            ("take_profit_pct", 12.0),
+            ("stop_loss_pct", 25.0),
+            ("trailing_stop_pct", 15.0),
+        ):
+            try:
+                default_value = float((getattr(self, "config", None) or {}).get(key, fallback))
+            except (TypeError, ValueError):
+                default_value = fallback
+            config.setdefault(key, default_value)
         position.config = config
         return self.default_exit_check(position, market_state)
 

@@ -53,6 +53,7 @@ INITIALIZATION_RETRY_BACKOFF_SECONDS = 60.0
 MISSING_DEPENDENCY_RELOG_SECONDS = 300.0
 PENDING_RECONCILIATION_MAX_ATTEMPTS = 6
 _ORDER_SUBMIT_TIMEOUT_SECONDS = 10.0
+_CLIENT_IO_TIMEOUT_SECONDS = 10.0
 _CLOB_READ_CIRCUIT_BREAKER_THRESHOLD = 3  # consecutive failures before opening
 _CLOB_READ_CIRCUIT_BREAKER_COOLDOWN = 30.0  # seconds to wait before retrying
 _CLOB_READ_FAILURE_LOG_INTERVAL = 30.0  # seconds between repeated failure logs
@@ -400,9 +401,17 @@ class LiveExecutionService:
             self._persist_lock = asyncio.Lock()
         return self._persist_lock
 
-    async def _run_client_io(self, func: Any, *args: Any) -> Any:
+    async def _run_client_io(
+        self,
+        func: Any,
+        *args: Any,
+        timeout: float | None = _CLIENT_IO_TIMEOUT_SECONDS,
+    ) -> Any:
         async with self._get_client_io_lock():
-            return await asyncio.to_thread(func, *args)
+            task = asyncio.to_thread(func, *args)
+            if timeout is None:
+                return await task
+            return await asyncio.wait_for(task, timeout=float(max(0.1, timeout)))
 
     async def check_buy_pre_submit_gate(
         self,

@@ -20,6 +20,8 @@ from services.signal_bus import (
     set_trade_signal_status as project_trade_signal_status,
     upsert_trade_signal,
 )
+from services.strategy_loader import strategy_loader
+from services.strategy_sdk import StrategySDK
 from services.ws_feeds import get_feed_manager
 from utils.logger import get_logger
 from utils.utcnow import utcnow
@@ -88,6 +90,44 @@ def _normalize_datetime(value: Any) -> datetime | None:
     except Exception:
         return None
     return _to_utc(parsed)
+
+
+def _opportunity_signal_expires_at(now: datetime, opportunity: Opportunity, default_ttl_minutes: int) -> datetime:
+    strategy_key = str(getattr(opportunity, "strategy", "") or "").strip().lower()
+    try:
+        instance = strategy_loader.get_instance(strategy_key) if strategy_key else None
+    except Exception:
+        instance = None
+    candidates: list[Any] = []
+    config = getattr(instance, "config", None)
+    if isinstance(config, dict):
+        candidates.extend(
+            [
+                config.get("retention_max_age_minutes"),
+                config.get("retention_window"),
+                config.get("retention_period"),
+                config.get("retention_duration"),
+                config.get("opportunity_ttl_minutes"),
+                config.get("opportunity_ttl"),
+            ]
+        )
+    candidates.extend(
+        [
+            getattr(instance, "retention_max_age_minutes", None),
+            getattr(instance, "retention_window", None),
+            getattr(instance, "opportunity_ttl_minutes", None),
+            getattr(opportunity, "retention_max_age_minutes", None),
+            getattr(opportunity, "retention_window", None),
+            getattr(opportunity, "opportunity_ttl_minutes", None),
+        ]
+    )
+    for candidate in candidates:
+        parsed = StrategySDK.parse_duration_minutes(candidate)
+        if parsed is None:
+            continue
+        ttl_minutes = max(1, min(int(parsed), 60 * 24 * 90))
+        return now + timedelta(minutes=ttl_minutes)
+    return now + timedelta(minutes=max(1, int(default_ttl_minutes or 120)))
 
 
 def _normalize_text_list(raw: Any) -> list[str]:
@@ -398,7 +438,7 @@ class IntentRuntime:
         self._next_runtime_sequence += 1
         return sequence
 
-    def _clear_deferred_state_locked(self, signal_id: str) -> None:
+    def _clear_deferred_state_locked(self, signal_id: str, *, clear_snapshot_state: bool = True) -> None:
         existing_tokens = self._deferred_tokens_by_signal_id.pop(signal_id, set())
         for token_id in existing_tokens:
             signal_ids = self._deferred_signal_ids_by_token.get(token_id)
@@ -407,6 +447,12 @@ class IntentRuntime:
             signal_ids.discard(signal_id)
             if not signal_ids:
                 self._deferred_signal_ids_by_token.pop(token_id, None)
+        if clear_snapshot_state:
+            snapshot = self._signals_by_id.get(signal_id)
+            if snapshot is not None:
+                snapshot["deferred_until_ws"] = False
+                snapshot["deferred_reason"] = None
+                snapshot["deferred_started_at"] = None
 
     def _set_deferred_state_locked(
         self,
@@ -415,7 +461,15 @@ class IntentRuntime:
         required_token_ids: list[str],
         reason: str,
     ) -> None:
-        self._clear_deferred_state_locked(signal_id)
+        snapshot = self._signals_by_id.get(signal_id)
+        deferred_started_at = None
+        if snapshot is not None and bool(snapshot.get("deferred_until_ws")):
+            deferred_started_at = _to_iso(
+                _normalize_datetime(snapshot.get("deferred_started_at"))
+                or _normalize_datetime(snapshot.get("updated_at"))
+                or utcnow()
+            )
+        self._clear_deferred_state_locked(signal_id, clear_snapshot_state=False)
         token_set = {token_id for token_id in _normalize_token_ids(required_token_ids) if token_id}
         if token_set:
             self._deferred_tokens_by_signal_id[signal_id] = set(token_set)
@@ -426,6 +480,7 @@ class IntentRuntime:
             snapshot["required_token_ids"] = sorted(token_set)
             snapshot["deferred_until_ws"] = True
             snapshot["deferred_reason"] = str(reason or "strict_ws_context_missing")
+            snapshot["deferred_started_at"] = deferred_started_at or _to_iso(utcnow())
 
     def _tokens_have_fresh_ws_quotes(
         self,
@@ -678,12 +733,14 @@ class IntentRuntime:
                 if snapshot is None:
                     self._clear_deferred_state_locked(signal_id)
                     continue
-                updated_at = _normalize_datetime(snapshot.get("updated_at"))
-                if updated_at is None:
-                    updated_at = _normalize_datetime(snapshot.get("created_at"))
-                if updated_at is None:
+                deferred_started_at = _normalize_datetime(snapshot.get("deferred_started_at"))
+                if deferred_started_at is None:
+                    deferred_started_at = _normalize_datetime(snapshot.get("updated_at"))
+                if deferred_started_at is None:
+                    deferred_started_at = _normalize_datetime(snapshot.get("created_at"))
+                if deferred_started_at is None:
                     continue
-                age_seconds = (now - updated_at).total_seconds()
+                age_seconds = (now - deferred_started_at).total_seconds()
                 if age_seconds < max_age:
                     continue
                 self._clear_deferred_state_locked(signal_id)
@@ -827,6 +884,7 @@ class IntentRuntime:
                     "runtime_lane": _runtime_lane_for_source(str(row.get("source") or "")),
                     "deferred_until_ws": False,
                     "deferred_reason": None,
+                    "deferred_started_at": None,
                     "created_at": _to_iso(_normalize_datetime(row.get("created_at"))),
                     "updated_at": _to_iso(_normalize_datetime(row.get("updated_at"))),
                 }
@@ -910,7 +968,7 @@ class IntentRuntime:
                     getattr(opportunity, "strategy", None),
                     market_id,
                 )
-                expires_at = getattr(opportunity, "resolution_date", None) or (now + timedelta(minutes=default_ttl_minutes))
+                expires_at = _opportunity_signal_expires_at(now, opportunity, default_ttl_minutes)
                 payload = copy.deepcopy(payload_json or {})
                 strategy_context = copy.deepcopy(strategy_context_json or {})
                 payload["ingested_at"] = _to_iso(now)
@@ -957,6 +1015,7 @@ class IntentRuntime:
                     "runtime_lane": _runtime_lane_for_source(source),
                     "deferred_until_ws": False,
                     "deferred_reason": None,
+                    "deferred_started_at": None,
                     "created_at": _to_iso(now),
                     "updated_at": _to_iso(now),
                 }
@@ -976,7 +1035,8 @@ class IntentRuntime:
                         continue
                     incoming_snapshot["status"] = "pending"
                     incoming_snapshot["effective_price"] = None
-                    self._clear_deferred_state_locked(existing["id"])
+                    existing_deferred_started_at = existing.get("deferred_started_at")
+                    self._clear_deferred_state_locked(existing["id"], clear_snapshot_state=False)
                     _ea = str(
                         (incoming_snapshot.get("payload_json") or {})
                         .get("strategy_runtime", {})
@@ -995,6 +1055,9 @@ class IntentRuntime:
                         )
                         incoming_snapshot["deferred_until_ws"] = True
                         incoming_snapshot["deferred_reason"] = "awaiting_post_arm_ws_tick"
+                        incoming_snapshot["deferred_started_at"] = (
+                            existing.get("deferred_started_at") or existing_deferred_started_at or _to_iso(now)
+                        )
                         incoming_snapshot["runtime_sequence"] = None
                     elif (
                         normalized_source in _PREWARM_SOURCES
@@ -1011,6 +1074,9 @@ class IntentRuntime:
                         )
                         incoming_snapshot["deferred_until_ws"] = True
                         incoming_snapshot["deferred_reason"] = "prewarm_waiting_for_strict_ws_quote"
+                        incoming_snapshot["deferred_started_at"] = (
+                            existing.get("deferred_started_at") or existing_deferred_started_at or _to_iso(now)
+                        )
                         incoming_snapshot["runtime_sequence"] = None
                     else:
                         incoming_snapshot["runtime_sequence"] = self._allocate_runtime_sequence_locked()
@@ -1044,6 +1110,7 @@ class IntentRuntime:
                         )
                         incoming_snapshot["deferred_until_ws"] = True
                         incoming_snapshot["deferred_reason"] = "awaiting_post_arm_ws_tick"
+                        incoming_snapshot["deferred_started_at"] = _to_iso(now)
                     elif (
                         normalized_source in _PREWARM_SOURCES
                         and incoming_snapshot["required_token_ids"]
@@ -1059,6 +1126,7 @@ class IntentRuntime:
                         )
                         incoming_snapshot["deferred_until_ws"] = True
                         incoming_snapshot["deferred_reason"] = "prewarm_waiting_for_strict_ws_quote"
+                        incoming_snapshot["deferred_started_at"] = _to_iso(now)
                     else:
                         incoming_snapshot["runtime_sequence"] = self._allocate_runtime_sequence_locked()
                     self._signals_by_id[signal_id] = incoming_snapshot
@@ -1337,7 +1405,8 @@ class IntentRuntime:
 
         _UPSERT_CHUNK_SIZE = 50
         snapshot_items = list(snapshots.values())
-        signal_types_by_source: set[str] = set()
+        signal_types_in_batch: set[str] = set()
+        strategy_types_in_batch: set[str] = set()
 
         # Process in chunks to avoid holding a connection for minutes
         for chunk_start in range(0, max(len(snapshot_items), 1), _UPSERT_CHUNK_SIZE):
@@ -1348,7 +1417,10 @@ class IntentRuntime:
                 for snapshot in chunk:
                     signal_type = str(snapshot.get("signal_type") or "").strip().lower()
                     if signal_type:
-                        signal_types_by_source.add(signal_type)
+                        signal_types_in_batch.add(signal_type)
+                    strategy_type = str(snapshot.get("strategy_type") or "").strip().lower()
+                    if strategy_type:
+                        strategy_types_in_batch.add(strategy_type)
                     row = await upsert_trade_signal(
                         session,
                         source=str(snapshot.get("source") or source),
@@ -1388,7 +1460,8 @@ class IntentRuntime:
                     session,
                     source=source,
                     keep_dedupe_keys=keep_dedupe_keys,
-                    signal_types=sorted(signal_types_by_source),
+                    signal_types=sorted(signal_types_in_batch),
+                    strategy_types=sorted(strategy_types_in_batch),
                     commit=False,
                 )
                 await session.commit()

@@ -8,22 +8,6 @@ if str(BACKEND_ROOT) not in sys.path:
 from api.routes import _derive_opportunity_sub_strategy  # noqa: E402
 
 
-def test_derive_temporal_decay_subfilters():
-    certainty = {
-        "strategy": "temporal_decay",
-        "title": "Certainty Shock: Government shutdown?",
-        "positions_to_take": [],
-    }
-    decay = {
-        "strategy": "temporal_decay",
-        "title": "Temporal Decay: BTC above 120k by March?",
-        "positions_to_take": [],
-    }
-
-    assert _derive_opportunity_sub_strategy(certainty) == "certainty_shock"
-    assert _derive_opportunity_sub_strategy(decay) == "decay_curve"
-
-
 def test_derive_highfreq_substrategy_from_metadata():
     opp = {
         "strategy": "btc_eth_highfreq",

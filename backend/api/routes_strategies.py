@@ -51,11 +51,6 @@ from services.strategy_versioning import (
 )
 from services.strategy_sdk import StrategySDK
 from services.strategy_loader import strategy_loader as _strategy_loader
-from services.strategies.late_favorite_alpha import (
-    late_favorite_alpha_config_schema,
-    late_favorite_alpha_defaults,
-    validate_late_favorite_alpha_config,
-)
 from services.strategies.news_edge import (
     news_edge_config_schema,
     news_edge_defaults,
@@ -134,8 +129,6 @@ def _normalize_strategy_config_for_source(
     normalized_source_key = str(source_key or "scanner").strip().lower()
     normalized_slug = str(strategy_slug or "").strip().lower()
     payload = dict(config or {})
-    if normalized_slug == "late_favorite_alpha":
-        return validate_late_favorite_alpha_config(payload)
     if normalized_source_key == "traders":
         if normalized_slug == "traders_copy_trade":
             payload = validate_traders_copy_trade_config(payload)
@@ -1042,8 +1035,6 @@ async def get_unified_docs():
                 "StrategySDK.pool_eligibility_config_schema()": "Schema for pool eligibility tuning",
                 "news_edge_defaults()": "Default news strategy filters",
                 "news_edge_config_schema()": "Schema for news strategy filters",
-                "late_favorite_alpha_defaults()": "Default late-favorite alpha strategy params",
-                "late_favorite_alpha_config_schema()": "Schema for late-favorite alpha params",
                 "CRYPTO_HF_SCOPE_DEFAULTS": "Default high-frequency crypto scope and exit controls",
                 "crypto_highfreq_scope_config_schema()": "Schema for high-frequency crypto scope controls",
                 "StrategySDK.strategy_retention_config_schema()": "Schema for max_opportunities and retention_window",
@@ -1057,7 +1048,6 @@ async def get_unified_docs():
                 "validate_traders_copy_trade_config(config)": "Normalize explicit traders copy-trade params",
                 "StrategySDK.validate_pool_eligibility_config(config)": "Normalize smart-pool eligibility params",
                 "validate_news_edge_config(config)": "Normalize news filter params",
-                "validate_late_favorite_alpha_config(config)": "Normalize late-favorite alpha params",
                 "StrategySDK.normalize_strategy_retention_config(config)": "Normalize retention aliases to retention_max_age_minutes",
                 "StrategySDK.normalize_reverse_intent(value, ...)": "Normalize stop-and-reverse payload for should_exit()",
                 "StrategySDK.parse_duration_minutes(value)": "Parse durations like 15m, 2h, 3d into minutes",
@@ -1100,8 +1090,6 @@ async def get_unified_docs():
             "crypto_highfreq_scope_schema": _get_crypto_module_fn("crypto_highfreq_scope_config_schema"),
             "news_edge_defaults": news_edge_defaults(),
             "news_edge_schema": news_edge_config_schema(),
-            "late_favorite_alpha_defaults": late_favorite_alpha_defaults(),
-            "late_favorite_alpha_schema": late_favorite_alpha_config_schema(),
             "traders_copy_trade_defaults": traders_copy_trade_defaults(),
             "traders_copy_trade_schema": traders_copy_trade_config_schema(),
         },

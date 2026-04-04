@@ -1,4 +1,6 @@
+import asyncio
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -10,7 +12,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from services import live_execution_adapter
-from services.live_execution_service import OrderStatus
+from services.live_execution_service import OrderStatus, live_execution_service
 
 
 @pytest.mark.asyncio
@@ -147,3 +149,9 @@ async def test_execute_live_order_aggressive_quote_respects_max_execution_price(
     assert result.payload["resolved_price"] == pytest.approx(0.92)
     _, kwargs = place_mock.await_args
     assert kwargs["price"] == pytest.approx(0.92)
+
+
+@pytest.mark.asyncio
+async def test_live_execution_service_client_io_times_out():
+    with pytest.raises(asyncio.TimeoutError):
+        await live_execution_service._run_client_io(lambda: time.sleep(0.5), timeout=0.01)

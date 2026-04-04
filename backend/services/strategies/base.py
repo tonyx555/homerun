@@ -1208,6 +1208,7 @@ class BaseStrategy(ABC):
         config = getattr(self, "config", {}) or {}
         market_by_id = {str(m.id): m for m in markets}
         legs: list[ExecutionLeg] = []
+        single_market = markets[0] if len(markets) == 1 else None
 
         for index, position in enumerate(positions):
             market_id = str(
@@ -1215,11 +1216,14 @@ class BaseStrategy(ABC):
                 or position.get("id")
                 or position.get("market")
                 or (markets[index].id if index < len(markets) else "")
+                or (single_market.id if single_market is not None else "")
             ).strip()
             if not market_id:
                 continue
 
             market = market_by_id.get(market_id)
+            if market is None and single_market is not None and str(single_market.id) == market_id:
+                market = single_market
             action = str(position.get("action") or position.get("side") or "").strip().lower()
             side = "sell" if action.startswith("sell") else "buy"
             outcome = str(position.get("outcome") or "").strip().lower() or None
@@ -1233,7 +1237,9 @@ class BaseStrategy(ABC):
                     leg_id=f"leg_{index + 1}",
                     market_id=market_id,
                     market_question=str(
-                        position.get("market_question") or (market.question if market is not None else "")
+                        position.get("market_question")
+                        or (market.question if market is not None else "")
+                        or (single_market.question if single_market is not None else "")
                     )
                     or None,
                     token_id=token_id,
@@ -1555,6 +1561,11 @@ class BaseStrategy(ABC):
             market_roster=market_roster,
             is_guaranteed=is_guaranteed,
         )
+        if execution_plan is None or len(list(execution_plan.legs or [])) != len(enriched_positions):
+            raise RuntimeError(
+                f"{self.strategy_type} created {len(enriched_positions)} position(s) but execution plan "
+                f"contains {len(list(execution_plan.legs or [])) if execution_plan is not None else 0} leg(s)."
+            )
         plan_metadata = execution_plan.metadata if execution_plan is not None else {}
         market_coverage = plan_metadata.get("market_coverage") if isinstance(plan_metadata, dict) else None
         if (
