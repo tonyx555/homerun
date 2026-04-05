@@ -1,9 +1,10 @@
 import asyncio
 import sys
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -114,6 +115,14 @@ class _FakeReferenceRuntime:
 
     def get_status(self):
         return {}
+
+
+class _FakeAsyncSessionContext:
+    async def __aenter__(self):
+        return object()
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
 
 
 def test_reference_runtime_notifies_on_binance_and_chainlink_updates(monkeypatch):
@@ -248,6 +257,38 @@ def test_rebuild_crypto_rows_from_cache_refreshes_time_derived_fields():
     assert row["combined"] == pytest.approx(1.0)
     assert row["oracle_price"] == 70000.0
     assert row["oracle_source"] == "chainlink"
+
+
+@pytest.mark.asyncio
+async def test_refresh_event_catalog_skips_full_reload_when_catalog_unchanged(monkeypatch):
+    runtime = market_runtime.MarketRuntime()
+    updated_at = datetime(2026, 4, 5, 12, 0, tzinfo=timezone.utc)
+    metadata_only = ([], [], {"updated_at": updated_at})
+    full_catalog = (
+        [],
+        [
+            {
+                "id": "market-1",
+                "condition_id": "condition-1",
+                "clob_token_ids": ["yes-1", "no-1"],
+            }
+        ],
+        {"updated_at": updated_at},
+    )
+    read_catalog = AsyncMock(side_effect=[metadata_only, full_catalog, metadata_only])
+
+    monkeypatch.setattr(market_runtime, "AsyncSessionLocal", lambda: _FakeAsyncSessionContext())
+    monkeypatch.setattr(market_runtime.shared_state, "read_market_catalog", read_catalog)
+
+    await runtime._refresh_event_catalog(force=True)
+    assert runtime._event_catalog_updated_at == updated_at.isoformat()
+    assert runtime._event_catalog_markets["market-1"]["id"] == "market-1"
+
+    runtime._last_catalog_refresh_mono = 0.0
+    await runtime._refresh_event_catalog()
+
+    assert read_catalog.await_count == 3
+    assert runtime._event_catalog_markets["condition-1"]["id"] == "market-1"
 
 
 @pytest.mark.asyncio

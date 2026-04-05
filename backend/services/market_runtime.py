@@ -30,6 +30,9 @@ _WS_REACTIVE_DEBOUNCE_SECONDS = max(0.01, float(getattr(settings, "CRYPTO_WS_REA
 _CATALOG_REFRESH_SECONDS = 5.0
 _CRYPTO_SNAPSHOT_PERSIST_INTERVAL_SECONDS = 5.0
 _CRYPTO_SNAPSHOT_MARKETS_LIMIT = 64
+_CRYPTO_SNAPSHOT_HISTORY_TAIL_LIMIT = 12
+_CRYPTO_SNAPSHOT_ORACLE_HISTORY_LIMIT = 24
+_CRYPTO_SNAPSHOT_UPCOMING_MARKETS_LIMIT = 8
 _FULL_REFRESH_FLOOR_SECONDS = 0.5
 _ML_PRUNE_INTERVAL_SECONDS = 3600.0
 _ML_RUNTIME_GATE_TTL_SECONDS = 10.0
@@ -62,6 +65,45 @@ def _parse_iso_utc(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _metadata_updated_at_iso(value: Any) -> str | None:
+    if hasattr(value, "isoformat"):
+        try:
+            return str(value.isoformat())
+        except Exception:
+            return None
+    text = str(value or "").strip()
+    return text or None
+
+
+def _compact_crypto_snapshot_markets(markets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    compact_rows: list[dict[str, Any]] = []
+    for raw_row in markets[:_CRYPTO_SNAPSHOT_MARKETS_LIMIT]:
+        if not isinstance(raw_row, dict):
+            continue
+        row = dict(raw_row)
+
+        history_tail = row.get("history_tail")
+        if isinstance(history_tail, list):
+            row["history_tail"] = copy.deepcopy(history_tail[-_CRYPTO_SNAPSHOT_HISTORY_TAIL_LIMIT:])
+        else:
+            row.pop("history_tail", None)
+
+        oracle_history = row.get("oracle_history")
+        if isinstance(oracle_history, list):
+            row["oracle_history"] = copy.deepcopy(oracle_history[-_CRYPTO_SNAPSHOT_ORACLE_HISTORY_LIMIT:])
+        else:
+            row.pop("oracle_history", None)
+
+        upcoming_markets = row.get("upcoming_markets")
+        if isinstance(upcoming_markets, list):
+            row["upcoming_markets"] = copy.deepcopy(upcoming_markets[:_CRYPTO_SNAPSHOT_UPCOMING_MARKETS_LIMIT])
+        else:
+            row.pop("upcoming_markets", None)
+
+        compact_rows.append(row)
+    return compact_rows
 
 
 def _near_market_boundary() -> bool:
@@ -316,37 +358,49 @@ class MarketRuntime:
     def get_crypto_markets(self) -> list[dict[str, Any]]:
         return copy.deepcopy(self._crypto_markets)
 
-    def get_crypto_status(self) -> dict[str, Any]:
+    def _get_ws_status(self) -> dict[str, Any]:
         ws_status = {}
         if self._feed_manager is not None:
             try:
                 ws_status = self._feed_manager.health_check()
             except Exception:
                 ws_status = {}
+        return ws_status
+
+    def _build_crypto_stats(
+        self,
+        *,
+        include_markets: bool = False,
+    ) -> dict[str, Any]:
+        stats = {
+            "market_count": len(self._crypto_markets),
+            "oracle_prices": self.get_oracle_prices(),
+            "trigger": self._last_crypto_trigger,
+            "ws_feeds": self._get_ws_status(),
+            **self._reference_runtime.get_status(),
+            "dispatch": {
+                "total_dispatches": self._dispatch_count,
+                "last_at": self._dispatch_last_at,
+                "last_trigger": self._dispatch_last_trigger,
+                "last_handlers": self._dispatch_last_handlers,
+                "last_opportunities": self._dispatch_last_opportunities,
+                "last_signals_published": self._dispatch_last_signals_published,
+                "last_error": self._dispatch_last_error,
+            },
+            "filter_diagnostics": self._dispatch_filter_diagnostics,
+        }
+        if include_markets:
+            stats["markets"] = self.get_crypto_markets()
+        return stats
+
+    def get_crypto_status(self) -> dict[str, Any]:
         return {
             "running": bool(self._started),
             "enabled": True,
             "current_activity": self._current_activity,
             "last_run_at": self._last_crypto_refresh_at,
             "last_error": self._last_error,
-            "stats": {
-                "market_count": len(self._crypto_markets),
-                "markets": self.get_crypto_markets(),
-                "oracle_prices": self.get_oracle_prices(),
-                "trigger": self._last_crypto_trigger,
-                "ws_feeds": ws_status,
-                **self._reference_runtime.get_status(),
-                "dispatch": {
-                    "total_dispatches": self._dispatch_count,
-                    "last_at": self._dispatch_last_at,
-                    "last_trigger": self._dispatch_last_trigger,
-                    "last_handlers": self._dispatch_last_handlers,
-                    "last_opportunities": self._dispatch_last_opportunities,
-                    "last_signals_published": self._dispatch_last_signals_published,
-                    "last_error": self._dispatch_last_error,
-                },
-                "filter_diagnostics": self._dispatch_filter_diagnostics,
-            },
+            "stats": self._build_crypto_stats(include_markets=True),
         }
 
     def _last_crypto_refresh_datetime(self) -> datetime | None:
@@ -368,13 +422,11 @@ class MarketRuntime:
         force: bool = False,
     ) -> None:
         resolved_control = dict(control or await self._read_crypto_control())
-        status = self.get_crypto_status()
-        stats = status.get("stats") if isinstance(status.get("stats"), dict) else {}
+        stats = self._build_crypto_stats(include_markets=False)
         persisted_stats = summarize_worker_stats(stats)
-        markets = stats.get("markets")
-        if isinstance(markets, list) and markets:
-            persisted_stats["markets"] = copy.deepcopy(markets[:_CRYPTO_SNAPSHOT_MARKETS_LIMIT])
-            persisted_stats["markets_count"] = len(markets)
+        if self._crypto_markets:
+            persisted_stats["markets"] = _compact_crypto_snapshot_markets(self._crypto_markets)
+            persisted_stats["markets_count"] = len(self._crypto_markets)
         oracle_prices = stats.get("oracle_prices")
         if isinstance(oracle_prices, dict) and oracle_prices:
             persisted_stats["oracle_prices"] = copy.deepcopy(oracle_prices)
@@ -383,7 +435,7 @@ class MarketRuntime:
         runtime_status.update_crypto(
             running=True,
             enabled=enabled and not paused,
-            current_activity=str(status.get("current_activity") or self._current_activity or "Idle"),
+            current_activity=str(self._current_activity or "Idle"),
             interval_seconds=int(resolved_control.get("interval_seconds") or 1),
             last_run_at=self._last_crypto_refresh_at,
             last_error=self._last_error,
@@ -399,7 +451,7 @@ class MarketRuntime:
                 "crypto",
                 running=True,
                 enabled=enabled and not paused,
-                current_activity=str(status.get("current_activity") or self._current_activity or "Idle"),
+                current_activity=str(self._current_activity or "Idle"),
                 interval_seconds=int(resolved_control.get("interval_seconds") or 1),
                 last_run_at=self._last_crypto_refresh_datetime(),
                 last_error=self._last_error,
@@ -624,6 +676,22 @@ class MarketRuntime:
         if not force and (time.monotonic() - self._last_catalog_refresh_mono) < _CATALOG_REFRESH_SECONDS:
             return
         async with AsyncSessionLocal() as session:
+            _events, _markets, metadata = await shared_state.read_market_catalog(
+                session,
+                include_events=False,
+                include_markets=False,
+                validate=False,
+            )
+        updated_at_iso = _metadata_updated_at_iso(metadata.get("updated_at"))
+        if (
+            not force
+            and self._event_catalog_markets
+            and updated_at_iso
+            and updated_at_iso == self._event_catalog_updated_at
+        ):
+            self._last_catalog_refresh_mono = time.monotonic()
+            return
+        async with AsyncSessionLocal() as session:
             _events, markets, metadata = await shared_state.read_market_catalog(
                 session,
                 include_events=False,
@@ -643,9 +711,8 @@ class MarketRuntime:
             for key in (market_id, condition_id, *token_ids):
                 if key:
                     lookup[key] = row
-        updated_at = metadata.get("updated_at")
         self._event_catalog_markets = lookup
-        self._event_catalog_updated_at = updated_at.isoformat() if hasattr(updated_at, "isoformat") else None
+        self._event_catalog_updated_at = _metadata_updated_at_iso(metadata.get("updated_at"))
         self._last_catalog_refresh_mono = time.monotonic()
 
     def _build_event_market_snapshot(self, market: dict[str, Any]) -> dict[str, Any]:

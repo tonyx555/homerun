@@ -2835,20 +2835,30 @@ class ArbitrageScanner:
         event_fetch_candidates = [slug for slug in event_slug_candidates if _should_refetch_touched_event(slug)]
         delta_events: list = []
         if event_fetch_candidates:
+            event_fetch_batch_size = max(1, min(25, len(event_fetch_candidates)))
+            fetch_started_at = _time.monotonic()
+            fetched_slugs = 0
             try:
-                delta_events = await asyncio.wait_for(
-                    self.market_data.get_events_by_slugs(
-                        event_fetch_candidates,
-                        closed=False,
-                    ),
-                    timeout=event_fetch_timeout,
-                )
+                for batch_start in range(0, len(event_fetch_candidates), event_fetch_batch_size):
+                    batch_slugs = event_fetch_candidates[batch_start : batch_start + event_fetch_batch_size]
+                    remaining_timeout = event_fetch_timeout - (_time.monotonic() - fetch_started_at)
+                    if remaining_timeout <= 0:
+                        raise asyncio.TimeoutError()
+                    batch_events = await asyncio.wait_for(
+                        self.market_data.get_events_by_slugs(
+                            batch_slugs,
+                            closed=False,
+                        ),
+                        timeout=remaining_timeout,
+                    )
+                    delta_events.extend(batch_events)
+                    fetched_slugs += len(batch_slugs)
             except asyncio.TimeoutError:
                 logger.warning(
                     f"Incremental event fetch timed out after {event_fetch_timeout:.1f}s "
-                    f"for {len(event_fetch_candidates)} touched event slugs; continuing with cached/derived events"
+                    f"for {len(event_fetch_candidates)} touched event slugs "
+                    f"({fetched_slugs} fetched before timeout); continuing with cached/derived events"
                 )
-                delta_events = []
             except Exception as e:
                 error_name = type(e).__name__
                 error_message = str(e).strip()
@@ -2856,7 +2866,6 @@ class ArbitrageScanner:
                     logger.warning(f"  Incremental event fetch failed (non-fatal) [{error_name}]: {error_message}")
                 else:
                     logger.warning(f"  Incremental event fetch failed (non-fatal) [{error_name}]")
-                delta_events = []
 
         market_map: dict[str, object] = {}
         for market in self._cached_markets:

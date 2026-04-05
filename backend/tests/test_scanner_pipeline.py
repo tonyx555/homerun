@@ -1,5 +1,6 @@
 """Tests for ArbitrageScanner: initialisation, scan pipeline, filtering, lifecycle."""
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -353,6 +354,55 @@ class TestScanPipeline:
             await scanner.refresh_catalog_incremental()
 
         mock_polymarket_client.get_events_by_slugs.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_refresh_catalog_incremental_keeps_partial_event_progress_when_late_batch_times_out(
+        self,
+        mock_polymarket_client,
+    ):
+        delta_markets = [
+            Market(
+                id=f"market-{idx}",
+                condition_id=f"condition-{idx}",
+                question=f"Will example {idx} happen?",
+                slug=f"example-{idx}",
+                event_slug=f"event-{idx}",
+                neg_risk=False,
+            )
+            for idx in range(30)
+        ]
+        first_batch_events = [
+            Event(
+                id=f"event-{idx}",
+                slug=f"event-{idx}",
+                title=f"Event {idx}",
+                category="Politics",
+                markets=[delta_markets[idx].model_copy(deep=True)],
+                neg_risk=False,
+            )
+            for idx in range(25)
+        ]
+
+        mock_polymarket_client.get_recent_markets.return_value = [market.model_copy(deep=True) for market in delta_markets]
+        mock_polymarket_client.get_events_by_slugs = AsyncMock(
+            side_effect=[first_batch_events, asyncio.TimeoutError()]
+        )
+
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+        scanner._cached_markets = [delta_markets[0].model_copy(deep=True)]
+        scanner._cached_events = []
+
+        with (
+            patch.object(scanner, "_ensure_runtime_strategies_loaded", new_callable=AsyncMock),
+            patch.object(scanner, "_set_activity", new_callable=AsyncMock),
+            patch("services.scanner.settings.WS_FEED_ENABLED", False),
+            patch("services.scanner.settings.NEWS_EDGE_ENABLED", False),
+        ):
+            await scanner.refresh_catalog_incremental()
+
+        assert mock_polymarket_client.get_events_by_slugs.await_count == 2
+        assert len(scanner._cached_markets) == 30
+        assert {event.slug for event in scanner._cached_events} == {f"event-{idx}" for idx in range(25)}
 
     def test_enforce_catalog_caps_keeps_event_rosters_atomic(self, mock_polymarket_client):
         scanner = _build_scanner(mock_client=mock_polymarket_client)
