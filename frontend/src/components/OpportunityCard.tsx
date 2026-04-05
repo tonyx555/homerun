@@ -437,6 +437,10 @@ function OpportunityCard({
 
   // Sparkline data
   const market = opportunity.markets[0]
+  const primaryMarketQuestion = String(market?.question || '').trim()
+  const preferMarketQuestionTitle = strategySdk === 'tail_end_carry' && primaryMarketQuestion.length > 0
+  const headerTitle = preferMarketQuestionTitle ? primaryMarketQuestion : opportunity.title
+  const headerSubtitle = preferMarketQuestionTitle ? opportunity.title : null
   const marketYesPrice = resolveMarketYesPrice(market)
   const marketNoPrice = resolveMarketNoPrice(market)
   const weather = market?.weather
@@ -786,8 +790,8 @@ function OpportunityCard({
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-1.5">
-                <h3 className="text-sm font-semibold truncate max-w-[620px]" title={opportunity.title}>
-                  {opportunity.title}
+                <h3 className="text-sm font-semibold truncate max-w-[620px]" title={headerTitle}>
+                  {headerTitle}
                 </h3>
                 <Badge variant="outline" className={cn("h-5 px-1.5 text-[10px]", STRATEGY_COLORS[opportunity.strategy])}>
                   {STRATEGY_NAMES[opportunity.strategy] || opportunity.strategy}
@@ -799,7 +803,7 @@ function OpportunityCard({
                 )}
               </div>
               <p className="mt-1 text-[11px] text-muted-foreground truncate max-w-[620px]">
-                {opportunity.description || opportunity.title}
+                {headerSubtitle || opportunity.description || opportunity.title}
               </p>
             </div>
             <div className="flex items-center gap-1 flex-shrink-0">
@@ -912,9 +916,16 @@ function OpportunityCard({
         </div>
 
         {/* ── Row 2: Title ── */}
-        <h3 className="text-sm font-medium text-foreground truncate leading-tight" title={opportunity.title}>
-          {opportunity.title}
-        </h3>
+        <div className="min-w-0 space-y-0.5">
+          <h3 className="text-sm font-medium text-foreground truncate leading-tight" title={headerTitle}>
+            {headerTitle}
+          </h3>
+          {headerSubtitle && (
+            <p className="text-[11px] text-muted-foreground truncate" title={headerSubtitle}>
+              {headerSubtitle}
+            </p>
+          )}
+        </div>
 
         {/* ── Row 3: Sparkline + Metrics ── */}
         <div className="space-y-1.5">
@@ -1498,7 +1509,7 @@ function OpportunityCard({
                 className="relative z-10"
                 role="dialog"
                 aria-modal="true"
-                aria-label={`Expanded opportunity: ${opportunity.title}`}
+                aria-label={`Expanded opportunity: ${headerTitle}`}
                 initial={{ scale: 0.94, opacity: 0, y: 22 }}
                 animate={{ scale: 1, opacity: 1, y: 0 }}
                 exit={{ scale: 0.97, opacity: 0, y: 14 }}
