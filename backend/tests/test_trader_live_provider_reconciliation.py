@@ -49,6 +49,51 @@ async def _seed_trader(session, trader_id: str) -> None:
     await session.commit()
 
 
+async def _seed_decision(
+    session,
+    *,
+    trader_id: str,
+    decision_id: str,
+    signal_id: str,
+    market_id: str,
+    market_question: str,
+    direction: str,
+    source: str = "scanner",
+    strategy_key: str = "generic_strategy",
+    strategy_version: int = 1,
+) -> None:
+    created_at = utcnow()
+    session.add(
+        TradeSignal(
+            id=signal_id,
+            source=source,
+            signal_type="entry",
+            strategy_type=strategy_key,
+            market_id=market_id,
+            market_question=market_question,
+            direction=direction,
+            entry_price=0.5,
+            dedupe_key=f"dedupe-{signal_id}",
+            payload_json={},
+            created_at=created_at,
+            updated_at=created_at,
+        )
+    )
+    session.add(
+        TraderDecision(
+            id=decision_id,
+            trader_id=trader_id,
+            signal_id=signal_id,
+            source=source,
+            strategy_key=strategy_key,
+            strategy_version=strategy_version,
+            decision="selected",
+            created_at=created_at,
+        )
+    )
+    await session.flush()
+
+
 @pytest.mark.asyncio
 async def test_sync_inventory_ignores_unfilled_live_open_orders(tmp_path):
     engine, session_factory = await _build_session_factory(tmp_path)
@@ -521,6 +566,16 @@ async def test_recover_missing_live_trader_orders_promotes_failed_existing_entry
     try:
         async with session_factory() as session:
             await _seed_trader(session, trader_id)
+            await _seed_decision(
+                session,
+                trader_id=trader_id,
+                decision_id="decision-existing-order",
+                signal_id="signal-existing-order",
+                market_id="market-manchester-ou",
+                market_question="Manchester City FC vs. Liverpool FC: O/U 4.5",
+                direction="buy_yes",
+                strategy_key="basic",
+            )
             now = utcnow()
             session.add(
                 TraderOrder(
@@ -600,6 +655,15 @@ async def test_recover_missing_live_trader_orders_finalizes_unfilled_existing_en
     try:
         async with session_factory() as session:
             await _seed_trader(session, trader_id)
+            await _seed_decision(
+                session,
+                trader_id=trader_id,
+                decision_id="decision-open-existing-order",
+                signal_id="signal-open-existing-order",
+                market_id="market-golf-winner",
+                market_question="Will Golfer X win the tournament?",
+                direction="buy_no",
+            )
             now = utcnow()
             session.add(
                 TraderOrder(

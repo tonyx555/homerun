@@ -611,6 +611,8 @@ def apply_platform_decision_gates(
         live_revalidation_sources = _normalize_text_list(params.get("require_live_revalidation_for_sources"))
         if not live_revalidation_sources:
             live_revalidation_sources = _normalize_text_list(params.get("require_market_data_age_for_sources"))
+        if not live_revalidation_sources:
+            live_revalidation_sources = ["crypto"]
         live_revalidation_required = False
 
         live_selected_price = safe_float(live_market_payload.get("live_selected_price"), None)
@@ -875,16 +877,21 @@ def apply_platform_decision_gates(
                 platform_gates.append(
                     {
                         "gate": "live_market_revalidation",
-                        "status": "passed" if live_revalidation_required else "skipped",
+                        "status": "passed" if live_age_ms is not None else "skipped",
                         "detail": (
-                            f"live_age_ms={live_age_ms:.0f} max={max_age_ms}"
-                            if live_revalidation_required and live_age_ms is not None
+                            (
+                                f"live_age_ms={live_age_ms:.0f} max={max_age_ms}"
+                                if live_revalidation_required
+                                else "Live market context present for optional revalidation"
+                            )
+                            if live_age_ms is not None
                             else "Live revalidation optional for this source"
                         ),
                         "payload": {
                             "source": source or None,
                             "timeframe": timeframe or None,
                             "required_sources": live_revalidation_sources,
+                            "revalidation_required": live_revalidation_required,
                             "live_selected_price": live_selected_price,
                             "live_market_fetched_at": (
                                 live_fetched_at.isoformat().replace("+00:00", "Z")

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from models import Event, ExecutionConstraints, ExecutionLeg, ExecutionPlan, Market, Opportunity
 from services.fee_model import fee_model

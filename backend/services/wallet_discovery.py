@@ -110,6 +110,12 @@ _TRADE_GAP_REANALYSIS_MIN_TOTAL_TRADES = 100
 _TRADE_GAP_REANALYSIS_MAX_RESOLVED_POSITIONS = 20
 _TRADE_GAP_REANALYSIS_MIN_RATIO = 10
 _TRADE_GAP_REANALYSIS_INTERVAL_HOURS = 4
+_DISCOVERY_CLOSED_POSITIONS_MAX = 150
+
+
+def _exception_text(exc: Exception) -> str:
+    text = str(exc).strip()
+    return text if text else repr(exc)
 
 
 def _is_retryable_db_error(exc: Exception) -> bool:
@@ -1307,20 +1313,65 @@ class WalletDiscoveryEngine:
         """
         address = address.lower()
 
-        try:
-            # Fetch data in parallel. Trade history is widened beyond 500 so
-            # strategy/rolling windows use deeper context while PnL truth comes
-            # from accuracy-first endpoints.
-            trades, positions, profile, pnl_snapshot, closed_positions = await asyncio.gather(
-                self.client.get_wallet_trades(address, limit=1500),
-                self.client.get_wallet_positions(address),
-                self.client.get_user_profile(address),
-                self.client.get_wallet_pnl(address, time_period="ALL"),
-                self.client.get_closed_positions_paginated(address, max_positions=500),
+        fetch_results = await asyncio.gather(
+            self.client.get_wallet_trades(address, limit=1500),
+            self.client.get_wallet_positions(address),
+            self.client.get_user_profile(address),
+            self.client.get_wallet_pnl(address, time_period="ALL"),
+            self.client.get_closed_positions_paginated(
+                address,
+                max_positions=_DISCOVERY_CLOSED_POSITIONS_MAX,
+            ),
+            return_exceptions=True,
+        )
+
+        trades_result, positions_result, profile_result, pnl_snapshot_result, closed_positions_result = fetch_results
+        fetch_failures: dict[str, str] = {}
+
+        if isinstance(trades_result, Exception):
+            fetch_failures["trades"] = _exception_text(trades_result)
+            trades: list[dict] = []
+        else:
+            trades = list(trades_result or [])
+
+        if isinstance(positions_result, Exception):
+            fetch_failures["positions"] = _exception_text(positions_result)
+            positions: list[dict] = []
+        else:
+            positions = list(positions_result or [])
+
+        if isinstance(profile_result, Exception):
+            fetch_failures["profile"] = _exception_text(profile_result)
+            profile: dict[str, Any] = {}
+        else:
+            profile = dict(profile_result or {})
+
+        if isinstance(pnl_snapshot_result, Exception):
+            fetch_failures["pnl"] = _exception_text(pnl_snapshot_result)
+            pnl_snapshot: dict[str, Any] = {}
+        else:
+            pnl_snapshot = dict(pnl_snapshot_result or {})
+
+        if isinstance(closed_positions_result, Exception):
+            fetch_failures["closed_positions"] = _exception_text(closed_positions_result)
+            closed_positions: list[dict] = []
+        else:
+            closed_positions = list(closed_positions_result or [])
+
+        if fetch_failures and not (trades or positions or closed_positions):
+            logger.error(
+                "Failed to fetch wallet analysis inputs",
+                address=address,
+                failures=fetch_failures,
             )
-        except Exception as e:
-            logger.error("Failed to fetch data for wallet %s: %s", address, e)
             return None
+
+        if fetch_failures:
+            logger.warning(
+                "Wallet analysis continuing with partial upstream data",
+                address=address,
+                failures=fetch_failures,
+            )
 
         if len(trades) < MIN_TRADES_FOR_ANALYSIS and not positions and len(closed_positions) < MIN_TRADES_FOR_ANALYSIS:
             return None

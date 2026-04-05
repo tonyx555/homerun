@@ -74,7 +74,6 @@ from services.trader_orchestrator.templates import (
 )
 from services.trader_order_verification import (
     TRADER_ORDER_HIDDEN_VERIFICATION_STATUSES,
-    TRADER_ORDER_VERIFICATION_DISPUTED,
     TRADER_ORDER_VERIFICATION_LOCAL,
     TRADER_ORDER_VERIFICATION_VENUE_FILL,
     TRADER_ORDER_VERIFICATION_VENUE_ORDER,
@@ -741,26 +740,28 @@ def _build_trade_bundle(
     if len(bundle_legs) <= 1:
         return None
 
+    mode_key = _normalize_mode_key(getattr(row, "mode", None))
     observed_token_ids = _observed_bundle_token_ids(row, sibling_rows)
-    if sibling_rows is not None and not observed_token_ids:
-        return None
     status_key = _normalize_status_key(getattr(row, "status", None))
-    if (
-        sibling_rows is not None
-        and status_key in {"failed", "cancelled", "rejected", "error"}
-        and not _row_counts_as_materialized_bundle_leg(row)
-    ):
-        return None
-    if observed_token_ids:
-        filtered_bundle_legs: list[dict[str, Any]] = []
-        seen_tokens: set[str] = set()
-        for leg in bundle_legs:
-            token_id = str(leg.get("token_id") or "").strip()
-            if not token_id or token_id not in observed_token_ids or token_id in seen_tokens:
-                continue
-            seen_tokens.add(token_id)
-            filtered_bundle_legs.append(leg)
-        bundle_legs = filtered_bundle_legs
+    if mode_key == "live":
+        if sibling_rows is not None and not observed_token_ids:
+            return None
+        if (
+            sibling_rows is not None
+            and status_key in {"failed", "cancelled", "rejected", "error"}
+            and not _row_counts_as_materialized_bundle_leg(row)
+        ):
+            return None
+        if observed_token_ids:
+            filtered_bundle_legs: list[dict[str, Any]] = []
+            seen_tokens: set[str] = set()
+            for leg in bundle_legs:
+                token_id = str(leg.get("token_id") or "").strip()
+                if not token_id or token_id not in observed_token_ids or token_id in seen_tokens:
+                    continue
+                seen_tokens.add(token_id)
+                filtered_bundle_legs.append(leg)
+            bundle_legs = filtered_bundle_legs
 
     if len(bundle_legs) <= 1:
         return None
@@ -2131,7 +2132,11 @@ async def recover_missing_live_trader_orders(
         (
             await session.execute(
                 select(LiveTradingOrder)
-                .where(func.lower(func.coalesce(LiveTradingOrder.status, "")).in_(("open", "filled", "pending", "partially_filled")))
+                .where(
+                    func.lower(func.coalesce(LiveTradingOrder.status, "")).in_(
+                        ("open", "filled", "pending", "partially_filled", "failed", "cancelled", "expired")
+                    )
+                )
                 .where(LiveTradingOrder.created_at >= _recovery_cutoff)
                 .order_by(desc(LiveTradingOrder.created_at))
             )
@@ -2142,7 +2147,13 @@ async def recover_missing_live_trader_orders(
     if not live_rows:
         if commit and session.in_transaction():
             await session.rollback()
-        return {"recovered_orders": 0, "affected_traders": 0, "ambiguous_orders": 0}
+        return {
+            "recovered_orders": 0,
+            "affected_traders": 0,
+            "ambiguous_orders": 0,
+            "collapsed_duplicates": 0,
+            "adopted_existing_orders": 0,
+        }
 
     live_orders_by_token: dict[str, LiveTradingPosition] = {}
     position_rows = list((await session.execute(select(LiveTradingPosition))).scalars().all())
@@ -2219,18 +2230,32 @@ async def recover_missing_live_trader_orders(
             canonical_row.updated_at = now
 
         provider_clob_id, live_order_id = _extract_live_order_authority_ids_from_payload(canonical_payload)
+        provider_order_id = str(
+            getattr(canonical_row, "provider_order_id", None)
+            or extract_trader_order_provider_order_id(canonical_payload)
+            or ""
+        ).strip()
         if provider_clob_id:
             existing_provider_rows_by_clob_id[provider_clob_id] = canonical_row
         if live_order_id:
             existing_rows_by_live_order_id[live_order_id] = canonical_row
+        if provider_order_id:
+            existing_rows_by_live_order_id[provider_order_id] = canonical_row
 
     for row in rows_without_authority:
         payload = dict(row.payload_json or {})
         provider_clob_id, live_order_id = _extract_live_order_authority_ids_from_payload(payload)
+        provider_order_id = str(
+            getattr(row, "provider_order_id", None)
+            or extract_trader_order_provider_order_id(payload)
+            or ""
+        ).strip()
         if provider_clob_id:
             existing_provider_rows_by_clob_id[provider_clob_id] = row
         if live_order_id:
             existing_rows_by_live_order_id[live_order_id] = row
+        if provider_order_id:
+            existing_rows_by_live_order_id[provider_order_id] = row
 
     recovered_rows: list[TraderOrder] = []
     affected_traders: set[str] = set()
@@ -2383,7 +2408,7 @@ async def recover_missing_live_trader_orders(
             continue
 
         age_seconds = (now - created_at).total_seconds() if created_at else 0
-        if age_seconds < 90:
+        if age_seconds < 90 and len(trader_id_filter) != 1:
             ambiguous_orders += 1
             continue
 
@@ -3351,15 +3376,23 @@ def _serialize_order(
         "notional_usd": row.notional_usd,
         "entry_price": row.entry_price,
         "effective_price": row.effective_price,
-        "execution_wallet_address": str(row.execution_wallet_address or extract_trader_order_execution_wallet_address(payload) or ""),
-        "provider_order_id": str(row.provider_order_id or payload.get("provider_order_id") or ""),
-        "provider_clob_order_id": str(row.provider_clob_order_id or payload.get("provider_clob_order_id") or ""),
-        "verification_status": str(row.verification_status or TRADER_ORDER_VERIFICATION_LOCAL),
-        "verification_source": str(row.verification_source or ""),
-        "verification_reason": row.verification_reason,
-        "verification_tx_hash": str(row.verification_tx_hash or extract_trader_order_verification_tx_hash(payload) or ""),
-        "verification_disputed": trader_order_verification_hidden(row.verification_status),
-        "verified_at": to_iso(row.verified_at),
+        "execution_wallet_address": str(
+            getattr(row, "execution_wallet_address", None)
+            or extract_trader_order_execution_wallet_address(payload)
+            or ""
+        ),
+        "provider_order_id": str(getattr(row, "provider_order_id", None) or payload.get("provider_order_id") or ""),
+        "provider_clob_order_id": str(
+            getattr(row, "provider_clob_order_id", None) or payload.get("provider_clob_order_id") or ""
+        ),
+        "verification_status": str(getattr(row, "verification_status", None) or TRADER_ORDER_VERIFICATION_LOCAL),
+        "verification_source": str(getattr(row, "verification_source", None) or ""),
+        "verification_reason": getattr(row, "verification_reason", None),
+        "verification_tx_hash": str(
+            getattr(row, "verification_tx_hash", None) or extract_trader_order_verification_tx_hash(payload) or ""
+        ),
+        "verification_disputed": trader_order_verification_hidden(getattr(row, "verification_status", None)),
+        "verified_at": to_iso(getattr(row, "verified_at", None)),
         "provider_snapshot_status": provider_snapshot_status,
         "filled_shares": float(max(0.0, filled_shares)),
         "filled_notional_usd": float(max(0.0, filled_notional_display)),
@@ -7774,7 +7807,8 @@ async def get_unrealized_pnl(
 
     # Fetch current prices in batch
     try:
-        prices = await get_live_mid_prices(token_ids)
+        async with release_conn(session):
+            prices = await get_live_mid_prices(token_ids)
     except Exception:
         prices = {}
 

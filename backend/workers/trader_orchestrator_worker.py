@@ -4526,7 +4526,6 @@ async def _run_trader_once(
             enable_live_market_context = True
         strict_ws_pricing_enforced = bool(strict_ws_pricing_only and enable_live_market_context)
         strict_ws_price_sources = ["ws_strict"]
-        strict_ws_price_source_set = set(strict_ws_price_sources)
         strict_market_data_age_ms = int(
             max(
                 25,
@@ -4945,55 +4944,56 @@ async def _run_trader_once(
                     source_config = source_configs.get(sig_source)
                     if _supports_live_market_context(sig, source_config):
                         context_candidates.append(sig)
-                try:
-                    if strict_ws_pricing_enforced and context_candidates:
-                        live_contexts = await build_cached_live_signal_contexts(
-                            context_candidates,
-                            max_history_points=max_history_points,
-                            strict_ws_only=True,
-                        )
-                    elif context_candidates:
-                        # WS-cache only — never block the hot path on HTTP
-                        # fallback calls to Polymarket.  Signals already carry
-                        # prices from their source workers; the WS cache just
-                        # provides a fresher snapshot when available.
-                        live_contexts = await build_cached_live_signal_contexts(
-                            context_candidates,
-                            max_history_points=max_history_points,
-                            strict_ws_only=False,
-                        )
-                    if fallback_candidates:
-                        try:
-                            live_contexts.update(
-                                await build_cached_live_signal_contexts(
-                                    fallback_candidates,
-                                    max_history_points=max_history_points,
-                                    strict_ws_only=False,
-                                )
-                            )
-                        except asyncio.CancelledError:
-                            raise
-                        except Exception as fb_exc:
-                            logger.warning("Fallback live market context failed (%s)", type(fb_exc).__name__)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
+                async with release_conn(session):
                     try:
-                        live_contexts = await build_cached_live_signal_contexts(
-                            context_candidates,
-                            max_history_points=max_history_points,
-                            strict_ws_only=strict_ws_pricing_enforced,
-                        )
-                    except Exception as cache_exc:
-                        logger.debug("Failed to load cached live market contexts after refresh failure", exc_info=cache_exc)
-                        live_contexts = {}
-                    if not live_contexts:
-                        exc_name = type(exc).__name__
-                        exc_message = str(exc).strip()
-                        if exc_message:
-                            logger.warning("Live market context refresh failed (%s): %s", exc_name, exc_message)
-                        else:
-                            logger.warning("Live market context refresh failed (%s)", exc_name)
+                        if strict_ws_pricing_enforced and context_candidates:
+                            live_contexts = await build_cached_live_signal_contexts(
+                                context_candidates,
+                                max_history_points=max_history_points,
+                                strict_ws_only=True,
+                            )
+                        elif context_candidates:
+                            # WS-cache only — never block the hot path on HTTP
+                            # fallback calls to Polymarket.  Signals already carry
+                            # prices from their source workers; the WS cache just
+                            # provides a fresher snapshot when available.
+                            live_contexts = await build_cached_live_signal_contexts(
+                                context_candidates,
+                                max_history_points=max_history_points,
+                                strict_ws_only=False,
+                            )
+                        if fallback_candidates:
+                            try:
+                                live_contexts.update(
+                                    await build_cached_live_signal_contexts(
+                                        fallback_candidates,
+                                        max_history_points=max_history_points,
+                                        strict_ws_only=False,
+                                    )
+                                )
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception as fb_exc:
+                                logger.warning("Fallback live market context failed (%s)", type(fb_exc).__name__)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        try:
+                            live_contexts = await build_cached_live_signal_contexts(
+                                context_candidates,
+                                max_history_points=max_history_points,
+                                strict_ws_only=strict_ws_pricing_enforced,
+                            )
+                        except Exception as cache_exc:
+                            logger.debug("Failed to load cached live market contexts after refresh failure", exc_info=cache_exc)
+                            live_contexts = {}
+                        if not live_contexts:
+                            exc_name = type(exc).__name__
+                            exc_message = str(exc).strip()
+                            if exc_message:
+                                logger.warning("Live market context refresh failed (%s): %s", exc_name, exc_message)
+                            else:
+                                logger.warning("Live market context refresh failed (%s)", exc_name)
 
             deferred_signals = 0
             deferred_by_reason: dict[str, int] = {}

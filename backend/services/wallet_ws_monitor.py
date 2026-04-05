@@ -55,9 +55,8 @@ DEFAULT_HTTP_RPC_URL = settings.POLYGON_RPC_URL
 
 # Fallback RPC endpoints (tried in order after the configured primary).
 FALLBACK_HTTP_RPC_URLS = (
-    "https://polygon-bor-rpc.publicnode.com",
     "https://polygon-rpc.com",
-    "https://rpc.ankr.com/polygon",
+    "https://polygon-bor-rpc.publicnode.com",
 )
 
 DEFAULT_HTTP_TIMEOUT = httpx.Timeout(connect=5.0, read=12.0, write=10.0, pool=8.0)
@@ -155,6 +154,24 @@ def _build_rpc_candidates(primary_url: str) -> list[str]:
         if url and url not in urls:
             urls.append(url)
     return urls
+
+
+def _rpc_error_text(error: object) -> str:
+    if isinstance(error, dict):
+        message = str(error.get("message") or "").strip()
+        if message:
+            return message.lower()
+    text = str(error or "").strip()
+    return text.lower()
+
+
+def _rpc_error_requires_auth(error: object) -> bool:
+    text = _rpc_error_text(error)
+    return any(marker in text for marker in ("unauthorized", "api key", "authenticate your request"))
+
+
+def _rpc_error_indicates_unsupported_logs_query(error: object) -> bool:
+    return "invalid block range params" in _rpc_error_text(error)
 
 
 def _normalize_rpc_http_url(raw_url: object) -> str:
@@ -896,6 +913,14 @@ class WalletWebSocketMonitor:
                     rpc_error = result.get("error")
                     if rpc_error is not None:
                         endpoint_error = RuntimeError(f"RPC error from endpoint {endpoint}: {rpc_error}")
+                        should_evict_endpoint = _rpc_error_requires_auth(rpc_error) or (
+                            method == "eth_getLogs"
+                            and _rpc_error_indicates_unsupported_logs_query(rpc_error)
+                        )
+                        if should_evict_endpoint:
+                            self._rpc_urls = [url for url in self._rpc_urls if url != endpoint]
+                            if endpoint == self._http_rpc_url and self._rpc_urls:
+                                self._http_rpc_url = self._rpc_urls[0]
                         if endpoint_attempt < RPC_ATTEMPTS_PER_ENDPOINT - 1:
                             await asyncio.sleep(0.15 * (endpoint_attempt + 1))
                             continue
@@ -937,6 +962,9 @@ class WalletWebSocketMonitor:
                     # 401/403 = auth required or forbidden — skip retries on this endpoint
                     _status = getattr(getattr(e, "response", None), "status_code", None)
                     if _status in (401, 403):
+                        self._rpc_urls = [url for url in self._rpc_urls if url != endpoint]
+                        if endpoint == self._http_rpc_url and self._rpc_urls:
+                            self._http_rpc_url = self._rpc_urls[0]
                         break
                     if endpoint_attempt < RPC_ATTEMPTS_PER_ENDPOINT - 1:
                         await asyncio.sleep(0.2 * (endpoint_attempt + 1))
@@ -1183,7 +1211,7 @@ class WalletWebSocketMonitor:
                 else:
                     # Process any missed blocks (cap at 10 to avoid overload)
                     start = self._last_processed_block + 1
-                    end = min(latest_block, start + 10)
+                    end = min(latest_block, start + 9)
 
                     for block_num in range(start, end + 1):
                         if not self._running:

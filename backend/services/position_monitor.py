@@ -67,69 +67,100 @@ class PositionMonitor:
             try:
                 await self._check_positions()
             except Exception as e:
-                logger.error(f"Position monitor error: {e}")
+                logger.error("Position monitor error", exc_info=e)
 
             await asyncio.sleep(self._poll_interval)
 
     async def _check_positions(self):
         """Check all open positions with price targets"""
         async with AsyncSessionLocal() as session:
-            # Get all open positions that have take_profit or stop_loss set
             result = await session.execute(
                 select(SimulationPosition).where(
                     SimulationPosition.status == TradeStatus.OPEN,
                 )
             )
             positions = list(result.scalars().all())
+        monitored = [
+            {
+                "id": position.id,
+                "token_id": position.token_id,
+                "take_profit_price": position.take_profit_price,
+                "stop_loss_price": position.stop_loss_price,
+            }
+            for position in positions
+            if position.take_profit_price is not None or position.stop_loss_price is not None
+        ]
 
-            # Filter to only positions with price targets
-            monitored = [p for p in positions if p.take_profit_price is not None or p.stop_loss_price is not None]
+        if not monitored:
+            return
 
-            if not monitored:
-                return
+        token_ids = list({str(position["token_id"]) for position in monitored if position["token_id"]})
+        if not token_ids:
+            return
 
-            # Get current prices for all monitored token_ids
-            token_ids = list(set(p.token_id for p in monitored if p.token_id))
-            if not token_ids:
-                return
+        prices = await self._fetch_prices(token_ids)
+        self._positions_checked += len(monitored)
+        if not prices:
+            return
 
-            prices = await self._fetch_prices(token_ids)
-            self._positions_checked += len(monitored)
+        monitored_ids = [str(position["id"]) for position in monitored if position["id"]]
+        if not monitored_ids:
+            return
+
+        async with AsyncSessionLocal() as session:
+            refreshed = await session.execute(
+                select(SimulationPosition).where(
+                    SimulationPosition.id.in_(monitored_ids),
+                    SimulationPosition.status == TradeStatus.OPEN,
+                )
+            )
+            positions_by_id = {
+                str(position.id): position
+                for position in refreshed.scalars().all()
+            }
 
             for position in monitored:
-                if not position.token_id or position.token_id not in prices:
+                token_id = str(position["token_id"] or "").strip()
+                if not token_id or token_id not in prices:
                     continue
 
-                current_price = prices[position.token_id]
+                db_position = positions_by_id.get(str(position["id"]))
+                if db_position is None:
+                    continue
+
+                current_price = prices[token_id]
                 if current_price <= 0:
                     continue
 
-                # Update stored current price
-                position.current_price = current_price
-                position.unrealized_pnl = (current_price - position.entry_price) * position.quantity
+                db_position.current_price = current_price
+                db_position.unrealized_pnl = (current_price - db_position.entry_price) * db_position.quantity
 
-                # Check take profit
-                if position.take_profit_price is not None and current_price >= position.take_profit_price:
+                if (
+                    position["take_profit_price"] is not None
+                    and current_price >= float(position["take_profit_price"])
+                ):
                     logger.info(
                         "Take profit triggered",
-                        position_id=position.id,
-                        entry_price=position.entry_price,
+                        position_id=db_position.id,
+                        entry_price=db_position.entry_price,
                         current_price=current_price,
-                        take_profit=position.take_profit_price,
+                        take_profit=position["take_profit_price"],
                     )
-                    await self._exit_position(session, position, current_price, "take_profit")
+                    await self._exit_position(session, db_position, current_price, "take_profit")
                     continue
 
-                # Check stop loss
-                if position.stop_loss_price is not None and current_price <= position.stop_loss_price:
+                if (
+                    position["stop_loss_price"] is not None
+                    and current_price <= float(position["stop_loss_price"])
+                ):
                     logger.info(
                         "Stop loss triggered",
-                        position_id=position.id,
-                        entry_price=position.entry_price,
+                        position_id=db_position.id,
+                        entry_price=db_position.entry_price,
                         current_price=current_price,
-                        stop_loss=position.stop_loss_price,
+                        stop_loss=position["stop_loss_price"],
                     )
-                    await self._exit_position(session, position, current_price, "stop_loss")
+                    await self._exit_position(session, db_position, current_price, "stop_loss")
                     continue
 
             await session.commit()
@@ -176,7 +207,7 @@ class PositionMonitor:
                 for tid, data in http_prices.items():
                     prices[tid] = data.get("mid", 0) if isinstance(data, dict) else float(data)
             except Exception as e:
-                logger.error(f"Failed to fetch prices via HTTP: {e}")
+                logger.error("Failed to fetch prices via HTTP", exc_info=e)
 
         if prices and stale_ids:
             ws_count = len(token_ids) - len(stale_ids)
@@ -241,7 +272,8 @@ class PositionMonitor:
 
         self._exits_triggered += 1
         logger.info(
-            f"Position exited ({reason})",
+            "Position exited (%s)",
+            reason,
             position_id=position.id,
             entry_price=position.entry_price,
             exit_price=exit_price,

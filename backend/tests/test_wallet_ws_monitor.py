@@ -42,6 +42,11 @@ def test_build_rpc_candidates_deduplicates_and_orders_urls():
     assert len(urls) == len(set(urls))
 
 
+def test_build_rpc_candidates_excludes_default_auth_required_public_fallbacks():
+    urls = _build_rpc_candidates("https://polygon-rpc.com")
+    assert "https://rpc.ankr.com/polygon" not in urls
+
+
 def test_build_rpc_candidates_normalizes_ws_primary_to_https():
     urls = _build_rpc_candidates("wss://polygon-bor-rpc.publicnode.com")
     assert urls[0] == "https://polygon-bor-rpc.publicnode.com"

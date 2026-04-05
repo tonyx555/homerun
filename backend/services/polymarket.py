@@ -596,9 +596,18 @@ class PolymarketClient:
                 
                 return info
         except Exception as e:
+            cooldown_active = bool(
+                isinstance(e, httpx.HTTPStatusError)
+                and e.response is not None
+                and e.response.status_code == 429
+                and "cooldown active" in str(e).lower()
+            )
             if isinstance(e, httpx.HTTPStatusError) and e.response is not None and e.response.status_code == 429:
                 self._market_lookup_cooldown_until[requested] = time.monotonic() + 60.0
-            _logger.warning("Market lookup failed for %s", condition_id, exc_info=e)
+            if cooldown_active:
+                _logger.debug("Market lookup gamma cooldown active for %s", condition_id)
+            else:
+                _logger.warning("Market lookup failed for %s", condition_id, exc_info=e)
 
         # Fallback path: the Data API reliably accepts ``market=<condition_id>``
         # and returns trade rows with title/slug metadata.

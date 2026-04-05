@@ -2910,12 +2910,12 @@ async def reconcile_live_positions(
     await session.commit()
     async with release_conn(session):
         wallet_positions_by_token = await _load_execution_wallet_positions_by_token()
-    wallet_positions_loaded = bool(_wallet_positions_last_refresh_succeeded)
+    wallet_positions_loaded = bool(_wallet_positions_last_refresh_succeeded or wallet_positions_by_token)
+    wallet_positions_index_present = bool(wallet_positions_by_token)
     wallet_closed_positions_by_token: dict[str, dict[str, Any]] = {}
     wallet_sell_trades_by_token: dict[str, dict[str, Any]] = {}
     wallet_close_activity_by_token: dict[str, dict[str, Any]] = {}
     wallet_closed_positions_loaded = False
-    wallet_activity_loaded = False
 
     for row in terminal_rows:
         row_id = str(row.id)
@@ -3111,6 +3111,8 @@ async def reconcile_live_positions(
             cond_key = _extract_condition_outcome_key(payload, str(row.direction or ""))
             if cond_key:
                 wallet_position = wallet_positions_by_token.get(cond_key)
+        if isinstance(wallet_position, dict) and _extract_wallet_position_size(wallet_position) <= _WALLET_SIZE_EPSILON:
+            return True
         age_anchor = getattr(row, "updated_at", None) or getattr(row, "executed_at", None) or getattr(row, "created_at", None)
         if not isinstance(age_anchor, datetime):
             return False
@@ -3140,7 +3142,6 @@ async def reconcile_live_positions(
             wallet_sell_trades_by_token = await _load_execution_wallet_recent_sell_trades_by_token()
             wallet_close_activity_by_token = await _load_execution_wallet_recent_close_activity_by_token()
         wallet_closed_positions_loaded = bool(_wallet_closed_positions_last_refresh_succeeded)
-        wallet_activity_loaded = bool(_wallet_activity_last_refresh_succeeded)
 
     # Release the DB connection back to the pool while we do external I/O
     # (Polymarket API, WS cache, CLOB midpoints).  The session
@@ -3882,7 +3883,7 @@ async def reconcile_live_positions(
         if (
             token_id
             and entry_fill_size > 0.0
-            and wallet_positions_loaded
+            and wallet_positions_index_present
             and not wallet_position_observed
             and pending_winning_idx is None
             and wallet_settlement_price is None
@@ -4066,6 +4067,9 @@ async def reconcile_live_positions(
             if snapshot_fill_price is None or snapshot_fill_price <= 0.0:
                 snapshot_fill_price = safe_float(pending_exit.get("average_fill_price"))
             required_exit_size = max(0.0, safe_float(pending_exit.get("exit_size"), 0.0) or 0.0)
+            reopened_partial_exit = (
+                str(pending_exit.get("reopen_reason") or "").strip().lower() == "partial_exit_fill_below_threshold"
+            )
             _fill_not, _fill_sz, _fill_px = _extract_live_fill_metrics(payload)
             _ep = _fill_px if _fill_px and _fill_px > 0 else safe_float(row.effective_price)
             if _ep is None or _ep <= 0:
@@ -4097,7 +4101,7 @@ async def reconcile_live_positions(
             provider_status_unknown = snapshot_status in {"", "missing", "invalid", "unknown"}
             wallet_flat_confirmed = wallet_position_size <= _WALLET_SIZE_EPSILON and (
                 wallet_position_observed
-                or wallet_positions_loaded
+                or wallet_positions_index_present
                 or isinstance(latest_wallet_sell_trade, dict)
             )
             close_fill_threshold_met = (
@@ -4116,6 +4120,7 @@ async def reconcile_live_positions(
                 and terminal_provider_status
                 and snapshot_filled_size > 0.0
                 and wallet_flat_confirmed
+                and not reopened_partial_exit
             )
             close_fill_unknown_but_wallet_flat = (
                 required_exit_size <= 0.0 and terminal_provider_status and wallet_flat_confirmed
@@ -4180,6 +4185,13 @@ async def reconcile_live_positions(
                     if reverse_signal_id and reverse_source:
                         reverse_signal_ids_by_source.setdefault(reverse_source, []).append(reverse_signal_id)
                     row.payload_json = payload
+                    _apply_position_close_verification(
+                        session,
+                        row=row,
+                        now=now,
+                        event_type="provider_exit_fill",
+                        payload_json=payload,
+                    )
                     hot_state.record_order_resolved(
                         trader_id=trader_id,
                         mode=str(row.mode or ""),
@@ -4936,7 +4948,7 @@ async def reconcile_live_positions(
             pending_provider_status = str(pending_exit.get("provider_status") or "").strip().lower()
             provider_close_verified = _pending_exit_has_verified_terminal_fill(pending_exit)
             wallet_flat_by_snapshot = wallet_position_observed and wallet_position_size <= _WALLET_SIZE_EPSILON
-            wallet_flat_by_absence = bool(token_id) and wallet_positions_loaded and wallet_position is None
+            wallet_flat_by_absence = bool(token_id) and wallet_positions_index_present and wallet_position is None
             wallet_trade_confirms_exit = (
                 isinstance(latest_wallet_sell_trade, dict)
                 and _extract_wallet_trade_size(latest_wallet_sell_trade) > _WALLET_SIZE_EPSILON
@@ -5076,7 +5088,15 @@ async def reconcile_live_positions(
         filled_size = max(0.0, float(entry_fill_size or 0.0))
         fill_price = entry_fill_price if entry_fill_price is not None and entry_fill_price > 0.0 else None
         status_key = str(row.status or "").strip().lower()
-        if status_key in {"open", "submitted"} and filled_notional <= 0.0 and filled_size <= 0.0:
+        raw_filled_notional, raw_filled_size, _raw_fill_price = _extract_live_fill_metrics(payload)
+        provider_snapshot_status = _provider_snapshot_status(payload)
+        if (
+            status_key in {"open", "submitted"}
+            and raw_filled_notional <= 0.0
+            and raw_filled_size <= 0.0
+            and wallet_position_size <= _WALLET_SIZE_EPSILON
+            and provider_snapshot_status not in {"filled", "partially_filled", "matched", "executed"}
+        ):
             if pending_market_info is not None and not pending_market_tradable:
                 next_status = "cancelled"
                 if not dry_run:
