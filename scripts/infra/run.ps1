@@ -1387,7 +1387,11 @@ function Cleanup-StaleHomerunProcesses {
         if (-not $isHomerun) { continue }
 
         # Verify the process is running from this project (not another instance)
-        if ($cmdLine -notmatch [regex]::Escape($backendDir) -and
+        if (($cmdLine -notmatch "workers\.host") -and
+            ($cmdLine -notmatch "workers\.runner") -and
+            ($cmdLine -notmatch "workers\.\w+_worker") -and
+            ($cmdLine -notmatch "gui\.py") -and
+            $cmdLine -notmatch [regex]::Escape($backendDir) -and
             $cmdLine -notmatch [regex]::Escape($projectRoot)) {
             continue
         }
@@ -1572,6 +1576,66 @@ function Test-NeedsSetup {
     return $false
 }
 
+function Start-HomerunGuiProcess {
+    param([string[]]$GuiArgs)
+
+    $runtimeDir = Join-Path (Get-Location).Path "output\runtime"
+    New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
+
+    $pythonwPath = Join-Path (Get-Location).Path "backend\venv\Scripts\pythonw.exe"
+    $pythonPath = Join-Path (Get-Location).Path "backend\venv\Scripts\python.exe"
+    $guiPython = if (Test-Path $pythonwPath) { $pythonwPath } else { $pythonPath }
+
+    $guiStdoutPath = Join-Path $runtimeDir "gui-stdout.log"
+    $guiStderrPath = Join-Path $runtimeDir "gui-stderr.log"
+    $guiBootstrapPath = Join-Path $runtimeDir "_gui_bootstrap.py"
+    Remove-Item -Path $guiStdoutPath, $guiStderrPath -Force -ErrorAction SilentlyContinue
+
+    $guiScriptPath = Join-Path (Get-Location).Path "gui.py"
+    $guiScriptLiteral = ($guiScriptPath -replace '\\', '\\\\')
+    @(
+        "import runpy"
+        "import sys"
+        "sys.argv = [r'$guiScriptLiteral']"
+        "runpy.run_path(r'$guiScriptLiteral', run_name='__main__')"
+    ) | Set-Content -Path $guiBootstrapPath -Encoding UTF8
+
+    $guiProcess = Start-Process -FilePath $guiPython `
+        -ArgumentList ('"' + $guiBootstrapPath + '"') `
+        -WorkingDirectory (Get-Location).Path `
+        -RedirectStandardOutput $guiStdoutPath `
+        -RedirectStandardError $guiStderrPath `
+        -PassThru
+
+    if ($env:HOMERUN_GUI_LAUNCHER -eq "bat") {
+        Start-Sleep -Seconds 3
+        if ($guiProcess.HasExited) {
+            Write-Host "Homerun GUI exited during startup." -ForegroundColor Red
+            if (Test-Path $guiStdoutPath) {
+                $stdoutTail = Get-Content -Path $guiStdoutPath -Tail 20 -ErrorAction SilentlyContinue
+                if ($stdoutTail) {
+                    Write-Host "GUI stdout (tail):" -ForegroundColor Yellow
+                    $stdoutTail | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkYellow }
+                }
+            }
+            if (Test-Path $guiStderrPath) {
+                $stderrTail = Get-Content -Path $guiStderrPath -Tail 20 -ErrorAction SilentlyContinue
+                if ($stderrTail) {
+                    Write-Host "GUI stderr (tail):" -ForegroundColor Yellow
+                    $stderrTail | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkYellow }
+                }
+            }
+            if ($guiProcess.ExitCode -eq 0) {
+                return 1
+            }
+            return $guiProcess.ExitCode
+        }
+    }
+
+    Wait-Process -Id $guiProcess.Id
+    return $guiProcess.ExitCode
+}
+
 # Show banner before any pre-flight output
 Write-Host ""
 Write-Host "    $([char]27)[38;2;30;107;69m██   ██  ██████  ███    ███ ███████ ██████  ██    ██ ███    ██$([char]27)[0m"
@@ -1636,8 +1700,10 @@ try {
         exit $LASTEXITCODE
     }
 
-    # Launch the GUI (tkinter – no extra dependencies)
-    python gui.py @guiArgs
+    # Launch the GUI as a dedicated child process so console lifecycle
+    # cannot tear down the tkinter window on Windows.
+    $guiExitCode = Start-HomerunGuiProcess -GuiArgs $guiArgs
+    exit $guiExitCode
 } finally {
     # Kill any remaining Homerun Python processes (workers, backend, etc.)
     Cleanup-StaleHomerunProcesses

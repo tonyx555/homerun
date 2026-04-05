@@ -2408,10 +2408,22 @@ class LiveExecutionService:
                 continue
             if cached.status not in active_statuses:
                 continue
-            if not str(cached.id or "").startswith("clob:"):
-                continue
             cached.status = OrderStatus.FILLED if float(cached.filled_size or 0.0) > 0 else OrderStatus.CANCELLED
             cached.updated_at = utcnow()
+            updated_orders.append(cached)
+
+        now = utcnow()
+        immediate_order_cutoff = 30.0
+        for cached in self._orders.values():
+            if cached.status not in active_statuses:
+                continue
+            if cached.order_type not in {OrderType.IOC, OrderType.FAK, OrderType.FOK}:
+                continue
+            age_seconds = max(0.0, (now - cached.created_at).total_seconds())
+            if age_seconds < immediate_order_cutoff:
+                continue
+            cached.status = OrderStatus.FILLED if float(cached.filled_size or 0.0) > 0 else OrderStatus.CANCELLED
+            cached.updated_at = now
             updated_orders.append(cached)
 
         if updated_orders:

@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import tkinter as tk
 import webbrowser
 import tkinter.font as tkfont
@@ -277,6 +278,25 @@ BORDER_LIGHT = "#2b4961"
 
 
 # ---------------------------------------------------------------------------
+# Windows subprocess launch options
+# ---------------------------------------------------------------------------
+def _windows_subprocess_kwargs() -> dict:
+    if sys.platform != "win32":
+        return {}
+
+    kwargs: dict[str, object] = {}
+    create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if create_no_window:
+        kwargs["creationflags"] = create_no_window
+
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0
+    kwargs["startupinfo"] = startupinfo
+    return kwargs
+
+
+# ---------------------------------------------------------------------------
 # Port killing
 # ---------------------------------------------------------------------------
 def kill_port(port: int) -> None:
@@ -284,7 +304,7 @@ def kill_port(port: int) -> None:
         try:
             result = subprocess.run(
                 ["netstat", "-ano", "-p", "TCP"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, timeout=5, **_windows_subprocess_kwargs(),
             )
             for line in result.stdout.splitlines():
                 if f":{port}" in line and "LISTENING" in line:
@@ -293,7 +313,12 @@ def kill_port(port: int) -> None:
                     if pid == os.getpid() or pid == 0:
                         continue
                     try:
-                        subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, timeout=5)
+                        subprocess.run(
+                            ["taskkill", "/F", "/PID", str(pid)],
+                            capture_output=True,
+                            timeout=5,
+                            **_windows_subprocess_kwargs(),
+                        )
                     except Exception:
                         pass
             time.sleep(0.5)
@@ -332,7 +357,7 @@ def kill_legacy_worker_processes() -> None:
                  "| Where-Object { $_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe' } "
                  "| Select-Object ProcessId,CommandLine "
                  "| ConvertTo-Json -Compress"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, timeout=10, **_windows_subprocess_kwargs(),
             )
             if result.returncode != 0 or not result.stdout.strip():
                 return
@@ -344,8 +369,6 @@ def kill_legacy_worker_processes() -> None:
                 cmd = str(entry.get("CommandLine") or "")
                 if not pid or pid == os.getpid():
                     continue
-                if backend_dir not in cmd and project_root not in cmd:
-                    continue
                 is_homerun = False
                 if "workers.host" in cmd:
                     is_homerun = True
@@ -353,10 +376,26 @@ def kill_legacy_worker_processes() -> None:
                     is_homerun = True
                 elif "uvicorn" in cmd and "main:app" in cmd:
                     is_homerun = True
+                elif "gui.py" in cmd:
+                    is_homerun = True
                 if not is_homerun:
                     continue
+                if (
+                    "workers.host" not in cmd
+                    and "workers.runner" not in cmd
+                    and "_worker" not in cmd
+                    and "gui.py" not in cmd
+                    and backend_dir not in cmd
+                    and project_root not in cmd
+                ):
+                    continue
                 try:
-                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, timeout=5)
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(pid)],
+                        capture_output=True,
+                        timeout=5,
+                        **_windows_subprocess_kwargs(),
+                    )
                 except Exception:
                     pass
         except Exception:
@@ -509,6 +548,7 @@ class HomerunApp:
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
         self.root = tk.Tk()
+        self.root.report_callback_exception = self._report_tk_exception
         self.root.title("HOMERUN – Autonomous Prediction Market Trading Platform")
         self.root.configure(bg=BG)
         self.root.geometry("1200x820")
@@ -1243,6 +1283,7 @@ class HomerunApp:
              "--retry-delay-seconds", str(retry_delay_seconds)],
             cwd=str(PROJECT_ROOT), capture_output=True, text=True, env=probe_env,
             timeout=max(15, int(retries * max(retry_delay_seconds, 0.25) * 4)),
+            **_windows_subprocess_kwargs(),
         )
         output = "\n".join(
             part.strip() for part in ((result.stdout or "").strip(), (result.stderr or "").strip())
@@ -1280,7 +1321,7 @@ class HomerunApp:
         for command in commands:
             try:
                 result = subprocess.run(command, cwd=str(PROJECT_ROOT), capture_output=True,
-                                        text=True, env=runtime_env, timeout=120)
+                                        text=True, env=runtime_env, timeout=120, **_windows_subprocess_kwargs())
             except Exception as exc:
                 outputs.append(f"{' '.join(command[:3])}: {exc}")
                 continue
@@ -1324,6 +1365,7 @@ class HomerunApp:
             [str(self._venv_python_path()), "-m", "workers.host", plane_name],
             cwd=str(BACKEND_DIR), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             env=self._build_runtime_env(process_role="worker"),
+            **_windows_subprocess_kwargs(),
         )
         _assign_to_job(worker_proc)
         self.worker_procs[plane_name] = worker_proc
@@ -1390,6 +1432,7 @@ class HomerunApp:
                 [str(venv_python), "-m", "uvicorn", "main:app", "--host", "0.0.0.0",
                  "--port", str(BACKEND_PORT), "--log-level", "info"],
                 cwd=str(BACKEND_DIR), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
+                **_windows_subprocess_kwargs(),
             )
             _assign_to_job(self.backend_proc)
         except Exception as e:
@@ -1414,6 +1457,7 @@ class HomerunApp:
             self.frontend_proc = subprocess.Popen(
                 [npm_bin, "run", "dev"], cwd=str(PROJECT_ROOT / "frontend"),
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
+                **_windows_subprocess_kwargs(),
             )
             _assign_to_job(self.frontend_proc)
         except Exception as e:
@@ -1529,7 +1573,7 @@ class HomerunApp:
         try:
             pull_result = subprocess.run(
                 ["git", "pull", "--ff-only"], cwd=str(PROJECT_ROOT),
-                capture_output=True, text=True, timeout=300,
+                capture_output=True, text=True, timeout=300, **_windows_subprocess_kwargs(),
             )
             for line in (pull_result.stdout or "").splitlines():
                 self._enqueue_log(line, source="SYSTEM", level="INFO")
@@ -1554,7 +1598,8 @@ class HomerunApp:
         self._enqueue_log(">>> Running setup script...", source="SYSTEM", level="INFO")
         try:
             setup_proc = subprocess.Popen(setup_cmd, cwd=str(PROJECT_ROOT),
-                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                          **_windows_subprocess_kwargs())
             assert setup_proc.stdout is not None
             for line in setup_proc.stdout:
                 msg = line.rstrip()
@@ -1792,7 +1837,7 @@ class HomerunApp:
                  "Get-CimInstance Win32_Process -Filter \"Name = 'python.exe'\" "
                  "| Select-Object ProcessId,CommandLine "
                  "| ConvertTo-Json -Compress"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, timeout=10, **_windows_subprocess_kwargs(),
             )
             if result.returncode != 0 or not result.stdout.strip():
                 return
@@ -1811,16 +1856,33 @@ class HomerunApp:
                     is_homerun = True
                 elif "uvicorn" in cmd and "main:app" in cmd:
                     is_homerun = True
+                elif "gui.py" in cmd:
+                    is_homerun = True
                 if not is_homerun:
                     continue
-                if backend_dir not in cmd and project_root not in cmd:
+                if (
+                    "workers.host" not in cmd
+                    and "workers.runner" not in cmd
+                    and "_worker" not in cmd
+                    and "gui.py" not in cmd
+                    and backend_dir not in cmd
+                    and project_root not in cmd
+                ):
                     continue
                 try:
-                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, timeout=5)
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(pid)],
+                        capture_output=True,
+                        timeout=5,
+                        **_windows_subprocess_kwargs(),
+                    )
                 except Exception:
                     pass
         except Exception:
             pass
+
+    def _report_tk_exception(self, exc_type, exc_value, exc_traceback) -> None:
+        traceback.print_exception(exc_type, exc_value, exc_traceback, file=sys.stderr)
 
     def _on_quit(self) -> None:
         self._shutting_down = True
@@ -1850,6 +1912,15 @@ def main() -> None:
             signal.signal(signal.SIGBREAK, _sigbreak_handler)
         except (AttributeError, OSError):
             pass
+
+    def _unhandled_exception_hook(exc_type, exc_value, exc_traceback):
+        traceback.print_exception(exc_type, exc_value, exc_traceback, file=sys.stderr)
+
+    def _thread_exception_hook(args: threading.ExceptHookArgs) -> None:
+        traceback.print_exception(args.exc_type, args.exc_value, args.exc_traceback, file=sys.stderr)
+
+    sys.excepthook = _unhandled_exception_hook
+    threading.excepthook = _thread_exception_hook
 
     app = HomerunApp()
     app.run()

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
@@ -260,7 +260,7 @@ export default function RecentTradesPanel({
   } | null>(null)
 
   const queryClient = useQueryClient()
-  const { isConnected, lastMessage } = useWebSocket('/ws')
+  const { isConnected, lastMessage } = useWebSocket('/ws', ['tracked_trader_signal'])
 
   const { data: discoverySettings } = useQuery({
     queryKey: ['settings-discovery'],
@@ -269,14 +269,14 @@ export default function RecentTradesPanel({
     staleTime: 60_000,
   })
 
-  const invalidateTrackedManagementQueries = () => {
+  const invalidateTrackedManagementQueries = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['wallets'] })
     queryClient.invalidateQueries({ queryKey: ['recent-trades-from-wallets'] })
     queryClient.invalidateQueries({ queryKey: ['trader-groups'] })
     queryClient.invalidateQueries({ queryKey: ['trader-group-suggestions'] })
     queryClient.invalidateQueries({ queryKey: ['opportunities', 'traders'] })
     queryClient.invalidateQueries({ queryKey: ['traders-overview'] })
-  }
+  }, [queryClient])
 
   const saveTraderSettingsMutation = useMutation({
     mutationFn: (payload: Partial<DiscoverySettings>) => updateDiscoverySettings(payload),
@@ -733,7 +733,7 @@ export default function RecentTradesPanel({
     }
   }
 
-  const handleSaveTraderOpportunitySettings = async (
+  const handleSaveTraderOpportunitySettings = useCallback((
     next: TraderOpportunitiesSettingsForm,
   ) => {
     if (!discoverySettings) {
@@ -757,7 +757,26 @@ export default function RecentTradesPanel({
       trader_opps_insider_min_confidence: next.individual_trade_min_confidence,
       trader_opps_insider_max_age_minutes: next.individual_trade_max_age_minutes,
     })
-  }
+  }, [discoverySettings, saveTraderSettingsMutation])
+
+  const handleCloseSettings = useCallback(() => {
+    setSettingsOpen(false)
+  }, [])
+
+  const traderOpportunitySettingsInitial = useMemo(
+    () => ({
+      confluence_limit: signalLimit,
+      individual_trade_limit: individualTradeLimit,
+      individual_trade_min_confidence: individualTradeMinConfidence,
+      individual_trade_max_age_minutes: individualTradeMaxAgeMinutes,
+    }),
+    [
+      individualTradeLimit,
+      individualTradeMaxAgeMinutes,
+      individualTradeMinConfidence,
+      signalLimit,
+    ],
+  )
 
   const handleCreateManualGroup = () => {
     const name = groupName.trim()
@@ -1390,13 +1409,8 @@ export default function RecentTradesPanel({
       {showOpportunities && mode === 'opportunities' && (
         <TraderOpportunitiesSettingsFlyout
           isOpen={settingsOpen}
-          onClose={() => setSettingsOpen(false)}
-          initial={{
-            confluence_limit: signalLimit,
-            individual_trade_limit: individualTradeLimit,
-            individual_trade_min_confidence: individualTradeMinConfidence,
-            individual_trade_max_age_minutes: individualTradeMaxAgeMinutes,
-          }}
+          onClose={handleCloseSettings}
+          initial={traderOpportunitySettingsInitial}
           onSave={handleSaveTraderOpportunitySettings}
           savePending={saveTraderSettingsMutation.isPending}
           saveMessage={settingsSaveMessage}

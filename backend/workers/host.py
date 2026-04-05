@@ -485,7 +485,9 @@ class WorkerHost:
 
         if self._enabled("load_market_cache"):
             try:
-                await market_cache_service.load_from_db()
+                cache_load_task = market_cache_service.start_background_load()
+                if cache_load_task is not None:
+                    self._background_tasks.append(cache_load_task)
             except Exception as exc:
                 logger.warning("Market cache load failed", plane=self._plane_name, exc_info=exc)
 

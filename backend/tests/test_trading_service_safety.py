@@ -1,6 +1,6 @@
 import sys
 import types
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -105,6 +105,11 @@ class _ReinitSnapshotClient:
 
     def get_order(self, clob_order_id: str):
         return {"id": clob_order_id, "status": "filled", "size": "12", "size_matched": "12", "avg_price": "0.33"}
+
+
+class _NoOpenOrdersClient:
+    def get_orders(self):
+        return []
 
 
 def _install_fake_clob_modules(monkeypatch) -> None:
@@ -407,3 +412,83 @@ async def test_get_order_snapshots_retries_after_reinitializing_client(monkeypat
     assert snapshots["clob-reinit"]["normalized_status"] == "filled"
     assert snapshots["clob-reinit"]["filled_size"] == pytest.approx(12.0)
     assert ensure_mock.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_provider_open_orders_closes_absent_local_active_orders(monkeypatch):
+    _configure_limits(monkeypatch)
+
+    service = LiveExecutionService()
+    service._initialized = True
+    service._client = _NoOpenOrdersClient()
+
+    open_order = Order(
+        id="local-open-order",
+        token_id="token-basic-no",
+        side=OrderSide.BUY,
+        price=0.705,
+        size=6.15,
+        order_type=live_execution_module.OrderType.IOC,
+        status=OrderStatus.OPEN,
+        filled_size=0.0,
+        clob_order_id="clob-basic-no",
+        created_at=datetime(2026, 4, 4, 2, 16, 5),
+        updated_at=datetime(2026, 4, 4, 2, 16, 5),
+    )
+    service._remember_order(open_order)
+
+    open_orders = await service.get_open_orders()
+
+    assert open_orders == []
+    assert service.get_order("local-open-order") is not None
+    assert service.get_order("local-open-order").status == OrderStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_sync_provider_open_orders_closes_stale_immediate_orders(monkeypatch):
+    _configure_limits(monkeypatch)
+
+    service = LiveExecutionService()
+    service._initialized = True
+    stale_created_at = live_execution_module.utcnow() - timedelta(seconds=90)
+
+    stale_order = Order(
+        id="local-stale-ioc",
+        token_id="token-basic-yes",
+        side=OrderSide.BUY,
+        price=0.215,
+        size=20.0,
+        order_type=live_execution_module.OrderType.IOC,
+        status=OrderStatus.OPEN,
+        filled_size=0.0,
+        clob_order_id="clob-stale-ioc",
+        created_at=stale_created_at,
+        updated_at=stale_created_at,
+    )
+    service._remember_order(stale_order)
+
+    class _StaleOpenOrderClient:
+        def get_orders(self):
+            return {
+                "data": [
+                    {
+                        "id": "clob-stale-ioc",
+                        "asset_id": "token-basic-yes",
+                        "side": "BUY",
+                        "price": "0.215",
+                        "original_size": "20",
+                        "size_matched": "0",
+                        "status": "open",
+                        "order_type": "FAK",
+                        "created_at": stale_created_at.isoformat(),
+                    }
+                ]
+            }
+
+    service._client = _StaleOpenOrderClient()
+
+    open_orders = await service.get_open_orders()
+
+    assert open_orders == []
+    assert service.get_order("local-stale-ioc") is not None
+    assert service.get_order("local-stale-ioc").status == OrderStatus.CANCELLED

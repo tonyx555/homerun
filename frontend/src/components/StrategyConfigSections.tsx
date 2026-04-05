@@ -1,37 +1,27 @@
-import { useCallback, useEffect, useState } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { memo, useCallback, useEffect, useMemo, useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  AlertCircle,
+  CheckCircle,
   ChevronDown,
   ChevronRight,
   Code2,
-  CheckCircle,
-  AlertCircle,
-  Save,
-  Loader2,
   ExternalLink,
+  Loader2,
+  Save,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
-import { Card } from './ui/card'
-import { Button } from './ui/button'
-import { Switch } from './ui/switch'
-import StrategyConfigForm from './StrategyConfigForm'
 import {
   getPlugins,
   updatePlugin,
   type StrategyPlugin,
 } from '../services/api'
+import StrategyConfigForm from './StrategyConfigForm'
+import { Button } from './ui/button'
+import { Card } from './ui/card'
+import { Switch } from './ui/switch'
 
-/**
- * Renders collapsible config sections for each opportunity strategy
- * matching the given `sourceKey`. Each strategy with a `config_schema`
- * containing `param_fields` gets its own collapsible card with dynamic
- * form controls rendered via StrategyConfigForm.
- *
- * This is designed to be embedded in any settings flyout — Weather, News,
- * Crypto, Traders, Markets (scanner). Coders only need to define
- * `config_schema` in their Python strategy seed to get controls here.
- */
-export default function StrategyConfigSections({
+function StrategyConfigSections({
   sourceKey,
   enabled,
 }: {
@@ -47,13 +37,16 @@ export default function StrategyConfigSections({
     enabled: enabled !== false,
   })
 
-  // Filter to strategies matching this subtab's source_key that have config schemas
-  const strategies = (allPlugins || []).filter(
-    (p) =>
-      normalizeSourceKey(p.source_key) === normalizedSourceKey &&
-      p.config_schema &&
-      p.config_schema.param_fields &&
-      p.config_schema.param_fields.length > 0
+  const strategies = useMemo(
+    () =>
+      (allPlugins || []).filter(
+        (plugin) =>
+          normalizeSourceKey(plugin.source_key) === normalizedSourceKey &&
+          plugin.config_schema &&
+          plugin.config_schema.param_fields &&
+          plugin.config_schema.param_fields.length > 0,
+      ),
+    [allPlugins, normalizedSourceKey],
   )
 
   if (strategies.length === 0) return null
@@ -71,6 +64,10 @@ export default function StrategyConfigSections({
   )
 }
 
+const MemoizedStrategyConfigSections = memo(StrategyConfigSections)
+
+export default MemoizedStrategyConfigSections
+
 function StrategyConfigCard({
   strategy,
   queryClient,
@@ -87,10 +84,8 @@ function StrategyConfigCard({
     text: string
   } | null>(null)
 
-  // Sync local config from strategy data
   useEffect(() => {
     const cfg = { ...(strategy.config || {}) }
-    // Strip internal _schema key
     delete cfg._schema
     setLocalConfig(cfg)
     setLocalEnabled(Boolean(strategy.enabled))
@@ -165,7 +160,7 @@ function StrategyConfigCard({
                 'text-[9px] px-1.5 py-0.5 rounded-full flex items-center gap-1',
                 saveMsg.type === 'success'
                   ? 'bg-emerald-500/10 text-emerald-400'
-                  : 'bg-red-500/10 text-red-400'
+                  : 'bg-red-500/10 text-red-400',
               )}
             >
               {saveMsg.type === 'success' ? (
@@ -224,7 +219,7 @@ function StrategyConfigCard({
               onClick={(e) => {
                 e.stopPropagation()
                 window.dispatchEvent(
-                  new CustomEvent('navigate-to-tab', { detail: 'strategies' })
+                  new CustomEvent('navigate-to-tab', { detail: 'strategies' }),
                 )
                 window.dispatchEvent(
                   new CustomEvent('navigate-strategies-subtab', {
@@ -233,7 +228,7 @@ function StrategyConfigCard({
                       sourceFilter: strategy.source_key,
                       source: strategy.source_key,
                     },
-                  })
+                  }),
                 )
               }}
               className="gap-1 text-[10px] h-6"
@@ -266,6 +261,5 @@ function StrategyConfigCard({
 }
 
 function normalizeSourceKey(sourceKey: string): string {
-  const key = String(sourceKey || '').trim().toLowerCase()
-  return key
+  return String(sourceKey || '').trim().toLowerCase()
 }

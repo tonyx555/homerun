@@ -1317,6 +1317,121 @@ def _compute_signal_latency_payload(
     return out
 
 
+def _build_scanner_signal_market_snapshot_live_context(signal: Any) -> dict[str, Any]:
+    payload = getattr(signal, "payload_json", None)
+    payload = payload if isinstance(payload, dict) else {}
+    markets = payload.get("markets")
+    markets = markets if isinstance(markets, list) else []
+    positions = payload.get("positions_to_take")
+    positions = positions if isinstance(positions, list) else []
+
+    direction = str(getattr(signal, "direction", "") or "").strip().lower()
+    target_market_id = str(getattr(signal, "market_id", "") or "").strip()
+    target_question = str(getattr(signal, "market_question", "") or "").strip()
+
+    selected_market: dict[str, Any] | None = None
+    for market in markets:
+        if not isinstance(market, dict):
+            continue
+        market_id = str(market.get("id") or market.get("market_id") or market.get("condition_id") or "").strip()
+        market_question = str(market.get("question") or market.get("market_question") or "").strip()
+        if target_market_id and market_id and market_id == target_market_id:
+            selected_market = market
+            break
+        if target_question and market_question and market_question == target_question:
+            selected_market = market
+            break
+    if selected_market is None and markets:
+        first_market = markets[0]
+        if isinstance(first_market, dict):
+            selected_market = first_market
+    if not isinstance(selected_market, dict):
+        return {}
+
+    token_ids = selected_market.get("clob_token_ids")
+    token_ids = token_ids if isinstance(token_ids, list) else []
+    yes_token_id = str(token_ids[0] or "").strip() if len(token_ids) > 0 else ""
+    no_token_id = str(token_ids[1] or "").strip() if len(token_ids) > 1 else ""
+
+    selected_outcome = "yes"
+    selected_token_id = yes_token_id
+    selected_price = safe_float(
+        selected_market.get("current_yes_price"),
+        safe_float(selected_market.get("yes_price"), None),
+    )
+    if direction.endswith("no"):
+        selected_outcome = "no"
+        selected_token_id = no_token_id
+        selected_price = safe_float(
+            selected_market.get("current_no_price"),
+            safe_float(selected_market.get("no_price"), None),
+        )
+
+    for position in positions:
+        if not isinstance(position, dict):
+            continue
+        position_token_id = str(position.get("token_id") or "").strip()
+        if position_token_id and position_token_id in {yes_token_id, no_token_id}:
+            selected_token_id = position_token_id
+            position_outcome = str(position.get("outcome") or "").strip().lower()
+            if position_outcome in {"yes", "no"}:
+                selected_outcome = position_outcome
+            position_price = safe_float(position.get("price"), None)
+            if position_price is not None and position_price > 0.0:
+                selected_price = position_price
+            break
+
+    if selected_price is None or selected_price <= 0.0:
+        return {}
+
+    observed_at = _parse_iso(
+        str(
+            selected_market.get("price_updated_at")
+            or payload.get("last_priced_at")
+            or payload.get("last_updated_at")
+            or payload.get("signal_emitted_at")
+            or payload.get("ingested_at")
+            or ""
+        )
+    )
+    observed_at_iso = observed_at.isoformat() if observed_at is not None else None
+    age_ms: float | None = None
+    if observed_at is not None:
+        age_ms = max(0.0, (utcnow() - observed_at).total_seconds() * 1000.0)
+
+    return {
+        "available": True,
+        "fetched_at": observed_at_iso,
+        "live_market_fetched_at": observed_at_iso,
+        "market_id": str(
+            selected_market.get("id") or selected_market.get("market_id") or selected_market.get("condition_id") or ""
+        ).strip()
+        or target_market_id
+        or None,
+        "condition_id": str(selected_market.get("condition_id") or "").strip() or None,
+        "market_question": str(
+            selected_market.get("question") or selected_market.get("market_question") or target_question or ""
+        ).strip()
+        or None,
+        "direction": direction or None,
+        "selected_outcome": selected_outcome,
+        "token_ids": [token for token in (yes_token_id, no_token_id) if token],
+        "yes_token_id": yes_token_id or None,
+        "no_token_id": no_token_id or None,
+        "selected_token_id": selected_token_id or None,
+        "live_yes_price": safe_float(selected_market.get("current_yes_price"), safe_float(selected_market.get("yes_price"), None)),
+        "live_no_price": safe_float(selected_market.get("current_no_price"), safe_float(selected_market.get("no_price"), None)),
+        "live_selected_price": float(selected_price),
+        "live_selected_price_source": "market_snapshot",
+        "market_data_source": "market_snapshot",
+        "source_observed_at": observed_at_iso,
+        "market_data_age_ms": age_ms,
+        "market_data_age_seconds": ((age_ms / 1000.0) if age_ms is not None else None),
+        "liquidity_usd": safe_float(selected_market.get("liquidity"), None),
+        "volume_usd": safe_float(selected_market.get("volume"), None),
+    }
+
+
 def _build_execution_latency_sample(
     signal: Any,
     *,
@@ -3747,15 +3862,12 @@ async def _run_trader_once(
     crypto_scope_prefiltered_dimensions: dict[str, int] = {}
 
     async with AsyncSessionLocal() as session:
-        # Set a session-level statement_timeout slightly under the cycle
-        # timeout so Postgres kills stuck queries *before* the asyncio
-        # cycle timeout fires.  This lets the error propagate cleanly
-        # through asyncpg (which is cancellable) instead of leaving an
-        # abandoned task holding a leaked DB connection.
+        # Bound DB statements inside this cycle without leaking the timeout
+        # onto pooled connections used by unrelated tasks.
         if cycle_timeout_seconds > 0:
             _stmt_timeout_ms = int(max(3000, (cycle_timeout_seconds - 2) * 1000))
             try:
-                await session.execute(text(f"SET statement_timeout = '{_stmt_timeout_ms}'"))
+                await session.execute(text(f"SET LOCAL statement_timeout = '{_stmt_timeout_ms}'"))
             except Exception:
                 pass
         trader_id = str(trader["id"])
@@ -4957,7 +5069,9 @@ async def _run_trader_once(
                         )
                         strict_release_age_budget_ms = max(
                             50,
-                            safe_int(strategy_params.get("max_market_data_age_ms"), int(strict_age_budget_ms)),
+                            int(strict_age_budget_ms)
+                            if signal_source == "scanner"
+                            else safe_int(strategy_params.get("max_market_data_age_ms"), int(strict_age_budget_ms)),
                         )
                         if signal_emitted_at is not None:
                             signal_release_age_ms = max(
@@ -4982,6 +5096,19 @@ async def _run_trader_once(
                     )
                     live_context = live_contexts.get(signal_id, {})
                     if strict_ws_pricing_enforced and signal_source in ("crypto", "scanner"):
+                        effective_strict_sources: list[str] = []
+                        for raw_source in (strategy_params.get("strict_ws_price_sources") or strict_ws_price_sources):
+                            normalized_source = str(raw_source or "").strip().lower()
+                            if normalized_source and normalized_source not in effective_strict_sources:
+                                effective_strict_sources.append(normalized_source)
+                        if signal_source == "scanner":
+                            if "redis_strict" not in effective_strict_sources:
+                                effective_strict_sources.append("redis_strict")
+                        effective_source_set = set(effective_strict_sources)
+                        effective_max_age_ms = max(
+                            25,
+                            safe_int(strategy_params.get("max_market_data_age_ms"), int(strict_age_budget_ms)),
+                        )
                         live_source = str(
                             live_context.get("market_data_source")
                             or live_context.get("live_selected_price_source")
@@ -4989,28 +5116,39 @@ async def _run_trader_once(
                         ).strip().lower()
                         live_price = safe_float(live_context.get("live_selected_price"), None)
                         live_age_ms = safe_float(live_context.get("market_data_age_ms"), None)
-                        # For scanner signals, accept redis_strict as a valid
-                        # source.  Tail-end markets are illiquid and may not
-                        # receive WS ticks for minutes at a time.  The scanner
-                        # already validated pricing when it generated the signal;
-                        # redis_strict is still WS-derived data cached in Redis.
-                        _effective_source_set = strict_ws_price_source_set
-                        if signal_source == "scanner":
-                            _effective_source_set = strict_ws_price_source_set | {"redis_strict"}
                         strict_context_ok = (
-                            live_source in _effective_source_set
+                            live_source in effective_source_set
                             and live_price is not None
                             and live_price > 0.0
                             and live_age_ms is not None
-                            and live_age_ms <= strict_age_budget_ms
+                            and live_age_ms <= effective_max_age_ms
                         )
+                        if not strict_context_ok and signal_source == "scanner":
+                            snapshot_live_context = _build_scanner_signal_market_snapshot_live_context(signal)
+                            if snapshot_live_context:
+                                live_context = dict(snapshot_live_context)
+                                live_source = str(
+                                    live_context.get("market_data_source")
+                                    or live_context.get("live_selected_price_source")
+                                    or ""
+                                ).strip().lower()
+                                live_price = safe_float(live_context.get("live_selected_price"), None)
+                                live_age_ms = safe_float(live_context.get("market_data_age_ms"), None)
+                                strict_context_ok = (
+                                    live_source in effective_source_set
+                                    and live_price is not None
+                                    and live_price > 0.0
+                                    and live_age_ms is not None
+                                    and live_age_ms <= effective_max_age_ms
+                                )
                         if not strict_context_ok:
                             live_reason_parts: list[str] = []
                             live_reason_parts.append(f"source={live_source or 'unknown'}")
                             live_reason_parts.append(
                                 f"age_ms={live_age_ms:.0f}" if live_age_ms is not None else "age_ms=unknown"
                             )
-                            live_reason_parts.append(f"max_age_ms={strict_age_budget_ms}")
+                            live_reason_parts.append(f"max_age_ms={effective_max_age_ms}")
+                            live_reason_parts.append(f"required_sources={effective_strict_sources}")
                             await get_intent_runtime().defer_signal(
                                 signal_id=signal_id,
                                 required_token_ids=list(getattr(signal, "required_token_ids", None) or []),
@@ -6660,15 +6798,6 @@ async def _run_trader_once(
             await _persist_trader_cycle_heartbeat(session, trader_id)
             if defer_signal_processing or stream_trigger_mode:
                 break
-
-        # Restore the default statement_timeout before the connection goes
-        # back to the pool so other callers are not affected.
-        if cycle_timeout_seconds > 0:
-            try:
-                _default_stmt_ms = max(1000, int(settings.DATABASE_STATEMENT_TIMEOUT_MS))
-                await session.execute(text(f"SET statement_timeout = '{_default_stmt_ms}'"))
-            except Exception:
-                pass
 
     return decisions_written, orders_written, processed_signals
 

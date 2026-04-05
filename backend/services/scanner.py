@@ -2789,22 +2789,50 @@ class ArbitrageScanner:
 
         event_slug_candidates: list[str] = []
         event_slug_seen: set[str] = set()
+        touched_markets_by_event_slug: dict[str, list] = {}
         for market in delta_markets:
             slug = str(getattr(market, "event_slug", "") or "").strip()
             if not slug or slug in event_slug_seen:
+                if slug:
+                    touched_markets_by_event_slug.setdefault(slug, []).append(market)
                 continue
             event_slug_seen.add(slug)
             event_slug_candidates.append(slug)
+            touched_markets_by_event_slug.setdefault(slug, []).append(market)
             if len(event_slug_candidates) >= max_event_slugs:
                 break
 
         cached_event_keys: set[str] = set()
+        cached_events_by_key: dict[str, object] = {}
         for event in self._cached_events:
             key = str(getattr(event, "slug", "") or getattr(event, "id", "") or "").strip()
             if key:
                 cached_event_keys.add(key)
+                cached_events_by_key[key] = event
 
-        event_fetch_candidates = list(event_slug_candidates)
+        def _should_refetch_touched_event(event_key: str) -> bool:
+            cached_event = cached_events_by_key.get(event_key)
+            if cached_event is None:
+                return True
+            cached_event_identity = str(
+                getattr(cached_event, "id", "") or getattr(cached_event, "slug", "") or event_key
+            ).strip()
+            if event_key not in self._verified_event_keys and cached_event_identity not in self._verified_event_keys:
+                return True
+            cached_event_markets = list(getattr(cached_event, "markets", None) or [])
+            if len(cached_event_markets) > 1:
+                return True
+            category = str(getattr(cached_event, "category", "") or "").strip().lower()
+            if category in {"sports", "soccer", "baseball", "basketball", "football", "hockey"}:
+                return True
+            for market in [*cached_event_markets, *touched_markets_by_event_slug.get(event_key, [])]:
+                if bool(getattr(market, "neg_risk", False)):
+                    return True
+                if str(getattr(market, "sports_market_type", "") or "").strip():
+                    return True
+            return False
+
+        event_fetch_candidates = [slug for slug in event_slug_candidates if _should_refetch_touched_event(slug)]
         delta_events: list = []
         if event_fetch_candidates:
             try:
@@ -2818,7 +2846,7 @@ class ArbitrageScanner:
             except asyncio.TimeoutError:
                 logger.warning(
                     f"Incremental event fetch timed out after {event_fetch_timeout:.1f}s "
-                    f"for {len(event_fetch_candidates)} uncached event slugs; continuing with cached/derived events"
+                    f"for {len(event_fetch_candidates)} touched event slugs; continuing with cached/derived events"
                 )
                 delta_events = []
             except Exception as e:

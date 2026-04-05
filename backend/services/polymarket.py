@@ -53,14 +53,20 @@ class PolymarketClient:
                 from services.market_cache import market_cache_service
 
                 if not market_cache_service._loaded:
-                    await market_cache_service.load_from_db()
+                    market_cache_service.start_background_load()
                 self._persistent_cache = market_cache_service
-                # Pre-populate in-memory caches from DB
-                self._market_cache.update(market_cache_service._market_cache)
-                self._username_cache.update(market_cache_service._username_cache)
             except Exception:
                 pass  # Graceful degradation: in-memory only
-        return self._persistent_cache
+        cache = self._persistent_cache
+        if cache is not None:
+            try:
+                if cache._market_cache:
+                    self._market_cache.update(cache._market_cache)
+                if cache._username_cache:
+                    self._username_cache.update(cache._username_cache)
+            except Exception:
+                pass
+        return cache
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -1836,15 +1842,36 @@ class PolymarketClient:
 
         return {"username": None, "address": address}
 
-    async def get_wallet_trades(self, address: str, limit: int = 100) -> list[dict]:
-        """Get recent trades for a wallet"""
-        response = await self._rate_limited_get(f"{self.data_url}/trades", params={"user": address, "limit": limit})
+    async def get_wallet_trades(self, address: str, limit: int = 100, offset: int = 0) -> list[dict]:
+        """Get recent trades for a wallet."""
+        params = {
+            "user": address,
+            "limit": min(max(int(limit or 100), 1), 500),
+            "offset": max(int(offset or 0), 0),
+        }
+        response = await self._rate_limited_get(f"{self.data_url}/trades", params=params)
         response.raise_for_status()
         data = response.json()
         return self._extract_list_payload(
             data,
             preferred_keys=("data", "items", "trades", "activity"),
         )
+
+    async def get_wallet_trades_paginated(self, address: str, *, max_trades: int = 1000, page_size: int = 500) -> list[dict]:
+        all_trades: list[dict] = []
+        offset = 0
+        capped_page_size = max(1, min(int(page_size or 500), 500))
+        capped_max_trades = max(1, min(int(max_trades or 1000), 10_000))
+        while len(all_trades) < capped_max_trades:
+            page = await self.get_wallet_trades(address, limit=capped_page_size, offset=offset)
+            if not page:
+                break
+            all_trades.extend(page)
+            if len(page) < capped_page_size:
+                break
+            offset += capped_page_size
+            await asyncio.sleep(0.05)
+        return all_trades[:capped_max_trades]
 
     async def get_market_trades(self, condition_id: str, limit: int = 100, offset: int = 0) -> list[dict]:
         """Get recent trades for a market"""
@@ -1864,6 +1891,7 @@ class PolymarketClient:
         limit: int = 100,
         offset: int = 0,
         activity_type: Optional[str] = None,
+        user: Optional[str] = None,
     ) -> list[dict]:
         """Fetch recent account activity from the Data API.
 
@@ -1873,6 +1901,8 @@ class PolymarketClient:
             "limit": min(limit, 500),
             "offset": min(offset, 1000),
         }
+        if user:
+            params["user"] = user
         if activity_type:
             params["type"] = activity_type
 
@@ -1888,6 +1918,77 @@ class PolymarketClient:
             except Exception:
                 continue
         return []
+
+    async def get_wallet_activity(
+        self,
+        address: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        activity_types: Optional[list[str] | tuple[str, ...] | set[str]] = None,
+    ) -> list[dict]:
+        """Fetch recent wallet activity rows for a specific wallet."""
+        normalized_types = [
+            str(activity_type or "").strip()
+            for activity_type in (activity_types or [])
+            if str(activity_type or "").strip()
+        ]
+        if not normalized_types:
+            return await self.get_activity(limit=limit, offset=offset, user=address)
+
+        collected: list[dict] = []
+        seen_fingerprints: set[str] = set()
+        for activity_type in normalized_types:
+            page = await self.get_activity(
+                limit=limit,
+                offset=offset,
+                activity_type=activity_type,
+                user=address,
+            )
+            for item in page:
+                if not isinstance(item, dict):
+                    continue
+                fingerprint = "|".join(
+                    (
+                        str(item.get("transactionHash") or item.get("txHash") or "").strip().lower(),
+                        str(item.get("type") or activity_type).strip().lower(),
+                        str(item.get("asset") or item.get("asset_id") or item.get("token_id") or "").strip(),
+                        str(item.get("timestamp") or item.get("createdAt") or item.get("created_at") or "").strip(),
+                    )
+                )
+                if fingerprint in seen_fingerprints:
+                    continue
+                seen_fingerprints.add(fingerprint)
+                collected.append(item)
+        return collected
+
+    async def get_wallet_activity_paginated(
+        self,
+        address: str,
+        *,
+        max_items: int = 1000,
+        page_size: int = 500,
+        activity_types: Optional[list[str] | tuple[str, ...] | set[str]] = None,
+    ) -> list[dict]:
+        all_items: list[dict] = []
+        offset = 0
+        capped_page_size = max(1, min(int(page_size or 500), 500))
+        capped_max_items = max(1, min(int(max_items or 1000), 10_000))
+        while len(all_items) < capped_max_items:
+            page = await self.get_wallet_activity(
+                address,
+                limit=capped_page_size,
+                offset=offset,
+                activity_types=activity_types,
+            )
+            if not page:
+                break
+            all_items.extend(page)
+            if len(page) < capped_page_size:
+                break
+            offset += capped_page_size
+            await asyncio.sleep(0.05)
+        return all_items[:capped_max_items]
 
     async def get_market_holders(
         self,

@@ -16,6 +16,7 @@ from config import settings
 from models.database import (
     AppSettings,
     AsyncSessionLocal,
+    NotifierRuntimeState,
     Trader,
     TraderDecision,
     TraderEvent,
@@ -366,6 +367,70 @@ class TelegramNotifier:
         await self._load_settings()
         logger.info("Notifier settings reloaded")
 
+    @staticmethod
+    def _close_alert_marker_for_order(order: TraderOrder) -> str:
+        status = str(getattr(order, "status", "") or "").strip().lower() or "closed"
+        payload = order.payload_json if isinstance(order.payload_json, dict) else {}
+        position_close = payload.get("position_close") if isinstance(payload, dict) else {}
+        position_close = position_close if isinstance(position_close, dict) else {}
+
+        closed_marker = str(position_close.get("closed_at") or "").strip()
+        if not closed_marker:
+            wallet_closed_timestamp = position_close.get("wallet_closed_position_timestamp")
+            if wallet_closed_timestamp not in {None, ""}:
+                closed_marker = str(wallet_closed_timestamp).strip()
+        if not closed_marker and getattr(order, "updated_at", None) is not None:
+            closed_marker = _to_utc(order.updated_at).isoformat()
+        if not closed_marker and getattr(order, "created_at", None) is not None:
+            closed_marker = _to_utc(order.created_at).isoformat()
+        if not closed_marker:
+            closed_marker = str(getattr(order, "id", "") or "").strip()
+        return f"{status}|{closed_marker}"
+
+    @staticmethod
+    def _normalize_close_alert_markers(value: Any) -> dict[str, str]:
+        if not isinstance(value, dict):
+            return {}
+        normalized: dict[str, str] = {}
+        for key, marker in value.items():
+            order_id = str(key or "").strip()
+            marker_text = str(marker or "").strip()
+            if not order_id or not marker_text:
+                continue
+            normalized[order_id] = marker_text
+        return normalized
+
+    def _trim_close_alert_markers(self) -> None:
+        while len(self._close_alert_markers) > CLOSE_ALERT_MARKER_LIMIT:
+            oldest = next(iter(self._close_alert_markers.keys()), None)
+            if oldest is None:
+                break
+            self._close_alert_markers.pop(oldest, None)
+
+    async def _persist_runtime_state(self, session) -> None:
+        row = await session.get(NotifierRuntimeState, "telegram")
+        if row is None:
+            row = NotifierRuntimeState(id="telegram")
+            session.add(row)
+        row.close_alert_markers_json = dict(self._close_alert_markers)
+        await session.commit()
+
+    async def _seed_close_alert_markers(self, session) -> None:
+        rows = (
+            await session.execute(
+                select(TraderOrder)
+                .where(TraderOrder.status.in_(tuple(REALIZED_ORDER_STATUSES)))
+                .order_by(TraderOrder.updated_at.desc(), TraderOrder.id.desc())
+                .limit(CLOSE_ALERT_MARKER_LIMIT)
+            )
+        ).scalars().all()
+
+        seeded_markers: dict[str, str] = {}
+        for row in reversed(rows):
+            seeded_markers[str(row.id)] = self._close_alert_marker_for_order(row)
+        self._close_alert_markers = seeded_markers
+        self._trim_close_alert_markers()
+
     async def _prime_cursors(self) -> None:
         """Avoid replaying old DB records when notifier starts."""
         try:
@@ -411,7 +476,16 @@ class TelegramNotifier:
                 )
                 if self._autotrader_active:
                     self._last_summary_at = utcnow()
-                self._close_alert_markers = {}
+                runtime_state = await session.get(NotifierRuntimeState, "telegram")
+                if runtime_state is not None:
+                    self._close_alert_markers = self._normalize_close_alert_markers(
+                        runtime_state.close_alert_markers_json
+                    )
+                if not self._close_alert_markers:
+                    await self._seed_close_alert_markers(session)
+                    await self._persist_runtime_state(session)
+                else:
+                    self._trim_close_alert_markers()
         except Exception as exc:
             logger.debug("Notifier cursor priming skipped", exc_info=exc)
 
@@ -762,30 +836,23 @@ class TelegramNotifier:
         mode: str,
     ) -> None:
         realized_rows: dict[str, TraderOrder] = {}
+        markers_changed = False
 
         for row in orders:
             if not self._is_realized_order(row):
                 continue
-            # Dedup by order_id + terminal status only (not updated_at).
-            # Two workers can resolve the same order concurrently, producing
-            # different updated_at values.  Including the timestamp in the
-            # marker caused duplicate notifications whenever the second
-            # commit bumped updated_at.
-            marker = str(row.status or "").lower()
+            marker = self._close_alert_marker_for_order(row)
             order_id = str(row.id)
             if self._close_alert_markers.get(order_id) == marker:
                 continue
             self._close_alert_markers[order_id] = marker
+            markers_changed = True
             realized_rows[order_id] = row
 
         if not realized_rows:
             return
 
-        while len(self._close_alert_markers) > CLOSE_ALERT_MARKER_LIMIT:
-            oldest = next(iter(self._close_alert_markers.keys()), None)
-            if oldest is None:
-                break
-            self._close_alert_markers.pop(oldest, None)
+        self._trim_close_alert_markers()
 
         rows = sorted(
             realized_rows.values(),
@@ -850,6 +917,8 @@ class TelegramNotifier:
             lines.append(f"{_bold('More:')} {_escape_html(remaining)} close(s)")
 
         await self._enqueue("\n".join(lines))
+        if markers_changed:
+            await self._persist_runtime_state(session)
 
     async def _maybe_send_timeline_summary(
         self,

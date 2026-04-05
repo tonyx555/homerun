@@ -610,9 +610,7 @@ def apply_platform_decision_gates(
         live_revalidation_enforced = _coerce_bool(params.get("require_live_market_revalidation"), True)
         live_revalidation_sources = _normalize_text_list(params.get("require_live_revalidation_for_sources"))
         if not live_revalidation_sources:
-            live_revalidation_sources = _normalize_text_list(
-                params.get("require_market_data_age_for_sources", ["crypto", "scanner"])
-            )
+            live_revalidation_sources = _normalize_text_list(params.get("require_market_data_age_for_sources"))
         live_revalidation_required = False
 
         live_selected_price = safe_float(live_market_payload.get("live_selected_price"), None)
@@ -948,7 +946,7 @@ def apply_platform_decision_gates(
 
     if final_decision == "selected":
         freshness_enforced = _coerce_bool(params.get("enforce_market_data_freshness"), True)
-        required_sources = _normalize_text_list(params.get("require_market_data_age_for_sources", ["crypto", "scanner"]))
+        required_sources = _normalize_text_list(params.get("require_market_data_age_for_sources"))
         source = str(market_data_context.get("source") or "")
         timeframe = str(market_data_context.get("timeframe") or "")
         age_ms = safe_float(market_data_context.get("age_ms"), None)

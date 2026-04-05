@@ -209,6 +209,22 @@ def _extract_yes_no_tokens(market_info: dict[str, Any]) -> tuple[Optional[str], 
 
 
 def _extract_payload_market_hint(signal: Any) -> dict[str, Any]:
+    def _normalize_hint_list(raw: Any) -> list[str]:
+        if not isinstance(raw, list):
+            return []
+        values: list[str] = []
+        seen: set[str] = set()
+        for item in raw:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            key = text.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            values.append(text)
+        return values
+
     payload_json = getattr(signal, "payload_json", None)
     payload = dict(payload_json) if isinstance(payload_json, dict) else {}
     merged_payload = signal_payload(signal)
@@ -368,8 +384,46 @@ def _extract_payload_market_hint(signal: Any) -> dict[str, Any]:
                     synthetic_hint.setdefault("id", market_id)
                 if token_id:
                     synthetic_hint["token_ids"] = [token_id]
-                if outcome:
-                    synthetic_hint.setdefault("outcomes", [outcome])
+            if outcome:
+                synthetic_hint.setdefault("outcomes", [outcome])
+
+    existing_token_ids = _extract_token_ids(hint)
+    synthetic_token_ids = _extract_token_ids(synthetic_hint)
+    if synthetic_token_ids:
+        if existing_token_ids:
+            merged_token_ids = list(existing_token_ids)
+            seen_token_ids = {token_id.lower() for token_id in merged_token_ids}
+            for token_id in synthetic_token_ids:
+                if token_id.lower() in seen_token_ids:
+                    continue
+                merged_token_ids.append(token_id)
+                seen_token_ids.add(token_id.lower())
+            synthetic_hint["token_ids"] = merged_token_ids
+        else:
+            synthetic_hint["token_ids"] = synthetic_token_ids
+
+    existing_outcomes = _normalize_hint_list(
+        hint.get("outcomes")
+        if isinstance(hint.get("outcomes"), list)
+        else hint.get("outcome_labels") or hint.get("outcomeLabels")
+    )
+    synthetic_outcomes = _normalize_hint_list(
+        synthetic_hint.get("outcomes")
+        if isinstance(synthetic_hint.get("outcomes"), list)
+        else synthetic_hint.get("outcome_labels") or synthetic_hint.get("outcomeLabels")
+    )
+    if synthetic_outcomes:
+        if existing_outcomes:
+            merged_outcomes = list(existing_outcomes)
+            seen_outcomes = {outcome.lower() for outcome in merged_outcomes}
+            for outcome in synthetic_outcomes:
+                if outcome.lower() in seen_outcomes:
+                    continue
+                merged_outcomes.append(outcome)
+                seen_outcomes.add(outcome.lower())
+            synthetic_hint["outcomes"] = merged_outcomes
+        else:
+            synthetic_hint["outcomes"] = synthetic_outcomes
 
     hint.update(synthetic_hint)
     return hint

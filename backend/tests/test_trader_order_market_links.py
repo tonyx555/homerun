@@ -253,13 +253,30 @@ async def test_list_serialized_trader_orders_includes_trade_bundle_metadata_for_
                 },
             )
         )
+        session.add(
+            TraderOrder(
+                id="order_bundle_2",
+                trader_id="trader_bundle_1",
+                signal_id="signal_bundle_1",
+                source="scanner",
+                market_id="market-cucuta",
+                market_question="Will Cúcuta Deportivo FC win on 2026-04-01?",
+                direction="buy_yes",
+                mode="paper",
+                status="open",
+                payload_json={
+                    "token_id": "token-cucuta",
+                },
+            )
+        )
         await session.commit()
 
         rows = await list_serialized_trader_orders(session, trader_id="trader_bundle_1", limit=20)
 
     await engine.dispose()
-    assert len(rows) == 1
-    bundle = rows[0]["trade_bundle"]
+    assert len(rows) == 2
+    row_by_id = {row["id"]: row for row in rows}
+    bundle = row_by_id["order_bundle_1"]["trade_bundle"]
     assert bundle is not None
     assert bundle["bundle_id"] == "signal_bundle_1"
     assert bundle["plan_id"] == "plan-bundle-1"
@@ -275,6 +292,99 @@ async def test_list_serialized_trader_orders_includes_trade_bundle_metadata_for_
     assert bundle["current_leg_index"] == 0
     assert [leg["token_id"] for leg in bundle["legs"]] == ["token-atletico", "token-cucuta"]
     assert [leg["notional_weight"] for leg in bundle["legs"]] == pytest.approx([0.79, 0.075])
+
+
+@pytest.mark.asyncio
+async def test_list_serialized_trader_orders_hides_failed_nonmaterialized_bundle_attempts(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    async with session_factory() as session:
+        session.add(
+            TradeSignal(
+                id="signal_bundle_materialized",
+                source="scanner",
+                signal_type="opportunity",
+                strategy_type="generic_strategy",
+                market_id="market-1",
+                market_question="Will Team A win?",
+                direction="buy_yes",
+                dedupe_key="bundle-materialized",
+                payload_json={
+                    "is_guaranteed": True,
+                    "roi_type": "guaranteed_spread",
+                    "positions_to_take": [
+                        {"action": "BUY", "outcome": "YES", "market": "Will Team A win?", "price": 0.44, "token_id": "token-yes"},
+                        {"action": "BUY", "outcome": "NO", "market": "Will Team A win?", "price": 0.45, "token_id": "token-no"},
+                    ],
+                    "execution_plan": {
+                        "plan_id": "plan-materialized",
+                        "legs": [
+                            {"leg_id": "leg-yes", "market_id": "market-1", "market_question": "Will Team A win?", "token_id": "token-yes", "side": "buy", "outcome": "yes", "limit_price": 0.44},
+                            {"leg_id": "leg-no", "market_id": "market-1", "market_question": "Will Team A win?", "token_id": "token-no", "side": "buy", "outcome": "no", "limit_price": 0.45},
+                        ],
+                    },
+                    "markets": [
+                        {
+                            "id": "market-1",
+                            "condition_id": "market-1",
+                            "question": "Will Team A win?",
+                            "clob_token_ids": ["token-yes", "token-no"],
+                        }
+                    ],
+                    "market_roster": {
+                        "market_count": 1,
+                        "markets": [
+                            {
+                                "id": "market-1",
+                                "condition_id": "market-1",
+                                "question": "Will Team A win?",
+                            }
+                        ],
+                    },
+                },
+            )
+        )
+        session.add(
+            TraderOrder(
+                id="order_bundle_materialized_yes",
+                trader_id="trader_bundle_materialized",
+                signal_id="signal_bundle_materialized",
+                source="scanner",
+                market_id="market-1",
+                market_question="Will Team A win?",
+                direction="buy_yes",
+                mode="live",
+                status="open",
+                verification_status="venue_order",
+                verification_source="live_order_ack",
+                provider_order_id="provider-yes",
+                payload_json={"token_id": "token-yes"},
+            )
+        )
+        session.add(
+            TraderOrder(
+                id="order_bundle_materialized_no",
+                trader_id="trader_bundle_materialized",
+                signal_id="signal_bundle_materialized",
+                source="scanner",
+                market_id="market-1",
+                market_question="Will Team A win?",
+                direction="buy_no",
+                mode="live",
+                status="failed",
+                verification_status="local",
+                verification_source="local_runtime",
+                payload_json={"token_id": "token-no"},
+            )
+        )
+        await session.commit()
+
+        rows = await list_serialized_trader_orders(session, trader_id="trader_bundle_materialized", limit=20)
+
+    await engine.dispose()
+    assert len(rows) == 2
+    by_id = {row["id"]: row for row in rows}
+    assert by_id["order_bundle_materialized_yes"]["trade_bundle"] is None
+    assert by_id["order_bundle_materialized_no"]["trade_bundle"] is None
 
 
 @pytest.mark.asyncio
@@ -364,3 +474,224 @@ async def test_list_serialized_trader_orders_demotes_unproven_guaranteed_bundle_
     assert bundle["signal_is_guaranteed"] is True
     assert bundle["is_guaranteed"] is False
     assert bundle["guarantee_reason"] == "missing_market_roster"
+
+
+@pytest.mark.asyncio
+async def test_list_serialized_trader_orders_prefers_order_execution_shape_over_mutated_signal_bundle(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    async with session_factory() as session:
+        session.add(
+            TradeSignal(
+                id="signal_mutated_bundle",
+                source="scanner",
+                signal_type="opportunity",
+                strategy_type="generic_bundle",
+                market_id="market-seoul",
+                market_question="Will the highest temperature in Seoul be 15°C on April 4?",
+                direction="buy_yes",
+                dedupe_key="mutated-bundle-1",
+                payload_json={
+                    "is_guaranteed": True,
+                    "positions_to_take": [
+                        {
+                            "action": "BUY",
+                            "outcome": "YES",
+                            "market": "Will the highest temperature in Seoul be 15°C on April 4?",
+                            "token_id": "token-yes",
+                            "price": 0.085,
+                        },
+                        {
+                            "action": "BUY",
+                            "outcome": "NO",
+                            "market": "Will the highest temperature in Seoul be 15°C on April 4?",
+                            "token_id": "token-no",
+                            "price": 0.845,
+                        },
+                    ],
+                    "execution_plan": {
+                        "plan_id": "plan-mutated-bundle",
+                        "policy": "PAIR_LOCK",
+                        "legs": [
+                            {
+                                "leg_id": "leg_1",
+                                "market_id": "market-seoul",
+                                "market_question": "Will the highest temperature in Seoul be 15°C on April 4?",
+                                "token_id": "token-yes",
+                                "side": "buy",
+                                "outcome": "yes",
+                                "limit_price": 0.085,
+                            },
+                            {
+                                "leg_id": "leg_2",
+                                "market_id": "market-seoul",
+                                "market_question": "Will the highest temperature in Seoul be 15°C on April 4?",
+                                "token_id": "token-no",
+                                "side": "buy",
+                                "outcome": "no",
+                                "limit_price": 0.845,
+                            },
+                        ],
+                    },
+                },
+            )
+        )
+        session.add(
+            TraderOrder(
+                id="order_mutated_bundle",
+                trader_id="trader_mutated_bundle",
+                signal_id="signal_mutated_bundle",
+                source="scanner",
+                market_id="market-seoul",
+                market_question="Will the highest temperature in Seoul be 15°C on April 4?",
+                direction="buy_yes",
+                mode="paper",
+                status="closed_win",
+                actual_profit=0.17,
+                payload_json={
+                    "token_id": "token-yes",
+                    "leg": {
+                        "leg_id": "leg_1",
+                        "market_id": "market-seoul",
+                        "market_question": "Will the highest temperature in Seoul be 15°C on April 4?",
+                        "token_id": "token-yes",
+                        "side": "buy",
+                        "outcome": "yes",
+                        "limit_price": 0.07,
+                    },
+                    "execution_session": {
+                        "session_id": "session_mutated_bundle",
+                        "leg_id": "leg_1_runtime",
+                        "leg_ref": "leg_1",
+                        "policy": "SINGLE_LEG",
+                    },
+                    "strategy_context": {
+                        "execution_plan": {
+                            "plan_id": "plan-runtime-single",
+                            "policy": "SINGLE_LEG",
+                            "legs": [
+                                {
+                                    "leg_id": "leg_1",
+                                    "market_id": "market-seoul",
+                                    "market_question": "Will the highest temperature in Seoul be 15°C on April 4?",
+                                    "token_id": "token-yes",
+                                    "side": "buy",
+                                    "outcome": "yes",
+                                    "limit_price": 0.07,
+                                }
+                            ],
+                        }
+                    },
+                },
+            )
+        )
+        await session.commit()
+
+        rows = await list_serialized_trader_orders(session, trader_id="trader_mutated_bundle", limit=20)
+
+    await engine.dispose()
+    assert len(rows) == 1
+    assert rows[0]["trade_bundle"] is None
+
+
+@pytest.mark.asyncio
+async def test_list_serialized_trader_orders_hides_unmaterialized_pair_signal_when_only_one_live_leg_is_observed(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    async with session_factory() as session:
+        session.add(
+            TradeSignal(
+                id="signal_partial_pair",
+                source="scanner",
+                signal_type="opportunity",
+                strategy_type="basic",
+                market_id="market-london",
+                market_question="Will the highest temperature in London be 15°C on April 4?",
+                direction="buy_yes",
+                dedupe_key="partial-pair-1",
+                payload_json={
+                    "is_guaranteed": True,
+                    "positions_to_take": [
+                        {
+                            "action": "BUY",
+                            "outcome": "YES",
+                            "market": "Will the highest temperature in London be 15°C on April 4?",
+                            "token_id": "token-yes",
+                            "price": 0.24,
+                        },
+                        {
+                            "action": "BUY",
+                            "outcome": "NO",
+                            "market": "Will the highest temperature in London be 15°C on April 4?",
+                            "token_id": "token-no",
+                            "price": 0.76,
+                        },
+                    ],
+                    "execution_plan": {
+                        "plan_id": "plan-partial-pair",
+                        "policy": "PAIR_LOCK",
+                        "legs": [
+                            {
+                                "leg_id": "leg_yes",
+                                "market_id": "market-london",
+                                "market_question": "Will the highest temperature in London be 15°C on April 4?",
+                                "token_id": "token-yes",
+                                "side": "buy",
+                                "outcome": "yes",
+                                "limit_price": 0.24,
+                            },
+                            {
+                                "leg_id": "leg_no",
+                                "market_id": "market-london",
+                                "market_question": "Will the highest temperature in London be 15°C on April 4?",
+                                "token_id": "token-no",
+                                "side": "buy",
+                                "outcome": "no",
+                                "limit_price": 0.76,
+                            },
+                        ],
+                    },
+                },
+            )
+        )
+        session.add_all(
+            [
+                TraderOrder(
+                    id="order_partial_pair_yes",
+                    trader_id="trader_partial_pair",
+                    signal_id="signal_partial_pair",
+                    source="scanner",
+                    market_id="market-london",
+                    market_question="Will the highest temperature in London be 15°C on April 4?",
+                    direction="buy_yes",
+                    mode="live",
+                    status="cancelled",
+                    payload_json={
+                        "token_id": "token-yes",
+                    },
+                    verification_status="local",
+                ),
+                TraderOrder(
+                    id="order_partial_pair_no",
+                    trader_id="trader_partial_pair",
+                    signal_id="signal_partial_pair",
+                    source="scanner",
+                    market_id="market-london",
+                    market_question="Will the highest temperature in London be 15°C on April 4?",
+                    direction="buy_no",
+                    mode="live",
+                    status="open",
+                    payload_json={
+                        "token_id": "token-no",
+                        "provider_clob_order_id": "clob-token-no",
+                    },
+                    provider_clob_order_id="clob-token-no",
+                    verification_status="wallet_position",
+                ),
+            ]
+        )
+        await session.commit()
+
+        rows = await list_serialized_trader_orders(session, trader_id="trader_partial_pair", limit=20)
+
+    await engine.dispose()
+    assert len(rows) == 2
+    assert all(row["trade_bundle"] is None for row in rows)

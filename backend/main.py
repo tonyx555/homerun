@@ -348,12 +348,15 @@ async def lifespan(app: FastAPI):
         try:
             from services.market_cache import market_cache_service
 
-            await market_cache_service.load_from_db()
+            cache_load_task = market_cache_service.start_background_load()
+            if cache_load_task is not None:
+                tasks.append(cache_load_task)
             stats = await market_cache_service.get_cache_stats()
             logger.info(
-                "Market cache loaded from DB",
-                markets=stats.get("market_count", 0),
-                usernames=stats.get("username_count", 0),
+                "Market cache warmup started",
+                markets=stats.get("markets_db_count", stats.get("markets_cached", 0)),
+                usernames=stats.get("usernames_db_count", stats.get("usernames_cached", 0)),
+                loading=bool(cache_load_task),
             )
         except Exception as e:
             logger.warning(f"Market cache load failed (non-critical): {e}")

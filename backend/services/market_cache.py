@@ -105,6 +105,31 @@ class MarketCacheService:
         self._username_cache: dict[str, str] = {}  # In-memory for fast access
         self._loaded = False
         self._last_hygiene_at: Optional[datetime] = None
+        self._load_lock = asyncio.Lock()
+        self._load_task: Optional[asyncio.Task] = None
+        self._load_started_at: Optional[datetime] = None
+        self._load_finished_at: Optional[datetime] = None
+        self._load_error: Optional[str] = None
+
+    def start_background_load(self) -> Optional[asyncio.Task]:
+        if self._loaded:
+            return None
+        task = self._load_task
+        if task is not None and not task.done():
+            return task
+
+        async def _runner() -> None:
+            await self.load_from_db()
+
+        task = asyncio.create_task(_runner(), name="market-cache-load")
+        self._load_task = task
+
+        def _clear(ref: asyncio.Task) -> None:
+            if self._load_task is ref:
+                self._load_task = None
+
+        task.add_done_callback(_clear)
+        return task
 
     @staticmethod
     def _norm(value: object) -> str:
@@ -114,43 +139,73 @@ class MarketCacheService:
 
     async def load_from_db(self):
         """Load all cached data from SQL into memory on startup."""
-        try:
-            async with AsyncSessionLocal() as session:
-                # Load markets
-                result = await session.execute(select(CachedMarket))
-                rows = result.scalars().all()
-                for row in rows:
-                    self._market_cache[row.condition_id] = {
-                        "question": row.question,
-                        "slug": row.slug,
-                        "groupItemTitle": row.group_item_title,
-                        "category": row.category,
-                        "active": row.active,
-                        **(row.extra_data or {}),
-                    }
+        if self._loaded:
+            return
+        existing_task = self._load_task
+        current_task = asyncio.current_task()
+        if existing_task is not None and existing_task is not current_task and not existing_task.done():
+            await existing_task
+            return
 
-                # Load usernames
-                result = await session.execute(select(CachedUsername))
-                rows = result.scalars().all()
-                for row in rows:
-                    self._username_cache[row.address] = row.username
-
-            self._loaded = True
-            logger.info(
-                "Cache loaded from database",
-                markets=len(self._market_cache),
-                usernames=len(self._username_cache),
-            )
+        async with self._load_lock:
+            if self._loaded:
+                return
+            self._load_started_at = utcnow()
+            self._load_finished_at = None
+            self._load_error = None
             try:
-                hygiene = await self.run_hygiene_if_due(force=True)
-                if int(hygiene.get("markets_deleted", 0)) > 0:
-                    logger.info("Market cache hygiene removed stale entries", **hygiene)
+                next_market_cache: dict[str, dict] = {}
+                next_username_cache: dict[str, str] = {}
+                market_count = 0
+                username_count = 0
+
+                async with AsyncSessionLocal() as session:
+                    market_stream = await session.stream_scalars(
+                        select(CachedMarket).execution_options(yield_per=1000)
+                    )
+                    async for row in market_stream:
+                        next_market_cache[row.condition_id] = {
+                            "question": row.question,
+                            "slug": row.slug,
+                            "groupItemTitle": row.group_item_title,
+                            "category": row.category,
+                            "active": row.active,
+                            **(row.extra_data or {}),
+                        }
+                        market_count += 1
+                        if market_count % 1000 == 0:
+                            await asyncio.sleep(0)
+
+                    username_stream = await session.stream_scalars(
+                        select(CachedUsername).execution_options(yield_per=1000)
+                    )
+                    async for row in username_stream:
+                        next_username_cache[row.address] = row.username
+                        username_count += 1
+                        if username_count % 1000 == 0:
+                            await asyncio.sleep(0)
+
+                self._market_cache = next_market_cache
+                self._username_cache = next_username_cache
+                self._loaded = True
+                self._load_finished_at = utcnow()
+                logger.info(
+                    "Cache loaded from database",
+                    markets=len(self._market_cache),
+                    usernames=len(self._username_cache),
+                )
+                try:
+                    hygiene = await self.run_hygiene_if_due(force=True)
+                    if int(hygiene.get("markets_deleted", 0)) > 0:
+                        logger.info("Market cache hygiene removed stale entries", **hygiene)
+                except Exception as e:
+                    logger.warning("Market cache hygiene failed after load", error=str(e))
             except Exception as e:
-                logger.warning("Market cache hygiene failed after load", error=str(e))
-        except Exception as e:
-            logger.error("Failed to load cache from database", error=str(e))
-            # Service remains usable with empty in-memory cache
-            self._loaded = True
+                self._load_error = str(e)
+                self._load_finished_at = utcnow()
+                logger.error("Failed to load cache from database", error=str(e))
+                # Service remains usable with empty in-memory cache
+                self._loaded = True
 
     # -------------------- Market metadata --------------------
 
@@ -373,6 +428,10 @@ class MarketCacheService:
             "markets_cached": len(self._market_cache),
             "usernames_cached": len(self._username_cache),
             "loaded": self._loaded,
+            "loading": bool(self._load_task and not self._load_task.done()),
+            "load_started_at": self._load_started_at.isoformat() if self._load_started_at else None,
+            "load_finished_at": self._load_finished_at.isoformat() if self._load_finished_at else None,
+            "load_error": self._load_error,
         }
 
         try:

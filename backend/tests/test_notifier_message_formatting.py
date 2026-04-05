@@ -55,8 +55,12 @@ async def test_position_close_alert_has_compact_layout_and_usd_totals(monkeypatc
             "trader-2": "Beta",
         }
 
+    async def _persist(_session) -> None:
+        return None
+
     monkeypatch.setattr(notifier, "_enqueue", _enqueue)
     monkeypatch.setattr(notifier, "_load_trader_name_map", _name_map)
+    monkeypatch.setattr(notifier, "_persist_runtime_state", _persist)
 
     now = datetime(2026, 3, 2, 12, 0, tzinfo=timezone.utc)
     orders = [
@@ -102,6 +106,51 @@ async def test_position_close_alert_has_compact_layout_and_usd_totals(monkeypatc
     assert "Triggers:" in plain
     assert "take_profit" in plain
     assert "stop_loss" in plain
+
+
+@pytest.mark.asyncio
+async def test_position_close_alert_skips_replayed_close_marker(monkeypatch):
+    notifier = TelegramNotifier()
+    captured: list[str] = []
+
+    async def _enqueue(text: str) -> None:
+        captured.append(text)
+
+    async def _name_map(_session, _trader_ids: set[str]) -> dict[str, str]:
+        return {"trader-1": "Alpha"}
+
+    async def _persist(_session) -> None:
+        return None
+
+    monkeypatch.setattr(notifier, "_enqueue", _enqueue)
+    monkeypatch.setattr(notifier, "_load_trader_name_map", _name_map)
+    monkeypatch.setattr(notifier, "_persist_runtime_state", _persist)
+
+    close_at = "2026-03-02T12:00:00Z"
+    notifier._close_alert_markers = {"order-1": f"resolved_win|{close_at}"}
+    now = datetime(2026, 3, 2, 13, 0, tzinfo=timezone.utc)
+    orders = [
+        SimpleNamespace(
+            id="order-1",
+            trader_id="trader-1",
+            status="resolved_win",
+            actual_profit=15.50,
+            market_question="Will CPI come in below 3%?",
+            market_id="market-1",
+            payload_json={"position_close": {"close_trigger": "take_profit", "closed_at": close_at}},
+            updated_at=now,
+            created_at=now,
+            mode="shadow",
+        ),
+    ]
+
+    await notifier._send_position_close_alerts(
+        session=object(),
+        orders=orders,
+        mode="shadow",
+    )
+
+    assert captured == []
 
 
 @pytest.mark.asyncio

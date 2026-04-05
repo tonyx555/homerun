@@ -567,6 +567,11 @@ def set_marks_event_loop(loop: asyncio.AbstractEventLoop) -> None:
     """
     global _marks_loop
     _marks_loop = loop
+    if _marks_push_pending:
+        try:
+            _marks_loop.call_soon_threadsafe(_schedule_marks_push)
+        except RuntimeError:
+            pass
     logger.info("Position marks event loop captured")
 
 
@@ -592,6 +597,8 @@ def _on_position_marks_changed(changed_marks: list) -> None:
 def _schedule_marks_push() -> None:
     """Create the marks push task from the event loop thread."""
     global _marks_push_task
+    if _marks_loop is None:
+        return
     if _marks_push_task is None or _marks_push_task.done():
         _marks_push_task = _marks_loop.create_task(_push_position_marks())
 

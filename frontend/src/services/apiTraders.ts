@@ -958,8 +958,15 @@ export interface TraderOrder {
   notional_usd: number | null
   entry_price: number | null
   effective_price: number | null
+  execution_wallet_address: string | null
   provider_order_id: string
   provider_clob_order_id: string
+  verification_status: string
+  verification_source: string | null
+  verification_reason: string | null
+  verification_tx_hash: string | null
+  verification_disputed: boolean
+  verified_at: string | null
   provider_snapshot_status: string
   filled_shares: number | null
   filled_notional_usd: number | null

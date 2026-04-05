@@ -315,6 +315,45 @@ class TestScanPipeline:
             "gtm-ant-mic-2026-04-01-mic",
         }
 
+    @pytest.mark.asyncio
+    async def test_refresh_catalog_incremental_skips_single_market_cached_event_refetch(
+        self,
+        mock_polymarket_client,
+    ):
+        cached_market = Market(
+            id="market-single",
+            condition_id="condition-single",
+            question="Will Example happen?",
+            slug="example-single",
+            event_slug="example-single-event",
+            neg_risk=False,
+        )
+        cached_event = Event(
+            id="event-single",
+            slug="example-single-event",
+            title="Example single event",
+            category="Politics",
+            markets=[cached_market],
+            neg_risk=False,
+        )
+        mock_polymarket_client.get_recent_markets.return_value = [cached_market.model_copy(deep=True)]
+        mock_polymarket_client.get_events_by_slugs = AsyncMock(return_value=[])
+
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+        scanner._cached_markets = [cached_market]
+        scanner._cached_events = [cached_event]
+        scanner._rebuild_realtime_graph(scanner._cached_events, scanner._cached_markets)
+
+        with (
+            patch.object(scanner, "_ensure_runtime_strategies_loaded", new_callable=AsyncMock),
+            patch.object(scanner, "_set_activity", new_callable=AsyncMock),
+            patch("services.scanner.settings.WS_FEED_ENABLED", False),
+            patch("services.scanner.settings.NEWS_EDGE_ENABLED", False),
+        ):
+            await scanner.refresh_catalog_incremental()
+
+        mock_polymarket_client.get_events_by_slugs.assert_not_awaited()
+
     def test_enforce_catalog_caps_keeps_event_rosters_atomic(self, mock_polymarket_client):
         scanner = _build_scanner(mock_client=mock_polymarket_client)
 

@@ -29,7 +29,6 @@ target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
-    """Run migrations in offline mode."""
     url = config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
@@ -51,11 +50,8 @@ def do_run_migrations(connection: Connection) -> None:
         compare_type=True,
         compare_server_default=True,
     )
-
-    # Do NOT wrap in begin_transaction() — migrations that use autocommit_block()
-    # (e.g. ALTER TYPE ... ADD VALUE) require Alembic to manage its own transaction
-    # state. An outer begin_transaction() breaks autocommit_block()'s assertion.
-    context.run_migrations()
+    with context.begin_transaction():
+        context.run_migrations()
 
 
 async def run_async_migrations() -> None:
@@ -72,7 +68,6 @@ async def run_async_migrations() -> None:
 
 
 def run_migrations_online() -> None:
-    """Run migrations in online mode."""
     connection = config.attributes.get("connection")
     if connection is not None:
         do_run_migrations(connection)

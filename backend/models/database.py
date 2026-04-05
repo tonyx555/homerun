@@ -2867,6 +2867,16 @@ class TraderOrchestratorSnapshot(Base):
     stats_json = Column(JSON, default=dict)
 
 
+class NotifierRuntimeState(Base):
+    """Durable notifier cursor and dedupe state."""
+
+    __tablename__ = "notifier_runtime_state"
+
+    id = Column(String, primary_key=True, default="telegram")
+    close_alert_markers_json = Column(JSON, default=dict)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
 class Trader(Base):
     """Single trader definition owned by the orchestrator."""
 
@@ -2993,6 +3003,14 @@ class TraderOrder(Base):
     notional_usd = Column(Float, nullable=True)
     entry_price = Column(Float, nullable=True)
     effective_price = Column(Float, nullable=True)
+    execution_wallet_address = Column(String, nullable=True, index=True)
+    provider_order_id = Column(String, nullable=True, index=True)
+    provider_clob_order_id = Column(String, nullable=True, index=True)
+    verification_status = Column(String, nullable=False, default="local", index=True)
+    verification_source = Column(String, nullable=True)
+    verification_reason = Column(Text, nullable=True)
+    verification_tx_hash = Column(String, nullable=True, index=True)
+    verified_at = Column(DateTime, nullable=True)
     edge_percent = Column(Float, nullable=True)
     confidence = Column(Float, nullable=True)
     actual_profit = Column(Float, nullable=True)
@@ -3008,6 +3026,35 @@ class TraderOrder(Base):
         Index("idx_trader_orders_status", "status"),
         Index("idx_trader_orders_trader_created", "trader_id", "created_at"),
         Index("idx_trader_orders_trader_mode_status", "trader_id", "mode", "status"),
+    )
+
+
+class TraderOrderVerificationEvent(Base):
+    """Immutable verification evidence attached to a trader order."""
+
+    __tablename__ = "trader_order_verification_events"
+
+    id = Column(String, primary_key=True)
+    trader_order_id = Column(
+        String,
+        ForeignKey("trader_orders.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    verification_status = Column(String, nullable=False, default="local", index=True)
+    source = Column(String, nullable=True, index=True)
+    event_type = Column(String, nullable=False, index=True)
+    reason = Column(Text, nullable=True)
+    provider_order_id = Column(String, nullable=True, index=True)
+    provider_clob_order_id = Column(String, nullable=True, index=True)
+    execution_wallet_address = Column(String, nullable=True, index=True)
+    tx_hash = Column(String, nullable=True, index=True)
+    payload_json = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=_utcnow, nullable=False, index=True)
+
+    __table_args__ = (
+        Index("idx_tove_order_created", "trader_order_id", "created_at"),
+        Index("idx_tove_status_created", "verification_status", "created_at"),
     )
 
 
@@ -3644,6 +3691,20 @@ def _on_checkout(dbapi_connection, connection_record, connection_proxy):
     connection_record.info["checkout_time"] = _time.monotonic()
     connection_record.info["checkout_task_name"] = task_name
     connection_record.info["checkout_task_coro"] = coro_name
+    try:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute(
+                f"SET statement_timeout = '{max(1000, int(settings.DATABASE_STATEMENT_TIMEOUT_MS))}'"
+            )
+            cursor.execute(
+                "SET idle_in_transaction_session_timeout = "
+                f"'{max(1000, int(settings.DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS))}'"
+            )
+        finally:
+            cursor.close()
+    except Exception:
+        pass
 
 @_sa_event.listens_for(async_engine.sync_engine, "checkin")
 def _on_checkin(dbapi_connection, connection_record):

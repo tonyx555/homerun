@@ -1554,12 +1554,65 @@ function resolveOrderLifecycleLabel(status: string): string {
   return titleCaseStatusLabel(status)
 }
 
-function resolveVenueStatusPresentation(providerSnapshotStatus: string): {
+function resolveVenueStatusPresentation(order: TraderOrder, providerSnapshotStatus: string): {
   label: string
   detail: string
   className: string
 } {
   const key = normalizeStatus(providerSnapshotStatus)
+  const verificationStatus = normalizeStatus(order.verification_status)
+  const verificationSource = cleanText(order.verification_source)
+  const verificationReason = cleanText(order.verification_reason)
+
+  if (verificationStatus === 'disputed') {
+    return {
+      label: 'Disputed',
+      detail: verificationReason || 'Venue history is inconsistent and this row is excluded from normal trading truth.',
+      className: 'border-red-300 bg-red-100 text-red-900 dark:border-red-400/45 dark:bg-red-500/12 dark:text-red-200',
+    }
+  }
+  if (verificationStatus === 'summary_only') {
+    return {
+      label: 'Summary',
+      detail: verificationReason || 'Recovered only from closed-position summary data, not direct order/trade lineage.',
+      className: 'border-amber-300 bg-amber-100 text-amber-900 dark:border-amber-400/45 dark:bg-amber-500/12 dark:text-amber-200',
+    }
+  }
+  if (verificationStatus === 'wallet_activity') {
+    return {
+      label: 'Wallet',
+      detail: verificationReason || verificationSource || 'Verified from wallet trade/activity authority.',
+      className: 'border-emerald-300 bg-emerald-100 text-emerald-900 dark:border-emerald-400/45 dark:bg-emerald-500/12 dark:text-emerald-200',
+    }
+  }
+  if (verificationStatus === 'wallet_position') {
+    return {
+      label: 'Wallet',
+      detail: verificationReason || verificationSource || 'Verified from current execution wallet holdings.',
+      className: 'border-sky-300 bg-sky-100 text-sky-900 dark:border-sky-400/45 dark:bg-sky-500/12 dark:text-sky-200',
+    }
+  }
+  if (verificationStatus === 'venue_order' && !key) {
+    return {
+      label: 'Acked',
+      detail: verificationReason || verificationSource || 'Venue order acknowledgement exists, but no current fill snapshot was preserved.',
+      className: 'border-sky-300 bg-sky-100 text-sky-900 dark:border-sky-400/45 dark:bg-sky-500/12 dark:text-sky-200',
+    }
+  }
+  if (verificationStatus === 'venue_fill' && !key) {
+    return {
+      label: 'Verified',
+      detail: verificationReason || verificationSource || 'Venue fill authority exists without a current snapshot status.',
+      className: 'border-emerald-300 bg-emerald-100 text-emerald-900 dark:border-emerald-400/45 dark:bg-emerald-500/12 dark:text-emerald-200',
+    }
+  }
+  if (verificationStatus === 'local' && !key) {
+    return {
+      label: 'Local',
+      detail: 'Only local orchestrator evidence is present for this row.',
+      className: 'border-border bg-muted/50 text-muted-foreground',
+    }
+  }
   if (key === 'filled') {
     return {
       label: 'Filled',
@@ -5283,6 +5336,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const [selectedAccountId] = useAtom(selectedAccountIdAtom)
   const selectedAccountIsLive = Boolean(selectedAccountId?.startsWith('live:'))
   const selectedAccountMode: 'shadow' | 'live' = selectedAccountIsLive ? 'live' : 'shadow'
+  const selectedTraderDataMode: 'shadow' | 'live' = selectedAccountId ? selectedAccountMode : 'live'
   const [selectedTraderId, setSelectedTraderId] = useState<string | null>(null)
   const [selectedDecisionId, setSelectedDecisionId] = useState<string | null>(null)
   const [traderFeedFilter, setTraderFeedFilter] = useState<FeedFilter>('all')
@@ -5396,8 +5450,8 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const liveExecutionSettings = settingsQuery.data?.live_execution ?? null
 
   const tradersQuery = useQuery({
-    queryKey: ['traders-list', selectedAccountMode],
-    queryFn: () => getTraders({ mode: selectedAccountMode }),
+    queryKey: ['traders-list', selectedAccountId ? selectedTraderDataMode : 'all-visible'],
+    queryFn: () => getTraders(selectedAccountId ? { mode: selectedTraderDataMode } : undefined),
     refetchInterval: isConnected ? 15000 : 30000,
   })
 
@@ -5589,8 +5643,8 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   })
 
   const ordersSummaryQuery = useQuery({
-    queryKey: ['trader-orders-summary', selectedAccountMode],
-    queryFn: () => getTraderOrdersSummary(selectedAccountMode),
+    queryKey: ['trader-orders-summary', selectedAccountId ? selectedTraderDataMode : 'all-visible'],
+    queryFn: () => getTraderOrdersSummary(selectedAccountId ? selectedTraderDataMode : undefined),
     enabled: traderIds.length > 0,
     refetchInterval: isConnected ? 10000 : 30000,
     staleTime: 3000,
@@ -5618,11 +5672,12 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const allOrders = useMemo(
     () => (allOrdersQuery.data || []).filter((order) => {
       if (!traderIdSet.has(String(order.trader_id || ''))) return false
+      if (!selectedAccountId) return true
       const orderMode = String(order.mode || '').trim().toLowerCase()
-      if (orderMode === 'live' || orderMode === 'shadow') return orderMode === selectedAccountMode
-      return selectedAccountMode === 'shadow'
+      if (orderMode === 'live' || orderMode === 'shadow') return orderMode === selectedTraderDataMode
+      return selectedTraderDataMode === 'shadow'
     }),
-    [allOrdersQuery.data, selectedAccountMode, traderIdSet]
+    [allOrdersQuery.data, selectedAccountId, selectedTraderDataMode, traderIdSet]
   )
   const marketModalMarketIds = useMemo(
     () => collectMarketAliases([
@@ -8325,7 +8380,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     const links = buildOrderMarketLinks(order, orderPayload, signalPayload)
     const outcome = orderOutcomeSummary(order)
     const executionSummary = orderExecutionTypeSummary(order)
-    const venuePresentation = resolveVenueStatusPresentation(providerSnapshotStatus)
+    const venuePresentation = resolveVenueStatusPresentation(order, providerSnapshotStatus)
     const currentValue = markPx > 0 && filledSize > 0
       ? markPx * filledSize
       : filledNotional > 0 ? filledNotional : requestedNotional
@@ -9513,6 +9568,11 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                 title={
                   `${venuePresentation.detail}`
                   + (providerSnapshotStatus ? ` • provider:${providerSnapshotStatus}` : '')
+                  + (order.verification_status ? ` • verification:${order.verification_status}` : '')
+                  + (order.verification_source ? ` • source:${order.verification_source}` : '')
+                  + (order.verification_reason ? ` • reason:${order.verification_reason}` : '')
+                  + (order.execution_wallet_address ? ` • wallet:${order.execution_wallet_address}` : '')
+                  + (order.verification_tx_hash ? ` • tx:${order.verification_tx_hash}` : '')
                   + (
                     order.provider_clob_order_id || order.provider_order_id
                       ? ` • order_ref:${order.provider_clob_order_id || order.provider_order_id}`

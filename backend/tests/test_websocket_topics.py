@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+import api.websocket as websocket_module
 from api.websocket import ConnectionManager
 
 
@@ -95,3 +96,21 @@ async def test_price_topic_subscription_state() -> None:
 
 def test_trader_orchestrator_status_uses_core_channel() -> None:
     assert ConnectionManager._message_channel("trader_orchestrator_status") == "core"
+
+
+class DummyLoop:
+    def __init__(self) -> None:
+        self.callbacks: list[object] = []
+
+    def call_soon_threadsafe(self, callback) -> None:
+        self.callbacks.append(callback)
+
+
+def test_set_marks_event_loop_schedules_pending_push(monkeypatch) -> None:
+    loop = DummyLoop()
+    monkeypatch.setattr(websocket_module, "_marks_loop", None)
+    monkeypatch.setattr(websocket_module, "_marks_push_pending", True)
+
+    websocket_module.set_marks_event_loop(loop)
+
+    assert loop.callbacks == [websocket_module._schedule_marks_push]

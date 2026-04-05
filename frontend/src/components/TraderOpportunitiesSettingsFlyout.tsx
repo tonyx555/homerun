@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { memo, useCallback, useEffect, useState } from 'react'
 import {
   AlertCircle,
   CheckCircle,
@@ -10,17 +10,26 @@ import {
   X,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
+import StrategyConfigSections from './StrategyConfigSections'
 import { Button } from './ui/button'
 import { Card } from './ui/card'
 import { Input } from './ui/input'
 import { Label } from './ui/label'
-import StrategyConfigSections from './StrategyConfigSections'
 
 export type TraderOpportunitiesSettingsForm = {
   confluence_limit: number
   individual_trade_limit: number
   individual_trade_min_confidence: number
   individual_trade_max_age_minutes: number
+}
+
+type TraderOpportunitiesSettingsFlyoutProps = {
+  isOpen: boolean
+  onClose: () => void
+  initial: TraderOpportunitiesSettingsForm
+  onSave: (next: TraderOpportunitiesSettingsForm) => void
+  savePending?: boolean
+  saveMessage?: { type: 'success' | 'error'; text: string } | null
 }
 
 function NumericField({
@@ -61,38 +70,61 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value))
 }
 
-export default function TraderOpportunitiesSettingsFlyout({
+function TraderOpportunitiesSettingsFlyout({
   isOpen,
   onClose,
   initial,
   onSave,
   savePending,
   saveMessage,
-}: {
-  isOpen: boolean
-  onClose: () => void
-  initial: TraderOpportunitiesSettingsForm
-  onSave: (next: TraderOpportunitiesSettingsForm) => void
-  savePending?: boolean
-  saveMessage?: { type: 'success' | 'error'; text: string } | null
-}) {
+}: TraderOpportunitiesSettingsFlyoutProps) {
   const [form, setForm] = useState<TraderOpportunitiesSettingsForm>(initial)
 
   useEffect(() => {
     if (!isOpen) return
-    setForm(initial)
-  }, [initial, isOpen])
+    setForm((current) => {
+      if (
+        current.confluence_limit === initial.confluence_limit &&
+        current.individual_trade_limit === initial.individual_trade_limit &&
+        current.individual_trade_min_confidence === initial.individual_trade_min_confidence &&
+        current.individual_trade_max_age_minutes === initial.individual_trade_max_age_minutes
+      ) {
+        return current
+      }
+      return initial
+    })
+  }, [
+    initial.confluence_limit,
+    initial.individual_trade_limit,
+    initial.individual_trade_max_age_minutes,
+    initial.individual_trade_min_confidence,
+    isOpen,
+  ])
 
-  if (!isOpen) return null
-
-  const handleSave = () => {
+  const handleSave = useCallback(() => {
     onSave({
       confluence_limit: Math.round(clamp(form.confluence_limit, 1, 200)),
       individual_trade_limit: Math.round(clamp(form.individual_trade_limit, 1, 500)),
       individual_trade_min_confidence: clamp(form.individual_trade_min_confidence, 0, 1),
-      individual_trade_max_age_minutes: Math.round(clamp(form.individual_trade_max_age_minutes, 1, 1440)),
+      individual_trade_max_age_minutes: Math.round(
+        clamp(form.individual_trade_max_age_minutes, 1, 1440),
+      ),
     })
-  }
+  }, [form, onSave])
+
+  const handleOpenStrategyCode = useCallback(() => {
+    onClose()
+    setTimeout(() => {
+      window.dispatchEvent(new CustomEvent('navigate-to-tab', { detail: 'strategies' }))
+      window.dispatchEvent(
+        new CustomEvent('navigate-strategies-subtab', {
+          detail: { subtab: 'opportunity', sourceFilter: 'traders' },
+        }),
+      )
+    }, 150)
+  }, [onClose])
+
+  if (!isOpen) return null
 
   return (
     <>
@@ -149,7 +181,6 @@ export default function TraderOpportunitiesSettingsFlyout({
             Auto-trader and copy trading settings are configured in the Auto Trader flyout.
           </p>
 
-          {/* ============ SIGNAL FILTERS ============ */}
           <Card className="bg-card/40 border-border/40 rounded-xl shadow-none p-3 space-y-3">
             <div className="flex items-center gap-1.5">
               <Filter className="w-3.5 h-3.5 text-orange-400" />
@@ -168,37 +199,34 @@ export default function TraderOpportunitiesSettingsFlyout({
             </div>
           </Card>
 
-          {/* ============ STRATEGY-OWNED FIREHOSE FILTERING ============ */}
           <Card className="bg-card/40 border-border/40 rounded-xl shadow-none p-3 space-y-3">
             <div className="flex items-center gap-1.5">
               <Users className="w-3.5 h-3.5 text-amber-400" />
-              <h4 className="text-[10px] uppercase tracking-widest font-semibold">Firehose Filtering Ownership</h4>
+              <h4 className="text-[10px] uppercase tracking-widest font-semibold">
+                Firehose Filtering Ownership
+              </h4>
             </div>
             <p className="text-[11px] text-muted-foreground/80 leading-relaxed">
-              Traders firehose inclusion/exclusion gates (tradability, crypto exclusion, source qualification,
-              age windows) are controlled in the <span className="text-foreground">Traders Confluence strategy config</span> below.
+              Traders firehose inclusion/exclusion gates (tradability, crypto exclusion, source
+              qualification, age windows) are controlled in the{' '}
+              <span className="text-foreground">Traders Confluence strategy config</span> below.
             </p>
           </Card>
 
-          {/* Dynamic strategy config sections from config_schema */}
           <StrategyConfigSections sourceKey="traders" enabled={isOpen} />
 
           <Card className="bg-card/40 border-border/40 rounded-xl shadow-none p-3">
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-xs font-medium">Strategy Code</p>
-                <p className="text-[10px] text-muted-foreground">Edit the Traders Confluence detector source code</p>
+                <p className="text-[10px] text-muted-foreground">
+                  Edit the Traders Confluence detector source code
+                </p>
               </div>
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => {
-                  onClose()
-                  setTimeout(() => {
-                    window.dispatchEvent(new CustomEvent('navigate-to-tab', { detail: 'strategies' }))
-                    window.dispatchEvent(new CustomEvent('navigate-strategies-subtab', { detail: { subtab: 'opportunity', sourceFilter: 'traders' } }))
-                  }, 150)
-                }}
+                onClick={handleOpenStrategyCode}
                 className="gap-1.5 text-[10px] h-7"
               >
                 <ExternalLink className="w-3 h-3" />
@@ -211,3 +239,7 @@ export default function TraderOpportunitiesSettingsFlyout({
     </>
   )
 }
+
+const MemoizedTraderOpportunitiesSettingsFlyout = memo(TraderOpportunitiesSettingsFlyout)
+
+export default MemoizedTraderOpportunitiesSettingsFlyout

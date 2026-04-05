@@ -6,7 +6,14 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from services.trader_orchestrator_state import _grouped_trade_counts
+from sqlalchemy import select
+
+from models.database import TraderOrder
+from services.trader_orchestrator_state import (
+    _expand_trader_order_status_filter,
+    _grouped_trade_counts,
+    _visible_trader_order_query_clause,
+)
 
 
 OPEN_STATUSES = ("submitted", "executed", "open")
@@ -34,13 +41,16 @@ def _order(
     trader_id: str,
     signal_id: str | None,
     status: str,
+    payload_json: dict | None = None,
+    verification_status: str = "local",
 ) -> SimpleNamespace:
     return SimpleNamespace(
         id=order_id,
         trader_id=trader_id,
         signal_id=signal_id,
         status=status,
-        payload_json={},
+        payload_json=payload_json or {},
+        verification_status=verification_status,
     )
 
 
@@ -124,3 +134,128 @@ def test_grouped_trade_counts_keep_single_orders_separate_without_bundle_signal(
         "failed_trades": 0,
         "partial_open_bundles": 0,
     }
+
+
+def test_grouped_trade_counts_prefer_order_execution_shape_over_multi_leg_signal():
+    rows = [
+        _order(
+            order_id="single_from_mutated_signal",
+            trader_id="t1",
+            signal_id="mutated_bundle_signal",
+            status="closed_win",
+            payload_json={
+                "leg": {
+                    "leg_id": "leg_1",
+                    "token_id": "token-yes",
+                    "side": "buy",
+                    "outcome": "yes",
+                },
+                "execution_session": {
+                    "policy": "SINGLE_LEG",
+                    "leg_ref": "leg_1",
+                },
+                "strategy_context": {
+                    "execution_plan": {
+                        "policy": "SINGLE_LEG",
+                        "legs": [
+                            {
+                                "leg_id": "leg_1",
+                                "token_id": "token-yes",
+                                "side": "buy",
+                                "outcome": "yes",
+                            }
+                        ],
+                    }
+                },
+            },
+        )
+    ]
+    signals = {
+        "mutated_bundle_signal": _signal("mutated_bundle_signal", 2),
+    }
+
+    totals, by_trader = _grouped_trade_counts(
+        rows,
+        signals,
+        open_statuses=OPEN_STATUSES,
+        resolved_statuses=RESOLVED_STATUSES,
+        failed_statuses=FAILED_STATUSES,
+    )
+
+    assert totals == {
+        "total_trades": 1,
+        "open_trades": 0,
+        "resolved_trades": 1,
+        "failed_trades": 0,
+        "partial_open_bundles": 0,
+    }
+    assert by_trader["t1"] == {
+        "trade_count": 1,
+        "open_trades": 0,
+        "resolved_trades": 1,
+        "failed_trades": 0,
+        "partial_open_bundles": 0,
+    }
+
+
+def test_grouped_trade_counts_ignore_hidden_verification_rows():
+    rows = [
+        _order(order_id="visible_open", trader_id="t1", signal_id="single_open", status="open"),
+        _order(
+            order_id="disputed_resolved",
+            trader_id="t1",
+            signal_id="single_resolved",
+            status="resolved_loss",
+            verification_status="disputed",
+        ),
+    ]
+    signals = {
+        "single_open": _signal("single_open", 1),
+        "single_resolved": _signal("single_resolved", 1),
+    }
+
+    totals, by_trader = _grouped_trade_counts(
+        rows,
+        signals,
+        open_statuses=OPEN_STATUSES,
+        resolved_statuses=RESOLVED_STATUSES,
+        failed_statuses=FAILED_STATUSES,
+    )
+
+    assert totals == {
+        "total_trades": 1,
+        "open_trades": 1,
+        "resolved_trades": 0,
+        "failed_trades": 0,
+        "partial_open_bundles": 0,
+    }
+    assert by_trader["t1"] == {
+        "trade_count": 1,
+        "open_trades": 1,
+        "resolved_trades": 0,
+        "failed_trades": 0,
+        "partial_open_bundles": 0,
+    }
+
+
+def test_visible_trader_order_query_clause_builds_not_in_filter():
+    clause = _visible_trader_order_query_clause()
+    statement = select(TraderOrder.id).where(clause)
+    compiled = str(statement.compile(compile_kwargs={"literal_binds": True}))
+
+    assert "NOT IN" in compiled.upper()
+
+
+def test_expand_trader_order_status_filter_maps_status_buckets():
+    assert _expand_trader_order_status_filter(None) is None
+    assert _expand_trader_order_status_filter("all") is None
+    assert _expand_trader_order_status_filter("open") == ("executed", "open", "submitted")
+    assert _expand_trader_order_status_filter("failed") == ("cancelled", "error", "failed", "rejected")
+    assert _expand_trader_order_status_filter("open+resolved") == (
+        "executed",
+        "open",
+        "resolved",
+        "resolved_loss",
+        "resolved_win",
+        "submitted",
+    )

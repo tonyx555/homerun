@@ -10,7 +10,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from models.database import Base, LiveTradingOrder, Trader, TraderOrder
+from models.database import Base, LiveTradingOrder, TradeSignal, Trader, TraderDecision, TraderOrder
 from services import trader_orchestrator_state
 from workers import trader_reconciliation_worker
 from services.trader_orchestrator_state import (
@@ -510,6 +510,277 @@ async def test_recover_missing_live_trader_orders_collapses_duplicate_authority_
             assert canonical.status == "resolved_win"
             canonical_payload = dict(canonical.payload_json or {})
             assert canonical_payload["live_wallet_authority"]["live_trading_order_id"] == "venue-order-mavs-cavs"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_recover_missing_live_trader_orders_promotes_failed_existing_entry_with_live_authority(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    trader_id = "live-trader-promote-existing"
+    try:
+        async with session_factory() as session:
+            await _seed_trader(session, trader_id)
+            now = utcnow()
+            session.add(
+                TraderOrder(
+                    id="failed-existing-order",
+                    trader_id=trader_id,
+                    signal_id="signal-existing-order",
+                    decision_id="decision-existing-order",
+                    source="scanner",
+                    strategy_key="basic",
+                    market_id="market-manchester-ou",
+                    market_question="Manchester City FC vs. Liverpool FC: O/U 4.5",
+                    direction="buy_yes",
+                    mode="live",
+                    status="failed",
+                    notional_usd=5.0,
+                    entry_price=0.5,
+                    effective_price=0.5,
+                    reason="Basic Arbitrage: signal selected",
+                    payload_json={
+                        "token_id": "token-over",
+                        "provider_clob_order_id": "clob-manchester-over",
+                    },
+                    provider_clob_order_id="clob-manchester-over",
+                    created_at=now,
+                    updated_at=now,
+                    error_message="timeout waiting for provider",
+                    verification_status="local",
+                )
+            )
+            session.add(
+                LiveTradingOrder(
+                    id="venue-order-manchester-over",
+                    wallet_address="0xwallet",
+                    clob_order_id="clob-manchester-over",
+                    token_id="token-over",
+                    side="BUY",
+                    price=0.5,
+                    size=10.0,
+                    order_type="IOC",
+                    status="filled",
+                    filled_size=10.0,
+                    average_fill_price=0.5,
+                    market_question="Manchester City FC vs. Liverpool FC: O/U 4.5",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            await session.commit()
+
+            result = await recover_missing_live_trader_orders(
+                session,
+                trader_ids=[trader_id],
+                commit=True,
+                broadcast=False,
+            )
+
+            assert result["recovered_orders"] == 0
+            assert result["adopted_existing_orders"] == 1
+
+            refreshed = await session.get(TraderOrder, "failed-existing-order")
+            assert refreshed is not None
+            assert refreshed.status == "open"
+            assert refreshed.error_message is None
+            assert refreshed.provider_clob_order_id == "clob-manchester-over"
+            assert refreshed.verification_status == "venue_fill"
+            payload = dict(refreshed.payload_json or {})
+            assert payload["live_wallet_authority"]["live_trading_order_id"] == "venue-order-manchester-over"
+            assert payload["provider_reconciliation"]["snapshot_status"] == "filled"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_recover_missing_live_trader_orders_finalizes_unfilled_existing_entry_with_failed_live_authority(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    trader_id = "live-trader-finalize-unfilled-existing"
+    try:
+        async with session_factory() as session:
+            await _seed_trader(session, trader_id)
+            now = utcnow()
+            session.add(
+                TraderOrder(
+                    id="open-existing-order",
+                    trader_id=trader_id,
+                    signal_id="signal-open-existing-order",
+                    decision_id="decision-open-existing-order",
+                    source="scanner",
+                    strategy_key="generic_strategy",
+                    market_id="market-golf-winner",
+                    market_question="Will Golfer X win the tournament?",
+                    direction="buy_no",
+                    mode="live",
+                    status="open",
+                    notional_usd=9.3,
+                    entry_price=0.86,
+                    effective_price=0.86,
+                    reason="Signal selected",
+                    payload_json={},
+                    created_at=now,
+                    updated_at=now,
+                    verification_status="local",
+                )
+            )
+            session.add(
+                LiveTradingOrder(
+                    id="venue-order-golf-failed",
+                    wallet_address="0xwallet",
+                    clob_order_id=None,
+                    token_id="token-golf-no",
+                    side="BUY",
+                    price=0.86,
+                    size=10.8,
+                    order_type="IOC",
+                    status="failed",
+                    filled_size=0.0,
+                    average_fill_price=0.0,
+                    market_question="Will Golfer X win the tournament?",
+                    error_message="PolyApiException[status_code=400, error_message={'error': 'no orders found to match with FAK order. FAK orders are partially filled or killed if no match is found.'}]",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            existing = await session.get(TraderOrder, "open-existing-order")
+            existing.provider_order_id = "venue-order-golf-failed"
+            await session.commit()
+
+            result = await recover_missing_live_trader_orders(
+                session,
+                trader_ids=[trader_id],
+                commit=True,
+                broadcast=False,
+            )
+
+            assert result["recovered_orders"] == 0
+            assert result["adopted_existing_orders"] == 1
+
+            refreshed = await session.get(TraderOrder, "open-existing-order")
+            assert refreshed is not None
+            assert refreshed.status == "rejected"
+            assert refreshed.notional_usd == pytest.approx(0.0)
+            assert refreshed.executed_at is None
+            assert "no orders found to match with FAK order" in str(refreshed.error_message or "")
+            payload = dict(refreshed.payload_json or {})
+            provider_reconciliation = payload.get("provider_reconciliation")
+            provider_reconciliation = provider_reconciliation if isinstance(provider_reconciliation, dict) else {}
+            assert provider_reconciliation.get("snapshot_status") == "failed"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_recover_missing_live_trader_orders_carries_full_bundle_signal_metadata(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    trader_id = "live-trader-bundle-authority"
+    try:
+        async with session_factory() as session:
+            await _seed_trader(session, trader_id)
+            now = utcnow()
+            session.add(
+                TradeSignal(
+                    id="signal-bundle-authority",
+                    source="scanner",
+                    signal_type="opportunity",
+                    strategy_type="generic_strategy",
+                    market_id="market-bundle-1",
+                    market_question="Will Team A win?",
+                    direction="buy_yes",
+                    dedupe_key="bundle-authority",
+                    payload_json={
+                        "is_guaranteed": True,
+                        "positions_to_take": [
+                            {"action": "BUY", "outcome": "YES", "token_id": "token-yes", "market": "Will Team A win?"},
+                            {"action": "BUY", "outcome": "NO", "token_id": "token-no", "market": "Will Team A win?"},
+                        ],
+                        "execution_plan": {
+                            "plan_id": "plan-bundle-authority",
+                            "metadata": {
+                                "full_bundle_execution_required": True,
+                                "full_bundle_execution_mode": "live_ioc_complete_or_flatten",
+                            },
+                            "legs": [
+                                {
+                                    "leg_id": "leg-yes",
+                                    "market_id": "market-bundle-1",
+                                    "market_question": "Will Team A win?",
+                                    "token_id": "token-yes",
+                                    "side": "buy",
+                                    "outcome": "yes",
+                                    "limit_price": 0.44,
+                                },
+                                {
+                                    "leg_id": "leg-no",
+                                    "market_id": "market-bundle-1",
+                                    "market_question": "Will Team A win?",
+                                    "token_id": "token-no",
+                                    "side": "buy",
+                                    "outcome": "no",
+                                    "limit_price": 0.45,
+                                },
+                            ],
+                        },
+                    },
+                    created_at=now - timedelta(minutes=1),
+                    updated_at=now - timedelta(minutes=1),
+                )
+            )
+            session.add(
+                TraderDecision(
+                    id="decision-bundle-authority",
+                    trader_id=trader_id,
+                    signal_id="signal-bundle-authority",
+                    source="scanner",
+                    strategy_key="generic_strategy",
+                    strategy_version=1,
+                    decision="selected",
+                    created_at=now - timedelta(minutes=1),
+                )
+            )
+            session.add(
+                LiveTradingOrder(
+                    id="venue-order-bundle-authority",
+                    wallet_address="0xwallet",
+                    clob_order_id="clob-bundle-authority",
+                    token_id="token-yes",
+                    side="BUY",
+                    price=0.44,
+                    size=5.0,
+                    order_type="IOC",
+                    status="filled",
+                    filled_size=5.0,
+                    average_fill_price=0.44,
+                    market_question="Will Team A win?",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            await session.commit()
+
+            result = await recover_missing_live_trader_orders(
+                session,
+                trader_ids=[trader_id],
+                commit=True,
+                broadcast=False,
+            )
+
+            assert result["recovered_orders"] == 1
+
+            recovered_rows = (
+                await session.execute(select(TraderOrder).where(TraderOrder.trader_id == trader_id).order_by(TraderOrder.created_at.asc()))
+            ).scalars().all()
+            assert len(recovered_rows) == 1
+            payload = dict(recovered_rows[0].payload_json or {})
+            execution_plan = payload.get("execution_plan")
+            execution_plan = execution_plan if isinstance(execution_plan, dict) else {}
+            metadata = execution_plan.get("metadata")
+            metadata = metadata if isinstance(metadata, dict) else {}
+            assert payload.get("is_guaranteed") is True
+            assert len(payload.get("positions_to_take") or []) == 2
+            assert metadata.get("full_bundle_execution_required") is True
+            assert metadata.get("full_bundle_execution_mode") == "live_ioc_complete_or_flatten"
     finally:
         await engine.dispose()
 

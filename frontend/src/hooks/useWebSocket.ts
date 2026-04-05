@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { normalizeUtcTimestampsInPlace } from '../lib/timestamps'
 
 interface WebSocketMessage {
@@ -156,18 +156,26 @@ function sharedDisconnect() {
 
 // ─── Hook ────────────────────────────────────────────────
 
-export function useWebSocket(url: string) {
+export function useWebSocket(url: string, messageTypes?: string[]) {
   const [isConnected, setIsConnected] = useState(sharedConnected)
   const [lastMessage, setLastMessage] = useState<WebSocketMessage | null>(null)
   const urlRef = useRef(url)
+  const messageTypesRef = useRef<Set<string> | null>(null)
   urlRef.current = url
+  messageTypesRef.current = Array.isArray(messageTypes) && messageTypes.length > 0
+    ? new Set(messageTypes)
+    : null
 
   useEffect(() => {
     mountedCount++
     disposed = false
 
     // Register listeners
-    const onMsg = (msg: WebSocketMessage) => setLastMessage(msg)
+    const onMsg = (msg: WebSocketMessage) => {
+      const allowedTypes = messageTypesRef.current
+      if (allowedTypes && !allowedTypes.has(String(msg.type))) return
+      setLastMessage(msg)
+    }
     const onStatus = (connected: boolean) => setIsConnected(connected)
     listeners.add(onMsg)
     statusListeners.add(onStatus)
