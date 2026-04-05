@@ -1354,6 +1354,7 @@ class BaseStrategy(ABC):
         custom_roi_percent: Optional[float] = None,
         # Pass a pre-computed risk score [0, 1] to bypass calculate_risk_score().
         custom_risk_score: Optional[float] = None,
+        fee_model_maker_mode: Optional[bool] = None,
     ) -> Optional[Opportunity]:
         """Create an Opportunity with fee/risk enrichment.
 
@@ -1367,6 +1368,9 @@ class BaseStrategy(ABC):
             custom_risk_score: Pre-computed risk score [0, 1]. When provided,
                 bypasses calculate_risk_score(). risk_factors will be empty
                 unless you set them on the returned opportunity afterward.
+            fee_model_maker_mode: Override the fee model's maker/taker assumption
+                for this opportunity. Use ``False`` for IOC/taker execution even
+                when the global fee model default is maker-biased.
         """
 
         if total_cost <= 0:
@@ -1407,11 +1411,11 @@ class BaseStrategy(ABC):
         else:
             fee_breakdown = fee_model.calculate_fees(
                 expected_payout=expected_payout,
-                num_legs=len(markets),
+                num_legs=max(len(markets), len(positions), len(entry_prices)),
                 is_negrisk=is_negrisk,
                 spread_bps=spread_bps,
                 total_cost=total_cost,
-                maker_mode=settings.FEE_MODEL_MAKER_MODE,
+                maker_mode=fee_model_maker_mode if fee_model_maker_mode is not None else settings.FEE_MODEL_MAKER_MODE,
                 total_liquidity=total_liquidity,
                 platform=platform,
                 entry_prices=entry_prices,

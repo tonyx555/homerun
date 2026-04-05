@@ -1126,11 +1126,6 @@ class AppSettings(Base):
     # Event-Driven Arbitrage
     event_driven_enabled = Column(Boolean, default=True)
 
-    # Correlation Arbitrage
-    correlation_arb_enabled = Column(Boolean, default=True)
-    correlation_arb_min_correlation = Column(Float, default=0.7)
-    correlation_arb_min_divergence = Column(Float, default=0.05)
-
     # Market Making
     market_making_enabled = Column(Boolean, default=True)
     market_making_spread_bps = Column(Float, default=100.0)

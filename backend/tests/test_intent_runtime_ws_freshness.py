@@ -113,7 +113,7 @@ async def test_project_upserts_scopes_source_sweep_by_strategy_type(monkeypatch)
                     "source": "scanner",
                     "source_item_id": "stable-corr-1",
                     "signal_type": "scanner_opportunity",
-                    "strategy_type": "correlation_arb",
+                    "strategy_type": "generic_pair_strategy",
                     "market_id": "market-corr-1",
                     "market_question": "Question?",
                     "direction": "buy_yes",
@@ -139,7 +139,7 @@ async def test_project_upserts_scopes_source_sweep_by_strategy_type(monkeypatch)
     assert kwargs["source"] == "scanner"
     assert kwargs["keep_dedupe_keys"] == {"dedupe-corr-1"}
     assert kwargs["signal_types"] == ["scanner_opportunity"]
-    assert kwargs["strategy_types"] == ["correlation_arb"]
+    assert kwargs["strategy_types"] == ["generic_pair_strategy"]
 
 
 @pytest.mark.asyncio

@@ -346,28 +346,69 @@ def kill_port(port: int) -> None:
                 pass
 
 
+def _list_windows_python_processes() -> list[dict]:
+    if sys.platform != "win32":
+        return []
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process "
+             "| Where-Object { $_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe' } "
+             "| Select-Object ProcessId,ParentProcessId,CommandLine "
+             "| ConvertTo-Json -Compress"],
+            capture_output=True, text=True, timeout=10, **_windows_subprocess_kwargs(),
+        )
+    except Exception:
+        return []
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(data, dict):
+        return [data]
+    if isinstance(data, list):
+        return data
+    return []
+
+
+def _current_windows_python_lineage(process_entries: list[dict]) -> set[int]:
+    lineage = {os.getpid()}
+    parent_by_pid: dict[int, int] = {}
+    for entry in process_entries:
+        try:
+            pid = int(entry.get("ProcessId") or 0)
+            parent_pid = int(entry.get("ParentProcessId") or 0)
+        except (TypeError, ValueError):
+            continue
+        if pid > 0:
+            parent_by_pid[pid] = parent_pid
+    cursor = parent_by_pid.get(os.getpid(), 0)
+    while cursor and cursor not in lineage:
+        lineage.add(cursor)
+        cursor = parent_by_pid.get(cursor, 0)
+    return lineage
+
+
 def kill_legacy_worker_processes() -> None:
     if sys.platform == "win32":
         backend_dir = str(BACKEND_DIR)
         project_root = str(PROJECT_ROOT)
+        gui_bootstrap_name = "_gui_bootstrap.py"
         try:
-            result = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 "Get-CimInstance Win32_Process "
-                 "| Where-Object { $_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe' } "
-                 "| Select-Object ProcessId,CommandLine "
-                 "| ConvertTo-Json -Compress"],
-                capture_output=True, text=True, timeout=10, **_windows_subprocess_kwargs(),
-            )
-            if result.returncode != 0 or not result.stdout.strip():
+            data = _list_windows_python_processes()
+            if not data:
                 return
-            data = json.loads(result.stdout)
-            if isinstance(data, dict):
-                data = [data]
+            protected_pids = _current_windows_python_lineage(data)
             for entry in data:
                 pid = entry.get("ProcessId")
                 cmd = str(entry.get("CommandLine") or "")
-                if not pid or pid == os.getpid():
+                try:
+                    pid_int = int(pid or 0)
+                except (TypeError, ValueError):
+                    continue
+                if not pid_int or pid_int in protected_pids:
                     continue
                 is_homerun = False
                 if "workers.host" in cmd:
@@ -376,7 +417,7 @@ def kill_legacy_worker_processes() -> None:
                     is_homerun = True
                 elif "uvicorn" in cmd and "main:app" in cmd:
                     is_homerun = True
-                elif "gui.py" in cmd:
+                elif "gui.py" in cmd or gui_bootstrap_name in cmd:
                     is_homerun = True
                 if not is_homerun:
                     continue
@@ -385,13 +426,14 @@ def kill_legacy_worker_processes() -> None:
                     and "workers.runner" not in cmd
                     and "_worker" not in cmd
                     and "gui.py" not in cmd
+                    and gui_bootstrap_name not in cmd
                     and backend_dir not in cmd
                     and project_root not in cmd
                 ):
                     continue
                 try:
                     subprocess.run(
-                        ["taskkill", "/F", "/T", "/PID", str(pid)],
+                        ["taskkill", "/F", "/T", "/PID", str(pid_int)],
                         capture_output=True,
                         timeout=5,
                         **_windows_subprocess_kwargs(),
@@ -1828,26 +1870,22 @@ class HomerunApp:
     def _kill_orphaned_workers(self) -> None:
         if sys.platform != "win32":
             return
-        my_pid = os.getpid()
         backend_dir = str(BACKEND_DIR)
         project_root = str(PROJECT_ROOT)
+        gui_bootstrap_name = "_gui_bootstrap.py"
         try:
-            result = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 "Get-CimInstance Win32_Process -Filter \"Name = 'python.exe'\" "
-                 "| Select-Object ProcessId,CommandLine "
-                 "| ConvertTo-Json -Compress"],
-                capture_output=True, text=True, timeout=10, **_windows_subprocess_kwargs(),
-            )
-            if result.returncode != 0 or not result.stdout.strip():
+            data = _list_windows_python_processes()
+            if not data:
                 return
-            data = json.loads(result.stdout)
-            if isinstance(data, dict):
-                data = [data]
+            protected_pids = _current_windows_python_lineage(data)
             for entry in data:
                 pid = entry.get("ProcessId")
                 cmd = entry.get("CommandLine") or ""
-                if not pid or pid == my_pid:
+                try:
+                    pid_int = int(pid or 0)
+                except (TypeError, ValueError):
+                    continue
+                if not pid_int or pid_int in protected_pids:
                     continue
                 is_homerun = False
                 if "workers.host" in cmd:
@@ -1856,7 +1894,7 @@ class HomerunApp:
                     is_homerun = True
                 elif "uvicorn" in cmd and "main:app" in cmd:
                     is_homerun = True
-                elif "gui.py" in cmd:
+                elif "gui.py" in cmd or gui_bootstrap_name in cmd:
                     is_homerun = True
                 if not is_homerun:
                     continue
@@ -1865,13 +1903,14 @@ class HomerunApp:
                     and "workers.runner" not in cmd
                     and "_worker" not in cmd
                     and "gui.py" not in cmd
+                    and gui_bootstrap_name not in cmd
                     and backend_dir not in cmd
                     and project_root not in cmd
                 ):
                     continue
                 try:
                     subprocess.run(
-                        ["taskkill", "/F", "/T", "/PID", str(pid)],
+                        ["taskkill", "/F", "/T", "/PID", str(pid_int)],
                         capture_output=True,
                         timeout=5,
                         **_windows_subprocess_kwargs(),

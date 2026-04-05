@@ -529,7 +529,9 @@ async def _run_scan_loop() -> None:
 
             # Pull latest universe snapshot written by market_universe worker.
             try:
-                await scanner._hydrate_catalog_from_db(only_if_newer=True)
+                hydrated_market_count = await scanner._hydrate_catalog_from_db(only_if_newer=True)
+                if hydrated_market_count > 0 and pending_heavy_targeted_ids is None:
+                    pending_heavy_targeted_ids = []
             except Exception as exc:
                 logger.warning("Scanner catalog sync from DB failed: %s", exc)
 

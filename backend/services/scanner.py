@@ -3602,177 +3602,208 @@ class ArbitrageScanner:
                 chunk_size = max(1, int(getattr(settings, "SCANNER_FULL_SNAPSHOT_CHUNK_SIZE", 300) or 300))
                 targeted_mode = bool(targeted_condition_ids)
                 universe_groups = _snapshot_build_groups(universe_markets)
-                chunk_start = 0
-                chunk_end = universe_count
-                chunk_markets = universe_markets
-                next_cursor_index = 0
-                cycle_completed = True
                 cycle_started_at = self._full_snapshot_cycle_started_at or now
-                processed_markets = universe_count
+                last_chunk_start = 0
+                last_chunk_end = universe_count
+                last_processed_markets = universe_count
+                cycle_completed = targeted_mode
+                last_full_filtered: list[Opportunity] = []
+                per_run_deadline = cycle_started + self._full_snapshot_strategy_timeout_seconds()
 
-                if not targeted_mode:
-                    requested_cursor = max(0, int(self._full_snapshot_cursor_index or 0))
-                    if requested_cursor >= universe_count or self._full_snapshot_cycle_total_markets != universe_count:
-                        requested_cursor = 0
-                        cycle_started_at = now
-                    elif self._full_snapshot_cycle_started_at is None:
-                        cycle_started_at = now
+                while True:
+                    chunk_now = datetime.now(timezone.utc)
+                    chunk_start = 0
+                    chunk_end = universe_count
+                    chunk_markets = universe_markets
+                    next_cursor_index = 0
+                    cycle_completed = True
+                    processed_markets = universe_count
 
-                    cursor_consumed = 0
-                    start_group_index = 0
-                    while start_group_index < len(universe_groups) and cursor_consumed < requested_cursor:
-                        cursor_consumed += len(universe_groups[start_group_index])
-                        start_group_index += 1
+                    if not targeted_mode:
+                        requested_cursor = max(0, int(self._full_snapshot_cursor_index or 0))
+                        if requested_cursor >= universe_count or self._full_snapshot_cycle_total_markets != universe_count:
+                            requested_cursor = 0
+                            cycle_started_at = chunk_now
+                        elif self._full_snapshot_cycle_started_at is None:
+                            cycle_started_at = chunk_now
 
-                    if start_group_index >= len(universe_groups):
-                        start_group_index = 0
                         cursor_consumed = 0
-                        cycle_started_at = now
+                        start_group_index = 0
+                        while start_group_index < len(universe_groups) and cursor_consumed < requested_cursor:
+                            cursor_consumed += len(universe_groups[start_group_index])
+                            start_group_index += 1
 
-                    selected_groups: list[list] = []
-                    selected_count = 0
-                    group_index = start_group_index
-                    while group_index < len(universe_groups):
-                        group = universe_groups[group_index]
-                        if selected_groups and selected_count + len(group) > chunk_size:
-                            break
-                        selected_groups.append(group)
-                        selected_count += len(group)
-                        group_index += 1
-                        if selected_count >= chunk_size:
-                            break
+                        if start_group_index >= len(universe_groups):
+                            start_group_index = 0
+                            cursor_consumed = 0
+                            cycle_started_at = chunk_now
 
-                    if not selected_groups and start_group_index < len(universe_groups):
-                        selected_groups = [universe_groups[start_group_index]]
-                        selected_count = len(universe_groups[start_group_index])
-                        group_index = start_group_index + 1
+                        selected_groups: list[list] = []
+                        selected_count = 0
+                        group_index = start_group_index
+                        while group_index < len(universe_groups):
+                            group = universe_groups[group_index]
+                            if selected_groups and selected_count + len(group) > chunk_size:
+                                break
+                            selected_groups.append(group)
+                            selected_count += len(group)
+                            group_index += 1
+                            if selected_count >= chunk_size:
+                                break
 
-                    chunk_start = cursor_consumed
-                    chunk_markets = [market for group in selected_groups for market in group]
-                    chunk_end = min(universe_count, chunk_start + selected_count)
-                    cycle_completed = group_index >= len(universe_groups)
-                    next_cursor_index = 0 if cycle_completed else chunk_end
-                    processed_markets = universe_count if cycle_completed else chunk_end
+                        if not selected_groups and start_group_index < len(universe_groups):
+                            selected_groups = [universe_groups[start_group_index]]
+                            selected_count = len(universe_groups[start_group_index])
+                            group_index = start_group_index + 1
 
-                async with self._scan_lock:
-                    self._last_full_snapshot_strategy_market_count = universe_count
-                    self._last_full_snapshot_chunk_market_count = len(chunk_markets)
+                        chunk_start = cursor_consumed
+                        chunk_markets = [market for group in selected_groups for market in group]
+                        chunk_end = min(universe_count, chunk_start + selected_count)
+                        cycle_completed = group_index >= len(universe_groups)
+                        next_cursor_index = 0 if cycle_completed else chunk_end
+                        processed_markets = universe_count if cycle_completed else chunk_end
 
-                await self._set_activity(
-                    (
-                        f"Heavy lane: running full-snapshot chunk "
-                        f"{chunk_start + 1}-{chunk_end}/{universe_count} "
-                        f"({len(chunk_markets)} markets)..."
-                    )
-                )
+                    async with self._scan_lock:
+                        self._last_full_snapshot_strategy_market_count = universe_count
+                        self._last_full_snapshot_chunk_market_count = len(chunk_markets)
 
-                token_ids = self._collect_live_token_ids(chunk_markets)
-                full_snapshot_prices: dict[str, dict] = {}
-                if token_ids:
-                    full_snapshot_prices = await self._snapshot_ws_prices(token_ids)
-                self._apply_live_prices_to_markets(chunk_markets, full_snapshot_prices)
-
-                market_ids = [str(getattr(market, "id", "") or "") for market in chunk_markets]
-                full_event = DataEvent(
-                    event_type=EventType.MARKET_DATA_REFRESH,
-                    source="scanner_full_snapshot",
-                    timestamp=utcnow(),
-                    payload={
-                        "scan_mode": "full_snapshot_heavy",
-                        "strategy_batch": "full_snapshot",
-                        "reason": reason,
-                        "targeted": targeted_mode,
-                        "chunk_start": chunk_start,
-                        "chunk_end": chunk_end,
-                        "chunk_size": len(chunk_markets),
-                        "total_market_count": universe_count,
-                        "affected_market_count": len(market_ids),
-                    },
-                    markets=chunk_markets,
-                    events=cached_events_snapshot,
-                    prices=dict(full_snapshot_prices),
-                    scan_mode="full_snapshot_heavy",
-                    changed_market_ids=market_ids,
-                    affected_market_ids=market_ids,
-                )
-
-                full_opportunities = await self._dispatch_market_refresh(
-                    full_event,
-                    incremental_slugs=set(),
-                    full_slugs=full_slugs,
-                    full_market_snapshot=chunk_markets,
-                    full_prices=full_snapshot_prices,
-                    handler_timeout_seconds=self._full_snapshot_strategy_timeout_seconds(),
-                )
-                full_opportunities = self._deduplicate_cross_strategy(full_opportunities)
-
-                full_quality_reports: dict = {}
-                full_filtered: list[Opportunity] = []
-                for opp in full_opportunities:
-                    strategy_instance = strategy_loader.get_instance(opp.strategy)
-                    overrides = (
-                        getattr(strategy_instance, "quality_filter_overrides", None) if strategy_instance else None
-                    )
-                    report = quality_filter.evaluate_opportunity(opp, overrides=overrides)
-                    full_quality_reports[opp.stable_id or opp.id] = report
-                    if report.passed:
-                        full_filtered.append(opp)
-
-                full_filtered.sort(key=lambda item: item.roi_percent, reverse=True)
-                full_filtered = self._apply_opportunity_caps(full_filtered)
-
-                if full_filtered:
-                    await self._attach_ai_judgments(full_filtered)
-
-                async with self._scan_lock:
-                    self._cached_prices.update(full_snapshot_prices)
-                    self._update_market_price_history(chunk_markets, full_snapshot_prices, now)
-                    self._quality_reports = full_quality_reports
-                    self._last_full_snapshot_strategy_opportunity_count = len(full_filtered)
-                    self._full_snapshot_cycle_total_markets = universe_count
-                    self._full_snapshot_cycle_processed_markets = processed_markets
-                    self._full_snapshot_cursor_index = next_cursor_index
-                    if chunk_start == 0:
-                        self._full_snapshot_cycle_started_at = cycle_started_at
-                    elif self._full_snapshot_cycle_started_at is None:
-                        self._full_snapshot_cycle_started_at = cycle_started_at
-                    if cycle_completed:
-                        self._full_snapshot_cycle_completed_at = now
-                    elif chunk_start == 0:
-                        self._full_snapshot_cycle_completed_at = None
-                    if full_filtered:
-                        self._opportunities = await asyncio.get_running_loop().run_in_executor(
-                            None, self._merge_opportunities, full_filtered
+                    await self._set_activity(
+                        (
+                            f"Heavy lane: running full-snapshot chunk "
+                            f"{chunk_start + 1}-{chunk_end}/{universe_count} "
+                            f"({len(chunk_markets)} markets)..."
                         )
-                    opportunities_snapshot = [_clone_model(opp) for opp in self._opportunities]
+                    )
 
-                refreshed_opportunities = await self.refresh_opportunity_prices(
-                    opportunities_snapshot,
-                    now=now,
-                    drop_stale=False,
-                )
-                if refreshed_opportunities:
-                    refreshed_opportunities.sort(key=lambda opp: opp.roi_percent, reverse=True)
-                    refreshed_opportunities = self._apply_opportunity_caps(refreshed_opportunities)
+                    token_ids = self._collect_live_token_ids(chunk_markets)
+                    full_snapshot_prices: dict[str, dict] = {}
+                    if token_ids:
+                        full_snapshot_prices = await self._snapshot_ws_prices(token_ids)
+                    self._apply_live_prices_to_markets(chunk_markets, full_snapshot_prices)
 
-                async with self._scan_lock:
-                    self._opportunities = refreshed_opportunities
-                    if self._opportunities:
-                        self._rebuild_opportunity_market_ids()
-                        self._queue_market_history_backfill(self._opportunities)
-                    self._last_scan = now
-                    self._last_full_snapshot_strategy_scan = now
+                    market_ids = [str(getattr(market, "id", "") or "") for market in chunk_markets]
+                    full_event = DataEvent(
+                        event_type=EventType.MARKET_DATA_REFRESH,
+                        source="scanner_full_snapshot",
+                        timestamp=utcnow(),
+                        payload={
+                            "scan_mode": "full_snapshot_heavy",
+                            "strategy_batch": "full_snapshot",
+                            "reason": reason,
+                            "targeted": targeted_mode,
+                            "chunk_start": chunk_start,
+                            "chunk_end": chunk_end,
+                            "chunk_size": len(chunk_markets),
+                            "total_market_count": universe_count,
+                            "affected_market_count": len(market_ids),
+                        },
+                        markets=chunk_markets,
+                        events=cached_events_snapshot,
+                        prices=dict(full_snapshot_prices),
+                        scan_mode="full_snapshot_heavy",
+                        changed_market_ids=market_ids,
+                        affected_market_ids=market_ids,
+                    )
 
-                for callback in self._scan_callbacks:
-                    try:
-                        await callback(full_filtered)
-                    except Exception as e:
-                        logger.warning(f"  Callback error: {e}", exc_info=e)
+                    remaining_budget = max(1.0, per_run_deadline - time.monotonic())
+                    handler_timeout_seconds = min(
+                        self._full_snapshot_strategy_timeout_seconds(),
+                        max(10.0, remaining_budget),
+                    )
+                    full_opportunities = await self._dispatch_market_refresh(
+                        full_event,
+                        incremental_slugs=set(),
+                        full_slugs=full_slugs,
+                        full_market_snapshot=chunk_markets,
+                        full_prices=full_snapshot_prices,
+                        handler_timeout_seconds=handler_timeout_seconds,
+                    )
+                    full_opportunities = self._deduplicate_cross_strategy(full_opportunities)
 
-                cycle_suffix = " full coverage cycle complete." if cycle_completed else ""
+                    full_quality_reports: dict = {}
+                    full_filtered: list[Opportunity] = []
+                    for opp in full_opportunities:
+                        strategy_instance = strategy_loader.get_instance(opp.strategy)
+                        overrides = (
+                            getattr(strategy_instance, "quality_filter_overrides", None) if strategy_instance else None
+                        )
+                        report = quality_filter.evaluate_opportunity(opp, overrides=overrides)
+                        full_quality_reports[opp.stable_id or opp.id] = report
+                        if report.passed:
+                            full_filtered.append(opp)
+
+                    full_filtered.sort(key=lambda item: item.roi_percent, reverse=True)
+                    full_filtered = self._apply_opportunity_caps(full_filtered)
+
+                    if full_filtered:
+                        await self._attach_ai_judgments(full_filtered)
+
+                    async with self._scan_lock:
+                        self._cached_prices.update(full_snapshot_prices)
+                        self._update_market_price_history(chunk_markets, full_snapshot_prices, chunk_now)
+                        self._quality_reports = full_quality_reports
+                        self._last_full_snapshot_strategy_opportunity_count = len(full_filtered)
+                        self._full_snapshot_cycle_total_markets = universe_count
+                        self._full_snapshot_cycle_processed_markets = processed_markets
+                        self._full_snapshot_cursor_index = next_cursor_index
+                        if chunk_start == 0:
+                            self._full_snapshot_cycle_started_at = cycle_started_at
+                        elif self._full_snapshot_cycle_started_at is None:
+                            self._full_snapshot_cycle_started_at = cycle_started_at
+                        if cycle_completed:
+                            self._full_snapshot_cycle_completed_at = chunk_now
+                        elif chunk_start == 0:
+                            self._full_snapshot_cycle_completed_at = None
+                        if full_filtered:
+                            self._opportunities = await asyncio.get_running_loop().run_in_executor(
+                                None, self._merge_opportunities, full_filtered
+                            )
+                        opportunities_snapshot = [_clone_model(opp) for opp in self._opportunities]
+
+                    refreshed_opportunities = await self.refresh_opportunity_prices(
+                        opportunities_snapshot,
+                        now=chunk_now,
+                        drop_stale=False,
+                    )
+                    if refreshed_opportunities:
+                        refreshed_opportunities.sort(key=lambda opp: opp.roi_percent, reverse=True)
+                        refreshed_opportunities = self._apply_opportunity_caps(refreshed_opportunities)
+
+                    async with self._scan_lock:
+                        self._opportunities = refreshed_opportunities
+                        if self._opportunities:
+                            self._rebuild_opportunity_market_ids()
+                            self._queue_market_history_backfill(self._opportunities)
+                        self._last_scan = chunk_now
+                        self._last_full_snapshot_strategy_scan = chunk_now
+
+                    for callback in self._scan_callbacks:
+                        try:
+                            await callback(full_filtered)
+                        except Exception as e:
+                            logger.warning(f"  Callback error: {e}", exc_info=e)
+
+                    last_chunk_start = chunk_start
+                    last_chunk_end = chunk_end
+                    last_processed_markets = processed_markets
+                    last_full_filtered = full_filtered
+                    if targeted_mode or cycle_completed:
+                        break
+                    if (per_run_deadline - time.monotonic()) < 10.0:
+                        break
+
+                if cycle_completed:
+                    cycle_suffix = " full coverage cycle complete."
+                elif targeted_mode:
+                    cycle_suffix = ""
+                else:
+                    cycle_suffix = (
+                        f" coverage advanced to {last_processed_markets}/{universe_count}; "
+                        f"continuing next pass."
+                    )
                 await self._set_activity(
-                    f"Heavy lane complete — {len(full_filtered)} opportunities "
-                    f"(chunk {chunk_start + 1}-{chunk_end}/{universe_count}).{cycle_suffix}"
+                    f"Heavy lane complete — {len(last_full_filtered)} opportunities "
+                    f"(chunk {last_chunk_start + 1}-{last_chunk_end}/{universe_count}).{cycle_suffix}"
                 )
                 async with self._scan_lock:
                     return self._opportunities

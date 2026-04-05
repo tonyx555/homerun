@@ -247,16 +247,6 @@ _SCANNER_SCHEMA_CROSS_PLATFORM = {
     ]
 }
 
-_SCANNER_SCHEMA_CORRELATION = {
-    "param_fields": [
-        *_COMMON_SCANNER_SCHEMA["param_fields"][:3],
-        {"key": "min_correlation", "label": "Min Correlation", "type": "number", "min": 0, "max": 1, "phase": "signal"},
-        {"key": "min_divergence", "label": "Min Divergence", "type": "number", "min": 0, "max": 1, "phase": "signal"},
-        {"key": "z_score_threshold", "label": "Z-Score Threshold", "type": "number", "min": 0, "phase": "signal"},
-        *_COMMON_SCANNER_SCHEMA["param_fields"][3:],
-    ]
-}
-
 _SCANNER_SCHEMA_STAT_ARB = {
     "param_fields": [
         *_COMMON_SCANNER_SCHEMA["param_fields"][:3],
@@ -381,7 +371,16 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
             "param_fields": [
                 *_COMMON_SCANNER_SCHEMA["param_fields"][:3],
                 {"key": "min_liquidity", "label": "Min Liquidity", "type": "number", "min": 0, "phase": "signal"},
-                {"key": "min_markets", "label": "Min Markets", "type": "integer", "min": 1, "phase": "signal"},
+                {"key": "min_book_depth", "label": "Min Ask Depth", "type": "number", "min": 0, "phase": "signal"},
+                {"key": "max_leg_spread", "label": "Max Leg Spread", "type": "number", "min": 0, "max": 1, "phase": "signal"},
+                {
+                    "key": "require_accepting_orders",
+                    "label": "Require Accepting Orders",
+                    "type": "boolean",
+                    "phase": "signal",
+                },
+                {"key": "require_order_book", "label": "Require Order Book", "type": "boolean", "phase": "signal"},
+                {"key": "require_polymarket", "label": "Require Polymarket", "type": "boolean", "phase": "signal"},
                 *_COMMON_SCANNER_SCHEMA["param_fields"][3:],
             ]
         },
@@ -440,13 +439,6 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         import_module="services.strategies.vpin_toxicity",
         sort_order=115,
         config_schema=_COMMON_SCANNER_SCHEMA,
-    ),
-    SystemOpportunityStrategySeed(
-        slug="correlation_arb",
-        source_key="scanner",
-        import_module="services.strategies.correlation_arb",
-        sort_order=150,
-        config_schema=_SCANNER_SCHEMA_CORRELATION,
     ),
     SystemOpportunityStrategySeed(
         slug="prob_surface_arb",
@@ -1041,6 +1033,7 @@ async def ensure_system_opportunity_strategies_seeded(session: AsyncSession) -> 
     # unified entries, plus any previously removed strategies.
     _REMOVED_SLUGS = [
         "weather_bucket_edge",
+        "correlation_arb",
         # Old execution-only duplicates (now aliases on unified entries)
         "crypto_5m",
         "crypto_15m",

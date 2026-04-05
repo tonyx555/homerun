@@ -749,19 +749,19 @@ class TestScanPipeline:
             patch.object(scanner, "_ensure_runtime_strategies_loaded", new_callable=AsyncMock),
             patch.object(scanner, "_partition_market_refresh_strategies", return_value=(set(), {"full_only"})),
             patch.object(scanner, "_snapshot_ws_prices", new_callable=AsyncMock, return_value={}),
-            patch.object(scanner, "_dispatch_market_refresh", new_callable=AsyncMock, return_value=[]),
+            patch.object(scanner, "_dispatch_market_refresh", new_callable=AsyncMock, return_value=[]) as dispatch_mock,
             patch.object(scanner, "_set_activity", new_callable=AsyncMock),
             patch("services.scanner.settings.SCANNER_FULL_SNAPSHOT_CHUNK_SIZE", 2),
             patch("services.scanner.settings.SCANNER_FORCE_FULL_UNIVERSE", True),
         ):
             await scanner.scan_full_snapshot_strategies(force=True)
-            assert scanner._last_full_snapshot_chunk_market_count == 2
+            assert dispatch_mock.await_count == 2
+            assert scanner._last_full_snapshot_chunk_market_count == 1
             assert scanner._full_snapshot_cycle_total_markets == 3
-            assert scanner._full_snapshot_cycle_processed_markets == 2
-            assert scanner._full_snapshot_cursor_index == 2
-            await scanner.scan_full_snapshot_strategies(force=True)
+            assert scanner._full_snapshot_cycle_processed_markets == 3
+            assert scanner._full_snapshot_cursor_index == 0
+            assert scanner._full_snapshot_cycle_completed_at is not None
 
-        assert scanner._last_full_snapshot_chunk_market_count == 1
         assert scanner._full_snapshot_cycle_total_markets == 3
         assert scanner._full_snapshot_cycle_processed_markets == 3
         assert scanner._full_snapshot_cursor_index == 0

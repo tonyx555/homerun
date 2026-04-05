@@ -1353,16 +1353,19 @@ function Cleanup-StaleHomerunProcesses {
     .SYNOPSIS
     Kill orphaned Python worker processes from a previous crashed run.
 
-    Finds python.exe processes whose command line contains "workers.runner"
-    or "uvicorn" running from this project's backend directory and kills them.
+    Finds python/pythonw processes whose command line contains Homerun worker,
+    backend, or GUI bootstrap markers and kills them.
     This prevents stale connections from saturating local services and blocking
     startup after an unclean exit.
     #>
     $projectRoot = (Get-Location).Path
     $backendDir = Join-Path $projectRoot "backend"
+    $guiBootstrapName = "_gui_bootstrap.py"
 
     try {
-        $pythonProcesses = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue
+        $pythonProcesses = Get-CimInstance Win32_Process | Where-Object {
+            $_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe'
+        }
     } catch {
         return
     }
@@ -1383,6 +1386,7 @@ function Cleanup-StaleHomerunProcesses {
         elseif ($cmdLine -match "workers\.\w+_worker") { $isHomerun = $true }
         elseif (($cmdLine -match "uvicorn") -and ($cmdLine -match "main:app")) { $isHomerun = $true }
         elseif ($cmdLine -match "gui\.py") { $isHomerun = $true }
+        elseif ($cmdLine -match [regex]::Escape($guiBootstrapName)) { $isHomerun = $true }
 
         if (-not $isHomerun) { continue }
 
@@ -1391,6 +1395,7 @@ function Cleanup-StaleHomerunProcesses {
             ($cmdLine -notmatch "workers\.runner") -and
             ($cmdLine -notmatch "workers\.\w+_worker") -and
             ($cmdLine -notmatch "gui\.py") -and
+            ($cmdLine -notmatch [regex]::Escape($guiBootstrapName)) -and
             $cmdLine -notmatch [regex]::Escape($backendDir) -and
             $cmdLine -notmatch [regex]::Escape($projectRoot)) {
             continue
