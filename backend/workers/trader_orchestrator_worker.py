@@ -1274,6 +1274,18 @@ def _strategy_evaluation_timeout_seconds(
     return _STRATEGY_EVALUATION_TIMEOUT_SECONDS
 
 
+def _remaining_cycle_budget_seconds(
+    *,
+    cycle_started_mono: float,
+    cycle_timeout_seconds: float,
+    reserve_seconds: float = 0.0,
+) -> float | None:
+    if cycle_timeout_seconds <= 0:
+        return None
+    remaining = float(cycle_timeout_seconds) - (time.monotonic() - cycle_started_mono) - float(reserve_seconds)
+    return max(0.0, remaining)
+
+
 def _compute_signal_latency_payload(
     signal: Any,
     *,
@@ -3860,6 +3872,7 @@ async def _run_trader_once(
     prefiltered_signals = 0
     prefiltered_by_reason: dict[str, int] = {}
     crypto_scope_prefiltered_dimensions: dict[str, int] = {}
+    cycle_started_mono = time.monotonic()
 
     async with AsyncSessionLocal() as session:
         # Bound DB statements inside this cycle without leaking the timeout
@@ -4944,37 +4957,60 @@ async def _run_trader_once(
                     source_config = source_configs.get(sig_source)
                     if _supports_live_market_context(sig, source_config):
                         context_candidates.append(sig)
+
+                async def _load_live_contexts() -> dict[str, dict[str, Any]]:
+                    loaded_contexts: dict[str, dict[str, Any]] = {}
+                    if strict_ws_pricing_enforced and context_candidates:
+                        loaded_contexts = await build_cached_live_signal_contexts(
+                            context_candidates,
+                            max_history_points=max_history_points,
+                            strict_ws_only=True,
+                        )
+                    elif context_candidates:
+                        loaded_contexts = await build_cached_live_signal_contexts(
+                            context_candidates,
+                            max_history_points=max_history_points,
+                            strict_ws_only=False,
+                        )
+                    if fallback_candidates:
+                        try:
+                            loaded_contexts.update(
+                                await build_cached_live_signal_contexts(
+                                    fallback_candidates,
+                                    max_history_points=max_history_points,
+                                    strict_ws_only=False,
+                                )
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as fb_exc:
+                            logger.warning("Fallback live market context failed (%s)", type(fb_exc).__name__)
+                    return loaded_contexts
+
+                live_context_timeout_seconds = _remaining_cycle_budget_seconds(
+                    cycle_started_mono=cycle_started_mono,
+                    cycle_timeout_seconds=cycle_timeout_seconds,
+                    reserve_seconds=2.0,
+                )
                 async with release_conn(session):
                     try:
-                        if strict_ws_pricing_enforced and context_candidates:
-                            live_contexts = await build_cached_live_signal_contexts(
-                                context_candidates,
-                                max_history_points=max_history_points,
-                                strict_ws_only=True,
-                            )
-                        elif context_candidates:
-                            # WS-cache only — never block the hot path on HTTP
-                            # fallback calls to Polymarket.  Signals already carry
-                            # prices from their source workers; the WS cache just
-                            # provides a fresher snapshot when available.
-                            live_contexts = await build_cached_live_signal_contexts(
-                                context_candidates,
-                                max_history_points=max_history_points,
-                                strict_ws_only=False,
-                            )
-                        if fallback_candidates:
-                            try:
-                                live_contexts.update(
-                                    await build_cached_live_signal_contexts(
-                                        fallback_candidates,
-                                        max_history_points=max_history_points,
-                                        strict_ws_only=False,
-                                    )
+                        if live_context_timeout_seconds is not None:
+                            if live_context_timeout_seconds < 0.25:
+                                live_contexts = {}
+                            else:
+                                live_contexts = await asyncio.wait_for(
+                                    _load_live_contexts(),
+                                    timeout=live_context_timeout_seconds,
                                 )
-                            except asyncio.CancelledError:
-                                raise
-                            except Exception as fb_exc:
-                                logger.warning("Fallback live market context failed (%s)", type(fb_exc).__name__)
+                        else:
+                            live_contexts = await _load_live_contexts()
+                    except asyncio.TimeoutError:
+                        live_contexts = {}
+                        logger.warning(
+                            "Live market context refresh timed out for trader=%s timeout=%.2fs",
+                            trader_id,
+                            max(0.25, float(live_context_timeout_seconds or 0.0)),
+                        )
                     except asyncio.CancelledError:
                         raise
                     except Exception as exc:
@@ -5711,6 +5747,16 @@ async def _run_trader_once(
                         source_config,
                         strategy_params,
                     )
+                    remaining_cycle_budget = _remaining_cycle_budget_seconds(
+                        cycle_started_mono=cycle_started_mono,
+                        cycle_timeout_seconds=cycle_timeout_seconds,
+                        reserve_seconds=1.0,
+                    )
+                    if remaining_cycle_budget is not None:
+                        evaluation_timeout_seconds = max(
+                            0.1,
+                            min(float(evaluation_timeout_seconds), float(remaining_cycle_budget)),
+                        )
                     decision_future = loop.run_in_executor(
                         _STRATEGY_EVAL_POOL,
                         strategy.evaluate,

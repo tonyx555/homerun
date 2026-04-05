@@ -2224,9 +2224,11 @@ class ArbitrageScanner:
                     await self._backfill_market_history_for_opportunities(opportunities, ts)
                 await self._persist_market_history_for_opportunities(opportunities)
             except asyncio.TimeoutError:
-                logger.warning("  Sparkline backfill timed out (shared attach)")
+                self._queue_market_history_backfill(opportunities)
+                logger.debug("Sparkline backfill timed out during shared attach; queued async retry")
             except Exception as e:
-                logger.warning(f"  Sparkline backfill error in shared attach: {e}", exc_info=e)
+                self._queue_market_history_backfill(opportunities)
+                logger.warning("Sparkline backfill error in shared attach; queued async retry", exc_info=e)
         else:
             self._queue_market_history_backfill(opportunities)
 
@@ -2550,13 +2552,60 @@ class ArbitrageScanner:
 
             # Phase 1 — Fetch events + markets concurrently
             _phase_t = _time.monotonic()
-            events, markets = await asyncio.wait_for(
-                asyncio.gather(
-                    self.market_data.get_all_events(closed=False),
-                    self.market_data.get_all_markets(active=True),
-                ),
+            events_task = asyncio.create_task(
+                self.market_data.get_all_events(closed=False),
+                name="scanner-catalog-events",
+            )
+            markets_task = asyncio.create_task(
+                self.market_data.get_all_markets(active=True),
+                name="scanner-catalog-markets",
+            )
+            done, pending = await asyncio.wait(
+                {events_task, markets_task},
                 timeout=core_fetch_timeout,
             )
+            if pending:
+                for pending_task in pending:
+                    pending_task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+
+            events: list = []
+            markets: list = []
+            core_fetch_failures: dict[str, BaseException] = {}
+            for label, task in (("events", events_task), ("markets", markets_task)):
+                if task in done:
+                    try:
+                        result = task.result()
+                    except Exception as exc:
+                        core_fetch_failures[label] = exc
+                        continue
+                    if label == "events":
+                        events = list(result or [])
+                    else:
+                        markets = list(result or [])
+                    continue
+                core_fetch_failures[label] = asyncio.TimeoutError(f"{label} fetch timed out")
+
+            fallback_labels: list[str] = []
+            if core_fetch_failures:
+                if not self._cached_events and not self._cached_markets:
+                    try:
+                        await self._hydrate_catalog_from_db()
+                    except Exception as hydrate_exc:
+                        logger.debug("Catalog refresh cache hydration fallback failed", exc_info=hydrate_exc)
+                if not events and self._cached_events:
+                    events = list(self._cached_events)
+                    fallback_labels.append("events")
+                if not markets and self._cached_markets:
+                    markets = list(self._cached_markets)
+                    fallback_labels.append("markets")
+                if not events and not markets:
+                    raise next(iter(core_fetch_failures.values()))
+                logger.warning(
+                    "Catalog refresh core fetch degraded; using cached or partial data",
+                    failures=sorted(core_fetch_failures.keys()),
+                    fallbacks=fallback_labels,
+                )
             logger.debug(f"  [timing] Polymarket fetch: {_time.monotonic() - _phase_t:.1f}s")
 
             now = datetime.now(timezone.utc)

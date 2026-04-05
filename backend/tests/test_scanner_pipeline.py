@@ -188,6 +188,35 @@ class TestScanPipeline:
         mock_polymarket_client.get_all_markets.assert_awaited_once_with(active=True)
 
     @pytest.mark.asyncio
+    async def test_refresh_catalog_uses_partial_upstream_results_when_one_core_fetch_times_out(
+        self,
+        mock_polymarket_client,
+    ):
+        market = Market(
+            id="market-timeout-fallback",
+            condition_id="condition-timeout-fallback",
+            question="Will fallback market stay available?",
+            slug="timeout-fallback",
+            outcome_prices=[0.52, 0.48],
+        )
+        mock_polymarket_client.get_all_events.side_effect = asyncio.TimeoutError()
+        mock_polymarket_client.get_all_markets.return_value = [market]
+
+        scanner = _build_scanner(mock_client=mock_polymarket_client, strategies=[])
+
+        with (
+            patch.object(scanner, "_ensure_runtime_strategies_loaded", new_callable=AsyncMock),
+            patch.object(scanner, "_set_activity", new_callable=AsyncMock),
+            patch("services.scanner.settings.WS_FEED_ENABLED", False),
+            patch("services.scanner.settings.NEWS_EDGE_ENABLED", False),
+        ):
+            market_count = await scanner.refresh_catalog()
+
+        assert market_count == 1
+        assert len(scanner._cached_markets) == 1
+        assert scanner._cached_markets[0].id == "market-timeout-fallback"
+
+    @pytest.mark.asyncio
     async def test_refresh_catalog_backfills_flat_market_event_context_from_event_payload(self, mock_polymarket_client):
         flat_market = Market(
             id="market-antigua",

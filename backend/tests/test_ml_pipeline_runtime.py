@@ -1,3 +1,4 @@
+import asyncio
 import sys
 import time
 from pathlib import Path
@@ -116,3 +117,29 @@ async def test_market_runtime_reactive_updates_never_record(monkeypatch):
     sdk.annotate_market_batch.assert_awaited_once_with(task_key="crypto_directional", markets=payload)
     sdk.record_market_batch.assert_not_awaited()
     sdk.prune_data.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_market_runtime_resolves_ml_runtime_state_with_timeout_fallback(monkeypatch):
+    async def _slow_runtime_state(_task_key):
+        await asyncio.sleep(0.02)
+        return {
+            "task_key": "crypto_directional",
+            "recording_enabled": True,
+            "deployment_active": True,
+            "engaged": True,
+        }
+
+    sdk = _FakeMachineLearningSdk(recording_enabled=True, deployment_active=True)
+    sdk.get_runtime_state = AsyncMock(side_effect=_slow_runtime_state)
+    monkeypatch.setattr(market_runtime, "get_machine_learning_sdk", lambda: sdk)
+    monkeypatch.setattr(market_runtime, "_ML_RUNTIME_STATE_TIMEOUT_SECONDS", 0.001)
+
+    runtime = market_runtime.MarketRuntime()
+    runtime._last_ml_gate_check_mono = 0.0
+
+    result = await runtime._resolve_ml_runtime_state(allow_record=True)
+
+    assert result is None
+    assert runtime._ml_runtime_recording_enabled is False
+    assert runtime._ml_runtime_deployment_active is False

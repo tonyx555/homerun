@@ -105,6 +105,9 @@ UNFILLED_ORDER_STATUSES = {"submitted", "open"}
 SHADOW_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
 LIVE_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
 CLEANUP_ELIGIBLE_ORDER_STATUSES = {"submitted", "executed", "open"}
+_LIVE_ORDER_AUTHORITY_RECOVERY_WINDOW_HOURS = 24
+_LIVE_ORDER_AUTHORITY_RECOVERY_GENERAL_MAX_ROWS = 400
+_LIVE_ORDER_AUTHORITY_RECOVERY_CANDIDATE_CACHE_BUCKET_SECONDS = 60
 PENDING_LIVE_EXIT_TERMINAL_STATUSES = {
     "filled",
     "superseded_resolution",
@@ -2127,19 +2130,22 @@ async def recover_missing_live_trader_orders(
     # CLOB records that Polymarket still considers "open" but were filled or
     # cancelled long ago.  Loading all 16K+ rows was causing 30s+ timeouts
     # and 100MB+ memory spikes every cycle.
-    _recovery_cutoff = _now() - timedelta(hours=24)
+    _recovery_cutoff = _now() - timedelta(hours=_LIVE_ORDER_AUTHORITY_RECOVERY_WINDOW_HOURS)
+    live_rows_query = (
+        select(LiveTradingOrder)
+        .where(
+            func.lower(func.coalesce(LiveTradingOrder.status, "")).in_(
+                ("open", "filled", "pending", "partially_filled", "failed", "cancelled", "expired")
+            )
+        )
+        .where(LiveTradingOrder.created_at >= _recovery_cutoff)
+        .order_by(desc(LiveTradingOrder.created_at))
+    )
+    if not trader_id_filter:
+        live_rows_query = live_rows_query.limit(_LIVE_ORDER_AUTHORITY_RECOVERY_GENERAL_MAX_ROWS)
     live_rows = list(
         (
-            await session.execute(
-                select(LiveTradingOrder)
-                .where(
-                    func.lower(func.coalesce(LiveTradingOrder.status, "")).in_(
-                        ("open", "filled", "pending", "partially_filled", "failed", "cancelled", "expired")
-                    )
-                )
-                .where(LiveTradingOrder.created_at >= _recovery_cutoff)
-                .order_by(desc(LiveTradingOrder.created_at))
-            )
+            await session.execute(live_rows_query)
         )
         .scalars()
         .all()
@@ -2156,7 +2162,22 @@ async def recover_missing_live_trader_orders(
         }
 
     live_orders_by_token: dict[str, LiveTradingPosition] = {}
-    position_rows = list((await session.execute(select(LiveTradingPosition))).scalars().all())
+    relevant_token_ids = {
+        str(row.token_id or "").strip()
+        for row in live_rows
+        if str(row.token_id or "").strip()
+    }
+    position_rows: list[LiveTradingPosition] = []
+    if relevant_token_ids:
+        position_rows = list(
+            (
+                await session.execute(
+                    select(LiveTradingPosition).where(LiveTradingPosition.token_id.in_(list(relevant_token_ids)))
+                )
+            )
+            .scalars()
+            .all()
+        )
     for row in position_rows:
         token_key = _wallet_position_token_key(row.token_id)
         if not token_key:
@@ -2165,11 +2186,29 @@ async def recover_missing_live_trader_orders(
         if current is None or (current.updated_at or current.created_at or _now()) < (row.updated_at or row.created_at or _now()):
             live_orders_by_token[token_key] = row
 
+    existing_rows_query = (
+        select(TraderOrder)
+        .where(TraderOrder.mode == "live")
+        .where(
+            or_(
+                func.lower(func.coalesce(TraderOrder.status, "")).in_(
+                    tuple(
+                        LIVE_ACTIVE_ORDER_STATUSES
+                        | RESOLVED_ORDER_STATUSES
+                        | {"cancelled", "failed", "rejected", "error"}
+                    )
+                ),
+                TraderOrder.created_at >= _recovery_cutoff,
+                TraderOrder.updated_at >= _recovery_cutoff,
+                TraderOrder.executed_at >= _recovery_cutoff,
+            )
+        )
+    )
+    if trader_id_filter:
+        existing_rows_query = existing_rows_query.where(TraderOrder.trader_id.in_(list(trader_id_filter)))
     existing_rows = list(
         (
-            await session.execute(
-                select(TraderOrder).where(TraderOrder.mode == "live")
-            )
+            await session.execute(existing_rows_query)
         )
         .scalars()
         .all()
@@ -2261,6 +2300,7 @@ async def recover_missing_live_trader_orders(
     affected_traders: set[str] = set()
     ambiguous_orders = 0
     adopted_existing_orders = 0
+    candidate_cache: dict[tuple[str, int, tuple[str, ...] | None], dict[str, Any] | None] = {}
 
     for live_row in live_rows:
         clob_order_id = str(live_row.clob_order_id or "").strip()
@@ -2412,12 +2452,21 @@ async def recover_missing_live_trader_orders(
             ambiguous_orders += 1
             continue
 
-        candidate = await _infer_live_order_authority_candidate(
-            session,
-            market_question=market_question,
-            created_at=created_at,
-            trader_ids=trader_id_filter or None,
+        candidate_cache_key = (
+            market_question,
+            int(created_at.timestamp()) // _LIVE_ORDER_AUTHORITY_RECOVERY_CANDIDATE_CACHE_BUCKET_SECONDS,
+            tuple(sorted(trader_id_filter)) if trader_id_filter else None,
         )
+        if candidate_cache_key in candidate_cache:
+            candidate = candidate_cache[candidate_cache_key]
+        else:
+            candidate = await _infer_live_order_authority_candidate(
+                session,
+                market_question=market_question,
+                created_at=created_at,
+                trader_ids=trader_id_filter or None,
+            )
+            candidate_cache[candidate_cache_key] = candidate
         if candidate is None:
             ambiguous_orders += 1
             continue

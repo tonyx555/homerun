@@ -36,6 +36,10 @@ _CRYPTO_SNAPSHOT_UPCOMING_MARKETS_LIMIT = 8
 _FULL_REFRESH_FLOOR_SECONDS = 0.5
 _ML_PRUNE_INTERVAL_SECONDS = 3600.0
 _ML_RUNTIME_GATE_TTL_SECONDS = 10.0
+_ML_RUNTIME_STATE_TIMEOUT_SECONDS = 3.0
+_ML_ANNOTATE_TIMEOUT_SECONDS = 8.0
+_ML_RECORD_TIMEOUT_SECONDS = 8.0
+_ML_PRUNE_TIMEOUT_SECONDS = 8.0
 _BOUNDARY_INTERVALS_SECONDS = (300, 900, 3600, 14400)
 _BOUNDARY_PREFETCH_WINDOW_SECONDS = 15
 _BOUNDARY_LINGER_WINDOW_SECONDS = 10
@@ -828,13 +832,19 @@ class MarketRuntime:
 
         if is_active:
             try:
-                await sdk.annotate_market_batch(task_key=_CRYPTO_ML_TASK_KEY, markets=payload)
+                await asyncio.wait_for(
+                    sdk.annotate_market_batch(task_key=_CRYPTO_ML_TASK_KEY, markets=payload),
+                    timeout=_ML_ANNOTATE_TIMEOUT_SECONDS,
+                )
             except Exception as exc:
                 logger.warning("Failed to annotate crypto markets with ML predictions", exc_info=exc)
 
         if should_record:
             try:
-                await sdk.record_market_batch(task_key=_CRYPTO_ML_TASK_KEY, markets=payload)
+                await asyncio.wait_for(
+                    sdk.record_market_batch(task_key=_CRYPTO_ML_TASK_KEY, markets=payload),
+                    timeout=_ML_RECORD_TIMEOUT_SECONDS,
+                )
             except Exception as exc:
                 logger.warning("Failed to record ML training snapshots", exc_info=exc)
 
@@ -842,7 +852,10 @@ class MarketRuntime:
         if not should_record or (now_mono - self._last_ml_prune_mono) < _ML_PRUNE_INTERVAL_SECONDS:
             return
         try:
-            await sdk.prune_data(task_key=_CRYPTO_ML_TASK_KEY)
+            await asyncio.wait_for(
+                sdk.prune_data(task_key=_CRYPTO_ML_TASK_KEY),
+                timeout=_ML_PRUNE_TIMEOUT_SECONDS,
+            )
             self._last_ml_prune_mono = now_mono
         except Exception as exc:
             logger.warning("Failed to prune ML training snapshots", exc_info=exc)
@@ -857,7 +870,10 @@ class MarketRuntime:
 
         sdk = get_machine_learning_sdk()
         try:
-            runtime_state = await sdk.get_runtime_state(_CRYPTO_ML_TASK_KEY)
+            runtime_state = await asyncio.wait_for(
+                sdk.get_runtime_state(_CRYPTO_ML_TASK_KEY),
+                timeout=_ML_RUNTIME_STATE_TIMEOUT_SECONDS,
+            )
         except Exception as exc:
             logger.warning("Failed to resolve ML runtime state for crypto markets", exc_info=exc)
             self._last_ml_gate_check_mono = now_mono
