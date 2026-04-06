@@ -1538,7 +1538,9 @@ def _live_active_notional(mode: Any, status: Any, row_notional: float, payload: 
             return filled_notional_usd
         return max(0.0, abs(row_notional))
     if status_key in {"open", "submitted"}:
-        return max(0.0, filled_notional_usd)
+        if filled_notional_usd > 0.0:
+            return filled_notional_usd
+        return max(0.0, abs(row_notional))
     return 0.0
 
 

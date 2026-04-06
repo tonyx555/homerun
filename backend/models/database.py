@@ -2322,6 +2322,7 @@ class LiveTradingOrder(Base):
 
     id = Column(String, primary_key=True)
     wallet_address = Column(String, nullable=False, index=True)
+    market_id = Column(String, nullable=True, index=True)
     clob_order_id = Column(String, nullable=True, index=True)
     token_id = Column(String, nullable=False, index=True)
     side = Column(String, nullable=False)

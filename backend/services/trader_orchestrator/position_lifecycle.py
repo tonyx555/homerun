@@ -2228,7 +2228,9 @@ async def load_market_info_for_orders(orders: list[TraderOrder]) -> dict[str, Op
 
         info: Optional[dict[str, Any]] = None
         if lookup_id.startswith("0x"):
-            info = await polymarket_client.get_market_by_condition_id(lookup_id)
+            info = await polymarket_client.get_market_by_condition_id(lookup_id, force_refresh=True)
+            if info is None:
+                info = await polymarket_client.get_market_by_condition_id(lookup_id)
         if info is None:
             info = await polymarket_client.get_market_by_token_id(lookup_id)
 
