@@ -1304,7 +1304,8 @@ class TelegramNotifier:
                 return []
 
             if response.status_code != 200:
-                logger.warning("Telegram getUpdates failed", status=response.status_code, body=response.text[:250])
+                log_method = logger.info if response.status_code == 409 else logger.warning
+                log_method("Telegram getUpdates failed", status=response.status_code, body=response.text[:250])
                 return []
 
             body = response.json()

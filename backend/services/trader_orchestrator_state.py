@@ -106,7 +106,7 @@ SHADOW_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
 LIVE_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
 CLEANUP_ELIGIBLE_ORDER_STATUSES = {"submitted", "executed", "open"}
 _LIVE_ORDER_AUTHORITY_RECOVERY_WINDOW_HOURS = 24
-_LIVE_ORDER_AUTHORITY_RECOVERY_GENERAL_MAX_ROWS = 400
+_LIVE_ORDER_AUTHORITY_RECOVERY_GENERAL_MAX_ROWS = 150
 _LIVE_ORDER_AUTHORITY_RECOVERY_CANDIDATE_CACHE_BUCKET_SECONDS = 60
 PENDING_LIVE_EXIT_TERMINAL_STATUSES = {
     "filled",
@@ -449,7 +449,7 @@ def _extract_order_condition_id(row: TraderOrder) -> str:
         or _normalize_condition_id(payload.get("conditionId"))
         or _normalize_condition_id(payload.get("market_id"))
         or _normalize_condition_id(payload.get("marketId"))
-        or _normalize_condition_id(row.market_id)
+        or _normalize_condition_id(getattr(row, "market_id", None))
     )
 
 
@@ -1652,7 +1652,29 @@ def _live_order_authority_key_from_payload(payload: dict[str, Any]) -> str:
     if provider_clob_id:
         return f"clob:{provider_clob_id.lower()}"
     if live_order_id:
-        return f"live:{live_order_id}"
+        return f"live:{live_order_id.lower()}"
+    return ""
+
+
+def _live_order_authority_key_from_row(row: TraderOrder) -> str:
+    payload = dict(getattr(row, "payload_json", None) or {})
+    provider_clob_id = str(
+        getattr(row, "provider_clob_order_id", None)
+        or extract_trader_order_provider_clob_order_id(payload)
+        or ""
+    ).strip()
+    if provider_clob_id:
+        return f"clob:{provider_clob_id.lower()}"
+    provider_order_id = str(
+        getattr(row, "provider_order_id", None)
+        or extract_trader_order_provider_order_id(payload)
+        or ""
+    ).strip()
+    if provider_order_id:
+        return f"provider:{provider_order_id.lower()}"
+    _provider_clob_id, live_order_id = _extract_live_order_authority_ids_from_payload(payload)
+    if live_order_id:
+        return f"live:{live_order_id.lower()}"
     return ""
 
 
@@ -1667,6 +1689,29 @@ def _live_order_authority_row_sort_key(row: TraderOrder) -> tuple[int, int, int,
         -created_at.timestamp(),
         str(row.id or ""),
     )
+
+
+def _dedupe_live_authority_rows(rows: list[TraderOrder]) -> list[TraderOrder]:
+    canonical_by_key: dict[str, TraderOrder] = {}
+    ordered_rows: list[TraderOrder] = []
+    for row in rows:
+        if _normalize_mode_key(getattr(row, "mode", None)) != "live":
+            ordered_rows.append(row)
+            continue
+        authority_key = _live_order_authority_key_from_row(row)
+        if not authority_key:
+            ordered_rows.append(row)
+            continue
+        current = canonical_by_key.get(authority_key)
+        if current is None:
+            canonical_by_key[authority_key] = row
+            ordered_rows.append(row)
+            continue
+        if _live_order_authority_row_sort_key(row) < _live_order_authority_row_sort_key(current):
+            canonical_by_key[authority_key] = row
+            replace_index = ordered_rows.index(current)
+            ordered_rows[replace_index] = row
+    return ordered_rows
 
 
 def _build_live_order_authority_payload(
@@ -2206,6 +2251,29 @@ async def recover_missing_live_trader_orders(
     )
     if trader_id_filter:
         existing_rows_query = existing_rows_query.where(TraderOrder.trader_id.in_(list(trader_id_filter)))
+    else:
+        relevant_market_ids = {
+            str(getattr(position_row, "market_id", "") or "").strip()
+            for position_row in position_rows
+            if str(getattr(position_row, "market_id", "") or "").strip()
+        }
+        relevant_provider_clob_ids = {
+            str(live_row.clob_order_id or "").strip().lower()
+            for live_row in live_rows
+            if str(live_row.clob_order_id or "").strip()
+        }
+        if relevant_market_ids or relevant_provider_clob_ids:
+            market_filters: list[Any] = [
+                TraderOrder.market_id.is_(None),
+                TraderOrder.market_id == "",
+            ]
+            if relevant_market_ids:
+                market_filters.append(TraderOrder.market_id.in_(list(relevant_market_ids)))
+            if relevant_provider_clob_ids:
+                market_filters.append(
+                    func.lower(func.coalesce(TraderOrder.provider_clob_order_id, "")).in_(list(relevant_provider_clob_ids))
+                )
+            existing_rows_query = existing_rows_query.where(or_(*market_filters))
     existing_rows = list(
         (
             await session.execute(existing_rows_query)
@@ -2219,9 +2287,10 @@ async def recover_missing_live_trader_orders(
     rows_by_authority_key: dict[str, list[TraderOrder]] = {}
     rows_without_authority: list[TraderOrder] = []
     existing_active_markets: set[tuple[str, str]] = set()
+    affected_traders: set[str] = set()
     for row in existing_rows:
         payload = dict(row.payload_json or {})
-        authority_key = _live_order_authority_key_from_payload(payload)
+        authority_key = _live_order_authority_key_from_row(row)
         if authority_key:
             rows_by_authority_key.setdefault(authority_key, []).append(row)
         else:
@@ -2247,6 +2316,9 @@ async def recover_missing_live_trader_orders(
     for group in rows_by_authority_key.values():
         ordered_group = sorted(group, key=_live_order_authority_row_sort_key)
         canonical_row = ordered_group[0]
+        canonical_trader_id = str(canonical_row.trader_id or "").strip()
+        if canonical_trader_id:
+            affected_traders.add(canonical_trader_id)
         canonical_payload = dict(canonical_row.payload_json or {})
         canonical_payload_changed = False
 
@@ -2275,11 +2347,12 @@ async def recover_missing_live_trader_orders(
             or ""
         ).strip()
         if provider_clob_id:
+            provider_clob_id = provider_clob_id.lower()
             existing_provider_rows_by_clob_id[provider_clob_id] = canonical_row
         if live_order_id:
-            existing_rows_by_live_order_id[live_order_id] = canonical_row
+            existing_rows_by_live_order_id[live_order_id.lower()] = canonical_row
         if provider_order_id:
-            existing_rows_by_live_order_id[provider_order_id] = canonical_row
+            existing_rows_by_live_order_id[provider_order_id.lower()] = canonical_row
 
     for row in rows_without_authority:
         payload = dict(row.payload_json or {})
@@ -2290,21 +2363,21 @@ async def recover_missing_live_trader_orders(
             or ""
         ).strip()
         if provider_clob_id:
+            provider_clob_id = provider_clob_id.lower()
             existing_provider_rows_by_clob_id[provider_clob_id] = row
         if live_order_id:
-            existing_rows_by_live_order_id[live_order_id] = row
+            existing_rows_by_live_order_id[live_order_id.lower()] = row
         if provider_order_id:
-            existing_rows_by_live_order_id[provider_order_id] = row
+            existing_rows_by_live_order_id[provider_order_id.lower()] = row
 
     recovered_rows: list[TraderOrder] = []
-    affected_traders: set[str] = set()
     ambiguous_orders = 0
     adopted_existing_orders = 0
     candidate_cache: dict[tuple[str, int, tuple[str, ...] | None], dict[str, Any] | None] = {}
 
     for live_row in live_rows:
-        clob_order_id = str(live_row.clob_order_id or "").strip()
-        live_order_id = str(live_row.id or "").strip()
+        clob_order_id = str(live_row.clob_order_id or "").strip().lower()
+        live_order_id = str(live_row.id or "").strip().lower()
 
         token_key = _wallet_position_token_key(live_row.token_id)
         position_row = live_orders_by_token.get(token_key)
@@ -2562,18 +2635,20 @@ async def recover_missing_live_trader_orders(
 
     await session.flush()
     for trader_id in sorted(affected_traders):
-        await create_trader_event(
-            session,
-            trader_id=trader_id,
-            event_type="live_order_authority_recovered",
-            severity="warn",
-            source="live_wallet_authority",
-            message="Recovered missing live venue orders into trader order authority.",
-            payload={
-                "recovered_order_ids": [row.id for row in recovered_rows if row.trader_id == trader_id],
-            },
-            commit=False,
-        )
+        trader_recovered_order_ids = [row.id for row in recovered_rows if row.trader_id == trader_id]
+        if trader_recovered_order_ids:
+            await create_trader_event(
+                session,
+                trader_id=trader_id,
+                event_type="live_order_authority_recovered",
+                severity="info",
+                source="live_wallet_authority",
+                message="Recovered missing live venue orders into trader order authority.",
+                payload={
+                    "recovered_order_ids": trader_recovered_order_ids,
+                },
+                commit=False,
+            )
         await sync_trader_position_inventory(
             session,
             trader_id=trader_id,
@@ -6576,7 +6651,7 @@ async def sync_trader_position_inventory(
         else:
             query = query.where(TraderOrder.mode == mode_key)
 
-    order_rows = list((await session.execute(query)).scalars().all())
+    order_rows = _dedupe_live_authority_rows(list((await session.execute(query)).scalars().all()))
 
     grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
     for row in order_rows:
@@ -6804,14 +6879,12 @@ async def get_open_position_count_for_trader(
             active_position_keys.add(key)
 
     order_status_expr = func.lower(func.trim(func.coalesce(TraderOrder.status, "")))
-    order_query = select(
-        TraderOrder.mode,
-        TraderOrder.status,
-        TraderOrder.market_id,
-        TraderOrder.direction,
-        TraderOrder.notional_usd,
-        TraderOrder.payload_json,
-    ).where(TraderOrder.trader_id == trader_id).where(order_status_expr.in_(tuple(OPEN_ORDER_STATUSES))).where(_visible_trader_order_query_clause())
+    order_query = (
+        select(TraderOrder)
+        .where(TraderOrder.trader_id == trader_id)
+        .where(order_status_expr.in_(tuple(OPEN_ORDER_STATUSES)))
+        .where(_visible_trader_order_query_clause())
+    )
     if mode is not None:
         mode_key = _normalize_mode_key(mode)
         if mode_key == "other":
@@ -6819,7 +6892,7 @@ async def get_open_position_count_for_trader(
         else:
             order_query = order_query.where(func.lower(func.coalesce(TraderOrder.mode, "")) == mode_key)
 
-    order_rows = (await session.execute(order_query)).all()
+    order_rows = _dedupe_live_authority_rows(list((await session.execute(order_query)).scalars().all()))
     active_order_position_keys: set[tuple[str, str, str]] = set()
     for row in order_rows:
         row_mode = _normalize_mode_key(mode if mode is not None else row.mode)
@@ -6870,11 +6943,12 @@ async def get_open_market_ids_for_trader(
             open_market_ids.add(market_id)
 
     order_status_expr = func.lower(func.trim(func.coalesce(TraderOrder.status, "")))
-    order_query = select(
-        TraderOrder.mode,
-        TraderOrder.status,
-        TraderOrder.market_id,
-    ).where(TraderOrder.trader_id == trader_id).where(order_status_expr.in_(tuple(OPEN_ORDER_STATUSES))).where(_visible_trader_order_query_clause())
+    order_query = (
+        select(TraderOrder)
+        .where(TraderOrder.trader_id == trader_id)
+        .where(order_status_expr.in_(tuple(OPEN_ORDER_STATUSES)))
+        .where(_visible_trader_order_query_clause())
+    )
     if mode is not None:
         mode_key = _normalize_mode_key(mode)
         if mode_key == "other":
@@ -6882,7 +6956,7 @@ async def get_open_market_ids_for_trader(
         else:
             order_query = order_query.where(func.lower(func.coalesce(TraderOrder.mode, "")) == mode_key)
 
-    order_rows = (await session.execute(order_query)).all()
+    order_rows = _dedupe_live_authority_rows(list((await session.execute(order_query)).scalars().all()))
     for row in order_rows:
         row_mode = _normalize_mode_key(mode if mode is not None else row.mode)
         if not _is_active_order_status(row_mode, row.status):
@@ -6928,15 +7002,7 @@ async def get_open_order_count_for_trader(
 ) -> int:
     effective_statuses = statuses if statuses is not None else UNFILLED_ORDER_STATUSES
     status_key_expr = func.lower(func.trim(func.coalesce(TraderOrder.status, "")))
-    query = (
-        select(
-            TraderOrder.mode,
-            func.count(TraderOrder.id).label("count"),
-        )
-        .where(TraderOrder.trader_id == trader_id)
-        .where(status_key_expr.in_(tuple(effective_statuses)))
-        .group_by(TraderOrder.mode)
-    )
+    query = select(TraderOrder).where(TraderOrder.trader_id == trader_id).where(status_key_expr.in_(tuple(effective_statuses)))
     if mode is not None:
         mode_key = _normalize_mode_key(mode)
         if mode_key == "other":
@@ -6944,30 +7010,28 @@ async def get_open_order_count_for_trader(
         else:
             query = query.where(func.lower(func.coalesce(TraderOrder.mode, "")) == mode_key)
 
-    rows = (await session.execute(query)).all()
-    total = 0
-    for row in rows:
-        total += int(row.count or 0)
-    return total
+    rows = _dedupe_live_authority_rows(list((await session.execute(query)).scalars().all()))
+    return len(rows)
 
 
 async def get_open_order_summary_for_trader(session: AsyncSession, trader_id: str) -> dict[str, int]:
-    rows = (
-        await session.execute(
-            select(
-                TraderOrder.mode,
-                func.count(TraderOrder.id).label("count"),
-            )
-            .where(TraderOrder.trader_id == trader_id)
-            .where(func.lower(func.trim(func.coalesce(TraderOrder.status, ""))).in_(tuple(UNFILLED_ORDER_STATUSES)))
-            .group_by(TraderOrder.mode)
-        )
-    ).all()
-
     summary = {"live": 0, "shadow": 0, "other": 0, "total": 0}
+    rows = _dedupe_live_authority_rows(
+        list(
+            (
+                await session.execute(
+                    select(TraderOrder)
+                    .where(TraderOrder.trader_id == trader_id)
+                    .where(func.lower(func.trim(func.coalesce(TraderOrder.status, ""))).in_(tuple(UNFILLED_ORDER_STATUSES)))
+                )
+            )
+            .scalars()
+            .all()
+        )
+    )
     for row in rows:
         mode = _normalize_mode_key(row.mode)
-        count = int(row.count or 0)
+        count = 1
         if mode == "live":
             summary["live"] += count
         elif mode == "shadow":
@@ -7002,37 +7066,21 @@ async def get_pending_live_exit_summary_for_trader(
     terminal_status_set = set(configured_terminal_statuses)
 
     status_key_expr = func.lower(func.coalesce(TraderOrder.status, ""))
-    pending_live_exit_expr = TraderOrder.payload_json["pending_live_exit"]
-    pending_live_exit_status_expr = func.lower(
-        func.trim(
-            func.coalesce(
-                pending_live_exit_expr["status"].as_string(),
-                "",
-            )
-        )
-    )
-    rows = (
-        await session.execute(
-            select(
-                TraderOrder.id,
-                TraderOrder.market_id,
-                TraderOrder.direction,
-                TraderOrder.signal_id,
-                pending_live_exit_status_expr.label("pending_live_exit_status"),
-            )
-            .where(TraderOrder.trader_id == trader_id)
-            .where(func.lower(func.coalesce(TraderOrder.mode, "")) == "live")
-            .where(status_key_expr.in_(tuple(_active_statuses_for_mode("live"))))
-            .where(_visible_trader_order_query_clause())
-            .where(pending_live_exit_expr.is_not(None))
-            .where(
-                or_(
-                    pending_live_exit_status_expr == "",
-                    pending_live_exit_status_expr.not_in(tuple(terminal_status_set)),
+    rows = _dedupe_live_authority_rows(
+        list(
+            (
+                await session.execute(
+                    select(TraderOrder)
+                    .where(TraderOrder.trader_id == trader_id)
+                    .where(func.lower(func.coalesce(TraderOrder.mode, "")) == "live")
+                    .where(status_key_expr.in_(tuple(_active_statuses_for_mode("live"))))
+                    .where(_visible_trader_order_query_clause())
                 )
             )
+            .scalars()
+            .all()
         )
-    ).all()
+    )
 
     order_ids: list[str] = []
     market_ids: set[str] = set()
@@ -7041,11 +7089,17 @@ async def get_pending_live_exit_summary_for_trader(
     identities: list[dict[str, Any]] = []
     identity_keys: set[str] = set()
     for row in rows:
+        payload = dict(row.payload_json or {})
+        pending_live_exit = payload.get("pending_live_exit")
+        if not isinstance(pending_live_exit, dict):
+            continue
         order_id = str(row.id or "").strip()
         market_id = str(row.market_id or "").strip()
         direction = str(row.direction or "").strip().lower()
         signal_id = str(row.signal_id or "").strip()
-        status_key = _normalize_status_key(row.pending_live_exit_status) or "unknown"
+        status_key = _normalize_status_key(pending_live_exit.get("status")) or "unknown"
+        if status_key in terminal_status_set:
+            continue
         statuses[status_key] = int(statuses.get(status_key, 0)) + 1
         if order_id:
             order_ids.append(order_id)

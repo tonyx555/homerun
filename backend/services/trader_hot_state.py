@@ -143,6 +143,7 @@ class _TraderSnapshot:
     """Mutable in-memory risk/position state for a single trader+mode."""
 
     open_position_keys: set[tuple[str, str, str]] = field(default_factory=set)
+    open_position_market_ids: set[str] = field(default_factory=set)
     open_order_keys: set[tuple[str, str, str]] = field(default_factory=set)
     open_order_ids: set[str] = field(default_factory=set)
     open_order_count: int = 0
@@ -160,6 +161,7 @@ class _TraderSnapshot:
     cursor_runtime_sequence: Optional[int] = None
     # Active orders for unrealized PnL — keyed by order_id
     active_order_legs: dict[str, _ActiveLeg] = field(default_factory=dict)
+    active_orders: dict[str, "_TrackedOrder"] = field(default_factory=dict)
 
 
 @dataclass
@@ -171,6 +173,17 @@ class _ActiveLeg:
     quantity: float
     direction: str
     notional: float
+
+
+@dataclass
+class _TrackedOrder:
+    market_id: str
+    source_key: str
+    copy_wallet: str
+    notional: float
+    position_key: tuple[str, str, str] | None
+    is_unfilled: bool
+    leg: _ActiveLeg | None
 
 
 # ── Global state ───────────────────────────────────────────────────
@@ -238,6 +251,45 @@ def _audit_buffer_append(entry: _AuditEntry) -> None:
                 dropped=overflow,
                 cap=_AUDIT_BUFFER_MAX_SIZE,
             )
+
+
+def _rebuild_snapshot_order_views(snap: _TraderSnapshot) -> None:
+    snap.open_order_keys = {
+        tracked.position_key
+        for tracked in snap.active_orders.values()
+        if tracked.position_key is not None
+    }
+    snap.open_order_ids = {
+        order_id
+        for order_id, tracked in snap.active_orders.items()
+        if tracked.is_unfilled
+    }
+    snap.open_order_count = len(snap.open_order_ids)
+    snap.open_market_ids = set(snap.open_position_market_ids)
+    snap.gross_notional = 0.0
+    snap.market_notional = {}
+    snap.source_notional = {}
+    snap.copy_leader_notional = {}
+    snap.active_order_legs = {}
+    for order_id, tracked in snap.active_orders.items():
+        if tracked.market_id:
+            snap.open_market_ids.add(tracked.market_id)
+        if tracked.notional > 0.0:
+            snap.gross_notional += tracked.notional
+            if tracked.market_id:
+                snap.market_notional[tracked.market_id] = (
+                    snap.market_notional.get(tracked.market_id, 0.0) + tracked.notional
+                )
+            if tracked.source_key:
+                snap.source_notional[tracked.source_key] = (
+                    snap.source_notional.get(tracked.source_key, 0.0) + tracked.notional
+                )
+            if tracked.copy_wallet:
+                snap.copy_leader_notional[tracked.copy_wallet] = (
+                    snap.copy_leader_notional.get(tracked.copy_wallet, 0.0) + tracked.notional
+                )
+        if tracked.leg is not None:
+            snap.active_order_legs[order_id] = tracked.leg
 
 
 _RESEED_INTERVAL_SECONDS = 600.0
@@ -360,37 +412,14 @@ async def _seed_from_db(session: AsyncSession) -> None:
 
         if _is_active_order_status(mode, order.status):
             order_id = str(order.id or "").strip()
-            if status_key in seed_unfilled_statuses and order_id:
-                snap.open_order_ids.add(order_id)
-                snap.open_order_count = len(snap.open_order_ids)
             market_id = str(order.market_id or "").strip()
-            if market_id:
-                snap.open_market_ids.add(market_id)
-            for scope in ("market_direction",):
-                key = _position_cap_scope_key(
-                    position_cap_scope=scope,
-                    mode=mode,
-                    market_id=order.market_id,
-                    direction=order.direction,
-                    payload=payload,
-                )
-                if key is not None:
-                    snap.open_order_keys.add(key)
-
-            if active_notional > 0:
-                snap.gross_notional += active_notional
-                _shadow_global_gross[mode] = _shadow_global_gross.get(mode, 0.0) + active_notional
-                if market_id:
-                    snap.market_notional[market_id] = snap.market_notional.get(market_id, 0.0) + active_notional
-                source_key = str(order.source or "").strip().lower()
-                if source_key:
-                    snap.source_notional[source_key] = snap.source_notional.get(source_key, 0.0) + active_notional
-                # Copy leader wallet
-                copy_wallet = _extract_copy_wallet(payload)
-                if copy_wallet:
-                    snap.copy_leader_notional[copy_wallet] = (
-                        snap.copy_leader_notional.get(copy_wallet, 0.0) + active_notional
-                    )
+            key = _position_cap_scope_key(
+                position_cap_scope="market_direction",
+                mode=mode,
+                market_id=order.market_id,
+                direction=order.direction,
+                payload=payload,
+            )
 
             # Build active leg for unrealized PnL
             _, filled_shares, fill_price = _extract_live_fill_metrics(payload)
@@ -405,13 +434,24 @@ async def _seed_from_db(session: AsyncSession) -> None:
                 if mode in {"live", "shadow"} and filled_shares > 0.0
                 else float(row_notional / entry_price if entry_price > 0 else 0.0)
             )
+            leg = None
             if token_id and entry_price > 0 and quantity > 0:
-                snap.active_order_legs[str(order.id)] = _ActiveLeg(
+                leg = _ActiveLeg(
                     token_id=token_id,
                     entry_price=entry_price,
                     quantity=quantity,
                     direction=str(order.direction or "").strip().lower(),
                     notional=active_notional,
+                )
+            if order_id:
+                snap.active_orders[order_id] = _TrackedOrder(
+                    market_id=market_id,
+                    source_key=str(order.source or "").strip().lower(),
+                    copy_wallet=_extract_copy_wallet(payload),
+                    notional=max(0.0, active_notional),
+                    position_key=key,
+                    is_unfilled=bool(status_key in seed_unfilled_statuses),
+                    leg=leg,
                 )
 
         # Realized PnL for today
@@ -454,7 +494,11 @@ async def _seed_from_db(session: AsyncSession) -> None:
             snap.open_position_keys.add(key)
         market_id = str(row.market_id or "").strip()
         if market_id:
-            snap.open_market_ids.add(market_id)
+            snap.open_position_market_ids.add(market_id)
+    for (_, mode_key), snap in _shadow_snapshots.items():
+        _rebuild_snapshot_order_views(snap)
+        if snap.gross_notional > 0.0:
+            _shadow_global_gross[mode_key] = _shadow_global_gross.get(mode_key, 0.0) + snap.gross_notional
     # Snapshot index by trader
     snapshots_by_trader: dict[str, list[_TraderSnapshot]] = {}
     for (tid, _), snap in _shadow_snapshots.items():
@@ -559,17 +603,30 @@ async def _seed_from_db(session: AsyncSession) -> None:
         shadow_snap = _shadow_snapshots.get(key)
         if shadow_snap is not None:
             # Merge any market_ids the old snapshot had that the shadow doesn't
-            shadow_snap.open_market_ids |= old_snap.open_market_ids
-            shadow_snap.open_order_ids |= old_snap.open_order_ids
-            shadow_snap.open_order_count = len(shadow_snap.open_order_ids)
-        elif old_snap.open_market_ids:
+            for order_id, tracked in old_snap.active_orders.items():
+                shadow_snap.active_orders.setdefault(order_id, tracked)
+            _rebuild_snapshot_order_views(shadow_snap)
+        elif old_snap.active_orders:
             # Old snapshot has open markets but shadow doesn't have this trader at all —
             # preserve it so the stacking guard still sees it
-            _shadow_snapshots[key] = old_snap
+            preserved_snap = _TraderSnapshot(
+                daily_realized_pnl=old_snap.daily_realized_pnl,
+                daily_pnl_date=old_snap.daily_pnl_date,
+                consecutive_losses=old_snap.consecutive_losses,
+                last_loss_at=old_snap.last_loss_at,
+                cursor_created_at=old_snap.cursor_created_at,
+                cursor_signal_id=old_snap.cursor_signal_id,
+                cursor_runtime_sequence=old_snap.cursor_runtime_sequence,
+            )
+            preserved_snap.active_orders.update(old_snap.active_orders)
+            _rebuild_snapshot_order_views(preserved_snap)
+            _shadow_snapshots[key] = preserved_snap
     _snapshots.clear()
     _snapshots.update(_shadow_snapshots)
     _global_gross.clear()
-    _global_gross.update(_shadow_global_gross)
+    for (_, mode_key), snap in _snapshots.items():
+        if snap.gross_notional > 0.0:
+            _global_gross[mode_key] = _global_gross.get(mode_key, 0.0) + snap.gross_notional
     _global_daily_pnl.clear()
     _global_daily_pnl.update(_shadow_global_daily_pnl)
     _global_daily_pnl_date.clear()
@@ -604,7 +661,6 @@ def get_open_order_count(trader_id: str, mode: str) -> int:
     snap = _snapshots.get((trader_id, _normalize_mode_key(mode)))
     if snap is None:
         return 0
-    snap.open_order_count = len(snap.open_order_ids)
     return snap.open_order_count
 
 
@@ -775,13 +831,7 @@ def record_order_created(
 
     order_id_clean = str(order_id or "").strip()
     status_key = _normalize_status_key(status)
-    if order_id_clean and status_key in _HOT_UNFILLED_ORDER_STATUSES:
-        snap.open_order_ids.add(order_id_clean)
-        snap.open_order_count = len(snap.open_order_ids)
     market_id_clean = str(market_id or "").strip()
-    if market_id_clean:
-        snap.open_market_ids.add(market_id_clean)
-
     key = _position_cap_scope_key(
         position_cap_scope="market_direction",
         mode=mode_key,
@@ -789,32 +839,39 @@ def record_order_created(
         direction=direction,
         payload=payload,
     )
-    if key is not None:
-        snap.open_order_keys.add(key)
-
-    snap.gross_notional += active_notional
-    _global_gross[mode_key] = _global_gross.get(mode_key, 0.0) + active_notional
-    if market_id_clean:
-        snap.market_notional[market_id_clean] = snap.market_notional.get(market_id_clean, 0.0) + active_notional
     source_key = str(source or "").strip().lower()
-    if source_key:
-        snap.source_notional[source_key] = snap.source_notional.get(source_key, 0.0) + active_notional
     wallet = (str(copy_source_wallet).strip().lower() if copy_source_wallet else _extract_copy_wallet(payload))
-    if wallet:
-        snap.copy_leader_notional[wallet] = snap.copy_leader_notional.get(wallet, 0.0) + active_notional
 
     quantity = (
         float(filled_shares) if filled_shares > 0 else (notional_usd / entry_price if entry_price > 0 else 0.0)
     )
     token_id_clean = str(token_id or "").strip()
+    leg = None
     if token_id_clean and entry_price > 0 and quantity > 0:
-        snap.active_order_legs[order_id_clean] = _ActiveLeg(
+        leg = _ActiveLeg(
             token_id=token_id_clean,
             entry_price=entry_price,
             quantity=quantity,
             direction=str(direction or "").strip().lower(),
             notional=active_notional,
         )
+    if not order_id_clean:
+        return
+    snap.active_orders[order_id_clean] = _TrackedOrder(
+        market_id=market_id_clean,
+        source_key=source_key,
+        copy_wallet=wallet,
+        notional=max(0.0, active_notional),
+        position_key=key,
+        is_unfilled=bool(status_key in _HOT_UNFILLED_ORDER_STATUSES),
+        leg=leg,
+    )
+    _rebuild_snapshot_order_views(snap)
+    _global_gross[mode_key] = sum(
+        snapshot.gross_notional
+        for (_, snapshot_mode), snapshot in _snapshots.items()
+        if snapshot_mode == mode_key
+    )
 
 
 def record_order_resolved(
@@ -835,33 +892,15 @@ def record_order_resolved(
     if snap is None:
         return
 
-    # Remove active notional
-    leg = snap.active_order_legs.pop(order_id, None)
-    notional_to_remove = leg.notional if leg else 0.0
+    snap.active_orders.pop(str(order_id or "").strip(), None)
 
     status_key = _normalize_status_key(status)
-    if str(order_id or "").strip():
-        snap.open_order_ids.discard(str(order_id or "").strip())
-        snap.open_order_count = len(snap.open_order_ids)
-
-    if notional_to_remove > 0:
-        snap.gross_notional = max(0.0, snap.gross_notional - notional_to_remove)
-        _global_gross[mode_key] = max(0.0, _global_gross.get(mode_key, 0.0) - notional_to_remove)
-        market_id_clean = str(market_id or "").strip()
-        if market_id_clean:
-            snap.market_notional[market_id_clean] = max(
-                0.0, snap.market_notional.get(market_id_clean, 0.0) - notional_to_remove
-            )
-        source_key = str(source or "").strip().lower()
-        if source_key:
-            snap.source_notional[source_key] = max(
-                0.0, snap.source_notional.get(source_key, 0.0) - notional_to_remove
-            )
-        if copy_source_wallet:
-            wallet = str(copy_source_wallet).strip().lower()
-            snap.copy_leader_notional[wallet] = max(
-                0.0, snap.copy_leader_notional.get(wallet, 0.0) - notional_to_remove
-            )
+    _rebuild_snapshot_order_views(snap)
+    _global_gross[mode_key] = sum(
+        snapshot.gross_notional
+        for (_, snapshot_mode), snapshot in _snapshots.items()
+        if snapshot_mode == mode_key
+    )
 
     # Track recently-closed market to prevent re-entry churn
     market_id_clean = str(market_id or "").strip()
@@ -902,37 +941,18 @@ def record_order_cancelled(
     if snap is None:
         return
 
-    leg = snap.active_order_legs.pop(order_id, None)
-    notional_to_remove = leg.notional if leg else 0.0
-
-    if str(order_id or "").strip():
-        snap.open_order_ids.discard(str(order_id or "").strip())
-        snap.open_order_count = len(snap.open_order_ids)
+    snap.active_orders.pop(str(order_id or "").strip(), None)
+    _rebuild_snapshot_order_views(snap)
+    _global_gross[mode_key] = sum(
+        snapshot.gross_notional
+        for (_, snapshot_mode), snapshot in _snapshots.items()
+        if snapshot_mode == mode_key
+    )
 
     # Track recently-closed market to prevent re-entry churn
     market_id_clean = str(market_id or "").strip()
     if market_id_clean:
         _recently_closed_markets[(trader_id, mode_key, market_id_clean)] = time.monotonic()
-
-    if notional_to_remove > 0:
-        snap.gross_notional = max(0.0, snap.gross_notional - notional_to_remove)
-        _global_gross[mode_key] = max(0.0, _global_gross.get(mode_key, 0.0) - notional_to_remove)
-        market_id_clean = str(market_id or "").strip()
-        if market_id_clean:
-            snap.market_notional[market_id_clean] = max(
-                0.0, snap.market_notional.get(market_id_clean, 0.0) - notional_to_remove
-            )
-        source_key = str(source or "").strip().lower()
-        if source_key:
-            snap.source_notional[source_key] = max(
-                0.0, snap.source_notional.get(source_key, 0.0) - notional_to_remove
-            )
-        if copy_source_wallet:
-            wallet = str(copy_source_wallet).strip().lower()
-            snap.copy_leader_notional[wallet] = max(
-                0.0, snap.copy_leader_notional.get(wallet, 0.0) - notional_to_remove
-            )
-
 
 def update_signal_cursor(
     trader_id: str,

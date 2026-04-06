@@ -27,6 +27,7 @@ from decimal import Decimal, ROUND_FLOOR
 import uuid
 
 from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import InterfaceError, OperationalError
 
 from config import settings
@@ -1428,6 +1429,7 @@ class LiveExecutionService:
                         "Restored signature type=%s from runtime state",
                         self._balance_signature_type,
                     )
+                await self.sync_positions()
                 await self._approve_clob_allowance()
                 # Probe all signature types to find which one has balance/allowance.
                 # This sets self._balance_signature_type and client signature settings
@@ -1628,28 +1630,56 @@ class LiveExecutionService:
             for attempt in range(_DB_RETRY_ATTEMPTS):
                 async with AsyncSessionLocal() as session:
                     try:
-                        await session.execute(
-                            delete(LiveTradingPosition).where(LiveTradingPosition.wallet_address == wallet)
-                        )
+                        persisted_at = utcnow()
+                        position_ids: set[str] = set()
+                        position_rows: list[dict[str, Any]] = []
                         for position in positions:
                             token_id = str(position.token_id or "").strip()
                             if not token_id:
                                 continue
-                            row = LiveTradingPosition(
-                                id=f"{wallet}:{token_id}",
-                                wallet_address=wallet,
-                                token_id=token_id,
-                                market_id=str(position.market_id or "").strip(),
-                                market_question=position.market_question,
-                                outcome=position.outcome,
-                                size=float(position.size),
-                                average_cost=float(position.average_cost),
-                                current_price=float(position.current_price),
-                                unrealized_pnl=float(position.unrealized_pnl),
-                                created_at=_normalize_utc_datetime(position.created_at) or utcnow(),
-                                updated_at=utcnow(),
+                            position_id = f"{wallet}:{token_id}"
+                            position_ids.add(position_id)
+                            position_rows.append(
+                                {
+                                    "id": position_id,
+                                    "wallet_address": wallet,
+                                    "token_id": token_id,
+                                    "market_id": str(position.market_id or "").strip(),
+                                    "market_question": position.market_question,
+                                    "outcome": position.outcome,
+                                    "size": float(position.size),
+                                    "average_cost": float(position.average_cost),
+                                    "current_price": float(position.current_price),
+                                    "unrealized_pnl": float(position.unrealized_pnl),
+                                    "created_at": _normalize_utc_datetime(position.created_at) or persisted_at,
+                                    "updated_at": persisted_at,
+                                }
                             )
-                            session.add(row)
+                        stale_rows_query = delete(LiveTradingPosition).where(
+                            LiveTradingPosition.wallet_address == wallet
+                        )
+                        if position_ids:
+                            stale_rows_query = stale_rows_query.where(~LiveTradingPosition.id.in_(list(position_ids)))
+                        await session.execute(stale_rows_query)
+                        if position_rows:
+                            insert_stmt = pg_insert(LiveTradingPosition).values(position_rows)
+                            await session.execute(
+                                insert_stmt.on_conflict_do_update(
+                                    index_elements=[LiveTradingPosition.id],
+                                    set_={
+                                        "wallet_address": insert_stmt.excluded.wallet_address,
+                                        "token_id": insert_stmt.excluded.token_id,
+                                        "market_id": insert_stmt.excluded.market_id,
+                                        "market_question": insert_stmt.excluded.market_question,
+                                        "outcome": insert_stmt.excluded.outcome,
+                                        "size": insert_stmt.excluded.size,
+                                        "average_cost": insert_stmt.excluded.average_cost,
+                                        "current_price": insert_stmt.excluded.current_price,
+                                        "unrealized_pnl": insert_stmt.excluded.unrealized_pnl,
+                                        "updated_at": insert_stmt.excluded.updated_at,
+                                    },
+                                )
+                            )
                         await session.commit()
                         return
                     except (OperationalError, InterfaceError) as exc:
@@ -2946,7 +2976,7 @@ class LiveExecutionService:
                 reserved = False
             error_str = str(e).lower()
             if "no orders found to match" in error_str or "fak" in error_str:
-                logger.warning(f"Order execution no-fill (FAK/FOK no liquidity): {e}")
+                logger.info(f"Order execution no-fill (FAK/FOK no liquidity): {e}")
             else:
                 logger.error(f"Order execution error: {e}")
 

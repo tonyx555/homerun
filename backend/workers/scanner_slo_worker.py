@@ -42,6 +42,20 @@ def _parse_slo_breach_reason_metrics(reason: str) -> set[str]:
     return {item.strip() for item in metrics_raw.split(",") if item.strip()}
 
 
+def _coverage_ratio_breached(
+    *,
+    coverage_ratio: float | None,
+    threshold: float,
+    heavy_inflight: bool,
+    full_coverage_completion_time: float | None,
+) -> bool:
+    if coverage_ratio is None:
+        return False
+    if heavy_inflight and full_coverage_completion_time is None:
+        return False
+    return coverage_ratio < threshold
+
+
 async def _run_loop() -> None:
     worker_name = "scanner_slo"
     heartbeat_interval = max(
@@ -189,6 +203,10 @@ async def _run_loop() -> None:
                     ),
                     "coverage_ratio": _as_float(status.get("coverage_ratio") or tiered.get("full_snapshot_coverage_ratio")),
                 }
+                coverage_cycle_in_progress = (
+                    bool(tiered.get("heavy_inflight", False))
+                    and metrics["full_coverage_completion_time"] is None
+                )
 
                 checks = {
                     "last_fast_scan_age_seconds": {
@@ -226,9 +244,11 @@ async def _run_loop() -> None:
                     "coverage_ratio": {
                         "threshold": threshold_coverage_ratio_min,
                         "severity": "critical",
-                        "breached": (
-                            metrics["coverage_ratio"] is not None
-                            and metrics["coverage_ratio"] < threshold_coverage_ratio_min
+                        "breached": _coverage_ratio_breached(
+                            coverage_ratio=metrics["coverage_ratio"],
+                            threshold=threshold_coverage_ratio_min,
+                            heavy_inflight=bool(tiered.get("heavy_inflight", False)),
+                            full_coverage_completion_time=metrics["full_coverage_completion_time"],
                         ),
                     },
                 }
@@ -259,6 +279,7 @@ async def _run_loop() -> None:
                                 "threshold": check.get("threshold"),
                                 "scanner_running": bool(status.get("running", False)),
                                 "scanner_enabled": bool(status.get("enabled", False)),
+                                "coverage_cycle_in_progress": coverage_cycle_in_progress,
                             },
                         )
                         if action.get("action") in {"opened", "resolved"}:

@@ -44,6 +44,7 @@ _CANCEL_GRACE_SECONDS = 5.0
 
 IN_CLAUSE_CHUNK_SIZE = 2000
 ACTIVITY_INSERT_CHUNK_SIZE = 1000
+POOL_RECOMPUTE_MERGE_BATCH_SIZE = 64
 
 
 def _is_bind_limit_error(exc: Exception) -> bool:
@@ -2104,9 +2105,8 @@ class SmartWalletPoolService:
             if meta.get("updated_at") == now_iso:
                 dirty_wallets.append(wallet)
 
-        MERGE_BATCH_SIZE = 200
-        for i in range(0, len(dirty_wallets), MERGE_BATCH_SIZE):
-            batch = dirty_wallets[i : i + MERGE_BATCH_SIZE]
+        for i in range(0, len(dirty_wallets), POOL_RECOMPUTE_MERGE_BATCH_SIZE):
+            batch = dirty_wallets[i : i + POOL_RECOMPUTE_MERGE_BATCH_SIZE]
             payloads = [
                 {
                     "address": wallet.address,
@@ -2130,8 +2130,10 @@ class SmartWalletPoolService:
                     await session.execute(sa_update(DiscoveredWallet), payloads)
                     await asyncio.shield(session.commit())
                 except asyncio.CancelledError:
-                    if session.in_transaction():
-                        await asyncio.shield(session.rollback())
+                    logger.info(
+                        "Pool recompute wallet merge cancelled during commit; deferring session cleanup to context exit",
+                        batch_size=len(batch),
+                    )
                     raise
                 except Exception:
                     if session.in_transaction():

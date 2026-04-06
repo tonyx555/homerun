@@ -30,7 +30,7 @@ logger = get_logger(__name__)
 
 _SIGNAL_ACTIVE_STATUSES = {"pending", "selected", "submitted"}
 _SIGNAL_TERMINAL_STATUSES = {"executed", "skipped", "expired", "failed"}
-_STATUS_PROJECTION_BATCH_MAX = 256
+_STATUS_PROJECTION_BATCH_MAX = 64
 _RUNTIME_LANE_BY_SOURCE = {"crypto": "crypto"}
 _PREWARM_SOURCES = {"scanner"}
 _PREWARM_WAIT_TIMEOUT_SECONDS = 0.5
@@ -1403,7 +1403,7 @@ class IntentRuntime:
         if not snapshots and not sweep_missing:
             return
 
-        _UPSERT_CHUNK_SIZE = 50
+        _UPSERT_CHUNK_SIZE = 20
         snapshot_items = list(snapshots.values())
         signal_types_in_batch: set[str] = set()
         strategy_types_in_batch: set[str] = set()
@@ -1485,7 +1485,7 @@ class IntentRuntime:
         if not latest_by_signal_id:
             return
 
-        _STATUS_CHUNK_SIZE = 50
+        _STATUS_CHUNK_SIZE = 16
         items = list(latest_by_signal_id.values())
         for chunk_start in range(0, len(items), _STATUS_CHUNK_SIZE):
             chunk = items[chunk_start:chunk_start + _STATUS_CHUNK_SIZE]

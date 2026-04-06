@@ -110,6 +110,7 @@ logger = get_logger("trader_orchestrator_worker")
 strategy_db_loader = strategy_loader
 
 _TRADER_TIMEOUT_CANCEL_GRACE_SECONDS = 5.0
+_MIN_LIVE_PROCESS_SIGNAL_CYCLE_TIMEOUT_SECONDS = 20.0
 _STRATEGY_EVALUATION_TIMEOUT_SECONDS = 15.0
 _SIGNAL_DEADLOCK_MAX_RETRIES = 3
 _SIGNAL_DEADLOCK_BASE_DELAY = 0.1
@@ -133,6 +134,7 @@ _pending_runtime_cycle_specs: dict[str, dict[str, Any]] = {}
 _skip_log_last_at: dict[str, float] = {}  # trader_id -> last log monotonic time
 _skip_log_suppressed: dict[str, int] = {}  # trader_id -> suppressed count
 _SKIP_LOG_INTERVAL_SECONDS = 60.0  # only log once per minute per trader
+_OVERLAP_WARNING_MIN_STUCK_SECONDS = 15.0
 _STUCK_TASK_HARD_KILL_SECONDS = 300.0  # force-kill tasks stuck longer than 5 minutes
 
 
@@ -3464,6 +3466,9 @@ def _maybe_log_execution_latency_sla_breach(*, lane: str, metrics: dict[str, Any
     p95 = _latency_stage_percentile(overall, stage_key=_LATENCY_SLA_STAGE_KEY, percentile_key="p95")
     if target_ms is None or p95 is None or p95 <= target_ms:
         return
+    alert_threshold_ms = max(int(target_ms * 5), 1000)
+    if p95 < alert_threshold_ms:
+        return
 
     lane_key = str(lane or _LANE_GENERAL).strip().lower() or _LANE_GENERAL
     now = utcnow()
@@ -4522,6 +4527,12 @@ async def _run_trader_once(
             )
         )
         scan_batch_size = min(scan_batch_size, max_signals_per_cycle)
+        runtime_trigger_serial_mode = bool(
+            stream_trigger_mode
+            and run_mode == "live"
+            and not is_high_frequency_trader
+            and "scanner" in sources
+        )
         if stream_trigger_mode:
             runtime_trigger_scan_batch_size = (
                 _HIGH_FREQUENCY_RUNTIME_TRIGGER_SCAN_BATCH_SIZE
@@ -4530,6 +4541,9 @@ async def _run_trader_once(
             )
             max_signals_per_cycle = min(max_signals_per_cycle, runtime_trigger_signal_limit)
             scan_batch_size = min(scan_batch_size, runtime_trigger_scan_batch_size, max_signals_per_cycle)
+            if runtime_trigger_serial_mode:
+                max_signals_per_cycle = 1
+                scan_batch_size = 1
         enable_live_market_context = bool(live_market_context_settings.get("enabled", True))
         strict_ws_pricing_only = _coerce_bool(
             live_market_context_settings.get("strict_ws_pricing_only"),
@@ -4929,6 +4943,13 @@ async def _run_trader_once(
                     )
                 continue
             signals = scoped_signals
+            already_open_signal_ids: set[str] = set()
+            if run_mode == "live" and not allow_averaging and open_market_ids:
+                already_open_signal_ids = {
+                    str(signal.id)
+                    for signal in signals
+                    if str(getattr(signal, "market_id", "") or "").strip() in open_market_ids
+                }
             await _ensure_prefetched_source_runtime_state(
                 session,
                 trader_id=trader_id,
@@ -4947,6 +4968,8 @@ async def _run_trader_once(
                 context_candidates: list[Any] = []
                 fallback_candidates: list[Any] = []
                 for sig in signals:
+                    if str(sig.id) in already_open_signal_ids:
+                        continue
                     sig_source = normalize_source_key(getattr(sig, "source", ""))
                     if strict_ws_pricing_enforced and sig_source in ("crypto", "scanner"):
                         context_candidates.append(sig)
@@ -5130,6 +5153,95 @@ async def _run_trader_once(
                     requested_strategy_version_error = (
                         str(prefetched_source_runtime.get("requested_strategy_version_error") or "").strip() or None
                     )
+                    signal_market_id = str(getattr(signal, "market_id", "") or "").strip()
+                    if signal_id in already_open_signal_ids:
+                        runtime_signal = RuntimeTradeSignalView(signal, live_context={})
+                        runtime_signal.source = signal_source
+                        blocked_reason = "Stacking guard: market already open"
+                        checks_payload = [
+                            {
+                                "check_key": "stacking_guard_open_market",
+                                "check_label": "Stacking guard",
+                                "passed": False,
+                                "score": None,
+                                "detail": "Market already open for trader; skipped before live context refresh.",
+                                "payload": {
+                                    "market_id": signal_market_id,
+                                    "allow_averaging": False,
+                                },
+                            }
+                        ]
+                        decision_row = await create_trader_decision(
+                            session,
+                            trader_id=trader_id,
+                            signal=runtime_signal,
+                            strategy_key=strategy_key_for_output,
+                            strategy_version=requested_strategy_version,
+                            decision="blocked",
+                            reason=blocked_reason,
+                            score=0.0,
+                            checks_summary={"count": len(checks_payload)},
+                            risk_snapshot={},
+                            payload={
+                                "source_key": signal_source,
+                                "source_config": source_config,
+                                "prefilter": "open_market",
+                            },
+                            commit=False,
+                        )
+                        decisions_written += 1
+                        await create_trader_decision_checks(
+                            session,
+                            decision_id=decision_row.id,
+                            checks=checks_payload,
+                            commit=False,
+                        )
+                        await set_trade_signal_status(
+                            session,
+                            signal_id=signal_id,
+                            status="skipped",
+                            commit=False,
+                        )
+                        await record_signal_consumption(
+                            session,
+                            trader_id=trader_id,
+                            signal_id=signal_id,
+                            decision_id=decision_row.id,
+                            outcome="blocked",
+                            reason=blocked_reason,
+                            commit=False,
+                        )
+                        await create_trader_event(
+                            session,
+                            trader_id=trader_id,
+                            event_type="decision",
+                            severity="info",
+                            source=signal_source,
+                            message=blocked_reason,
+                            payload={
+                                "decision_id": decision_row.id,
+                                "signal_id": signal.id,
+                                "decision": "blocked",
+                                "market_id": getattr(runtime_signal, "market_id", None),
+                                "market_question": getattr(runtime_signal, "market_question", None),
+                                "direction": getattr(runtime_signal, "direction", None),
+                            },
+                            commit=False,
+                        )
+                        await upsert_trader_signal_cursor(
+                            session,
+                            trader_id=trader_id,
+                            last_signal_created_at=_signal_cursor_timestamp(signal),
+                            last_signal_id=signal_id,
+                            commit=False,
+                        )
+                        cursor_created_at = _signal_cursor_timestamp(signal)
+                        cursor_signal_id = signal_id
+                        cursor_runtime_sequence = _signal_runtime_sequence(signal) or cursor_runtime_sequence
+                        processed_signals += 1
+                        prefiltered_signals += 1
+                        prefiltered_by_reason["open_market"] = prefiltered_by_reason.get("open_market", 0) + 1
+                        continue
                     live_context = live_contexts.get(signal_id, {})
                     if strict_ws_pricing_enforced and signal_source in ("crypto", "scanner"):
                         effective_strict_sources: list[str] = []
@@ -6973,7 +7085,11 @@ async def _run_trader_once_with_timeout(
                     if per_trader_timeout > 0:
                         break
     effective_timeout = per_trader_timeout if per_trader_timeout > 0 else timeout_seconds
-    timeout = max(1.0, min(180.0, float(effective_timeout)))
+    requested_timeout = max(1.0, min(180.0, float(effective_timeout)))
+    timeout = requested_timeout
+    run_mode = _canonical_trader_mode(control.get("mode"), default="shadow")
+    if process_signals and run_mode == "live":
+        timeout = max(_MIN_LIVE_PROCESS_SIGNAL_CYCLE_TIMEOUT_SECONDS, timeout)
     trader_id = str(trader.get("id") or "")
     existing = _inflight_trader_cycle_tasks.get(trader_id) if trader_id else None
     if existing is not None and not existing.done():
@@ -6998,7 +7114,8 @@ async def _run_trader_once_with_timeout(
             # Rate-limit the "still finishing" warnings to once per minute per trader
             now_mono = time.monotonic()
             last_log = _skip_log_last_at.get(trader_id, 0.0)
-            if now_mono - last_log >= _SKIP_LOG_INTERVAL_SECONDS:
+            warning_eligible = stuck_seconds >= _OVERLAP_WARNING_MIN_STUCK_SECONDS
+            if warning_eligible and now_mono - last_log >= _SKIP_LOG_INTERVAL_SECONDS:
                 suppressed = _skip_log_suppressed.get(trader_id, 0)
                 suffix = f" (suppressed {suppressed} duplicates)" if suppressed else ""
                 if process_signals and has_runtime_trigger:
@@ -7008,7 +7125,7 @@ async def _run_trader_once_with_timeout(
                         process_signals=process_signals,
                         trigger_signal_ids_by_source=trigger_signal_ids_by_source,
                         trigger_signal_snapshots_by_source=trigger_signal_snapshots_by_source,
-                        timeout_seconds=timeout,
+                        timeout_seconds=requested_timeout,
                     )
                     logger.warning(
                         "Queued pending runtime trigger because prior trader run is still finishing for trader=%s stuck=%.0fs%s",
@@ -7027,7 +7144,6 @@ async def _run_trader_once_with_timeout(
                 _skip_log_last_at[trader_id] = now_mono
                 _skip_log_suppressed[trader_id] = 0
             else:
-                _skip_log_suppressed[trader_id] = _skip_log_suppressed.get(trader_id, 0) + 1
                 if process_signals and has_runtime_trigger:
                     _queue_pending_runtime_cycle(
                         trader=trader,
@@ -7035,8 +7151,10 @@ async def _run_trader_once_with_timeout(
                         process_signals=process_signals,
                         trigger_signal_ids_by_source=trigger_signal_ids_by_source,
                         trigger_signal_snapshots_by_source=trigger_signal_snapshots_by_source,
-                        timeout_seconds=timeout,
+                        timeout_seconds=requested_timeout,
                     )
+                if warning_eligible:
+                    _skip_log_suppressed[trader_id] = _skip_log_suppressed.get(trader_id, 0) + 1
             return 0, 0, 0
 
     task = asyncio.create_task(

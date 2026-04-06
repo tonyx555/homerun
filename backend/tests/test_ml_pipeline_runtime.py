@@ -64,6 +64,7 @@ async def test_market_runtime_skips_ml_when_idle(monkeypatch):
     runtime._last_ml_gate_check_mono = 0.0
 
     await runtime._refresh_ml_pipeline([{"id": "btc-15m"}], allow_record=True)
+    await runtime._ml_runtime_refresh_task
 
     sdk.get_runtime_state.assert_awaited_once_with("crypto_directional")
     sdk.annotate_market_batch.assert_not_awaited()
@@ -82,6 +83,8 @@ async def test_market_runtime_records_without_active_deployment(monkeypatch):
 
     payload = [{"id": "btc-15m"}]
     await runtime._refresh_ml_pipeline(payload, allow_record=True)
+    await runtime._ml_runtime_refresh_task
+    await runtime._refresh_ml_pipeline(payload, allow_record=True)
 
     sdk.annotate_market_batch.assert_not_awaited()
     sdk.record_market_batch.assert_awaited_once_with(task_key="crypto_directional", markets=payload)
@@ -98,6 +101,8 @@ async def test_market_runtime_annotates_without_recording(monkeypatch):
 
     payload = [{"id": "btc-15m"}]
     await runtime._refresh_ml_pipeline(payload, allow_record=True)
+    await runtime._ml_runtime_refresh_task
+    await runtime._refresh_ml_pipeline(payload, allow_record=True)
 
     sdk.annotate_market_batch.assert_awaited_once_with(task_key="crypto_directional", markets=payload)
     sdk.record_market_batch.assert_not_awaited()
@@ -112,6 +117,8 @@ async def test_market_runtime_reactive_updates_never_record(monkeypatch):
     runtime._last_ml_gate_check_mono = 0.0
 
     payload = [{"id": "btc-15m"}]
+    await runtime._refresh_ml_pipeline(payload, allow_record=False)
+    await runtime._ml_runtime_refresh_task
     await runtime._refresh_ml_pipeline(payload, allow_record=False)
 
     sdk.annotate_market_batch.assert_awaited_once_with(task_key="crypto_directional", markets=payload)

@@ -303,11 +303,14 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
   }, [sandboxAccounts, autotraderOverlay])
 
   const polymarketSnapshot = useMemo<LiveVenueSnapshot>(() => {
-    const exposure = tradingPositions.reduce(
+    const visibleTradingPositions = polymarketReady
+      ? tradingPositions.filter((position) => toFiniteNumber(position.size) > 0)
+      : []
+    const exposure = visibleTradingPositions.reduce(
       (sum, pos) => sum + toFiniteNumber(pos.size) * toFiniteNumber(pos.current_price),
       0
     )
-    const unrealizedPnl = tradingPositions.reduce((sum, pos) => sum + toFiniteNumber(pos.unrealized_pnl), 0)
+    const unrealizedPnl = visibleTradingPositions.reduce((sum, pos) => sum + toFiniteNumber(pos.unrealized_pnl), 0)
     return {
       id: 'polymarket',
       label: 'Polymarket',
@@ -315,10 +318,10 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
       accountLabel: tradingStatus?.wallet_address
         ? `${tradingStatus.wallet_address.slice(0, 8)}...${tradingStatus.wallet_address.slice(-6)}`
         : 'No wallet',
-      balance: toFiniteNumber(tradingBalance?.balance),
-      available: toFiniteNumber(tradingBalance?.available),
+      balance: polymarketReady ? toFiniteNumber(tradingBalance?.balance) : 0,
+      available: polymarketReady ? toFiniteNumber(tradingBalance?.available) : 0,
       exposure,
-      openPositions: tradingPositions.filter((position) => toFiniteNumber(position.size) > 0).length,
+      openPositions: visibleTradingPositions.length,
       unrealizedPnl,
     }
   }, [
@@ -330,20 +333,24 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
   ])
 
   const kalshiSnapshot = useMemo<LiveVenueSnapshot>(() => {
-    const exposure = kalshiPositions.reduce(
+    const kalshiConnected = Boolean(kalshiStatus?.authenticated)
+    const visibleKalshiPositions = kalshiConnected
+      ? kalshiPositions.filter((position) => toFiniteNumber(position.size) > 0)
+      : []
+    const exposure = visibleKalshiPositions.reduce(
       (sum, pos) => sum + toFiniteNumber(pos.size) * toFiniteNumber(pos.current_price),
       0
     )
-    const unrealizedPnl = kalshiPositions.reduce((sum, pos) => sum + toFiniteNumber(pos.unrealized_pnl), 0)
+    const unrealizedPnl = visibleKalshiPositions.reduce((sum, pos) => sum + toFiniteNumber(pos.unrealized_pnl), 0)
     return {
       id: 'kalshi',
       label: 'Kalshi',
-      connected: Boolean(kalshiStatus?.authenticated),
+      connected: kalshiConnected,
       accountLabel: kalshiStatus?.email || (kalshiStatus?.member_id ? `Member ${kalshiStatus.member_id}` : 'No account'),
-      balance: toFiniteNumber(kalshiBalance?.balance ?? kalshiStatus?.balance?.balance),
-      available: toFiniteNumber(kalshiBalance?.available ?? kalshiStatus?.balance?.available),
+      balance: kalshiConnected ? toFiniteNumber(kalshiBalance?.balance ?? kalshiStatus?.balance?.balance) : 0,
+      available: kalshiConnected ? toFiniteNumber(kalshiBalance?.available ?? kalshiStatus?.balance?.available) : 0,
       exposure,
-      openPositions: kalshiPositions.filter((position) => toFiniteNumber(position.size) > 0).length,
+      openPositions: visibleKalshiPositions.length,
       unrealizedPnl,
     }
   }, [kalshiStatus, kalshiBalance?.balance, kalshiBalance?.available, kalshiPositions])
@@ -519,7 +526,9 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
   }, [sandboxTrades])
 
   const livePositionRows = useMemo(() => {
-    const polymarketRows = tradingPositions.map((position) => {
+    const polymarketRows = (polymarketReady ? tradingPositions : [])
+      .filter((position) => toFiniteNumber(position.size) > 0)
+      .map((position) => {
       const size = toFiniteNumber(position.size)
       const markPrice = toFiniteNumber(position.current_price)
       const entryPrice = toFiniteNumber(position.average_cost)
@@ -541,7 +550,9 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
       }
     })
 
-    const kalshiRows = kalshiPositions.map((position) => {
+    const kalshiRows = (kalshiStatus?.authenticated ? kalshiPositions : [])
+      .filter((position) => toFiniteNumber(position.size) > 0)
+      .map((position) => {
       const size = toFiniteNumber(position.size)
       const markPrice = toFiniteNumber(position.current_price)
       const entryPrice = toFiniteNumber(position.average_cost)
@@ -564,7 +575,7 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
     })
 
     return [...polymarketRows, ...kalshiRows].sort((left, right) => Math.abs(right.marketValue) - Math.abs(left.marketValue))
-  }, [tradingPositions, kalshiPositions])
+  }, [polymarketReady, tradingPositions, kalshiStatus?.authenticated, kalshiPositions])
 
   const liveOrderRows = useMemo(() => {
     return [...liveOrders].sort(

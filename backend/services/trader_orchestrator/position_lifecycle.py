@@ -23,7 +23,7 @@ from services.trader_order_verification import (
     apply_trader_order_verification,
     derive_trader_order_verification,
 )
-from services.trader_orchestrator_state import _extract_copy_source_wallet_from_payload
+from services.trader_orchestrator_state import _dedupe_live_authority_rows, _extract_copy_source_wallet_from_payload
 from utils.utcnow import utcnow
 from utils.converters import safe_float
 import services.trader_hot_state as hot_state
@@ -40,6 +40,8 @@ _FAILED_EXIT_MIN_RETRY_INTERVAL_SECONDS = 15
 _WALLET_CACHE_TTL_SECONDS = 15.0
 _WALLET_HISTORY_CACHE_TTL_SECONDS = 60.0
 _WALLET_HISTORY_GRACE_SECONDS = 120.0
+_WALLET_POSITIONS_LOAD_TIMEOUT_SECONDS = 4.0
+_WALLET_HISTORY_LOAD_TIMEOUT_SECONDS = 4.0
 _wallet_positions_cache: tuple[float, dict[str, dict[str, Any]]] = (0.0, {})
 _wallet_positions_last_refresh_succeeded = False
 _wallet_closed_positions_cache: tuple[float, dict[str, dict[str, Any]]] = (0.0, {})
@@ -51,6 +53,9 @@ _WALLET_SIZE_EPSILON = 1e-9
 _MARK_TOUCH_INTERVAL_SECONDS = 0.5
 _MAX_LIVE_EXIT_FALLBACK_MARK_AGE_SECONDS = 120.0
 _LIVE_EXIT_ORDER_TIMEOUT_SECONDS = 12.0
+_MARKET_INFO_LOAD_TIMEOUT_SECONDS = 4.0
+_ORDER_SNAPSHOT_LOAD_TIMEOUT_SECONDS = 3.0
+_RECONCILE_TIMING_WARN_SECONDS = 20.0
 _TERMINAL_REOPEN_LOOKBACK_HOURS = 6.0
 _NONACTIVE_WALLET_REOPEN_LOOKBACK_HOURS = 24.0
 
@@ -2071,6 +2076,86 @@ async def _load_execution_wallet_recent_close_activity_by_token() -> dict[str, d
     return latest_by_token
 
 
+async def _load_mapping_with_timeout(
+    loader,
+    *,
+    timeout: float,
+    fallback: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        return await asyncio.wait_for(loader(), timeout=timeout)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return dict(fallback or {})
+
+
+def _market_lookup_candidates_for_order(order: Any) -> tuple[str, list[str], dict[str, Any]]:
+    def _append_lookup_candidate(target: list[str], value: Any) -> None:
+        candidate = str(value or "").strip()
+        if candidate and candidate not in target:
+            target.append(candidate)
+
+    market_id = str(getattr(order, "market_id", "") or "").strip()
+    if not market_id:
+        return "", [], {}
+    payload = dict(getattr(order, "payload_json", {}) or {})
+    live_market = payload.get("live_market") if isinstance(payload.get("live_market"), dict) else {}
+    candidates: list[str] = []
+    _append_lookup_candidate(candidates, market_id)
+    _append_lookup_candidate(candidates, payload.get("condition_id"))
+    _append_lookup_candidate(candidates, payload.get("token_id"))
+    _append_lookup_candidate(candidates, payload.get("selected_token_id"))
+    _append_lookup_candidate(candidates, payload.get("yes_token_id"))
+    _append_lookup_candidate(candidates, payload.get("no_token_id"))
+    if live_market:
+        _append_lookup_candidate(candidates, live_market.get("market_id"))
+        _append_lookup_candidate(candidates, live_market.get("condition_id"))
+        _append_lookup_candidate(candidates, live_market.get("selected_token_id"))
+        _append_lookup_candidate(candidates, live_market.get("yes_token_id"))
+        _append_lookup_candidate(candidates, live_market.get("no_token_id"))
+        token_ids = live_market.get("token_ids")
+        if isinstance(token_ids, list):
+            for token_id in token_ids:
+                _append_lookup_candidate(candidates, token_id)
+    return market_id, candidates, dict(live_market or {})
+
+
+def _fallback_market_info_for_orders(orders: list[TraderOrder]) -> dict[str, dict[str, Any]]:
+    fallback: dict[str, dict[str, Any]] = {}
+    for order in orders:
+        market_id, candidates, live_market = _market_lookup_candidates_for_order(order)
+        if not market_id:
+            continue
+        if live_market:
+            fallback[market_id] = live_market
+            continue
+        for candidate in candidates:
+            cached_entry = _market_info_cache.get(candidate)
+            if cached_entry is None:
+                continue
+            cached_info = cached_entry[1]
+            if isinstance(cached_info, dict):
+                fallback[market_id] = dict(cached_info)
+                break
+    return fallback
+
+
+def _cached_order_snapshots_by_clob_ids(clob_order_ids: list[str]) -> dict[str, dict[str, Any]]:
+    requested = {str(order_id or "").strip() for order_id in clob_order_ids if str(order_id or "").strip()}
+    if not requested:
+        return {}
+    snapshots: dict[str, dict[str, Any]] = {}
+    for order in live_execution_service._orders.values():
+        snapshot = live_execution_service._snapshot_from_cached_order(order)
+        if snapshot is None:
+            continue
+        clob_order_id = str(snapshot.get("clob_order_id") or "").strip()
+        if clob_order_id in requested:
+            snapshots[clob_order_id] = snapshot
+    return snapshots
+
+
 # Module-level TTL cache for market metadata to avoid redundant REST API calls.
 # Each entry maps lookup_id -> (fetched_at_monotonic, market_info_dict).
 _market_info_cache: dict[str, tuple[float, Optional[dict[str, Any]]]] = {}
@@ -2121,40 +2206,17 @@ def _market_info_needs_refresh(lookup_id: str, now_mono: float) -> bool:
 
 async def load_market_info_for_orders(orders: list[TraderOrder]) -> dict[str, Optional[dict[str, Any]]]:
     lookup_candidates_by_market_id: dict[str, list[str]] = {}
-
-    def _append_lookup_candidate(target: list[str], value: Any) -> None:
-        candidate = str(value or "").strip()
-        if candidate and candidate not in target:
-            target.append(candidate)
+    fallback_info_by_market_id = _fallback_market_info_for_orders(orders)
 
     for order in orders:
-        market_id = str(getattr(order, "market_id", "") or "").strip()
+        market_id, candidates, _ = _market_lookup_candidates_for_order(order)
         if not market_id:
             continue
-        payload = dict(getattr(order, "payload_json", {}) or {})
-        live_market = payload.get("live_market") if isinstance(payload.get("live_market"), dict) else {}
-        candidates: list[str] = []
-        _append_lookup_candidate(candidates, market_id)
-        _append_lookup_candidate(candidates, payload.get("condition_id"))
-        _append_lookup_candidate(candidates, payload.get("token_id"))
-        _append_lookup_candidate(candidates, payload.get("selected_token_id"))
-        _append_lookup_candidate(candidates, payload.get("yes_token_id"))
-        _append_lookup_candidate(candidates, payload.get("no_token_id"))
-        if live_market:
-            _append_lookup_candidate(candidates, live_market.get("market_id"))
-            _append_lookup_candidate(candidates, live_market.get("condition_id"))
-            _append_lookup_candidate(candidates, live_market.get("selected_token_id"))
-            _append_lookup_candidate(candidates, live_market.get("yes_token_id"))
-            _append_lookup_candidate(candidates, live_market.get("no_token_id"))
-            token_ids = live_market.get("token_ids")
-            if isinstance(token_ids, list):
-                for token_id in token_ids:
-                    _append_lookup_candidate(candidates, token_id)
         lookup_candidates_by_market_id[market_id] = candidates
 
     lookup_ids = sorted({candidate for candidates in lookup_candidates_by_market_id.values() for candidate in candidates})
     if not lookup_ids:
-        return {}
+        return fallback_info_by_market_id
 
     now_mono = _time_mod.monotonic()
 
@@ -2166,13 +2228,9 @@ async def load_market_info_for_orders(orders: list[TraderOrder]) -> dict[str, Op
 
         info: Optional[dict[str, Any]] = None
         if lookup_id.startswith("0x"):
-            info = await polymarket_client.get_market_by_condition_id(lookup_id, force_refresh=True)
-            if info is None:
-                info = await polymarket_client.get_market_by_condition_id(lookup_id)
+            info = await polymarket_client.get_market_by_condition_id(lookup_id)
         if info is None:
-            info = await polymarket_client.get_market_by_token_id(lookup_id, force_refresh=True)
-            if info is None:
-                info = await polymarket_client.get_market_by_token_id(lookup_id)
+            info = await polymarket_client.get_market_by_token_id(lookup_id)
 
         _market_info_cache[lookup_id] = (now_mono, info)
         return lookup_id, info
@@ -2194,7 +2252,7 @@ async def load_market_info_for_orders(orders: list[TraderOrder]) -> dict[str, Op
 
     out: dict[str, Optional[dict[str, Any]]] = {}
     for market_id, candidates in lookup_candidates_by_market_id.items():
-        info = None
+        info = fallback_info_by_market_id.get(market_id)
         for candidate in candidates:
             candidate_info = info_by_lookup_id.get(candidate)
             if candidate_info is not None:
@@ -2271,6 +2329,7 @@ async def reconcile_paper_positions(
             if (row.executed_at or row.updated_at or row.created_at) is not None
             and (row.executed_at or row.updated_at or row.created_at) <= cutoff
         ]
+    candidates = _dedupe_live_authority_rows(candidates)
 
     signal_ids = [str(row.signal_id) for row in candidates if row.signal_id]
     signal_payloads: dict[str, dict[str, Any]] = {}
@@ -2906,10 +2965,15 @@ async def reconcile_live_positions(
         ]
     else:
         terminal_rows = [row for row in terminal_rows if _terminal_row_requires_reopen_audit(row, now_naive)]
+    terminal_rows = _dedupe_live_authority_rows(terminal_rows)
 
     await session.commit()
     async with release_conn(session):
-        wallet_positions_by_token = await _load_execution_wallet_positions_by_token()
+        wallet_positions_by_token = await _load_mapping_with_timeout(
+            _load_execution_wallet_positions_by_token,
+            timeout=_WALLET_POSITIONS_LOAD_TIMEOUT_SECONDS,
+            fallback=dict(_wallet_positions_cache[1] or {}),
+        )
     wallet_positions_loaded = bool(_wallet_positions_last_refresh_succeeded or wallet_positions_by_token)
     wallet_positions_index_present = bool(wallet_positions_by_token)
     wallet_closed_positions_by_token: dict[str, dict[str, Any]] = {}
@@ -3138,16 +3202,37 @@ async def reconcile_live_positions(
     _lc_t1 = _time.monotonic()
     if any(_candidate_needs_wallet_history(row) for row in candidates):
         async with release_conn(session):
-            wallet_closed_positions_by_token = await _load_execution_wallet_closed_positions_by_token()
-            wallet_sell_trades_by_token = await _load_execution_wallet_recent_sell_trades_by_token()
-            wallet_close_activity_by_token = await _load_execution_wallet_recent_close_activity_by_token()
-        wallet_closed_positions_loaded = bool(_wallet_closed_positions_last_refresh_succeeded)
+            wallet_closed_positions_by_token, wallet_sell_trades_by_token, wallet_close_activity_by_token = await asyncio.gather(
+                _load_mapping_with_timeout(
+                    _load_execution_wallet_closed_positions_by_token,
+                    timeout=_WALLET_HISTORY_LOAD_TIMEOUT_SECONDS,
+                    fallback=dict(_wallet_closed_positions_cache[1] or {}),
+                ),
+                _load_mapping_with_timeout(
+                    _load_execution_wallet_recent_sell_trades_by_token,
+                    timeout=_WALLET_HISTORY_LOAD_TIMEOUT_SECONDS,
+                    fallback=dict(_wallet_sell_trades_cache[1] or {}),
+                ),
+                _load_mapping_with_timeout(
+                    _load_execution_wallet_recent_close_activity_by_token,
+                    timeout=_WALLET_HISTORY_LOAD_TIMEOUT_SECONDS,
+                    fallback=dict(_wallet_activity_cache[1] or {}),
+                ),
+            )
+        wallet_closed_positions_loaded = bool(
+            _wallet_closed_positions_last_refresh_succeeded or wallet_closed_positions_by_token
+        )
 
     # Release the DB connection back to the pool while we do external I/O
     # (Polymarket API, WS cache, CLOB midpoints).  The session
     # lazily reconnects on the next DB operation.
+    fallback_market_info_by_id = _fallback_market_info_for_orders(candidates)
     async with release_conn(session):
-        market_info_by_id = await load_market_info_for_orders(candidates)
+        market_info_by_id = await _load_mapping_with_timeout(
+            lambda: load_market_info_for_orders(candidates),
+            timeout=_MARKET_INFO_LOAD_TIMEOUT_SECONDS,
+            fallback=fallback_market_info_by_id,
+        )
         ws_mid_prices: dict[str, float] = {}
         clob_mid_prices: dict[str, float] = {}
         token_ids_for_prices = sorted(
@@ -3243,12 +3328,11 @@ async def reconcile_live_positions(
         )
         pending_exit_snapshots: dict[str, dict[str, Any]] = {}
         if pending_exit_provider_ids:
-            try:
-                pending_exit_snapshots = await live_execution_service.get_order_snapshots_by_clob_ids(
-                    pending_exit_provider_ids
-                )
-            except Exception:
-                pending_exit_snapshots = {}
+            pending_exit_snapshots = await _load_mapping_with_timeout(
+                lambda: live_execution_service.get_order_snapshots_by_clob_ids(pending_exit_provider_ids),
+                timeout=_ORDER_SNAPSHOT_LOAD_TIMEOUT_SECONDS,
+                fallback=_cached_order_snapshots_by_clob_ids(pending_exit_provider_ids),
+            )
 
         # Backfill: fetch entry fill snapshots for orders missing entry price.
         # IOC/FAK orders may have average_fill_price=0 in LiveTradingOrder because
@@ -3270,12 +3354,11 @@ async def reconcile_live_positions(
             if _bf_clob:
                 entry_backfill_clob_ids.append(_bf_clob)
         if entry_backfill_clob_ids:
-            try:
-                entry_backfill_snapshots = await live_execution_service.get_order_snapshots_by_clob_ids(
-                    entry_backfill_clob_ids
-                )
-            except Exception:
-                entry_backfill_snapshots = {}
+            entry_backfill_snapshots = await _load_mapping_with_timeout(
+                lambda: live_execution_service.get_order_snapshots_by_clob_ids(entry_backfill_clob_ids),
+                timeout=_ORDER_SNAPSHOT_LOAD_TIMEOUT_SECONDS,
+                fallback=_cached_order_snapshots_by_clob_ids(entry_backfill_clob_ids),
+            )
 
     _lc_t2 = _time.monotonic()
 
@@ -5854,7 +5937,7 @@ async def reconcile_live_positions(
                 f"commit={_lc_t3c - _lc_t3b:.1f}s total={_total_elapsed:.1f}s "
                 f"(candidates={len(candidates)} terminal_audit={len(terminal_rows)})"
             )
-            if _total_elapsed >= 5.0:
+            if _total_elapsed >= _RECONCILE_TIMING_WARN_SECONDS:
                 logger.warning("reconcile_live_positions timing: %s", _timing_msg)
             else:
                 logger.debug("reconcile_live_positions timing: %s", _timing_msg)

@@ -557,6 +557,7 @@ _marks_loop: asyncio.AbstractEventLoop | None = None
 
 _marks_callback_count = 0
 _marks_push_count = 0
+_marks_callback_registered = False
 
 
 def set_marks_event_loop(loop: asyncio.AbstractEventLoop) -> None:
@@ -567,6 +568,7 @@ def set_marks_event_loop(loop: asyncio.AbstractEventLoop) -> None:
     """
     global _marks_loop
     _marks_loop = loop
+    _ensure_position_marks_push_registered()
     if _marks_push_pending:
         try:
             _marks_loop.call_soon_threadsafe(_schedule_marks_push)
@@ -585,8 +587,6 @@ def _on_position_marks_changed(changed_marks: list) -> None:
     _marks_callback_count += 1
     _marks_push_pending = True
     if _marks_loop is None:
-        if _marks_callback_count <= 3:
-            logger.warning("position marks callback fired but _marks_loop is None (callback #%d)", _marks_callback_count)
         return
     try:
         _marks_loop.call_soon_threadsafe(_schedule_marks_push)
@@ -655,18 +655,18 @@ async def _marks_periodic_refresh() -> None:
 def start_marks_refresh_loop() -> None:
     """Start the periodic marks refresh. Call from lifespan after event loop is running."""
     global _marks_refresh_task
+    _ensure_position_marks_push_registered()
     if _marks_refresh_task is None or _marks_refresh_task.done():
         _marks_refresh_task = asyncio.ensure_future(_marks_periodic_refresh())
 
 
-def _setup_position_marks_push() -> None:
-    """Wire PositionMarkState to broadcast marks via WS."""
+def _ensure_position_marks_push_registered() -> None:
+    global _marks_callback_registered
+    if _marks_callback_registered:
+        return
     pms = get_position_mark_state()
     pms.set_on_marks_changed(_on_position_marks_changed)
-
-
-# Run setup at import time so the callback is wired before any prices arrive
-_setup_position_marks_push()
+    _marks_callback_registered = True
 
 
 async def handle_websocket(websocket: WebSocket):

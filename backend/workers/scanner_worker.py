@@ -8,6 +8,7 @@ and bridges opportunities directly into the runtime signal queue.
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import uuid
 from datetime import datetime, timezone
@@ -662,6 +663,29 @@ async def _run_scan_loop() -> None:
                         ),
                         name="scanner-full-snapshot-lane",
                     )
+
+            try:
+                scanner._opportunities = await scanner.refresh_opportunity_prices(
+                    scanner.get_opportunities(),
+                    now=datetime.now(timezone.utc),
+                    drop_stale=True,
+                )
+                detected_age_threshold_seconds = max(
+                    60.0,
+                    float(
+                        getattr(
+                            settings,
+                            "SCANNER_SLO_MAX_OPPORTUNITY_LAST_DETECTED_AGE_P95_SECONDS",
+                            180.0,
+                        )
+                        or 180.0
+                    ),
+                )
+                scanner.remove_old_opportunities(
+                    max_age_minutes=max(1, int(math.ceil(detected_age_threshold_seconds / 60.0))),
+                )
+            except Exception as exc:
+                logger.warning("Scanner stale-opportunity cleanup failed", exc_info=exc)
 
             try:
                 opportunities = scanner.get_opportunities()

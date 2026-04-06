@@ -37,6 +37,7 @@ _NEWS_PREFETCH_EXECUTOR = ThreadPoolExecutor(
     thread_name_prefix="news_prefetch",
 )
 logger = get_logger(__name__)
+_FULL_SNAPSHOT_MARKET_SAFETY_CAP = 15000
 
 
 def _make_aware(dt: Optional[datetime]) -> Optional[datetime]:
@@ -1578,6 +1579,8 @@ class ArbitrageScanner:
         pool = [market for market in self._cached_markets if self._is_market_active(market, now)]
         if not pool:
             return []
+        if cap <= 0 and len(pool) > _FULL_SNAPSHOT_MARKET_SAFETY_CAP:
+            cap = _FULL_SNAPSHOT_MARKET_SAFETY_CAP
 
         selected: list = []
         seen_ids: set[str] = set()
@@ -2601,7 +2604,12 @@ class ArbitrageScanner:
                     fallback_labels.append("markets")
                 if not events and not markets:
                     raise next(iter(core_fetch_failures.values()))
-                logger.warning(
+                log_fn = (
+                    logger.info
+                    if sorted(core_fetch_failures.keys()) == sorted(fallback_labels)
+                    else logger.warning
+                )
+                log_fn(
                     "Catalog refresh core fetch degraded; using cached or partial data",
                     failures=sorted(core_fetch_failures.keys()),
                     fallbacks=fallback_labels,
@@ -2646,7 +2654,7 @@ class ArbitrageScanner:
                         logger.info(f"  Fetched {len(kalshi_events)} Kalshi events and {len(kalshi_markets)} Kalshi markets")
                         logger.debug(f"  [timing] Kalshi fetch: {_time.monotonic() - _phase_t:.1f}s")
                 except Exception as e:
-                    logger.warning(f"  Kalshi fetch failed (non-fatal): {e}", exc_info=e)
+                    logger.info(f"  Kalshi fetch failed (non-fatal): {e}")
 
             # Phase 2b — prune closed/resolved/expired, then enforce hard caps.
             events, markets = self._prune_active_catalog(events, markets, now)
@@ -2903,7 +2911,7 @@ class ArbitrageScanner:
                     delta_events.extend(batch_events)
                     fetched_slugs += len(batch_slugs)
             except asyncio.TimeoutError:
-                logger.warning(
+                logger.info(
                     f"Incremental event fetch timed out after {event_fetch_timeout:.1f}s "
                     f"for {len(event_fetch_candidates)} touched event slugs "
                     f"({fetched_slugs} fetched before timeout); continuing with cached/derived events"
@@ -3615,6 +3623,8 @@ class ArbitrageScanner:
                     else:
                         cap = int(getattr(settings, "SCANNER_FULL_SNAPSHOT_MAX_MARKETS", 0) or 0)
                     active_markets = [market for market in cached_markets_snapshot if self._is_market_active(market, now)]
+                    if cap <= 0 and len(active_markets) > _FULL_SNAPSHOT_MARKET_SAFETY_CAP:
+                        cap = _FULL_SNAPSHOT_MARKET_SAFETY_CAP
                     if "tail_end_carry" in full_slugs:
                         tail_priority = [
                             market for market in active_markets if self._is_tail_end_priority_market(market, now)

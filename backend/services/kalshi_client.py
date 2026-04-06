@@ -177,7 +177,7 @@ class KalshiClient:
                 cooldown_until = time.monotonic() + backoff
                 self._read_cooldown_until = max(self._read_cooldown_until, cooldown_until)
                 if time.monotonic() >= self._read_429_warning_cooldown_until:
-                    logger.warning(
+                    logger.info(
                         "Kalshi 429 rate limited, retrying",
                         path=path,
                         attempt=attempt + 1,

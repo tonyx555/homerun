@@ -20,6 +20,7 @@ Usage:
 
 import asyncio
 import httpx
+import threading
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -41,6 +42,7 @@ _pre_trade_vpn_cache_until: float = 0.0
 _PRE_TRADE_VPN_CACHE_TTL_SUCCESS_SECONDS = 120.0
 _PRE_TRADE_VPN_CACHE_TTL_FAILURE_SECONDS = 10.0
 _VPN_BACKGROUND_REFRESH_TASK: Optional[asyncio.Task] = None
+_clob_patch_lock = threading.Lock()
 
 
 @dataclass
@@ -128,11 +130,9 @@ def get_sync_proxy_client() -> httpx.Client:
     cfg = _get_config()
     signature = _config_signature(cfg)
     global _sync_proxy_client, _sync_client_signature
-    if _sync_proxy_client is not None and not _sync_proxy_client.is_closed:
-        if _sync_client_signature == signature:
-            return _sync_proxy_client
-        _sync_proxy_client.close()
-        _sync_proxy_client = None
+    existing_client = _sync_proxy_client
+    if existing_client is not None and not existing_client.is_closed and _sync_client_signature == signature:
+        return existing_client
 
     proxy_url = _get_proxy_url()
     kwargs = {
@@ -149,9 +149,12 @@ def get_sync_proxy_client() -> httpx.Client:
     else:
         logger.info("Created sync trading client (no proxy)")
 
-    _sync_proxy_client = httpx.Client(**kwargs)
+    replacement_client = httpx.Client(**kwargs)
+    if existing_client is not None and not existing_client.is_closed and existing_client is not replacement_client:
+        existing_client.close()
+    _sync_proxy_client = replacement_client
     _sync_client_signature = signature
-    return _sync_proxy_client
+    return replacement_client
 
 
 def get_async_proxy_client() -> httpx.AsyncClient:
@@ -164,15 +167,9 @@ def get_async_proxy_client() -> httpx.AsyncClient:
     cfg = _get_config()
     signature = _config_signature(cfg)
     global _async_proxy_client, _async_client_signature
-    if _async_proxy_client is not None and not _async_proxy_client.is_closed:
-        if _async_client_signature == signature:
-            return _async_proxy_client
-        old_client = _async_proxy_client
-        _async_proxy_client = None
-        try:
-            asyncio.create_task(old_client.aclose())
-        except Exception:
-            pass
+    existing_client = _async_proxy_client
+    if existing_client is not None and not existing_client.is_closed and _async_client_signature == signature:
+        return existing_client
 
     proxy_url = _get_proxy_url()
     kwargs = {
@@ -188,9 +185,15 @@ def get_async_proxy_client() -> httpx.AsyncClient:
     else:
         logger.info("Created async trading client (no proxy)")
 
-    _async_proxy_client = httpx.AsyncClient(**kwargs)
+    replacement_client = httpx.AsyncClient(**kwargs)
+    if existing_client is not None and not existing_client.is_closed and existing_client is not replacement_client:
+        try:
+            asyncio.create_task(existing_client.aclose())
+        except Exception:
+            pass
+    _async_proxy_client = replacement_client
     _async_client_signature = signature
-    return _async_proxy_client
+    return replacement_client
 
 
 def patch_clob_client_proxy() -> bool:
@@ -211,35 +214,36 @@ def patch_clob_client_proxy() -> bool:
 
     try:
         from py_clob_client.http_helpers import helpers as clob_helpers
-
-        existing = getattr(clob_helpers, "_http_client", None)
-        existing_closed = bool(getattr(existing, "is_closed", False)) if existing is not None else True
-        if _clob_patch_signature == signature and existing is not None and not existing_closed:
-            return True
-
-        if existing is not None:
-            try:
-                existing.close()
-            except Exception:
-                pass
-
-        # Replace with configured transport (proxy when enabled, direct otherwise)
-        clob_helpers._http_client = get_sync_proxy_client()
-        _clob_patch_signature = signature
-        if patching_proxy:
-            logger.info(
-                "Patched py-clob-client HTTP client with trading proxy",
-                proxy=_mask_proxy_url(proxy_url),
-            )
-        else:
-            logger.info("Patched py-clob-client HTTP client with direct transport")
-        return True
-
-    except ImportError:
-        logger.warning("py-clob-client not installed, cannot patch HTTP client for proxy")
+    except ImportError as exc:
+        logger.error("Failed to import py-clob-client transport helpers", exc_info=exc)
         return False
-    except Exception as e:
-        logger.error(f"Failed to patch CLOB client proxy: {e}")
+
+    try:
+        with _clob_patch_lock:
+            existing = getattr(clob_helpers, "_http_client", None)
+            existing_closed = bool(getattr(existing, "is_closed", False)) if existing is not None else True
+            if _clob_patch_signature == signature and existing is not None and not existing_closed:
+                return True
+
+            replacement_client = get_sync_proxy_client()
+            clob_helpers._http_client = replacement_client
+            if existing is not None and existing is not replacement_client and not existing_closed:
+                try:
+                    existing.close()
+                except Exception:
+                    pass
+
+            _clob_patch_signature = signature
+            if patching_proxy:
+                logger.info(
+                    "Patched py-clob-client HTTP client with trading proxy",
+                    proxy=_mask_proxy_url(proxy_url),
+                )
+            else:
+                logger.info("Patched py-clob-client HTTP client with direct transport")
+            return True
+    except Exception as exc:
+        logger.error("Failed to patch CLOB client proxy", exc_info=exc)
         return False
 
 

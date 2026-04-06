@@ -10,7 +10,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from models.database import Base, LiveTradingOrder, TradeSignal, Trader, TraderDecision, TraderOrder
+from models.database import Base, LiveTradingOrder, LiveTradingPosition, TradeSignal, Trader, TraderDecision, TraderOrder
 from services import trader_orchestrator_state
 from workers import trader_reconciliation_worker
 from services.trader_orchestrator_state import (
@@ -555,6 +555,183 @@ async def test_recover_missing_live_trader_orders_collapses_duplicate_authority_
             assert canonical.status == "resolved_win"
             canonical_payload = dict(canonical.payload_json or {})
             assert canonical_payload["live_wallet_authority"]["live_trading_order_id"] == "venue-order-mavs-cavs"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_recover_missing_live_trader_orders_collapses_duplicate_authority_rows_when_position_market_ids_differ(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    trader_id = "live-trader-collapse-mismatched-market-ids"
+    try:
+        async with session_factory() as session:
+            await _seed_trader(session, trader_id)
+            now = utcnow()
+            session.add_all(
+                [
+                    TraderOrder(
+                        id="live-order-canonical-mismatch",
+                        trader_id=trader_id,
+                        source="crypto",
+                        strategy_key="tail_end_carry",
+                        market_id="1871044",
+                        market_question="Jazz vs. Thunder: 1H Moneyline",
+                        direction="buy_no",
+                        mode="live",
+                        status="executed",
+                        notional_usd=6.85,
+                        entry_price=0.92,
+                        effective_price=0.92,
+                        reason="Tail carry signal selected",
+                        provider_clob_order_id="clob-jazz-thunder",
+                        created_at=now,
+                        executed_at=now,
+                        updated_at=now,
+                        payload_json={},
+                    ),
+                    TraderOrder(
+                        id="live-order-duplicate-mismatch",
+                        trader_id=trader_id,
+                        source="crypto",
+                        strategy_key="tail_end_carry",
+                        market_id="1871044",
+                        market_question="Jazz vs. Thunder: 1H Moneyline",
+                        direction="buy_no",
+                        mode="live",
+                        status="executed",
+                        notional_usd=6.85,
+                        entry_price=0.92,
+                        effective_price=0.92,
+                        reason="Recovered from live venue authority",
+                        provider_clob_order_id="clob-jazz-thunder",
+                        created_at=now,
+                        executed_at=now,
+                        updated_at=now,
+                        payload_json={},
+                    ),
+                    LiveTradingOrder(
+                        id="venue-order-jazz-thunder",
+                        wallet_address="0xwallet",
+                        market_id="1871044",
+                        clob_order_id="clob-jazz-thunder",
+                        token_id="token-jazz-thunder",
+                        side="BUY",
+                        price=0.92,
+                        size=7.4,
+                        order_type="IOC",
+                        status="filled",
+                        filled_size=7.4,
+                        average_fill_price=0.92,
+                        market_question="Jazz vs. Thunder: 1H Moneyline",
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                    LiveTradingPosition(
+                        id="0xwallet:token-jazz-thunder",
+                        wallet_address="0xwallet",
+                        token_id="token-jazz-thunder",
+                        market_id="0x31f5380ecd1201be8724b01223acd97f49a3d19e68e1db78ed37042702a8f078",
+                        market_question="Jazz vs. Thunder: 1H Moneyline",
+                        outcome="No",
+                        size=7.4,
+                        average_cost=0.92,
+                        current_price=0.915,
+                        unrealized_pnl=-0.04,
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                ]
+            )
+            await session.commit()
+
+            result = await recover_missing_live_trader_orders(
+                session,
+                trader_ids=None,
+                commit=True,
+                broadcast=False,
+            )
+
+            assert result["collapsed_duplicates"] == 1
+
+            rows = (
+                await session.execute(
+                    select(TraderOrder)
+                    .where(TraderOrder.trader_id == trader_id)
+                    .order_by(TraderOrder.id.asc())
+                )
+            ).scalars().all()
+            assert [row.id for row in rows] == ["live-order-canonical-mismatch"]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_live_open_order_counts_dedupe_provider_clob_rows_without_payload_authority(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    trader_id = "live-trader-dedupe-open-counts"
+    try:
+        async with session_factory() as session:
+            await _seed_trader(session, trader_id)
+            now = utcnow()
+            session.add_all(
+                [
+                    TraderOrder(
+                        id="live-order-open-a",
+                        trader_id=trader_id,
+                        source="crypto",
+                        strategy_key="tail_end_carry",
+                        market_id="market-mavs-cavs",
+                        market_question="Mavericks vs. Cavaliers",
+                        direction="buy_no",
+                        mode="live",
+                        status="open",
+                        notional_usd=4.47,
+                        entry_price=0.895,
+                        effective_price=0.895,
+                        provider_clob_order_id="clob-mavs-cavs-open",
+                        created_at=now,
+                        executed_at=now,
+                        updated_at=now,
+                        payload_json={},
+                    ),
+                    TraderOrder(
+                        id="live-order-open-b",
+                        trader_id=trader_id,
+                        source="crypto",
+                        strategy_key="tail_end_carry",
+                        market_id="market-mavs-cavs",
+                        market_question="Mavericks vs. Cavaliers",
+                        direction="buy_no",
+                        mode="live",
+                        status="open",
+                        notional_usd=4.47,
+                        entry_price=0.895,
+                        effective_price=0.895,
+                        provider_clob_order_id="clob-mavs-cavs-open",
+                        created_at=now,
+                        executed_at=now,
+                        updated_at=now,
+                        payload_json={},
+                    ),
+                ]
+            )
+            await session.commit()
+
+            await sync_trader_position_inventory(session, trader_id=trader_id, mode="live")
+            open_orders = await get_open_order_count_for_trader(session, trader_id, mode="live")
+            open_positions = await get_open_position_count_for_trader(session, trader_id, mode="live")
+
+            assert open_orders == 1
+            assert open_positions == 1
+
+            position_rows = (
+                await session.execute(
+                    select(TraderOrder)
+                    .where(TraderOrder.trader_id == trader_id)
+                    .order_by(TraderOrder.id.asc())
+                )
+            ).scalars().all()
+            assert len(position_rows) == 2
     finally:
         await engine.dispose()
 

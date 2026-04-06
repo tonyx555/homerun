@@ -46,6 +46,10 @@ logger = get_logger("wallet_intelligence")
 IN_CLAUSE_CHUNK_SIZE = 5000
 SIGNAL_UPSERT_BATCH_SIZE = 500
 WALLET_TAG_UPDATE_BATCH_SIZE = 200
+_CONFLUENCE_QUALIFYING_WALLET_LIMIT = 256
+_CONFLUENCE_EVENT_ROW_LIMIT = 5000
+_CONFLUENCE_CANDIDATE_LIMIT = 180
+_CONFLUENCE_MARKET_CONTEXT_TIMEOUT_SECONDS = 12.0
 _MIN_UTC = datetime.min.replace(tzinfo=timezone.utc)
 
 
@@ -133,11 +137,14 @@ class ConfluenceDetector:
                             ) AS qa
                                 ON qa.wallet_address = war.wallet_address
                             WHERE war.traded_at >= :cutoff_60m
+                            ORDER BY war.traded_at DESC
+                            LIMIT :event_limit
                             """
                         ),
                         {
                             "addresses": addresses,
                             "cutoff_60m": as_utc_naive(cutoff_60m),
+                            "event_limit": _CONFLUENCE_EVENT_ROW_LIMIT,
                         },
                     )
                 ).mappings()
@@ -244,6 +251,18 @@ class ConfluenceDetector:
             await self.expire_old_signals()
             return await self.get_active_signals()
 
+        candidates.sort(
+            key=lambda candidate: (
+                -int(candidate["cluster_adjusted"]),
+                -int(candidate["core_wallets"]),
+                -float(candidate["net_notional"]),
+                -float(candidate["weighted_wallet_score"]),
+                str(candidate["market_id"]),
+            )
+        )
+        if len(candidates) > _CONFLUENCE_CANDIDATE_LIMIT:
+            candidates = candidates[:_CONFLUENCE_CANDIDATE_LIMIT]
+
         # -- Phase 3: batch-fetch conflicting notionals (single session) --
         conflicting_map = await self._batch_conflicting_notional(
             candidates=[(c["market_id"], c["side"]) for c in candidates],
@@ -253,7 +272,17 @@ class ConfluenceDetector:
 
         # -- Phase 4: batch-fetch market context via HTTP (no DB session) --
         unique_market_ids = list({c["market_id"] for c in candidates})
-        market_context_map = await self._batch_resolve_market_context(unique_market_ids)
+        try:
+            market_context_map = await asyncio.wait_for(
+                self._batch_resolve_market_context(unique_market_ids),
+                timeout=_CONFLUENCE_MARKET_CONTEXT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            market_context_map = {}
+            logger.warning(
+                "Confluence market context fetch timed out after %.0fs; continuing without venue metadata",
+                _CONFLUENCE_MARKET_CONTEXT_TIMEOUT_SECONDS,
+            )
 
         # -- Phase 5: compute conviction + batch-upsert signals (single session) --
         signal_payloads: list[dict] = []
@@ -362,6 +391,8 @@ class ConfluenceDetector:
                     DiscoveredWallet.anomaly_score,
                     DiscoveredWallet.cluster_id,
                     DiscoveredWallet.in_top_pool,
+                    tracked_wallets.c.wallet_address.is_not(None).label("is_tracked"),
+                    group_wallets.c.wallet_address.is_not(None).label("is_group_member"),
                 )
                 .select_from(recent_wallets)
                 .outerjoin(DiscoveredWallet, DiscoveredWallet.address == recent_wallets.c.wallet_address)
@@ -389,7 +420,16 @@ class ConfluenceDetector:
             )
 
             wallet_map: dict[str, dict] = {}
-            for address_raw, rank_score, composite_score, anomaly_score, cluster_id, in_top_pool in result.all():
+            for (
+                address_raw,
+                rank_score,
+                composite_score,
+                anomaly_score,
+                cluster_id,
+                in_top_pool,
+                is_tracked,
+                is_group_member,
+            ) in result.all():
                 address = str(address_raw or "").strip().lower()
                 if not address:
                     continue
@@ -400,9 +440,22 @@ class ConfluenceDetector:
                     "anomaly_score": anomaly_score or 0.0,
                     "cluster_id": cluster_id,
                     "in_top_pool": bool(in_top_pool),
+                    "is_tracked": bool(is_tracked),
+                    "is_group_member": bool(is_group_member),
                 }
-
-            return list(wallet_map.values())
+            wallets = list(wallet_map.values())
+            wallets.sort(
+                key=lambda wallet: (
+                    -int(wallet.get("is_tracked", False)),
+                    -int(wallet.get("is_group_member", False)),
+                    -int(wallet.get("in_top_pool", False)),
+                    -float(wallet.get("composite_score", 0.0)),
+                    -float(wallet.get("rank_score", 0.0)),
+                    float(wallet.get("anomaly_score", 0.0)),
+                    str(wallet.get("address") or ""),
+                )
+            )
+            return wallets[:_CONFLUENCE_QUALIFYING_WALLET_LIMIT]
 
     def _normalize_side(self, raw: Optional[str]) -> str:
         side = (raw or "").upper().strip()

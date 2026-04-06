@@ -1,3 +1,4 @@
+import asyncio
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -108,6 +109,55 @@ async def test_load_market_info_for_orders_uses_payload_aliases_when_market_id_i
 
     assert result["1456183"] == expected
     get_by_condition.assert_awaited()
+
+
+def test_fallback_market_info_for_orders_uses_payload_live_market():
+    order = SimpleNamespace(
+        market_id="market-1",
+        payload_json={
+            "token_id": "token-1",
+            "live_market": {
+                "market_id": "market-1",
+                "selected_token_id": "token-1",
+                "closed": False,
+                "accepting_orders": True,
+                "outcome_prices": [0.4, 0.6],
+            },
+        },
+    )
+
+    result = position_lifecycle._fallback_market_info_for_orders([order])
+
+    assert result == {
+        "market-1": {
+            "market_id": "market-1",
+            "selected_token_id": "token-1",
+            "closed": False,
+            "accepting_orders": True,
+            "outcome_prices": [0.4, 0.6],
+        }
+    }
+
+
+def test_cached_order_snapshots_by_clob_ids_returns_cached_matches(monkeypatch):
+    cached_order = SimpleNamespace(
+        clob_order_id="clob-1",
+        status="open",
+        filled_size=3.0,
+        average_fill_price=0.41,
+        size=5.0,
+        price=0.42,
+    )
+    monkeypatch.setattr(position_lifecycle.live_execution_service, "_orders", {"order-1": cached_order})
+    monkeypatch.setattr(
+        position_lifecycle.live_execution_service,
+        "_snapshot_from_cached_order",
+        lambda order: {"clob_order_id": order.clob_order_id, "filled_size": order.filled_size},
+    )
+
+    result = position_lifecycle._cached_order_snapshots_by_clob_ids(["clob-1", "missing"])
+
+    assert result == {"clob-1": {"clob_order_id": "clob-1", "filled_size": 3.0}}
 
 
 @pytest.mark.asyncio
@@ -243,6 +293,114 @@ async def test_reconcile_live_skips_wallet_history_when_position_is_still_open(t
             closed_loader.assert_not_awaited()
             sell_loader.assert_not_awaited()
             activity_loader.assert_not_awaited()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_live_uses_cached_wallet_positions_when_refresh_times_out(tmp_path, monkeypatch):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    try:
+        async with session_factory() as session:
+            await _seed_order(
+                session,
+                mode="live",
+                payload_json={
+                    "token_id": "token-1",
+                    "live_market": {"selected_token_id": "token-1"},
+                },
+            )
+            monkeypatch.setattr(
+                position_lifecycle,
+                "load_market_info_for_orders",
+                AsyncMock(
+                    return_value={
+                        "market-1": {
+                            "closed": False,
+                            "accepting_orders": True,
+                            "winner": None,
+                            "winning_outcome": None,
+                            "outcome_prices": [0.4, 0.6],
+                        }
+                    }
+                ),
+            )
+
+            async def slow_wallet_positions():
+                await asyncio.sleep(0.05)
+                return {}
+
+            monkeypatch.setattr(position_lifecycle, "_load_execution_wallet_positions_by_token", slow_wallet_positions)
+            monkeypatch.setattr(position_lifecycle, "_WALLET_POSITIONS_LOAD_TIMEOUT_SECONDS", 0.01)
+            monkeypatch.setattr(
+                position_lifecycle,
+                "_wallet_positions_cache",
+                (
+                    position_lifecycle._time_mod.monotonic(),
+                    {"token-1": {"size": 100.0, "curPrice": 0.4}},
+                ),
+            )
+            monkeypatch.setattr(position_lifecycle, "_wallet_positions_last_refresh_succeeded", True)
+            monkeypatch.setattr(position_lifecycle.polymarket_client, "get_midpoint", AsyncMock(return_value=None))
+
+            result = await position_lifecycle.reconcile_live_positions(
+                session,
+                trader_id="trader-1",
+                trader_params={},
+                dry_run=False,
+            )
+
+            assert result["held"] == 1
+            assert result["closed"] == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_live_uses_payload_market_snapshot_when_market_refresh_times_out(tmp_path, monkeypatch):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    try:
+        async with session_factory() as session:
+            await _seed_order(
+                session,
+                mode="live",
+                payload_json={
+                    "token_id": "token-1",
+                    "live_market": {
+                        "market_id": "market-1",
+                        "selected_token_id": "token-1",
+                        "closed": False,
+                        "accepting_orders": True,
+                        "winner": None,
+                        "winning_outcome": None,
+                        "outcome_prices": [0.4, 0.6],
+                    },
+                },
+            )
+
+            async def slow_market_info(_orders):
+                await asyncio.sleep(0.05)
+                return {}
+
+            monkeypatch.setattr(position_lifecycle, "load_market_info_for_orders", slow_market_info)
+            monkeypatch.setattr(position_lifecycle, "_MARKET_INFO_LOAD_TIMEOUT_SECONDS", 0.01)
+            monkeypatch.setattr(
+                position_lifecycle,
+                "_load_execution_wallet_positions_by_token",
+                AsyncMock(return_value={"token-1": {"size": 100.0, "curPrice": 0.4}}),
+            )
+            monkeypatch.setattr(position_lifecycle, "_wallet_positions_last_refresh_succeeded", True)
+            monkeypatch.setattr(position_lifecycle.polymarket_client, "get_midpoint", AsyncMock(return_value=None))
+
+            result = await position_lifecycle.reconcile_live_positions(
+                session,
+                trader_id="trader-1",
+                trader_params={},
+                dry_run=False,
+            )
+
+            assert result["held"] == 1
+            assert result["closed"] == 0
     finally:
         await engine.dispose()
 

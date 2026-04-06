@@ -699,12 +699,12 @@ class WalletWebSocketMonitor:
                     consecutive_misses = 0
                 except asyncio.TimeoutError:
                     consecutive_misses += 1
-                    logger.warning(
-                        "Wallet WS heartbeat pong timeout",
-                        misses=consecutive_misses,
-                        threshold=_MAX_MISSES,
-                    )
                     if consecutive_misses >= _MAX_MISSES:
+                        logger.warning(
+                            "Wallet WS heartbeat pong timeout",
+                            misses=consecutive_misses,
+                            threshold=_MAX_MISSES,
+                        )
                         await ws.close()
                         return
                 except Exception:
@@ -944,7 +944,7 @@ class WalletWebSocketMonitor:
                         break
 
                     if endpoint != self._http_rpc_url:
-                        logger.warning(
+                        logger.info(
                             "Wallet monitor RPC failover",
                             previous_endpoint=self._http_rpc_url,
                             active_endpoint=endpoint,

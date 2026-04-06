@@ -292,6 +292,47 @@ async def test_refresh_event_catalog_skips_full_reload_when_catalog_unchanged(mo
 
 
 @pytest.mark.asyncio
+async def test_run_loop_iteration_schedules_catalog_refresh_without_waiting(monkeypatch):
+    runtime = market_runtime.MarketRuntime()
+    runtime._last_catalog_refresh_mono = 0.0
+
+    refresh_started = asyncio.Event()
+    release_refresh = asyncio.Event()
+    refresh_calls: list[bool] = []
+    crypto_calls: list[str] = []
+
+    async def _slow_refresh(*, force: bool = False):
+        refresh_calls.append(bool(force))
+        refresh_started.set()
+        await release_refresh.wait()
+
+    async def _read_control():
+        return {"is_enabled": True, "is_paused": False, "interval_seconds": 0.01}
+
+    async def _refresh_crypto_markets(*, trigger: str, full_source_sweep: bool, force_refresh: bool = False):
+        crypto_calls.append(str(trigger))
+
+    monkeypatch.setattr(runtime, "_refresh_event_catalog", _slow_refresh)
+    monkeypatch.setattr(runtime, "_read_crypto_control", _read_control)
+    monkeypatch.setattr(runtime, "_refresh_crypto_markets", _refresh_crypto_markets)
+    monkeypatch.setattr(market_runtime, "_near_market_boundary", lambda: False)
+    monkeypatch.setattr(market_runtime, "_FULL_REFRESH_FLOOR_SECONDS", 0.0)
+
+    started_at = time.perf_counter()
+    await runtime._run_loop_iteration()
+    elapsed = time.perf_counter() - started_at
+
+    assert elapsed < 0.15
+    assert crypto_calls == ["periodic_scan"]
+    assert runtime._event_catalog_refresh_task is not None
+    await asyncio.wait_for(refresh_started.wait(), timeout=1.0)
+
+    release_refresh.set()
+    await asyncio.wait_for(runtime._event_catalog_refresh_task, timeout=1.0)
+    assert refresh_calls == [False]
+
+
+@pytest.mark.asyncio
 async def test_refresh_crypto_markets_publishes_snapshot_without_waiting_for_opportunity_dispatch(monkeypatch):
     fake_reference = _FakeReferenceRuntime({"BTC": 70000.0})
     monkeypatch.setattr(market_runtime, "get_reference_runtime", lambda: fake_reference)

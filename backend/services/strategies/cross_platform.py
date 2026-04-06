@@ -579,12 +579,13 @@ class _KalshiMarketCache:
         """
         all_markets: list[Market] = []
         cursor: Optional[str] = None
-        max_pages = 30
+        max_pages = 12
+        fetch_deadline_mono = time.monotonic() + 6.0
 
         try:
             if self._shared_client is None or self._shared_client.is_closed:
                 self._shared_client = httpx.Client(
-                    timeout=30.0,
+                    timeout=6.0,
                     follow_redirects=True,
                     headers={
                         "Accept": "application/json",
@@ -593,21 +594,36 @@ class _KalshiMarketCache:
                 )
             client = self._shared_client
             for page in range(max_pages):
+                if time.monotonic() >= fetch_deadline_mono:
+                    logger.info(
+                        "Kalshi market refresh hit fetch deadline",
+                        pages_fetched=page,
+                        markets=len(all_markets),
+                    )
+                    break
                 params: dict = {"limit": 200, "status": "open"}
                 if cursor:
                     params["cursor"] = cursor
 
                 # Rate limit: pause between pages to avoid 429
                 if page > 0:
-                    time.sleep(0.35)
+                    remaining_budget = fetch_deadline_mono - time.monotonic()
+                    if remaining_budget <= 0:
+                        break
+                    time.sleep(min(0.35, remaining_budget))
 
                 data = None
                 max_retries = 3
                 for attempt in range(max_retries + 1):
+                    if time.monotonic() >= fetch_deadline_mono:
+                        break
                     try:
                         now = time.monotonic()
                         if now < self._read_cooldown_until:
-                            time.sleep(self._read_cooldown_until - now)
+                            remaining_budget = fetch_deadline_mono - now
+                            if remaining_budget <= 0:
+                                break
+                            time.sleep(min(self._read_cooldown_until - now, remaining_budget))
                         resp = client.get(f"{self._api_url}/markets", params=params)
                         if resp.status_code == 429 and attempt < max_retries:
                             backoff = 2**attempt  # 1s, 2s, 4s
@@ -622,13 +638,16 @@ class _KalshiMarketCache:
                                 time.monotonic() + backoff,
                             )
                             if time.monotonic() >= self._read_429_warning_cooldown_until:
-                                logger.warning(
+                                logger.info(
                                     "Kalshi markets 429, retrying",
                                     attempt=attempt + 1,
                                     backoff_seconds=backoff,
                                 )
                                 self._read_429_warning_cooldown_until = time.monotonic() + 30.0
-                            time.sleep(backoff)
+                            remaining_budget = fetch_deadline_mono - time.monotonic()
+                            if remaining_budget <= 0:
+                                break
+                            time.sleep(min(backoff, remaining_budget))
                             continue
                         resp.raise_for_status()
                         data = resp.json()
@@ -676,9 +695,10 @@ class _KalshiMarketCache:
             if fetched:
                 self._markets = fetched
                 self._last_fetch = time.monotonic()
-            elif not self._markets:
-                # First fetch failed and cache is empty
+            else:
                 self._last_fetch = time.monotonic()
+                if self._markets:
+                    logger.info("Kalshi market refresh failed; serving stale cache", count=len(self._markets))
         return self._markets
 
 
@@ -856,19 +876,29 @@ class CrossPlatformStrategy(BaseStrategy):
         )
         # Pre-compute token sets for Kalshi markets (refreshed with cache)
         self._kalshi_tokens: dict[str, set[str]] = {}
+        self._kalshi_market_lookup: dict[str, Market] = {}
+        self._kalshi_token_to_market_ids: dict[str, set[str]] = {}
 
     def _refresh_kalshi_tokens(self, kalshi_markets: list[Market]) -> dict[str, set[str]]:
         """Build/update the tokenized question index for Kalshi markets."""
         token_index: dict[str, set[str]] = {}
+        market_lookup: dict[str, Market] = {}
+        token_to_market_ids: dict[str, set[str]] = {}
         for km in kalshi_markets:
-            token_index[km.id] = _tokenize(km.question)
+            tokens = _tokenize(km.question)
+            token_index[km.id] = tokens
+            market_lookup[km.id] = km
+            for token in tokens:
+                token_to_market_ids.setdefault(token, set()).add(km.id)
+        self._kalshi_tokens = token_index
+        self._kalshi_market_lookup = market_lookup
+        self._kalshi_token_to_market_ids = token_to_market_ids
         return token_index
 
     def _find_best_match(
         self,
         pm_market: Market,
         pm_tokens: set[str],
-        kalshi_markets: list[Market],
         kalshi_token_index: dict[str, set[str]],
         multiway_events: set[str],
     ) -> Optional[tuple[Market, float]]:
@@ -884,8 +914,16 @@ class CrossPlatformStrategy(BaseStrategy):
         """
         best_market: Optional[Market] = None
         best_score = 0.0
+        candidate_market_ids: set[str] = set()
+        for token in pm_tokens:
+            candidate_market_ids.update(self._kalshi_token_to_market_ids.get(token, set()))
+        if not candidate_market_ids:
+            return None
 
-        for km in kalshi_markets:
+        for market_id in sorted(candidate_market_ids):
+            km = self._kalshi_market_lookup.get(market_id)
+            if km is None:
+                continue
             km_tokens = kalshi_token_index.get(km.id)
             if not km_tokens:
                 continue
@@ -1056,9 +1094,10 @@ class CrossPlatformStrategy(BaseStrategy):
         pairs_checked = 0
         pairs_matched = 0
         outcome_rejections = 0
-        best_unmatched_score = 0.0
-        best_unmatched_pm = ""
-        best_unmatched_k = ""
+        event_by_market_id: dict[str, Event] = {}
+        for event in events:
+            for event_market in event.markets:
+                event_by_market_id.setdefault(event_market.id, event)
 
         for pm_market in pm_only_markets:
             # Skip inactive, closed, or non-binary markets
@@ -1090,26 +1129,10 @@ class CrossPlatformStrategy(BaseStrategy):
             match = self._find_best_match(
                 pm_market,
                 pm_tokens,
-                kalshi_markets,
                 kalshi_token_index,
                 multiway_events,
             )
             if match is None:
-                # Track best near-miss for debugging
-                best_score_for_pm = 0.0
-                best_km_question = ""
-                for km in kalshi_markets:
-                    km_tokens = kalshi_token_index.get(km.id)
-                    if not km_tokens:
-                        continue
-                    score = _jaccard_similarity(pm_tokens, km_tokens)
-                    if score > best_score_for_pm:
-                        best_score_for_pm = score
-                        best_km_question = km.question
-                if best_score_for_pm > best_unmatched_score:
-                    best_unmatched_score = best_score_for_pm
-                    best_unmatched_pm = pm_market.question[:80]
-                    best_unmatched_k = best_km_question[:80]
                 continue
 
             kalshi_market, similarity = match
@@ -1174,14 +1197,7 @@ class CrossPlatformStrategy(BaseStrategy):
             )
 
             # Find the parent event for this Polymarket market (if any)
-            parent_event: Optional[Event] = None
-            for event in events:
-                for em in event.markets:
-                    if em.id == pm_market.id:
-                        parent_event = event
-                        break
-                if parent_event:
-                    break
+            parent_event = event_by_market_id.get(pm_market.id)
 
             # Use both markets for risk assessment.
             # Create a synthetic market list with both platforms' liquidity.
@@ -1257,16 +1273,6 @@ class CrossPlatformStrategy(BaseStrategy):
             multiway_events=len(multiway_events),
             opportunities=len(opportunities),
         )
-
-        # Log best near-miss to help debug matching issues
-        if pairs_matched == 0 and best_unmatched_score > 0:
-            logger.info(
-                "Cross-platform best near-miss (no match reached threshold)",
-                best_score=round(best_unmatched_score, 3),
-                threshold=_MATCH_THRESHOLD,
-                polymarket=best_unmatched_pm,
-                kalshi=best_unmatched_k,
-            )
 
         return opportunities
 

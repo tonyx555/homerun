@@ -24,6 +24,7 @@ from services.trader_orchestrator.position_lifecycle import (
     get_registered_token_ids as get_exit_registered_tokens,
 )
 from services.trader_orchestrator_state import (
+    _dedupe_live_authority_rows,
     create_trader_event,
     get_open_order_count_for_trader,
     list_traders,
@@ -62,6 +63,7 @@ _TRADER_RECONCILE_RETRY_MAX_DELAY_SECONDS = 0.3
 _TRADER_RECONCILE_TIMEOUT_SECONDS = 30.0
 _RECONCILIATION_CYCLE_TIMEOUT_SECONDS = 120.0
 _MAX_TRIGGER_DRAIN_PER_CYCLE = 128
+_TIMEOUT_CANCEL_GRACE_SECONDS = 5.0
 _RECONCILE_TRIGGER_EVENTS = frozenset(
     {
         "trader_order",
@@ -72,6 +74,12 @@ _RECONCILE_TRIGGER_EVENTS = frozenset(
         "provider_status",
     }
 )
+_abandoned_timed_tasks: set[asyncio.Task] = set()
+_inflight_timed_tasks: dict[str, asyncio.Task] = {}
+
+
+class _TimedTaskStillRunningError(RuntimeError):
+    pass
 
 
 def _reconcile_retry_delay_seconds(attempt: int) -> float:
@@ -79,6 +87,57 @@ def _reconcile_retry_delay_seconds(attempt: int) -> float:
         _TRADER_RECONCILE_RETRY_BASE_DELAY_SECONDS * (2**attempt),
         _TRADER_RECONCILE_RETRY_MAX_DELAY_SECONDS,
     )
+
+
+def _discard_abandoned_task(task: asyncio.Task) -> None:
+    _abandoned_timed_tasks.discard(task)
+
+
+def _clear_inflight_timed_task(label: str, task: asyncio.Task) -> None:
+    if _inflight_timed_tasks.get(label) is task:
+        _inflight_timed_tasks.pop(label, None)
+
+
+async def _graceful_timeout(coro, *, timeout: float, label: str):
+    existing = _inflight_timed_tasks.get(label)
+    if existing is not None and not existing.done():
+        raise _TimedTaskStillRunningError(label)
+
+    task = asyncio.create_task(coro, name=f"trader-reconciliation-{label}")
+    _inflight_timed_tasks[label] = task
+    task.add_done_callback(lambda done_task, step_label=label: _clear_inflight_timed_task(step_label, done_task))
+
+    try:
+        done, _ = await asyncio.wait({task}, timeout=timeout)
+        if done:
+            return task.result()
+
+        task.cancel()
+        done_after, _ = await asyncio.wait({task}, timeout=_TIMEOUT_CANCEL_GRACE_SECONDS)
+        if done_after:
+            try:
+                task.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+        else:
+            _abandoned_timed_tasks.add(task)
+            task.add_done_callback(_discard_abandoned_task)
+        raise asyncio.TimeoutError()
+    except asyncio.CancelledError:
+        if not task.done():
+            task.cancel()
+            try:
+                await asyncio.shield(asyncio.wait({task}, timeout=_TIMEOUT_CANCEL_GRACE_SECONDS))
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+            if not task.done():
+                _abandoned_timed_tasks.add(task)
+                task.add_done_callback(_discard_abandoned_task)
+        raise
 
 
 def _default_strategy_params(trader: dict[str, Any]) -> dict[str, Any]:
@@ -325,6 +384,7 @@ async def _sync_position_marks_and_exit_registry() -> None:
                 .scalars()
                 .all()
             )
+        rows = _dedupe_live_authority_rows(rows)
 
         # Build sets for tracking
         active_order_ids: set[str] = set()
@@ -468,6 +528,7 @@ async def _sync_position_marks_and_exit_registry() -> None:
 
 _recovery_next_attempt_at: float = 0.0
 _RECOVERY_BACKOFF_SECONDS = 120.0  # back off 2 minutes on failure
+_RECOVERY_SUCCESS_INTERVAL_SECONDS = 300.0
 _live_order_cleanup_next_at: float = 0.0
 
 
@@ -484,15 +545,23 @@ async def _run_reconciliation_cycle(
     if now_mono >= _recovery_next_attempt_at:
         try:
             async with AsyncSessionLocal() as session:
-                await asyncio.wait_for(
+                await _graceful_timeout(
                     recover_missing_live_trader_orders(
                         session,
                         trader_ids=None,
                         commit=True,
                         broadcast=True,
                     ),
+                    label="authority_recovery",
                     timeout=_TRADER_RECONCILE_TIMEOUT_SECONDS,
                 )
+            _recovery_next_attempt_at = time.monotonic() + _RECOVERY_SUCCESS_INTERVAL_SECONDS
+        except _TimedTaskStillRunningError:
+            _recovery_next_attempt_at = time.monotonic() + _RECOVERY_BACKOFF_SECONDS
+            logger.warning(
+                "Live order authority recovery is still finishing from the prior timeout; backing off %.0fs",
+                _RECOVERY_BACKOFF_SECONDS,
+            )
         except asyncio.TimeoutError:
             _recovery_next_attempt_at = time.monotonic() + _RECOVERY_BACKOFF_SECONDS
             logger.warning(
@@ -542,10 +611,19 @@ async def _run_reconciliation_cycle(
             return None
         for attempt in range(_TRADER_RECONCILE_ATTEMPTS):
             try:
-                return await asyncio.wait_for(
+                return await _graceful_timeout(
                     _reconcile_live_state_for_trader(trader, provider_pass=provider_pass),
+                    label=f"reconcile:{trader_id}",
                     timeout=_TRADER_RECONCILE_TIMEOUT_SECONDS,
                 )
+            except _TimedTaskStillRunningError:
+                logger.warning(
+                    "Live reconciliation skipped because prior timed-out cleanup is still finishing for trader=%s reason=%s",
+                    trader_id,
+                    reason,
+                )
+                summary["failures"] = int(summary["failures"]) + 1
+                break
             except asyncio.TimeoutError:
                 logger.warning(
                     "Live reconciliation timed out for trader=%s reason=%s attempt=%d/%d timeout=%.1fs",
@@ -723,15 +801,18 @@ async def run_worker_loop() -> None:
 
     startup_summary = _empty_cycle_summary()
     try:
-        startup_summary = await asyncio.wait_for(
+        startup_summary = await _graceful_timeout(
             _run_reconciliation_cycle(
                 reason="startup",
                 emit_event=True,
                 provider_pass=True,
                 heartbeat_activity="Startup reconciling",
             ),
+            label="cycle:startup",
             timeout=_RECONCILIATION_CYCLE_TIMEOUT_SECONDS,
         )
+    except _TimedTaskStillRunningError:
+        logger.warning("Startup reconciliation cycle is still finishing from the prior timeout")
     except asyncio.TimeoutError:
         logger.warning(
             "Startup reconciliation cycle timed out after %.0fs",
@@ -877,15 +958,22 @@ async def run_worker_loop() -> None:
                             provider_pass = True
 
                 try:
-                    cycle_summary = await asyncio.wait_for(
+                    cycle_summary = await _graceful_timeout(
                         _run_reconciliation_cycle(
                             reason=cycle_reason,
                             emit_event=emit_event,
                             provider_pass=provider_pass,
                             heartbeat_activity="Reconciling",
                         ),
+                        label="cycle:main",
                         timeout=_RECONCILIATION_CYCLE_TIMEOUT_SECONDS,
                     )
+                except _TimedTaskStillRunningError:
+                    logger.warning(
+                        "Reconciliation cycle skipped because the prior timed-out cycle is still finishing reason=%s",
+                        cycle_reason,
+                    )
+                    cycle_summary = _empty_cycle_summary()
                 except asyncio.TimeoutError:
                     logger.warning(
                         "Reconciliation cycle timed out after %.0fs reason=%s",

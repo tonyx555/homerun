@@ -118,26 +118,34 @@ class PolymarketClient:
             except Exception as exc:
                 if not isinstance(exc, httpx.TransportError) and not self._is_retryable_closed_client_error(exc):
                     raise
+                closed_client_error = self._is_retryable_closed_client_error(exc)
                 await self._reset_failed_client(client)
                 if attempt < _MAX_RETRIES - 1:
                     delay = min(_BASE_DELAY * (2**attempt), _MAX_DELAY)
                     delay *= 0.5 + random.random()
-                    now = time.monotonic()
-                    if (now - self._network_error_last_log_at) >= self._network_error_log_interval_seconds:
-                        self._network_error_last_log_at = now
-                        _logger.warning(
-                            "Network error, retrying",
+                    if closed_client_error:
+                        _logger.debug(
+                            "Closed client reset, retrying",
                             url=url,
                             attempt=attempt + 1,
-                            delay=round(delay, 2),
-                            error=str(exc),
                         )
                     else:
-                        _logger.debug(
-                            "Network error retry suppressed",
-                            url=url,
-                            attempt=attempt + 1,
-                        )
+                        now = time.monotonic()
+                        if (now - self._network_error_last_log_at) >= self._network_error_log_interval_seconds:
+                            self._network_error_last_log_at = now
+                            _logger.info(
+                                "Network error, retrying",
+                                url=url,
+                                attempt=attempt + 1,
+                                delay=round(delay, 2),
+                                error=str(exc),
+                            )
+                        else:
+                            _logger.debug(
+                                "Network error retry suppressed",
+                                url=url,
+                                attempt=attempt + 1,
+                            )
                     if client_kind == "trading":
                         client = await self._get_trading_client()
                     elif client_kind == "default":

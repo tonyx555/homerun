@@ -34,12 +34,19 @@ _CRYPTO_SNAPSHOT_HISTORY_TAIL_LIMIT = 12
 _CRYPTO_SNAPSHOT_ORACLE_HISTORY_LIMIT = 24
 _CRYPTO_SNAPSHOT_UPCOMING_MARKETS_LIMIT = 8
 _FULL_REFRESH_FLOOR_SECONDS = 0.5
+_LOOP_ITERATION_TIMEOUT_SECONDS = 30.0
+_ASYNC_TIMEOUT_CANCEL_GRACE_SECONDS = 5.0
 _ML_PRUNE_INTERVAL_SECONDS = 3600.0
 _ML_RUNTIME_GATE_TTL_SECONDS = 10.0
+_ML_RUNTIME_FAILURE_BACKOFF_SECONDS = 30.0
+_ML_RUNTIME_FAILURE_LOG_INTERVAL_SECONDS = 300.0
 _ML_RUNTIME_STATE_TIMEOUT_SECONDS = 3.0
 _ML_ANNOTATE_TIMEOUT_SECONDS = 8.0
 _ML_RECORD_TIMEOUT_SECONDS = 8.0
 _ML_PRUNE_TIMEOUT_SECONDS = 8.0
+_CRYPTO_MARKET_FETCH_TIMEOUT_SECONDS = 10.0
+_CRYPTO_SUBSCRIPTION_SYNC_TIMEOUT_SECONDS = 3.0
+_CRYPTO_SNAPSHOT_PUBLISH_TIMEOUT_SECONDS = 5.0
 _BOUNDARY_INTERVALS_SECONDS = (300, 900, 3600, 14400)
 _BOUNDARY_PREFETCH_WINDOW_SECONDS = 15
 _BOUNDARY_LINGER_WINDOW_SECONDS = 10
@@ -276,6 +283,7 @@ class MarketRuntime:
         self._start_lock = asyncio.Lock()
         self._stop_event = asyncio.Event()
         self._main_task: asyncio.Task[None] | None = None
+        self._loop_iteration_task: asyncio.Task[None] | None = None
         self._reactive_task: asyncio.Task[None] | None = None
         self._opportunity_dispatch_task: asyncio.Task[None] | None = None
         self._feed_manager = None
@@ -294,8 +302,15 @@ class MarketRuntime:
         self._last_snapshot_persist_mono = 0.0
         self._last_ml_prune_mono = 0.0
         self._last_ml_gate_check_mono = 0.0
+        self._ml_runtime_retry_not_before_mono = 0.0
         self._ml_runtime_recording_enabled = False
         self._ml_runtime_deployment_active = False
+        self._last_ml_runtime_failure_log_mono = 0.0
+        self._ml_runtime_state_lock = asyncio.Lock()
+        self._ml_runtime_refresh_task: asyncio.Task[None] | None = None
+        self._event_catalog_refresh_task: asyncio.Task[None] | None = None
+        self._ml_pipeline_lock = asyncio.Lock()
+        self._abandoned_tasks: set[asyncio.Task[Any]] = set()
         self._pending_tokens: set[str] = set()
         self._pending_assets: set[str] = set()
         self._pending_reactive_lock = asyncio.Lock()
@@ -312,6 +327,96 @@ class MarketRuntime:
         self._dispatch_last_signals_published: int = 0
         self._dispatch_last_error: str | None = None
         self._dispatch_filter_diagnostics: dict[str, Any] = {}
+
+    def _retain_abandoned_task(self, task: asyncio.Task[Any]) -> None:
+        self._abandoned_tasks.add(task)
+        task.add_done_callback(self._abandoned_tasks.discard)
+
+    def _clear_loop_iteration_task(self, task: asyncio.Task[Any]) -> None:
+        if self._loop_iteration_task is task:
+            self._loop_iteration_task = None
+
+    def _clear_ml_runtime_refresh_task(self, task: asyncio.Task[Any]) -> None:
+        if self._ml_runtime_refresh_task is task:
+            self._ml_runtime_refresh_task = None
+
+    def _clear_event_catalog_refresh_task(self, task: asyncio.Task[Any]) -> None:
+        if self._event_catalog_refresh_task is task:
+            self._event_catalog_refresh_task = None
+
+    def _cached_ml_runtime_state(self, *, allow_record: bool) -> dict[str, bool]:
+        return {
+            "recording_enabled": (self._ml_runtime_recording_enabled if allow_record else False),
+            "deployment_active": self._ml_runtime_deployment_active,
+        }
+
+    def _schedule_ml_runtime_state_refresh(self) -> None:
+        refresh_task = self._ml_runtime_refresh_task
+        if refresh_task is not None and not refresh_task.done():
+            return
+
+        async def _refresh() -> None:
+            await self._resolve_ml_runtime_state(allow_record=True)
+
+        refresh_task = asyncio.create_task(
+            _refresh(),
+            name="market-runtime-ml-state-refresh",
+        )
+        self._ml_runtime_refresh_task = refresh_task
+        refresh_task.add_done_callback(self._clear_ml_runtime_refresh_task)
+
+    def _schedule_event_catalog_refresh(self, *, force: bool = False) -> None:
+        refresh_task = self._event_catalog_refresh_task
+        if refresh_task is not None and not refresh_task.done():
+            return
+
+        async def _refresh() -> None:
+            await self._refresh_event_catalog(force=force)
+
+        refresh_task = asyncio.create_task(
+            _refresh(),
+            name="market-runtime-event-catalog-refresh",
+        )
+        self._event_catalog_refresh_task = refresh_task
+        refresh_task.add_done_callback(self._clear_event_catalog_refresh_task)
+
+    async def _await_with_cancel_grace(
+        self,
+        awaitable: Any,
+        *,
+        timeout: float,
+        task_name: str,
+    ) -> Any:
+        task = awaitable if isinstance(awaitable, asyncio.Task) else asyncio.create_task(awaitable, name=task_name)
+        try:
+            done, _ = await asyncio.wait({task}, timeout=timeout)
+            if done:
+                return task.result()
+
+            task.cancel()
+            done_after, _ = await asyncio.wait({task}, timeout=_ASYNC_TIMEOUT_CANCEL_GRACE_SECONDS)
+            if not done_after:
+                self._retain_abandoned_task(task)
+            else:
+                try:
+                    task.result()
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+            raise asyncio.TimeoutError()
+        except asyncio.CancelledError:
+            if not task.done():
+                task.cancel()
+                try:
+                    await asyncio.shield(asyncio.wait({task}, timeout=_ASYNC_TIMEOUT_CANCEL_GRACE_SECONDS))
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+                if not task.done():
+                    self._retain_abandoned_task(task)
+            raise
 
     @property
     def started(self) -> bool:
@@ -337,6 +442,18 @@ class MarketRuntime:
 
     async def stop(self) -> None:
         self._stop_event.set()
+        if self._event_catalog_refresh_task is not None and not self._event_catalog_refresh_task.done():
+            self._event_catalog_refresh_task.cancel()
+            try:
+                await self._event_catalog_refresh_task
+            except asyncio.CancelledError:
+                pass
+        if self._ml_runtime_refresh_task is not None and not self._ml_runtime_refresh_task.done():
+            self._ml_runtime_refresh_task.cancel()
+            try:
+                await self._ml_runtime_refresh_task
+            except asyncio.CancelledError:
+                pass
         if self._reactive_task is not None and not self._reactive_task.done():
             self._reactive_task.cancel()
             try:
@@ -612,13 +729,21 @@ class MarketRuntime:
         return out
 
     async def _run_loop(self) -> None:
-        _LOOP_ITERATION_TIMEOUT_SECONDS = 30.0
         while not self._stop_event.is_set():
+            if self._loop_iteration_task is not None and not self._loop_iteration_task.done():
+                self._current_activity = "Waiting for prior loop cleanup"
+                await asyncio.sleep(1.0)
+                continue
+            iteration_task = asyncio.create_task(self._run_loop_iteration(), name="market-runtime-loop-iteration")
+            self._loop_iteration_task = iteration_task
+            iteration_task.add_done_callback(self._clear_loop_iteration_task)
             try:
-                await asyncio.wait_for(
-                    self._run_loop_iteration(),
+                sleep_seconds = await self._await_with_cancel_grace(
+                    iteration_task,
+                    task_name="market-runtime-loop-iteration",
                     timeout=_LOOP_ITERATION_TIMEOUT_SECONDS,
                 )
+                await asyncio.sleep(max(_FULL_REFRESH_FLOOR_SECONDS, float(sleep_seconds or 0.0)))
             except asyncio.TimeoutError:
                 self._last_error = "Loop iteration timed out"
                 self._current_activity = "Error: loop iteration timeout"
@@ -642,9 +767,9 @@ class MarketRuntime:
                     logger.warning("Failed to persist crypto worker snapshot after runtime error", exc_info=snapshot_exc)
                 await asyncio.sleep(1.0)
 
-    async def _run_loop_iteration(self) -> None:
+    async def _run_loop_iteration(self) -> float:
         if (time.monotonic() - self._last_catalog_refresh_mono) >= _CATALOG_REFRESH_SECONDS:
-            await self._refresh_event_catalog()
+            self._schedule_event_catalog_refresh()
         control = await self._read_crypto_control()
         enabled = bool(control.get("is_enabled", True))
         paused = bool(control.get("is_paused", False))
@@ -662,7 +787,7 @@ class MarketRuntime:
                 await self._persist_crypto_worker_snapshot(control=control, force=True)
             except Exception as snapshot_exc:
                 logger.warning("Failed to persist crypto worker snapshot", exc_info=snapshot_exc)
-        await asyncio.sleep(interval_seconds)
+        return interval_seconds
 
     async def _read_crypto_control(self) -> dict[str, Any]:
         try:
@@ -821,67 +946,106 @@ class MarketRuntime:
     async def _refresh_ml_pipeline(self, payload: list[dict[str, Any]], *, allow_record: bool) -> None:
         if not payload:
             return
-        runtime_state = await self._resolve_ml_runtime_state(allow_record=allow_record)
-        if runtime_state is None:
+        if not allow_record and self._ml_pipeline_lock.locked():
             return
-        should_record = bool(runtime_state.get("recording_enabled")) if allow_record else False
-        is_active = bool(runtime_state.get("deployment_active"))
-        if not should_record and not is_active:
-            return
-        sdk = get_machine_learning_sdk()
-
-        if is_active:
-            try:
-                await asyncio.wait_for(
-                    sdk.annotate_market_batch(task_key=_CRYPTO_ML_TASK_KEY, markets=payload),
-                    timeout=_ML_ANNOTATE_TIMEOUT_SECONDS,
-                )
-            except Exception as exc:
-                logger.warning("Failed to annotate crypto markets with ML predictions", exc_info=exc)
-
-        if should_record:
-            try:
-                await asyncio.wait_for(
-                    sdk.record_market_batch(task_key=_CRYPTO_ML_TASK_KEY, markets=payload),
-                    timeout=_ML_RECORD_TIMEOUT_SECONDS,
-                )
-            except Exception as exc:
-                logger.warning("Failed to record ML training snapshots", exc_info=exc)
-
-        now_mono = time.monotonic()
-        if not should_record or (now_mono - self._last_ml_prune_mono) < _ML_PRUNE_INTERVAL_SECONDS:
-            return
-        try:
-            await asyncio.wait_for(
-                sdk.prune_data(task_key=_CRYPTO_ML_TASK_KEY),
-                timeout=_ML_PRUNE_TIMEOUT_SECONDS,
+        async with self._ml_pipeline_lock:
+            now_mono = time.monotonic()
+            cache_fresh = (
+                now_mono < self._ml_runtime_retry_not_before_mono
+                or (now_mono - self._last_ml_gate_check_mono) < _ML_RUNTIME_GATE_TTL_SECONDS
             )
-            self._last_ml_prune_mono = now_mono
-        except Exception as exc:
-            logger.warning("Failed to prune ML training snapshots", exc_info=exc)
+            if not cache_fresh:
+                self._schedule_ml_runtime_state_refresh()
+            runtime_state = self._cached_ml_runtime_state(allow_record=allow_record)
+            if not runtime_state.get("recording_enabled") and not runtime_state.get("deployment_active"):
+                return
+            should_record = bool(runtime_state.get("recording_enabled")) if allow_record else False
+            is_active = bool(runtime_state.get("deployment_active"))
+            sdk = get_machine_learning_sdk()
+
+            if is_active:
+                try:
+                    await self._await_with_cancel_grace(
+                        sdk.annotate_market_batch(task_key=_CRYPTO_ML_TASK_KEY, markets=payload),
+                        timeout=_ML_ANNOTATE_TIMEOUT_SECONDS,
+                        task_name="market-runtime-ml-annotate",
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to annotate crypto markets with ML predictions", exc_info=exc)
+
+            if should_record:
+                try:
+                    await self._await_with_cancel_grace(
+                        sdk.record_market_batch(task_key=_CRYPTO_ML_TASK_KEY, markets=payload),
+                        timeout=_ML_RECORD_TIMEOUT_SECONDS,
+                        task_name="market-runtime-ml-record",
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to record ML training snapshots", exc_info=exc)
+
+            now_mono = time.monotonic()
+            if not should_record or (now_mono - self._last_ml_prune_mono) < _ML_PRUNE_INTERVAL_SECONDS:
+                return
+            try:
+                await self._await_with_cancel_grace(
+                    sdk.prune_data(task_key=_CRYPTO_ML_TASK_KEY),
+                    timeout=_ML_PRUNE_TIMEOUT_SECONDS,
+                    task_name="market-runtime-ml-prune",
+                )
+                self._last_ml_prune_mono = now_mono
+            except Exception as exc:
+                logger.warning("Failed to prune ML training snapshots", exc_info=exc)
 
     async def _resolve_ml_runtime_state(self, *, allow_record: bool) -> dict[str, bool] | None:
         now_mono = time.monotonic()
+        if now_mono < self._ml_runtime_retry_not_before_mono:
+            return {
+                "recording_enabled": False,
+                "deployment_active": False,
+            }
         if (now_mono - self._last_ml_gate_check_mono) < _ML_RUNTIME_GATE_TTL_SECONDS:
             return {
                 "recording_enabled": (self._ml_runtime_recording_enabled if allow_record else False),
                 "deployment_active": self._ml_runtime_deployment_active,
             }
 
-        sdk = get_machine_learning_sdk()
-        try:
-            runtime_state = await asyncio.wait_for(
-                sdk.get_runtime_state(_CRYPTO_ML_TASK_KEY),
-                timeout=_ML_RUNTIME_STATE_TIMEOUT_SECONDS,
-            )
-        except Exception as exc:
-            logger.warning("Failed to resolve ML runtime state for crypto markets", exc_info=exc)
-            self._last_ml_gate_check_mono = now_mono
-            self._ml_runtime_recording_enabled = False
-            self._ml_runtime_deployment_active = False
-            return None
+        async with self._ml_runtime_state_lock:
+            now_mono = time.monotonic()
+            if now_mono < self._ml_runtime_retry_not_before_mono:
+                return {
+                    "recording_enabled": False,
+                    "deployment_active": False,
+                }
+            if (now_mono - self._last_ml_gate_check_mono) < _ML_RUNTIME_GATE_TTL_SECONDS:
+                return {
+                    "recording_enabled": (self._ml_runtime_recording_enabled if allow_record else False),
+                    "deployment_active": self._ml_runtime_deployment_active,
+                }
+
+            sdk = get_machine_learning_sdk()
+            try:
+                runtime_state = await self._await_with_cancel_grace(
+                    sdk.get_runtime_state(_CRYPTO_ML_TASK_KEY),
+                    timeout=_ML_RUNTIME_STATE_TIMEOUT_SECONDS,
+                    task_name="market-runtime-ml-runtime-state",
+                )
+            except Exception as exc:
+                should_log_warning = self._ml_runtime_recording_enabled or self._ml_runtime_deployment_active
+                if should_log_warning:
+                    if isinstance(exc, asyncio.TimeoutError):
+                        logger.info("ML runtime state unavailable for crypto markets; temporarily disabling ML enrichment")
+                    else:
+                        logger.warning("Failed to resolve ML runtime state for crypto markets", exc_info=exc)
+                    self._last_ml_runtime_failure_log_mono = now_mono
+                self._last_ml_gate_check_mono = now_mono
+                self._ml_runtime_retry_not_before_mono = now_mono + _ML_RUNTIME_FAILURE_BACKOFF_SECONDS
+                self._ml_runtime_recording_enabled = False
+                self._ml_runtime_deployment_active = False
+                return None
 
         self._last_ml_gate_check_mono = now_mono
+        self._ml_runtime_retry_not_before_mono = 0.0
+        self._last_ml_runtime_failure_log_mono = 0.0
         self._ml_runtime_recording_enabled = bool(runtime_state.get("recording_enabled"))
         self._ml_runtime_deployment_active = bool(runtime_state.get("deployment_active"))
         return {
@@ -897,7 +1061,11 @@ class MarketRuntime:
         force_refresh: bool = False,
     ) -> None:
         svc = get_crypto_service()
-        markets = await asyncio.to_thread(svc.get_live_markets, bool(force_refresh))
+        markets = await self._await_with_cancel_grace(
+            asyncio.to_thread(svc.get_live_markets, bool(force_refresh)),
+            timeout=_CRYPTO_MARKET_FETCH_TIMEOUT_SECONDS,
+            task_name="market-runtime-crypto-market-fetch",
+        )
         payload = self._build_crypto_market_payload(markets or [])
         await self._refresh_ml_pipeline(payload, allow_record=True)
         self._crypto_markets = payload
@@ -908,8 +1076,22 @@ class MarketRuntime:
             self._index_crypto_market_row(row)
         self._last_crypto_refresh_at = utcnow().isoformat().replace("+00:00", "Z")
         self._last_crypto_trigger = str(trigger)
-        await self._sync_crypto_subscriptions()
-        await self._publish_crypto_snapshot(payload, trigger=trigger)
+        try:
+            await self._await_with_cancel_grace(
+                self._sync_crypto_subscriptions(),
+                timeout=_CRYPTO_SUBSCRIPTION_SYNC_TIMEOUT_SECONDS,
+                task_name="market-runtime-crypto-subscription-sync",
+            )
+        except asyncio.TimeoutError:
+            logger.info("Crypto subscription sync exceeded runtime budget; keeping existing subscriptions")
+        try:
+            await self._await_with_cancel_grace(
+                self._publish_crypto_snapshot(payload, trigger=trigger),
+                timeout=_CRYPTO_SNAPSHOT_PUBLISH_TIMEOUT_SECONDS,
+                task_name="market-runtime-crypto-snapshot-publish",
+            )
+        except asyncio.TimeoutError:
+            logger.info("Crypto snapshot publish exceeded runtime budget; continuing with in-memory state")
         await self._queue_opportunity_dispatch(
             payload,
             trigger=trigger,

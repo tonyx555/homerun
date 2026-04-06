@@ -38,6 +38,8 @@ _PRICE_TO_BEAT_RETRY_SECONDS = 30.0
 _PRICE_TO_BEAT_429_RETRY_SECONDS = 300.0
 _PRICE_TO_BEAT_API_GLOBAL_COOLDOWN_SECONDS = 60.0
 _PRICE_TO_BEAT_DELAYED_HISTORY_MAX_SECONDS = 300.0
+_PRICE_TO_BEAT_REFRESH_MAX_MARKETS_PER_CALL = 1
+_PRICE_TO_BEAT_REFRESH_MAX_SECONDS = 3.0
 
 _shared_sync_client: httpx.Client | None = None
 
@@ -348,7 +350,11 @@ class CryptoService:
                 logger.warning(f"CryptoService fetch failed: {e}")
         if self._cache:
             try:
-                self._update_price_to_beat(self._cache)
+                self._update_price_to_beat(
+                    self._cache,
+                    max_markets=_PRICE_TO_BEAT_REFRESH_MAX_MARKETS_PER_CALL,
+                    max_seconds=_PRICE_TO_BEAT_REFRESH_MAX_SECONDS,
+                )
             except Exception as exc:
                 logger.warning("CryptoService price-to-beat refresh failed", exc_info=exc)
         return self._cache
@@ -764,7 +770,13 @@ class CryptoService:
             return None
         return open_price
 
-    def _update_price_to_beat(self, markets: list[CryptoMarket]) -> None:
+    def _update_price_to_beat(
+        self,
+        markets: list[CryptoMarket],
+        *,
+        max_markets: int | None = None,
+        max_seconds: float | None = None,
+    ) -> None:
         """Look up the price-to-beat for each market.
 
         Priority:
@@ -774,6 +786,8 @@ class CryptoService:
         3) Live oracle fallback within 10s of event start.
         """
         feed = None
+        started_at = time.monotonic()
+        attempted_markets = 0
         try:
             from services.chainlink_feed import get_chainlink_feed
 
@@ -812,6 +826,12 @@ class CryptoService:
             if now < retry_after:
                 continue
 
+            if max_markets is not None and attempted_markets >= max_markets:
+                break
+            if max_seconds is not None and (time.monotonic() - started_at) >= max_seconds:
+                break
+            attempted_markets += 1
+
             if now >= self._price_to_beat_api_cooldown_until:
                 ptb_api, api_status = self._fetch_price_to_beat_from_crypto_api(
                     api_client,
@@ -837,7 +857,7 @@ class CryptoService:
                         now + _PRICE_TO_BEAT_429_RETRY_SECONDS,
                     )
                     if self._price_to_beat_api_cooldown_until > previous_cooldown:
-                        logger.warning(
+                        logger.info(
                             "CryptoService: crypto-price API rate limited; backing off",
                             slug=slug,
                             asset=m.asset,
@@ -909,7 +929,7 @@ class CryptoService:
                 float(self._price_to_beat_retry_after.get(slug) or 0.0),
                 now + _PRICE_TO_BEAT_RETRY_SECONDS,
             )
-            logger.warning(
+            logger.info(
                 "CryptoService: all price_to_beat sources failed for %s (%s), "
                 "elapsed=%.0fs, retrying in %.0fs",
                 m.asset,
@@ -934,8 +954,8 @@ class CryptoService:
                 resolved += 1
             else:
                 missing += 1
-        if missing > 0:
-            logger.warning(
+        if missing > 0 and resolved > 0:
+            logger.info(
                 "CryptoService: price_to_beat resolved=%d, missing=%d out of %d markets",
                 resolved,
                 missing,

@@ -44,6 +44,7 @@ import {
   getTraderMarketHistory,
   getTraderDecisionDetail,
   getTraderConfigSchema,
+  getTraderLiveWalletPositions,
   getTraderOrchestratorOverview,
   getTraderOrdersSummary,
   getTraderSources,
@@ -5789,6 +5790,13 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     () => traders.find((trader) => trader.id === selectedTraderId) || null,
     [traders, selectedTraderId]
   )
+  const selectedTraderLiveWalletPositionsQuery = useQuery({
+    queryKey: ['trader-live-wallet-positions', selectedTraderId],
+    queryFn: () => getTraderLiveWalletPositions(String(selectedTraderId), { include_managed: true }),
+    enabled: Boolean(selectedTraderId && selectedTrader?.mode === 'live'),
+    refetchInterval: isConnected ? 8000 : 20000,
+    staleTime: 2000,
+  })
   useEffect(() => {
     setDeleteForceConfirm(false)
   }, [selectedTraderId])
@@ -9128,8 +9136,20 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   )
 
   const selectedTraderOpenLivePositions = useMemo(
-    () => selectedPositionBook.filter((row) => row.liveOrderCount > 0).length,
-    [selectedPositionBook]
+    () => {
+      if (selectedTrader?.mode === 'live') {
+        const payload = selectedTraderLiveWalletPositionsQuery.data
+        const summaryCount = Number(payload?.summary?.returned_positions)
+        if (Number.isFinite(summaryCount)) {
+          return Math.max(0, summaryCount)
+        }
+        if (Array.isArray(payload?.positions)) {
+          return payload.positions.length
+        }
+      }
+      return selectedPositionBook.filter((row) => row.liveOrderCount > 0).length
+    },
+    [selectedPositionBook, selectedTrader?.mode, selectedTraderLiveWalletPositionsQuery.data]
   )
 
   const selectedTraderOpenShadowPositions = useMemo(
@@ -13062,7 +13082,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                     icon={AlertTriangle}
                     iconClassName="text-red-500"
                     tone="danger"
-                    count={`${selectedTraderOpenLivePositions + selectedTraderOpenShadowPositions} positions • ${selectedTraderOpenLiveOrders + selectedTraderOpenShadowOrders} open orders`}
+                    count={selectedTraderDeleteExposureSummary || 'No open exposure'}
                     defaultOpen={false}
                   >
                     <p className="text-xs text-muted-foreground">

@@ -247,21 +247,18 @@ class MachineLearningSDK:
             }
 
         async with AsyncSessionLocal() as session:
-            total_snapshots = (
+            snapshot_rollup = (
                 await session.execute(
-                    select(func.count(MLTrainingSnapshot.id)).where(MLTrainingSnapshot.task_key == task.task_key)
+                    select(
+                        func.count(MLTrainingSnapshot.id),
+                        func.min(MLTrainingSnapshot.timestamp),
+                        func.max(MLTrainingSnapshot.timestamp),
+                    ).where(MLTrainingSnapshot.task_key == task.task_key)
                 )
-            ).scalar() or 0
-            oldest = (
-                await session.execute(
-                    select(func.min(MLTrainingSnapshot.timestamp)).where(MLTrainingSnapshot.task_key == task.task_key)
-                )
-            ).scalar()
-            newest = (
-                await session.execute(
-                    select(func.max(MLTrainingSnapshot.timestamp)).where(MLTrainingSnapshot.task_key == task.task_key)
-                )
-            ).scalar()
+            ).one()
+            total_snapshots = snapshot_rollup[0] or 0
+            oldest = snapshot_rollup[1]
+            newest = snapshot_rollup[2]
 
         payload = {
             "config": config,
