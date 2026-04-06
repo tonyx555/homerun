@@ -3231,7 +3231,9 @@ class ArbitrageScanner:
 
                     def _classify_cached(prioritizer, mkts, ts):
                         prioritizer.update_stability_scores()
-                        return prioritizer.classify_all(mkts, ts)
+                        tiered = prioritizer.classify_all(mkts, ts)
+                        prioritizer.compute_attention_scores(mkts)
+                        return tiered
 
                     tier_map = await loop.run_in_executor(
                         None, _classify_cached, self._prioritizer, self._cached_markets, now
@@ -3239,15 +3241,32 @@ class ArbitrageScanner:
                     candidate_markets = [m for m in tier_map[MarketTier.HOT] if self._is_market_active(m, now)]
                     affected_market_ids = [str(getattr(m, "id", "") or "") for m in candidate_markets]
                     if not candidate_markets:
-                        logger.info("  No HOT-tier markets, skipping fast scan")
-                        self._opportunities = await self.refresh_opportunity_prices(
-                            self._opportunities,
-                            now=now,
-                            drop_stale=False,
-                        )
-                        self._last_scan = now
-                        self._last_fast_scan = now
-                        return self._opportunities
+                        timer_cap = max(10, int(settings.REALTIME_SCAN_MAX_BATCH_MARKETS or 800))
+                        warm_candidates = [m for m in tier_map[MarketTier.WARM] if self._is_market_active(m, now)]
+                        if warm_candidates:
+                            warm_candidates.sort(
+                                key=lambda market: (
+                                    1.0 if self._is_tail_end_priority_market(market, now) else 0.0,
+                                    *self._market_priority_key(market),
+                                ),
+                                reverse=True,
+                            )
+                            candidate_markets = warm_candidates[:timer_cap]
+                            affected_market_ids = [str(getattr(m, "id", "") or "") for m in candidate_markets]
+                            logger.info(
+                                "  No HOT-tier markets; falling back to %d WARM-tier markets",
+                                len(candidate_markets),
+                            )
+                        else:
+                            logger.info("  No HOT-tier or WARM-tier markets, skipping fast scan")
+                            self._opportunities = await self.refresh_opportunity_prices(
+                                self._opportunities,
+                                now=now,
+                                drop_stale=False,
+                            )
+                            self._last_scan = now
+                            self._last_fast_scan = now
+                            return self._opportunities
 
                     if truly_new:
                         existing_candidate_ids = {str(getattr(m, "id", "") or "") for m in candidate_markets}
@@ -3305,9 +3324,12 @@ class ArbitrageScanner:
 
                 await loop.run_in_executor(None, _apply_prices_and_history, self, candidate_markets, merged_prices, now)
 
-                changed_markets = await loop.run_in_executor(
-                    None, self._prioritizer.get_changed_markets, candidate_markets
-                )
+                if reactive_mode:
+                    changed_markets = list(candidate_markets)
+                else:
+                    changed_markets = await loop.run_in_executor(
+                        None, self._prioritizer.get_markets_needing_eval, candidate_markets
+                    )
                 if not changed_markets:
                     logger.info(f"  All {len(candidate_markets)} candidate markets unchanged, skipping strategies")
                     await self._set_activity(f"Fast scan: {len(candidate_markets)} markets unchanged, skipping")
@@ -3472,7 +3494,7 @@ class ArbitrageScanner:
         targeted_condition_ids: Optional[list[str]] = None,
         force: bool = False,
     ) -> list[Opportunity]:
-        """Run only full-snapshot MARKET_DATA_REFRESH strategies on a bounded market set."""
+        """Run a full-snapshot sweep of scanner MARKET_DATA_REFRESH strategies."""
         cycle_started = time.monotonic()
         async with self._full_snapshot_lane_lock:
             now = datetime.now(timezone.utc)
@@ -3504,10 +3526,11 @@ class ArbitrageScanner:
 
             try:
                 await self._ensure_runtime_strategies_loaded()
-                _, full_slugs = self._partition_market_refresh_strategies()
+                incremental_slugs, full_slugs = self._partition_market_refresh_strategies()
+                heavy_slugs = set(incremental_slugs) | set(full_slugs)
                 async with self._scan_lock:
-                    self._last_full_snapshot_strategy_count = len(full_slugs)
-                if not full_slugs:
+                    self._last_full_snapshot_strategy_count = len(heavy_slugs)
+                if not heavy_slugs:
                     async with self._scan_lock:
                         return self._opportunities
 
@@ -3620,7 +3643,7 @@ class ArbitrageScanner:
                     else:
                         cap = int(getattr(settings, "SCANNER_FULL_SNAPSHOT_MAX_MARKETS", 0) or 0)
                     active_markets = [market for market in cached_markets_snapshot if self._is_market_active(market, now)]
-                    if "tail_end_carry" in full_slugs:
+                    if "tail_end_carry" in heavy_slugs:
                         tail_priority = [
                             market for market in active_markets if self._is_tail_end_priority_market(market, now)
                         ]
@@ -3655,7 +3678,7 @@ class ArbitrageScanner:
                     logger.info(
                         "Heavy lane: zero qualifying markets — cycle state reset",
                         active_markets=len(active_markets),
-                        full_slugs=list(full_slugs),
+                        full_slugs=list(heavy_slugs),
                     )
                     await self._set_activity("Heavy lane: no qualifying markets")
                     return self._opportunities
@@ -3776,7 +3799,7 @@ class ArbitrageScanner:
                     full_opportunities = await self._dispatch_market_refresh(
                         full_event,
                         incremental_slugs=set(),
-                        full_slugs=full_slugs,
+                        full_slugs=heavy_slugs,
                         full_market_snapshot=chunk_markets,
                         full_prices=full_snapshot_prices,
                         handler_timeout_seconds=handler_timeout_seconds,

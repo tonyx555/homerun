@@ -161,7 +161,7 @@ def _seed_scanner_cache(scanner, markets=None):
             MarketTier.COLD: [],
         }
     )
-    scanner._prioritizer.get_changed_markets = MagicMock(return_value=list(markets))
+    scanner._prioritizer.get_markets_needing_eval = MagicMock(return_value=list(markets))
     scanner._prioritizer.update_after_evaluation = MagicMock(return_value=0)
     scanner._prioritizer.compute_attention_scores = MagicMock()
     scanner._prioritizer.update_stability_scores = MagicMock()
@@ -550,7 +550,7 @@ class TestScanPipeline:
                 MarketTier.COLD: [],
             }
         )
-        scanner._prioritizer.get_changed_markets = MagicMock(return_value=[home])
+        scanner._prioritizer.get_markets_needing_eval = MagicMock(return_value=[home])
         scanner._prioritizer.update_after_evaluation = MagicMock(return_value=0)
         scanner._prioritizer.compute_attention_scores = MagicMock()
         scanner._prioritizer.update_stability_scores = MagicMock()
@@ -650,6 +650,86 @@ class TestScanPipeline:
 
         assert scanner._last_scan is not None
         assert isinstance(scanner._last_scan, datetime)
+
+    @pytest.mark.asyncio
+    async def test_scan_fast_falls_back_to_warm_tier_when_hot_tier_empty(self, mock_polymarket_client):
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+        warm_markets = [
+            Market(
+                id="m_warm_1",
+                condition_id="c_warm_1",
+                question="Warm market one?",
+                slug="warm-market-one",
+                clob_token_ids=["warm_yes_1", "warm_no_1"],
+                outcome_prices=[0.91, 0.09],
+                volume=150000.0,
+                liquidity=12000.0,
+            ),
+            Market(
+                id="m_warm_2",
+                condition_id="c_warm_2",
+                question="Warm market two?",
+                slug="warm-market-two",
+                clob_token_ids=["warm_yes_2", "warm_no_2"],
+                outcome_prices=[0.89, 0.11],
+                volume=125000.0,
+                liquidity=9000.0,
+            ),
+        ]
+        _seed_scanner_cache(scanner, markets=warm_markets)
+
+        from services.market_prioritizer import MarketTier
+
+        scanner._prioritizer.classify_all = MagicMock(
+            return_value={
+                MarketTier.HOT: [],
+                MarketTier.WARM: list(warm_markets),
+                MarketTier.COLD: [],
+            }
+        )
+        scanner._prioritizer.get_markets_needing_eval = MagicMock(return_value=list(warm_markets))
+
+        with (
+            patch.object(scanner, "_ensure_runtime_strategies_loaded", new_callable=AsyncMock),
+            patch.object(scanner, "_dispatch_market_refresh", new_callable=AsyncMock, return_value=[]) as dispatch_mock,
+            patch("services.scanner.quality_filter"),
+        ):
+            await scanner.scan_fast()
+
+        dispatched_event = dispatch_mock.await_args.args[0]
+        assert dispatched_event.scan_mode == "fast_timer"
+        assert [market.id for market in dispatched_event.markets] == ["m_warm_1", "m_warm_2"]
+        assert dispatched_event.payload["affected_market_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_scan_fast_keeps_hot_tier_markets_eligible_even_when_fingerprints_are_unchanged(
+        self,
+        mock_polymarket_client,
+    ):
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+        market = Market(
+            id="m_hot_eval_1",
+            condition_id="c_hot_eval_1",
+            question="Hot tier market?",
+            slug="hot-tier-market",
+            clob_token_ids=["hot_yes_eval_1", "hot_no_eval_1"],
+            outcome_prices=[0.9, 0.1],
+            volume=250000.0,
+            liquidity=14000.0,
+        )
+        _seed_scanner_cache(scanner, markets=[market])
+        scanner._prioritizer.get_markets_needing_eval = MagicMock(return_value=[market])
+
+        with (
+            patch.object(scanner, "_ensure_runtime_strategies_loaded", new_callable=AsyncMock),
+            patch.object(scanner, "_dispatch_market_refresh", new_callable=AsyncMock, return_value=[]) as dispatch_mock,
+            patch("services.scanner.quality_filter"),
+        ):
+            await scanner.scan_fast()
+
+        scanner._prioritizer.get_markets_needing_eval.assert_called_once()
+        dispatched_event = dispatch_mock.await_args.args[0]
+        assert [candidate.id for candidate in dispatched_event.markets] == ["m_hot_eval_1"]
 
     @pytest.mark.asyncio
     async def test_refresh_opportunity_prices_sets_last_priced_at(self, mock_polymarket_client):
@@ -800,6 +880,43 @@ class TestScanPipeline:
         assert len(results) == 1
         assert len(scanner._opportunities) == 1
         assert scanner._opportunities[0].markets[0]["id"] == "m_full_1"
+
+    @pytest.mark.asyncio
+    async def test_full_snapshot_scan_dispatches_incremental_strategies_across_full_universe(
+        self,
+        mock_polymarket_client,
+    ):
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+        market = Market(
+            id="m_full_dispatch_1",
+            condition_id="c_full_dispatch_1",
+            question="Will the heavy lane include incremental strategies?",
+            slug="full-dispatch-1",
+            clob_token_ids=["tok_full_dispatch_yes", "tok_full_dispatch_no"],
+            outcome_prices=[0.47, 0.53],
+        )
+        scanner._cached_markets = [market]
+        scanner._cached_market_by_id = {market.id: market}
+        scanner._cached_events = []
+
+        with (
+            patch.object(scanner, "_ensure_runtime_strategies_loaded", new_callable=AsyncMock),
+            patch.object(
+                scanner,
+                "_partition_market_refresh_strategies",
+                return_value=({"basic"}, {"tail_end_carry"}),
+            ),
+            patch.object(scanner, "_snapshot_ws_prices", new_callable=AsyncMock, return_value={}),
+            patch.object(scanner, "_dispatch_market_refresh", new_callable=AsyncMock, return_value=[]) as dispatch_mock,
+            patch.object(scanner, "_set_activity", new_callable=AsyncMock),
+            patch("services.scanner.settings.SCANNER_FULL_SNAPSHOT_CHUNK_SIZE", 100),
+            patch("services.scanner.settings.SCANNER_FORCE_FULL_UNIVERSE", True),
+        ):
+            await scanner.scan_full_snapshot_strategies(force=True)
+
+        dispatched_kwargs = dispatch_mock.await_args.kwargs
+        assert dispatched_kwargs["incremental_slugs"] == set()
+        assert dispatched_kwargs["full_slugs"] == {"basic", "tail_end_carry"}
 
     @pytest.mark.asyncio
     async def test_full_snapshot_scan_processes_chunked_cursor_progression(

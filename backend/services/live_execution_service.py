@@ -297,6 +297,7 @@ class Order:
     error_message: Optional[str] = None
     market_question: Optional[str] = None
     opportunity_id: Optional[str] = None
+    market_id: Optional[str] = None
 
 
 @dataclass
@@ -1554,7 +1555,7 @@ class LiveExecutionService:
         if not wallet:
             return
 
-        from models.database import AsyncSessionLocal, LiveTradingOrder
+        from models.database import AsyncSessionLocal, LiveTradingOrder, TradeSignal
 
         unique_orders: dict[str, Order] = {}
         for order in orders:
@@ -1572,6 +1573,23 @@ class LiveExecutionService:
                             select(LiveTradingOrder).where(LiveTradingOrder.id.in_(order_ids))
                         )
                         existing_rows = {row.id: row for row in existing_result.scalars().all()}
+                        signal_ids = sorted(
+                            {
+                                str(order.opportunity_id or "").strip()
+                                for order in unique_orders.values()
+                                if str(order.opportunity_id or "").strip()
+                            }
+                        )
+                        market_ids_by_signal_id: dict[str, str] = {}
+                        if signal_ids:
+                            signal_result = await session.execute(
+                                select(TradeSignal.id, TradeSignal.market_id).where(TradeSignal.id.in_(signal_ids))
+                            )
+                            market_ids_by_signal_id = {
+                                str(signal_id): str(market_id)
+                                for signal_id, market_id in signal_result.all()
+                                if str(signal_id or "").strip() and str(market_id or "").strip()
+                            }
                         for order in unique_orders.values():
                             row = existing_rows.get(order.id)
                             if row is None:
@@ -1579,16 +1597,29 @@ class LiveExecutionService:
                                 session.add(row)
                             token_key = str(order.token_id or "").strip()
                             authoritative_market_question = order.market_question
+                            authoritative_market_id = str(getattr(order, "market_id", "") or "").strip() or None
                             if token_key:
                                 position = self._positions.get(token_key)
                                 if position is not None:
+                                    position_market_id = str(position.market_id or "").strip() or None
+                                    if position_market_id:
+                                        authoritative_market_id = position_market_id
+                                        order.market_id = position_market_id
                                     position_market_question = str(position.market_question or "").strip()
                                     if position_market_question:
                                         authoritative_market_question = position_market_question
                                         order.market_question = position_market_question
+                            if authoritative_market_id is None:
+                                resolved_market_id = (
+                                    market_ids_by_signal_id.get(str(order.opportunity_id or "").strip()) or None
+                                )
+                                if resolved_market_id:
+                                    authoritative_market_id = resolved_market_id
+                                    order.market_id = resolved_market_id
                             created_at = _normalize_utc_datetime(order.created_at) or utcnow()
                             updated_at = _normalize_utc_datetime(order.updated_at) or utcnow()
                             row.wallet_address = wallet
+                            row.market_id = authoritative_market_id
                             row.clob_order_id = str(order.clob_order_id or "").strip() or None
                             row.token_id = token_key
                             row.side = order.side.value
@@ -1821,6 +1852,7 @@ class LiveExecutionService:
                                     market_question = position_market_question
                             order = Order(
                                 id=str(row.id),
+                                market_id=str(row.market_id or "").strip() or None,
                                 token_id=token_key,
                                 side=side,
                                 price=float(safe_float(row.price, 0.0) or 0.0),

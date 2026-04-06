@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
@@ -335,3 +336,45 @@ def test_max_hold_still_triggers():
 
     assert decision.action == "close"
     assert "max hold" in decision.reason.lower()
+
+
+def test_evaluate_does_not_reapply_signal_phase_keyword_exclusions():
+    strategy = TailEndCarryStrategy()
+    signal = SimpleNamespace(
+        id="signal-solana-1",
+        source="scanner",
+        strategy_type="tail_end_carry",
+        entry_price=0.915,
+        edge_percent=3.2,
+        confidence=0.5,
+        liquidity=5000.0,
+        payload_json={
+            "strategy": "tail_end_carry",
+            "strategy_type": "tail_end_carry",
+            "risk_score": 0.6,
+            "resolution_date": "2026-04-06T23:59:00Z",
+            "markets": [
+                {
+                    "id": "market-solana",
+                    "question": "Solana Up or Down on April 6?",
+                    "slug": "solana-up-or-down-april-6",
+                    "sports_market_type": None,
+                }
+            ],
+        },
+        strategy_context_json={},
+    )
+
+    decision = strategy.evaluate(
+        signal,
+        {
+            "params": {
+                "exclude_market_keywords": ["solana"],
+                "base_size_usd": 10.0,
+                "max_size_usd": 20.0,
+            }
+        },
+    )
+
+    assert decision.decision == "selected"
+    assert all(check.key != "keyword_exclusion" for check in decision.checks)

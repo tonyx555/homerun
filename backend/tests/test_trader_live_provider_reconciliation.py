@@ -666,6 +666,122 @@ async def test_recover_missing_live_trader_orders_collapses_duplicate_authority_
 
 
 @pytest.mark.asyncio
+async def test_recover_missing_live_trader_orders_adopts_sell_exit_into_pending_exit_and_deletes_auxiliary_row(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    trader_id = "live-trader-sell-exit-adoption"
+    try:
+        async with session_factory() as session:
+            await _seed_trader(session, trader_id)
+            now = utcnow()
+            session.add_all(
+                [
+                    TraderOrder(
+                        id="parent-entry-order",
+                        trader_id=trader_id,
+                        source="scanner",
+                        strategy_key="tail_end_carry",
+                        market_id="market-hormuz",
+                        market_question="Will 20 ships transit the Strait of Hormuz on any day in March?",
+                        direction="buy_no",
+                        mode="live",
+                        status="executed",
+                        notional_usd=8.54,
+                        entry_price=0.922,
+                        effective_price=0.922,
+                        reason="Tail carry signal selected",
+                        payload_json={
+                            "token_id": "token-hormuz-no",
+                            "pending_live_exit": {
+                                "status": "submitted",
+                                "provider_clob_order_id": "clob-hormuz-exit",
+                                "exit_size": 9.26,
+                            },
+                        },
+                        created_at=now,
+                        executed_at=now,
+                        updated_at=now,
+                    ),
+                    TraderOrder(
+                        id="auxiliary-sell-authority-row",
+                        trader_id=trader_id,
+                        source="scanner",
+                        strategy_key="tail_end_carry",
+                        market_id="market-hormuz",
+                        market_question="Will 20 ships transit the Strait of Hormuz on any day in March?",
+                        direction="buy_no",
+                        mode="live",
+                        status="open",
+                        notional_usd=0.0,
+                        entry_price=0.97,
+                        effective_price=0.97,
+                        reason="Recovered from live venue authority",
+                        provider_clob_order_id="clob-hormuz-exit",
+                        payload_json={
+                            "provider_clob_order_id": "clob-hormuz-exit",
+                            "provider_reconciliation": {
+                                "snapshot": {
+                                    "side": "SELL",
+                                    "normalized_status": "open",
+                                }
+                            },
+                            "live_wallet_authority": {
+                                "live_trading_order_id": "venue-exit-order-hormuz",
+                            },
+                        },
+                        created_at=now,
+                        executed_at=now,
+                        updated_at=now,
+                    ),
+                    LiveTradingOrder(
+                        id="venue-exit-order-hormuz",
+                        wallet_address="0xwallet",
+                        market_id="market-hormuz",
+                        clob_order_id="clob-hormuz-exit",
+                        token_id="token-hormuz-no",
+                        side="SELL",
+                        price=0.97,
+                        size=9.26,
+                        order_type="GTC",
+                        status="open",
+                        filled_size=0.0,
+                        average_fill_price=0.0,
+                        market_question="Will 20 ships transit the Strait of Hormuz on any day in March?",
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                ]
+            )
+            await session.commit()
+
+            result = await recover_missing_live_trader_orders(
+                session,
+                trader_ids=[trader_id],
+                commit=True,
+                broadcast=False,
+            )
+
+            assert result["recovered_orders"] == 0
+            assert result["collapsed_duplicates"] == 1
+            assert result["adopted_existing_orders"] == 1
+
+            rows = (
+                await session.execute(
+                    select(TraderOrder)
+                    .where(TraderOrder.trader_id == trader_id)
+                    .order_by(TraderOrder.id.asc())
+                )
+            ).scalars().all()
+            assert [row.id for row in rows] == ["parent-entry-order"]
+            pending_exit = dict((rows[0].payload_json or {}).get("pending_live_exit") or {})
+            assert pending_exit["status"] == "submitted"
+            assert pending_exit["provider_clob_order_id"] == "clob-hormuz-exit"
+            assert pending_exit["exit_order_id"] == "venue-exit-order-hormuz"
+            assert pending_exit["provider_status"] == "open"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_live_open_order_counts_dedupe_provider_clob_rows_without_payload_authority(tmp_path):
     engine, session_factory = await _build_session_factory(tmp_path)
     trader_id = "live-trader-dedupe-open-counts"

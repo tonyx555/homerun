@@ -173,7 +173,7 @@ class TailEndCarryStrategy(BaseStrategy):
         "repricing_weight": 0.45,
         "max_opportunities": 120,
         "exclude_market_keywords": [
-            "bitcoin", "ethereum", "lol:", "counter-strike",
+            "lol:", "counter-strike",
             "tweets", "league of legends", "esports", "rift legends",
             "dota", "valorant", "cs2", "cs:", "esl pro",
         ],
@@ -714,22 +714,13 @@ class TailEndCarryStrategy(BaseStrategy):
     # ------------------------------------------------------------------
 
     def custom_checks(self, signal: Any, context: dict, params: dict, payload: dict) -> list[DecisionCheck]:
-        """Tail carry: source, strategy type, entry band, resolution window, keyword exclusion, live game checks."""
+        """Tail carry: execution-time source, strategy type, entry band, resolution window, and live game checks."""
         min_entry = clamp(to_float(params.get("min_entry_price", 0.85), 0.85), 0.01, 0.995)
         max_entry = clamp(to_float(params.get("max_entry_price", 0.999), 0.999), min_entry, 0.999)
         min_upside_percent = clamp(to_float(params.get("min_upside_percent", 5.0), 5.0), 5.0, 100.0)
         min_days = max(0.0, to_float(params.get("min_days_to_resolution", 0.01), 0.01))
         max_days = max(min_days + 0.005, to_float(params.get("max_days_to_resolution", 1.0), 1.0))
-
-        excluded_keywords = self._normalize_excluded_keywords(
-            params.get("exclude_market_keywords", self.config.get("exclude_market_keywords", ""))
-        )
-        keyword_ok = True
-        blocked_keyword: str | None = None
         signal_text = self._signal_market_text(signal, payload)
-        if excluded_keywords:
-            blocked_keyword = self._first_blocked_keyword(signal_text, excluded_keywords)
-            keyword_ok = blocked_keyword is None
 
         block_spread_markets = _is_bool_true(params.get("block_spread_markets", True))
         is_spread = False
@@ -797,12 +788,6 @@ class TailEndCarryStrategy(BaseStrategy):
         checks = [
             DecisionCheck("source", "Scanner source", source == "scanner", detail="Requires source=scanner."),
             DecisionCheck("strategy", "Tail carry strategy type", strategy_ok, detail="strategy=tail_end_carry"),
-            DecisionCheck(
-                "keyword_exclusion",
-                "Market keyword exclusion",
-                keyword_ok,
-                detail=f"blocked by '{blocked_keyword}'" if blocked_keyword else "no excluded keywords matched",
-            ),
             DecisionCheck(
                 "spread_market",
                 "Not a spread market",

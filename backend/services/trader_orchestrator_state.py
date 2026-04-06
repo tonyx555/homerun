@@ -1618,6 +1618,40 @@ def _extract_live_order_authority_ids_from_payload(payload: dict[str, Any]) -> t
     return provider_clob_id, live_order_id
 
 
+def _extract_pending_live_exit_authority_ids(payload: dict[str, Any]) -> tuple[str, str]:
+    pending_exit = payload.get("pending_live_exit")
+    if not isinstance(pending_exit, dict):
+        return "", ""
+    provider_clob_id = str(
+        pending_exit.get("provider_clob_order_id")
+        or pending_exit.get("exit_order_clob_id")
+        or ""
+    ).strip()
+    exit_order_id = str(pending_exit.get("exit_order_id") or "").strip()
+    return provider_clob_id, exit_order_id
+
+
+def _provider_side_from_payload(payload: dict[str, Any]) -> str:
+    provider_reconciliation = payload.get("provider_reconciliation")
+    if not isinstance(provider_reconciliation, dict):
+        provider_reconciliation = {}
+    snapshot = provider_reconciliation.get("snapshot")
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    raw_snapshot = snapshot.get("raw")
+    if not isinstance(raw_snapshot, dict):
+        raw_snapshot = {}
+    return str(raw_snapshot.get("side") or snapshot.get("side") or "").strip().upper()
+
+
+def _is_recovered_sell_authority_row(row: TraderOrder) -> bool:
+    payload = dict(getattr(row, "payload_json", None) or {})
+    return (
+        str(getattr(row, "reason", None) or "").strip().lower() == "recovered from live venue authority"
+        and _provider_side_from_payload(payload) == "SELL"
+    )
+
+
 def _value_is_missing(value: Any) -> bool:
     if value is None:
         return True
@@ -1716,6 +1750,85 @@ def _dedupe_live_authority_rows(rows: list[TraderOrder]) -> list[TraderOrder]:
             replace_index = ordered_rows.index(current)
             ordered_rows[replace_index] = row
     return ordered_rows
+
+
+def _sync_pending_live_exit_from_live_order(
+    row: TraderOrder,
+    *,
+    live_row: LiveTradingOrder,
+    now: datetime,
+) -> bool:
+    payload = dict(row.payload_json or {})
+    pending_exit = payload.get("pending_live_exit")
+    if not isinstance(pending_exit, dict):
+        return False
+
+    normalized_provider_status = _normalize_status_key(live_row.status)
+    filled_size = max(0.0, safe_float(live_row.filled_size, 0.0) or 0.0)
+    average_fill_price = safe_float(live_row.average_fill_price, None)
+    filled_notional_usd = 0.0
+    if average_fill_price is not None and average_fill_price > 0.0 and filled_size > 0.0:
+        filled_notional_usd = filled_size * average_fill_price
+    elif filled_size > 0.0:
+        limit_price = safe_float(live_row.price, 0.0) or 0.0
+        if limit_price > 0.0:
+            filled_notional_usd = filled_size * limit_price
+
+    if normalized_provider_status == "filled":
+        pending_status = "filled"
+    elif normalized_provider_status in {"cancelled", "expired"}:
+        pending_status = "cancelled"
+    elif normalized_provider_status in {"failed", "rejected", "error"}:
+        pending_status = "cancelled"
+    else:
+        pending_status = "submitted"
+
+    snapshot = {
+        "id": str(live_row.id or ""),
+        "clob_order_id": str(live_row.clob_order_id or ""),
+        "normalized_status": normalized_provider_status,
+        "status": str(live_row.status or ""),
+        "side": str(live_row.side or "").strip().upper() or None,
+        "size": safe_float(live_row.size, None),
+        "filled_size": filled_size,
+        "average_fill_price": average_fill_price,
+        "filled_notional_usd": filled_notional_usd,
+        "limit_price": safe_float(live_row.price, None),
+        "updated_at": to_iso(live_row.updated_at),
+    }
+
+    changed = False
+    for key, value in (
+        ("status", pending_status),
+        ("provider_status", normalized_provider_status or str(live_row.status or "").strip().lower() or None),
+        ("exit_order_id", str(live_row.id or "").strip() or None),
+        ("provider_clob_order_id", str(live_row.clob_order_id or "").strip() or None),
+        ("filled_size", filled_size if filled_size > 0.0 else None),
+        ("filled_notional_usd", filled_notional_usd if filled_notional_usd > 0.0 else None),
+        ("average_fill_price", average_fill_price if average_fill_price is not None and average_fill_price > 0.0 else None),
+        ("last_snapshot_at", to_iso(live_row.updated_at or now)),
+        ("snapshot", snapshot),
+    ):
+        if value is None:
+            continue
+        if pending_exit.get(key) != value:
+            pending_exit[key] = value
+            changed = True
+
+    if pending_status == "filled" and pending_exit.get("resolved_at") is None:
+        pending_exit["resolved_at"] = to_iso(now)
+        changed = True
+    elif pending_status == "cancelled":
+        last_error = str(live_row.error_message or "").strip() or f"provider_exit_status:{normalized_provider_status or 'cancelled'}"
+        if pending_exit.get("last_error") != last_error:
+            pending_exit["last_error"] = last_error
+            changed = True
+
+    if changed:
+        payload["pending_live_exit"] = pending_exit
+        row.payload_json = payload
+        row.updated_at = now
+    return changed
 
 
 def _build_live_order_authority_payload(
@@ -2288,6 +2401,9 @@ async def recover_missing_live_trader_orders(
     now = _now()
     existing_provider_rows_by_clob_id: dict[str, TraderOrder] = {}
     existing_rows_by_live_order_id: dict[str, TraderOrder] = {}
+    pending_exit_rows_by_clob_id: dict[str, TraderOrder] = {}
+    pending_exit_rows_by_live_order_id: dict[str, TraderOrder] = {}
+    recovered_sell_rows_by_authority_key: dict[str, list[TraderOrder]] = {}
     rows_by_authority_key: dict[str, list[TraderOrder]] = {}
     rows_without_authority: list[TraderOrder] = []
     existing_active_markets: set[tuple[str, str]] = set()
@@ -2295,14 +2411,22 @@ async def recover_missing_live_trader_orders(
     for row in existing_rows:
         payload = dict(row.payload_json or {})
         authority_key = _live_order_authority_key_from_row(row)
+        is_recovered_sell_authority = _is_recovered_sell_authority_row(row)
         if authority_key:
             rows_by_authority_key.setdefault(authority_key, []).append(row)
+            if is_recovered_sell_authority:
+                recovered_sell_rows_by_authority_key.setdefault(authority_key, []).append(row)
         else:
             rows_without_authority.append(row)
+        pending_exit_clob_id, pending_exit_live_order_id = _extract_pending_live_exit_authority_ids(payload)
+        if pending_exit_clob_id:
+            pending_exit_rows_by_clob_id[pending_exit_clob_id.lower()] = row
+        if pending_exit_live_order_id:
+            pending_exit_rows_by_live_order_id[pending_exit_live_order_id.lower()] = row
         row_status = str(row.status or "").strip().lower()
         row_trader_id = str(row.trader_id or "").strip()
         row_market_id = str(row.market_id or "").strip()
-        if row_trader_id and row_market_id:
+        if row_trader_id and row_market_id and not is_recovered_sell_authority:
             if row_status in OPEN_ORDER_STATUSES:
                 existing_active_markets.add((row_trader_id, row_market_id))
             # Also block recovery for recently closed/resolved orders to prevent
@@ -2382,6 +2506,7 @@ async def recover_missing_live_trader_orders(
     for live_row in live_rows:
         clob_order_id = str(live_row.clob_order_id or "").strip().lower()
         live_order_id = str(live_row.id or "").strip().lower()
+        live_side = str(live_row.side or "").strip().upper()
 
         token_key = _wallet_position_token_key(live_row.token_id)
         position_row = live_orders_by_token.get(token_key)
@@ -2397,6 +2522,45 @@ async def recover_missing_live_trader_orders(
             position_row=position_row,
             now=now,
         )
+        if live_side == "SELL":
+            pending_exit_parent = None
+            if clob_order_id:
+                pending_exit_parent = pending_exit_rows_by_clob_id.get(clob_order_id)
+            if pending_exit_parent is None and live_order_id:
+                pending_exit_parent = pending_exit_rows_by_live_order_id.get(live_order_id)
+            if pending_exit_parent is not None:
+                if _sync_pending_live_exit_from_live_order(
+                    pending_exit_parent,
+                    live_row=live_row,
+                    now=now,
+                ):
+                    adopted_existing_orders += 1
+                parent_trader_id = str(pending_exit_parent.trader_id or "").strip()
+                if parent_trader_id:
+                    affected_traders.add(parent_trader_id)
+                for authority_key in tuple(
+                    key
+                    for key in (
+                        f"clob:{clob_order_id}" if clob_order_id else "",
+                        f"live:{live_order_id}" if live_order_id else "",
+                    )
+                    if key
+                ):
+                    duplicate_rows = recovered_sell_rows_by_authority_key.get(authority_key, [])
+                    for duplicate_row in list(duplicate_rows):
+                        if duplicate_row.id == pending_exit_parent.id:
+                            continue
+                        await _reassign_deleted_live_order_references(
+                            session,
+                            duplicate_order_id=str(duplicate_row.id or ""),
+                            canonical_order_id=str(pending_exit_parent.id or ""),
+                        )
+                        await session.delete(duplicate_row)
+                        collapsed_duplicates += 1
+                    recovered_sell_rows_by_authority_key.pop(authority_key, None)
+                continue
+            ambiguous_orders += 1
+            continue
         existing_row = None
         if clob_order_id:
             existing_row = existing_provider_rows_by_clob_id.get(clob_order_id)
@@ -5520,11 +5684,15 @@ async def list_unconsumed_trade_signals(
     sources: Optional[list[str]] = None,
     statuses: Optional[list[str]] = None,
     strategy_types_by_source: Optional[dict[str, Any]] = None,
+    cursor_runtime_sequence: Optional[int] = None,
     cursor_created_at: Optional[datetime] = None,
     cursor_signal_id: Optional[str] = None,
+    signal_ids: Optional[list[str]] = None,
+    exclude_market_ids: Optional[list[str]] = None,
     limit: int = 200,
 ) -> list[TradeSignal]:
     now = _now().replace(tzinfo=None)
+    normalized_cursor_runtime_sequence = safe_int(cursor_runtime_sequence, None)
     normalized_cursor_created_at = cursor_created_at
     if isinstance(normalized_cursor_created_at, datetime) and normalized_cursor_created_at.tzinfo is not None:
         normalized_cursor_created_at = normalized_cursor_created_at.astimezone(timezone.utc).replace(tzinfo=None)
@@ -5549,9 +5717,27 @@ async def list_unconsumed_trade_signals(
             )
         )
         .where(or_(TradeSignal.expires_at.is_(None), TradeSignal.expires_at >= now))
-        .order_by(signal_sort_ts.asc(), TradeSignal.id.asc())
         .limit(max(1, min(limit, 5000)))
     )
+    normalized_signal_ids = [str(signal_id or "").strip() for signal_id in (signal_ids or []) if str(signal_id or "").strip()]
+    if signal_ids is not None:
+        if not normalized_signal_ids:
+            return []
+        query = query.where(TradeSignal.id.in_(normalized_signal_ids))
+    normalized_excluded_market_ids = [
+        str(market_id or "").strip()
+        for market_id in (exclude_market_ids or [])
+        if str(market_id or "").strip()
+    ]
+    if normalized_excluded_market_ids:
+        query = query.where(~TradeSignal.market_id.in_(normalized_excluded_market_ids))
+    if normalized_cursor_runtime_sequence is not None:
+        query = query.where(
+            or_(
+                TradeSignal.runtime_sequence.is_(None),
+                TradeSignal.runtime_sequence > normalized_cursor_runtime_sequence,
+            )
+        )
     if normalized_cursor_created_at is not None:
         if normalized_cursor_signal_id:
             query = query.where(
@@ -5612,6 +5798,14 @@ async def list_unconsumed_trade_signals(
         if not source_strategy_clauses:
             return []
         query = query.where(or_(*source_strategy_clauses))
+    if normalized_cursor_runtime_sequence is not None:
+        query = query.order_by(
+            TradeSignal.runtime_sequence.asc().nulls_last(),
+            signal_sort_ts.asc(),
+            TradeSignal.id.asc(),
+        )
+    else:
+        query = query.order_by(signal_sort_ts.asc(), TradeSignal.id.asc())
     return list((await session.execute(query)).scalars().all())
 
 

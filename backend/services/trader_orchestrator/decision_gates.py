@@ -1639,15 +1639,14 @@ def apply_platform_decision_gates(
         )
 
     if final_decision == "selected":
-        pending_exit_guard_passed = pending_exit_count <= pending_exit_max_allowed
+        pending_exit_guard_enabled = pending_exit_max_allowed > 0
+        pending_exit_guard_passed = (
+            pending_exit_count <= pending_exit_max_allowed if pending_exit_guard_enabled else True
+        )
         pending_exit_detail = (
             f"Pending live exits <= {pending_exit_max_allowed} (current={pending_exit_count})"
-            if pending_exit_max_allowed > 0
-            else (
-                "No non-terminal pending live exits detected"
-                if pending_exit_guard_passed
-                else f"{pending_exit_count} non-terminal pending live exit(s) detected"
-            )
+            if pending_exit_guard_enabled
+            else "Disabled because max_pending_exits <= 0; identity guard still applies"
         )
         checks_payload.append(
             {
@@ -1672,7 +1671,7 @@ def apply_platform_decision_gates(
             platform_gates.append(
                 {
                     "gate": "pending_live_exit_guard",
-                    "status": "passed",
+                    "status": "passed" if pending_exit_guard_enabled else "skipped",
                     "detail": pending_exit_detail,
                 }
             )

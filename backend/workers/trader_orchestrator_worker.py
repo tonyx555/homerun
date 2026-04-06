@@ -81,6 +81,7 @@ from services.trader_orchestrator_state import (
     create_trader_event as _create_trader_event,
     create_trader_order as _create_trader_order,
     get_pending_live_exit_summary_for_trader,
+    list_unconsumed_trade_signals as _list_unconsumed_trade_signals_authoritative,
     list_live_wallet_positions_for_trader,
     list_traders,
     record_signal_consumption as _record_signal_consumption,
@@ -511,10 +512,11 @@ async def list_unconsumed_trade_signals(
     cursor_runtime_sequence=None,
     cursor_created_at=None,
     cursor_signal_id=None,
+    exclude_market_ids=None,
     limit=200,
 ):
-    del session
-    return await get_intent_runtime().list_unconsumed_signals(
+    return await _list_unconsumed_trade_signals_authoritative(
+        session,
         trader_id=str(trader_id or ""),
         sources=list(sources or []),
         statuses=list(statuses or []),
@@ -522,6 +524,7 @@ async def list_unconsumed_trade_signals(
         cursor_runtime_sequence=int(cursor_runtime_sequence) if cursor_runtime_sequence is not None else None,
         cursor_created_at=cursor_created_at,
         cursor_signal_id=cursor_signal_id,
+        exclude_market_ids=list(exclude_market_ids or []),
         limit=int(limit),
     )
 
@@ -1097,6 +1100,26 @@ async def _build_triggered_trade_signals(
     if not ordered_ids:
         return []
 
+    eligible_rows = await _list_unconsumed_trade_signals_authoritative(
+        session,
+        trader_id=trader_id,
+        sources=list(sources or []),
+        statuses=list(statuses or []),
+        strategy_types_by_source=dict(strategy_types_by_source or {}),
+        cursor_runtime_sequence=cursor_runtime_sequence,
+        cursor_created_at=cursor_created_at,
+        cursor_signal_id=cursor_signal_id,
+        signal_ids=ordered_ids,
+        limit=max(len(ordered_ids), int(limit)),
+    )
+    eligible_rows_by_id = {
+        str(getattr(row, "id", "") or "").strip(): row
+        for row in eligible_rows
+        if str(getattr(row, "id", "") or "").strip()
+    }
+    if not eligible_rows_by_id:
+        return []
+
     snapshots = signal_snapshots_by_source or {}
     rows: list[Any] = []
     source_order = [source for source in sources if source in signal_ids_by_source]
@@ -1108,18 +1131,26 @@ async def _build_triggered_trade_signals(
             signal_id = str(raw_signal_id or "").strip()
             if not signal_id or signal_id in seen_row_ids:
                 continue
+            authoritative_row = eligible_rows_by_id.get(signal_id)
+            if authoritative_row is None:
+                continue
             snapshot = (snapshots.get(source_key) or {}).get(signal_id)
             if snapshot is None and source_key != "__all__":
                 snapshot = (snapshots.get("__all__") or {}).get(signal_id)
-            if not isinstance(snapshot, dict):
-                continue
-            row = _coerce_runtime_signal_snapshot(snapshot)
-            if normalized_statuses and str(getattr(row, "status", "") or "").strip().lower() not in normalized_statuses:
-                continue
-            if cursor_runtime_sequence is not None:
-                row_runtime_sequence = _signal_runtime_sequence(row)
-                if row_runtime_sequence is None or row_runtime_sequence <= int(cursor_runtime_sequence):
-                    continue
+            if isinstance(snapshot, dict):
+                row = _coerce_runtime_signal_snapshot(snapshot)
+                row.status = str(getattr(authoritative_row, "status", "") or getattr(row, "status", "")).strip().lower()
+                row.runtime_sequence = getattr(authoritative_row, "runtime_sequence", getattr(row, "runtime_sequence", None))
+                if not str(getattr(row, "market_question", "") or "").strip():
+                    row.market_question = str(getattr(authoritative_row, "market_question", "") or "").strip()
+                if getattr(row, "expires_at", None) is None:
+                    row.expires_at = getattr(authoritative_row, "expires_at", None)
+                if getattr(row, "created_at", None) is None:
+                    row.created_at = getattr(authoritative_row, "created_at", None)
+                if getattr(row, "updated_at", None) is None:
+                    row.updated_at = getattr(authoritative_row, "updated_at", None)
+            else:
+                row = authoritative_row
             seen_row_ids.add(signal_id)
             rows.append(row)
 
@@ -1408,6 +1439,21 @@ def _build_scanner_signal_market_snapshot_live_context(signal: Any) -> dict[str,
             or ""
         )
     )
+    if observed_at is None:
+        for raw_observed_at in (
+            getattr(signal, "updated_at", None),
+            getattr(signal, "created_at", None),
+        ):
+            if isinstance(raw_observed_at, datetime):
+                observed_at = (
+                    raw_observed_at
+                    if raw_observed_at.tzinfo is not None
+                    else raw_observed_at.replace(tzinfo=timezone.utc)
+                )
+                break
+            observed_at = _parse_iso(str(raw_observed_at or ""))
+            if observed_at is not None:
+                break
     observed_at_iso = observed_at.isoformat() if observed_at is not None else None
     age_ms: float | None = None
     if observed_at is not None:
@@ -4628,6 +4674,17 @@ async def _run_trader_once(
                     payload={"changes": live_risk_clamp_changes},
                 )
         allow_averaging = bool(effective_risk_limits.get("allow_averaging", False))
+        excluded_market_ids_for_signal_fetch = (
+            set(open_market_ids)
+            if run_mode == "live" and not allow_averaging and open_market_ids
+            else set()
+        )
+        if prefetched_signals and excluded_market_ids_for_signal_fetch:
+            prefetched_signals = [
+                signal
+                for signal in prefetched_signals
+                if str(getattr(signal, "market_id", "") or "").strip() not in excluded_market_ids_for_signal_fetch
+            ] or None
 
         # Realized PnL: instant hot-state lookups.
         global_daily_pnl = await get_daily_realized_pnl(session, trader_id=None, mode=run_mode)
@@ -4794,6 +4851,7 @@ async def _run_trader_once(
                     cursor_runtime_sequence=cursor_runtime_sequence,
                     cursor_created_at=cursor_created_at,
                     cursor_signal_id=cursor_signal_id,
+                    exclude_market_ids=excluded_market_ids_for_signal_fetch,
                     limit=batch_limit,
                 )
             if not signals:

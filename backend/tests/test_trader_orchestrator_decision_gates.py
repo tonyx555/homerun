@@ -302,7 +302,7 @@ def test_min_exit_notional_guard_arms_stop_loss_when_inside_close_window(monkeyp
     assert min_exit_check["payload"]["conservative_exit_source"] == "stop_loss_pct"
 
 
-def test_pending_live_exit_guard_blocks_new_entry_when_exit_is_in_flight():
+def test_pending_live_exit_guard_is_disabled_when_max_allowed_is_zero():
     result = apply_platform_decision_gates(
         decision_obj=_decision(25.0),
         runtime_signal=_runtime_signal(),
@@ -326,14 +326,44 @@ def test_pending_live_exit_guard_blocks_new_entry_when_exit_is_in_flight():
         invoke_hooks=False,
     )
 
-    assert result["final_decision"] == "blocked"
-    assert "Pending live exit guard blocked" in result["final_reason"]
-    assert any(g["gate"] == "pending_live_exit_guard" and g["status"] == "blocked" for g in result["platform_gates"])
+    assert result["final_decision"] == "selected"
+    assert any(g["gate"] == "pending_live_exit_guard" and g["status"] == "skipped" for g in result["platform_gates"])
     pending_exit_check = next(
         check for check in result["checks_payload"] if check["check_key"] == "pending_live_exit_guard"
     )
-    assert pending_exit_check["passed"] is False
+    assert pending_exit_check["passed"] is True
     assert pending_exit_check["payload"]["count"] == 2
+    assert pending_exit_check["payload"]["max_allowed"] == 0
+
+
+def test_pending_live_exit_guard_blocks_when_positive_cap_is_exceeded():
+    result = apply_platform_decision_gates(
+        decision_obj=_decision(25.0),
+        runtime_signal=_runtime_signal(),
+        strategy=None,
+        checks_payload=[],
+        trading_schedule_ok=True,
+        trading_schedule_config={},
+        global_limits={"max_gross_exposure_usd": 5000.0},
+        effective_risk_limits={"max_trade_notional_usd": 1000.0},
+        allow_averaging=True,
+        open_market_ids=set(),
+        pending_live_exit_count=2,
+        pending_live_exit_summary={
+            "count": 2,
+            "order_ids": ["order-1", "order-2"],
+            "market_ids": ["market-1"],
+            "statuses": {"submitted": 2},
+        },
+        pending_live_exit_max_allowed=1,
+        portfolio_allocator=None,
+        risk_evaluator=_risk_evaluator,
+        invoke_hooks=False,
+    )
+
+    assert result["final_decision"] == "blocked"
+    assert "Pending live exit guard blocked" in result["final_reason"]
+    assert any(g["gate"] == "pending_live_exit_guard" and g["status"] == "blocked" for g in result["platform_gates"])
 
 
 def test_pending_live_exit_identity_guard_blocks_matching_market_direction_signal():
