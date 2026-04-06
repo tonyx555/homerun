@@ -102,6 +102,13 @@ _CANCEL_GRACE_SECONDS = 5.0
 # the SAWarning "connection was garbage collected" leak).
 _abandoned_tasks: set[asyncio.Task] = set()
 _inflight_timed_tasks: dict[str, asyncio.Task] = {}
+_FULL_INTELLIGENCE_STEP_TIMEOUTS: dict[str, float] = {
+    "confluence": 30.0,
+    "tagger": 25.0,
+    "clusterer": 25.0,
+    "cross_platform": 25.0,
+    "cohorts": 25.0,
+}
 
 
 class _TimedTaskStillRunningError(RuntimeError):
@@ -230,6 +237,81 @@ async def _run_with_retryable_db_retries(
             )
             await asyncio.sleep(delay)
     raise RuntimeError(f"unreachable retry loop for step={step_name}")
+
+
+async def _run_full_intelligence(*, include_confluence: bool) -> dict[str, str]:
+    step_specs: list[tuple[str, Callable[[], Awaitable[Any]], float]] = []
+    if include_confluence:
+        step_specs.append(
+            (
+                "confluence",
+                wallet_intelligence.confluence.scan_for_confluence,
+                _FULL_INTELLIGENCE_STEP_TIMEOUTS["confluence"],
+            )
+        )
+    step_specs.extend(
+        [
+            (
+                "tagger",
+                wallet_intelligence.tagger.tag_all_wallets,
+                _FULL_INTELLIGENCE_STEP_TIMEOUTS["tagger"],
+            ),
+            (
+                "clusterer",
+                wallet_intelligence.clusterer.run_clustering,
+                _FULL_INTELLIGENCE_STEP_TIMEOUTS["clusterer"],
+            ),
+            (
+                "cross_platform",
+                wallet_intelligence.cross_platform.scan_cross_platform,
+                _FULL_INTELLIGENCE_STEP_TIMEOUTS["cross_platform"],
+            ),
+            (
+                "cohorts",
+                wallet_intelligence.cohort_analyzer.analyze_cohorts,
+                _FULL_INTELLIGENCE_STEP_TIMEOUTS["cohorts"],
+            ),
+        ]
+    )
+
+    outcomes: dict[str, str] = {}
+    for step_name, operation, timeout_seconds in step_specs:
+        try:
+            await _graceful_timeout(
+                operation(),
+                timeout=timeout_seconds,
+                label=f"full_intelligence_{step_name}",
+            )
+            outcomes[step_name] = "ok"
+        except _TimedTaskStillRunningError:
+            outcomes[step_name] = "still_running"
+            logger.warning(
+                "Tracked-traders full_intelligence step skipped because prior run is still finishing",
+                step=step_name,
+            )
+        except asyncio.TimeoutError:
+            outcomes[step_name] = "timeout"
+            logger.warning(
+                "Tracked-traders full_intelligence step timed out",
+                step=step_name,
+                timeout_seconds=timeout_seconds,
+            )
+        except Exception as exc:
+            retryable_db = _is_retryable_db_error(exc)
+            outcomes[step_name] = "retryable_db" if retryable_db else type(exc).__name__
+            if retryable_db:
+                logger.warning(
+                    "Tracked-traders full_intelligence step skipped due retryable DB contention",
+                    step=step_name,
+                    exc_info=exc,
+                )
+            else:
+                logger.warning(
+                    "Tracked-traders full_intelligence step failed",
+                    step=step_name,
+                    exc_info=exc,
+                )
+    return outcomes
 
 
 async def _trader_opportunity_intent_settings() -> dict[str, Any]:
@@ -680,14 +762,11 @@ async def _run_loop() -> None:
                 try:
                     await _run_with_retryable_db_retries(
                         "full_intelligence",
-                        lambda: _graceful_timeout(wallet_intelligence.run_full_analysis(include_confluence=False), timeout=120, label="full_intelligence"),
+                        lambda: _run_full_intelligence(include_confluence=False),
                     )
                 except _TimedTaskStillRunningError:
                     activity_labels.append("full_intelligence_still_running")
                     logger.warning("Tracked-traders full_intelligence skipped because prior run is still finishing")
-                except asyncio.TimeoutError:
-                    activity_labels.append("full_intelligence_timeout")
-                    logger.warning("Tracked-traders full_intelligence timed out after 120s")
                 except Exception as exc:
                     if _is_retryable_db_error(exc):
                         activity_labels.append("full_intelligence_db_contention")

@@ -37,7 +37,6 @@ _NEWS_PREFETCH_EXECUTOR = ThreadPoolExecutor(
     thread_name_prefix="news_prefetch",
 )
 logger = get_logger(__name__)
-_FULL_SNAPSHOT_MARKET_SAFETY_CAP = 15000
 
 
 def _make_aware(dt: Optional[datetime]) -> Optional[datetime]:
@@ -1579,8 +1578,6 @@ class ArbitrageScanner:
         pool = [market for market in self._cached_markets if self._is_market_active(market, now)]
         if not pool:
             return []
-        if cap <= 0 and len(pool) > _FULL_SNAPSHOT_MARKET_SAFETY_CAP:
-            cap = _FULL_SNAPSHOT_MARKET_SAFETY_CAP
 
         selected: list = []
         seen_ids: set[str] = set()
@@ -3623,8 +3620,6 @@ class ArbitrageScanner:
                     else:
                         cap = int(getattr(settings, "SCANNER_FULL_SNAPSHOT_MAX_MARKETS", 0) or 0)
                     active_markets = [market for market in cached_markets_snapshot if self._is_market_active(market, now)]
-                    if cap <= 0 and len(active_markets) > _FULL_SNAPSHOT_MARKET_SAFETY_CAP:
-                        cap = _FULL_SNAPSHOT_MARKET_SAFETY_CAP
                     if "tail_end_carry" in full_slugs:
                         tail_priority = [
                             market for market in active_markets if self._is_tail_end_priority_market(market, now)

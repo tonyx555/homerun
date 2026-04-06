@@ -847,6 +847,50 @@ class TestScanPipeline:
         assert scanner._full_snapshot_cycle_completed_at is not None
 
     @pytest.mark.asyncio
+    async def test_full_snapshot_scan_honors_force_full_universe_without_hidden_cap(
+        self,
+        mock_polymarket_client,
+    ):
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+        markets = []
+        for idx in range(15005):
+            yes = f"tok_yes_force_{idx}_" + ("0" * 20)
+            no = f"tok_no_force_{idx}_" + ("0" * 20)
+            markets.append(
+                Market(
+                    id=f"m_force_{idx}",
+                    condition_id=f"c_force_{idx}",
+                    question=f"Force market {idx}?",
+                    slug=f"force-market-{idx}",
+                    clob_token_ids=[yes, no],
+                    outcome_prices=[0.49, 0.51],
+                )
+            )
+        scanner._cached_markets = list(markets)
+        scanner._cached_market_by_id = {m.id: m for m in markets}
+        scanner._cached_events = []
+
+        with (
+            patch.object(scanner, "_ensure_runtime_strategies_loaded", new_callable=AsyncMock),
+            patch.object(scanner, "_partition_market_refresh_strategies", return_value=(set(), {"full_only"})),
+            patch.object(scanner, "_snapshot_ws_prices", new_callable=AsyncMock, return_value={}),
+            patch.object(scanner, "_dispatch_market_refresh", new_callable=AsyncMock, return_value=[]) as dispatch_mock,
+            patch.object(scanner, "_set_activity", new_callable=AsyncMock),
+            patch("services.scanner.settings.SCANNER_FULL_SNAPSHOT_CHUNK_SIZE", 20000),
+            patch("services.scanner.settings.SCANNER_FORCE_FULL_UNIVERSE", True),
+            patch("services.scanner.settings.SCANNER_FULL_SNAPSHOT_MAX_MARKETS", 0),
+        ):
+            await scanner.scan_full_snapshot_strategies(force=True)
+
+        assert dispatch_mock.await_count == 1
+        assert scanner._last_full_snapshot_strategy_market_count == 15005
+        assert scanner._last_full_snapshot_chunk_market_count == 15005
+        assert scanner._full_snapshot_cycle_total_markets == 15005
+        assert scanner._full_snapshot_cycle_processed_markets == 15005
+        assert scanner._full_snapshot_cursor_index == 0
+        assert scanner._full_snapshot_cycle_completed_at is not None
+
+    @pytest.mark.asyncio
     async def test_refresh_catalog_reads_prices_from_ws_cache(self, mock_polymarket_client):
         """refresh_catalog reads prices via _snapshot_ws_prices, not get_prices_batch."""
         # Token IDs must be >20 chars to pass the _collect_polymarket_tokens filter

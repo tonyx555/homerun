@@ -287,7 +287,7 @@ class Settings(BaseSettings):
     # slower cadence with an explicit bounded market batch.
     SCANNER_FULL_SNAPSHOT_STRATEGY_INTERVAL_SECONDS: int = 120
     SCANNER_FULL_SNAPSHOT_MAX_MARKETS: int = 0  # 0 disables cap (scan full active market universe)
-    SCANNER_FULL_SNAPSHOT_CHUNK_SIZE: int = 300  # Markets processed per heavy-lane chunk
+    SCANNER_FULL_SNAPSHOT_CHUNK_SIZE: int = 1500  # Markets processed per heavy-lane chunk
     SCANNER_FAST_STRATEGY_TIMEOUT_SECONDS: float = 12.0
     SCANNER_FULL_SNAPSHOT_STRATEGY_TIMEOUT_SECONDS: float = 60.0
     SCANNER_FULL_SNAPSHOT_WATCHDOG_SECONDS: int = 180
