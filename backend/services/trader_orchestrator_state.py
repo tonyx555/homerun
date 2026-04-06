@@ -1526,7 +1526,7 @@ def _extract_live_fill_metrics(payload: dict[str, Any]) -> tuple[float, float, O
     return filled_notional_usd, filled_shares, average_fill_price
 
 
-def _live_active_notional(mode: Any, status: Any, row_notional: float, payload: dict[str, Any]) -> float:
+def _live_active_notional(mode: Any, status: Any, row_notional: float, payload: dict[str, Any], executed_at: Any = None) -> float:
     mode_key = _normalize_mode_key(mode)
     if mode_key not in {"live", "shadow"}:
         return max(0.0, abs(row_notional))
@@ -1538,7 +1538,11 @@ def _live_active_notional(mode: Any, status: Any, row_notional: float, payload: 
             return filled_notional_usd
         return max(0.0, abs(row_notional))
     if status_key in {"open", "submitted"}:
-        return max(0.0, filled_notional_usd)
+        if filled_notional_usd > 0.0:
+            return filled_notional_usd
+        if executed_at is not None:
+            return max(0.0, abs(row_notional))
+        return 0.0
     return 0.0
 
 
@@ -6669,7 +6673,7 @@ async def sync_trader_position_inventory(
         if not isinstance(position_state, dict):
             position_state = {}
         row_notional = safe_float(row.notional_usd, 0.0) or 0.0
-        notional = _live_active_notional(row.mode, row.status, row_notional, payload)
+        notional = _live_active_notional(row.mode, row.status, row_notional, payload, executed_at=row.executed_at)
         _, _, fill_price = _extract_live_fill_metrics(payload)
         entry_price = (
             fill_price
@@ -6900,7 +6904,7 @@ async def get_open_position_count_for_trader(
             continue
         row_payload = dict(row.payload_json or {})
         row_notional = safe_float(row.notional_usd, 0.0) or 0.0
-        active_notional = _live_active_notional(row_mode, row.status, row_notional, row_payload)
+        active_notional = _live_active_notional(row_mode, row.status, row_notional, row_payload, executed_at=row.executed_at)
         if active_notional <= 0.0:
             continue
         key = _position_cap_scope_key(
@@ -7873,7 +7877,7 @@ async def get_unrealized_pnl(
         position_state = payload.get("position_state")
         position_state = position_state if isinstance(position_state, dict) else {}
         row_notional = safe_float(order.notional_usd, 0.0) or 0.0
-        notional = _live_active_notional(order_mode, order.status, row_notional, payload)
+        notional = _live_active_notional(order_mode, order.status, row_notional, payload, executed_at=order.executed_at)
         _, filled_shares, fill_price = _extract_live_fill_metrics(payload)
         entry_price = (
             fill_price
