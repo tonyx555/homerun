@@ -1582,6 +1582,27 @@ class WalletTagger:
 class CrossPlatformTracker:
     """Track traders across Polymarket and Kalshi."""
 
+    def __init__(self) -> None:
+        self._matcher = None
+
+    def _matcher_strategy(self):
+        if self._matcher is None:
+            from services.strategies.cross_platform import CrossPlatformStrategy
+
+            self._matcher = CrossPlatformStrategy()
+        return self._matcher
+
+    async def _get_polymarket_markets(self) -> list[Any]:
+        try:
+            from services.scanner import scanner as market_scanner
+
+            cached = list(getattr(market_scanner, "_cached_markets", []) or [])
+            if cached:
+                return [market for market in cached if getattr(market, "platform", "polymarket") == "polymarket"]
+        except Exception:
+            pass
+        return await polymarket_client.get_all_markets(active=True)
+
     async def scan_cross_platform(self):
         """
         Compare trading activity across platforms:
@@ -1594,26 +1615,19 @@ class CrossPlatformTracker:
         logger.info("Starting cross-platform scan...")
 
         try:
-            # Use the existing cross-platform strategy's Kalshi cache
             from services.strategies.cross_platform import (
-                _KalshiMarketCache,
                 _tokenize,
-                _jaccard_similarity,
-                _MATCH_THRESHOLD,
+                _detect_multiway_kalshi_events,
             )
-            from config import settings
-
-            kalshi_cache = _KalshiMarketCache(api_url=settings.KALSHI_API_URL, ttl_seconds=120)
-            # Kalshi cache uses synchronous HTTP — run in thread pool
-            kalshi_markets = await asyncio.to_thread(kalshi_cache.get_markets)
+            matcher = self._matcher_strategy()
+            kalshi_markets = await asyncio.to_thread(matcher._kalshi_cache.get_markets)
 
             if not kalshi_markets:
                 logger.info("No Kalshi markets available, skipping cross-platform scan")
                 return
 
-            # Get Polymarket markets
             try:
-                poly_markets = await polymarket_client.get_all_markets(active=True)
+                poly_markets = await self._get_polymarket_markets()
             except Exception as e:
                 logger.warning("Failed to fetch Polymarket markets", error=str(e))
                 return
@@ -1622,48 +1636,34 @@ class CrossPlatformTracker:
                 logger.info("No Polymarket markets available")
                 return
 
-            # CPU-bound market matching: run in thread pool
-            def _match_markets(poly_mkts, kalshi_mkts, threshold):
-                kalshi_token_idx = {}
-                for km in kalshi_mkts:
-                    kalshi_token_idx[km.id] = _tokenize(km.question)
-
-                pairs = []
-                for pm in poly_mkts:
-                    if pm.closed or not pm.active:
-                        continue
-                    pm_tokens = _tokenize(pm.question)
-                    if not pm_tokens:
-                        continue
-
-                    best_score = 0.0
-                    best_km = None
-                    for km in kalshi_mkts:
-                        km_tokens = kalshi_token_idx.get(km.id)
-                        if not km_tokens:
-                            continue
-                        score = _jaccard_similarity(pm_tokens, km_tokens)
-                        if score > best_score:
-                            best_score = score
-                            best_km = km
-
-                    if best_km and best_score >= threshold:
-                        pairs.append(
-                            {
-                                "polymarket_id": pm.id,
-                                "polymarket_question": pm.question,
-                                "kalshi_id": best_km.id,
-                                "kalshi_question": best_km.question,
-                                "similarity": best_score,
-                                "pm_yes_price": pm.yes_price,
-                                "pm_no_price": pm.no_price,
-                                "k_yes_price": best_km.yes_price,
-                                "k_no_price": best_km.no_price,
-                            }
-                        )
-                return pairs
-
-            matched_pairs = await asyncio.to_thread(_match_markets, poly_markets, kalshi_markets, _MATCH_THRESHOLD)
+            kalshi_token_index = matcher._refresh_kalshi_tokens(kalshi_markets)
+            multiway_events = _detect_multiway_kalshi_events(kalshi_markets)
+            matched_pairs = []
+            for pm in poly_markets:
+                if pm.closed or not pm.active:
+                    continue
+                if len(list(getattr(pm, "outcome_prices", []) or [])) != 2:
+                    continue
+                pm_tokens = _tokenize(pm.question)
+                if not pm_tokens:
+                    continue
+                match = matcher._find_best_match(pm, pm_tokens, kalshi_token_index, multiway_events)
+                if match is None:
+                    continue
+                best_km, best_score = match
+                matched_pairs.append(
+                    {
+                        "polymarket_id": pm.id,
+                        "polymarket_question": pm.question,
+                        "kalshi_id": best_km.id,
+                        "kalshi_question": best_km.question,
+                        "similarity": best_score,
+                        "pm_yes_price": pm.yes_price,
+                        "pm_no_price": pm.no_price,
+                        "k_yes_price": best_km.yes_price,
+                        "k_no_price": best_km.no_price,
+                    }
+                )
 
             logger.info(
                 "Cross-platform market matches found",
@@ -1726,12 +1726,12 @@ class CrossPlatformTracker:
         # Get top discovered wallets
         async with AsyncSessionLocal() as session:
             result = await session.execute(
-                select(DiscoveredWallet)
+                select(DiscoveredWallet.address)
                 .where(DiscoveredWallet.is_profitable == True)  # noqa: E712
                 .order_by(DiscoveredWallet.rank_score.desc())
                 .limit(100)
             )
-            wallets = list(result.scalars().all())
+            wallets = [str(address).strip().lower() for address in result.scalars().all() if str(address or "").strip()]
 
         market_id_set = set(market_ids)
         semaphore = asyncio.Semaphore(5)
@@ -1750,7 +1750,7 @@ class CrossPlatformTracker:
                 except Exception:
                     pass
 
-        await asyncio.gather(*[check_wallet(w.address) for w in wallets])
+        await asyncio.gather(*[check_wallet(address) for address in wallets])
         return wallet_markets
 
     async def _upsert_cross_platform_entity(

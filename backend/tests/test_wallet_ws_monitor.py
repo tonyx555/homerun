@@ -47,6 +47,14 @@ def test_build_rpc_candidates_excludes_default_auth_required_public_fallbacks():
     assert "https://rpc.ankr.com/polygon" not in urls
 
 
+def test_build_rpc_candidates_does_not_reintroduce_excluded_endpoints():
+    urls = _build_rpc_candidates(
+        "https://polygon-bor-rpc.publicnode.com",
+        excluded_urls={"https://polygon-rpc.com"},
+    )
+    assert urls == ["https://polygon-bor-rpc.publicnode.com"]
+
+
 def test_build_rpc_candidates_normalizes_ws_primary_to_https():
     urls = _build_rpc_candidates("wss://polygon-bor-rpc.publicnode.com")
     assert urls[0] == "https://polygon-bor-rpc.publicnode.com"
@@ -195,6 +203,58 @@ async def test_get_logs_for_block_uses_all_exchange_addresses(monkeypatch):
     params = captured["payload"]["params"][0]
     assert params["address"] == list(CTF_EXCHANGE_ADDRESSES)
     assert params["topics"] == [ORDER_FILLED_TOPIC]
+
+
+def test_wallet_monitor_endpoint_eviction_is_sticky():
+    monitor = WalletWebSocketMonitor()
+    monitor._http_rpc_url = "https://polygon-rpc.com"
+    monitor._rpc_urls = _build_rpc_candidates(monitor._http_rpc_url)
+
+    monitor._evict_rpc_endpoint("https://polygon-rpc.com")
+    monitor._refresh_rpc_candidates()
+
+    assert "https://polygon-rpc.com" in monitor._evicted_rpc_urls
+    assert "https://polygon-rpc.com" not in monitor._rpc_urls
+    assert monitor._http_rpc_url != "https://polygon-rpc.com"
+
+
+@pytest.mark.asyncio
+async def test_wallet_monitor_invalid_block_range_is_treated_as_transient(monkeypatch):
+    monitor = WalletWebSocketMonitor()
+    monitor._http_rpc_url = "https://polygon-bor-rpc.publicnode.com"
+    monitor._rpc_urls = [monitor._http_rpc_url]
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "error": {
+                    "code": -32000,
+                    "message": "invalid block range params",
+                }
+            }
+
+    class _FakeClient:
+        async def post(self, endpoint, json):
+            return _FakeResponse()
+
+    async def _get_rpc_client():
+        return _FakeClient()
+
+    monkeypatch.setattr(monitor, "_get_rpc_client", _get_rpc_client)
+
+    result = await monitor._rpc_request(
+        {"jsonrpc": "2.0", "id": 1, "method": "eth_getLogs", "params": [{}]},
+        method="eth_getLogs",
+        block_hex="0x123",
+    )
+
+    assert result is None
+    assert monitor._rpc_urls == ["https://polygon-bor-rpc.publicnode.com"]
+    assert "https://polygon-bor-rpc.publicnode.com" not in monitor._evicted_rpc_urls
+    assert monitor._rpc_failure_streak == 0
 
 
 @pytest.mark.asyncio

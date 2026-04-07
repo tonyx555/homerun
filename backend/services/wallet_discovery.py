@@ -1877,6 +1877,115 @@ class WalletDiscoveryEngine:
             return [addresses]
         return [addresses[i : i + size] for i in range(0, len(addresses), size)]
 
+    async def _discovered_wallet_catalog_exceeds_cap(self, session, *, cap: int) -> bool:
+        probe_limit = max(1, int(cap) + 1)
+        probe_result = await session.execute(
+            text(
+                """
+                SELECT count(*) AS probe_count
+                FROM (
+                    SELECT 1
+                    FROM discovered_wallets
+                    LIMIT :probe_limit
+                ) AS probe
+                """
+            ),
+            {"probe_limit": probe_limit},
+        )
+        return int(probe_result.scalar() or 0) > int(cap)
+
+    async def _approximate_discovered_wallet_count(self, session) -> int:
+        result = await session.execute(
+            text(
+                """
+                SELECT GREATEST(
+                    COALESCE(
+                        (
+                            SELECT floor(reltuples)::bigint
+                            FROM pg_class
+                            WHERE oid = 'discovered_wallets'::regclass
+                        ),
+                        0
+                    ),
+                    COALESCE(
+                        (
+                            SELECT n_live_tup::bigint
+                            FROM pg_stat_user_tables
+                            WHERE relname = 'discovered_wallets'
+                        ),
+                        0
+                    )
+                ) AS approx_total
+                """
+            )
+        )
+        return max(0, int(result.scalar() or 0))
+
+    async def _select_wallet_cleanup_candidates(
+        self,
+        session,
+        *,
+        now: datetime,
+        cutoff_trade: datetime,
+        cutoff_discovered: datetime,
+        limit: int,
+        stale_only: bool,
+        exclude_addresses: list[str] | None = None,
+    ) -> list[str]:
+        if limit <= 0:
+            return []
+        exclude_addresses = [str(address).strip().lower() for address in (exclude_addresses or []) if str(address).strip()]
+        stale_clause = ""
+        if stale_only:
+            stale_clause = """
+              AND (last_trade_at IS NULL OR last_trade_at < :cutoff_trade)
+              AND (discovered_at IS NULL OR discovered_at < :cutoff_discovered)
+            """
+        result = await session.execute(
+            text(
+                f"""
+                SELECT address
+                FROM discovered_wallets
+                WHERE NOT COALESCE(in_top_pool, FALSE)
+                  AND lower(COALESCE(discovery_source, '')) NOT IN ('manual', 'manual_pool', 'referral')
+                  AND NOT (CAST(COALESCE(source_flags, '{{}}'::json) AS jsonb) ? :manual_include)
+                  AND NOT (CAST(COALESCE(source_flags, '{{}}'::json) AS jsonb) ? :manual_exclude)
+                  AND NOT (CAST(COALESCE(source_flags, '{{}}'::json) AS jsonb) ? :blacklisted)
+                  AND (:exclude_empty OR address <> ALL(CAST(:exclude_addresses AS text[])))
+                  {stale_clause}
+                ORDER BY
+                  (
+                    COALESCE(rank_score, 0.0)
+                    + LEAST(COALESCE(total_trades, 0), 2500)::double precision / 2500.0
+                    + CASE
+                        WHEN last_analyzed_at IS NOT NULL THEN GREATEST(
+                            0.0,
+                            1.0 - EXTRACT(EPOCH FROM (:now_ts - last_analyzed_at)) / 2592000.0
+                        )
+                        ELSE 0.0
+                      END
+                    + CASE WHEN COALESCE(total_pnl, 0.0) > 0.0 THEN 0.3 ELSE 0.0 END
+                    + CASE WHEN lower(COALESCE(recommendation, '')) = 'copy_candidate' THEN 0.5 ELSE 0.0 END
+                    + CASE WHEN COALESCE(is_profitable, FALSE) THEN 0.2 ELSE 0.0 END
+                  ) ASC,
+                  address ASC
+                LIMIT :limit
+                """
+            ),
+            {
+                "manual_include": POOL_FLAG_MANUAL_INCLUDE,
+                "manual_exclude": POOL_FLAG_MANUAL_EXCLUDE,
+                "blacklisted": POOL_FLAG_BLACKLISTED,
+                "exclude_empty": not exclude_addresses,
+                "exclude_addresses": exclude_addresses,
+                "cutoff_trade": as_utc_naive(cutoff_trade),
+                "cutoff_discovered": as_utc_naive(cutoff_discovered),
+                "now_ts": as_utc_naive(now),
+                "limit": int(limit),
+            },
+        )
+        return [str(address).strip().lower() for address in result.scalars().all() if str(address or "").strip()]
+
     async def _upsert_discovered_placeholders(
         self,
         addresses: set[str],
@@ -1971,58 +2080,42 @@ class WalletDiscoveryEngine:
                 ),
             )
         )
-
-        wallets: list[DiscoveredWallet] = []
         async with AsyncSessionLocal() as session:
-            total_result = await session.execute(select(func.count(DiscoveredWallet.address)))
-            total_wallets = int(total_result.scalar() or 0)
-            if total_wallets <= max_discovered_wallets:
+            if not await self._discovered_wallet_catalog_exceeds_cap(session, cap=max_discovered_wallets):
                 return 0
+            approx_total = await self._approximate_discovered_wallet_count(session)
 
-            rows = await session.execute(
-                select(DiscoveredWallet).options(
-                    load_only(
-                        DiscoveredWallet.address,
-                        DiscoveredWallet.in_top_pool,
-                        DiscoveredWallet.discovery_source,
-                        DiscoveredWallet.source_flags,
-                        DiscoveredWallet.rank_score,
-                        DiscoveredWallet.total_trades,
-                        DiscoveredWallet.last_analyzed_at,
-                        DiscoveredWallet.last_trade_at,
-                        DiscoveredWallet.discovered_at,
-                        DiscoveredWallet.total_pnl,
-                        DiscoveredWallet.recommendation,
-                        DiscoveredWallet.is_profitable,
+        estimated_excess = max(1, approx_total - max_discovered_wallets)
+        remove_target = min(
+            DISCOVERY_MAX_DB_BATCH,
+            max(maintenance_batch, estimated_excess),
+        )
+
+        to_remove: list[str] = []
+        async with AsyncSessionLocal() as session:
+            to_remove = await self._select_wallet_cleanup_candidates(
+                session,
+                now=now,
+                cutoff_trade=cutoff_trade,
+                cutoff_discovered=cutoff_discovered,
+                limit=remove_target,
+                stale_only=True,
+            )
+            if len(to_remove) < remove_target:
+                to_remove.extend(
+                    await self._select_wallet_cleanup_candidates(
+                        session,
+                        now=now,
+                        cutoff_trade=cutoff_trade,
+                        cutoff_discovered=cutoff_discovered,
+                        limit=remove_target - len(to_remove),
+                        stale_only=False,
+                        exclude_addresses=to_remove,
                     )
                 )
-            )
-            wallets = list(rows.scalars().all())
-
-        candidates: list[DiscoveredWallet] = []
-        non_protected: list[DiscoveredWallet] = []
-
-        for wallet in wallets:
-            if self._is_wallet_discovery_protected(wallet):
-                continue
-            non_protected.append(wallet)
-            if wallet.last_trade_at is not None and wallet.last_trade_at >= cutoff_trade:
-                continue
-            if wallet.discovered_at is not None and wallet.discovered_at >= cutoff_discovered:
-                continue
-            candidates.append(wallet)
-
-        removable = candidates if candidates else non_protected
-        removable.sort(key=lambda wallet: self._discovery_curation_score(wallet, now))
-        remove_count = total_wallets - max_discovered_wallets
-        if remove_count <= 0:
-            return 0
-        if len(removable) < remove_count:
-            removable = non_protected
-        if not removable:
+        if not to_remove:
             return 0
 
-        to_remove = [wallet.address for wallet in removable[:remove_count]]
         removed = 0
         for chunk in self._chunked(to_remove, maintenance_batch):
             async with AsyncSessionLocal() as session:
@@ -2605,11 +2698,6 @@ class WalletDiscoveryEngine:
 
             wallets_pruned = await self._cleanup_discovered_wallet_catalog()
             self._wallets_pruned_last_run = wallets_pruned
-
-            try:
-                await smart_wallet_pool.recompute_pool()
-            except Exception as e:
-                logger.warning("Smart pool recompute after discovery failed: %s", e)
 
             # --- Record run metadata ---
             self._last_run_at = utcnow()

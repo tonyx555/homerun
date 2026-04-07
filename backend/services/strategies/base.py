@@ -1438,13 +1438,6 @@ class BaseStrategy(ABC):
         if custom_roi_percent is not None:
             roi = float(custom_roi_percent)
 
-        min_roi_percent = float(self.min_profit or 0.0) * 100.0
-        if roi < min_roi_percent:
-            return None
-
-        if not is_guaranteed and roi > 120.0:
-            return None
-
         # Calculate max position size based on liquidity
         min_liquidity = min((m.liquidity for m in markets), default=0)
         max_position = min_liquidity * 0.1  # Don't exceed 10% of liquidity

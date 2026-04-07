@@ -298,6 +298,7 @@ def _material_signal_change(existing: dict[str, Any], incoming: dict[str, Any]) 
         "confidence",
         "liquidity",
         "quality_passed",
+        "quality_rejection_reasons",
         "dedupe_key",
         "expires_at",
     ):
@@ -330,6 +331,7 @@ def _coerce_runtime_signal(snapshot: dict[str, Any]) -> Any:
         payload_json=copy.deepcopy(snapshot.get("payload_json") or {}),
         strategy_context_json=copy.deepcopy(snapshot.get("strategy_context_json") or {}),
         quality_passed=snapshot.get("quality_passed"),
+        quality_rejection_reasons=list(snapshot.get("quality_rejection_reasons") or []),
         dedupe_key=str(snapshot.get("dedupe_key") or "").strip(),
         runtime_sequence=_normalize_runtime_sequence(snapshot.get("runtime_sequence")),
         required_token_ids=list(snapshot.get("required_token_ids") or []),
@@ -979,13 +981,17 @@ class IntentRuntime:
                 strategy_context["bridge_source"] = str(source)
                 strategy_context["bridge_run_at"] = _to_iso(now)
                 opp_quality_passed: bool | None = None
+                opp_quality_rejection_reasons: list[str] = []
                 if quality_filter_pipeline is not None:
                     report = quality_filter_pipeline.evaluate(opportunity)
                     opp_quality_passed = bool(report.passed)
+                    opp_quality_rejection_reasons = list(getattr(report, "rejection_reasons", []) or [])
                 elif quality_reports is not None:
                     report = quality_reports.get(getattr(opportunity, "stable_id", None) or getattr(opportunity, "id", None))
                     if report is not None:
                         opp_quality_passed = bool(report.passed)
+                        opp_quality_rejection_reasons = list(getattr(report, "rejection_reasons", []) or [])
+                desired_status = "filtered" if opp_quality_passed is False else "pending"
 
                 incoming_snapshot = {
                     "id": "",
@@ -1002,10 +1008,11 @@ class IntentRuntime:
                     "confidence": float(getattr(opportunity, "confidence", 0.0) or 0.0),
                     "liquidity": float(getattr(opportunity, "min_liquidity", 0.0) or 0.0),
                     "expires_at": _to_iso(_normalize_datetime(expires_at)),
-                    "status": "pending",
+                    "status": desired_status,
                     "payload_json": payload,
                     "strategy_context_json": strategy_context,
                     "quality_passed": opp_quality_passed,
+                    "quality_rejection_reasons": opp_quality_rejection_reasons,
                     "dedupe_key": dedupe_key,
                     "runtime_sequence": None,
                     "required_token_ids": _extract_required_token_ids(
@@ -1033,7 +1040,6 @@ class IntentRuntime:
                     if not material_change:
                         active_dedupe_keys.add(dedupe_key)
                         continue
-                    incoming_snapshot["status"] = "pending"
                     incoming_snapshot["effective_price"] = None
                     existing_deferred_started_at = existing.get("deferred_started_at")
                     self._clear_deferred_state_locked(existing["id"], clear_snapshot_state=False)
@@ -1043,7 +1049,12 @@ class IntentRuntime:
                         .get("execution_activation", "")
                         or ""
                     )
-                    if (
+                    if incoming_snapshot["status"] == "filtered":
+                        incoming_snapshot["runtime_sequence"] = None
+                        incoming_snapshot["deferred_until_ws"] = False
+                        incoming_snapshot["deferred_reason"] = None
+                        incoming_snapshot["deferred_started_at"] = None
+                    elif (
                         _ea == "ws_post_arm_tick"
                         and incoming_snapshot["required_token_ids"]
                     ):
@@ -1098,7 +1109,9 @@ class IntentRuntime:
                         .get("execution_activation", "")
                         or ""
                     )
-                    if (
+                    if incoming_snapshot["status"] == "filtered":
+                        incoming_snapshot["runtime_sequence"] = None
+                    elif (
                         _ea == "ws_post_arm_tick"
                         and incoming_snapshot["required_token_ids"]
                     ):
@@ -1438,7 +1451,7 @@ class IntentRuntime:
                         payload_json=copy.deepcopy(snapshot.get("payload_json") or {}),
                         strategy_context_json=copy.deepcopy(snapshot.get("strategy_context_json") or {}),
                         quality_passed=snapshot.get("quality_passed"),
-                        quality_rejection_reasons=None,
+                        quality_rejection_reasons=list(snapshot.get("quality_rejection_reasons") or []),
                         dedupe_key=str(snapshot.get("dedupe_key") or ""),
                         signal_id=str(snapshot.get("id") or "") or None,
                         runtime_sequence=snapshot.get("runtime_sequence"),

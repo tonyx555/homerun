@@ -10,6 +10,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
+import services.wallet_discovery as wallet_discovery_module  # noqa: E402
 from services.wallet_discovery import WalletDiscoveryEngine  # noqa: E402
 
 
@@ -113,3 +114,96 @@ class TestWalletDiscoveryGrowth:
         assert len(calls) == 12
         assert len({(order_by, time_period, category) for order_by, time_period, category, _ in calls[:6]}) == 6
         assert engine._leaderboard_scan_cursor == 12 % len(engine._leaderboard_discovery_combinations())
+
+    @pytest.mark.asyncio
+    async def test_cleanup_catalog_prunes_bounded_candidates_without_full_table_scan(self, monkeypatch):
+        engine = WalletDiscoveryEngine()
+
+        async def fake_over_cap(session, *, cap: int) -> bool:
+            assert cap == 100
+            return True
+
+        async def fake_approx_count(session) -> int:
+            return 160
+
+        candidate_calls: list[tuple[bool, int, tuple[str, ...]]] = []
+
+        async def fake_select_candidates(
+            session,
+            *,
+            now,
+            cutoff_trade,
+            cutoff_discovered,
+            limit: int,
+            stale_only: bool,
+            exclude_addresses=None,
+        ) -> list[str]:
+            exclude_addresses = tuple(exclude_addresses or [])
+            candidate_calls.append((stale_only, limit, exclude_addresses))
+            if stale_only:
+                return ["0xa", "0xb"]
+            return ["0xc", "0xd", "0xe"][:limit]
+
+        class _DummyResult:
+            def __init__(self, rowcount: int):
+                self.rowcount = rowcount
+
+        rowcounts = iter([5])
+
+        class _DummySession:
+            async def execute(self, statement):
+                return _DummyResult(next(rowcounts))
+
+            async def commit(self):
+                return None
+
+        class _DummySessionCtx:
+            async def __aenter__(self):
+                return _DummySession()
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        monkeypatch.setattr(engine, "_discovered_wallet_catalog_exceeds_cap", fake_over_cap)
+        monkeypatch.setattr(engine, "_approximate_discovered_wallet_count", fake_approx_count)
+        monkeypatch.setattr(engine, "_select_wallet_cleanup_candidates", fake_select_candidates)
+        monkeypatch.setattr(engine, "_discovery_setting", lambda key, default: 100 if key == "max_discovered_wallets" else 3)
+        monkeypatch.setattr(wallet_discovery_module, "AsyncSessionLocal", _DummySessionCtx)
+
+        removed = await engine._cleanup_discovered_wallet_catalog()
+
+        assert removed == 5
+        assert candidate_calls == [
+            (True, 60, ()),
+            (False, 58, ("0xa", "0xb")),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_cleanup_catalog_skips_when_probe_is_not_over_cap(self, monkeypatch):
+        engine = WalletDiscoveryEngine()
+
+        async def fake_over_cap(session, *, cap: int) -> bool:
+            assert cap == 100
+            return False
+
+        class _DummySession:
+            async def execute(self, statement):
+                raise AssertionError("delete path should not execute")
+
+            async def commit(self):
+                raise AssertionError("delete path should not execute")
+
+        class _DummySessionCtx:
+            async def __aenter__(self):
+                return _DummySession()
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        monkeypatch.setattr(engine, "_discovered_wallet_catalog_exceeds_cap", fake_over_cap)
+        monkeypatch.setattr(engine, "_discovery_setting", lambda key, default: 100 if key == "max_discovered_wallets" else 3)
+        monkeypatch.setattr(wallet_discovery_module, "AsyncSessionLocal", _DummySessionCtx)
+
+        removed = await engine._cleanup_discovered_wallet_catalog()
+
+        assert removed == 0

@@ -53,10 +53,11 @@ DEFAULT_WS_URL = settings.POLYGON_WS_URL
 # Default HTTP RPC fallback endpoint
 DEFAULT_HTTP_RPC_URL = settings.POLYGON_RPC_URL
 
+DEFAULT_PUBLIC_HTTP_RPC_URL = "https://polygon-bor-rpc.publicnode.com"
+
 # Fallback RPC endpoints (tried in order after the configured primary).
 FALLBACK_HTTP_RPC_URLS = (
-    "https://polygon-rpc.com",
-    "https://polygon-bor-rpc.publicnode.com",
+    DEFAULT_PUBLIC_HTTP_RPC_URL,
 )
 
 DEFAULT_HTTP_TIMEOUT = httpx.Timeout(connect=5.0, read=12.0, write=10.0, pool=8.0)
@@ -146,12 +147,17 @@ def _should_reset_http_client(exc: Exception) -> bool:
     )
 
 
-def _build_rpc_candidates(primary_url: str) -> list[str]:
+def _build_rpc_candidates(primary_url: str, *, excluded_urls: Optional[set[str]] = None) -> list[str]:
     """Build de-duplicated RPC endpoints in failover order."""
+    excluded = {
+        normalized
+        for normalized in (_normalize_rpc_http_url(url) for url in (excluded_urls or set()))
+        if normalized
+    }
     urls: list[str] = []
     for raw_url in (primary_url, *FALLBACK_HTTP_RPC_URLS):
         url = _normalize_rpc_http_url(raw_url)
-        if url and url not in urls:
+        if url and url not in excluded and url not in urls:
             urls.append(url)
     return urls
 
@@ -171,6 +177,14 @@ def _rpc_error_requires_auth(error: object) -> bool:
 
 
 def _rpc_error_indicates_unsupported_logs_query(error: object) -> bool:
+    text = _rpc_error_text(error)
+    return (
+        "eth_getlogs" in text
+        and ("unsupported" in text or "not supported" in text or "method not found" in text)
+    )
+
+
+def _rpc_error_indicates_logs_block_not_ready(error: object) -> bool:
     return "invalid block range params" in _rpc_error_text(error)
 
 
@@ -361,8 +375,12 @@ class WalletWebSocketMonitor:
         self._tracked_sources: dict[str, set[str]] = {}
         self._callbacks: list[Callable] = []
         self._ws_url: str = DEFAULT_WS_URL
-        self._http_rpc_url: str = _normalize_rpc_http_url(DEFAULT_HTTP_RPC_URL) or "https://polygon-rpc.com"
-        self._rpc_urls: list[str] = _build_rpc_candidates(self._http_rpc_url)
+        self._http_rpc_url: str = _normalize_rpc_http_url(DEFAULT_HTTP_RPC_URL) or DEFAULT_PUBLIC_HTTP_RPC_URL
+        self._evicted_rpc_urls: set[str] = set()
+        self._rpc_urls: list[str] = _build_rpc_candidates(
+            self._http_rpc_url,
+            excluded_urls=self._evicted_rpc_urls,
+        )
         self._reconnect_delay: int = 5
         self._max_reconnect_delay: int = 60
         self._ws_connection = None
@@ -396,6 +414,21 @@ class WalletWebSocketMonitor:
             "last_event_detected_at": "",
             "last_fallback_poll_at": "",
         }
+
+    def _refresh_rpc_candidates(self) -> None:
+        self._rpc_urls = _build_rpc_candidates(
+            self._http_rpc_url,
+            excluded_urls=self._evicted_rpc_urls,
+        )
+
+    def _evict_rpc_endpoint(self, endpoint: str) -> None:
+        normalized = _normalize_rpc_http_url(endpoint)
+        if not normalized:
+            return
+        self._evicted_rpc_urls.add(normalized)
+        self._rpc_urls = [url for url in self._rpc_urls if url != normalized]
+        if self._http_rpc_url == normalized:
+            self._http_rpc_url = self._rpc_urls[0] if self._rpc_urls else ""
 
     # ==================== WALLET MANAGEMENT ====================
 
@@ -884,7 +917,7 @@ class WalletWebSocketMonitor:
         """Send an HTTP JSON-RPC request with endpoint failover."""
         last_error: Optional[Exception] = None
         if not self._rpc_urls:
-            self._rpc_urls = _build_rpc_candidates(self._http_rpc_url)
+            self._refresh_rpc_candidates()
         if not self._rpc_urls:
             return None
 
@@ -913,17 +946,29 @@ class WalletWebSocketMonitor:
                     rpc_error = result.get("error")
                     if rpc_error is not None:
                         endpoint_error = RuntimeError(f"RPC error from endpoint {endpoint}: {rpc_error}")
-                        should_evict_endpoint = _rpc_error_requires_auth(rpc_error) or (
+                        unsupported_logs_query = (
                             method == "eth_getLogs"
                             and _rpc_error_indicates_unsupported_logs_query(rpc_error)
                         )
+                        block_not_ready = (
+                            method == "eth_getLogs"
+                            and _rpc_error_indicates_logs_block_not_ready(rpc_error)
+                        )
+                        should_evict_endpoint = _rpc_error_requires_auth(rpc_error) or unsupported_logs_query
                         if should_evict_endpoint:
-                            self._rpc_urls = [url for url in self._rpc_urls if url != endpoint]
-                            if endpoint == self._http_rpc_url and self._rpc_urls:
-                                self._http_rpc_url = self._rpc_urls[0]
+                            self._evict_rpc_endpoint(endpoint)
                         if endpoint_attempt < RPC_ATTEMPTS_PER_ENDPOINT - 1:
                             await asyncio.sleep(0.15 * (endpoint_attempt + 1))
                             continue
+                        if block_not_ready:
+                            logger.info(
+                                "Wallet monitor RPC block not yet available on endpoint",
+                                method=method,
+                                endpoint=endpoint,
+                                block=block_hex or None,
+                                error=rpc_error,
+                            )
+                            return None
                         now = time.monotonic()
                         if (now - self._rpc_last_endpoint_failure_log_at) >= self._rpc_endpoint_failure_log_interval_seconds:
                             self._rpc_last_endpoint_failure_log_at = now
@@ -950,7 +995,7 @@ class WalletWebSocketMonitor:
                             active_endpoint=endpoint,
                         )
                         self._http_rpc_url = endpoint
-                        self._rpc_urls = _build_rpc_candidates(self._http_rpc_url)
+                        self._refresh_rpc_candidates()
 
                     self._rpc_failure_streak = 0
                     self._rpc_backoff_until = 0.0
@@ -962,9 +1007,7 @@ class WalletWebSocketMonitor:
                     # 401/403 = auth required or forbidden — skip retries on this endpoint
                     _status = getattr(getattr(e, "response", None), "status_code", None)
                     if _status in (401, 403):
-                        self._rpc_urls = [url for url in self._rpc_urls if url != endpoint]
-                        if endpoint == self._http_rpc_url and self._rpc_urls:
-                            self._http_rpc_url = self._rpc_urls[0]
+                        self._evict_rpc_endpoint(endpoint)
                         break
                     if endpoint_attempt < RPC_ATTEMPTS_PER_ENDPOINT - 1:
                         await asyncio.sleep(0.2 * (endpoint_attempt + 1))

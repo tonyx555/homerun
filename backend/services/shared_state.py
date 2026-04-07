@@ -21,7 +21,6 @@ from models.database import (
     ScannerSnapshot,
     ScannerRun,
     OpportunityState,
-    OpportunityEvent,
     ScannerSloIncident,
 )
 from models.opportunity import Opportunity, OpportunityFilter
@@ -125,7 +124,7 @@ async def write_scanner_snapshot(
     row.ws_feeds_json = status.get("ws_feeds")
     if market_history is not None:
         row.market_history_json = market_history
-    await _persist_incremental_state(session, payload, status, last_scan)
+    opportunity_events = await _persist_incremental_state(session, payload, status, last_scan)
     await _commit_with_retry(session)
 
     # Publish events so the broadcaster can relay immediately.
@@ -156,6 +155,29 @@ async def write_scanner_snapshot(
                 "source": "scanner_snapshot_write",
             },
         )
+        if opportunity_events:
+            await event_bus.publish(
+                "opportunity_events",
+                {
+                    "events": opportunity_events,
+                },
+            )
+            for event in opportunity_events:
+                opportunity_payload = event.get("opportunity") if isinstance(event, dict) else {}
+                if not isinstance(opportunity_payload, dict):
+                    opportunity_payload = {}
+                await event_bus.publish(
+                    "opportunity_update",
+                    {
+                        "id": event.get("id"),
+                        "stable_id": event.get("stable_id"),
+                        "run_id": event.get("run_id"),
+                        "event_type": event.get("event_type"),
+                        "revision": int(opportunity_payload.get("revision") or 0),
+                        "opportunity": opportunity_payload,
+                        "created_at": event.get("created_at"),
+                    },
+                )
     except Exception:
         pass  # fire-and-forget
 
@@ -399,7 +421,7 @@ async def _persist_incremental_state(
     payload: list[dict[str, Any]],
     status: dict[str, Any],
     completed_at: datetime,
-) -> None:
+) -> list[dict[str, Any]]:
     """Persist per-run + per-opportunity incremental state/event records."""
     # Determine scan mode for observability.
     scan_mode = "full"
@@ -418,6 +440,7 @@ async def _persist_incremental_state(
         completed_at=completed_at,
     )
     session.add(run)
+    event_messages: list[dict[str, Any]] = []
 
     # Build stable_id -> payload map; stable_id is the lifecycle key.
     current_map: dict[str, dict[str, Any]] = {}
@@ -474,15 +497,15 @@ async def _persist_incremental_state(
                 last_run_id=run.id,
             )
             session.add(row)
-            session.add(
-                OpportunityEvent(
-                    id=uuid.uuid4().hex[:16],
-                    stable_id=stable_id,
-                    run_id=run.id,
-                    event_type="detected",
-                    opportunity_json=incoming_item,
-                    created_at=completed_at,
-                )
+            event_messages.append(
+                {
+                    "id": uuid.uuid4().hex[:16],
+                    "stable_id": stable_id,
+                    "run_id": run.id,
+                    "event_type": "detected",
+                    "opportunity": incoming_item,
+                    "created_at": format_iso_utc_z(completed_at),
+                }
             )
             continue
 
@@ -518,15 +541,15 @@ async def _persist_incremental_state(
             event_type = None
 
         if event_type:
-            session.add(
-                OpportunityEvent(
-                    id=uuid.uuid4().hex[:16],
-                    stable_id=stable_id,
-                    run_id=run.id,
-                    event_type=event_type,
-                    opportunity_json=incoming_item,
-                    created_at=completed_at,
-                )
+            event_messages.append(
+                {
+                    "id": uuid.uuid4().hex[:16],
+                    "stable_id": stable_id,
+                    "run_id": run.id,
+                    "event_type": event_type,
+                    "opportunity": incoming_item,
+                    "created_at": format_iso_utc_z(completed_at),
+                }
             )
 
     # Any previously active row missing from current payload is now expired.
@@ -539,16 +562,19 @@ async def _persist_incremental_state(
         row.last_seen_at = completed_at
         row.last_updated_at = completed_at
         row.last_run_id = run.id
-        session.add(
-            OpportunityEvent(
-                id=uuid.uuid4().hex[:16],
-                stable_id=stable_id,
-                run_id=run.id,
-                event_type="expired",
-                opportunity_json=row.opportunity_json,
-                created_at=completed_at,
-            )
+        expired_payload = row.opportunity_json if isinstance(row.opportunity_json, dict) else {}
+        event_messages.append(
+            {
+                "id": uuid.uuid4().hex[:16],
+                "stable_id": stable_id,
+                "run_id": run.id,
+                "event_type": "expired",
+                "opportunity": expired_payload,
+                "created_at": format_iso_utc_z(completed_at),
+            }
         )
+
+    return event_messages
 
 
 async def update_scanner_activity(session: AsyncSession, activity: str) -> None:

@@ -1298,6 +1298,39 @@ class ArbitrageScanner:
         ws_ttl = float(getattr(settings, "WS_PRICE_STALE_SECONDS", 30.0) or 30.0)
         return max(30.0, ws_ttl * 2.0)
 
+    def _opportunity_last_detected_retention_seconds(self, now: Optional[datetime] = None) -> float:
+        base_seconds = max(
+            60.0,
+            float(
+                getattr(
+                    settings,
+                    "SCANNER_SLO_MAX_OPPORTUNITY_LAST_DETECTED_AGE_P95_SECONDS",
+                    180.0,
+                )
+                or 180.0
+            ),
+        )
+        total_markets = max(0, int(self._full_snapshot_cycle_total_markets or 0))
+        processed_markets = max(0, int(self._full_snapshot_cycle_processed_markets or 0))
+        cycle_started_at = self._full_snapshot_cycle_started_at
+        if cycle_started_at is None or total_markets <= 0:
+            return base_seconds
+
+        estimated_cycle_seconds: Optional[float] = None
+        cycle_completed_at = self._full_snapshot_cycle_completed_at
+        if cycle_completed_at is not None and processed_markets >= total_markets:
+            estimated_cycle_seconds = max(0.0, (cycle_completed_at - cycle_started_at).total_seconds())
+        elif processed_markets > 0:
+            now_dt = now or datetime.now(timezone.utc)
+            elapsed_seconds = max(0.0, (now_dt - cycle_started_at).total_seconds())
+            coverage_ratio = min(1.0, max(float(processed_markets) / float(total_markets), 1e-6))
+            estimated_cycle_seconds = elapsed_seconds / coverage_ratio
+
+        if estimated_cycle_seconds is None or estimated_cycle_seconds <= 0:
+            return base_seconds
+
+        return min(3600.0, max(base_seconds, 300.0, estimated_cycle_seconds * 1.5))
+
     def _market_price_is_stale(self, market: dict, now_ts: float, max_age_seconds: float) -> bool:
         token_ids = self._coerce_market_token_ids(market.get("clob_token_ids"))
         if len(token_ids) < 2:
@@ -1330,6 +1363,7 @@ class ArbitrageScanner:
         now_dt = now or datetime.now(timezone.utc)
         now_ts = now_dt.timestamp()
         max_age_seconds = self._opportunity_price_max_age_seconds()
+        detected_retention_seconds = max(max_age_seconds, self._opportunity_last_detected_retention_seconds(now_dt))
 
         token_ids: list[str] = []
         seen_tokens: set[str] = set()
@@ -1505,7 +1539,7 @@ class ArbitrageScanner:
                     or getattr(opp, "last_seen_at", None)
                     or getattr(opp, "detected_at", None)
                 )
-                if seen_at is None or (now_dt - seen_at).total_seconds() > max_age_seconds:
+                if seen_at is None or (now_dt - seen_at).total_seconds() > detected_retention_seconds:
                     continue
             filtered.append(opp)
 
@@ -3262,7 +3296,7 @@ class ArbitrageScanner:
                             self._opportunities = await self.refresh_opportunity_prices(
                                 self._opportunities,
                                 now=now,
-                                drop_stale=False,
+                                drop_stale=True,
                             )
                             self._last_scan = now
                             self._last_fast_scan = now
@@ -3337,7 +3371,7 @@ class ArbitrageScanner:
                     self._opportunities = await self.refresh_opportunity_prices(
                         self._opportunities,
                         now=now,
-                        drop_stale=False,
+                        drop_stale=True,
                     )
                     self._last_scan = now
                     self._last_fast_scan = now
@@ -3368,12 +3402,26 @@ class ArbitrageScanner:
 
                 await self._ensure_runtime_strategies_loaded()
                 incremental_slugs, _ = self._partition_market_refresh_strategies()
+                tail_end_fast_strategy = strategy_loader.get_instance("tail_end_carry")
+                tail_end_fast_markets: list = []
+                if tail_end_fast_strategy is not None:
+                    tail_end_fast_markets = [
+                        market
+                        for market in self._cached_markets
+                        if self._is_market_active(market, now) and self._is_tail_end_priority_market(market, now)
+                    ]
+                    if tail_end_fast_markets:
+                        tail_end_fast_markets.sort(
+                            key=lambda market: self._tail_end_priority_key(market, now),
+                            reverse=True,
+                        )
+                        tail_end_fast_markets = tail_end_fast_markets[:2000]
                 if not incremental_slugs or not markets_for_strategies:
                     logger.info("  Fast scan dispatch skipped: no eligible strategies or no verified market batch")
                     self._opportunities = await self.refresh_opportunity_prices(
                         self._opportunities,
                         now=now,
-                        drop_stale=False,
+                        drop_stale=True,
                     )
                     self._last_scan = now
                     self._last_fast_scan = now
@@ -3408,10 +3456,19 @@ class ArbitrageScanner:
                     full_slugs=set(),
                     handler_timeout_seconds=self._fast_strategy_timeout_seconds(),
                 )
+                if tail_end_fast_strategy is not None and tail_end_fast_markets:
+                    tail_end_fast_opportunities = await loop.run_in_executor(
+                        None,
+                        tail_end_fast_strategy.detect,
+                        list(self._cached_events),
+                        list(tail_end_fast_markets),
+                        dict(self._cached_prices),
+                    )
+                    if tail_end_fast_opportunities:
+                        fast_opportunities.extend(tail_end_fast_opportunities)
 
-                fast_opportunities = self._deduplicate_cross_strategy(fast_opportunities)
                 fast_quality_reports: dict = {}
-                fast_filtered: list = []
+                fast_actionable: list = []
                 for opp in fast_opportunities:
                     strategy_instance = strategy_loader.get_instance(opp.strategy)
                     overrides = (
@@ -3420,11 +3477,8 @@ class ArbitrageScanner:
                     report = quality_filter.evaluate_opportunity(opp, overrides=overrides)
                     fast_quality_reports[opp.stable_id or opp.id] = report
                     if report.passed:
-                        fast_filtered.append(opp)
-                fast_opportunities = fast_filtered
-                self._quality_reports = fast_quality_reports
-                fast_opportunities.sort(key=lambda x: x.roi_percent, reverse=True)
-                fast_opportunities = self._apply_opportunity_caps(fast_opportunities)
+                        fast_actionable.append(opp)
+                fast_actionable.sort(key=lambda x: x.roi_percent, reverse=True)
 
                 def _update_prioritizer_state(prioritizer, mkts, ts):
                     unchanged_count = prioritizer.update_after_evaluation(mkts, ts)
@@ -3439,8 +3493,9 @@ class ArbitrageScanner:
                     now,
                 )
 
+                if fast_actionable:
+                    await self._attach_ai_judgments(fast_actionable)
                 if fast_opportunities:
-                    await self._attach_ai_judgments(fast_opportunities)
                     self._opportunities = await loop.run_in_executor(
                         None, self._merge_opportunities, fast_opportunities
                     )
@@ -3448,13 +3503,26 @@ class ArbitrageScanner:
                 self._opportunities = await self.refresh_opportunity_prices(
                     self._opportunities,
                     now=now,
-                    drop_stale=False,
+                    drop_stale=True,
                 )
+                merged_quality_reports = dict(self._quality_reports)
+                merged_quality_reports.update(fast_quality_reports)
                 if self._opportunities:
                     self._opportunities.sort(key=lambda opp: opp.roi_percent, reverse=True)
-                    self._opportunities = self._apply_opportunity_caps(self._opportunities)
+                    active_ids = {
+                        str(getattr(opp, "stable_id", None) or getattr(opp, "id", "") or "").strip()
+                        for opp in self._opportunities
+                        if str(getattr(opp, "stable_id", None) or getattr(opp, "id", "") or "").strip()
+                    }
+                    self._quality_reports = {
+                        stable_id: report
+                        for stable_id, report in merged_quality_reports.items()
+                        if stable_id in active_ids
+                    }
                     self._rebuild_opportunity_market_ids()
                     self._queue_market_history_backfill(self._opportunities)
+                else:
+                    self._quality_reports = {}
 
                 self._last_scan = now
                 self._last_fast_scan = now
@@ -3804,10 +3872,9 @@ class ArbitrageScanner:
                         full_prices=full_snapshot_prices,
                         handler_timeout_seconds=handler_timeout_seconds,
                     )
-                    full_opportunities = self._deduplicate_cross_strategy(full_opportunities)
 
                     full_quality_reports: dict = {}
-                    full_filtered: list[Opportunity] = []
+                    full_actionable: list[Opportunity] = []
                     for opp in full_opportunities:
                         strategy_instance = strategy_loader.get_instance(opp.strategy)
                         overrides = (
@@ -3816,19 +3883,19 @@ class ArbitrageScanner:
                         report = quality_filter.evaluate_opportunity(opp, overrides=overrides)
                         full_quality_reports[opp.stable_id or opp.id] = report
                         if report.passed:
-                            full_filtered.append(opp)
+                            full_actionable.append(opp)
 
-                    full_filtered.sort(key=lambda item: item.roi_percent, reverse=True)
-                    full_filtered = self._apply_opportunity_caps(full_filtered)
+                    full_actionable.sort(key=lambda item: item.roi_percent, reverse=True)
 
-                    if full_filtered:
-                        await self._attach_ai_judgments(full_filtered)
+                    if full_actionable:
+                        await self._attach_ai_judgments(full_actionable)
 
                     async with self._scan_lock:
                         self._cached_prices.update(full_snapshot_prices)
                         self._update_market_price_history(chunk_markets, full_snapshot_prices, chunk_now)
-                        self._quality_reports = full_quality_reports
-                        self._last_full_snapshot_strategy_opportunity_count = len(full_filtered)
+                        merged_quality_reports = dict(self._quality_reports)
+                        merged_quality_reports.update(full_quality_reports)
+                        self._last_full_snapshot_strategy_opportunity_count = len(full_opportunities)
                         self._full_snapshot_cycle_total_markets = universe_count
                         self._full_snapshot_cycle_processed_markets = processed_markets
                         self._full_snapshot_cursor_index = next_cursor_index
@@ -3840,39 +3907,52 @@ class ArbitrageScanner:
                             self._full_snapshot_cycle_completed_at = chunk_now
                         elif chunk_start == 0:
                             self._full_snapshot_cycle_completed_at = None
-                        if full_filtered:
+                        if full_opportunities:
                             self._opportunities = await asyncio.get_running_loop().run_in_executor(
-                                None, self._merge_opportunities, full_filtered
+                                None, self._merge_opportunities, full_opportunities
                             )
                         opportunities_snapshot = [_clone_model(opp) for opp in self._opportunities]
 
                     refreshed_opportunities = await self.refresh_opportunity_prices(
                         opportunities_snapshot,
                         now=chunk_now,
-                        drop_stale=False,
+                        drop_stale=True,
                     )
+                    if not refreshed_opportunities and opportunities_snapshot and not full_opportunities:
+                        refreshed_opportunities = opportunities_snapshot
                     if refreshed_opportunities:
                         refreshed_opportunities.sort(key=lambda opp: opp.roi_percent, reverse=True)
-                        refreshed_opportunities = self._apply_opportunity_caps(refreshed_opportunities)
 
                     async with self._scan_lock:
                         self._opportunities = refreshed_opportunities
                         if self._opportunities:
+                            active_ids = {
+                                str(getattr(opp, "stable_id", None) or getattr(opp, "id", "") or "").strip()
+                                for opp in self._opportunities
+                                if str(getattr(opp, "stable_id", None) or getattr(opp, "id", "") or "").strip()
+                            }
+                            self._quality_reports = {
+                                stable_id: report
+                                for stable_id, report in merged_quality_reports.items()
+                                if stable_id in active_ids
+                            }
                             self._rebuild_opportunity_market_ids()
                             self._queue_market_history_backfill(self._opportunities)
+                        else:
+                            self._quality_reports = {}
                         self._last_scan = chunk_now
                         self._last_full_snapshot_strategy_scan = chunk_now
 
                     for callback in self._scan_callbacks:
                         try:
-                            await callback(full_filtered)
+                            await callback(full_opportunities)
                         except Exception as e:
                             logger.warning(f"  Callback error: {e}", exc_info=e)
 
                     last_chunk_start = chunk_start
                     last_chunk_end = chunk_end
                     last_processed_markets = processed_markets
-                    last_full_filtered = full_filtered
+                    last_full_filtered = full_opportunities
                     if targeted_mode or cycle_completed:
                         break
                     if (per_run_deadline - time.monotonic()) < 10.0:
@@ -3971,74 +4051,6 @@ class ArbitrageScanner:
         except Exception as e:
             logger.warning(f"  News prefetch error: {e}", exc_info=e)
 
-    def _deduplicate_cross_strategy(self, opportunities: list[Opportunity]) -> list[Opportunity]:
-        """Remove duplicate opportunities that cover the same underlying markets.
-
-        When multiple strategies detect the same set of markets, keep only the one
-        with the highest ROI — unless a strategy has set allow_deduplication=False,
-        in which case its opportunities are always preserved.
-        """
-        # Separate protected opportunities (allow_deduplication=False)
-        protected = []
-        candidates = []
-        for opp in opportunities:
-            strategy_instance = strategy_loader.get_instance(opp.strategy)
-            if strategy_instance and not getattr(strategy_instance, "allow_deduplication", True):
-                protected.append(opp)
-            else:
-                candidates.append(opp)
-
-        seen: dict[str, Opportunity] = {}
-        for opp in candidates:
-            market_ids = sorted(m.get("id", "") for m in opp.markets)
-            fingerprint = "|".join(market_ids)
-            if fingerprint in seen:
-                if opp.roi_percent > seen[fingerprint].roi_percent:
-                    seen[fingerprint] = opp
-            else:
-                seen[fingerprint] = opp
-
-        deduped = list(seen.values()) + protected
-        removed = len(opportunities) - len(deduped)
-        if removed > 0:
-            logger.info(f"  Deduplicated: removed {removed} cross-strategy duplicates")
-        return deduped
-
-    @staticmethod
-    def _coerce_cap_value(raw_value: object) -> Optional[int]:
-        if raw_value is None:
-            return None
-        if isinstance(raw_value, bool):
-            return None
-        try:
-            value = int(raw_value)
-        except (TypeError, ValueError):
-            return None
-        if value < 0:
-            return None
-        return value
-
-    @staticmethod
-    def _strategy_cap_from_instance(instance: object, fallback: int) -> int:
-        if instance is None:
-            return fallback
-
-        config = getattr(instance, "config", None)
-        candidates = []
-        if isinstance(config, dict):
-            candidates.append(config.get("retention_max_opportunities"))
-            candidates.append(config.get("max_opportunities_per_strategy"))
-            candidates.append(config.get("max_opportunities"))
-        candidates.append(getattr(instance, "retention_max_opportunities", None))
-        candidates.append(getattr(instance, "max_opportunities_per_strategy", None))
-        candidates.append(getattr(instance, "max_opportunities", None))
-
-        for candidate in candidates:
-            cap_value = ArbitrageScanner._coerce_cap_value(candidate)
-            if cap_value is not None:
-                return cap_value
-        return fallback
-
     @staticmethod
     def _coerce_retention_minutes(raw_value: object) -> Optional[int]:
         parsed = StrategySDK.parse_duration_minutes(raw_value)
@@ -4078,47 +4090,11 @@ class ArbitrageScanner:
                 return ttl
         return fallback
 
-    def _strategy_cap_for_key(self, strategy_key: str, fallback: int) -> int:
-        key = str(strategy_key or "").strip().lower()
-        if not key:
-            return fallback
-        return self._strategy_cap_from_instance(strategy_loader.get_instance(key), fallback)
-
     def _strategy_ttl_for_key(self, strategy_key: str, fallback: int) -> int:
         key = str(strategy_key or "").strip().lower()
         if not key:
             return fallback
         return self._strategy_ttl_from_instance(strategy_loader.get_instance(key), fallback)
-
-    def _apply_opportunity_caps(self, opportunities: list[Opportunity]) -> list[Opportunity]:
-        """Limit pool size globally and per strategy to prevent strategy flood."""
-        total_cap = int(getattr(settings, "SCANNER_MAX_OPPORTUNITIES_TOTAL", 0) or 0)
-        per_strategy_cap = int(getattr(settings, "SCANNER_MAX_OPPORTUNITIES_PER_STRATEGY", 0) or 0)
-        kept: list[Opportunity] = []
-        by_strategy: dict[str, int] = {}
-        resolved_caps: dict[str, int] = {}
-
-        for opp in opportunities:
-            strategy = str(getattr(opp, "strategy", "") or "unknown")
-            strategy_cap = resolved_caps.get(strategy)
-            if strategy_cap is None:
-                strategy_cap = self._strategy_cap_for_key(strategy, per_strategy_cap)
-                resolved_caps[strategy] = strategy_cap
-            if strategy_cap > 0 and by_strategy.get(strategy, 0) >= strategy_cap:
-                continue
-            by_strategy[strategy] = by_strategy.get(strategy, 0) + 1
-            kept.append(opp)
-            if total_cap > 0 and len(kept) >= total_cap:
-                break
-
-        removed = len(opportunities) - len(kept)
-        if removed > 0:
-            logger.info(
-                "Opportunity caps applied: "
-                f"{len(kept)} kept, {removed} removed "
-                f"(total_cap={total_cap or 'off'}, per_strategy_cap={per_strategy_cap or 'off'})"
-            )
-        return kept
 
     def _merge_opportunities(self, new_opportunities: list[Opportunity]) -> list[Opportunity]:
         """Merge newly detected opportunities into the existing pool.
@@ -4230,7 +4206,6 @@ class ArbitrageScanner:
 
         # Sort by ROI
         merged.sort(key=lambda x: x.roi_percent, reverse=True)
-        merged = self._apply_opportunity_caps(merged)
 
         retained = len(merged) - new_count - updated_count
         if retained < 0:

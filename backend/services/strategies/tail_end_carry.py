@@ -171,7 +171,6 @@ class TailEndCarryStrategy(BaseStrategy):
         "max_spread": 0.05,
         "min_repricing_buffer": 0.015,
         "repricing_weight": 0.45,
-        "max_opportunities": 120,
         "exclude_market_keywords": [
             "lol:", "counter-strike",
             "tweets", "league of legends", "esports", "rift legends",
@@ -474,17 +473,15 @@ class TailEndCarryStrategy(BaseStrategy):
         cfg.update(getattr(self, "config", {}) or {})
 
         min_probability = clamp(safe_float(cfg.get("min_probability"), 0.85), 0.5, 0.995)
-        max_probability = clamp(safe_float(cfg.get("max_probability"), 0.999), min_probability + 0.005, 0.999)
         min_upside_percent = clamp(safe_float(cfg.get("min_upside_percent"), 5.0), 5.0, 100.0)
         sports_min_probability = clamp(safe_float(cfg.get("sports_min_probability"), 0.90), 0.5, 0.995)
         sports_max_days = max(0.005, safe_float(cfg.get("sports_max_days_to_resolution"), 0.25))
-        min_days = max(0.0, safe_float(cfg.get("min_days_to_resolution"), 0.01))
+        min_days = 0.0
         max_days = max(min_days + 0.005, safe_float(cfg.get("max_days_to_resolution"), 1.0))
         min_liquidity = max(100.0, safe_float(cfg.get("min_liquidity"), 3500.0))
         max_spread = clamp(safe_float(cfg.get("max_spread"), 0.05), 0.005, 0.20)
         min_repricing_buffer = clamp(safe_float(cfg.get("min_repricing_buffer"), 0.015), 0.005, 0.10)
         repricing_weight = clamp(safe_float(cfg.get("repricing_weight"), 0.45), 0.10, 0.90)
-        max_opportunities = max(1, int(safe_float(cfg.get("max_opportunities"), 120)))
         panic_drop_threshold = clamp(safe_float(cfg.get("panic_drop_threshold"), 0.08), 0.02, 0.30)
         panic_window_points = max(3, int(safe_float(cfg.get("panic_window_points"), 6)))
         panic_recovery_ratio_max = clamp(safe_float(cfg.get("panic_recovery_ratio_max"), 0.20), 0.0, 0.9)
@@ -506,18 +503,7 @@ class TailEndCarryStrategy(BaseStrategy):
             if market.closed or not market.active:
                 continue
             event_for_market = event_by_market.get(market.id)
-            if excluded_keywords:
-                market_text = self._market_text(market, event_for_market)
-                if self._first_blocked_keyword(market_text, excluded_keywords) is not None:
-                    continue
-            if block_spread_markets:
-                sports_type = getattr(market, "sports_market_type", None)
-                if sports_type == "spreads":
-                    continue
-                if self._is_spread_market(market_text if excluded_keywords else self._market_text(market, event_for_market)):
-                    continue
-            if safe_float(getattr(market, "liquidity", 0.0)) < min_liquidity:
-                continue
+            market_text = self._market_text(market, event_for_market)
             if (
                 len(list(getattr(market, "clob_token_ids", []) or [])) < 2
                 and len(list(getattr(market, "outcome_prices", []) or [])) < 2
@@ -572,28 +558,31 @@ class TailEndCarryStrategy(BaseStrategy):
             # Fix #1: classify market category
             category = self._classify_market_from_model(market, event_for_market)
             is_sports = category in (CATEGORY_SPORTS, CATEGORY_ESPORTS)
-
-            # Sports-specific: tighter resolution window (default 0.25 days / 6 hours)
-            if is_sports and days_to_res > sports_max_days:
-                continue
-
-            # Fix #3: skip live games for sports/esports
-            if skip_live_games and is_sports:
-                if self._is_live_game(market, now, live_game_buffer_minutes):
-                    continue
-
-            # Sports use a higher min_probability (0.90 default vs 0.85 general)
-            effective_min_prob = sports_min_probability if is_sports else min_probability
+            blocked_keyword = self._first_blocked_keyword(market_text, excluded_keywords) if excluded_keywords else None
+            sports_type = getattr(market, "sports_market_type", None)
+            is_spread_market = bool(
+                block_spread_markets
+                and (
+                    sports_type == "spreads"
+                    or self._is_spread_market(market_text)
+                )
+            )
+            liquidity = safe_float(getattr(market, "liquidity", 0.0))
+            liquidity_ok = liquidity >= min_liquidity
+            live_game_detected = bool(
+                skip_live_games
+                and is_sports
+                and self._is_live_game(market, now, live_game_buffer_minutes)
+            )
+            sports_window_ok = (not is_sports) or days_to_res <= sports_max_days
 
             for outcome in ("YES", "NO"):
                 price, bid, ask, token_id = self._extract_side_book(market, prices, outcome)
-                if not (effective_min_prob <= price <= max_probability):
+                if price < min_probability:
                     continue
                 if price <= 0.0:
                     continue
                 max_settlement_upside_pct = ((1.0 - price) / price) * 100.0
-                if max_settlement_upside_pct < min_upside_percent:
-                    continue
 
                 history_key = f"{market.id}:{outcome}"
                 history = history_by_key.get(history_key)
@@ -602,24 +591,25 @@ class TailEndCarryStrategy(BaseStrategy):
                     history_by_key[history_key] = history
                 history.append(float(price))
                 price_window = list(history)[-panic_window_points:]
+                panic_guard_ok = True
                 if len(price_window) >= panic_window_points:
                     window_high = max(price_window)
                     window_low = min(price_window)
                     drop_from_high = (window_high - price) / max(window_high, 1e-6)
                     recovery_ratio = (price - window_low) / max(window_high - window_low, 1e-6)
                     if drop_from_high >= panic_drop_threshold and recovery_ratio <= panic_recovery_ratio_max:
-                        continue
+                        panic_guard_ok = False
 
                 spread = 0.0
+                spread_ok = True
                 if isinstance(bid, float) and isinstance(ask, float) and bid > 0.0 and ask > 0.0:
                     spread = max(0.0, ask - bid)
                     if spread > max_spread:
-                        continue
+                        spread_ok = False
 
                 target_move = max(min_repricing_buffer, (1.0 - price) * repricing_weight)
                 target_price = min(0.999, price + target_move)
-                if target_price <= (price + 1e-6):
-                    continue
+                upside_ok = max_settlement_upside_pct >= min_upside_percent
 
                 positions = [
                     {
@@ -636,6 +626,14 @@ class TailEndCarryStrategy(BaseStrategy):
                             "max_settlement_upside_pct": max_settlement_upside_pct,
                             "market_category": category,
                             "game_start_time": getattr(market, "game_start_time", None),
+                            "blocked_keyword": blocked_keyword,
+                            "is_spread_market": is_spread_market,
+                            "liquidity_ok": liquidity_ok,
+                            "sports_window_ok": sports_window_ok,
+                            "live_game_detected": live_game_detected,
+                            "panic_guard_ok": panic_guard_ok,
+                            "spread_ok": spread_ok,
+                            "upside_ok": upside_ok,
                         },
                     }
                 ]
@@ -646,10 +644,10 @@ class TailEndCarryStrategy(BaseStrategy):
                     or ""
                 )
                 if len(market_label) > 80:
-                    market_label = market_label[:77] + "…"
+                    market_label = market_label[:77] + "..."
 
                 opp = self.create_opportunity(
-                    title=f"Tail Carry: {outcome} {price:.1%} — {market_label}" if market_label else f"Tail Carry: {outcome} {price:.1%} into resolution",
+                    title=f"Tail Carry: {outcome} {price:.1%} - {market_label}" if market_label else f"Tail Carry: {outcome} {price:.1%} into resolution",
                     description=(
                         f"{outcome} at {price:.3f} with {days_to_res:.1f} days to resolution; "
                         f"target repricing to {target_price:.3f}. [{category}]"
@@ -687,6 +685,20 @@ class TailEndCarryStrategy(BaseStrategy):
                 opp.strategy_context["market_category"] = category
                 opp.strategy_context["game_start_time"] = getattr(market, "game_start_time", None)
                 opp.strategy_context["sports_market_type"] = getattr(market, "sports_market_type", None)
+                opp.strategy_context["blocked_keyword"] = blocked_keyword
+                opp.strategy_context["is_spread_market"] = is_spread_market
+                opp.strategy_context["execution_min_liquidity"] = min_liquidity
+                opp.strategy_context["liquidity_ok"] = liquidity_ok
+                opp.strategy_context["sports_min_probability"] = sports_min_probability
+                opp.strategy_context["sports_window_ok"] = sports_window_ok
+                opp.strategy_context["live_game_detected"] = live_game_detected
+                opp.strategy_context["panic_guard_ok"] = panic_guard_ok
+                opp.strategy_context["book_spread"] = spread
+                opp.strategy_context["book_spread_ok"] = spread_ok
+                opp.strategy_context["execution_max_spread"] = max_spread
+                opp.strategy_context["max_settlement_upside_pct"] = max_settlement_upside_pct
+                opp.strategy_context["upside_ok"] = upside_ok
+                opp.strategy_context["raw_tail_candidate"] = True
 
                 strength = (target_price - price) * (1.0 - opp.risk_score)
                 candidates.append((strength, opp))
@@ -705,8 +717,6 @@ class TailEndCarryStrategy(BaseStrategy):
                 continue
             seen.add(key)
             out.append(opp)
-            if len(out) >= max_opportunities:
-                break
         return out
 
     # ------------------------------------------------------------------
@@ -723,13 +733,23 @@ class TailEndCarryStrategy(BaseStrategy):
         signal_text = self._signal_market_text(signal, payload)
 
         block_spread_markets = _is_bool_true(params.get("block_spread_markets", True))
+        excluded_keywords = self._normalize_excluded_keywords(params.get("exclude_market_keywords"))
+        blocked_keyword = str(payload.get("blocked_keyword") or "").strip() or None
+        min_liquidity = max(100.0, to_float(params.get("min_liquidity", 3500.0), 3500.0))
+        liquidity = max(0.0, to_float(getattr(signal, "liquidity", 0.0), 0.0))
+        max_spread = clamp(to_float(params.get("max_spread", 0.05), 0.05), 0.005, 0.20)
+        observed_spread = max(0.0, to_float(payload.get("book_spread", 0.0), 0.0))
+        spread_ok = bool(payload.get("book_spread_ok", observed_spread <= max_spread))
+        panic_guard_ok = bool(payload.get("panic_guard_ok", True))
         is_spread = False
         if block_spread_markets:
-            markets_list = payload.get("markets")
-            if isinstance(markets_list, list) and markets_list:
-                m0 = markets_list[0] if isinstance(markets_list[0], dict) else {}
-                if m0.get("sports_market_type") == "spreads":
-                    is_spread = True
+            is_spread = bool(payload.get("is_spread_market", False))
+            if not is_spread:
+                markets_list = payload.get("markets")
+                if isinstance(markets_list, list) and markets_list:
+                    m0 = markets_list[0] if isinstance(markets_list[0], dict) else {}
+                    if m0.get("sports_market_type") == "spreads":
+                        is_spread = True
             if not is_spread:
                 is_spread = self._is_spread_market(signal_text)
 
@@ -795,6 +815,19 @@ class TailEndCarryStrategy(BaseStrategy):
                 detail="Spread markets blocked (volatile mid-game swings)" if is_spread else "ok",
             ),
             DecisionCheck(
+                "keyword_block",
+                "Market keyword allowed",
+                blocked_keyword is None,
+                detail=f"blocked keyword={blocked_keyword}" if blocked_keyword else ",".join(excluded_keywords[:5]) if excluded_keywords else "ok",
+            ),
+            DecisionCheck(
+                "liquidity_floor",
+                "Hard liquidity floor",
+                liquidity >= min_liquidity,
+                score=liquidity,
+                detail=f">= {min_liquidity:.0f}",
+            ),
+            DecisionCheck(
                 "entry",
                 "Entry probability band",
                 effective_min_entry <= entry_price <= max_entry,
@@ -814,6 +847,19 @@ class TailEndCarryStrategy(BaseStrategy):
                 upside_ok,
                 score=max_settlement_upside_pct,
                 detail=f">= {min_upside_percent:.2f}%",
+            ),
+            DecisionCheck(
+                "book_spread",
+                "Bid/ask spread within limit",
+                spread_ok,
+                score=observed_spread,
+                detail=f"<= {max_spread:.3f}",
+            ),
+            DecisionCheck(
+                "panic_guard",
+                "Recent price action not in panic unwind",
+                panic_guard_ok,
+                detail="panic/recovery guard",
             ),
         ]
 

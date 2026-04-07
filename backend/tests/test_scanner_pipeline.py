@@ -772,6 +772,63 @@ class TestScanPipeline:
         assert abs((refreshed_opp.last_priced_at - ts).total_seconds()) < 1.0
 
     @pytest.mark.asyncio
+    async def test_scan_fast_drops_stale_opportunities_on_runtime_refresh(self, mock_polymarket_client):
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+        market = Market(
+            id="m_runtime_refresh",
+            condition_id="c_runtime_refresh",
+            question="Will runtime refresh stay fresh?",
+            slug="runtime-refresh",
+            clob_token_ids=["tok_runtime_yes", "tok_runtime_no"],
+            outcome_prices=[0.48, 0.52],
+        )
+        _seed_scanner_cache(scanner, markets=[market])
+        scanner._prioritizer.get_markets_needing_eval = MagicMock(return_value=[])
+        refresh_mock = AsyncMock(return_value=[])
+
+        with (
+            patch.object(scanner, "_ensure_runtime_strategies_loaded", new_callable=AsyncMock),
+            patch.object(scanner, "_set_activity", new_callable=AsyncMock),
+            patch.object(scanner, "refresh_opportunity_prices", refresh_mock),
+            patch.object(scanner, "_snapshot_ws_prices", new_callable=AsyncMock, return_value={}),
+        ):
+            await scanner.scan_fast()
+
+        assert refresh_mock.await_count == 1
+        assert refresh_mock.await_args.kwargs["drop_stale"] is True
+
+    @pytest.mark.asyncio
+    async def test_full_snapshot_drops_stale_opportunities_on_runtime_refresh(self, mock_polymarket_client):
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+        market = Market(
+            id="m_full_refresh",
+            condition_id="c_full_refresh",
+            question="Will full snapshot refresh stay fresh?",
+            slug="full-refresh",
+            clob_token_ids=["tok_full_yes", "tok_full_no"],
+            outcome_prices=[0.49, 0.51],
+        )
+        scanner._cached_markets = [market]
+        scanner._cached_market_by_id = {market.id: market}
+        scanner._cached_events = []
+        refresh_mock = AsyncMock(return_value=[])
+
+        with (
+            patch.object(scanner, "_ensure_runtime_strategies_loaded", new_callable=AsyncMock),
+            patch.object(scanner, "_partition_market_refresh_strategies", return_value=(set(), {"tail_end_carry"})),
+            patch.object(scanner, "_dispatch_market_refresh", new_callable=AsyncMock, return_value=[]),
+            patch.object(scanner, "_set_activity", new_callable=AsyncMock),
+            patch.object(scanner, "refresh_opportunity_prices", refresh_mock),
+            patch.object(scanner, "_snapshot_ws_prices", new_callable=AsyncMock, return_value={}),
+            patch("services.scanner.settings.SCANNER_FORCE_FULL_UNIVERSE", True),
+            patch("services.scanner.settings.SCANNER_FULL_SNAPSHOT_CHUNK_SIZE", 300),
+        ):
+            await scanner.scan_full_snapshot_strategies(force=True)
+
+        assert refresh_mock.await_count == 1
+        assert refresh_mock.await_args.kwargs["drop_stale"] is True
+
+    @pytest.mark.asyncio
     async def test_refresh_opportunity_prices_preserves_multi_outcome_prices(self, mock_polymarket_client):
         scanner = _build_scanner(mock_client=mock_polymarket_client)
         opp = Opportunity(
@@ -816,6 +873,62 @@ class TestScanPipeline:
         assert market["yes_price"] == pytest.approx(0.25)
         assert market["no_price"] == pytest.approx(0.30)
         assert market["outcome_prices"] == pytest.approx([0.25, 0.30, 0.27, 0.18])
+
+    @pytest.mark.asyncio
+    async def test_refresh_opportunity_prices_keeps_full_snapshot_opportunity_until_cycle_can_revisit(
+        self, mock_polymarket_client
+    ):
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+        seen_at = utcnow() - timedelta(minutes=4)
+        stale_price_at = utcnow() - timedelta(minutes=3)
+        opp = Opportunity(
+            strategy="tail_end_carry",
+            title="Heavy lane stale retention",
+            description="D",
+            total_cost=0.91,
+            gross_profit=0.09,
+            fee=0.01,
+            net_profit=0.08,
+            roi_percent=8.79,
+            markets=[
+                {
+                    "id": "m_heavy_retention",
+                    "question": "Test?",
+                    "clob_token_ids": ["tok_yes", "tok_no"],
+                    "yes_price": 0.09,
+                    "no_price": 0.91,
+                    "price_updated_at": stale_price_at.replace(tzinfo=None).isoformat() + "Z",
+                }
+            ],
+            positions_to_take=[],
+            detected_at=seen_at,
+            last_detected_at=seen_at,
+            last_seen_at=seen_at,
+        )
+        scanner._full_snapshot_cycle_total_markets = 47000
+        scanner._full_snapshot_cycle_processed_markets = 4700
+        scanner._full_snapshot_cycle_started_at = utcnow() - timedelta(minutes=2)
+        scanner._full_snapshot_cycle_completed_at = None
+
+        with (
+            patch.object(scanner, "_snapshot_ws_prices", new_callable=AsyncMock, return_value={}),
+            patch("services.scanner.settings.SCANNER_MARKET_PRICE_MAX_AGE_SECONDS", 60),
+        ):
+            refreshed = await scanner.refresh_opportunity_prices([opp], now=utcnow(), drop_stale=True)
+
+        assert refreshed == [opp]
+
+    def test_opportunity_last_detected_retention_expands_for_large_full_snapshot_cycle(self):
+        scanner = _build_scanner()
+        scanner._full_snapshot_cycle_total_markets = 47000
+        scanner._full_snapshot_cycle_processed_markets = 4700
+        scanner._full_snapshot_cycle_started_at = utcnow() - timedelta(minutes=2)
+        scanner._full_snapshot_cycle_completed_at = None
+
+        retention_seconds = scanner._opportunity_last_detected_retention_seconds(utcnow())
+
+        assert retention_seconds >= 300.0
+        assert retention_seconds > 180.0
 
     @pytest.mark.asyncio
     async def test_full_snapshot_scan_keeps_existing_pool_when_no_new_full_results(
@@ -1819,6 +1932,64 @@ class TestScannerCallbacks:
 
         cb1.assert_awaited_once()
         cb2.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_full_snapshot_scan_callback_invoked(self, mock_polymarket_client):
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+        market = Market(
+            id="m_full_callback_1",
+            condition_id="c_full_callback_1",
+            question="Will the full snapshot callback fire?",
+            slug="full-callback-1",
+            clob_token_ids=["tok_full_cb_yes_" + ("0" * 20), "tok_full_cb_no_" + ("0" * 20)],
+            outcome_prices=[0.48, 0.52],
+        )
+        scanner._cached_markets = [market]
+        scanner._cached_market_by_id = {market.id: market}
+        scanner._cached_events = []
+        opportunity = Opportunity(
+            strategy="basic",
+            title="Full snapshot callback opportunity",
+            description="Heavy lane callback regression",
+            total_cost=0.96,
+            expected_payout=1.0,
+            gross_profit=0.04,
+            fee=0.02,
+            net_profit=0.02,
+            roi_percent=2.08,
+            risk_score=0.3,
+            markets=[
+                {
+                    "id": market.id,
+                    "question": market.question,
+                    "yes_price": 0.48,
+                    "no_price": 0.52,
+                    "clob_token_ids": list(market.clob_token_ids),
+                }
+            ],
+            mispricing_type=MispricingType.WITHIN_MARKET,
+            last_seen_at=utcnow(),
+            detected_at=utcnow(),
+        )
+        callback = AsyncMock()
+        scanner.add_callback(callback)
+
+        with (
+            patch.object(scanner, "_ensure_runtime_strategies_loaded", new_callable=AsyncMock),
+            patch.object(scanner, "_partition_market_refresh_strategies", return_value=(set(), {"full_only"})),
+            patch.object(scanner, "_snapshot_ws_prices", new_callable=AsyncMock, return_value={}),
+            patch.object(scanner, "_dispatch_market_refresh", new_callable=AsyncMock, return_value=[opportunity]),
+            patch.object(scanner, "_set_activity", new_callable=AsyncMock),
+            patch("services.scanner.quality_filter") as mock_qf,
+        ):
+            mock_qf.evaluate_opportunity = MagicMock(return_value=_make_quality_pass())
+            results = await scanner.scan_full_snapshot_strategies(force=True)
+
+        assert len(results) == 1
+        callback.assert_awaited_once()
+        call_args = callback.call_args[0][0]
+        assert len(call_args) == 1
+        assert call_args[0].title == "Full snapshot callback opportunity"
 
     @pytest.mark.asyncio
     async def test_callback_exception_does_not_break_scan(self, mock_polymarket_client, sample_opportunity):

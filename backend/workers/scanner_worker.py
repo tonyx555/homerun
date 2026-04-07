@@ -31,6 +31,7 @@ from sqlalchemy.exc import DBAPIError
 
 from config import apply_runtime_settings_overrides, settings
 from models.database import AsyncSessionLocal
+from services.quality_filter import quality_filter
 from services.scanner import scanner
 from services.runtime_signal_queue import get_queue_depth
 from services.shared_state import (
@@ -42,6 +43,7 @@ from services.shared_state import (
     write_scanner_snapshot,
 )
 from services.strategy_signal_bridge import bridge_opportunities_to_signals
+from services.strategy_loader import strategy_loader
 from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.worker_state import write_worker_snapshot
 from utils.logger import get_logger
@@ -227,10 +229,17 @@ async def _enqueue_detection_batch(
     status: dict,
     *,
     batch_kind: str,
+    quality_reports: Optional[dict] = None,
 ) -> tuple[str | None, int, int]:
     """Persist scanner truth and emit runtime signals directly."""
     market_history: dict[str, list[dict]] = {}
+    effective_quality_reports: dict = dict(quality_reports or {})
     for opportunity in opportunities:
+        stable_id = str(getattr(opportunity, "stable_id", None) or getattr(opportunity, "id", "") or "").strip()
+        if stable_id and stable_id not in effective_quality_reports:
+            strategy_instance = strategy_loader.get_instance(getattr(opportunity, "strategy", None))
+            overrides = getattr(strategy_instance, "quality_filter_overrides", None) if strategy_instance else None
+            effective_quality_reports[stable_id] = quality_filter.evaluate_opportunity(opportunity, overrides=overrides)
         for market in getattr(opportunity, "markets", None) or []:
             if not isinstance(market, dict):
                 continue
@@ -255,6 +264,7 @@ async def _enqueue_detection_batch(
             session,
             opportunities,
             source="scanner",
+            quality_reports=effective_quality_reports,
             sweep_missing=True,
             refresh_prices=False,
         )
@@ -462,6 +472,7 @@ async def _run_scan_loop() -> None:
             scanner.get_opportunities(),
             startup_status,
             batch_kind="startup",
+            quality_reports=getattr(scanner, "quality_reports", {}) or {},
         )
         heartbeat_state["queue_pending"] = pending
         heartbeat_state["dropped_batches"] = int(heartbeat_state.get("dropped_batches", 0) or 0) + dropped
@@ -670,16 +681,8 @@ async def _run_scan_loop() -> None:
                     now=datetime.now(timezone.utc),
                     drop_stale=True,
                 )
-                detected_age_threshold_seconds = max(
-                    60.0,
-                    float(
-                        getattr(
-                            settings,
-                            "SCANNER_SLO_MAX_OPPORTUNITY_LAST_DETECTED_AGE_P95_SECONDS",
-                            180.0,
-                        )
-                        or 180.0
-                    ),
+                detected_age_threshold_seconds = scanner._opportunity_last_detected_retention_seconds(
+                    datetime.now(timezone.utc)
                 )
                 scanner.remove_old_opportunities(
                     max_age_minutes=max(1, int(math.ceil(detected_age_threshold_seconds / 60.0))),
@@ -748,6 +751,7 @@ async def _run_scan_loop() -> None:
                             opportunities,
                             status,
                             batch_kind=batch_kind,
+                            quality_reports=getattr(scanner, "quality_reports", {}) or {},
                         )
                         heartbeat_state["queue_pending"] = pending
                         heartbeat_state["dropped_batches"] = (
