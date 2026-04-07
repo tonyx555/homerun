@@ -4573,12 +4573,6 @@ async def _run_trader_once(
             )
         )
         scan_batch_size = min(scan_batch_size, max_signals_per_cycle)
-        runtime_trigger_serial_mode = bool(
-            stream_trigger_mode
-            and run_mode == "live"
-            and not is_high_frequency_trader
-            and "scanner" in sources
-        )
         if stream_trigger_mode:
             runtime_trigger_scan_batch_size = (
                 _HIGH_FREQUENCY_RUNTIME_TRIGGER_SCAN_BATCH_SIZE
@@ -4587,9 +4581,6 @@ async def _run_trader_once(
             )
             max_signals_per_cycle = min(max_signals_per_cycle, runtime_trigger_signal_limit)
             scan_batch_size = min(scan_batch_size, runtime_trigger_scan_batch_size, max_signals_per_cycle)
-            if runtime_trigger_serial_mode:
-                max_signals_per_cycle = 1
-                scan_batch_size = 1
         enable_live_market_context = bool(live_market_context_settings.get("enabled", True))
         strict_ws_pricing_only = _coerce_bool(
             live_market_context_settings.get("strict_ws_pricing_only"),

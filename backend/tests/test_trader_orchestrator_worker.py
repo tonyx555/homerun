@@ -4984,3 +4984,154 @@ async def test_run_trader_once_prefetches_strategy_metadata_once_per_source(monk
     assert resolve_mock.await_count == 1
     assert experiment_mock.await_count == 1
 
+
+@pytest.mark.asyncio
+async def test_run_trader_once_live_runtime_trigger_processes_runtime_trigger_batch(monkeypatch):
+    signals: list[SimpleNamespace] = []
+    for idx in range(5):
+        signal = _base_signal()
+        signal.id = f"signal-{idx + 1}"
+        signal.source = "scanner"
+        signal.signal_type = "scanner_opportunity"
+        signal.strategy_type = "generic_strategy"
+        signal.market_id = f"market-{idx + 1}"
+        signal.market_question = f"Will market {idx + 1} resolve?"
+        signal.direction = "buy_no"
+        signal.entry_price = 0.88
+        signal.created_at = datetime.utcnow() + timedelta(seconds=idx)
+        signals.append(signal)
+
+    decisions: list[dict] = []
+
+    async def _build_triggered(*args, **kwargs):
+        return list(signals)
+
+    async def _create_decision(session, **kwargs):
+        decisions.append(kwargs)
+        return SimpleNamespace(id=f"decision-{len(decisions)}")
+
+    async def _execute_signal(self, **kwargs):
+        return SimpleNamespace(
+            session_id=f"session-{len(decisions)}",
+            status="completed",
+            effective_price=0.88,
+            error_message=None,
+            orders_written=0,
+            payload={},
+        )
+
+    async def _reconcile_active_sessions(self, *, mode, trader_id=None):
+        return {"active_seen": 0, "expired": 0, "completed": 0, "failed": 0}
+
+    trader_payload = {
+        "id": "trader-1",
+        "source_configs": [
+            {
+                "source_key": "scanner",
+                "strategy_key": "generic_strategy",
+                "strategy_params": {
+                    "max_signals_per_cycle": 10,
+                    "scan_batch_size": 10,
+                    "require_live_market_revalidation": False,
+                    "require_live_revalidation_for_sources": [],
+                    "enforce_market_data_freshness": False,
+                },
+            }
+        ],
+        "risk_limits": {"allow_averaging": True},
+        "metadata": {"resume_policy": "resume_full"},
+    }
+    control_payload = _base_control_payload()
+
+    monkeypatch.setattr(trader_orchestrator_worker, "AsyncSessionLocal", lambda: _DummySessionContext())
+    monkeypatch.setattr(trader_orchestrator_worker, "_query_sources_for_configs", lambda *_: ["scanner"])
+    monkeypatch.setattr(trader_orchestrator_worker, "_build_triggered_trade_signals", _build_triggered)
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "resolve_strategy_version",
+        AsyncMock(side_effect=lambda _session, *, strategy_key, requested_version: _mock_resolve_strategy_version(strategy_key)),
+    )
+    monkeypatch.setattr(trader_orchestrator_worker, "get_active_strategy_experiment", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        trader_orchestrator_worker.strategy_db_loader,
+        "get_availability",
+        lambda strategy_key: SimpleNamespace(
+            available=True,
+            strategy_key=strategy_key,
+            resolved_key=strategy_key,
+            reason=None,
+        ),
+    )
+    monkeypatch.setattr(
+        trader_orchestrator_worker.strategy_db_loader,
+        "get_strategy",
+        lambda *_: _SelectedStrategy(),
+    )
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "RuntimeTradeSignalView",
+        lambda sig, live_context=None: SimpleNamespace(**sig.__dict__, live_context=(live_context or {})),
+    )
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "evaluate_risk",
+        lambda **_: SimpleNamespace(allowed=True, reason="ok", checks=[]),
+    )
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "_backfill_simulation_ledger_for_active_paper_orders",
+        AsyncMock(return_value={"attempted": 0, "backfilled": 0, "skipped": 0, "errors": []}),
+    )
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "sync_trader_position_inventory",
+        AsyncMock(return_value={}),
+    )
+    monkeypatch.setattr(trader_orchestrator_worker, "get_open_position_count_for_trader", AsyncMock(return_value=0))
+    monkeypatch.setattr(trader_orchestrator_worker, "get_open_order_count_for_trader", AsyncMock(return_value=0))
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "get_pending_live_exit_summary_for_trader",
+        AsyncMock(return_value={"count": 0, "order_ids": [], "market_ids": [], "statuses": {}}),
+    )
+    monkeypatch.setattr(trader_orchestrator_worker, "get_open_market_ids_for_trader", AsyncMock(return_value=set()))
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "cleanup_trader_open_orders",
+        AsyncMock(return_value={"matched": 0, "updated": 0}),
+    )
+    monkeypatch.setattr(trader_orchestrator_worker, "get_daily_realized_pnl", AsyncMock(return_value=0.0))
+    monkeypatch.setattr(trader_orchestrator_worker, "get_consecutive_loss_count", AsyncMock(return_value=0))
+    monkeypatch.setattr(trader_orchestrator_worker, "get_last_resolved_loss_at", AsyncMock(return_value=None))
+    monkeypatch.setattr(trader_orchestrator_worker, "get_trader_signal_cursor", AsyncMock(return_value=(None, None)))
+    monkeypatch.setattr(trader_orchestrator_worker, "get_trader_signal_sequence_cursor", AsyncMock(return_value=None))
+    monkeypatch.setattr(trader_orchestrator_worker, "get_gross_exposure", AsyncMock(return_value=0.0))
+    monkeypatch.setattr(trader_orchestrator_worker, "get_market_exposure", AsyncMock(return_value=0.0))
+    monkeypatch.setattr(trader_orchestrator_worker, "create_trader_decision", _create_decision)
+    monkeypatch.setattr(trader_orchestrator_worker, "create_trader_decision_checks", AsyncMock(return_value=None))
+    monkeypatch.setattr(trader_orchestrator_worker.ExecutionSessionEngine, "execute_signal", _execute_signal)
+    monkeypatch.setattr(
+        trader_orchestrator_worker.ExecutionSessionEngine,
+        "reconcile_active_sessions",
+        _reconcile_active_sessions,
+    )
+    monkeypatch.setattr(trader_orchestrator_worker, "set_trade_signal_status", AsyncMock(return_value=True))
+    monkeypatch.setattr(trader_orchestrator_worker, "record_signal_consumption", AsyncMock(return_value=None))
+    monkeypatch.setattr(trader_orchestrator_worker, "create_trader_order", AsyncMock(return_value=None))
+    monkeypatch.setattr(trader_orchestrator_worker, "create_trader_event", AsyncMock(return_value=None))
+    monkeypatch.setattr(trader_orchestrator_worker, "upsert_trader_signal_cursor", AsyncMock(return_value=None))
+    monkeypatch.setattr(trader_orchestrator_worker, "_emit_cycle_heartbeat_if_due", AsyncMock(return_value=None))
+    monkeypatch.setattr(trader_orchestrator_worker, "_persist_trader_cycle_heartbeat", AsyncMock(return_value=None))
+
+    decisions_written, orders_written, processed_signals = await trader_orchestrator_worker._run_trader_once(
+        trader_payload,
+        control_payload,
+        trigger_signal_ids_by_source={"scanner": [signal.id for signal in signals]},
+        trigger_signal_snapshots_by_source={"scanner": {signal.id: {"id": signal.id} for signal in signals}},
+    )
+
+    assert decisions_written == 4
+    assert orders_written == 0
+    assert processed_signals == 4
+    assert len(decisions) == 4
+

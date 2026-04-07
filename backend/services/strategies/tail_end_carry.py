@@ -140,6 +140,8 @@ class TailEndCarryStrategy(BaseStrategy):
 
     quality_filter_overrides = QualityFilterOverrides(
         min_roi=1.0,
+        min_position_size=20.0,
+        min_absolute_profit=3.0,
         max_resolution_months=1.0,
     )
 
