@@ -301,7 +301,6 @@ def _material_signal_change(existing: dict[str, Any], incoming: dict[str, Any]) 
         "quality_passed",
         "quality_rejection_reasons",
         "dedupe_key",
-        "expires_at",
     ):
         if existing.get(key) != incoming.get(key):
             return True

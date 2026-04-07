@@ -1640,6 +1640,7 @@ async def test_run_trader_once_persists_heartbeat_when_signal_queue_is_empty(mon
         return []
 
     monkeypatch.setattr(trader_orchestrator_worker, "AsyncSessionLocal", lambda: _DummySessionContext())
+    monkeypatch.setattr(trader_orchestrator_worker, "_trader_idle_maintenance_last_run", {})
     monkeypatch.setattr(
         trader_orchestrator_worker,
         "_backfill_simulation_ledger_for_active_paper_orders",
@@ -3638,6 +3639,11 @@ async def test_run_trader_once_uses_cached_live_context_builder_for_trigger_cycl
     monkeypatch.setattr(trader_orchestrator_worker, "get_trader_signal_cursor", AsyncMock(return_value=(None, None)))
     monkeypatch.setattr(
         trader_orchestrator_worker,
+        "_list_unconsumed_trade_signals_authoritative",
+        AsyncMock(return_value=[SimpleNamespace(id="signal-1", status="pending", runtime_sequence=None)]),
+    )
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
         "list_unconsumed_trade_signals",
         AsyncMock(side_effect=AssertionError("trigger cycles should use prefetched signal snapshots")),
     )
@@ -3798,6 +3804,11 @@ async def test_run_trader_once_trigger_cycle_fetches_full_live_context_when_stri
     monkeypatch.setattr(trader_orchestrator_worker, "get_consecutive_loss_count", AsyncMock(return_value=0))
     monkeypatch.setattr(trader_orchestrator_worker, "get_last_resolved_loss_at", AsyncMock(return_value=None))
     monkeypatch.setattr(trader_orchestrator_worker, "get_trader_signal_cursor", AsyncMock(return_value=(None, None)))
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "_list_unconsumed_trade_signals_authoritative",
+        AsyncMock(return_value=[SimpleNamespace(id="signal-1", status="pending", runtime_sequence=None)]),
+    )
     monkeypatch.setattr(
         trader_orchestrator_worker,
         "list_unconsumed_trade_signals",

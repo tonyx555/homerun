@@ -352,7 +352,7 @@ def test_evaluate_does_not_reapply_signal_phase_keyword_exclusions():
             "strategy": "tail_end_carry",
             "strategy_type": "tail_end_carry",
             "risk_score": 0.6,
-            "resolution_date": "2026-04-06T23:59:00Z",
+            "resolution_date": "2027-01-01T00:00:00Z",
             "markets": [
                 {
                     "id": "market-solana",
@@ -372,6 +372,8 @@ def test_evaluate_does_not_reapply_signal_phase_keyword_exclusions():
                 "exclude_market_keywords": ["solana"],
                 "base_size_usd": 10.0,
                 "max_size_usd": 20.0,
+                "max_days_to_resolution": 365,
+                "min_days_to_resolution": 0.0,
             }
         },
     )

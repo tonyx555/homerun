@@ -1086,7 +1086,6 @@ async def _build_triggered_trade_signals(
     if not signal_ids_by_source or not sources:
         return []
 
-    normalized_statuses = {str(status or "").strip().lower() for status in statuses if str(status or "").strip()}
     ordered_ids: list[str] = []
     seen_ids: set[str] = set()
     ordered_sources = ["__all__", *sources]
@@ -4670,13 +4669,6 @@ async def _run_trader_once(
             if run_mode == "live" and not allow_averaging and open_market_ids
             else set()
         )
-        if prefetched_signals and excluded_market_ids_for_signal_fetch:
-            prefetched_signals = [
-                signal
-                for signal in prefetched_signals
-                if str(getattr(signal, "market_id", "") or "").strip() not in excluded_market_ids_for_signal_fetch
-            ] or None
-
         # Realized PnL: instant hot-state lookups.
         global_daily_pnl = await get_daily_realized_pnl(session, trader_id=None, mode=run_mode)
         trader_daily_pnl = await get_daily_realized_pnl(session, trader_id=trader_id, mode=run_mode)

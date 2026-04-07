@@ -34,7 +34,6 @@ from sqlalchemy.orm import load_only
 
 from models.database import AppSettings, DiscoveredWallet, AsyncSessionLocal
 from services.polymarket import polymarket_client
-from services.smart_wallet_pool import smart_wallet_pool
 from services.pause_state import global_pause_state
 from utils.converters import coerce_bool as _coerce_bool
 from utils.fifo_pnl import compute_fifo_pnl_multi_market

@@ -1758,7 +1758,7 @@ def _sync_pending_live_exit_from_live_order(
     live_row: LiveTradingOrder,
     now: datetime,
 ) -> bool:
-    payload = dict(row.payload_json or {})
+    payload = copy.deepcopy(row.payload_json or {})
     pending_exit = payload.get("pending_live_exit")
     if not isinstance(pending_exit, dict):
         return False
