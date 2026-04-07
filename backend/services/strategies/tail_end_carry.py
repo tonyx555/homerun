@@ -8,6 +8,7 @@ liquidity/spread quality and non-trivial expected repricing room.
 from __future__ import annotations
 
 import re
+from dataclasses import asdict
 from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -167,9 +168,9 @@ class TailEndCarryStrategy(BaseStrategy):
         # Sports-specific entry overrides
         "sports_min_probability": 0.90,
         "sports_max_days_to_resolution": 0.25,
-        "min_days_to_resolution": 0.01,
+        "min_days_to_resolution": 0.0,
         "max_days_to_resolution": 1.0,
-        "min_liquidity": 3500.0,
+        "min_liquidity": 1000.0,
         "max_spread": 0.05,
         "min_repricing_buffer": 0.015,
         "repricing_weight": 0.45,
@@ -206,6 +207,7 @@ class TailEndCarryStrategy(BaseStrategy):
         "max_hold_minutes": 1440.0,
         "price_policy": "taker_limit",
         "time_in_force": "IOC",
+        "allow_taker_limit_buy_above_signal": True,
         "immediate_break_even_stop_enabled": True,
         "immediate_break_even_stop_buffer_pct": 0.5,
         "max_market_data_age_ms": 15000,
@@ -461,6 +463,154 @@ class TailEndCarryStrategy(BaseStrategy):
         buffer_seconds = buffer_minutes * 60.0
         return (game_start.timestamp() - buffer_seconds) <= now.timestamp()
 
+    def _tail_end_limits(self, params: dict[str, Any]) -> dict[str, Any]:
+        cfg = dict(self.default_config)
+        if params:
+            cfg.update(params)
+
+        min_probability = clamp(safe_float(cfg.get("min_probability"), 0.85), 0.5, 0.995)
+        max_probability = clamp(safe_float(cfg.get("max_probability"), 0.999), min_probability, 0.999)
+        sports_min_probability = clamp(safe_float(cfg.get("sports_min_probability"), 0.90), 0.5, 0.995)
+        min_days = max(0.0, safe_float(cfg.get("min_days_to_resolution"), 0.0))
+        max_days = max(min_days + 0.005, safe_float(cfg.get("max_days_to_resolution"), 1.0))
+        sports_max_days = max(min_days + 0.005, safe_float(cfg.get("sports_max_days_to_resolution"), 0.25))
+        min_liquidity = max(100.0, safe_float(cfg.get("min_liquidity"), 1000.0))
+        max_spread = clamp(safe_float(cfg.get("max_spread"), 0.05), 0.005, 0.20)
+        min_upside_percent = clamp(safe_float(cfg.get("min_upside_percent"), 5.0), 5.0, 100.0)
+        min_repricing_buffer = clamp(safe_float(cfg.get("min_repricing_buffer"), 0.015), 0.005, 0.10)
+        repricing_weight = clamp(safe_float(cfg.get("repricing_weight"), 0.45), 0.10, 0.90)
+        panic_drop_threshold = clamp(safe_float(cfg.get("panic_drop_threshold"), 0.08), 0.02, 0.30)
+        panic_window_points = max(3, int(safe_float(cfg.get("panic_window_points"), 6)))
+        panic_recovery_ratio_max = clamp(safe_float(cfg.get("panic_recovery_ratio_max"), 0.20), 0.0, 0.9)
+        block_spread_markets = _is_bool_true(cfg.get("block_spread_markets", True))
+        skip_live_games = _is_bool_true(cfg.get("skip_live_games", True))
+        live_game_buffer_minutes = max(0.0, safe_float(cfg.get("live_game_buffer_minutes"), 15.0))
+        allow_taker_limit_buy_above_signal = _is_bool_true(cfg.get("allow_taker_limit_buy_above_signal", True))
+
+        return {
+            "min_probability": min_probability,
+            "max_probability": max_probability,
+            "sports_min_probability": sports_min_probability,
+            "sports_max_days_to_resolution": sports_max_days,
+            "min_days_to_resolution": min_days,
+            "max_days_to_resolution": max_days,
+            "min_liquidity": min_liquidity,
+            "min_upside_percent": min_upside_percent,
+            "max_spread": max_spread,
+            "min_repricing_buffer": min_repricing_buffer,
+            "repricing_weight": repricing_weight,
+            "panic_drop_threshold": panic_drop_threshold,
+            "panic_window_points": panic_window_points,
+            "panic_recovery_ratio_max": panic_recovery_ratio_max,
+            "block_spread_markets": block_spread_markets,
+            "skip_live_games": skip_live_games,
+            "live_game_buffer_minutes": live_game_buffer_minutes,
+            "allow_taker_limit_buy_above_signal": allow_taker_limit_buy_above_signal,
+            "price_policy": str(cfg.get("price_policy", "taker_limit") or "taker_limit"),
+            "time_in_force": str(cfg.get("time_in_force", "IOC") or "IOC"),
+        }
+
+    def _tail_end_checks(
+        self,
+        *,
+        source: str,
+        strategy_type: str,
+        signal_text: str,
+        entry_price: float,
+        dtr: float | None,
+        category: str,
+        blocked_keyword: str | None,
+        is_spread: bool,
+        liquidity: float,
+        observed_spread: float,
+        panic_guard_ok: bool,
+        is_live: bool,
+        limits: dict[str, Any],
+    ) -> list[DecisionCheck]:
+        effective_min_entry = (
+            limits["sports_min_probability"] if category in (CATEGORY_SPORTS, CATEGORY_ESPORTS) else limits["min_probability"]
+        )
+        effective_max_days = (
+            limits["sports_max_days_to_resolution"]
+            if category in (CATEGORY_SPORTS, CATEGORY_ESPORTS)
+            else limits["max_days_to_resolution"]
+        )
+        effective_days_ok = dtr is not None and limits["min_days_to_resolution"] <= dtr <= effective_max_days
+        upside_pct = ((1.0 - entry_price) / entry_price * 100.0) if entry_price > 0.0 else 0.0
+        upside_ok = upside_pct >= float(limits.get("min_upside_percent", 5.0))
+        spread_ok = observed_spread <= float(limits["max_spread"])
+        live_game_ok = not is_live
+
+        checks = [
+            DecisionCheck("source", "Scanner source", source == "scanner", detail="Requires source=scanner."),
+            DecisionCheck("strategy", "Tail carry strategy type", strategy_type == "tail_end_carry", detail="strategy=tail_end_carry"),
+            DecisionCheck(
+                "spread_market",
+                "Not a spread market",
+                not is_spread,
+                detail="Spread markets blocked (volatile mid-game swings)" if is_spread else "ok",
+            ),
+            DecisionCheck(
+                "keyword_block",
+                "Market keyword allowed",
+                blocked_keyword is None,
+                detail=f"blocked keyword={blocked_keyword}" if blocked_keyword else "ok",
+            ),
+            DecisionCheck(
+                "liquidity_floor",
+                "Hard liquidity floor",
+                liquidity >= float(limits["min_liquidity"]),
+                score=liquidity,
+                detail=f">= {float(limits['min_liquidity']):.0f}",
+            ),
+            DecisionCheck(
+                "entry",
+                "Entry probability band",
+                effective_min_entry <= entry_price <= float(limits["max_probability"]),
+                score=entry_price,
+                detail=f"[{effective_min_entry:.3f}, {float(limits['max_probability']):.3f}]{' (sports override)' if category in (CATEGORY_SPORTS, CATEGORY_ESPORTS) else ''}",
+            ),
+            DecisionCheck(
+                "resolution_window",
+                "Resolution window",
+                effective_days_ok,
+                score=dtr,
+                detail=f"[{float(limits['min_days_to_resolution']):.2f}, {effective_max_days:.2f}] days{' (sports override)' if category in (CATEGORY_SPORTS, CATEGORY_ESPORTS) else ''}",
+            ),
+            DecisionCheck(
+                "upside",
+                "Max settlement upside floor",
+                upside_ok,
+                score=upside_pct,
+                detail=f">= {float(limits.get('min_upside_percent', 5.0)):.2f}%",
+            ),
+            DecisionCheck(
+                "book_spread",
+                "Bid/ask spread within limit",
+                spread_ok,
+                score=observed_spread,
+                detail=f"<= {float(limits['max_spread']):.3f}",
+            ),
+            DecisionCheck(
+                "panic_guard",
+                "Recent price action not in panic unwind",
+                panic_guard_ok,
+                detail="panic/recovery guard",
+            ),
+        ]
+
+        if limits["skip_live_games"]:
+            checks.append(
+                DecisionCheck(
+                    "live_game",
+                    "Not a live game",
+                    live_game_ok,
+                    detail=f"category={category}, live={is_live}",
+                ),
+            )
+
+        return checks
+
     # ------------------------------------------------------------------
     # Detection
     # ------------------------------------------------------------------
@@ -474,23 +624,25 @@ class TailEndCarryStrategy(BaseStrategy):
         cfg = dict(self.default_config)
         cfg.update(getattr(self, "config", {}) or {})
 
-        min_probability = clamp(safe_float(cfg.get("min_probability"), 0.85), 0.5, 0.995)
-        min_upside_percent = clamp(safe_float(cfg.get("min_upside_percent"), 5.0), 5.0, 100.0)
-        sports_min_probability = clamp(safe_float(cfg.get("sports_min_probability"), 0.90), 0.5, 0.995)
-        sports_max_days = max(0.005, safe_float(cfg.get("sports_max_days_to_resolution"), 0.25))
-        min_days = 0.0
-        max_days = max(min_days + 0.005, safe_float(cfg.get("max_days_to_resolution"), 1.0))
-        min_liquidity = max(100.0, safe_float(cfg.get("min_liquidity"), 3500.0))
-        max_spread = clamp(safe_float(cfg.get("max_spread"), 0.05), 0.005, 0.20)
-        min_repricing_buffer = clamp(safe_float(cfg.get("min_repricing_buffer"), 0.015), 0.005, 0.10)
-        repricing_weight = clamp(safe_float(cfg.get("repricing_weight"), 0.45), 0.10, 0.90)
-        panic_drop_threshold = clamp(safe_float(cfg.get("panic_drop_threshold"), 0.08), 0.02, 0.30)
-        panic_window_points = max(3, int(safe_float(cfg.get("panic_window_points"), 6)))
-        panic_recovery_ratio_max = clamp(safe_float(cfg.get("panic_recovery_ratio_max"), 0.20), 0.0, 0.9)
+        limits = self._tail_end_limits(cfg)
+        min_probability = float(limits["min_probability"])
+        min_upside_percent = float(limits["min_upside_percent"])
+        sports_min_probability = float(limits["sports_min_probability"])
+        sports_max_days = float(limits["sports_max_days_to_resolution"])
+        min_days = float(limits["min_days_to_resolution"])
+        max_days = float(limits["max_days_to_resolution"])
+        min_liquidity = float(limits["min_liquidity"])
+        max_spread = float(limits["max_spread"])
+        min_repricing_buffer = float(limits["min_repricing_buffer"])
+        repricing_weight = float(limits["repricing_weight"])
+        panic_drop_threshold = float(limits["panic_drop_threshold"])
+        panic_window_points = int(limits["panic_window_points"])
+        panic_recovery_ratio_max = float(limits["panic_recovery_ratio_max"])
         excluded_keywords = self._normalize_excluded_keywords(cfg.get("exclude_market_keywords"))
-        block_spread_markets = _is_bool_true(cfg.get("block_spread_markets", True))
-        skip_live_games = _is_bool_true(cfg.get("skip_live_games", True))
-        live_game_buffer_minutes = max(0.0, safe_float(cfg.get("live_game_buffer_minutes"), 15.0))
+        block_spread_markets = bool(limits["block_spread_markets"])
+        skip_live_games = bool(limits["skip_live_games"])
+        live_game_buffer_minutes = float(limits["live_game_buffer_minutes"])
+        allow_taker_limit_buy_above_signal = bool(limits["allow_taker_limit_buy_above_signal"])
 
         event_by_market: dict[str, Event] = {}
         for event in events:
@@ -500,6 +652,7 @@ class TailEndCarryStrategy(BaseStrategy):
         now = utcnow().astimezone(timezone.utc)
         candidates: list[tuple[float, Opportunity]] = []
         history_by_key = self.state.setdefault("tail_carry_price_history", {})
+        raw_detected_count = 0
 
         for market in markets:
             if market.closed or not market.active:
@@ -584,6 +737,7 @@ class TailEndCarryStrategy(BaseStrategy):
                     continue
                 if price <= 0.0:
                     continue
+                raw_detected_count += 1
                 max_settlement_upside_pct = ((1.0 - price) / price) * 100.0
 
                 history_key = f"{market.id}:{outcome}"
@@ -613,13 +767,36 @@ class TailEndCarryStrategy(BaseStrategy):
                 target_price = min(0.999, price + target_move)
                 upside_ok = max_settlement_upside_pct >= min_upside_percent
 
+                contract_checks = self._tail_end_checks(
+                    source="scanner",
+                    strategy_type="tail_end_carry",
+                    signal_text=market_text,
+                    entry_price=price,
+                    dtr=days_to_res,
+                    category=category,
+                    blocked_keyword=blocked_keyword,
+                    is_spread=is_spread_market,
+                    liquidity=liquidity,
+                    observed_spread=spread,
+                    panic_guard_ok=panic_guard_ok,
+                    is_live=live_game_detected,
+                    limits=limits,
+                )
+                if not all(check.passed for check in contract_checks):
+                    continue
+
                 positions = [
                     {
                         "action": "BUY",
                         "outcome": outcome,
                         "price": price,
+                        "max_execution_price": target_price if allow_taker_limit_buy_above_signal else price,
+                        "max_entry_price": target_price if allow_taker_limit_buy_above_signal else price,
                         "token_id": token_id,
                         "entry_style": "tail_carry",
+                        "price_policy": limits["price_policy"],
+                        "time_in_force": limits["time_in_force"],
+                        "allow_taker_limit_buy_above_signal": allow_taker_limit_buy_above_signal,
                         "_tail_end": {
                             "days_to_resolution": days_to_res,
                             "spread": spread,
@@ -698,14 +875,30 @@ class TailEndCarryStrategy(BaseStrategy):
                 opp.strategy_context["book_spread"] = spread
                 opp.strategy_context["book_spread_ok"] = spread_ok
                 opp.strategy_context["execution_max_spread"] = max_spread
+                opp.strategy_context["max_entry_price"] = target_price if allow_taker_limit_buy_above_signal else price
+                opp.strategy_context["execution_max_price"] = target_price if allow_taker_limit_buy_above_signal else price
+                opp.strategy_context["allow_taker_limit_buy_above_signal"] = allow_taker_limit_buy_above_signal
                 opp.strategy_context["max_settlement_upside_pct"] = max_settlement_upside_pct
                 opp.strategy_context["upside_ok"] = upside_ok
                 opp.strategy_context["raw_tail_candidate"] = True
+                opp.strategy_context["eligibility_checks"] = [asdict(check) for check in contract_checks]
 
                 strength = (target_price - price) * (1.0 - opp.risk_score)
                 candidates.append((strength, opp))
 
         if not candidates:
+            self._filter_diagnostics = {
+                "strategy_type": self.strategy_type,
+                "message": f"Tail carry detected 0/{raw_detected_count} displayable candidates",
+                "raw_detected_count": int(raw_detected_count),
+                "displayable_count": 0,
+                "execution_eligible_count": 0,
+                "summary": {
+                    "raw_detected_count": int(raw_detected_count),
+                    "displayable_count": 0,
+                    "execution_eligible_count": 0,
+                },
+            }
             return []
 
         candidates.sort(key=lambda item: item[0], reverse=True)
@@ -719,6 +912,19 @@ class TailEndCarryStrategy(BaseStrategy):
                 continue
             seen.add(key)
             out.append(opp)
+        final_displayable_count = len(out)
+        self._filter_diagnostics = {
+            "strategy_type": self.strategy_type,
+            "message": f"Tail carry detected {final_displayable_count}/{raw_detected_count} displayable candidates",
+            "raw_detected_count": int(raw_detected_count),
+            "displayable_count": int(final_displayable_count),
+            "execution_eligible_count": int(final_displayable_count),
+            "summary": {
+                "raw_detected_count": int(raw_detected_count),
+                "displayable_count": int(final_displayable_count),
+                "execution_eligible_count": int(final_displayable_count),
+            },
+        }
         return out
 
     # ------------------------------------------------------------------
@@ -727,33 +933,10 @@ class TailEndCarryStrategy(BaseStrategy):
 
     def custom_checks(self, signal: Any, context: dict, params: dict, payload: dict) -> list[DecisionCheck]:
         """Tail carry: execution-time source, strategy type, entry band, resolution window, and live game checks."""
-        min_entry = clamp(to_float(params.get("min_entry_price", 0.85), 0.85), 0.01, 0.995)
-        max_entry = clamp(to_float(params.get("max_entry_price", 0.999), 0.999), min_entry, 0.999)
-        min_upside_percent = clamp(to_float(params.get("min_upside_percent", 5.0), 5.0), 5.0, 100.0)
-        min_days = max(0.0, to_float(params.get("min_days_to_resolution", 0.01), 0.01))
-        max_days = max(min_days + 0.005, to_float(params.get("max_days_to_resolution", 1.0), 1.0))
+        limits = self._tail_end_limits(params)
         signal_text = self._signal_market_text(signal, payload)
-
-        block_spread_markets = _is_bool_true(params.get("block_spread_markets", True))
-        excluded_keywords = self._normalize_excluded_keywords(params.get("exclude_market_keywords"))
-        blocked_keyword = str(payload.get("blocked_keyword") or "").strip() or None
-        min_liquidity = max(100.0, to_float(params.get("min_liquidity", 3500.0), 3500.0))
-        liquidity = max(0.0, to_float(getattr(signal, "liquidity", 0.0), 0.0))
-        max_spread = clamp(to_float(params.get("max_spread", 0.05), 0.05), 0.005, 0.20)
-        observed_spread = max(0.0, to_float(payload.get("book_spread", 0.0), 0.0))
-        spread_ok = bool(payload.get("book_spread_ok", observed_spread <= max_spread))
-        panic_guard_ok = bool(payload.get("panic_guard_ok", True))
-        is_spread = False
-        if block_spread_markets:
-            is_spread = bool(payload.get("is_spread_market", False))
-            if not is_spread:
-                markets_list = payload.get("markets")
-                if isinstance(markets_list, list) and markets_list:
-                    m0 = markets_list[0] if isinstance(markets_list[0], dict) else {}
-                    if m0.get("sports_market_type") == "spreads":
-                        is_spread = True
-            if not is_spread:
-                is_spread = self._is_spread_market(signal_text)
+        strategy_context = getattr(signal, "strategy_context_json", None)
+        strategy_context = strategy_context if isinstance(strategy_context, dict) else {}
 
         source = str(getattr(signal, "source", "") or "").strip().lower()
         strategy_type = (
@@ -761,7 +944,6 @@ class TailEndCarryStrategy(BaseStrategy):
             .strip()
             .lower()
         )
-        strategy_ok = strategy_type == "tail_end_carry"
 
         entry_price = to_float(getattr(signal, "entry_price", 0.0), 0.0)
         if entry_price <= 0.0:
@@ -771,111 +953,52 @@ class TailEndCarryStrategy(BaseStrategy):
 
         dtr = days_to_resolution(payload)
         max_settlement_upside_pct = ((1.0 - entry_price) / entry_price * 100.0) if entry_price > 0.0 else 0.0
-        upside_ok = max_settlement_upside_pct >= min_upside_percent
-
-        # Fix #1: classify market for category-aware logic
         category = self._classify_market_from_payload(payload)
         is_sports = category in (CATEGORY_SPORTS, CATEGORY_ESPORTS)
-
-        # Sports-specific entry overrides: tighter probability and resolution window
-        sports_min_probability = clamp(
-            to_float(params.get("sports_min_probability", 0.90), 0.90), 0.50, 0.995
-        )
-        sports_max_days = max(
-            min_days + 0.005,
-            to_float(params.get("sports_max_days_to_resolution", 0.25), 0.25),
-        )
-        effective_min_entry = sports_min_probability if is_sports else min_entry
-        effective_max_days = sports_max_days if is_sports else max_days
-        effective_days_ok = dtr is not None and min_days <= dtr <= effective_max_days
-
-        # Fix #3: live game gate
-        skip_live_games = _is_bool_true(params.get("skip_live_games", True))
-        live_game_buffer = max(0.0, to_float(params.get("live_game_buffer_minutes", 15.0), 15.0))
+        live_game_buffer = float(limits["live_game_buffer_minutes"])
         now = utcnow().astimezone(timezone.utc)
-        is_live = False
-        if skip_live_games and is_sports:
-            is_live = self._is_live_game_from_payload(payload, now, live_game_buffer)
-        live_game_ok = not is_live
+        is_live = bool(limits["skip_live_games"] and is_sports and self._is_live_game_from_payload(payload, now, live_game_buffer))
 
-        # Stash for compute_score / evaluate
         payload["_entry_price"] = entry_price
         payload["_dtr"] = dtr
-        payload["_max_days"] = effective_max_days
+        payload["_max_days"] = float(limits["sports_max_days_to_resolution"] if is_sports else limits["max_days_to_resolution"])
         payload["_strategy_type"] = strategy_type
         payload["_max_settlement_upside_pct"] = max_settlement_upside_pct
         payload["_market_category"] = category
         payload["_is_live_game"] = is_live
 
-        checks = [
-            DecisionCheck("source", "Scanner source", source == "scanner", detail="Requires source=scanner."),
-            DecisionCheck("strategy", "Tail carry strategy type", strategy_ok, detail="strategy=tail_end_carry"),
-            DecisionCheck(
-                "spread_market",
-                "Not a spread market",
-                not is_spread,
-                detail="Spread markets blocked (volatile mid-game swings)" if is_spread else "ok",
-            ),
-            DecisionCheck(
-                "keyword_block",
-                "Market keyword allowed",
-                blocked_keyword is None,
-                detail=f"blocked keyword={blocked_keyword}" if blocked_keyword else ",".join(excluded_keywords[:5]) if excluded_keywords else "ok",
-            ),
-            DecisionCheck(
-                "liquidity_floor",
-                "Hard liquidity floor",
-                liquidity >= min_liquidity,
-                score=liquidity,
-                detail=f">= {min_liquidity:.0f}",
-            ),
-            DecisionCheck(
-                "entry",
-                "Entry probability band",
-                effective_min_entry <= entry_price <= max_entry,
-                score=entry_price,
-                detail=f"[{effective_min_entry:.3f}, {max_entry:.3f}]{' (sports override)' if is_sports else ''}",
-            ),
-            DecisionCheck(
-                "resolution_window",
-                "Resolution window",
-                effective_days_ok,
-                score=dtr,
-                detail=f"[{min_days:.2f}, {effective_max_days:.2f}] days{' (sports override)' if is_sports else ''}",
-            ),
-            DecisionCheck(
-                "upside",
-                "Max settlement upside floor",
-                upside_ok,
-                score=max_settlement_upside_pct,
-                detail=f">= {min_upside_percent:.2f}%",
-            ),
-            DecisionCheck(
-                "book_spread",
-                "Bid/ask spread within limit",
-                spread_ok,
-                score=observed_spread,
-                detail=f"<= {max_spread:.3f}",
-            ),
-            DecisionCheck(
-                "panic_guard",
-                "Recent price action not in panic unwind",
-                panic_guard_ok,
-                detail="panic/recovery guard",
-            ),
-        ]
+        blocked_keyword = str(strategy_context.get("blocked_keyword") or payload.get("blocked_keyword") or "").strip() or None
+        liquidity = max(0.0, to_float(getattr(signal, "liquidity", 0.0), 0.0))
+        observed_spread = max(
+            0.0,
+            to_float(strategy_context.get("book_spread", payload.get("book_spread", 0.0)), 0.0),
+        )
+        panic_guard_ok = bool(strategy_context.get("panic_guard_ok", payload.get("panic_guard_ok", True)))
+        is_spread = bool(strategy_context.get("is_spread_market", payload.get("is_spread_market", False)))
+        if not is_spread:
+            markets_list = payload.get("markets")
+            if isinstance(markets_list, list) and markets_list:
+                m0 = markets_list[0] if isinstance(markets_list[0], dict) else {}
+                if m0.get("sports_market_type") == "spreads":
+                    is_spread = True
+        if not is_spread:
+            is_spread = self._is_spread_market(signal_text)
 
-        # Fix #3: live game check (hard reject)
-        if skip_live_games:
-            checks.append(
-                DecisionCheck(
-                    "live_game",
-                    "Not a live game",
-                    live_game_ok,
-                    detail=f"category={category}, live={is_live}",
-                ),
-            )
-
+        checks = self._tail_end_checks(
+            source=source,
+            strategy_type=strategy_type,
+            signal_text=signal_text,
+            entry_price=entry_price,
+            dtr=dtr,
+            category=category,
+            blocked_keyword=blocked_keyword,
+            is_spread=is_spread,
+            liquidity=liquidity,
+            observed_spread=observed_spread,
+            panic_guard_ok=panic_guard_ok,
+            is_live=is_live,
+            limits=limits,
+        )
         return checks
 
     def compute_score(

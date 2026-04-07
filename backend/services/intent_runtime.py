@@ -594,9 +594,19 @@ class IntentRuntime:
         try:
             if not getattr(feed_manager, "_started", False):
                 await feed_manager.start()
-            missing = [token_id for token_id in normalized if token_id not in self._hot_subscription_tokens]
+            polymarket_feed = getattr(feed_manager, "polymarket_feed", None)
+            live_subscribed = {
+                str(token_id or "").strip().lower()
+                for token_id in list(getattr(polymarket_feed, "_subscribed_assets", set()) or set())
+                if str(token_id or "").strip()
+            }
+            missing = [
+                token_id
+                for token_id in normalized
+                if token_id not in self._hot_subscription_tokens or token_id not in live_subscribed
+            ]
             if missing:
-                await feed_manager.polymarket_feed.subscribe(missing)
+                await polymarket_feed.subscribe(missing)
                 self._hot_subscription_tokens.update(missing)
         except Exception as exc:
             logger.warning("Intent runtime token prewarm subscribe failed", exc_info=exc)
@@ -747,6 +757,11 @@ class IntentRuntime:
         now = utcnow()
         published_by_source: dict[str, dict[str, dict[str, Any]]] = {}
         projection_snapshots: dict[str, dict[str, Any]] = {}
+        quote_gated_reasons = {
+            "awaiting_post_arm_ws_tick",
+            "prewarm_waiting_for_strict_ws_quote",
+            "strict_ws_pricing_live_context_unavailable",
+        }
         async with self._lock:
             all_deferred_signal_ids: set[str] = set()
             for token_signal_ids in self._deferred_signal_ids_by_token.values():
@@ -765,6 +780,9 @@ class IntentRuntime:
                     continue
                 age_seconds = (now - deferred_started_at).total_seconds()
                 if age_seconds < max_age:
+                    continue
+                deferred_reason = str(snapshot.get("deferred_reason") or "").strip().lower()
+                if deferred_reason in quote_gated_reasons and not self._snapshot_ready_for_runtime(snapshot):
                     continue
                 self._clear_deferred_state_locked(signal_id)
                 snapshot["status"] = "pending"
@@ -856,6 +874,11 @@ class IntentRuntime:
                 }
             )
             await self._publish_signal_stats()
+        if token_ids:
+            self._start_task(
+                self._ensure_hot_subscriptions(token_ids),
+                name=f"intent-runtime-defer-prewarm-{normalized_signal_id}",
+            )
         return True
 
     async def hydrate_from_db(self) -> None:
@@ -1085,6 +1108,13 @@ class IntentRuntime:
                     elif (
                         _ea == "ws_post_arm_tick"
                         and incoming_snapshot["required_token_ids"]
+                        and not (
+                            normalized_source == "scanner"
+                            and self._tokens_have_fresh_ws_quotes(
+                                incoming_snapshot["required_token_ids"],
+                                source=normalized_source,
+                            )
+                        )
                     ):
                         incoming_snapshot["payload_json"]["execution_armed_at"] = _to_iso(now)
                         self._set_deferred_state_locked(
@@ -1142,6 +1172,13 @@ class IntentRuntime:
                     elif (
                         _ea == "ws_post_arm_tick"
                         and incoming_snapshot["required_token_ids"]
+                        and not (
+                            normalized_source == "scanner"
+                            and self._tokens_have_fresh_ws_quotes(
+                                incoming_snapshot["required_token_ids"],
+                                source=normalized_source,
+                            )
+                        )
                     ):
                         incoming_snapshot["payload_json"]["execution_armed_at"] = _to_iso(now)
                         self._set_deferred_state_locked(

@@ -5282,6 +5282,115 @@ async def _run_trader_once(
                         prefiltered_by_reason["open_market"] = prefiltered_by_reason.get("open_market", 0) + 1
                         continue
                     live_context = live_contexts.get(signal_id, {})
+                    runtime_signal = RuntimeTradeSignalView(signal, live_context=live_context)
+                    runtime_signal.source = signal_source
+                    if signal_source == "scanner" and strategy_key_for_output == "tail_end_carry":
+                        loaded_prefilter_strategy = strategy_db_loader.get_strategy(strategy_key_for_output)
+                        prefilter_strategy = _strategy_instance_from_loaded(loaded_prefilter_strategy)
+                        if prefilter_strategy is not None and hasattr(prefilter_strategy, "custom_checks"):
+                            prefilter_payload = (
+                                dict(getattr(runtime_signal, "payload_json", None) or {})
+                                if isinstance(getattr(runtime_signal, "payload_json", None), dict)
+                                else {}
+                            )
+                            prefilter_context = {
+                                "params": strategy_params,
+                                "trader": trader,
+                                "mode": control.get("mode", "shadow"),
+                                "live_market": live_context,
+                                "source_config": source_config,
+                            }
+                            prefilter_checks = prefilter_strategy.custom_checks(
+                                runtime_signal,
+                                prefilter_context,
+                                strategy_params,
+                                prefilter_payload,
+                            )
+                            if any(not getattr(check, "passed", False) for check in prefilter_checks):
+                                checks_payload = _checks_to_payload(prefilter_checks)
+                                failed_fragments = []
+                                for check_payload in checks_payload:
+                                    if bool(check_payload.get("passed", False)):
+                                        continue
+                                    label = str(check_payload.get("check_label") or "Check").strip()
+                                    detail = str(check_payload.get("detail") or "").strip()
+                                    failed_fragments.append(f"{label}: {detail}" if detail else label)
+                                skipped_reason = "Tail carry filters not met"
+                                if failed_fragments:
+                                    skipped_reason = f"{skipped_reason} | failed checks: {' | '.join(failed_fragments)}"
+                                decision_row = await create_trader_decision(
+                                    session,
+                                    trader_id=trader_id,
+                                    signal=runtime_signal,
+                                    strategy_key=strategy_key_for_output,
+                                    strategy_version=requested_strategy_version,
+                                    decision="skipped",
+                                    reason=skipped_reason,
+                                    score=0.0,
+                                    checks_summary={"count": len(checks_payload)},
+                                    risk_snapshot={},
+                                    payload={
+                                        "source_key": signal_source,
+                                        "source_config": source_config,
+                                        "prefilter": "shared_strategy_eligibility",
+                                    },
+                                    commit=False,
+                                )
+                                decisions_written += 1
+                                await create_trader_decision_checks(
+                                    session,
+                                    decision_id=decision_row.id,
+                                    checks=checks_payload,
+                                    commit=False,
+                                )
+                                await set_trade_signal_status(
+                                    session,
+                                    signal_id=signal_id,
+                                    status="skipped",
+                                    commit=False,
+                                )
+                                await record_signal_consumption(
+                                    session,
+                                    trader_id=trader_id,
+                                    signal_id=signal_id,
+                                    decision_id=decision_row.id,
+                                    outcome="skipped",
+                                    reason=skipped_reason,
+                                    commit=False,
+                                )
+                                await create_trader_event(
+                                    session,
+                                    trader_id=trader_id,
+                                    event_type="decision",
+                                    severity="info",
+                                    source=signal_source,
+                                    message=skipped_reason,
+                                    payload={
+                                        "decision_id": decision_row.id,
+                                        "signal_id": signal.id,
+                                        "decision": "skipped",
+                                        "market_id": getattr(runtime_signal, "market_id", None),
+                                        "market_question": getattr(runtime_signal, "market_question", None),
+                                        "direction": getattr(runtime_signal, "direction", None),
+                                    },
+                                    commit=False,
+                                )
+                                await upsert_trader_signal_cursor(
+                                    session,
+                                    trader_id=trader_id,
+                                    last_signal_created_at=_signal_cursor_timestamp(signal),
+                                    last_signal_id=signal_id,
+                                    commit=False,
+                                )
+                                cursor_created_at = _signal_cursor_timestamp(signal)
+                                cursor_signal_id = signal_id
+                                cursor_runtime_sequence = _signal_runtime_sequence(signal) or cursor_runtime_sequence
+                                processed_signals += 1
+                                prefiltered_signals += 1
+                                prefiltered_by_reason["shared_strategy_eligibility"] = (
+                                    prefiltered_by_reason.get("shared_strategy_eligibility", 0) + 1
+                                )
+                                continue
                     if strict_ws_pricing_enforced and signal_source in ("crypto", "scanner"):
                         effective_strict_sources: list[str] = []
                         for raw_source in (strategy_params.get("strict_ws_price_sources") or strict_ws_price_sources):
@@ -6169,6 +6278,7 @@ async def _run_trader_once(
                             risk_evaluator=risk_evaluator,
                             invoke_hooks=True,
                             strategy_params=strategy_params,
+                            global_runtime=global_runtime_settings,
                         )
                     final_decision = gate_result["final_decision"]
                     final_reason = gate_result["final_reason"]

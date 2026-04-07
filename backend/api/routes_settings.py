@@ -187,8 +187,18 @@ class ScannerSettingsModel(BaseModel):
         le=10000,
         description="Per-strategy cap for opportunities retained in scanner pool (0 disables)",
     )
-
-
+    skipped_signal_reactivation_cooldown_seconds: int = Field(
+        default=180,
+        ge=0,
+        le=86400,
+        description="Cooldown before an unchanged skipped scanner signal can reactivate",
+    )
+    strict_ws_max_age_ms: int = Field(
+        default=30000,
+        ge=25,
+        le=30000,
+        description="Maximum websocket price age allowed for scanner strict WS execution paths",
+    )
 class LiveExecutionSettings(BaseModel):
     """Live execution safety configuration"""
 

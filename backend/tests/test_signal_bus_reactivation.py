@@ -707,6 +707,46 @@ async def test_expire_stale_signals_expires_scanner_signal_without_price_timesta
 
 
 @pytest.mark.asyncio
+async def test_expire_stale_signals_keeps_runtime_revalidated_scanner_signal_pending(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    signal_id = uuid.uuid4().hex
+    try:
+        async with session_factory() as session:
+            now = utcnow().replace(microsecond=0)
+            stale_created = now - timedelta(minutes=15)
+            session.add(
+                TradeSignal(
+                    id=signal_id,
+                    source="scanner",
+                    source_item_id="scanner_runtime_revalidated_1",
+                    signal_type="scanner_opportunity",
+                    strategy_type="custom_scanner_strategy",
+                    market_id="scanner_market_runtime_revalidated_1",
+                    direction="buy_yes",
+                    dedupe_key="dedupe_scanner_runtime_revalidated_stale",
+                    status="pending",
+                    payload_json={
+                        "strategy_runtime": {"execution_activation": "ws_post_arm_tick"},
+                        "markets": [{"clob_token_ids": ["yes", "no"]}],
+                    },
+                    strategy_context_json={"execution_activation": "ws_post_arm_tick"},
+                    expires_at=now + timedelta(hours=2),
+                    created_at=stale_created,
+                    updated_at=stale_created,
+                )
+            )
+            await session.commit()
+
+            await expire_stale_signals(session, commit=True)
+
+            refreshed = await session.get(TradeSignal, signal_id)
+            assert refreshed is not None
+            assert refreshed.status == "pending"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_list_trade_signals_skips_price_staleness_for_non_scanner_source(tmp_path):
     engine, session_factory = await _build_session_factory(tmp_path)
     signal_id = uuid.uuid4().hex
@@ -740,6 +780,47 @@ async def test_list_trade_signals_skips_price_staleness_for_non_scanner_source(t
                 limit=10,
                 offset=0,
             )
+            assert any(row.id == signal_id for row in rows)
+
+            refreshed = await session.get(TradeSignal, signal_id)
+            assert refreshed is not None
+            assert refreshed.status == "pending"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_list_trade_signals_keeps_runtime_revalidated_scanner_signal_pending(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    signal_id = uuid.uuid4().hex
+    try:
+        async with session_factory() as session:
+            now = utcnow().replace(microsecond=0)
+            stale_created = now - timedelta(minutes=15)
+            session.add(
+                TradeSignal(
+                    id=signal_id,
+                    source="scanner",
+                    source_item_id="scanner_runtime_revalidated_list_1",
+                    signal_type="scanner_opportunity",
+                    strategy_type="custom_scanner_strategy",
+                    market_id="scanner_market_runtime_revalidated_list_1",
+                    direction="buy_yes",
+                    dedupe_key="dedupe_scanner_runtime_revalidated_list_stale",
+                    status="pending",
+                    payload_json={
+                        "strategy_runtime": {"execution_activation": "ws_post_arm_tick"},
+                        "markets": [{"clob_token_ids": ["yes", "no"]}],
+                    },
+                    strategy_context_json={"execution_activation": "ws_post_arm_tick"},
+                    expires_at=now + timedelta(hours=2),
+                    created_at=stale_created,
+                    updated_at=stale_created,
+                )
+            )
+            await session.commit()
+
+            rows = await list_trade_signals(session, source="scanner", status=None, limit=10, offset=0)
             assert any(row.id == signal_id for row in rows)
 
             refreshed = await session.get(TradeSignal, signal_id)

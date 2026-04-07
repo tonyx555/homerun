@@ -75,6 +75,18 @@ class StrategySDK:
         "firehose_source_scope": "all",
         "firehose_side_filter": "all",
     }
+    TRADER_EXECUTION_POLICY_DEFAULTS: dict[str, Any] = {
+        "allow_taker_limit_buy_above_signal": False,
+    }
+    TRADER_EXECUTION_POLICY_CONFIG_SCHEMA: dict[str, Any] = {
+        "param_fields": [
+            {
+                "key": "allow_taker_limit_buy_above_signal",
+                "label": "Allow Taker Limit Buy Above Signal Price",
+                "type": "boolean",
+            },
+        ]
+    }
     TRADER_FILTER_CONFIG_SCHEMA: dict[str, Any] = {
         "param_fields": [
             {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
@@ -1073,6 +1085,62 @@ class StrategySDK:
     @staticmethod
     def trader_filter_defaults() -> dict[str, Any]:
         return dict(StrategySDK.TRADER_FILTER_DEFAULTS)
+
+    @staticmethod
+    def trader_execution_policy_defaults() -> dict[str, Any]:
+        return dict(StrategySDK.TRADER_EXECUTION_POLICY_DEFAULTS)
+
+    @staticmethod
+    def trader_execution_policy_config_schema() -> dict[str, Any]:
+        return dict(StrategySDK.TRADER_EXECUTION_POLICY_CONFIG_SCHEMA)
+
+    @staticmethod
+    def validate_trader_execution_policy_config(config: Any) -> dict[str, Any]:
+        cfg = dict(StrategySDK.TRADER_EXECUTION_POLICY_DEFAULTS)
+        raw = config if isinstance(config, dict) else {}
+        cfg.update({str(k): v for k, v in raw.items() if str(k) != "_schema"})
+
+        selected = False
+        for alias in (
+            "allow_taker_limit_buy_above_signal",
+            "allow_taker_limit_pay_up",
+            "allow_taker_limit_to_exceed_signal_price",
+            "allow_buy_above_signal_price",
+        ):
+            if alias in raw:
+                cfg["allow_taker_limit_buy_above_signal"] = _coerce_bool(
+                    raw.get(alias),
+                    StrategySDK.TRADER_EXECUTION_POLICY_DEFAULTS["allow_taker_limit_buy_above_signal"],
+                )
+                selected = True
+                break
+
+        execution_policy = cfg.get("execution_policy")
+        if not selected and isinstance(execution_policy, dict):
+            for alias in (
+                "allow_taker_limit_buy_above_signal",
+                "allow_taker_limit_pay_up",
+                "allow_taker_limit_to_exceed_signal_price",
+                "allow_buy_above_signal_price",
+            ):
+                if alias in execution_policy:
+                    cfg["allow_taker_limit_buy_above_signal"] = _coerce_bool(
+                        execution_policy.get(alias),
+                        StrategySDK.TRADER_EXECUTION_POLICY_DEFAULTS["allow_taker_limit_buy_above_signal"],
+                    )
+                    break
+
+        cfg["allow_taker_limit_buy_above_signal"] = _coerce_bool(
+            cfg.get("allow_taker_limit_buy_above_signal"),
+            StrategySDK.TRADER_EXECUTION_POLICY_DEFAULTS["allow_taker_limit_buy_above_signal"],
+        )
+        return cfg
+
+    @staticmethod
+    def allow_taker_limit_buy_above_signal_price(params: Any, *, default: bool = False) -> bool:
+        cfg = params if isinstance(params, dict) else {}
+        normalized = StrategySDK.validate_trader_execution_policy_config(cfg)
+        return _coerce_bool(normalized.get("allow_taker_limit_buy_above_signal"), default)
 
     @staticmethod
     def trader_filter_config_schema() -> dict[str, Any]:

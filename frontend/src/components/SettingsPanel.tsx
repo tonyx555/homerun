@@ -239,6 +239,8 @@ export default function SettingsPanel({
     min_liquidity: 1000.0,
     max_opportunities_total: 500,
     max_opportunities_per_strategy: 120,
+    skipped_signal_reactivation_cooldown_seconds: 180,
+    strict_ws_max_age_ms: 30000,
   })
 
   const [maintenanceForm, setMaintenanceForm] = useState({
@@ -349,6 +351,9 @@ export default function SettingsPanel({
         min_liquidity: settings.scanner?.min_liquidity ?? 1000.0,
         max_opportunities_total: settings.scanner?.max_opportunities_total ?? 500,
         max_opportunities_per_strategy: settings.scanner?.max_opportunities_per_strategy ?? 120,
+        skipped_signal_reactivation_cooldown_seconds:
+          settings.scanner?.skipped_signal_reactivation_cooldown_seconds ?? 180,
+        strict_ws_max_age_ms: settings.scanner?.strict_ws_max_age_ms ?? 30000,
       })
 
       setMaintenanceForm({
@@ -767,7 +772,7 @@ export default function SettingsPanel({
       case 'security':
         return uiLockForm.enabled ? `Auto-lock ${uiLockForm.idle_timeout_minutes}m` : 'Disabled'
       case 'scanner':
-        return `caps ${scannerForm.max_opportunities_total}/${scannerForm.max_opportunities_per_strategy}`
+        return `caps ${scannerForm.max_opportunities_total}/${scannerForm.max_opportunities_per_strategy} · ws ${scannerForm.strict_ws_max_age_ms}ms`
       case 'discovery':
         return discoveryForm.maintenance_enabled
           ? `${discoveryForm.max_discovered_wallets.toLocaleString()} cap`
@@ -1123,6 +1128,41 @@ export default function SettingsPanel({
                             className="mt-1 text-sm"
                           />
                           <p className="text-[11px] text-muted-foreground/70 mt-1">Set `0` to disable</p>
+                        </div>
+                      </div>
+                      <div className="rounded-md border border-border/60 bg-muted/15 p-3 space-y-3">
+                        <p className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">Scanner Runtime</p>
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <div>
+                            <Label className="text-xs text-muted-foreground">Skipped Signal Cooldown (seconds)</Label>
+                            <Input
+                              type="number"
+                              value={scannerForm.skipped_signal_reactivation_cooldown_seconds}
+                              onChange={(e) => setScannerForm((p) => ({
+                                ...p,
+                                skipped_signal_reactivation_cooldown_seconds: Math.max(0, parseInt(e.target.value) || 0),
+                              }))}
+                              min={0}
+                              max={86400}
+                              className="mt-1 text-sm"
+                            />
+                            <p className="text-[11px] text-muted-foreground/70 mt-1">How long unchanged skipped signals stay suppressed before they can reactivate.</p>
+                          </div>
+                          <div>
+                            <Label className="text-xs text-muted-foreground">Scanner Strict WS Age Budget (ms)</Label>
+                            <Input
+                              type="number"
+                              value={scannerForm.strict_ws_max_age_ms}
+                              onChange={(e) => setScannerForm((p) => ({
+                                ...p,
+                                strict_ws_max_age_ms: Math.max(25, parseInt(e.target.value) || 25),
+                              }))}
+                              min={25}
+                              max={30000}
+                              className="mt-1 text-sm"
+                            />
+                            <p className="text-[11px] text-muted-foreground/70 mt-1">Maximum age for scanner websocket pricing before the row is treated as stale.</p>
+                          </div>
                         </div>
                       </div>
                       <Separator className="opacity-30" />

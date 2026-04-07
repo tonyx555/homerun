@@ -74,6 +74,7 @@ async def execute_live_order(
     enforce_fallback_bound: bool = False,
     max_execution_price: float | None = None,
     min_execution_price: float | None = None,
+    allow_taker_limit_buy_above_signal: bool = False,
     skip_buy_pre_submit_gate: bool = False,
 ) -> LiveOrderExecution:
     normalized_token_id = str(token_id or "").strip()
@@ -113,6 +114,7 @@ async def execute_live_order(
         "enforce_fallback_bound": bool(enforce_fallback_bound),
         "max_execution_price": max_execution,
         "min_execution_price": min_execution,
+        "allow_taker_limit_buy_above_signal": bool(allow_taker_limit_buy_above_signal),
     }
 
     if not normalized_token_id:
@@ -227,14 +229,22 @@ async def execute_live_order(
                     if abs(bounded_quote - float(live_quote)) >= 1e-9:
                         price_resolution = f"{price_resolution}|bounded_by_min_execution"
                     live_quote = bounded_quote
-                if (post_only or enforce_fallback_bound) and fallback is not None and fallback > 0:
-                    if normalized_side == OrderSide.BUY:
-                        bounded_quote = min(float(live_quote), float(fallback))
-                    else:
-                        bounded_quote = max(float(live_quote), float(fallback))
-                    if abs(bounded_quote - float(live_quote)) >= 1e-9:
-                        price_resolution = f"{price_resolution}|bounded_by_fallback"
-                    live_quote = _clamp_binary_price(bounded_quote)
+                should_apply_fallback_bound = (post_only or enforce_fallback_bound) and fallback is not None and fallback > 0
+                if should_apply_fallback_bound:
+                    skip_buy_fallback_bound = (
+                        normalized_side == OrderSide.BUY
+                        and bool(allow_taker_limit_buy_above_signal)
+                        and bool(aggressive_quote)
+                        and not post_only
+                    )
+                    if not skip_buy_fallback_bound:
+                        if normalized_side == OrderSide.BUY:
+                            bounded_quote = min(float(live_quote), float(fallback))
+                        else:
+                            bounded_quote = max(float(live_quote), float(fallback))
+                        if abs(bounded_quote - float(live_quote)) >= 1e-9:
+                            price_resolution = f"{price_resolution}|bounded_by_fallback"
+                        live_quote = _clamp_binary_price(bounded_quote)
                 live_notional = float(live_quote) * requested_size
                 fallback_notional = (float(fallback) * requested_size) if fallback is not None and fallback > 0 else 0.0
                 if (

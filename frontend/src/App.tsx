@@ -1247,6 +1247,15 @@ function App() {
     () => Array.from(new Set(displayOpportunities.map((opportunity) => opportunity.id))),
     [displayOpportunities],
   )
+  const scannerOpportunityCountValue = Number(
+    status?.opportunities_count ?? totalOpportunities,
+  )
+  const scannerOpportunityCount = Number.isFinite(scannerOpportunityCountValue)
+    ? Math.max(0, Math.trunc(scannerOpportunityCountValue))
+    : totalOpportunities
+  const displayableOpportunityCount = opportunitiesView === 'scanner'
+    ? scannerOpportunityCount
+    : displayOpportunities.length
 
   const {
     data: strategyFacetCounts,
@@ -1350,13 +1359,13 @@ function App() {
 
   // Counts indexed by source_key — consumed by the dynamic tab renderer
   const tabCounts: Record<string, number> = useMemo(() => ({
-    scanner: totalOpportunities,
+    scanner: scannerOpportunityCount,
     traders: tradersCount,
     news: newsCount,
     weather: weatherCount,
     crypto: cryptoCount,
     sports: sportsCount,
-  }), [totalOpportunities, tradersCount, newsCount, weatherCount, cryptoCount, sportsCount])
+  }), [scannerOpportunityCount, tradersCount, newsCount, weatherCount, cryptoCount, sportsCount])
 
   // Build opportunities subtabs from the fixed supported source keys.
   // Source keys that are exit-only (no detect/opportunities) are hidden from tabs.
@@ -1722,7 +1731,7 @@ function App() {
 
   useKeyboardShortcuts(shortcuts, !uiLockOverlayVisible)
 
-  const totalPages = Math.ceil(totalOpportunities / ITEMS_PER_PAGE)
+  const totalPages = Math.ceil(displayableOpportunityCount / ITEMS_PER_PAGE)
 
   // If data shrinks while user is on a later page, clamp back to the last valid page.
   useEffect(() => {
@@ -1752,12 +1761,19 @@ function App() {
       }
     }
 
-    if ((status.opportunities_count || 0) > 0) {
+    if (opportunitiesView === 'scanner' && displayableOpportunityCount === 0) {
+      return {
+        title: 'No scanner opportunities right now',
+        description: 'No opportunities are currently in the scanner pool.',
+      }
+    }
+
+    if (displayableOpportunityCount === 0 && totalOpportunities > 0) {
       return {
         title: hasActiveOpportunityFilters
-          ? `${status.opportunities_count} opportunities found but none match current filters`
-          : `${status.opportunities_count} opportunities found, but none currently pass display criteria`,
-        description: 'Try lowering the minimum profit % or adjusting filters',
+          ? `No opportunities match the current filters`
+          : 'No opportunities are visible in the current view',
+        description: `There are ${totalOpportunities.toLocaleString()} opportunities in the pool, but none are visible with the current tab or filters.`,
       }
     }
 
@@ -2016,7 +2032,7 @@ function App() {
           lastScan={status?.last_scan}
           workerHealth={workerHealth}
           sourceCounts={{
-            scanner: totalOpportunities,
+            scanner: scannerOpportunityCount,
             traders: tradersCount,
             news: newsCount,
             weather: weatherCount,
@@ -2490,7 +2506,7 @@ function App() {
     
                           onOpenCopilot={handleOpenCopilotForOpportunity}
                           isConnected={isConnected}
-                          totalCount={totalOpportunities}
+                          totalCount={displayableOpportunityCount}
                         />
                       ) : oppsViewMode === 'list' ? (
                         <OpportunityTable
@@ -2740,12 +2756,12 @@ function App() {
                           ) : (
                             <>
                               {oppsViewMode === 'terminal' ? (
-                                <OpportunityTerminal
+                              <OpportunityTerminal
                                   opportunities={displayOpportunities}
     
                                   onOpenCopilot={handleOpenCopilotForOpportunity}
                                   isConnected={isConnected}
-                                  totalCount={totalOpportunities}
+                                  totalCount={displayableOpportunityCount}
                                 />
                               ) : oppsViewMode === 'list' ? (
                                 <OpportunityTable
@@ -2772,7 +2788,7 @@ function App() {
                                 <Separator />
                                 <div className="flex items-center justify-between pt-4">
                                   <div className="text-xs text-muted-foreground">
-                                    {currentPage * ITEMS_PER_PAGE + 1} - {Math.min((currentPage + 1) * ITEMS_PER_PAGE, totalOpportunities)} of {totalOpportunities}
+                                    {currentPage * ITEMS_PER_PAGE + 1} - {Math.min((currentPage + 1) * ITEMS_PER_PAGE, displayableOpportunityCount)} of {displayableOpportunityCount}
                                     {searchQuery && ` (filtered)`}
                                   </div>
                                   <div className="flex items-center gap-2">

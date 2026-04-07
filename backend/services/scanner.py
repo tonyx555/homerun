@@ -2518,6 +2518,7 @@ class ArbitrageScanner:
     def _strategy_runtime_status_rows(self) -> list[dict]:
         rows: list[dict] = []
         loaded_slugs: set[str] = set()
+        diagnostics = self._strategy_filter_diagnostics()
 
         for strategy in self._get_all_strategies():
             strategy_key = str(self._strategy_key(strategy) or "").strip().lower()
@@ -2530,6 +2531,7 @@ class ArbitrageScanner:
                     "type": strategy_key,
                     "status": "loaded",
                     "error_message": None,
+                    "filter_diagnostics": diagnostics.get(strategy_key),
                 }
             )
 
@@ -2553,6 +2555,43 @@ class ArbitrageScanner:
 
         rows.sort(key=lambda row: str(row.get("type") or ""))
         return rows
+
+    def _strategy_filter_diagnostics(self) -> dict[str, dict]:
+        diagnostics: dict[str, dict] = {}
+        displayable_counts: dict[str, int] = {}
+        execution_eligible_counts: dict[str, int] = {}
+
+        for opp in self._opportunities:
+            strategy_key = str(getattr(opp, "strategy", "") or "").strip().lower()
+            if not strategy_key:
+                continue
+            displayable_counts[strategy_key] = displayable_counts.get(strategy_key, 0) + 1
+            stable_id = str(getattr(opp, "stable_id", None) or getattr(opp, "id", "") or "").strip()
+            if not stable_id:
+                execution_eligible_counts[strategy_key] = execution_eligible_counts.get(strategy_key, 0) + 1
+                continue
+            report = self._quality_reports.get(stable_id)
+            if report is None or bool(getattr(report, "passed", False)):
+                execution_eligible_counts[strategy_key] = execution_eligible_counts.get(strategy_key, 0) + 1
+
+        for strategy in self._get_all_strategies():
+            strategy_key = str(self._strategy_key(strategy) or "").strip().lower()
+            if not strategy_key:
+                continue
+            diag = dict(strategy.get_filter_diagnostics() or {})
+            diag["raw_detected_count"] = int(diag.get("raw_detected_count") or displayable_counts.get(strategy_key, 0))
+            if diag:
+                diag["displayable_count"] = int(displayable_counts.get(strategy_key, 0))
+                diag["execution_eligible_count"] = int(execution_eligible_counts.get(strategy_key, 0))
+            else:
+                diag = {
+                    "raw_detected_count": int(displayable_counts.get(strategy_key, 0)),
+                    "displayable_count": int(displayable_counts.get(strategy_key, 0)),
+                    "execution_eligible_count": int(execution_eligible_counts.get(strategy_key, 0)),
+                }
+            diagnostics[strategy_key] = diag
+
+        return diagnostics
 
     # ------------------------------------------------------------------
     # Market catalog: fetch from upstream APIs, persist to DB, hydrate
@@ -4591,6 +4630,11 @@ class ArbitrageScanner:
     def get_status(self) -> dict:
         """Get current scanner status"""
         strategy_rows = self._strategy_runtime_status_rows()
+        strategy_filter_diagnostics = {
+            str(row.get("type") or "").strip().lower(): dict(row.get("filter_diagnostics") or {})
+            for row in strategy_rows
+            if isinstance(row, dict) and row.get("filter_diagnostics") is not None
+        }
         now = datetime.now(timezone.utc)
 
         def _age_seconds(dt: Optional[datetime]) -> Optional[float]:
@@ -4647,6 +4691,7 @@ class ArbitrageScanner:
                 threshold_seconds=heavy_watchdog_seconds,
             ),
         }
+        displayable_count = len(self._opportunities)
         status = {
             "running": self._running,
             "enabled": self._enabled,
@@ -4660,10 +4705,11 @@ class ArbitrageScanner:
             ),
             "opportunity_price_age_p95": _p95(opportunity_price_ages),
             "opportunity_last_detected_age_p95": _p95(opportunity_detected_ages),
-            "opportunities_count": len(self._opportunities),
+            "opportunities_count": displayable_count,
             "current_activity": self._current_activity,
             "lane_watchdogs": lane_watchdogs,
             "strategies": strategy_rows,
+            "strategy_diagnostics": strategy_filter_diagnostics,
         }
 
         # Add WebSocket feed status

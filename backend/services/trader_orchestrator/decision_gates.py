@@ -488,6 +488,7 @@ def apply_platform_decision_gates(
     pending_live_exit_max_allowed: int = 0,
     pending_live_exit_identity_guard_enabled: bool = True,
     strategy_params: dict[str, Any] | None = None,
+    global_runtime: dict[str, Any] | None = None,
     execution_mode: str = "live",
 ) -> dict[str, Any]:
     final_decision = str(getattr(decision_obj, "decision", "failed") or "failed")
@@ -501,6 +502,11 @@ def apply_platform_decision_gates(
     pending_exit_count = max(0, int(pending_live_exit_count or 0))
     pending_exit_max_allowed = max(0, int(pending_live_exit_max_allowed or 0))
     pending_exit_summary = dict(pending_live_exit_summary or {})
+    global_runtime = dict(global_runtime or {})
+    global_live_market_context = global_runtime.get("live_market_context")
+    global_live_market_context = (
+        dict(global_live_market_context) if isinstance(global_live_market_context, dict) else {}
+    )
     risk_snapshot: dict[str, Any] = {}
     platform_gates: list[dict[str, Any]] = []
     market_data_context = _runtime_signal_market_data_context(runtime_signal)
@@ -595,6 +601,9 @@ def apply_platform_decision_gates(
         source = str(market_data_context.get("source") or "")
         timeframe = str(market_data_context.get("timeframe") or "")
         max_age_ms = _resolve_market_data_age_budget_ms(params, timeframe)
+        global_max_age_ms = safe_float(global_live_market_context.get("max_market_data_age_ms"), None)
+        if global_max_age_ms is not None and global_max_age_ms > 0.0:
+            max_age_ms = max(50, min(max_age_ms, int(global_max_age_ms)))
         market_data_source = str(
             live_market_payload.get("market_data_source")
             or live_market_payload.get("live_selected_price_source")
@@ -602,10 +611,19 @@ def apply_platform_decision_gates(
         ).strip().lower()
         if not market_data_source:
             market_data_source = "unknown"
-        strict_ws_pricing_required = _coerce_bool(params.get("require_strict_ws_pricing"), False)
+        global_strict_ws_pricing_only = _coerce_bool(
+            global_live_market_context.get("strict_ws_pricing_only"),
+            False,
+        )
+        strict_ws_pricing_required = (
+            _coerce_bool(params.get("require_strict_ws_pricing"), False)
+            or global_strict_ws_pricing_only
+        )
         strict_ws_price_sources = _normalize_text_list(params.get("strict_ws_price_sources"))
         if not strict_ws_price_sources:
             strict_ws_price_sources = ["ws_strict"]
+        if global_strict_ws_pricing_only:
+            strict_ws_price_sources = ["ws_strict", "redis_strict"]
 
         live_revalidation_enforced = _coerce_bool(params.get("require_live_market_revalidation"), True)
         live_revalidation_sources = _normalize_text_list(params.get("require_live_revalidation_for_sources"))

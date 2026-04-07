@@ -551,6 +551,8 @@ type GlobalSettingsDraft = {
   liveMarketHistoryFidelitySeconds: string
   liveMarketHistoryMaxPoints: string
   liveMarketContextTimeoutSeconds: string
+  liveMarketStrictWsPricingOnly: boolean
+  liveMarketMaxMarketDataAgeMs: string
   liveProviderHealthWindowSeconds: string
   liveProviderHealthMinErrors: string
   liveProviderHealthBlockSeconds: string
@@ -590,6 +592,8 @@ const DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME = {
     history_fidelity_seconds: 300,
     max_history_points: 120,
     timeout_seconds: 4,
+    strict_ws_pricing_only: true,
+    max_market_data_age_ms: 10000,
   },
   live_provider_health: {
     window_seconds: 180,
@@ -822,6 +826,14 @@ function buildGlobalSettingsDraft(
     ),
     liveMarketContextTimeoutSeconds: String(
       marketContext.timeout_seconds ?? DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_market_context.timeout_seconds
+    ),
+    liveMarketStrictWsPricingOnly: Boolean(
+      marketContext.strict_ws_pricing_only
+      ?? DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_market_context.strict_ws_pricing_only
+    ),
+    liveMarketMaxMarketDataAgeMs: String(
+      marketContext.max_market_data_age_ms
+      ?? DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_market_context.max_market_data_age_ms
     ),
     liveProviderHealthWindowSeconds: String(
       providerHealth.window_seconds ?? DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_provider_health.window_seconds
@@ -6860,6 +6872,14 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         12,
         DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_market_context.timeout_seconds,
       )
+      const liveMarketMaxMarketDataAgeMs = Math.trunc(
+        clampNumber(
+          toNumber(globalSettingsDraft.liveMarketMaxMarketDataAgeMs),
+          25,
+          30000,
+          DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME.live_market_context.max_market_data_age_ms,
+        )
+      )
       const liveProviderHealthWindowSeconds = Math.trunc(
         clampNumber(
           toNumber(globalSettingsDraft.liveProviderHealthWindowSeconds),
@@ -6947,6 +6967,8 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
             history_fidelity_seconds: liveMarketHistoryFidelitySeconds,
             max_history_points: liveMarketHistoryMaxPoints,
             timeout_seconds: liveMarketContextTimeoutSeconds,
+            strict_ws_pricing_only: globalSettingsDraft.liveMarketStrictWsPricingOnly,
+            max_market_data_age_ms: liveMarketMaxMarketDataAgeMs,
           },
           live_provider_health: {
             window_seconds: liveProviderHealthWindowSeconds,
@@ -12539,6 +12561,29 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                       onCheckedChange={(checked) => setGlobalSettingsField('liveMarketContextEnabled', checked)}
                     />
                   </label>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <label className="rounded-md border border-border/60 bg-muted/15 px-2.5 py-2 flex items-center justify-between gap-2">
+                      <span className="text-xs text-muted-foreground">Strict WS Pricing Only</span>
+                      <Switch
+                        checked={globalSettingsDraft.liveMarketStrictWsPricingOnly}
+                        onCheckedChange={(checked) => setGlobalSettingsField('liveMarketStrictWsPricingOnly', checked)}
+                      />
+                    </label>
+                    <div>
+                      <Label>Max Market Data Age (ms)</Label>
+                      <Input
+                        type="number"
+                        min={25}
+                        max={30000}
+                        value={globalSettingsDraft.liveMarketMaxMarketDataAgeMs}
+                        onChange={(event) => setGlobalSettingsField('liveMarketMaxMarketDataAgeMs', event.target.value)}
+                        className="mt-1"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground/70">
+                    Strict WS pricing forces live market context to use websocket pricing. The age budget caps how stale that pricing can be.
+                  </p>
                   <div className="grid gap-2 sm:grid-cols-2">
                     <div>
                       <Label>History Window (seconds)</Label>

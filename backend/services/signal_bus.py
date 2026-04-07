@@ -34,7 +34,14 @@ from services.market_tradability import get_market_tradability_map
 SIGNAL_TERMINAL_STATUSES = {"executed", "skipped", "expired", "failed"}
 SIGNAL_ACTIVE_STATUSES = {"pending", "selected", "submitted"}
 SIGNAL_REACTIVATABLE_STATUSES = {"selected", "submitted", "executed", "skipped", "expired", "failed"}
-_UNCHANGED_SCANNER_SKIPPED_REACTIVATION_COOLDOWN_SECONDS = 180.0
+
+
+def _scanner_skipped_reactivation_cooldown_seconds() -> float:
+    raw = getattr(settings, "SCANNER_SKIPPED_SIGNAL_REACTIVATION_COOLDOWN_SECONDS", 180.0)
+    return max(
+        0.0,
+        float(180.0 if raw is None else raw),
+    )
 _SKIPPED_REACTIVATION_VOLATILE_KEYS = {
     "bridge_run_at",
     "bridge_source",
@@ -132,7 +139,7 @@ def _should_reactivate_unchanged_skipped_scanner_signal(row: TradeSignal, *, sou
     now = _to_utc_naive(_utc_now())
     if now is None:
         return False
-    return (now - updated_at).total_seconds() >= _UNCHANGED_SCANNER_SKIPPED_REACTIVATION_COOLDOWN_SECONDS
+    return (now - updated_at).total_seconds() >= _scanner_skipped_reactivation_cooldown_seconds()
 
 
 def _has_signal_material_change(
@@ -396,6 +403,19 @@ def _signal_recently_refreshed(row: TradeSignal, now: datetime, max_age_seconds:
     else:
         refreshed_at = refreshed_at.astimezone(timezone.utc)
     return (now - refreshed_at).total_seconds() <= max_age_seconds
+
+
+def _uses_runtime_price_revalidation(payload: Any, strategy_context: Any) -> bool:
+    payload_json = payload if isinstance(payload, dict) else {}
+    strategy_context_json = strategy_context if isinstance(strategy_context, dict) else {}
+    runtime = payload_json.get("strategy_runtime")
+    runtime_json = runtime if isinstance(runtime, dict) else {}
+    activation = str(
+        runtime_json.get("execution_activation")
+        or strategy_context_json.get("execution_activation")
+        or ""
+    ).strip().lower()
+    return activation == "ws_post_arm_tick"
 
 
 def _strategy_runtime_metadata(opportunity: Opportunity) -> dict[str, Any]:
@@ -821,6 +841,9 @@ async def upsert_trade_signal(
         market_id=market_id,
         market_question=market_question,
     )
+    if isinstance(normalized_payload_json, dict):
+        normalized_payload_json = dict(normalized_payload_json)
+        normalized_payload_json["signal_emitted_at"] = _utc_now().isoformat()
     row: Optional[TradeSignal] = None
     emission_event_type = "upsert_insert"
     emission_reason: str | None = None
@@ -1072,6 +1095,7 @@ async def expire_stale_signals(session: AsyncSession, *, commit: bool = True) ->
             expire_reason = "expires_at_passed"
         elif (
             str(row.source or "").strip().lower() == "scanner"
+            and not _uses_runtime_price_revalidation(row.payload_json, row.strategy_context_json)
             and _payload_contains_stale_market_prices(row.payload_json, now, max_price_age_seconds)
             and not _signal_recently_refreshed(row, now, max_price_age_seconds)
         ):
@@ -1260,6 +1284,7 @@ async def _expire_non_tradable_pending_signals(
         source_key = str(row.source or "").strip().lower()
         if (
             source_key == "scanner"
+            and not _uses_runtime_price_revalidation(row.payload_json, row.strategy_context_json)
             and _payload_contains_stale_market_prices(row.payload_json, now, max_price_age_seconds)
             and not _signal_recently_refreshed(row, now, max_price_age_seconds)
         ):

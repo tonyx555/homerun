@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -35,6 +36,57 @@ def test_tokens_have_fresh_ws_quotes_uses_scanner_age_budget(monkeypatch):
     runtime = IntentRuntime()
     assert runtime._tokens_have_fresh_ws_quotes(["scanner-token"], source="scanner") is True
     assert seen_max_age == [pytest.approx(30.0)]
+
+
+@pytest.mark.asyncio
+async def test_ensure_hot_subscriptions_resubscribes_when_live_feed_lost_token(monkeypatch):
+    subscribe_mock = AsyncMock(return_value=None)
+    feed_manager = SimpleNamespace(
+        _started=True,
+        start=AsyncMock(return_value=None),
+        polymarket_feed=SimpleNamespace(
+            subscribe=subscribe_mock,
+            _subscribed_assets=set(),
+        ),
+    )
+    monkeypatch.setattr("services.intent_runtime.get_feed_manager", lambda: feed_manager)
+
+    runtime = IntentRuntime()
+    runtime._hot_subscription_tokens.add("scanner-token")
+
+    await runtime._ensure_hot_subscriptions(["scanner-token"])
+
+    subscribe_mock.assert_awaited_once_with(["scanner-token"])
+
+
+@pytest.mark.asyncio
+async def test_defer_signal_rewarms_required_tokens(monkeypatch):
+    monkeypatch.setattr("services.intent_runtime.event_bus.publish", AsyncMock(return_value=None))
+
+    runtime = IntentRuntime()
+    runtime._ensure_hot_subscriptions = AsyncMock(return_value=None)
+    runtime._signals_by_id["signal-1"] = {
+        "id": "signal-1",
+        "source": "scanner",
+        "status": "pending",
+        "direction": "buy_no",
+        "payload_json": {
+            "positions_to_take": [
+                {
+                    "token_id": "scanner-token",
+                }
+            ]
+        },
+        "required_token_ids": ["scanner-token"],
+        "updated_at": utcnow().isoformat().replace("+00:00", "Z"),
+    }
+
+    deferred = await runtime.defer_signal(signal_id="signal-1", reason="strict_ws_pricing_live_context_unavailable")
+    await asyncio.sleep(0)
+
+    assert deferred is True
+    runtime._ensure_hot_subscriptions.assert_awaited_once_with(["scanner-token"])
+    assert runtime._signals_by_id["signal-1"]["deferred_until_ws"] is True
 
 
 @pytest.mark.asyncio
@@ -403,7 +455,7 @@ def test_build_signal_contract_persists_full_event_market_roster():
 
 
 @pytest.mark.asyncio
-async def test_publish_opportunities_defers_scanner_market_refresh_until_post_arm_ws_tick(monkeypatch):
+async def test_publish_opportunities_uses_fresh_scanner_ws_quotes_without_post_arm_deferral(monkeypatch):
     published_batches: list[dict[str, object]] = []
 
     async def _publish_signal_batch(**kwargs):
@@ -473,24 +525,15 @@ async def test_publish_opportunities_defers_scanner_market_refresh_until_post_ar
 
     published = await runtime.publish_opportunities([opportunity], source="scanner")
 
-    assert published == 0
-    assert published_batches == []
-    snapshot = next(iter(runtime._signals_by_id.values()))
-    assert snapshot["deferred_until_ws"] is True
-    assert snapshot["deferred_reason"] == "awaiting_post_arm_ws_tick"
-    armed_at_epoch = datetime.fromisoformat(
-        snapshot["payload_json"]["execution_armed_at"].replace("Z", "+00:00")
-    ).timestamp()
-
-    cache.observed_at_epoch = armed_at_epoch - 0.5
-    await runtime._reactivate_deferred_signals_for_token("scanner-token")
-    assert published_batches == []
-
-    cache.observed_at_epoch = armed_at_epoch + 0.001
-    await runtime._reactivate_deferred_signals_for_token("scanner-token")
+    assert published == 1
     assert len(published_batches) == 1
-    reactivated_snapshot = next(iter(published_batches[0]["signal_snapshots"].values()))
-    assert reactivated_snapshot["payload_json"]["signal_emitted_at"] == published_batches[0]["emitted_at"]
+    snapshot = next(iter(runtime._signals_by_id.values()))
+    assert snapshot["deferred_until_ws"] is False
+    assert snapshot["deferred_reason"] is None
+    assert snapshot["runtime_sequence"] is not None
+    assert "execution_armed_at" not in snapshot["payload_json"]
+    published_snapshot = next(iter(published_batches[0]["signal_snapshots"].values()))
+    assert published_snapshot["payload_json"]["signal_emitted_at"] == published_batches[0]["emitted_at"]
 
 
 @pytest.mark.asyncio
@@ -567,12 +610,10 @@ async def test_deferred_timeout_uses_stable_deferred_start_under_repeated_refres
 
     await runtime._release_stale_deferred_signals()
 
-    assert len(published_batches) == 1
-    reactivated_snapshot = next(iter(published_batches[0]["signal_snapshots"].values()))
-    assert reactivated_snapshot["deferred_until_ws"] is False
-    assert reactivated_snapshot["deferred_reason"] is None
-    assert reactivated_snapshot["runtime_sequence"] is not None
-    assert reactivated_snapshot["payload_json"]["signal_emitted_at"] == published_batches[0]["emitted_at"]
+    assert published_batches == []
+    assert refreshed_snapshot["deferred_until_ws"] is True
+    assert refreshed_snapshot["deferred_reason"] == "prewarm_waiting_for_strict_ws_quote"
+    assert refreshed_snapshot["runtime_sequence"] is None
 
 
 def test_build_signal_contract_treats_trader_strategy_like_other_ws_driven_strategies(monkeypatch):

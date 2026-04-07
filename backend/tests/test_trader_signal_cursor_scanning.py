@@ -251,6 +251,78 @@ async def test_unconsumed_signals_can_filter_by_source_strategy_type(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_reactivated_signal_bypasses_cursor_when_updated_after_last_consumption(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    trader_id = uuid.uuid4().hex
+    try:
+        async with session_factory() as session:
+            now = utcnow().replace(microsecond=0)
+            reactivated_signal = TradeSignal(
+                id=uuid.uuid4().hex,
+                source="scanner",
+                source_item_id="reactivated-tail",
+                signal_type="scanner_opportunity",
+                strategy_type="tail_end_carry",
+                market_id="reactivated-market",
+                direction="buy_no",
+                dedupe_key="reactivated-tail",
+                status="pending",
+                created_at=now,
+                updated_at=now,
+            )
+            later_signal = TradeSignal(
+                id=uuid.uuid4().hex,
+                source="scanner",
+                source_item_id="later-tail",
+                signal_type="scanner_opportunity",
+                strategy_type="tail_end_carry",
+                market_id="later-market",
+                direction="buy_no",
+                dedupe_key="later-tail",
+                status="pending",
+                created_at=now + timedelta(seconds=30),
+                updated_at=now + timedelta(seconds=30),
+            )
+            trader = Trader(
+                id=trader_id,
+                name="Reactivated Cursor Trader",
+                source_configs_json=[{"source_key": "scanner", "strategy_key": "tail_end_carry", "strategy_params": {}}],
+            )
+            session.add_all([trader, reactivated_signal, later_signal])
+            await session.commit()
+
+            await record_signal_consumption(
+                session,
+                trader_id=trader_id,
+                signal_id=reactivated_signal.id,
+                outcome="skipped",
+            )
+
+            reactivated_signal.updated_at = now + timedelta(seconds=20)
+            await session.commit()
+
+            await upsert_trader_signal_cursor(
+                session,
+                trader_id=trader_id,
+                last_signal_created_at=later_signal.updated_at,
+                last_signal_id=later_signal.id,
+            )
+
+            rows = await list_unconsumed_trade_signals(
+                session,
+                trader_id=trader_id,
+                sources=["scanner"],
+                statuses=["pending"],
+                cursor_created_at=later_signal.updated_at,
+                cursor_signal_id=later_signal.id,
+                limit=10,
+            )
+            assert [row.id for row in rows] == [reactivated_signal.id]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_worker_signal_fetch_excludes_submitted_restart_window(tmp_path):
     engine, session_factory = await _build_session_factory(tmp_path)
     trader_id = uuid.uuid4().hex

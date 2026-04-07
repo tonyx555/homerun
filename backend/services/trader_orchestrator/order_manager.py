@@ -8,6 +8,7 @@ from typing import Any
 from services.live_execution_adapter import execute_live_order
 from services.polymarket import polymarket_client
 from services.live_execution_service import live_execution_service
+from services.strategy_sdk import StrategySDK
 from utils.converters import safe_float
 
 
@@ -188,11 +189,16 @@ def _derive_min_upside_price_cap(min_upside_percent: Any) -> float | None:
     return _valid_execution_bound(100.0 / (100.0 + float(upside)))
 
 
+def _allow_taker_limit_buy_above_signal(strategy_params: dict[str, Any] | None) -> bool:
+    return StrategySDK.allow_taker_limit_buy_above_signal_price(strategy_params or {}, default=False)
+
+
 def _resolve_execution_price_bounds(
     *,
     leg: dict[str, Any],
     strategy_params: dict[str, Any],
     fallback_price: float | None,
+    allow_taker_limit_buy_above_signal: bool = False,
 ) -> tuple[float | None, float | None]:
     side_key = str(leg.get("side") or "buy").strip().lower()
     price_policy = str(leg.get("price_policy") or "").strip().lower()
@@ -209,8 +215,13 @@ def _resolve_execution_price_bounds(
             _valid_execution_bound(strategy_params.get("max_probability")),
             _derive_min_upside_price_cap(strategy_params.get("min_upside_percent")),
         ]
+        has_explicit_cap = any(candidate is not None for candidate in candidates)
         if price_policy == "taker_limit" and fallback_bound is not None:
-            candidates.append(fallback_bound)
+            if allow_taker_limit_buy_above_signal:
+                if not has_explicit_cap:
+                    candidates.append(fallback_bound)
+            else:
+                candidates.append(fallback_bound)
         resolved = min((candidate for candidate in candidates if candidate is not None), default=None)
         return resolved, None
 
@@ -536,6 +547,7 @@ async def submit_execution_leg(
     time_in_force = str(leg.get("time_in_force") or "GTC").strip().upper()
     post_only = bool(leg.get("post_only", False))
     params = dict(strategy_params or {})
+    allow_taker_limit_buy_above_signal = _allow_taker_limit_buy_above_signal(params)
 
     if mode_key == "shadow":
         quote_price = None
@@ -621,6 +633,7 @@ async def submit_execution_leg(
         leg=leg,
         strategy_params=params,
         fallback_price=price,
+        allow_taker_limit_buy_above_signal=allow_taker_limit_buy_above_signal,
     )
 
     execution = await execute_live_order(
@@ -636,6 +649,7 @@ async def submit_execution_leg(
         enforce_fallback_bound=enforce_fallback,
         max_execution_price=max_execution_price,
         min_execution_price=min_execution_price,
+        allow_taker_limit_buy_above_signal=allow_taker_limit_buy_above_signal,
         skip_buy_pre_submit_gate=skip_buy_pre_submit_gate,
     )
 
@@ -663,6 +677,7 @@ async def submit_execution_leg(
                     enforce_fallback_bound=enforce_fallback,
                     max_execution_price=max_execution_price,
                     min_execution_price=min_execution_price,
+                    allow_taker_limit_buy_above_signal=allow_taker_limit_buy_above_signal,
                     skip_buy_pre_submit_gate=skip_buy_pre_submit_gate,
                 )
                 if retry_execution.status != "failed":

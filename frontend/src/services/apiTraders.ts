@@ -503,6 +503,8 @@ export interface TraderOrchestratorConfig {
       history_fidelity_seconds: number
       max_history_points: number
       timeout_seconds: number
+      strict_ws_pricing_only: boolean
+      max_market_data_age_ms: number
     }
     live_provider_health: {
       window_seconds: number

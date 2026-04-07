@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     WS_HEARTBEAT_MAX_MISSES: int = 3  # Consecutive pong misses before closing connection
     WS_STRICT_CONTEXT_WARMUP_SECONDS: float = 0.75  # Strict context WS subscribe warmup before evaluation
     SCANNER_STRICT_WS_MAX_AGE_MS: int = 30000  # WS-only max age for scanner-source strict execution
+    SCANNER_SKIPPED_SIGNAL_REACTIVATION_COOLDOWN_SECONDS: int = 180  # Cooldown before reactivating skipped signals
     INTENT_RUNTIME_DEFERRED_MAX_AGE_SECONDS: float = 15.0  # Force-release deferred signals after this many seconds without a WS tick
 
     # Scanner Settings
@@ -751,6 +752,8 @@ async def apply_search_filters():
         ("MIN_LIQUIDITY", "min_liquidity", 1000.0),
         ("SCANNER_MAX_OPPORTUNITIES_TOTAL", "scanner_max_opportunities_total", 500),
         ("SCANNER_MAX_OPPORTUNITIES_PER_STRATEGY", "scanner_max_opportunities_per_strategy", 120),
+        ("SCANNER_SKIPPED_SIGNAL_REACTIVATION_COOLDOWN_SECONDS", "scanner_skipped_signal_reactivation_cooldown_seconds", 180),
+        ("SCANNER_STRICT_WS_MAX_AGE_MS", "scanner_strict_ws_max_age_ms", 30000),
         # Trading safety limits (used by live_execution_service order validation + /trader-orchestrator/live/status)
         ("MAX_TRADE_SIZE_USD", "max_trade_size_usd", 100.0),
         ("MAX_DAILY_TRADE_VOLUME", "max_daily_trade_volume", 1000.0),

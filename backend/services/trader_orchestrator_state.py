@@ -302,7 +302,7 @@ def _normalize_live_market_context(value: Any) -> dict[str, Any]:
         "max_market_data_age_ms": max(
             25,
             min(
-                10_000,
+                30_000,
                 safe_int(source.get("max_market_data_age_ms"), DEFAULT_LIVE_MARKET_CONTEXT["max_market_data_age_ms"]),
             ),
         ),
@@ -5707,13 +5707,17 @@ async def list_unconsumed_trade_signals(
         .group_by(TraderSignalConsumption.signal_id)
         .subquery("max_consumed")
     )
+    reactivated_after_consumption_clause = and_(
+        max_consumed_subq.c.max_consumed_at.is_not(None),
+        signal_sort_ts > max_consumed_subq.c.max_consumed_at,
+    )
     query = (
         select(TradeSignal)
         .outerjoin(max_consumed_subq, TradeSignal.id == max_consumed_subq.c.signal_id)
         .where(
             or_(
                 max_consumed_subq.c.max_consumed_at.is_(None),
-                signal_sort_ts > max_consumed_subq.c.max_consumed_at,
+                reactivated_after_consumption_clause,
             )
         )
         .where(or_(TradeSignal.expires_at.is_(None), TradeSignal.expires_at >= now))
@@ -5734,6 +5738,7 @@ async def list_unconsumed_trade_signals(
     if normalized_cursor_runtime_sequence is not None:
         query = query.where(
             or_(
+                reactivated_after_consumption_clause,
                 TradeSignal.runtime_sequence.is_(None),
                 TradeSignal.runtime_sequence > normalized_cursor_runtime_sequence,
             )
@@ -5742,12 +5747,18 @@ async def list_unconsumed_trade_signals(
         if normalized_cursor_signal_id:
             query = query.where(
                 or_(
+                    reactivated_after_consumption_clause,
                     signal_sort_ts > normalized_cursor_created_at,
                     and_(signal_sort_ts == normalized_cursor_created_at, TradeSignal.id > normalized_cursor_signal_id),
                 )
             )
         else:
-            query = query.where(signal_sort_ts > normalized_cursor_created_at)
+            query = query.where(
+                or_(
+                    reactivated_after_consumption_clause,
+                    signal_sort_ts > normalized_cursor_created_at,
+                )
+            )
     normalized_statuses = (
         [str(status or "").strip().lower() for status in statuses if str(status or "").strip()]
         if statuses is not None

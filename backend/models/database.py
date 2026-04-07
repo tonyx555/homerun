@@ -980,6 +980,8 @@ class AppSettings(Base):
     min_liquidity = Column(Float, default=1000.0)
     scanner_max_opportunities_total = Column(Integer, default=500)
     scanner_max_opportunities_per_strategy = Column(Integer, default=120)
+    scanner_skipped_signal_reactivation_cooldown_seconds = Column(Integer, default=180)
+    scanner_strict_ws_max_age_ms = Column(Integer, default=30000)
 
     # Discovery Engine Settings
     discovery_max_discovered_wallets = Column(Integer, default=20_000)
@@ -2480,6 +2482,9 @@ class ScannerSnapshot(Base):
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
     last_scan_at = Column(DateTime, nullable=True)
     opportunities_json = Column(JSON, default=list)  # list of Opportunity dicts
+    raw_detected_count = Column(Integer, default=0)
+    displayable_count = Column(Integer, default=0)
+    execution_eligible_count = Column(Integer, default=0)
     opportunities_count = Column(Integer, default=0)
     # Status fields (denormalized for API)
     running = Column(Boolean, default=True)
@@ -2487,6 +2492,7 @@ class ScannerSnapshot(Base):
     current_activity = Column(String, nullable=True)
     interval_seconds = Column(Integer, default=60)
     strategies_json = Column(JSON, default=list)  # list of {name, type}
+    strategy_diagnostics_json = Column(JSON, default=dict)
     tiered_scanning_json = Column(JSON, nullable=True)
     ws_feeds_json = Column(JSON, nullable=True)
     # market_id -> [{t: epoch_ms, yes: float, no: float}, ...]

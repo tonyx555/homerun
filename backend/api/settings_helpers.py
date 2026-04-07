@@ -321,6 +321,14 @@ def scanner_payload(settings: AppSettings) -> dict[str, Any]:
             getattr(settings, "scanner_max_opportunities_per_strategy", None),
             120,
         ),
+        "skipped_signal_reactivation_cooldown_seconds": _with_default(
+            getattr(settings, "scanner_skipped_signal_reactivation_cooldown_seconds", None),
+            180,
+        ),
+        "strict_ws_max_age_ms": _with_default(
+            getattr(settings, "scanner_strict_ws_max_age_ms", None),
+            30000,
+        ),
     }
 
 
@@ -739,6 +747,10 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
         settings.min_liquidity = scan.min_liquidity
         settings.scanner_max_opportunities_total = int(getattr(scan, "max_opportunities_total", 500))
         settings.scanner_max_opportunities_per_strategy = int(getattr(scan, "max_opportunities_per_strategy", 120))
+        settings.scanner_skipped_signal_reactivation_cooldown_seconds = int(
+            getattr(scan, "skipped_signal_reactivation_cooldown_seconds", 180)
+        )
+        settings.scanner_strict_ws_max_age_ms = int(getattr(scan, "strict_ws_max_age_ms", 30000))
 
     if live_execution:
         trade = live_execution

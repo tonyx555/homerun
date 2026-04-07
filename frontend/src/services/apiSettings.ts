@@ -59,6 +59,8 @@ export interface ScannerSettings {
   min_liquidity: number
   max_opportunities_total: number
   max_opportunities_per_strategy: number
+  skipped_signal_reactivation_cooldown_seconds: number
+  strict_ws_max_age_ms: number
 }
 
 export interface DiscoverySettings {

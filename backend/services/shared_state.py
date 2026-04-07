@@ -111,15 +111,29 @@ async def write_scanner_snapshot(
     if row is None:
         row = ScannerSnapshot(id=SNAPSHOT_ID)
         session.add(row)
+    strategy_diagnostics = status.get("strategy_diagnostics")
+    strategy_diagnostics = strategy_diagnostics if isinstance(strategy_diagnostics, dict) else {}
+    raw_detected_count = 0
+    execution_eligible_count = 0
+    for diag in strategy_diagnostics.values():
+        if not isinstance(diag, dict):
+            continue
+        raw_detected_count += int(diag.get("raw_detected_count") or 0)
+        execution_eligible_count += int(diag.get("execution_eligible_count") or 0)
+    displayable_count = len(opportunities)
     row.updated_at = utcnow()
     row.last_scan_at = last_scan
     row.opportunities_json = payload
-    row.opportunities_count = int(len(opportunities))
+    row.raw_detected_count = int(raw_detected_count)
+    row.displayable_count = int(displayable_count)
+    row.execution_eligible_count = int(execution_eligible_count)
+    row.opportunities_count = int(displayable_count)
     row.running = status.get("running", True)
     row.enabled = status.get("enabled", True)
     row.current_activity = status.get("current_activity")
     row.interval_seconds = status.get("interval_seconds", 60)
     row.strategies_json = status.get("strategies", [])
+    row.strategy_diagnostics_json = status.get("strategy_diagnostics", {})
     row.tiered_scanning_json = status.get("tiered_scanning")
     row.ws_feeds_json = status.get("ws_feeds")
     if market_history is not None:
@@ -136,10 +150,11 @@ async def write_scanner_snapshot(
             "last_scan": status.get("last_scan"),
             "last_fast_scan": status.get("last_fast_scan"),
             "last_heavy_scan": status.get("last_heavy_scan"),
-            "opportunities_count": len(opportunities),
+            "opportunities_count": row.opportunities_count,
             "current_activity": status.get("current_activity"),
             "lane_watchdogs": status.get("lane_watchdogs"),
             "strategies": status.get("strategies", []),
+            "strategy_diagnostics": status.get("strategy_diagnostics", {}),
             "tiered_scanning": status.get("tiered_scanning"),
             "ws_feeds": status.get("ws_feeds"),
         }
@@ -151,7 +166,7 @@ async def write_scanner_snapshot(
         await event_bus.publish(
             "opportunities_update",
             {
-                "count": len(opportunities),
+                "count": row.opportunities_count,
                 "source": "scanner_snapshot_write",
             },
         )
@@ -654,6 +669,7 @@ async def read_scanner_snapshot(
         "current_activity": row.current_activity,
         "lane_watchdogs": tiered.get("lane_watchdogs"),
         "strategies": row.strategies_json or [],
+        "strategy_diagnostics": row.strategy_diagnostics_json if isinstance(row.strategy_diagnostics_json, dict) else {},
         "tiered_scanning": row.tiered_scanning_json,
         "ws_feeds": row.ws_feeds_json,
     }
@@ -675,8 +691,12 @@ async def read_scanner_status(
             ScannerSnapshot.last_scan_at,
             ScannerSnapshot.current_activity,
             ScannerSnapshot.strategies_json,
+            ScannerSnapshot.strategy_diagnostics_json,
             ScannerSnapshot.tiered_scanning_json,
             ScannerSnapshot.ws_feeds_json,
+            ScannerSnapshot.raw_detected_count,
+            ScannerSnapshot.displayable_count,
+            ScannerSnapshot.execution_eligible_count,
             ScannerSnapshot.opportunities_count,
         ).where(ScannerSnapshot.id == SNAPSHOT_ID)
     )
@@ -700,6 +720,7 @@ async def read_scanner_status(
         "current_activity": row.current_activity,
         "lane_watchdogs": tiered.get("lane_watchdogs"),
         "strategies": row.strategies_json or [],
+        "strategy_diagnostics": row.strategy_diagnostics_json if isinstance(row.strategy_diagnostics_json, dict) else {},
         "tiered_scanning": row.tiered_scanning_json,
         "ws_feeds": row.ws_feeds_json,
     }
@@ -858,6 +879,7 @@ def _default_status() -> dict[str, Any]:
         "current_activity": "Waiting for scanner worker.",
         "lane_watchdogs": None,
         "strategies": [],
+        "strategy_diagnostics": {},
         "tiered_scanning": None,
         "ws_feeds": None,
     }
